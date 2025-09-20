@@ -1,0 +1,60 @@
+version: "3.9"
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: mermaid-litellm
+    ports:
+      - "4000:4000"
+    environment:
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-mermaid-1234}"
+      DATABASE_URL: "postgresql://mermaid:mermaid123@db:5432/litellm"
+      STORE_MODEL_IN_DB: "True"
+      # Ollama configuration
+      OLLAMA_API_BASE: "http://10.88.0.1:11434"
+      # Pass through API keys from host environment
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      AZURE_API_KEY: "${AZURE_API_KEY:-}"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:z  # :z for SELinux/Podman compatibility
+    command: ["--config=/app/config.yaml", "--detailed_debug"]
+    depends_on:
+      - db
+    restart: unless-stopped
+    security_opt:
+      - label=disable  # For rootless podman compatibility
+    networks:
+      - litellm-network
+
+  db:
+    image: docker.io/library/postgres:16-alpine  # Fully qualified for Podman
+    container_name: mermaid-postgres
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: mermaid
+      POSTGRES_PASSWORD: mermaid123
+    volumes:
+      - litellm_data:/var/lib/postgresql/data:z
+    ports:
+      - "5433:5432"  # Use 5433 to avoid conflicts with local postgres
+    restart: unless-stopped
+    security_opt:
+      - label=disable
+    networks:
+      - litellm-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mermaid"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  litellm_data:
+    name: mermaid_litellm_data
+
+networks:
+  litellm-network:
+    name: mermaid_network
+    driver: bridge
