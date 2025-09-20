@@ -14,6 +14,10 @@ pub struct Config {
     #[serde(default)]
     pub default_model: ModelSettings,
 
+    /// LiteLLM proxy configuration
+    #[serde(default)]
+    pub litellm: LiteLLMConfig,
+
     /// Ollama configuration
     #[serde(default)]
     pub ollama: OllamaConfig,
@@ -33,17 +37,23 @@ pub struct Config {
     /// Context loader configuration
     #[serde(default)]
     pub context: ContextConfig,
+
+    /// Operation mode configuration
+    #[serde(default)]
+    pub mode: ModeConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             default_model: ModelSettings::default(),
+            litellm: LiteLLMConfig::default(),
             ollama: OllamaConfig::default(),
             openai: OpenAIConfig::default(),
             anthropic: AnthropicConfig::default(),
             ui: UIConfig::default(),
             context: ContextConfig::default(),
+            mode: ModeConfig::default(),
         }
     }
 }
@@ -67,10 +77,28 @@ impl Default for ModelSettings {
     fn default() -> Self {
         Self {
             provider: "ollama".to_string(),
-            name: "deepseek-coder:33b".to_string(),
+            name: "tinyllama".to_string(),
             temperature: 0.7,
             max_tokens: 4096,
             system_prompt: None,
+        }
+    }
+}
+
+/// LiteLLM proxy configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiteLLMConfig {
+    /// Proxy server URL
+    pub proxy_url: String,
+    /// Master key for authentication
+    pub master_key: Option<String>,
+}
+
+impl Default for LiteLLMConfig {
+    fn default() -> Self {
+        Self {
+            proxy_url: "http://localhost:4000".to_string(),
+            master_key: None,
         }
     }
 }
@@ -177,6 +205,30 @@ impl Default for ContextConfig {
     }
 }
 
+/// Operation mode configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeConfig {
+    /// Default operation mode (normal, accept_edits, plan_mode, bypass_all)
+    pub default_mode: String,
+    /// Remember mode between sessions
+    pub remember_mode: bool,
+    /// Auto-commit in AcceptEdits mode
+    pub auto_commit_on_accept: bool,
+    /// Require double confirmation for destructive operations in BypassAll mode
+    pub require_destructive_confirmation: bool,
+}
+
+impl Default for ModeConfig {
+    fn default() -> Self {
+        Self {
+            default_mode: "normal".to_string(),
+            remember_mode: false,
+            auto_commit_on_accept: false,
+            require_destructive_confirmation: true,
+        }
+    }
+}
+
 /// Load configuration from multiple sources
 pub fn load_config() -> Result<Config> {
     // Get config directories
@@ -260,7 +312,7 @@ pub fn init_config() -> Result<()> {
 
 [default_model]
 provider = "ollama"
-name = "deepseek-coder:33b"
+name = "tinyllama"
 temperature = 0.7
 max_tokens = 4096
 

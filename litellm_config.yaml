@@ -10,59 +10,59 @@ model_list:
   - model_name: ollama/qwen3-coder:30b
     litellm_params:
       model: ollama/qwen3-coder:30b
-      api_base: http://10.88.0.1:11434  # Podman gateway IP
+      api_base: http://localhost:11434  # Host gateway for rootless Podman
       stream: true
 
   # Tiny models (< 2B params) - Fast, good for testing
   - model_name: ollama/tinyllama
     litellm_params:
       model: ollama/tinyllama
-      api_base: http://10.88.0.1:11434
+      api_base: http://localhost:11434
       stream: true
 
   - model_name: ollama/phi
     litellm_params:
       model: ollama/phi
-      api_base: http://10.88.0.1:11434
+      api_base: http://localhost:11434
       stream: true
 
   # Small models (7B params) - Good balance
   - model_name: ollama/llama2
     litellm_params:
       model: ollama/llama2
-      api_base: http://10.88.0.1:11434
+      api_base: http://localhost:11434
       stream: true
 
   - model_name: ollama/mistral
     litellm_params:
       model: ollama/mistral
-      api_base: http://10.88.0.1:11434
+      api_base: http://localhost:11434
       stream: true
 
   - model_name: ollama/codellama
     litellm_params:
       model: ollama/codellama
-      api_base: http://10.88.0.1:11434
+      api_base: http://localhost:11434
       stream: true
 
   # Medium models (13B params)
   - model_name: ollama/codellama:13b
     litellm_params:
       model: ollama/codellama:13b
-      api_base: http://10.88.0.1:11434
+      api_base: http://localhost:11434
       stream: true
 
   # Large models (33B+ params) - Best quality
   - model_name: ollama/deepseek-coder:33b
     litellm_params:
       model: ollama/deepseek-coder:33b
-      api_base: http://10.88.0.1:11434
+      api_base: http://localhost:11434
       stream: true
 
   - model_name: ollama/llama2:70b
     litellm_params:
       model: ollama/llama2:70b
-      api_base: http://10.88.0.1:11434
+      api_base: http://localhost:11434
       stream: true
 
   # ==========================================

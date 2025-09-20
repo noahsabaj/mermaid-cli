@@ -208,8 +208,9 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
     let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
-                .title("Welcome to Mermaid CLI! For help, enter Normal mode (esc) and type in :help")
-                .borders(Borders::NONE),
+                .title("Chat")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
         )
         .wrap(Wrap { trim: false })
         .scroll((app.scroll_offset, 0));
@@ -291,7 +292,8 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, app_state: &AppSt
         "Ready".to_string()
     };
 
-    let status_line = Line::from(vec![
+    // Build status line - simplified to show only AppState mode
+    let mut spans = vec![
         Span::styled(
             format!(" {} ", mode_str),
             Style::default()
@@ -299,14 +301,21 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, app_state: &AppSt
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" "),
-        Span::raw(status_text),
         Span::raw(" | "),
-        Span::styled(
-            "Ctrl+C to quit",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
+    ];
+    spans.push(Span::raw(status_text));
+    spans.push(Span::raw(" | "));
+    spans.push(Span::styled(
+        "Shift+Tab: cycle modes",
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.push(Span::raw(" | "));
+    spans.push(Span::styled(
+        "Ctrl+C: quit",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    let status_line = Line::from(spans);
 
     let status_bar = Paragraph::new(vec![status_line])
         .style(Style::default().bg(Color::Black));

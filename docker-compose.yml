@@ -3,14 +3,13 @@ services:
   litellm:
     image: ghcr.io/berriai/litellm:main-stable
     container_name: mermaid-litellm
-    ports:
-      - "4000:4000"
+    network_mode: host
     environment:
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-mermaid-1234}"
-      DATABASE_URL: "postgresql://mermaid:mermaid123@db:5432/litellm"
+      DATABASE_URL: "postgresql://mermaid:mermaid123@localhost:5433/litellm"
       STORE_MODEL_IN_DB: "True"
-      # Ollama configuration
-      OLLAMA_API_BASE: "http://10.88.0.1:11434"
+      # Ollama configuration - using localhost since we're in host network mode
+      OLLAMA_API_BASE: "http://localhost:11434"
       # Pass through API keys from host environment
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
@@ -25,8 +24,6 @@ services:
     restart: unless-stopped
     security_opt:
       - label=disable  # For rootless podman compatibility
-    networks:
-      - litellm-network
 
   db:
     image: docker.io/library/postgres:16-alpine  # Fully qualified for Podman

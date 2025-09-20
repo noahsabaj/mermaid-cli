@@ -2,23 +2,27 @@ use anyhow::Result;
 
 use super::traits::Model;
 use super::unified::UnifiedModel;
+use crate::app::Config;
 
 /// Factory for creating model instances using the unified LLM interface
 pub struct ModelFactory;
 
 impl ModelFactory {
-    /// Create a model instance from a model identifier
+    /// Create a model instance from a model identifier with optional config
     /// Format: provider/model (e.g., "ollama/deepseek-coder:33b", "openai/gpt-4", "anthropic/claude-3-opus")
     /// All models go through LiteLLM proxy which handles authentication
-    pub async fn create(model_id: &str) -> Result<Box<dyn Model>> {
+    pub async fn create(model_id: &str, config: Option<&Config>) -> Result<Box<dyn Model>> {
         // Validate format (provider/model)
         if !model_id.contains('/') {
             anyhow::bail!("Invalid model format. Expected 'provider/model' (e.g., 'ollama/deepseek-coder:33b')");
         }
 
+        // Extract master_key from config if provided
+        let master_key = config.and_then(|c| c.litellm.master_key.clone());
+
         // With LiteLLM proxy, we just pass the model ID directly
         // LiteLLM handles all provider-specific authentication and routing
-        let model = UnifiedModel::new(model_id).await?;
+        let model = UnifiedModel::new(model_id, master_key).await?;
         Ok(Box::new(model))
     }
 
@@ -75,8 +79,8 @@ impl ModelFactory {
     }
 
     /// Validate that a model is accessible
-    pub async fn validate(model_id: &str) -> Result<bool> {
-        match Self::create(model_id).await {
+    pub async fn validate(model_id: &str, config: Option<&Config>) -> Result<bool> {
+        match Self::create(model_id, config).await {
             Ok(model) => model.validate_connection().await,
             Err(_) => Ok(false),
         }

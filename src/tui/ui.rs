@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -19,10 +19,18 @@ use crate::tui::render::render_ui;
 
 /// Run the terminal UI
 pub async fn run_ui(mut app: App) -> Result<()> {
+    // Check if we have an interactive terminal
+    if !crossterm::tty::IsTty::is_tty(&io::stdout()) {
+        eprintln!("❌ Mermaid requires an interactive terminal.");
+        eprintln!("   Cannot run in non-interactive mode (pipes, redirects, etc.)");
+        eprintln!("   Try running directly in your terminal: mermaid");
+        return Err(anyhow::anyhow!("No interactive terminal available"));
+    }
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;  // Removed EnableMouseCapture for text selection
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -41,8 +49,7 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
+        LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
 
@@ -63,15 +70,6 @@ async fn run_app(
     loop {
         // Draw UI
         terminal.draw(|f| render_ui(f, app, app_state))?;
-
-        // Handle streaming responses
-        if app.is_generating {
-            // Check for streamed content (non-blocking)
-            if let Ok(chunk) = rx.try_recv() {
-                app.current_response.push_str(&chunk);
-                continue; // Immediately redraw with new content
-            }
-        }
 
         // Handle input events
         if event::poll(std::time::Duration::from_millis(50))? {
@@ -133,19 +131,20 @@ async fn run_app(
                                             .chat(&input, &context, &config, Some(callback))
                                             .await
                                         {
-                                            Ok(response) => {
-                                                // Response is complete
-                                                let _ = tx_done.send(format!("\n[DONE]:{}", response.content)).await;
+                                            Ok(_) => {
+                                                // Response is complete - content already streamed via callback
+                                                let _ = tx_done.send("[DONE]:".to_string()).await;
                                             }
                                             Err(e) => {
                                                 let _ = tx_done
-                                                    .send(format!("\n[ERROR]:{}", e))
+                                                    .send(format!("[ERROR]:{}", e))
                                                     .await;
                                             }
                                         }
                                     });
                                 }
                             }
+                            // Removed auto-switch to command mode - user should use Esc then ':'
                             KeyCode::Char(c) => {
                                 app.input.push(c);
                             }
@@ -170,7 +169,12 @@ async fn run_app(
                                 app.input.push(c);
                             }
                             KeyCode::Backspace => {
-                                app.input.pop();
+                                if app.input.is_empty() {
+                                    // If input is empty, exit command mode
+                                    *app_state = AppState::Insert;
+                                } else {
+                                    app.input.pop();
+                                }
                             }
                             _ => {}
                         }
@@ -185,42 +189,73 @@ async fn run_app(
                     }
                 }
 
+                // Global keyboard shortcuts that work in any state
+
                 // Handle Ctrl+C to quit
                 if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
                     app.quit();
                     break;
                 }
+
+                // Handle Shift+Tab to cycle operation modes
+                if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::SHIFT {
+                    app.cycle_mode();
+                }
+
+                // Handle Ctrl+Tab to cycle reverse (optional)
+                if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::CONTROL {
+                    app.cycle_mode_reverse();
+                }
+
+                // Mode-specific shortcuts
+                if key.modifiers == KeyModifiers::CONTROL {
+                    match key.code {
+                        KeyCode::Char('e') => app.set_mode(crate::tui::mode::OperationMode::AcceptEdits),
+                        KeyCode::Char('p') => app.set_mode(crate::tui::mode::OperationMode::PlanMode),
+                        KeyCode::Char('y') => app.toggle_bypass_mode(),
+                        _ => {}
+                    }
+                }
+
+                // Escape key returns to Normal mode from any operation mode
+                if key.code == KeyCode::Esc && *app_state == AppState::Normal {
+                    app.set_mode(crate::tui::mode::OperationMode::Normal);
+                }
             }
         }
 
-        // Check for completion of generation
+        // Handle streaming responses and check for completion
         if app.is_generating {
-            if let Ok(chunk) = rx.try_recv() {
+            // Process all available messages from the channel
+            while let Ok(chunk) = rx.try_recv() {
                 if chunk.starts_with("[DONE]:") {
                     // Generation complete
                     app.is_generating = false;
-                    let response = chunk.strip_prefix("[DONE]:").unwrap_or(&chunk);
-                    app.add_message(
-                        crate::tui::app::MessageRole::Assistant,
-                        response.to_string(),
-                    );
-                    app.current_response.clear();
+                    // Add the accumulated response from streaming
+                    if !app.current_response.is_empty() {
+                        let response_text = app.current_response.clone();
+                        app.add_message(
+                            crate::tui::app::MessageRole::Assistant,
+                            response_text.clone(),
+                        );
 
-                    // Parse and execute any actions
-                    let actions = agents::parse_actions(response);
-                    for action in actions {
-                        match agents::execute_action(&action).await {
-                            Ok(agents::ActionResult::Success { output }) => {
-                                app.set_status(format!("✓ Action completed: {}", output));
-                            }
-                            Ok(agents::ActionResult::Error { error }) => {
-                                app.set_status(format!("✗ Action failed: {}", error));
-                            }
-                            Err(e) => {
-                                app.set_status(format!("✗ Error: {}", e));
+                        // Parse and execute any actions from the response
+                        let actions = agents::parse_actions(&response_text);
+                        for action in actions {
+                            match agents::execute_action(&action).await {
+                                Ok(agents::ActionResult::Success { output }) => {
+                                    app.set_status(format!("✓ Action completed: {}", output));
+                                }
+                                Ok(agents::ActionResult::Error { error }) => {
+                                    app.set_status(format!("✗ Action failed: {}", error));
+                                }
+                                Err(e) => {
+                                    app.set_status(format!("✗ Error: {}", e));
+                                }
                             }
                         }
                     }
+                    app.current_response.clear();
                 } else if chunk.starts_with("[ERROR]:") {
                     // Error occurred
                     app.is_generating = false;
@@ -231,8 +266,12 @@ async fn run_app(
                     );
                     app.current_response.clear();
                 } else {
+                    // Regular chunk - append to current response
                     app.current_response.push_str(&chunk);
                 }
+
+                // Break after processing one message to allow redraw
+                break;
             }
         }
 

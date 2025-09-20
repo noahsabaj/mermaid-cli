@@ -1,3 +1,4 @@
+use super::mode::OperationMode;
 use crate::models::{Model, ProjectContext};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -47,6 +48,10 @@ pub struct App {
     pub model_name: String,
     /// Status message
     pub status_message: Option<String>,
+    /// Current operation mode (Normal, AcceptEdits, PlanMode, BypassAll)
+    pub operation_mode: OperationMode,
+    /// Flag for confirming destructive operations in BypassAll mode
+    pub bypass_confirmed: bool,
 }
 
 impl App {
@@ -72,6 +77,8 @@ impl App {
             working_dir,
             model_name,
             status_message: None,
+            operation_mode: OperationMode::default(), // Starts in Normal mode
+            bypass_confirmed: false,
         }
     }
 
@@ -127,6 +134,44 @@ impl App {
     /// Quit the application
     pub fn quit(&mut self) {
         self.running = false;
+    }
+
+    /// Cycle to the next operation mode
+    pub fn cycle_mode(&mut self) {
+        self.operation_mode = self.operation_mode.cycle();
+        self.bypass_confirmed = false; // Reset confirmation flag when changing modes
+        self.set_status(format!("Operation mode: {} - {}",
+            self.operation_mode.display_name(),
+            self.operation_mode.description()
+        ));
+    }
+
+    /// Cycle to the previous operation mode
+    pub fn cycle_mode_reverse(&mut self) {
+        self.operation_mode = self.operation_mode.cycle_reverse();
+        self.bypass_confirmed = false;
+        self.set_status(format!("Operation mode: {} - {}",
+            self.operation_mode.display_name(),
+            self.operation_mode.description()
+        ));
+    }
+
+    /// Set a specific operation mode
+    pub fn set_mode(&mut self, mode: OperationMode) {
+        if self.operation_mode != mode {
+            self.operation_mode = mode;
+            self.bypass_confirmed = false;
+            self.set_status(format!("Mode: {}", mode.display_name()));
+        }
+    }
+
+    /// Toggle bypass mode (Ctrl+Y shortcut)
+    pub fn toggle_bypass_mode(&mut self) {
+        if self.operation_mode == OperationMode::BypassAll {
+            self.set_mode(OperationMode::Normal);
+        } else {
+            self.set_mode(OperationMode::BypassAll);
+        }
     }
 }
 

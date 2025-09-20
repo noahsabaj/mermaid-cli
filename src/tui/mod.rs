@@ -5,9 +5,11 @@
 mod app;
 mod chat;
 mod input;
+mod mode;
 mod render;
 mod ui;
 
 // Public re-exports - the ONLY way to access TUI functionality
 pub use app::{App, AppState};
+pub use mode::OperationMode;
 pub use ui::run_ui;

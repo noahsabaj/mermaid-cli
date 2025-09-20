@@ -1,7 +1,7 @@
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use futures::StreamExt;
 
@@ -19,13 +19,16 @@ pub struct UnifiedModel {
 
 impl UnifiedModel {
     /// Create a new unified model instance
-    pub async fn new(model_name: &str) -> Result<Self> {
+    pub async fn new(model_name: &str, config_master_key: Option<String>) -> Result<Self> {
         // Get proxy URL from environment or use default
         let proxy_url = std::env::var("LITELLM_PROXY_URL")
             .unwrap_or_else(|_| "http://localhost:4000".to_string());
 
         // Get master key for authentication
-        let master_key = std::env::var("LITELLM_MASTER_KEY").ok();
+        // Priority: Environment variable > Config > None
+        let master_key = std::env::var("LITELLM_MASTER_KEY")
+            .ok()
+            .or(config_master_key);
 
         Ok(Self {
             client: Client::builder()
@@ -206,7 +209,7 @@ impl Model for UnifiedModel {
             }
 
             Ok(ModelResponse {
-                content: full_response,
+                content: String::new(),  // Content already sent via callback, don't duplicate
                 usage: None,  // Usage stats not available in streaming
                 model_name: self.model_name.clone(),
             })
@@ -256,14 +259,34 @@ impl Model for UnifiedModel {
     }
 
     async fn validate_connection(&self) -> Result<bool> {
-        // Check if LiteLLM proxy is accessible
+        // Skip validation for local models to speed up startup
+        if self.is_local_provider() {
+            return Ok(true);
+        }
+
+        // Check if LiteLLM proxy is accessible with a short timeout
         let health_url = format!("{}/health", self.proxy_url);
-        match self.client.get(&health_url).send().await {
+
+        // Create a client with shorter timeout for health checks
+        let health_client = Client::builder()
+            .timeout(std::time::Duration::from_secs(3)) // 3 second timeout for health checks
+            .build()?;
+
+        let mut request = health_client.get(&health_url);
+        if let Some(key) = &self.master_key {
+            request = request.header("Authorization", format!("Bearer {}", key));
+        }
+
+        match request.send().await {
             Ok(response) => Ok(response.status().is_success()),
             Err(_) => {
-                // Try alternate health check
+                // Try alternate health check with /models endpoint
                 let models_url = format!("{}/models", self.proxy_url);
-                match self.client.get(&models_url).send().await {
+                let mut request = health_client.get(&models_url);
+                if let Some(key) = &self.master_key {
+                    request = request.header("Authorization", format!("Bearer {}", key));
+                }
+                match request.send().await {
                     Ok(response) => Ok(response.status().is_success()),
                     Err(_) => Ok(false),
                 }
@@ -274,7 +297,7 @@ impl Model for UnifiedModel {
 
 /// Helper function to create a unified model from a model string
 pub async fn create_from_string(model_string: &str) -> Result<UnifiedModel> {
-    UnifiedModel::new(model_string).await
+    UnifiedModel::new(model_string, None).await
 }
 
 // Response structures for LiteLLM proxy (OpenAI format)
