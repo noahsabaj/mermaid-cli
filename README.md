@@ -319,12 +319,10 @@ MIT License - See [LICENSE](LICENSE) file for details.
 ## 🗺️ Roadmap
 
 - [ ] Multi-agent collaboration
-- [ ] Web UI option
 - [ ] Plugin system
 - [ ] VSCode extension
 - [ ] Model fine-tuning support
 - [ ] Semantic code search
-- [ ] Test generation
 - [ ] Code review mode
 
 ## 💬 Community
