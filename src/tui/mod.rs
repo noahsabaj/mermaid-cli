@@ -3,6 +3,7 @@
 
 // Private submodules - not directly accessible from outside
 mod app;
+mod markdown;
 mod mode;
 mod render;
 mod ui;

@@ -7,12 +7,33 @@ use ratatui::{
 };
 
 use crate::tui::app::App;
+use crate::tui::markdown::parse_markdown;
 use crate::diagnostics::{DiagnosticsMode, render_diagnostics_panel};
 use crate::models::MessageRole;
 
 /// Render the main UI
 pub fn render_ui(frame: &mut Frame, app: &App) {
-    // Create main layout
+    // Calculate input area height based on content
+    let terminal_width = frame.area().width.saturating_sub(4) as usize; // Account for borders
+    let input_lines = if app.input.is_empty() {
+        1
+    } else {
+        // Calculate how many lines the input will take
+        let mut lines = 1;
+        let mut current_line_length = 0;
+        for ch in app.input.chars() {
+            if ch == '\n' || current_line_length >= terminal_width {
+                lines += 1;
+                current_line_length = if ch == '\n' { 0 } else { 1 };
+            } else {
+                current_line_length += 1;
+            }
+        }
+        lines.min(5) // Cap at 5 lines max
+    };
+    let input_height = (input_lines + 2) as u16; // +2 for borders
+
+    // Create main layout with dynamic input height
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(0)
@@ -20,7 +41,7 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
             [
                 Constraint::Length(3),  // Header
                 Constraint::Min(10),    // Main content
-                Constraint::Length(3),  // Input
+                Constraint::Length(input_height),  // Dynamic input height
                 Constraint::Length(1),  // Status bar
             ]
             .as_ref(),
@@ -187,9 +208,16 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
             ),
         ]));
 
-        // Add message content (split by lines)
-        for line in msg.content.lines() {
-            lines.push(Line::from(line.to_string()));
+        // Parse markdown for assistant messages, plain text for user messages
+        if matches!(msg.role, MessageRole::Assistant) {
+            // Use markdown parsing for assistant messages
+            let parsed_lines = parse_markdown(&msg.content);
+            lines.extend(parsed_lines);
+        } else {
+            // Plain text for user messages
+            for line in msg.content.lines() {
+                lines.push(Line::from(line.to_string()));
+            }
         }
 
         // Add completion indicator for assistant messages
@@ -526,7 +554,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         (None, area)
     };
 
-    // Render the input box
+    // Render the input box with text wrapping
     let input_style = Style::default().fg(Color::White);
     let title = if showing_command_hints {
         " Enter Command "
@@ -535,8 +563,9 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     };
     let input_text = app.input.clone();
 
-    let input = Paragraph::new(input_text)
+    let input = Paragraph::new(input_text.clone())
         .style(input_style)
+        .wrap(Wrap { trim: false })  // Enable text wrapping
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -552,20 +581,38 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(input, input_area);
 
-    // Always show cursor
+    // Calculate cursor position for wrapped text
     {
-        // Calculate cursor position based on input length
-        let cursor_offset = app.input.len();
+        let inner_width = input_area.width.saturating_sub(2) as usize; // Account for borders
+        let cursor_pos = app.cursor_position.min(app.input.len());
 
-        // Position cursor at the end of the input text
-        let cursor_x = input_area.x + 1 + cursor_offset as u16;
-        let cursor_y = input_area.y + 1; // +1 to account for the border
+        // Calculate which line and column the cursor is on
+        let mut current_line = 0;
+        let mut current_col = 0;
+        let mut char_count = 0;
 
-        // Ensure cursor doesn't go beyond the input area bounds
-        let cursor_x = cursor_x.min(input_area.x + input_area.width.saturating_sub(2));
+        for ch in app.input.chars() {
+            if char_count == cursor_pos {
+                break;
+            }
 
-        // Set the cursor position
-        frame.set_cursor_position((cursor_x, cursor_y));
+            if ch == '\n' || current_col >= inner_width {
+                current_line += 1;
+                current_col = if ch == '\n' { 0 } else { 1 };
+            } else {
+                current_col += 1;
+            }
+            char_count += 1;
+        }
+
+        // Set cursor position
+        let cursor_x = input_area.x + 1 + (current_col as u16);
+        let cursor_y = input_area.y + 1 + (current_line as u16);
+
+        // Ensure cursor is within bounds
+        if cursor_y < input_area.y + input_area.height {
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
     }
 }
 

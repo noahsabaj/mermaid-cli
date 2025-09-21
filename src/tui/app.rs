@@ -12,6 +12,8 @@ pub struct App {
     pub messages: Vec<ChatMessage>,
     /// User input buffer
     pub input: String,
+    /// Cursor position in the input string
+    pub cursor_position: usize,
     /// Is the app running?
     pub running: bool,
     /// Current model
@@ -88,6 +90,7 @@ impl App {
         Self {
             messages: Vec::new(),
             input: String::new(),
+            cursor_position: 0,
             running: true,
             model: Arc::new(Mutex::new(model)),
             context,
@@ -140,6 +143,7 @@ impl App {
     /// Clear the input buffer
     pub fn clear_input(&mut self) {
         self.input.clear();
+        self.cursor_position = 0;
     }
 
     /// Toggle sidebar visibility

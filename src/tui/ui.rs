@@ -229,6 +229,7 @@ async fn run_app(
                         } else if !app.input.is_empty() {
                             // Clear input if not generating
                             app.input.clear();
+                            app.cursor_position = 0;  // Reset cursor when clearing
                             app.set_status("Input cleared");
                         }
                     }
@@ -294,10 +295,36 @@ async fn run_app(
                         }
                     }
                     KeyCode::Char(c) => {
-                        app.input.push(c);
+                        // Insert character at cursor position
+                        app.input.insert(app.cursor_position, c);
+                        app.cursor_position += 1;
                     }
                     KeyCode::Backspace => {
-                        app.input.pop();
+                        if app.cursor_position > 0 {
+                            app.cursor_position -= 1;
+                            app.input.remove(app.cursor_position);
+                        }
+                    }
+                    KeyCode::Delete => {
+                        if app.cursor_position < app.input.len() {
+                            app.input.remove(app.cursor_position);
+                        }
+                    }
+                    KeyCode::Left => {
+                        if app.cursor_position > 0 {
+                            app.cursor_position -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if app.cursor_position < app.input.len() {
+                            app.cursor_position += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        app.cursor_position = 0;
+                    }
+                    KeyCode::End => {
+                        app.cursor_position = app.input.len();
                     }
                     // Navigation keys always available
                     KeyCode::Up => app.scroll_down(1),
