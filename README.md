@@ -297,13 +297,6 @@ cargo build --release
 ### Can I use this with my proprietary code?
 Yes! With local models (Ollama), your code never leaves your machine.
 
-### Which model should I use?
-- **For privacy**: `ollama/deepseek-coder:33b` or `ollama/codellama`
-- **For capability**: `anthropic/claude-3-opus` or `openai/gpt-4o`
-- **For speed**: `groq/llama3-70b` or `groq/mixtral-8x7b`
-- **For balance**: `openai/gpt-3.5-turbo` or `anthropic/claude-3-sonnet`
-- **For cost**: `ollama/tinyllama` (local, free)
-
 ### Does it work offline?
 Yes, with Ollama and local models.
 
@@ -326,19 +319,15 @@ MIT License - See [LICENSE](LICENSE) file for details.
 ## 🗺️ Roadmap
 
 - [ ] Multi-agent collaboration
-- [ ] Web UI option
 - [ ] Plugin system
 - [ ] VSCode extension
 - [ ] Model fine-tuning support
 - [ ] Semantic code search
-- [ ] Test generation
 - [ ] Code review mode
 
 ## 💬 Community
 
 - GitHub Issues: [Report bugs or request features](https://github.com/yourusername/mermaid/issues)
-- Discord: [Join our community](https://discord.gg/mermaid)
-- Twitter: [@MermaidAI](https://twitter.com/mermaidai)
 
 ---
 
