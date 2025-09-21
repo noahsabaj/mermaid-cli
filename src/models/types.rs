@@ -2,6 +2,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Represents a chat message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: MessageRole,
+    pub content: String,
+    pub timestamp: chrono::DateTime<chrono::Local>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MessageRole {
+    User,
+    Assistant,
+    System,
+}
+
 /// Represents the context of the current project
 #[derive(Debug, Clone)]
 pub struct ProjectContext {

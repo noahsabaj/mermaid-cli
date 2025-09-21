@@ -1,15 +1,15 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::types::{ModelCapabilities, ModelConfig, ModelResponse, ProjectContext, StreamCallback};
+use super::types::{ChatMessage, ModelCapabilities, ModelConfig, ModelResponse, ProjectContext, StreamCallback};
 
 /// Core trait that all model backends must implement
 #[async_trait]
 pub trait Model: Send + Sync {
-    /// Send a chat message to the model and get a response
+    /// Send a chat conversation to the model and get a response
     async fn chat(
         &mut self,
-        message: &str,
+        messages: &[ChatMessage],
         context: &ProjectContext,
         config: &ModelConfig,
         stream_callback: Option<StreamCallback>,

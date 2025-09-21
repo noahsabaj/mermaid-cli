@@ -6,7 +6,14 @@ use serde_json::json;
 use futures::StreamExt;
 
 use super::traits::Model;
-use super::types::{ModelCapabilities, ModelConfig, ModelResponse, ProjectContext, StreamCallback};
+use super::types::{ChatMessage, MessageRole, ModelCapabilities, ModelConfig, ModelResponse, ProjectContext, StreamCallback};
+use crate::constants::{
+    DEFAULT_LITELLM_PROXY_URL, HTTP_REQUEST_TIMEOUT_SECS,
+    GPT4_32K_CONTEXT, GPT4_TURBO_CONTEXT, GPT35_CONTEXT,
+    CLAUDE_3_OPUS_CONTEXT, CLAUDE_25_CONTEXT,
+    OLLAMA_DEFAULT_CONTEXT, GROQ_LLAMA_CONTEXT, GROQ_DEFAULT_CONTEXT,
+    GEMINI_15_PRO_CONTEXT,
+};
 
 /// Unified model implementation using LiteLLM Proxy
 /// This drastically simplifies our code - ALL providers go through the same interface
@@ -22,7 +29,7 @@ impl UnifiedModel {
     pub async fn new(model_name: &str, config_master_key: Option<String>) -> Result<Self> {
         // Get proxy URL from environment or use default
         let proxy_url = std::env::var("LITELLM_PROXY_URL")
-            .unwrap_or_else(|_| "http://localhost:4000".to_string());
+            .unwrap_or_else(|_| DEFAULT_LITELLM_PROXY_URL.to_string());
 
         // Get master key for authentication
         // Priority: Environment variable > Config > None
@@ -32,7 +39,7 @@ impl UnifiedModel {
 
         Ok(Self {
             client: Client::builder()
-                .timeout(std::time::Duration::from_secs(600)) // 10 minute timeout
+                .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
                 .build()?,
             proxy_url,
             model_name: model_name.to_string(),
@@ -51,12 +58,12 @@ impl UnifiedModel {
             "openai" => ModelCapabilities {
                 max_context_length: if model.contains("gpt-4") {
                     if model.contains("32k") {
-                        32768
+                        GPT4_32K_CONTEXT
                     } else {
-                        128000  // GPT-4 Turbo
+                        GPT4_TURBO_CONTEXT
                     }
                 } else {
-                    16384  // GPT-3.5
+                    GPT35_CONTEXT
                 },
                 supports_streaming: true,
                 supports_functions: true,
@@ -64,32 +71,32 @@ impl UnifiedModel {
             },
             "anthropic" => ModelCapabilities {
                 max_context_length: if model.contains("claude-3") {
-                    200000
+                    CLAUDE_3_OPUS_CONTEXT
                 } else {
-                    100000
+                    CLAUDE_25_CONTEXT
                 },
                 supports_streaming: true,
                 supports_functions: true,
                 supports_vision: model.contains("claude-3"),
             },
             "ollama" => ModelCapabilities {
-                max_context_length: 32768,  // Most Ollama models
+                max_context_length: OLLAMA_DEFAULT_CONTEXT,
                 supports_streaming: true,
                 supports_functions: false,
                 supports_vision: model.contains("llava") || model.contains("vision"),
             },
             "groq" => ModelCapabilities {
                 max_context_length: if model.contains("mixtral") {
-                    32768
+                    GROQ_LLAMA_CONTEXT
                 } else {
-                    8192
+                    GROQ_DEFAULT_CONTEXT
                 },
                 supports_streaming: true,
                 supports_functions: false,
                 supports_vision: false,
             },
             "google" | "gemini" => ModelCapabilities {
-                max_context_length: 1048576,  // Gemini 1.5 Pro supports 1M tokens
+                max_context_length: GEMINI_15_PRO_CONTEXT,
                 supports_streaming: true,
                 supports_functions: true,
                 supports_vision: model.contains("vision") || model.contains("pro"),
@@ -110,17 +117,17 @@ impl UnifiedModel {
 impl Model for UnifiedModel {
     async fn chat(
         &mut self,
-        message: &str,
+        messages: &[ChatMessage],
         context: &ProjectContext,
         config: &ModelConfig,
         stream_callback: Option<StreamCallback>,
     ) -> Result<ModelResponse> {
         // Build OpenAI-compatible messages array
-        let mut messages = Vec::new();
+        let mut json_messages = Vec::new();
 
         // Add system prompt if configured
         if let Some(system) = &config.system_prompt {
-            messages.push(json!({
+            json_messages.push(json!({
                 "role": "system",
                 "content": system
             }));
@@ -129,22 +136,29 @@ impl Model for UnifiedModel {
         // Add project context as system message if not empty
         let context_str = context.to_prompt_context();
         if !context_str.is_empty() {
-            messages.push(json!({
+            json_messages.push(json!({
                 "role": "system",
                 "content": format!("Project Context:\n{}", context_str)
             }));
         }
 
-        // Add user message
-        messages.push(json!({
-            "role": "user",
-            "content": message
-        }));
+        // Convert ChatMessage array to JSON format
+        for msg in messages {
+            let role = match msg.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::System => "system",
+            };
+            json_messages.push(json!({
+                "role": role,
+                "content": msg.content
+            }));
+        }
 
         // Prepare request body (OpenAI format - LiteLLM handles translation)
         let mut request_body = json!({
             "model": self.model_name,
-            "messages": messages,
+            "messages": json_messages,
             "stream": stream_callback.is_some(),
         });
 
@@ -174,7 +188,7 @@ impl Model for UnifiedModel {
             let response = request
                 .send()
                 .await
-                .context("Failed to connect to LiteLLM proxy")?;
+                .with_context(|| format!("Failed to connect to LiteLLM proxy at {}. Is the proxy running? Try: ./start_litellm.sh", self.proxy_url))?;
 
             if !response.status().is_success() {
                 let error_text = response.text().await?;
@@ -225,7 +239,7 @@ impl Model for UnifiedModel {
             let response = request
                 .send()
                 .await
-                .context("Failed to connect to LiteLLM proxy")?;
+                .with_context(|| format!("Failed to connect to LiteLLM proxy at {}. Is the proxy running? Try: ./start_litellm.sh", self.proxy_url))?;
 
             if !response.status().is_success() {
                 let error_text = response.text().await?;

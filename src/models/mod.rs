@@ -11,6 +11,7 @@ mod unified;
 pub use factory::ModelFactory;
 pub use traits::Model;
 pub use types::{
-    ModelCapabilities, ModelConfig, ModelResponse, ProjectContext, StreamCallback, TokenUsage,
+    ChatMessage, MessageRole, ModelCapabilities, ModelConfig, ModelResponse, ProjectContext,
+    StreamCallback, TokenUsage,
 };
 pub use unified::create_from_string;
