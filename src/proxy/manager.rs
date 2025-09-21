@@ -3,7 +3,7 @@ use tokio::process::Command;
 
 use super::{get_compose_dir, is_container_runtime_available, is_proxy_running};
 use crate::utils::{log_info, log_warn, log_error};
-use crate::constants::{PROXY_STARTUP_WAIT_SECS, PROXY_CHECK_INTERVAL_SECS, PROXY_MAX_STARTUP_ATTEMPTS};
+use crate::constants::{PROXY_STARTUP_WAIT_SECS, PROXY_POLL_INTERVAL_MS, PROXY_MAX_STARTUP_ATTEMPTS};
 
 /// Start the LiteLLM proxy
 pub async fn start_proxy() -> Result<()> {
@@ -44,19 +44,20 @@ pub async fn start_proxy() -> Result<()> {
         anyhow::bail!("Failed to start LiteLLM proxy: {}", stderr);
     }
 
-    // Wait for proxy to be ready
+    // Smart polling loop - check every 100ms until ready
     log_info("⏳", "Waiting for LiteLLM proxy to be ready...");
-    tokio::time::sleep(std::time::Duration::from_secs(PROXY_STARTUP_WAIT_SECS)).await;
 
-    // Verify it's running
-    for i in 0..PROXY_MAX_STARTUP_ATTEMPTS {
+    let max_wait_time = std::time::Duration::from_secs(PROXY_STARTUP_WAIT_SECS + (PROXY_MAX_STARTUP_ATTEMPTS as u64));
+    let poll_interval = std::time::Duration::from_millis(PROXY_POLL_INTERVAL_MS);
+    let start_time = std::time::Instant::now();
+
+    while start_time.elapsed() < max_wait_time {
         if is_proxy_running().await {
-            log_info("✅", "LiteLLM proxy started successfully");
+            let elapsed = start_time.elapsed();
+            log_info("✅", format!("LiteLLM proxy started successfully in {:.1}s", elapsed.as_secs_f64()));
             return Ok(());
         }
-        if i < PROXY_MAX_STARTUP_ATTEMPTS - 1 {
-            tokio::time::sleep(std::time::Duration::from_secs(PROXY_CHECK_INTERVAL_SECS)).await;
-        }
+        tokio::time::sleep(poll_interval).await;
     }
 
     anyhow::bail!(

@@ -13,4 +13,4 @@ pub use loader::{ContextLoader, LoaderConfig};
 pub use ranker::{RankerConfig, RepoRanker};
 pub use repo_graph::RepoGraph;
 pub use repomap::{generate_repo_map, RepoMap, RepoMapStats};
-pub use tree_parser::{Symbol, SymbolKind, TreeParser};
+pub use tree_parser::{Symbol, SymbolKind, SymbolReference, TreeParser};

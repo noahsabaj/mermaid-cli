@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
 use ignore::{DirEntry, WalkBuilder};
+use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tiktoken_rs::{cl100k_base, CoreBPE};
 
+use crate::cache::CacheManager;
 use crate::models::ProjectContext;
 
 /// Configuration for the context loader
@@ -96,28 +100,47 @@ impl Default for LoaderConfig {
 pub struct ContextLoader {
     config: LoaderConfig,
     tokenizer: CoreBPE,
+    cache: Option<Arc<CacheManager>>,
 }
 
 impl ContextLoader {
     /// Create a new context loader with default config
     pub fn new() -> Result<Self> {
+        let cache = CacheManager::new().ok().map(Arc::new);
         Ok(Self {
             config: LoaderConfig::default(),
             tokenizer: cl100k_base()?,
+            cache,
         })
     }
 
     /// Create with custom config
     pub fn with_config(config: LoaderConfig) -> Result<Self> {
+        let cache = CacheManager::new().ok().map(Arc::new);
         Ok(Self {
             config,
             tokenizer: cl100k_base()?,
+            cache,
         })
     }
 
     /// Load project context from the given path (alias for compatibility)
     pub fn load(&self, root_path: &Path) -> Result<ProjectContext> {
         self.load_context(root_path)
+    }
+
+    /// Load only the project structure without file contents (fast)
+    pub fn load_structure(&self, root_path: &Path) -> Result<crate::models::LazyProjectContext> {
+        // Collect all file paths (without loading content)
+        let files = self.collect_files(root_path)?;
+
+        // Create lazy context with just paths
+        let lazy_context = crate::models::LazyProjectContext::new(
+            root_path.to_string_lossy().to_string(),
+            files,
+        );
+
+        Ok(lazy_context)
     }
 
     /// Load project context from the given path
@@ -130,36 +153,58 @@ impl ContextLoader {
         // Collect all files using the ignore crate
         let files = self.collect_files(root_path)?;
 
-        // Load file contents
-        let mut total_tokens = 0;
-        let mut loaded_files = 0;
+        // Use atomic counters for thread-safe tracking
+        let total_tokens = Arc::new(AtomicUsize::new(0));
+        let loaded_files = Arc::new(AtomicUsize::new(0));
 
-        for file_path in files {
-            if loaded_files >= self.config.max_files {
-                break;
-            }
+        // Create a shared tokenizer for all threads
+        let tokenizer = Arc::new(self.tokenizer.clone());
 
-            if let Ok(content) = self.load_file(&file_path) {
-                // Estimate token count
-                let tokens = self.count_tokens(&content);
-
-                if total_tokens + tokens > self.config.max_context_tokens {
-                    break;
+        // Process files in parallel and collect results
+        let loaded_contents: Vec<(String, String, usize)> = files
+            .par_iter()
+            .filter_map(|file_path| {
+                // Check if we've hit the file limit
+                if loaded_files.load(Ordering::Relaxed) >= self.config.max_files {
+                    return None;
                 }
 
-                let relative_path = file_path
-                    .strip_prefix(root_path)
-                    .unwrap_or(&file_path)
-                    .to_string_lossy()
-                    .to_string();
+                // Try to load the file
+                if let Ok(content) = self.load_file(file_path) {
+                    // Count tokens using the shared tokenizer
+                    let tokens = tokenizer.encode_with_special_tokens(&content).len();
 
-                context.add_file(relative_path, content);
-                total_tokens += tokens;
-                loaded_files += 1;
-            }
+                    // Check if adding this file would exceed token limit
+                    let current_total = total_tokens.load(Ordering::Relaxed);
+                    if current_total + tokens > self.config.max_context_tokens {
+                        return None;
+                    }
+
+                    // Update counters atomically
+                    total_tokens.fetch_add(tokens, Ordering::Relaxed);
+                    loaded_files.fetch_add(1, Ordering::Relaxed);
+
+                    let relative_path = file_path
+                        .strip_prefix(root_path)
+                        .unwrap_or(file_path)
+                        .to_string_lossy()
+                        .to_string();
+
+                    Some((relative_path, content, tokens))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Add all loaded files to context
+        let mut actual_total_tokens = 0;
+        for (path, content, tokens) in loaded_contents {
+            context.add_file(path, content);
+            actual_total_tokens += tokens;
         }
 
-        context.token_count = total_tokens;
+        context.token_count = actual_total_tokens;
 
         // Auto-include important files
         self.auto_include_important_files(&mut context, root_path);

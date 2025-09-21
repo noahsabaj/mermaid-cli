@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tree_sitter::{Node, Parser, Query, QueryCursor};
@@ -6,7 +7,7 @@ use tree_sitter::{Node, Parser, Query, QueryCursor};
 use streaming_iterator::StreamingIterator;
 
 /// Symbol types we extract from code
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymbolKind {
     Function,
     Class,
@@ -19,7 +20,7 @@ pub enum SymbolKind {
 }
 
 /// A code symbol extracted from the AST
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
@@ -30,7 +31,7 @@ pub struct Symbol {
 }
 
 /// A reference to a symbol from another location
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolReference {
     pub symbol_name: String,
     pub from_file: PathBuf,

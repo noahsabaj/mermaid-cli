@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::tui::app::App;
+use crate::diagnostics::{DiagnosticsMode, render_diagnostics_panel};
 use crate::models::MessageRole;
 
 /// Render the main UI
@@ -52,6 +53,13 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
 
     // Render status bar
     render_status_bar(frame, chunks[3], app);
+
+    // Render diagnostics panel if in detailed mode
+    if app.diagnostics_mode == DiagnosticsMode::Detailed {
+        if let Some(ref stats) = app.hardware_stats {
+            render_diagnostics_panel(frame, frame.area(), stats);
+        }
+    }
 }
 
 /// Render the header
@@ -598,6 +606,17 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Span::raw(" | "),
     ];
+
+    // Add hardware stats if in compact mode
+    if app.diagnostics_mode == DiagnosticsMode::Compact {
+        if let Some(ref stats) = app.hardware_stats {
+            spans.push(Span::styled(
+                stats.to_status_line(),
+                Style::default().fg(Color::Cyan),
+            ));
+            spans.push(Span::raw(" | "));
+        }
+    }
 
     // Add warning message if in dangerous mode
     let warning_level = app.operation_mode.warning_level();

@@ -11,6 +11,7 @@ pub const COMMAND_TIMEOUT_SECS: u64 = 30;
 pub const HTTP_REQUEST_TIMEOUT_SECS: u64 = 600; // 10 minutes for large model requests
 pub const PROXY_STARTUP_WAIT_SECS: u64 = 3;
 pub const PROXY_CHECK_INTERVAL_SECS: u64 = 1;
+pub const PROXY_POLL_INTERVAL_MS: u64 = 100; // Fast polling for proxy startup
 pub const PROXY_MAX_STARTUP_ATTEMPTS: usize = 10;
 
 // UI Configuration

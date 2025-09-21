@@ -11,7 +11,7 @@ use crate::{
     proxy::{count_mermaid_processes, ensure_proxy, is_proxy_running, stop_proxy},
     session::{ConversationManager, SessionState, select_conversation},
     tui::{run_ui, App},
-    utils::{log_info, log_warn, log_error},
+    utils::{log_info, log_warn, log_error, log_progress},
 };
 
 /// Main runtime orchestrator
@@ -52,7 +52,13 @@ impl Orchestrator {
 
     /// Run the orchestrator
     pub async fn run(mut self) -> Result<()> {
+        // Progress tracking for startup
+        let total_steps = 7; // Total startup steps
+        let mut current_step = 0;
+
         // Handle subcommands
+        current_step += 1;
+        log_progress(current_step, total_steps, "Processing commands");
         if let Some(command) = &self.cli.command {
             if handle_command(command).await? {
                 return Ok(()); // Command handled, exit
@@ -61,6 +67,8 @@ impl Orchestrator {
         }
 
         // Determine model to use (CLI arg > session > config)
+        current_step += 1;
+        log_progress(current_step, total_steps, "Configuring model");
         let (model_id, should_save_session) = if let Some(model) = &self.cli.model {
             // CLI argument overrides session
             (model.clone(), true)
@@ -89,15 +97,21 @@ impl Orchestrator {
         log_info("🧜‍♀️", format!("Starting Mermaid with model: {}", model_id.green()));
 
         // Ensure LiteLLM proxy is running (unless --no-auto-proxy is set)
+        current_step += 1;
+        log_progress(current_step, total_steps, "Checking LiteLLM proxy");
         if !is_proxy_running().await {
             ensure_proxy(self.cli.no_auto_proxy).await?;
             self.proxy_started_by_us = !self.cli.no_auto_proxy;
         }
 
         // Ensure Ollama model is available (auto-install if needed)
+        current_step += 1;
+        log_progress(current_step, total_steps, "Checking model availability");
         ensure_ollama_model(&model_id, self.cli.no_auto_install).await?;
 
         // Create model instance with config for authentication
+        current_step += 1;
+        log_progress(current_step, total_steps, "Initializing model");
         let model = match ModelFactory::create(&model_id, Some(&self.config)).await {
             Ok(m) => m,
             Err(e) => {
@@ -114,11 +128,36 @@ impl Orchestrator {
             .clone()
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // Load project context
-        let context = self.load_project_context(&project_path)?;
+        // Load project structure quickly (no file contents)
+        current_step += 1;
+        log_progress(current_step, total_steps, "Loading project structure");
+        let lazy_context = self.load_project_structure(&project_path)?;
 
-        // Create app instance with model and context
+        // Create app instance with model and lazy context (converts to regular context)
+        current_step += 1;
+        log_progress(current_step, total_steps, "Starting UI");
+        let context = lazy_context.to_project_context().await;
         let mut app = App::new(model, context);
+
+        // Start loading files in background after UI is visible
+        let lazy_context_bg = lazy_context.clone();
+        let project_path_bg = project_path.clone();
+        tokio::spawn(async move {
+            // Load priority files first (README, config, etc.)
+            let priority = crate::models::get_priority_files(
+                &project_path_bg.to_string_lossy()
+            );
+            if !priority.is_empty() {
+                let _ = lazy_context_bg.load_files_batch(priority).await;
+            }
+
+            // Then load remaining files progressively
+            let all_files = lazy_context_bg.get_file_list();
+            for chunk in all_files.chunks(10) {
+                let _ = lazy_context_bg.load_files_batch(chunk.to_vec()).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
 
         // Handle --resume or --continue flags
         if self.cli.resume || self.cli.continue_conversation {
@@ -158,7 +197,22 @@ impl Orchestrator {
         result
     }
 
-    /// Load project context
+    /// Load project structure quickly (no file contents)
+    fn load_project_structure(&self, project_path: &PathBuf) -> Result<crate::models::LazyProjectContext> {
+        let loader = ContextLoader::new()?;
+
+        log_info("📂", format!("Loading project structure from: {}", project_path.display()));
+
+        let context = loader.load_structure(project_path)?;
+
+        log_info("📊", format!("Found {} files (loading in background...)",
+            context.total_file_count()
+        ));
+
+        Ok(context)
+    }
+
+    /// Load project context (keeping for compatibility)
     fn load_project_context(&self, project_path: &PathBuf) -> Result<ProjectContext> {
         let loader = ContextLoader::new()?;
 

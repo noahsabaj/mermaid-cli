@@ -40,8 +40,8 @@ pub async fn ensure_model(model_name: &str, no_auto_install: bool) -> Result<()>
     // Get the model name without provider prefix
     let model = &model_name[7..]; // Remove "ollama/" prefix
 
-    // Check if any models exist
-    let models = detector::list_models()?;
+    // Check if any models exist (use async version)
+    let models = detector::list_models_async().await?;
 
     // Check if the requested model exists
     let model_exists = models.iter().any(|m| m.contains(model));

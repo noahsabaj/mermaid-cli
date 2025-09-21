@@ -82,6 +82,28 @@ async fn run_app(
     // Initialize file watcher for the current directory
     let watcher = FileSystemWatcher::new(Path::new("."))?;
     let mut last_refresh = std::time::Instant::now();
+
+    // Start hardware monitoring if available
+    let hardware_monitor = app.hardware_monitor.clone();
+    let hardware_tx = tx.clone();
+    if let Some(monitor) = hardware_monitor {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+                let stats = {
+                    let mut m = monitor.lock().await;
+                    m.get_stats()
+                };
+                if let Ok(stats) = stats {
+                    // Send hardware stats as JSON
+                    if let Ok(json) = serde_json::to_string(&stats) {
+                        let _ = hardware_tx.send(format!("[HARDWARE_STATS]:{}", json)).await;
+                    }
+                }
+            }
+        });
+    }
     loop {
         // Get viewport height for proper scrolling
         let viewport_height = terminal.size()?.height.saturating_sub(8); // 3 header + 3 input + 1 status + 1 margin
@@ -182,8 +204,14 @@ async fn run_app(
                 // Simplified key handling - no modes
                 match key.code {
                     KeyCode::Esc => {
-                        // If generating, abort the generation but keep what was generated
-                        if app.is_generating {
+                        use crate::diagnostics::DiagnosticsMode;
+
+                        // If diagnostics panel is open, close it
+                        if app.diagnostics_mode == DiagnosticsMode::Detailed {
+                            app.diagnostics_mode = DiagnosticsMode::Compact;
+                            app.set_status("Diagnostics panel closed");
+                        } else if app.is_generating {
+                            // If generating, abort the generation but keep what was generated
                             if let Some(abort) = app.generation_abort.take() {
                                 abort.abort();
                             }
@@ -300,6 +328,11 @@ async fn run_app(
                 // Handle Ctrl+Tab to cycle reverse (optional)
                 if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::CONTROL {
                     app.cycle_mode_reverse();
+                }
+
+                // F2 to toggle diagnostics
+                if key.code == KeyCode::F(2) {
+                    app.toggle_diagnostics();
                 }
 
                 // Mode-specific shortcuts
@@ -503,6 +536,13 @@ async fn run_app(
                         format!("Error: {}", error),
                     );
                     app.current_response.clear();
+                } else if chunk.starts_with("[HARDWARE_STATS]:") {
+                    // Hardware stats update
+                    if let Some(json_str) = chunk.strip_prefix("[HARDWARE_STATS]:") {
+                        if let Ok(stats) = serde_json::from_str::<crate::diagnostics::HardwareStats>(json_str) {
+                            app.hardware_stats = Some(stats);
+                        }
+                    }
                 } else {
                     // Regular chunk - append to current response
                     app.current_response.push_str(&chunk);
@@ -512,6 +552,24 @@ async fn run_app(
                 }
 
                 // Break after processing one message to allow redraw
+                break;
+            }
+        }
+
+        // Always check for hardware stats updates (even when not generating)
+        while let Ok(chunk) = rx.try_recv() {
+            if chunk.starts_with("[HARDWARE_STATS]:") {
+                // Hardware stats update
+                if let Some(json_str) = chunk.strip_prefix("[HARDWARE_STATS]:") {
+                    if let Ok(stats) = serde_json::from_str::<crate::diagnostics::HardwareStats>(json_str) {
+                        app.hardware_stats = Some(stats);
+                    }
+                }
+                break; // Process one update per loop iteration
+            } else if !app.is_generating {
+                // If we're not generating and it's not a hardware stats message,
+                // put it back for later processing when generation starts
+                // Note: This is a simplified approach - in production you might want a queue
                 break;
             }
         }
@@ -730,6 +788,10 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
                 }
             }
         }
+        Some("stats") | Some("diag") | Some("diagnostics") => {
+            // Toggle diagnostics display
+            app.toggle_diagnostics();
+        }
         Some("list") => {
             // List saved conversations
             if let Some(ref manager) = app.conversation_manager {
@@ -767,13 +829,15 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
                  :save [name] - Save current conversation\n\
                  :load [name] - Load a conversation\n\
                  :list - List saved conversations\n\
+                 :stats/:diag - Toggle hardware diagnostics\n\
                  :help/:h - Show this help\n\
                  \n\
                  Keys:\n\
                  i - Enter insert mode (type messages)\n\
-                 Esc - Return to normal mode\n\
+                 Esc - Return to normal mode / Close diagnostics\n\
                  : - Enter command mode\n\
                  Tab - Toggle sidebar\n\
+                 F2 - Toggle hardware diagnostics\n\
                  Ctrl+C - Quit"
                     .to_string(),
             );

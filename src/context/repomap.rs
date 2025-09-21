@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
+use rayon::prelude::*;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -80,32 +82,64 @@ impl RepoMap {
 
     /// Parse all files and extract symbols
     async fn parse_files(&mut self, files: &[PathBuf]) -> Result<()> {
-        let mut cache = self.cache.lock().await;
+        let cache_lock = self.cache.lock().await;
 
-        for file in files {
-            // Skip if already cached
-            if cache.parsed_files.contains_key(file) {
-                continue;
-            }
+        // Filter out already cached files
+        let files_to_parse: Vec<PathBuf> = files
+            .iter()
+            .filter(|f| !cache_lock.parsed_files.contains_key(*f))
+            .cloned()
+            .collect();
 
-            // Read file content
-            let content = fs::read_to_string(file)
-                .with_context(|| format!("Failed to read file: {}", file.display()))?;
+        drop(cache_lock); // Release lock before parallel processing
 
-            // Parse symbols
-            match self.parser.parse_file(file, &content) {
-                Ok(symbols) => {
-                    cache.parsed_files.insert(file.clone(), symbols.clone());
+        // Parse files in parallel
+        let parsed_results: Vec<(PathBuf, Option<Vec<Symbol>>, Option<Vec<SymbolReference>>)> =
+            files_to_parse
+                .par_iter()
+                .filter_map(|file| {
+                    // Read file content
+                    match fs::read_to_string(file) {
+                        Ok(content) => {
+                            // Create a new parser for this thread
+                            match TreeParser::new() {
+                                Ok(mut parser) => {
+                                    // Parse symbols
+                                    let symbols = match parser.parse_file(file, &content) {
+                                        Ok(syms) => Some(syms),
+                                        Err(e) => {
+                                            eprintln!("Failed to parse {}: {}", file.display(), e);
+                                            None
+                                        }
+                                    };
 
-                    // Also extract references
-                    if let Ok(references) = self.parser.find_references(file, &content) {
-                        cache.file_references.insert(file.clone(), references);
+                                    // Extract references
+                                    let references = parser.find_references(file, &content).ok();
+
+                                    Some((file.clone(), symbols, references))
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to create parser for {}: {}", file.display(), e);
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to read {}: {}", file.display(), e);
+                            None
+                        }
                     }
-                }
-                Err(e) => {
-                    // Log error but continue with other files
-                    eprintln!("Failed to parse {}: {}", file.display(), e);
-                }
+                })
+                .collect();
+
+        // Update cache with parsed results
+        let mut cache = self.cache.lock().await;
+        for (path, symbols, references) in parsed_results {
+            if let Some(syms) = symbols {
+                cache.parsed_files.insert(path.clone(), syms);
+            }
+            if let Some(refs) = references {
+                cache.file_references.insert(path, refs);
             }
         }
 
@@ -267,6 +301,3 @@ pub async fn generate_repo_map(
     repomap.build_from_directory(root_path).await?;
     repomap.generate_map(chat_files, &[], Some(token_budget)).await
 }
-
-// Add missing import
-use std::collections::HashMap;

@@ -1,8 +1,10 @@
 use anyhow::Result;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use super::tree_parser::{Symbol, SymbolKind, SymbolReference};
 
@@ -178,11 +180,23 @@ impl RepoGraph {
 
         // PageRank iterations
         for _ in 0..iterations {
-            // Reset new scores
-            new_scores.fill((1.0 - damping) / num_nodes as f64);
+            // Reset new scores with thread-safe access
+            let new_scores_mutex = Arc::new(Mutex::new(vec![0.0; num_nodes]));
 
-            // Distribute scores through edges
-            for node_idx in self.graph.node_indices() {
+            // Initialize with base score
+            {
+                let mut ns = new_scores_mutex.lock().unwrap();
+                ns.fill((1.0 - damping) / num_nodes as f64);
+            }
+
+            // Collect node indices for parallel processing
+            let node_indices: Vec<_> = self.graph.node_indices().collect();
+
+            // Track dangling mass for redistribution
+            let dangling_mass = Arc::new(Mutex::new(0.0));
+
+            // Distribute scores through edges in parallel
+            node_indices.par_iter().for_each(|&node_idx| {
                 let pos = index_to_position[&node_idx];
                 let score = scores[pos];
 
@@ -191,22 +205,45 @@ impl RepoGraph {
                 if !out_edges.is_empty() {
                     let total_weight: f64 = out_edges.iter().map(|e| e.weight().weight).sum();
 
-                    for edge in out_edges {
-                        let target = edge.target();
-                        let target_pos = index_to_position[&target];
-                        let edge_weight = edge.weight().weight;
+                    // Prepare updates
+                    let updates: Vec<(usize, f64)> = out_edges
+                        .iter()
+                        .map(|edge| {
+                            let target = edge.target();
+                            let target_pos = index_to_position[&target];
+                            let edge_weight = edge.weight().weight;
+                            let transfer = damping * score * (edge_weight / total_weight);
+                            (target_pos, transfer)
+                        })
+                        .collect();
 
-                        // Transfer score proportional to edge weight
-                        new_scores[target_pos] += damping * score * (edge_weight / total_weight);
+                    // Apply updates with lock
+                    let mut ns = new_scores_mutex.lock().unwrap();
+                    for (target_pos, transfer) in updates {
+                        ns[target_pos] += transfer;
                     }
                 } else {
-                    // No outgoing edges - distribute equally (handling dangling nodes)
-                    let share = damping * score / num_nodes as f64;
-                    for score in &mut new_scores {
-                        *score += share;
-                    }
+                    // No outgoing edges - accumulate dangling mass
+                    let mut dm = dangling_mass.lock().unwrap();
+                    *dm += damping * score;
+                }
+            });
+
+            // Distribute dangling mass equally
+            let dm = *dangling_mass.lock().unwrap();
+            if dm > 0.0 {
+                let share = dm / num_nodes as f64;
+                let mut ns = new_scores_mutex.lock().unwrap();
+                for score in ns.iter_mut() {
+                    *score += share;
                 }
             }
+
+            // Extract new scores from mutex
+            new_scores = match Arc::try_unwrap(new_scores_mutex) {
+                Ok(mutex) => mutex.into_inner().unwrap(),
+                Err(arc) => arc.lock().unwrap().clone(),
+            };
 
             // Apply personalization in each iteration
             if let Some(ref personalization) = personalization {

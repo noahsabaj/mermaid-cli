@@ -47,3 +47,9 @@ pub fn log_status(message: impl std::fmt::Display) {
     // These will be handled differently when TUI is active
     eprintln!("{}", message);
 }
+
+/// Progress indicator for startup sequence
+pub fn log_progress(step: usize, total: usize, message: impl std::fmt::Display) {
+    let progress = format!("[{}/{}]", step, total);
+    eprintln!("{} {} {}", progress, "→".to_string(), message);
+}

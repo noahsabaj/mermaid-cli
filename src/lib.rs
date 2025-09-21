@@ -1,8 +1,10 @@
 pub mod agents;
 pub mod app;
+pub mod cache;
 pub mod cli;
 pub mod constants;
 pub mod context;
+pub mod diagnostics;
 pub mod models;
 pub mod ollama;
 pub mod proxy;

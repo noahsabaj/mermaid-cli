@@ -1,5 +1,6 @@
 use super::mode::OperationMode;
 use crate::agents::{ModeAwareExecutor, AgentAction};
+use crate::diagnostics::{DiagnosticsMode, HardwareMonitor, HardwareStats};
 use crate::models::{ChatMessage, MessageRole, Model, ProjectContext};
 use crate::session::{ConversationHistory, ConversationManager};
 use std::sync::Arc;
@@ -59,6 +60,12 @@ pub struct App {
     pub conversation_manager: Option<ConversationManager>,
     /// Current conversation being tracked
     pub current_conversation: Option<ConversationHistory>,
+    /// Hardware monitor
+    pub hardware_monitor: Option<Arc<Mutex<HardwareMonitor>>>,
+    /// Current hardware stats
+    pub hardware_stats: Option<HardwareStats>,
+    /// Diagnostics display mode
+    pub diagnostics_mode: DiagnosticsMode,
 }
 
 impl App {
@@ -74,6 +81,9 @@ impl App {
         let current_conversation = conversation_manager.as_ref().map(|_| {
             ConversationHistory::new(working_dir.clone(), model_name.clone())
         });
+
+        // Initialize hardware monitor
+        let hardware_monitor = Some(Arc::new(Mutex::new(HardwareMonitor::new())));
 
         Self {
             messages: Vec::new(),
@@ -102,6 +112,9 @@ impl App {
             generation_abort: None,
             conversation_manager,
             current_conversation,
+            hardware_monitor,
+            hardware_stats: None,
+            diagnostics_mode: DiagnosticsMode::Compact,
         }
     }
 
@@ -367,6 +380,22 @@ impl App {
         if let Err(e) = self.save_conversation() {
             eprintln!("Failed to auto-save conversation: {}", e);
         }
+    }
+
+    /// Toggle diagnostics display mode
+    pub fn toggle_diagnostics(&mut self) {
+        self.diagnostics_mode = match self.diagnostics_mode {
+            DiagnosticsMode::Hidden => DiagnosticsMode::Compact,
+            DiagnosticsMode::Compact => DiagnosticsMode::Detailed,
+            DiagnosticsMode::Detailed => DiagnosticsMode::Hidden,
+        };
+
+        self.set_status(format!("Diagnostics: {:?}", self.diagnostics_mode));
+    }
+
+    /// Update hardware stats
+    pub fn update_hardware_stats(&mut self, stats: HardwareStats) {
+        self.hardware_stats = Some(stats);
     }
 }
 

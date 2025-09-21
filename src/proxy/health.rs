@@ -4,7 +4,7 @@ pub async fn is_proxy_running() -> bool {
         .unwrap_or_else(|_| "http://localhost:4000".to_string());
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_millis(200))  // Much faster timeout
         .build();
 
     if let Ok(client) = client {
