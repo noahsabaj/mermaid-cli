@@ -1,4 +1,5 @@
 use super::mode::OperationMode;
+use crate::agents::{ModeAwareExecutor, AgentAction};
 use crate::models::{Model, ProjectContext};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -52,6 +53,10 @@ pub struct App {
     pub operation_mode: OperationMode,
     /// Flag for confirming destructive operations in BypassAll mode
     pub bypass_confirmed: bool,
+    /// Pending action waiting for confirmation
+    pub pending_action: Option<AgentAction>,
+    /// Executor for pending action
+    pub pending_executor: Option<ModeAwareExecutor>,
 }
 
 impl App {
@@ -79,6 +84,8 @@ impl App {
             status_message: None,
             operation_mode: OperationMode::default(), // Starts in Normal mode
             bypass_confirmed: false,
+            pending_action: None,
+            pending_executor: None,
         }
     }
 
@@ -116,10 +123,36 @@ impl App {
 
     /// Scroll chat view up
     pub fn scroll_up(&mut self, amount: u16) {
-        // Calculate approximate max scroll based on message count
-        // Each message takes roughly 3-4 lines (role + content + spacing)
-        let estimated_lines = self.messages.len().saturating_mul(4) as u16;
-        let max_scroll = estimated_lines.saturating_sub(10); // Leave some buffer
+        // Count actual lines that will be rendered
+        let mut total_lines = 0u16;
+
+        for msg in &self.messages {
+            // Role line: [You] or [Mermaid]
+            total_lines += 1;
+
+            // Content lines (can be many for code blocks)
+            total_lines += msg.content.lines().count() as u16;
+
+            // Assistant messages have completion indicator (3 lines)
+            if matches!(msg.role, MessageRole::Assistant) {
+                total_lines += 3;
+            }
+
+            // Empty line between messages
+            total_lines += 1;
+        }
+
+        // Add lines for current response if generating
+        if self.is_generating && !self.current_response.is_empty() {
+            total_lines += 1; // Role line
+            total_lines += self.current_response.lines().count() as u16;
+            total_lines += 1; // Typing indicator
+        }
+
+        // Calculate max scroll: total lines minus viewport height
+        // Use 20 as a safe estimate for viewport height
+        let viewport_height = 20;
+        let max_scroll = total_lines.saturating_sub(viewport_height);
 
         self.scroll_offset = self.scroll_offset
             .saturating_add(amount)

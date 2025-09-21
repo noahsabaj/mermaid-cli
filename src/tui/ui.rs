@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::agents;
+use crate::agents::ModeAwareExecutor;
 use crate::models::{ModelConfig, StreamCallback};
 use crate::tui::{App, AppState};
 use crate::tui::render::render_ui;
@@ -30,7 +31,7 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;  // Removed EnableMouseCapture for text selection
+    execute!(stdout, EnterAlternateScreen)?;  // Mouse capture disabled to allow text selection
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -50,6 +51,7 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen
+        // Mouse capture disabled to allow text selection
     )?;
     terminal.show_cursor()?;
 
@@ -73,7 +75,20 @@ async fn run_app(
 
         // Handle input events
         if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            match event::read()? {
+                Event::Mouse(mouse) => {
+                    // Handle mouse wheel scrolling in all states
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            app.scroll_down(3);  // Scroll up moves view down
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.scroll_up(3);    // Scroll down moves view up
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Key(key) => {
                 match app_state {
                     AppState::Normal => {
                         match key.code {
@@ -87,6 +102,32 @@ async fn run_app(
                             KeyCode::Char(':') => {
                                 *app_state = AppState::Command;
                                 app.input.clear();
+                            }
+                            // Handle action confirmation
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                if let (Some(action), Some(mut executor)) = (app.pending_action.take(), app.pending_executor.take()) {
+                                    app.set_status("Executing action...");
+
+                                    // Execute the confirmed action
+                                    match executor.execute(action).await {
+                                        Ok(agents::ActionResult::Success { output }) => {
+                                            app.set_status(format!("✓ {}", output));
+                                        }
+                                        Ok(agents::ActionResult::Error { error }) => {
+                                            app.set_status(format!("✗ Action failed: {}", error));
+                                        }
+                                        Err(e) => {
+                                            app.set_status(format!("✗ Error: {}", e));
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                if app.pending_action.is_some() {
+                                    app.pending_action = None;
+                                    app.pending_executor = None;
+                                    app.set_status("Action skipped");
+                                }
                             }
                             KeyCode::Up => app.scroll_down(1),
                             KeyCode::Down => app.scroll_up(1),
@@ -198,7 +239,9 @@ async fn run_app(
                 }
 
                 // Handle Shift+Tab to cycle operation modes
-                if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::SHIFT {
+                // Note: Some terminals report Shift+Tab as BackTab, others as Tab with SHIFT modifier
+                if key.code == KeyCode::BackTab ||
+                   (key.code == KeyCode::Tab && key.modifiers == KeyModifiers::SHIFT) {
                     app.cycle_mode();
                 }
 
@@ -221,6 +264,8 @@ async fn run_app(
                 if key.code == KeyCode::Esc && *app_state == AppState::Normal {
                     app.set_mode(crate::tui::mode::OperationMode::Normal);
                 }
+                }
+                _ => {} // Ignore other events (FocusGained, FocusLost, Paste, Resize)
             }
         }
 
@@ -241,16 +286,36 @@ async fn run_app(
 
                         // Parse and execute any actions from the response
                         let actions = agents::parse_actions(&response_text);
+
+                        // Create mode-aware executor
+                        let mut executor = ModeAwareExecutor::new(app.operation_mode.clone());
+
                         for action in actions {
-                            match agents::execute_action(&action).await {
-                                Ok(agents::ActionResult::Success { output }) => {
-                                    app.set_status(format!("✓ Action completed: {}", output));
-                                }
-                                Ok(agents::ActionResult::Error { error }) => {
-                                    app.set_status(format!("✗ Action failed: {}", error));
-                                }
-                                Err(e) => {
-                                    app.set_status(format!("✗ Error: {}", e));
+                            // Check if action needs confirmation
+                            if executor.needs_confirmation(&action) {
+                                // Show confirmation prompt
+                                let action_desc = executor.describe_action(&action);
+                                app.add_message(
+                                    crate::tui::app::MessageRole::System,
+                                    format!("🔔 Action requires confirmation:\n{}\n\nPress 'y' to confirm, 'n' to skip", action_desc),
+                                );
+
+                                // Store pending action for confirmation
+                                app.pending_action = Some(action);
+                                app.pending_executor = Some(executor);
+                                break; // Wait for user confirmation
+                            } else {
+                                // Execute action directly
+                                match executor.execute(action).await {
+                                    Ok(agents::ActionResult::Success { output }) => {
+                                        app.set_status(format!("✓ {}", output));
+                                    }
+                                    Ok(agents::ActionResult::Error { error }) => {
+                                        app.set_status(format!("✗ Action failed: {}", error));
+                                    }
+                                    Err(e) => {
+                                        app.set_status(format!("✗ Error: {}", e));
+                                    }
                                 }
                             }
                         }
@@ -296,8 +361,54 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
         }
         Some("model") => {
             if let Some(model_name) = parts.get(1) {
-                // TODO: Implement model switching
-                app.set_status(format!("Switching to model: {}", model_name));
+                // Parse the model name (could be provider/model or just model)
+                let model_id = if model_name.contains('/') {
+                    model_name.to_string()
+                } else {
+                    // Assume ollama if no provider specified
+                    format!("ollama/{}", model_name)
+                };
+
+                app.set_status(format!("Switching to model: {}...", model_id));
+
+                // Try to create the new model
+                use crate::models::ModelFactory;
+                use crate::app::load_config;
+
+                let config = match load_config() {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        app.set_status(format!("Failed to load config: {}", e));
+                        return Ok(());
+                    }
+                };
+
+                // Create new model asynchronously
+                let model_id_clone = model_id.clone();
+                let new_model = tokio::task::spawn(async move {
+                    ModelFactory::create(&model_id_clone, Some(&config)).await
+                });
+
+                match new_model.await {
+                    Ok(Ok(model)) => {
+                        // Update the model and model name
+                        *app.model.lock().await = model;
+                        app.model_name = model_id.clone();
+                        app.set_status(format!("Switched to model: {}", model_id));
+
+                        // Save the model preference to session
+                        use crate::session::SessionState;
+                        let mut session = SessionState::load().unwrap_or_default();
+                        session.set_model(model_id);
+                        let _ = session.save();
+                    }
+                    Ok(Err(e)) => {
+                        app.set_status(format!("Failed to switch model: {}", e));
+                    }
+                    Err(e) => {
+                        app.set_status(format!("Failed to switch model: {}", e));
+                    }
+                }
             } else {
                 app.set_status(format!("Current model: {}", app.model_name));
             }

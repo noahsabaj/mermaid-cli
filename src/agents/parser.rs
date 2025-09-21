@@ -7,9 +7,10 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
     // Parse file write actions
     if let Some(captures) = extract_block(response, "FILE_WRITE") {
         for capture in captures {
-            if let Some(path) = extract_attribute(&capture, "path") {
+            // Extract path from [FILE_WRITE: path] format
+            if let Some(path) = extract_path_from_header(&capture, "FILE_WRITE") {
                 actions.push(AgentAction::WriteFile {
-                    path: path.clone(),
+                    path,
                     content: extract_content(&capture),
                 });
             }
@@ -19,7 +20,8 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
     // Parse file read actions
     if let Some(captures) = extract_block(response, "FILE_READ") {
         for capture in captures {
-            if let Some(path) = extract_attribute(&capture, "path") {
+            // Extract path from [FILE_READ: path] format
+            if let Some(path) = extract_path_from_header(&capture, "FILE_READ") {
                 actions.push(AgentAction::ReadFile { path });
             }
         }
@@ -28,10 +30,23 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
     // Parse command execution
     if let Some(captures) = extract_block(response, "COMMAND") {
         for capture in captures {
-            actions.push(AgentAction::ExecuteCommand {
-                command: extract_content(&capture),
-                working_dir: extract_attribute(&capture, "dir"),
-            });
+            // For COMMAND, the command itself is after the colon
+            let command = if let Some(cmd) = extract_path_from_header(&capture, "COMMAND") {
+                // Check if there's a dir= attribute
+                if let Some(dir_pos) = cmd.find(" dir=") {
+                    let command_part = cmd[..dir_pos].to_string();
+                    let dir_part = cmd[dir_pos + 5..].trim_matches('"').to_string();
+                    actions.push(AgentAction::ExecuteCommand {
+                        command: command_part,
+                        working_dir: Some(dir_part),
+                    });
+                } else {
+                    actions.push(AgentAction::ExecuteCommand {
+                        command: cmd,
+                        working_dir: None,
+                    });
+                }
+            }
         }
     }
 
@@ -99,4 +114,17 @@ fn extract_content(block: &str) -> String {
         }
     }
     String::new()
+}
+
+/// Extract path/command from header format [TYPE: path/command]
+fn extract_path_from_header(block: &str, block_type: &str) -> Option<String> {
+    let start_tag = format!("[{}:", block_type);
+    if let Some(start) = block.find(&start_tag) {
+        let path_start = start + start_tag.len();
+        if let Some(end) = block[path_start..].find(']') {
+            let path = block[path_start..path_start + end].trim();
+            return Some(path.to_string());
+        }
+    }
+    None
 }

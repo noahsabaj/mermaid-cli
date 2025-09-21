@@ -60,19 +60,30 @@ impl Orchestrator {
         }
 
         // Determine model to use (CLI arg > session > config)
-        let model_id = if let Some(model) = &self.cli.model {
-            model.clone()
+        let (model_id, should_save_session) = if let Some(model) = &self.cli.model {
+            // CLI argument overrides session
+            (model.clone(), true)
         } else if let Some(last_model) = self.session.get_model() {
-            last_model.to_string()
+            // Use saved session model (don't re-save it)
+            (last_model.to_string(), false)
         } else {
-            format!(
-                "{}/{}",
-                self.config.default_model.provider, self.config.default_model.name
+            // No session, use config default
+            (
+                format!(
+                    "{}/{}",
+                    self.config.default_model.provider, self.config.default_model.name
+                ),
+                true,
             )
         };
 
-        // Update session with current model
-        self.session.set_model(model_id.clone());
+        // Only update session if model came from CLI or config (not from session itself)
+        if should_save_session {
+            self.session.set_model(model_id.clone());
+            if let Err(e) = self.session.save() {
+                eprintln!("⚠️  Failed to save initial session: {}", e);
+            }
+        }
 
         println!("🧜‍♀️ Starting Mermaid with model: {}", model_id.green());
 
@@ -111,10 +122,8 @@ impl Orchestrator {
         // Run the TUI
         let result = run_ui(app).await;
 
-        // Save session state before exit
-        if let Err(e) = self.session.save() {
-            eprintln!("⚠️  Failed to save session: {}", e);
-        }
+        // Note: Session is saved by the UI when changes happen (e.g., model switching)
+        // We don't save here to avoid overwriting UI's changes with stale data
 
         // Cleanup
         self.cleanup().await?;

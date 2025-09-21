@@ -181,6 +181,47 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(line.to_string()));
         }
 
+        // Add completion indicator for assistant messages
+        if matches!(msg.role, MessageRole::Assistant) {
+            // Create a separator line that spans most of the width (accounting for borders)
+            let width = area.width.saturating_sub(4) as usize; // Subtract for borders and padding
+            let separator = "─".repeat(width);
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    separator,
+                    Style::default()
+                        .fg(Color::Rgb(100, 100, 100))  // More visible gray
+                ),
+            ]));
+
+            // Add completion message with checkmark
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "  ✓ ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Response Complete",
+                    Style::default()
+                        .fg(Color::Rgb(150, 150, 150))  // Light gray text
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+
+            // Add another separator for better visual separation
+            let separator2 = "─".repeat(width);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    separator2,
+                    Style::default()
+                        .fg(Color::Rgb(100, 100, 100)),
+                ),
+            ]));
+        }
+
         lines.push(Line::from("")); // Empty line between messages
     }
 
@@ -205,12 +246,16 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
         ]));
     }
 
+    // Use operation mode color for border to provide visual feedback
+    let border_color = app.operation_mode.color();
+    let title = format!("Chat [{}]", app.operation_mode.display_name());
+
     let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
-                .title("Chat")
+                .title(title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(border_color)),
         )
         .wrap(Wrap { trim: false })
         .scroll((app.scroll_offset, 0));
@@ -284,7 +329,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, app_state: &AppSt
         AppState::FileSelect => Color::Magenta,
     };
 
-    let status_text = if let Some(status) = &app.status_message {
+    let status_text = if app.pending_action.is_some() {
+        "⚠️ Action pending confirmation: Press 'y' to confirm, 'n' to skip".to_string()
+    } else if let Some(status) = &app.status_message {
         status.clone()
     } else if app.is_generating {
         "Generating response...".to_string()
@@ -292,8 +339,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, app_state: &AppSt
         "Ready".to_string()
     };
 
-    // Build status line - simplified to show only AppState mode
+    // Build status line - show both AppState and OperationMode
     let mut spans = vec![
+        // AppState mode (Normal/Insert/Command)
         Span::styled(
             format!(" {} ", mode_str),
             Style::default()
@@ -302,7 +350,28 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, app_state: &AppSt
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
+        // OperationMode indicator
+        Span::styled(
+            format!(" {} ", app.operation_mode.display_name()),
+            Style::default()
+                .bg(app.operation_mode.color())
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
     ];
+
+    // Add warning message if in dangerous mode
+    let warning_level = app.operation_mode.warning_level();
+    if let Some(warning) = warning_level.message() {
+        spans.push(Span::styled(
+            warning,
+            Style::default()
+                .fg(warning_level.color())
+                .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK),
+        ));
+        spans.push(Span::raw(" | "));
+    }
     spans.push(Span::raw(status_text));
     spans.push(Span::raw(" | "));
     spans.push(Span::styled(
