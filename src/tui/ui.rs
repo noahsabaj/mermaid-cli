@@ -108,10 +108,29 @@ async fn run_app(
                                 if let (Some(action), Some(mut executor)) = (app.pending_action.take(), app.pending_executor.take()) {
                                     app.set_status("Executing action...");
 
+                                    // Clone action to check type after execution
+                                    let action_clone = action.clone();
+
                                     // Execute the confirmed action
                                     match executor.execute(action).await {
                                         Ok(agents::ActionResult::Success { output }) => {
                                             app.set_status(format!("✓ {}", output));
+
+                                            // Update context for file operations
+                                            match &action_clone {
+                                                agents::AgentAction::WriteFile { path, content } => {
+                                                    app.context.add_file(path.clone(), content.clone());
+                                                    // Simple token approximation (1 token ≈ 4 bytes)
+                                                    app.context.token_count += content.len() / 4;
+                                                }
+                                                agents::AgentAction::DeleteFile { path } => {
+                                                    if let Some(content) = app.context.files.remove(path) {
+                                                        // Reduce token count
+                                                        app.context.token_count = app.context.token_count.saturating_sub(content.len() / 4);
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
                                         }
                                         Ok(agents::ActionResult::Error { error }) => {
                                             app.set_status(format!("✗ Action failed: {}", error));
@@ -305,10 +324,29 @@ async fn run_app(
                                 app.pending_executor = Some(executor);
                                 break; // Wait for user confirmation
                             } else {
+                                // Clone action to check type after execution
+                                let action_clone = action.clone();
+
                                 // Execute action directly
                                 match executor.execute(action).await {
                                     Ok(agents::ActionResult::Success { output }) => {
                                         app.set_status(format!("✓ {}", output));
+
+                                        // Update context for file operations
+                                        match &action_clone {
+                                            agents::AgentAction::WriteFile { path, content } => {
+                                                app.context.add_file(path.clone(), content.clone());
+                                                // Simple token approximation (1 token ≈ 4 bytes)
+                                                app.context.token_count += content.len() / 4;
+                                            }
+                                            agents::AgentAction::DeleteFile { path } => {
+                                                if let Some(content) = app.context.files.remove(path) {
+                                                    // Reduce token count
+                                                    app.context.token_count = app.context.token_count.saturating_sub(content.len() / 4);
+                                                }
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                     Ok(agents::ActionResult::Error { error }) => {
                                         app.set_status(format!("✗ Action failed: {}", error));
