@@ -66,63 +66,6 @@ pub fn create_directory(path: &str) -> Result<()> {
         .with_context(|| format!("Failed to create directory: {}", path.display()))
 }
 
-/// List files in a directory
-pub fn list_directory(path: &str) -> Result<Vec<String>> {
-    let path = normalize_path(path)?;
-
-    // Security check
-    validate_path(&path)?;
-
-    let mut entries = Vec::new();
-
-    for entry in fs::read_dir(&path)? {
-        let entry = entry?;
-        let file_name = entry.file_name().to_string_lossy().to_string();
-
-        if entry.file_type()?.is_dir() {
-            entries.push(format!("{}/", file_name));
-        } else {
-            entries.push(file_name);
-        }
-    }
-
-    entries.sort();
-    Ok(entries)
-}
-
-/// Check if a path exists
-pub fn path_exists(path: &str) -> Result<bool> {
-    let path = normalize_path(path)?;
-    Ok(path.exists())
-}
-
-/// Get file metadata
-pub fn get_file_info(path: &str) -> Result<FileInfo> {
-    let path = normalize_path(path)?;
-    validate_path(&path)?;
-
-    let metadata = fs::metadata(&path)?;
-
-    Ok(FileInfo {
-        size: metadata.len(),
-        is_dir: metadata.is_dir(),
-        is_file: metadata.is_file(),
-        modified: metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs()),
-    })
-}
-
-/// File information
-#[derive(Debug)]
-pub struct FileInfo {
-    pub size: u64,
-    pub is_dir: bool,
-    pub is_file: bool,
-    pub modified: Option<u64>,
-}
 
 /// Normalize a path (resolve relative paths)
 fn normalize_path(path: &str) -> Result<PathBuf> {

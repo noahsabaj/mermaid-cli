@@ -149,66 +149,6 @@ pub fn commit(message: &str, files: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Create a new branch
-pub fn create_branch(branch_name: &str) -> Result<()> {
-    let repo = Repository::open_from_env()
-        .context("Failed to open git repository. Is this a git repo?")?;
-
-    let head = repo.head()?.peel_to_commit()?;
-
-    repo.branch(branch_name, &head, false)
-        .with_context(|| format!("Failed to create branch: {}", branch_name))?;
-
-    Ok(())
-}
-
-/// Switch to a branch
-pub fn checkout_branch(branch_name: &str) -> Result<()> {
-    let repo = Repository::open_from_env()
-        .context("Failed to open git repository. Is this a git repo?")?;
-
-    let obj = repo.revparse_single(&format!("refs/heads/{}", branch_name))
-        .with_context(|| format!("Branch not found: {}", branch_name))?;
-
-    repo.checkout_tree(&obj, None)?;
-
-    repo.set_head(&format!("refs/heads/{}", branch_name))
-        .with_context(|| format!("Failed to set HEAD to branch: {}", branch_name))?;
-
-    Ok(())
-}
-
-/// Get current branch name
-pub fn current_branch() -> Result<String> {
-    let repo = Repository::open_from_env()
-        .context("Failed to open git repository. Is this a git repo?")?;
-
-    let head = repo.head()?;
-
-    Ok(head
-        .shorthand()
-        .unwrap_or("HEAD")
-        .to_string())
-}
-
-/// List all branches
-pub fn list_branches() -> Result<Vec<String>> {
-    let repo = Repository::open_from_env()
-        .context("Failed to open git repository. Is this a git repo?")?;
-
-    let mut branches = Vec::new();
-    let branch_iter = repo.branches(None)?;
-
-    for branch in branch_iter {
-        let (branch, _) = branch?;
-        if let Some(name) = branch.name()? {
-            branches.push(name.to_string());
-        }
-    }
-
-    Ok(branches)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,8 @@ use anyhow::Result;
 use tokio::process::Command;
 
 use super::{get_compose_dir, is_container_runtime_available, is_proxy_running};
+use crate::utils::{log_info, log_warn, log_error};
+use crate::constants::{PROXY_STARTUP_WAIT_SECS, PROXY_CHECK_INTERVAL_SECS, PROXY_MAX_STARTUP_ATTEMPTS};
 
 /// Start the LiteLLM proxy
 pub async fn start_proxy() -> Result<()> {
@@ -18,7 +20,7 @@ pub async fn start_proxy() -> Result<()> {
     // Get the directory with docker-compose.yml
     let compose_dir = get_compose_dir()?;
 
-    println!("🚀 Starting LiteLLM proxy with {}...", runtime);
+    log_info("🚀", format!("Starting LiteLLM proxy with {}...", runtime));
 
     // Build the command based on runtime type
     let output = if runtime == "podman" || runtime == "docker" {
@@ -43,17 +45,17 @@ pub async fn start_proxy() -> Result<()> {
     }
 
     // Wait for proxy to be ready
-    println!("⏳ Waiting for LiteLLM proxy to be ready...");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    log_info("⏳", "Waiting for LiteLLM proxy to be ready...");
+    tokio::time::sleep(std::time::Duration::from_secs(PROXY_STARTUP_WAIT_SECS)).await;
 
     // Verify it's running
-    for i in 0..10 {
+    for i in 0..PROXY_MAX_STARTUP_ATTEMPTS {
         if is_proxy_running().await {
-            println!("✅ LiteLLM proxy started successfully");
+            log_info("✅", "LiteLLM proxy started successfully");
             return Ok(());
         }
-        if i < 9 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if i < PROXY_MAX_STARTUP_ATTEMPTS - 1 {
+            tokio::time::sleep(std::time::Duration::from_secs(PROXY_CHECK_INTERVAL_SECS)).await;
         }
     }
 
@@ -71,7 +73,7 @@ pub async fn stop_proxy() -> Result<()> {
 
     let compose_dir = get_compose_dir()?;
 
-    println!("🛑 Stopping LiteLLM proxy...");
+    log_info("🛑", "Stopping LiteLLM proxy...");
 
     // Build the command based on runtime type
     let output = if runtime == "podman" || runtime == "docker" {
@@ -90,9 +92,9 @@ pub async fn stop_proxy() -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("⚠️  Failed to stop LiteLLM proxy gracefully: {}", stderr);
+        log_warn("⚠️", format!("Failed to stop LiteLLM proxy gracefully: {}", stderr));
     } else {
-        println!("✅ LiteLLM proxy stopped");
+        log_info("✅", "LiteLLM proxy stopped");
     }
 
     Ok(())
@@ -107,9 +109,9 @@ pub async fn ensure_proxy(no_auto_proxy: bool) -> Result<()> {
 
     // Proxy not running
     if no_auto_proxy {
-        eprintln!("❌ LiteLLM proxy is not running");
-        eprintln!("   Start it manually with: ./start_litellm.sh");
-        eprintln!("   Or remove the --no-auto-proxy flag");
+        log_error("❌", "LiteLLM proxy is not running");
+        log_error("", "Start it manually with: ./start_litellm.sh");
+        log_error("", "Or remove the --no-auto-proxy flag");
         std::process::exit(1);
     }
 

@@ -61,10 +61,13 @@ pub async fn execute_command(
 
 /// Run the command and stream output
 async fn run_command(mut cmd: Command) -> Result<String> {
-    let mut child = cmd.spawn().context("Failed to spawn command")?;
+    let mut child = cmd.spawn()
+        .context("Failed to execute command. Is the shell available?")?;
 
-    let stdout = child.stdout.take().context("Failed to get stdout")?;
-    let stderr = child.stderr.take().context("Failed to get stderr")?;
+    let stdout = child.stdout.take()
+        .context("Command process stdout stream not available. This is likely a bug.")?;
+    let stderr = child.stderr.take()
+        .context("Command process stderr stream not available. This is likely a bug.")?;
 
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
@@ -76,7 +79,7 @@ async fn run_command(mut cmd: Command) -> Result<String> {
     while let Some(line) = stdout_reader
         .next_line()
         .await
-        .context("Failed to read stdout")?
+        .context("Error reading command output. The process may have terminated unexpectedly.")?
     {
         output.push_str(&line);
         output.push('\n');
@@ -86,13 +89,14 @@ async fn run_command(mut cmd: Command) -> Result<String> {
     while let Some(line) = stderr_reader
         .next_line()
         .await
-        .context("Failed to read stderr")?
+        .context("Error reading command error output. The process may have terminated unexpectedly.")?
     {
         errors.push_str(&line);
         errors.push('\n');
     }
 
-    let status = child.wait().await.context("Failed to wait for command")?;
+    let status = child.wait().await
+        .context("Failed to wait for command to complete. Process may have crashed.")?;
 
     // Combine output and errors
     let mut full_output = output;
@@ -157,73 +161,6 @@ fn contains_dangerous_command(command: &str) -> bool {
     false
 }
 
-/// Execute a command and stream output in real-time
-pub async fn execute_streaming<F>(
-    command: &str,
-    working_dir: Option<&str>,
-    mut on_output: F,
-) -> Result<ActionResult>
-where
-    F: FnMut(&str),
-{
-    if contains_dangerous_command(command) {
-        return Ok(ActionResult::Error {
-            error: format!("Dangerous command blocked: {}", command),
-        });
-    }
-
-    let shell = if cfg!(target_os = "windows") {
-        "cmd"
-    } else {
-        "sh"
-    };
-
-    let shell_arg = if cfg!(target_os = "windows") {
-        "/C"
-    } else {
-        "-c"
-    };
-
-    let mut cmd = Command::new(shell);
-    cmd.arg(shell_arg)
-        .arg(command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    let mut child = cmd.spawn().context("Failed to spawn command")?;
-
-    let stdout = child.stdout.take().context("Failed to get stdout")?;
-    let mut stdout_reader = BufReader::new(stdout).lines();
-
-    let mut full_output = String::new();
-
-    while let Some(line) = stdout_reader
-        .next_line()
-        .await
-        .context("Failed to read stdout")?
-    {
-        on_output(&line);
-        full_output.push_str(&line);
-        full_output.push('\n');
-    }
-
-    let status = child.wait().await.context("Failed to wait for command")?;
-
-    if status.success() {
-        Ok(ActionResult::Success {
-            output: full_output,
-        })
-    } else {
-        Ok(ActionResult::Error {
-            error: format!("Command failed with status: {}", status.code().unwrap_or(-1)),
-        })
-    }
-}
 
 #[cfg(test)]
 mod tests {

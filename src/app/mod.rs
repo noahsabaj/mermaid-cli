@@ -6,5 +6,5 @@ mod config;
 mod state;
 
 // Public re-exports - the ONLY way to access app functionality
-pub use config::{Config, init_config, load_config};
+pub use config::{Config, init_config, load_config, save_config};
 pub use state::AppState;

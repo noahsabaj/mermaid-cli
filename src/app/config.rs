@@ -6,6 +6,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use crate::constants::{DEFAULT_LITELLM_PROXY_URL, DEFAULT_OLLAMA_PORT};
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,8 +141,8 @@ Remember: You're not just showing code examples - you can actually create, modif
 impl Default for ModelSettings {
     fn default() -> Self {
         Self {
-            provider: "ollama".to_string(),
-            name: "tinyllama".to_string(),
+            provider: String::from("ollama"),
+            name: String::from("tinyllama"),
             temperature: 0.7,
             max_tokens: 4096,
             system_prompt: Some(Self::default_system_prompt()),
@@ -161,7 +162,7 @@ pub struct LiteLLMConfig {
 impl Default for LiteLLMConfig {
     fn default() -> Self {
         Self {
-            proxy_url: "http://localhost:4000".to_string(),
+            proxy_url: DEFAULT_LITELLM_PROXY_URL.to_string(),
             master_key: None,
         }
     }
@@ -179,8 +180,8 @@ pub struct OllamaConfig {
 impl Default for OllamaConfig {
     fn default() -> Self {
         Self {
-            host: "localhost".to_string(),
-            port: 11434,
+            host: String::from("localhost"),
+            port: DEFAULT_OLLAMA_PORT,
         }
     }
 }
@@ -197,7 +198,7 @@ pub struct OpenAIConfig {
 impl Default for OpenAIConfig {
     fn default() -> Self {
         Self {
-            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key_env: String::from("OPENAI_API_KEY"),
             organization: None,
         }
     }
@@ -213,7 +214,7 @@ pub struct AnthropicConfig {
 impl Default for AnthropicConfig {
     fn default() -> Self {
         Self {
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            api_key_env: String::from("ANTHROPIC_API_KEY"),
         }
     }
 }
@@ -234,8 +235,8 @@ pub struct UIConfig {
 impl Default for UIConfig {
     fn default() -> Self {
         Self {
-            theme: "dark".to_string(),
-            syntax_theme: "monokai".to_string(),
+            theme: String::from("dark"),
+            syntax_theme: String::from("monokai"),
             show_line_numbers: true,
             show_sidebar: true,
         }
@@ -264,7 +265,7 @@ impl Default for ContextConfig {
             max_files: 100,
             max_context_tokens: 50000,
             include_patterns: vec![],
-            exclude_patterns: vec!["*.log".to_string(), "*.tmp".to_string()],
+            exclude_patterns: vec![String::from("*.log"), String::from("*.tmp")],
         }
     }
 }
@@ -285,7 +286,7 @@ pub struct ModeConfig {
 impl Default for ModeConfig {
     fn default() -> Self {
         Self {
-            default_mode: "normal".to_string(),
+            default_mode: String::from("normal"),
             remember_mode: false,
             auto_commit_on_accept: false,
             require_destructive_confirmation: true,
@@ -319,7 +320,7 @@ pub fn load_config() -> Result<Config> {
     // Extract and return config
     figment
         .extract()
-        .context("Failed to load configuration")
+        .context("Failed to load configuration. Check that config files are valid TOML format.")
 }
 
 /// Get the configuration directory

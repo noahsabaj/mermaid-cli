@@ -12,6 +12,7 @@ mod types;
 
 // Public re-exports - the ONLY way to access agent functionality
 pub use action_executor::execute_action;
+pub use filesystem::read_file;
 pub use mode_aware_executor::ModeAwareExecutor;
 pub use parser::parse_actions;
 pub use types::{ActionResult, AgentAction};

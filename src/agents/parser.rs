@@ -88,23 +88,6 @@ fn extract_block(text: &str, block_type: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Extract an attribute from a block header
-fn extract_attribute(block: &str, attr: &str) -> Option<String> {
-    let pattern = format!("{}=", attr);
-    if let Some(start) = block.find(&pattern) {
-        let value_start = start + pattern.len();
-        let rest = &block[value_start..];
-
-        // Find the end of the attribute value (space, newline, or ])
-        let end = rest
-            .find(|c: char| c.is_whitespace() || c == ']')
-            .unwrap_or(rest.len());
-
-        Some(rest[..end].trim_matches('"').to_string())
-    } else {
-        None
-    }
-}
 
 /// Extract content from a block (everything between the tags)
 fn extract_content(block: &str) -> String {
