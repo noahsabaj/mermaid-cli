@@ -34,6 +34,14 @@ pub struct Cli {
     #[arg(long)]
     pub stop_proxy_on_exit: bool,
 
+    /// Resume a previous conversation in this directory (shows selection UI)
+    #[arg(long, conflicts_with = "continue_conversation")]
+    pub resume: bool,
+
+    /// Continue the last conversation in this directory
+    #[arg(long, name = "continue", conflicts_with = "resume")]
+    pub continue_conversation: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

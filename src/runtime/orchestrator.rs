@@ -9,8 +9,9 @@ use crate::{
     models::{ModelFactory, ProjectContext},
     ollama::ensure_model as ensure_ollama_model,
     proxy::{count_mermaid_processes, ensure_proxy, is_proxy_running, stop_proxy},
-    session::SessionState,
+    session::{ConversationManager, SessionState, select_conversation},
     tui::{run_ui, App},
+    utils::{log_info, log_warn, log_error},
 };
 
 /// Main runtime orchestrator
@@ -32,7 +33,7 @@ impl Orchestrator {
             match load_config() {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    eprintln!("⚠️  Failed to load config: {}. Using defaults.", e);
+                    log_warn("⚠️", format!("Failed to load config: {}. Using defaults.", e));
                     Config::default()
                 }
             }
@@ -81,11 +82,11 @@ impl Orchestrator {
         if should_save_session {
             self.session.set_model(model_id.clone());
             if let Err(e) = self.session.save() {
-                eprintln!("⚠️  Failed to save initial session: {}", e);
+                log_warn("⚠️", format!("Failed to save initial session: {}", e));
             }
         }
 
-        println!("🧜‍♀️ Starting Mermaid with model: {}", model_id.green());
+        log_info("🧜‍♀️", format!("Starting Mermaid with model: {}", model_id.green()));
 
         // Ensure LiteLLM proxy is running (unless --no-auto-proxy is set)
         if !is_proxy_running().await {
@@ -100,8 +101,8 @@ impl Orchestrator {
         let model = match ModelFactory::create(&model_id, Some(&self.config)).await {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("❌ Failed to initialize model: {}", e);
-                eprintln!("   Make sure the model is available and properly configured.");
+                log_error("❌", format!("Failed to initialize model: {}", e));
+                log_error("", "Make sure the model is available and properly configured.");
                 std::process::exit(1);
             }
         };
@@ -117,7 +118,33 @@ impl Orchestrator {
         let context = self.load_project_context(&project_path)?;
 
         // Create app instance with model and context
-        let app = App::new(model, context);
+        let mut app = App::new(model, context);
+
+        // Handle --resume or --continue flags
+        if self.cli.resume || self.cli.continue_conversation {
+            let conversation_manager = ConversationManager::new(&project_path)?;
+            let conversations = conversation_manager.list_conversations()?;
+
+            if self.cli.continue_conversation {
+                // Continue the last conversation
+                if let Some(last_conv) = conversation_manager.load_last_conversation()? {
+                    log_info("↺", format!("Continuing last conversation: {}", last_conv.title.green()));
+                    app.load_conversation(last_conv);
+                } else {
+                    log_info("ℹ️", "No previous conversations found in this directory");
+                }
+            } else if self.cli.resume {
+                // Show selection UI for resuming a conversation
+                if !conversations.is_empty() {
+                    if let Some(selected) = select_conversation(conversations)? {
+                        log_info("↺", format!("Resuming conversation: {}", selected.title.green()));
+                        app.load_conversation(selected);
+                    }
+                } else {
+                    log_info("ℹ️", "No previous conversations found in this directory");
+                }
+            }
+        }
 
         // Run the TUI
         let result = run_ui(app).await;
@@ -135,15 +162,14 @@ impl Orchestrator {
     fn load_project_context(&self, project_path: &PathBuf) -> Result<ProjectContext> {
         let loader = ContextLoader::new()?;
 
-        println!("📂 Loading project context from: {}", project_path.display());
+        log_info("📂", format!("Loading project context from: {}", project_path.display()));
 
         let context = loader.load_context(project_path)?;
 
-        println!(
-            "📊 Loaded {} files (~{} tokens)",
+        log_info("📊", format!("Loaded {} files (~{} tokens)",
             context.files.len(),
             context.token_count
-        );
+        ));
 
         Ok(context)
     }
@@ -163,7 +189,7 @@ impl Orchestrator {
             };
 
             if should_stop {
-                println!("🛑 Stopping LiteLLM proxy (no other Mermaid instances running)...");
+                log_info("🛑", "Stopping LiteLLM proxy (no other Mermaid instances running)...");
                 stop_proxy().await?;
             }
         }
