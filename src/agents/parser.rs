@@ -31,7 +31,7 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
     if let Some(captures) = extract_block(response, "COMMAND") {
         for capture in captures {
             // For COMMAND, the command itself is after the colon
-            let command = if let Some(cmd) = extract_path_from_header(&capture, "COMMAND") {
+            if let Some(cmd) = extract_path_from_header(&capture, "COMMAND") {
                 // Check if there's a dir= attribute
                 if let Some(dir_pos) = cmd.find(" dir=") {
                     let command_part = cmd[..dir_pos].to_string();

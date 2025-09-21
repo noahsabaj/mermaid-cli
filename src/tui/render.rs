@@ -368,7 +368,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, app_state: &AppSt
             warning,
             Style::default()
                 .fg(warning_level.color())
-                .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK),
+                .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(" | "));
     }
@@ -384,10 +384,13 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, app_state: &AppSt
         Style::default().fg(Color::DarkGray),
     ));
 
+    // Create the status line and ensure it fills the entire width
     let status_line = Line::from(spans);
 
+    // Use Block to ensure the entire area is cleared before rendering
     let status_bar = Paragraph::new(vec![status_line])
-        .style(Style::default().bg(Color::Black));
+        .style(Style::default().bg(Color::Black))
+        .block(Block::default()); // This ensures the entire area is cleared
 
     frame.render_widget(status_bar, area);
 }

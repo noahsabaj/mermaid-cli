@@ -167,8 +167,8 @@ impl WarningLevel {
     pub fn message(&self) -> Option<&str> {
         match self {
             Self::None => None,
-            Self::Low => Some("⚠️  Auto-accepting file edits"),
-            Self::High => Some("⚠️  BYPASS MODE - All operations will be executed automatically!"),
+            Self::Low => Some("Auto-accept files"),
+            Self::High => Some("⚠️ BYPASS ALL"),
         }
     }
 }

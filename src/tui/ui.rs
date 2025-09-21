@@ -31,7 +31,7 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;  // Mouse capture disabled to allow text selection
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -50,8 +50,8 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen
-        // Mouse capture disabled to allow text selection
+        LeaveAlternateScreen,
+        DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 

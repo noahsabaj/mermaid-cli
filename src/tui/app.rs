@@ -173,20 +173,14 @@ impl App {
     pub fn cycle_mode(&mut self) {
         self.operation_mode = self.operation_mode.cycle();
         self.bypass_confirmed = false; // Reset confirmation flag when changing modes
-        self.set_status(format!("Operation mode: {} - {}",
-            self.operation_mode.display_name(),
-            self.operation_mode.description()
-        ));
+        self.set_status(format!("Mode: {}", self.operation_mode.display_name()));
     }
 
     /// Cycle to the previous operation mode
     pub fn cycle_mode_reverse(&mut self) {
         self.operation_mode = self.operation_mode.cycle_reverse();
         self.bypass_confirmed = false;
-        self.set_status(format!("Operation mode: {} - {}",
-            self.operation_mode.display_name(),
-            self.operation_mode.description()
-        ));
+        self.set_status(format!("Mode: {}", self.operation_mode.display_name()));
     }
 
     /// Set a specific operation mode
