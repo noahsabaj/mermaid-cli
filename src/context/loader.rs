@@ -115,6 +115,11 @@ impl ContextLoader {
         })
     }
 
+    /// Load project context from the given path (alias for compatibility)
+    pub fn load(&self, root_path: &Path) -> Result<ProjectContext> {
+        self.load_context(root_path)
+    }
+
     /// Load project context from the given path
     pub fn load_context(&self, root_path: &Path) -> Result<ProjectContext> {
         let mut context = ProjectContext::new(root_path.to_string_lossy().to_string());
