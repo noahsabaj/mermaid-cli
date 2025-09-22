@@ -2,7 +2,7 @@
 
 An open-source, model-agnostic AI pair programmer CLI that provides an interactive chat interface with full agentic coding capabilities. Built with a unified interface supporting **100+ LLM providers** through LiteLLM proxy - from local Ollama models to every major cloud API.
 
-## ✨ Features
+## Features
 
 - 🌐 **100+ Model Support**: Single interface for OpenAI, Anthropic, Google, Groq, Ollama, Azure, Cohere, Mistral, and 90+ more
 - 🔄 **Hot-Swappable Models**: Switch between any provider/model mid-session without losing context
@@ -14,7 +14,7 @@ An open-source, model-agnostic AI pair programmer CLI that provides an interacti
 - 🎯 **Smart Context**: Respects .gitignore and intelligently manages token limits
 - 🐳 **Rootless Containers**: Secure Podman/Docker deployment with no daemon overhead
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -62,7 +62,7 @@ mermaid list
 ./start_litellm.sh logs
 ```
 
-## 🎮 Interactive Commands
+## Interactive Commands
 
 Once in the chat interface:
 
@@ -81,7 +81,7 @@ Once in the chat interface:
 - `:sidebar` - Toggle file tree
 - `:quit` - Exit Mermaid
 
-## 🔧 Configuration
+## Configuration
 
 ### Environment Variables (`.env` file)
 The primary configuration is through environment variables. Copy `.env.example` to `.env`:
@@ -128,7 +128,7 @@ max_context_tokens = 75000
 ### Project Configuration
 Create `.mermaid/config.toml` in your project root to override global settings.
 
-## 🤝 Supported Providers (100+)
+## Supported Providers (100+)
 
 All providers are accessed through the unified LiteLLM proxy using the format `provider/model`:
 
@@ -163,7 +163,7 @@ All providers are accessed through the unified LiteLLM proxy using the format `p
 3. **For Ollama**: Models are auto-detected if Ollama is running
 4. **Test Connection**: `curl http://localhost:4000/models`
 
-## 💡 Example Workflows
+## Example Workflows
 
 ### Code Generation
 ```
@@ -201,7 +201,7 @@ Mermaid: I'll refactor this function to use async/await pattern.
 [Shows original code, explains changes, implements refactoring]
 ```
 
-## 🎨 Features in Action
+## Features in Action
 
 ### Agent Capabilities
 
@@ -220,7 +220,7 @@ Mermaid automatically:
 - Understands project structure (Cargo.toml, package.json, etc.)
 - Manages token limits intelligently
 
-## 🛠️ Development
+## Development
 
 ### Building from Source
 
@@ -246,17 +246,17 @@ cargo build --release
 │   Mermaid   │────▶│ LiteLLM Proxy│────▶│ 100+ Providers  │
 │     CLI     │     │  (Port 4000) │     │ (Unified API)   │
 └─────────────┘     └──────────────┘     └─────────────────┘
-       │                                          │
-       │                                   ┌──────┴──────┐
-       ▼                                   ▼             ▼
-  ┌─────────┐                      ┌─────────┐   ┌─────────┐
-  │  Local  │                      │  Cloud  │   │  Fast   │
-  │ Context │                      │  APIs   │   │Inference│
-  └─────────┘                      └─────────┘   └─────────┘
-                                   OpenAI        Groq
-                                   Anthropic     Together
-                                   Google        Anyscale
-                                   Azure         DeepInfra
+│                                          │
+│                                   ┌──────┴──────┐
+▼                                   ▼             ▼
+┌─────────┐                      ┌─────────┐   ┌─────────┐
+│  Local  │                      │  Cloud  │   │  Fast   │
+│ Context │                      │  APIs   │   │Inference│
+└─────────┘                      └─────────┘   └─────────┘
+                            OpenAI        Groq
+                            Anthropic     Together
+                            Google        Anyscale
+                            Azure         DeepInfra
 ```
 
 **Key Components:**
@@ -274,7 +274,7 @@ cargo build --release
 - Built-in caching and rate limiting
 - No need to maintain individual provider SDKs
 
-## 📊 Comparison
+## Comparison
 
 | Feature | Mermaid | Aider | Claude Code | GitHub Copilot |
 |---------|---------|-------|-------------|----------------|
@@ -292,7 +292,7 @@ cargo build --release
 
 *Free with local models, API costs apply for cloud models
 
-## 🤔 FAQ
+## FAQ
 
 ### Can I use this with my proprietary code?
 Yes! With local models (Ollama), your code never leaves your machine.
@@ -306,17 +306,17 @@ Mermaid already supports 100+ models through LiteLLM proxy! If your provider isn
 2. Use the OpenAI-compatible endpoint if your provider supports it
 3. Run models locally with Ollama for complete control
 
-## 📜 License
+## License
 
 MIT License - See [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - Built with [Ratatui](https://github.com/ratatui-org/ratatui) for the TUI
 - Uses [Ollama](https://ollama.ai) for local model support
 - Inspired by [Aider](https://github.com/paul-gauthier/aider) and Claude Code
 
-## 🗺️ Roadmap
+## Roadmap
 
 - [ ] Multi-agent collaboration
 - [ ] Plugin system
@@ -325,7 +325,7 @@ MIT License - See [LICENSE](LICENSE) file for details.
 - [ ] Semantic code search
 - [ ] Code review mode
 
-## 💬 Community
+## Community
 
 - GitHub Issues: [Report bugs or request features](https://github.com/yourusername/mermaid/issues)
 
