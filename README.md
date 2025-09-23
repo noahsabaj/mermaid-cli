@@ -4,15 +4,15 @@ An open-source, model-agnostic AI pair programmer CLI that provides an interacti
 
 ## Features
 
-- 🌐 **100+ Model Support**: Single interface for OpenAI, Anthropic, Google, Groq, Ollama, Azure, Cohere, Mistral, and 90+ more
-- 🔄 **Hot-Swappable Models**: Switch between any provider/model mid-session without losing context
-- 📂 **Project Aware**: Automatically loads and understands your entire project context
-- 🛠️ **True Agency**: Can read, write, execute commands, and manage git
-- 🔒 **Privacy First**: Run 100% locally with Ollama - your code never leaves your machine
-- 💬 **Interactive TUI**: Beautiful terminal interface with syntax highlighting
-- ⚡ **Real-time Streaming**: See responses as they're generated
-- 🎯 **Smart Context**: Respects .gitignore and intelligently manages token limits
-- 🐳 **Rootless Containers**: Secure Podman/Docker deployment with no daemon overhead
+- **100+ Model Support**: Single interface for OpenAI, Anthropic, Google, Groq, Ollama, Azure, Cohere, Mistral, and 90+ more
+- **Hot-Swappable Models**: Switch between any provider/model mid-session without losing context
+- **Project Aware**: Automatically loads and understands your entire project context
+- **True Agency**: Can read, write, execute commands, and manage git
+- **Privacy First**: Run 100% locally with Ollama - your code never leaves your machine
+- **Interactive TUI**: Beautiful terminal interface with syntax highlighting
+- **Real-time Streaming**: See responses as they're generated
+- **Smart Context**: Respects .gitignore and intelligently manages token limits
+- **Rootless Containers**: Secure Podman/Docker deployment with no daemon overhead
 
 ## Quick Start
 
