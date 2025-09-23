@@ -314,7 +314,7 @@ MIT License - See [LICENSE](LICENSE) file for details.
 
 - Built with [Ratatui](https://github.com/ratatui-org/ratatui) for the TUI
 - Uses [Ollama](https://ollama.ai) for local model support
-- Inspired by [Aider](https://github.com/paul-gauthier/aider) and Claude Code
+- Inspired by [Aider](https://github.com/paul-gauthier/aider), [Gemini-CLI](https://github.com/google-gemini/gemini-cli), and Claude Code
 
 ## Roadmap
 
