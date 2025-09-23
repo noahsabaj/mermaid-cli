@@ -26,7 +26,7 @@ An open-source, model-agnostic AI pair programmer CLI that provides an interacti
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/mermaid.git
+git clone https://github.com/noahsabaj/mermaid-cli.git
 cd mermaid
 
 # Copy environment template and add your API keys
@@ -226,7 +226,7 @@ Mermaid automatically:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/mermaid.git
+git clone https://github.com/noahsabaj/mermaid-cli.git
 cd mermaid
 
 # Build debug version
@@ -308,7 +308,18 @@ Mermaid already supports 100+ models through LiteLLM proxy! If your provider isn
 
 ## 📜 License
 
-MIT License - See [LICENSE](LICENSE) file for details.
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
 
 ## 🙏 Acknowledgments
 
@@ -327,7 +338,7 @@ MIT License - See [LICENSE](LICENSE) file for details.
 
 ## 💬 Community
 
-- GitHub Issues: [Report bugs or request features](https://github.com/yourusername/mermaid/issues)
+- GitHub Issues: [Report bugs or request features](https://github.com/noahsabaj/mermaid-cli/issues)
 
 ---
 

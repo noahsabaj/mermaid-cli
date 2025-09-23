@@ -2,10 +2,10 @@
 name = "mermaid"
 version = "0.1.0"
 edition = "2021"
-authors = ["Mermaid Contributors"]
+authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
 description = "An open-source, model-agnostic AI pair programmer CLI"
-repository = "https://github.com/yourusername/mermaid"
-license = "MIT"
+repository = "https://github.com/noahsabaj/mermaid-cli"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Async runtime
