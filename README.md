@@ -1,4 +1,4 @@
-# 🧜‍♀️ Mermaid - Open Source AI Pair Programmer
+# Mermaid - Open Source AI Pair Programmer
 
 An open-source, model-agnostic AI pair programmer CLI that provides an interactive chat interface with full agentic coding capabilities. Built with a unified interface supporting **100+ LLM providers** through LiteLLM proxy - from local Ollama models to every major cloud API.
 
@@ -278,16 +278,16 @@ cargo build --release
 
 | Feature | Mermaid | Aider | Claude Code | GitHub Copilot |
 |---------|---------|-------|-------------|----------------|
-| Open Source | ✅ | ✅ | ❌ | ❌ |
-| Local Models | ✅ | ✅ | ❌ | ❌ |
+| Open Source | Yes | Yes | No | No |
+| Local Models | Yes | Yes | No | No |
 | Model Providers | 100+ | ~10 | Claude only | OpenAI only |
-| Unified Interface | ✅ LiteLLM | ❌ | ❌ | ❌ |
-| Privacy | ✅ Full | ✅ Full | ❌ | ❌ |
-| File Operations | ✅ | ✅ | ✅ | Limited |
-| Command Execution | ✅ | ✅ | ✅ | ❌ |
-| Git Integration | ✅ | ✅ | ✅ | ✅ |
-| Streaming UI | ✅ | ✅ | ✅ | N/A |
-| Rootless Containers | ✅ Podman | ❌ | ❌ | ❌ |
+| Unified Interface | Yes (LiteLLM) | No | No | No |
+| Privacy | Full | Full | No | No |
+| File Operations | Yes | Yes | Yes | Limited |
+| Command Execution | Yes | Yes | Yes | No |
+| Git Integration | Yes | Yes | Yes | Yes |
+| Streaming UI | Yes | Yes | Yes | N/A |
+| Rootless Containers | Yes (Podman) | No | No | No |
 | Cost | Free* | Free* | $20/mo | $10/mo |
 
 *Free with local models, API costs apply for cloud models
@@ -344,4 +344,4 @@ dual licensed as above, without any additional terms or conditions.
 
 **Note**: This project is under active development. Expect breaking changes until v1.0.
 
-Made with 🧜‍♀️ by the open source community
+Made with love by the open source community
