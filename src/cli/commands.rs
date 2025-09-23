@@ -15,9 +15,9 @@ use super::Commands;
 pub async fn handle_command(command: &Commands) -> Result<bool> {
     match command {
         Commands::Init => {
-            println!("🧜‍♀️ Initializing Mermaid configuration...");
+            println!("Initializing Mermaid configuration...");
             init_config()?;
-            println!("✓ Configuration initialized successfully!");
+            println!("Configuration initialized successfully!");
             Ok(true)
         }
         Commands::List => {
@@ -38,7 +38,7 @@ pub async fn handle_command(command: &Commands) -> Result<bool> {
 
 /// List available models
 pub async fn list_models() -> Result<()> {
-    println!("🧜‍♀️ Available models:");
+    println!("Available models:");
     let models = ModelFactory::list_available().await?;
     for model in models {
         println!("  • {}", model.green());
@@ -48,22 +48,22 @@ pub async fn list_models() -> Result<()> {
 
 /// Show version information
 pub fn show_version() {
-    println!("🧜‍♀️ Mermaid v{}", env!("CARGO_PKG_VERSION"));
+    println!("Mermaid v{}", env!("CARGO_PKG_VERSION"));
     println!("   An open-source, model-agnostic AI pair programmer");
 }
 
 /// Show status of all dependencies
 async fn show_status() -> Result<()> {
-    println!("🧜‍♀️ Mermaid Status:");
+    println!("Mermaid Status:");
     println!();
 
     // Check Ollama
     if is_ollama_installed() {
         let models = get_ollama_models().unwrap_or_default();
         if models.is_empty() {
-            println!("  ⚠️  Ollama: Installed (no models)");
+            println!("  [WARNING] Ollama: Installed (no models)");
         } else {
-            println!("  ✅ Ollama: Running ({} models installed)", models.len());
+            println!("  [OK] Ollama: Running ({} models installed)", models.len());
             for model in models.iter().take(3) {
                 println!("      • {}", model);
             }
@@ -72,37 +72,37 @@ async fn show_status() -> Result<()> {
             }
         }
     } else {
-        println!("  ❌ Ollama: Not installed");
+        println!("  [ERROR] Ollama: Not installed");
     }
 
     // Check LiteLLM Proxy
     if is_proxy_running().await {
-        println!("  ✅ LiteLLM Proxy: Running at http://localhost:4000");
+        println!("  [OK] LiteLLM Proxy: Running at http://localhost:4000");
     } else {
-        println!("  ❌ LiteLLM Proxy: Not running");
+        println!("  [ERROR] LiteLLM Proxy: Not running");
     }
 
     // Check configuration
     if let Ok(home) = std::env::var("HOME") {
         let config_path = PathBuf::from(home).join(".config/mermaid/config.toml");
         if config_path.exists() {
-            println!("  ✅ Configuration: {}", config_path.display());
+            println!("  [OK] Configuration: {}", config_path.display());
         } else {
-            println!("  ⚠️  Configuration: Not found (using defaults)");
+            println!("  [WARNING] Configuration: Not found (using defaults)");
         }
     }
 
     // Check container runtime
     if which::which("podman-compose").is_ok() {
-        println!("  ✅ Container Runtime: Podman Compose");
+        println!("  [OK] Container Runtime: Podman Compose");
     } else if which::which("podman").is_ok() {
-        println!("  ✅ Container Runtime: Podman");
+        println!("  [OK] Container Runtime: Podman");
     } else if which::which("docker-compose").is_ok() {
-        println!("  ✅ Container Runtime: Docker Compose");
+        println!("  [OK] Container Runtime: Docker Compose");
     } else if which::which("docker").is_ok() {
-        println!("  ✅ Container Runtime: Docker");
+        println!("  [OK] Container Runtime: Docker");
     } else {
-        println!("  ❌ Container Runtime: Not found (Podman or Docker required)");
+        println!("  [ERROR] Container Runtime: Not found (Podman or Docker required)");
     }
 
     // Environment variables

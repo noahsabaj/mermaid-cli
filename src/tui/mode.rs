@@ -45,9 +45,9 @@ impl OperationMode {
     pub fn display_name(&self) -> &str {
         match self {
             Self::Normal => "Normal",
-            Self::AcceptEdits => "Accept Edits ✓",
-            Self::PlanMode => "Plan Mode 📋",
-            Self::BypassAll => "Bypass All ⚡",
+            Self::AcceptEdits => "Accept Edits",
+            Self::PlanMode => "Plan Mode",
+            Self::BypassAll => "Bypass All",
         }
     }
 
@@ -168,7 +168,7 @@ impl WarningLevel {
         match self {
             Self::None => None,
             Self::Low => Some("Auto-accept files"),
-            Self::High => Some("⚠️ BYPASS ALL"),
+            Self::High => Some("WARNING: BYPASS ALL"),
         }
     }
 }

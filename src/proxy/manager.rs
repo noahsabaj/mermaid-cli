@@ -11,7 +11,7 @@ pub async fn start_proxy() -> Result<()> {
     let runtime = is_container_runtime_available()
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "❌ Neither Podman nor Docker found\n   \
+                "ERROR: Neither Podman nor Docker found\n   \
                 Install Podman: sudo apt-get install podman podman-compose\n   \
                 Or install Docker: https://docs.docker.com/engine/install/"
             )
@@ -20,7 +20,7 @@ pub async fn start_proxy() -> Result<()> {
     // Get the directory with docker-compose.yml
     let compose_dir = get_compose_dir()?;
 
-    log_info("🚀", format!("Starting LiteLLM proxy with {}...", runtime));
+    log_info("START", format!("Starting LiteLLM proxy with {}...", runtime));
 
     // Build the command based on runtime type
     let output = if runtime == "podman" || runtime == "docker" {
@@ -45,7 +45,7 @@ pub async fn start_proxy() -> Result<()> {
     }
 
     // Smart polling loop - check every 100ms until ready
-    log_info("⏳", "Waiting for LiteLLM proxy to be ready...");
+    log_info("WAIT", "Waiting for LiteLLM proxy to be ready...");
 
     let max_wait_time = std::time::Duration::from_secs(PROXY_STARTUP_WAIT_SECS + (PROXY_MAX_STARTUP_ATTEMPTS as u64));
     let poll_interval = std::time::Duration::from_millis(PROXY_POLL_INTERVAL_MS);
@@ -54,7 +54,7 @@ pub async fn start_proxy() -> Result<()> {
     while start_time.elapsed() < max_wait_time {
         if is_proxy_running().await {
             let elapsed = start_time.elapsed();
-            log_info("✅", format!("LiteLLM proxy started successfully in {:.1}s", elapsed.as_secs_f64()));
+            log_info("SUCCESS", format!("LiteLLM proxy started successfully in {:.1}s", elapsed.as_secs_f64()));
             return Ok(());
         }
         tokio::time::sleep(poll_interval).await;
@@ -74,7 +74,7 @@ pub async fn stop_proxy() -> Result<()> {
 
     let compose_dir = get_compose_dir()?;
 
-    log_info("🛑", "Stopping LiteLLM proxy...");
+    log_info("STOP", "Stopping LiteLLM proxy...");
 
     // Build the command based on runtime type
     let output = if runtime == "podman" || runtime == "docker" {
@@ -93,9 +93,9 @@ pub async fn stop_proxy() -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        log_warn("⚠️", format!("Failed to stop LiteLLM proxy gracefully: {}", stderr));
+        log_warn("WARNING", format!("Failed to stop LiteLLM proxy gracefully: {}", stderr));
     } else {
-        log_info("✅", "LiteLLM proxy stopped");
+        log_info("SUCCESS", "LiteLLM proxy stopped");
     }
 
     Ok(())
@@ -110,7 +110,7 @@ pub async fn ensure_proxy(no_auto_proxy: bool) -> Result<()> {
 
     // Proxy not running
     if no_auto_proxy {
-        log_error("❌", "LiteLLM proxy is not running");
+        log_error("ERROR", "LiteLLM proxy is not running");
         log_error("", "Start it manually with: ./start_litellm.sh");
         log_error("", "Or remove the --no-auto-proxy flag");
         std::process::exit(1);

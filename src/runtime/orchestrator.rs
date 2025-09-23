@@ -33,7 +33,7 @@ impl Orchestrator {
             match load_config() {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    log_warn("⚠️", format!("Failed to load config: {}. Using defaults.", e));
+                    log_warn("WARNING", format!("Failed to load config: {}. Using defaults.", e));
                     Config::default()
                 }
             }
@@ -90,11 +90,11 @@ impl Orchestrator {
         if should_save_session {
             self.session.set_model(model_id.clone());
             if let Err(e) = self.session.save() {
-                log_warn("⚠️", format!("Failed to save initial session: {}", e));
+                log_warn("WARNING", format!("Failed to save initial session: {}", e));
             }
         }
 
-        log_info("🧜‍♀️", format!("Starting Mermaid with model: {}", model_id.green()));
+        log_info("MERMAID", format!("Starting Mermaid with model: {}", model_id.green()));
 
         // Ensure LiteLLM proxy is running (unless --no-auto-proxy is set)
         current_step += 1;
@@ -115,7 +115,7 @@ impl Orchestrator {
         let model = match ModelFactory::create(&model_id, Some(&self.config)).await {
             Ok(m) => m,
             Err(e) => {
-                log_error("❌", format!("Failed to initialize model: {}", e));
+                log_error("ERROR", format!("Failed to initialize model: {}", e));
                 log_error("", "Make sure the model is available and properly configured.");
                 std::process::exit(1);
             }
@@ -167,20 +167,20 @@ impl Orchestrator {
             if self.cli.continue_conversation {
                 // Continue the last conversation
                 if let Some(last_conv) = conversation_manager.load_last_conversation()? {
-                    log_info("↺", format!("Continuing last conversation: {}", last_conv.title.green()));
+                    log_info("CONTINUE", format!("Continuing last conversation: {}", last_conv.title.green()));
                     app.load_conversation(last_conv);
                 } else {
-                    log_info("ℹ️", "No previous conversations found in this directory");
+                    log_info("INFO", "No previous conversations found in this directory");
                 }
             } else if self.cli.resume {
                 // Show selection UI for resuming a conversation
                 if !conversations.is_empty() {
                     if let Some(selected) = select_conversation(conversations)? {
-                        log_info("↺", format!("Resuming conversation: {}", selected.title.green()));
+                        log_info("RESUME", format!("Resuming conversation: {}", selected.title.green()));
                         app.load_conversation(selected);
                     }
                 } else {
-                    log_info("ℹ️", "No previous conversations found in this directory");
+                    log_info("INFO", "No previous conversations found in this directory");
                 }
             }
         }
@@ -201,11 +201,11 @@ impl Orchestrator {
     fn load_project_structure(&self, project_path: &PathBuf) -> Result<crate::models::LazyProjectContext> {
         let loader = ContextLoader::new()?;
 
-        log_info("📂", format!("Loading project structure from: {}", project_path.display()));
+        log_info("FILES", format!("Loading project structure from: {}", project_path.display()));
 
         let context = loader.load_structure(project_path)?;
 
-        log_info("📊", format!("Found {} files (loading in background...)",
+        log_info("STATS", format!("Found {} files (loading in background...)",
             context.total_file_count()
         ));
 
@@ -216,11 +216,11 @@ impl Orchestrator {
     fn load_project_context(&self, project_path: &PathBuf) -> Result<ProjectContext> {
         let loader = ContextLoader::new()?;
 
-        log_info("📂", format!("Loading project context from: {}", project_path.display()));
+        log_info("FILES", format!("Loading project context from: {}", project_path.display()));
 
         let context = loader.load_context(project_path)?;
 
-        log_info("📊", format!("Loaded {} files (~{} tokens)",
+        log_info("STATS", format!("Loaded {} files (~{} tokens)",
             context.files.len(),
             context.token_count
         ));
@@ -243,7 +243,7 @@ impl Orchestrator {
             };
 
             if should_stop {
-                log_info("🛑", "Stopping LiteLLM proxy (no other Mermaid instances running)...");
+                log_info("STOP", "Stopping LiteLLM proxy (no other Mermaid instances running)...");
                 stop_proxy().await?;
             }
         }

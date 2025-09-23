@@ -39,7 +39,7 @@ pub fn render_diagnostics_panel(frame: &mut Frame, area: Rect, stats: &HardwareS
 
     // Panel border
     let panel_block = Block::default()
-        .title(" 📊 Hardware Diagnostics ")
+        .title(" Hardware Diagnostics ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -122,7 +122,7 @@ fn render_gpu_section(frame: &mut Frame, area: Rect, gpu: &super::types::GpuInfo
                         else if temp > 75.0 { Color::Yellow }
                         else { Color::Green };
 
-        let temp_text = Paragraph::new(format!("🌡️ Temperature: {:.0}°C", temp))
+        let temp_text = Paragraph::new(format!("Temperature: {:.0}°C", temp))
             .style(Style::default().fg(temp_color));
         frame.render_widget(temp_text, chunks[3]);
     }
@@ -161,7 +161,7 @@ fn render_performance_section(frame: &mut Frame, area: Rect, stats: &HardwareSta
                          else { Color::Red };
 
         lines.push(Line::from(vec![
-            Span::raw("⚡ Inference: "),
+            Span::raw("Inference: "),
             Span::styled(
                 format!("{:.1} tokens/sec", speed),
                 Style::default().fg(speed_color),

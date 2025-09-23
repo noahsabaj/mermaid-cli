@@ -306,12 +306,12 @@ impl CacheStats {
     pub fn format(&self) -> String {
         format!(
             "Cache Statistics:\n\
-            📁 Directory: {}\n\
-            📊 File Cache: {} entries\n\
-            💾 Memory Cache: {} entries\n\
-            📦 Total Size: {:.2} MB\n\
-            🗜️  Compressed: {:.2} MB (ratio: {:.1}x)\n\
-            ✅ Hit Rate: {:.1}% ({} hits, {} misses)",
+            Directory: {}\n\
+            File Cache: {} entries\n\
+            Memory Cache: {} entries\n\
+            Total Size: {:.2} MB\n\
+            Compressed: {:.2} MB (ratio: {:.1}x)\n\
+            Hit Rate: {:.1}% ({} hits, {} misses)",
             self.cache_directory.display(),
             self.file_cache_entries,
             self.memory_cache_entries,

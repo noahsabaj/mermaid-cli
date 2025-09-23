@@ -108,7 +108,7 @@ fn render_selector(f: &mut Frame, app: &ConversationSelector) {
     // Title
     let title = Paragraph::new("Select a conversation to resume")
         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-        .block(Block::default().borders(Borders::ALL).title(" 🧜‍♀️ Mermaid - Resume Session "));
+        .block(Block::default().borders(Borders::ALL).title(" Mermaid - Resume Session "));
     f.render_widget(title, chunks[0]);
 
     // Conversation list
@@ -161,7 +161,7 @@ fn render_selector(f: &mut Frame, app: &ConversationSelector) {
     // Help text
     let help = vec![
         Line::from(vec![
-            Span::raw("↑/k: Up  ↓/j: Down  "),
+            Span::raw("Up/k: Up  Down/j: Down  "),
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::raw(": Select  "),
             Span::styled("q/Esc", Style::default().fg(Color::Red)),

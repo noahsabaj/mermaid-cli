@@ -25,7 +25,7 @@ use crate::context::ContextLoader;
 pub async fn run_ui(mut app: App) -> Result<()> {
     // Check if we have an interactive terminal
     if !crossterm::tty::IsTty::is_tty(&io::stdout()) {
-        eprintln!("❌ Mermaid requires an interactive terminal.");
+        eprintln!("[ERROR] Mermaid requires an interactive terminal.");
         eprintln!("   Cannot run in non-interactive mode (pipes, redirects, etc.)");
         eprintln!("   Try running directly in your terminal: mermaid");
         return Err(anyhow::anyhow!("No interactive terminal available"));
@@ -54,7 +54,7 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     let mut session = SessionState::load().unwrap_or_default();
     session.set_model(app.model_name.clone());
     if let Err(e) = session.save() {
-        eprintln!("⚠️  Failed to save session: {}", e);
+        eprintln!("[WARNING] Failed to save session: {}", e);
     }
 
     // Restore terminal
@@ -152,10 +152,10 @@ async fn run_app(
                                             handle_action_success(app, &action_clone, output, &tx).await;
                                         }
                                         Ok(agents::ActionResult::Error { error }) => {
-                                            app.set_status(format!("✗ Action failed: {}", error));
+                                            app.set_status(format!("[FAILED] Action failed: {}", error));
                                         }
                                         Err(e) => {
-                                            app.set_status(format!("✗ Error: {}", e));
+                                            app.set_status(format!("[ERROR] Error: {}", e));
                                         }
                                     }
                                 }
@@ -182,10 +182,10 @@ async fn run_app(
                                             handle_action_success(app, &action_clone, output, &tx).await;
                                         }
                                         Ok(agents::ActionResult::Error { error }) => {
-                                            app.set_status(format!("✗ Action failed: {}", error));
+                                            app.set_status(format!("[FAILED] Action failed: {}", error));
                                         }
                                         Err(e) => {
-                                            app.set_status(format!("✗ Error: {}", e));
+                                            app.set_status(format!("[ERROR] Error: {}", e));
                                         }
                                     }
                                 }
@@ -476,7 +476,7 @@ async fn run_app(
                                         match &action_clone {
                                             agents::AgentAction::ReadFile { path } => {
                                                 // Feedback loop: Send file contents back to model
-                                                app.set_status(format!("✓ File read: {}", path));
+                                                app.set_status(format!("[OK] File read: {}", path));
                                                 // Keep pending_file_read true during feedback
                                                 app.is_generating = true;
                                                 app.current_response.clear();
@@ -524,14 +524,14 @@ async fn run_app(
                                                 });
                                             }
                                             agents::AgentAction::WriteFile { path, content } => {
-                                                app.set_status(format!("✓ {}", output));
+                                                app.set_status(format!("[OK] {}", output));
                                                 app.context.add_file(path.clone(), content.clone());
                                                 // Use proper tokenizer for accurate count
                                                 let tokens = count_file_tokens(content, &app.model_name);
                                                 app.context.token_count += tokens;
                                             }
                                             agents::AgentAction::DeleteFile { path } => {
-                                                app.set_status(format!("✓ {}", output));
+                                                app.set_status(format!("[OK] {}", output));
                                                 if let Some(content) = app.context.files.remove(path) {
                                                     // Use proper tokenizer for accurate count
                                                     let tokens = count_file_tokens(&content, &app.model_name);
@@ -539,15 +539,15 @@ async fn run_app(
                                                 }
                                             }
                                             _ => {
-                                                app.set_status(format!("✓ {}", output));
+                                                app.set_status(format!("[OK] {}", output));
                                             }
                                         }
                                     }
                                     Ok(agents::ActionResult::Error { error }) => {
-                                        app.set_status(format!("✗ Action failed: {}", error));
+                                        app.set_status(format!("[FAILED] Action failed: {}", error));
                                     }
                                     Err(e) => {
-                                        app.set_status(format!("✗ Error: {}", e));
+                                        app.set_status(format!("[ERROR] Error: {}", e));
                                     }
                                 }
                             }
@@ -611,7 +611,7 @@ async fn run_app(
                     // Update the context while preserving conversation history
                     app.context.files = new_context.files;
                     app.context.token_count = new_context.token_count;
-                        app.set_status("✓ Files refreshed from disk");
+                        app.set_status("[OK] Files refreshed from disk");
                     }
                 }
                 last_refresh = std::time::Instant::now();
@@ -751,16 +751,16 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
                 Ok(new_context) => {
                     app.context.files = new_context.files;
                     app.context.token_count = new_context.token_count;
-                    app.set_status(format!("✓ Refreshed: {} files, ~{} tokens",
+                    app.set_status(format!("[OK] Refreshed: {} files, ~{} tokens",
                         app.context.files.len(),
                         app.context.token_count));
                 }
                     Err(e) => {
-                        app.set_status(format!("✗ Failed to refresh: {}", e));
+                        app.set_status(format!("[FAILED] Failed to refresh: {}", e));
                     }
                 },
                 Err(e) => {
-                    app.set_status(format!("✗ Failed to create loader: {}", e));
+                    app.set_status(format!("[FAILED] Failed to create loader: {}", e));
                 }
             }
         }
@@ -887,7 +887,7 @@ async fn handle_action_success(
     match action {
         agents::AgentAction::ReadFile { path } => {
             // Feedback loop: Send file contents back to model
-            app.set_status(format!("✓ File read: {}", path));
+            app.set_status(format!("[OK] File read: {}", path));
 
             // Set feedback tracking
             app.pending_file_read = true;
@@ -942,14 +942,14 @@ async fn handle_action_success(
             });
         }
         agents::AgentAction::WriteFile { path, content } => {
-            app.set_status(format!("✓ {}", output));
+            app.set_status(format!("[OK] {}", output));
             app.context.add_file(path.clone(), content.clone());
             // Use proper tokenizer for accurate count
             let tokens = count_file_tokens(content, &app.model_name);
             app.context.token_count += tokens;
         }
         agents::AgentAction::DeleteFile { path } => {
-            app.set_status(format!("✓ {}", output));
+            app.set_status(format!("[OK] {}", output));
             if let Some(content) = app.context.files.remove(path) {
                 // Use proper tokenizer for accurate count
                 let tokens = count_file_tokens(&content, &app.model_name);
@@ -957,7 +957,7 @@ async fn handle_action_success(
             }
         }
         _ => {
-            app.set_status(format!("✓ {}", output));
+            app.set_status(format!("[OK] {}", output));
         }
     }
 }

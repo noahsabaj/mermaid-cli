@@ -1,10 +1,10 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "mermaid")]
 #[command(version = "0.1.0")]
-#[command(about = "🧜‍♀️ An open-source, model-agnostic AI pair programmer", long_about = None)]
+#[command(about = "An open-source, model-agnostic AI pair programmer", long_about = None)]
 pub struct Cli {
     /// Model to use (e.g., ollama/codellama, openai/gpt-4, anthropic/claude-3)
     #[arg(short, long)]
@@ -42,6 +42,22 @@ pub struct Cli {
     #[arg(long, name = "continue", conflicts_with = "resume")]
     pub continue_conversation: bool,
 
+    /// Non-interactive prompt to execute
+    #[arg(short, long, conflicts_with_all = &["resume", "continue"])]
+    pub prompt: Option<String>,
+
+    /// Output format for non-interactive mode
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, requires = "prompt")]
+    pub output_format: OutputFormat,
+
+    /// Maximum tokens to generate in response (non-interactive mode)
+    #[arg(long, requires = "prompt")]
+    pub max_tokens: Option<usize>,
+
+    /// Don't execute agent actions automatically (non-interactive mode)
+    #[arg(long, requires = "prompt")]
+    pub no_execute: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -58,4 +74,14 @@ pub enum Commands {
     Version,
     /// Check status of dependencies
     Status,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum OutputFormat {
+    /// Plain text output
+    Text,
+    /// JSON structured output
+    Json,
+    /// Markdown formatted output
+    Markdown,
 }

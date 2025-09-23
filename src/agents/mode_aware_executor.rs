@@ -79,7 +79,7 @@ impl ModeAwareExecutor {
         // Planning mode: just return what would happen
         if self.mode.is_planning_only() {
             return Ok(ActionResult::Success {
-                output: format!("📋 PLANNED: {}", self.describe_action(&action)),
+                output: format!("[PLANNED]: {}", self.describe_action(&action)),
             });
         }
 
@@ -89,7 +89,7 @@ impl ModeAwareExecutor {
                 self.bypass_confirmed = true;
                 return Ok(ActionResult::Success {
                     output: format!(
-                        "⚠️  DESTRUCTIVE OPERATION in Bypass Mode: {}\n\
+                        "[WARNING] DESTRUCTIVE OPERATION in Bypass Mode: {}\n\
                          Press Enter to confirm or Esc to cancel.",
                         self.describe_action(&action)
                     ),

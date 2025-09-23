@@ -152,8 +152,8 @@ if [[ "$COMMAND" == "up -d" ]]; then
 
     # Check if LiteLLM is responding
     if curl -s http://localhost:4000/health &> /dev/null; then
-        print_info "✅ LiteLLM proxy is running at http://localhost:4000"
-        print_info "📊 Admin UI available at http://localhost:4000/ui"
+        print_info "LiteLLM proxy is running at http://localhost:4000"
+        print_info "Admin UI available at http://localhost:4000/ui"
 
         # List available models
         print_info "Available models:"

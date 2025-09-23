@@ -87,7 +87,7 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let header_text = vec![
         Line::from(vec![
-            Span::styled("🧜‍♀️ ", Style::default().fg(Color::Cyan)),
+            Span::styled("[MERMAID] ", Style::default().fg(Color::Cyan)),
             Span::styled(
                 "Mermaid",
                 Style::default()
@@ -125,7 +125,7 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     // Add project info
     if let Some(project_type) = &app.context.project_type {
         items.push(ListItem::new(Line::from(vec![
-            Span::raw("📁 "),
+            Span::raw("[DIR] "),
             Span::styled(
                 format!("Project: {}", project_type),
                 Style::default().fg(Color::Yellow),
@@ -134,12 +134,12 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     items.push(ListItem::new(Line::from(vec![
-        Span::raw("📊 "),
+        Span::raw("[FILES] "),
         Span::raw(format!("Files: {}", app.context.files.len())),
     ])));
 
     items.push(ListItem::new(Line::from(vec![
-        Span::raw("🔤 "),
+        Span::raw("[TOKENS] "),
         Span::raw(format!("Tokens: {}", app.context.token_count)),
     ])));
 
@@ -154,9 +154,9 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
 
     for (path, _) in app.context.files.iter().take(max_files) {
         let icon = if path.ends_with('/') {
-            "📁"
+            "[DIR]"
         } else {
-            "📄"
+            "[FILE]"
         };
         items.push(ListItem::new(Line::from(vec![
             Span::raw(format!("{} ", icon)),
@@ -242,7 +242,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                 // Add completion message with checkmark
                 lines.push(Line::from(vec![
                     Span::styled(
-                        "  ✓ ",
+                        "  [OK] ",
                         Style::default()
                             .fg(Color::Green)
                             .add_modifier(Modifier::BOLD),
@@ -259,7 +259,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                 if let Some(status) = &app.reading_file_status {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            "  📖 ",
+                            "  [READ] ",
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
@@ -296,7 +296,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from("╔".to_string() + &"═".repeat(width - 2) + "╗"));
 
         // Title line
-        let title = format!("📝 Action: {}", confirmation.action_description);
+        let title = format!("Action: {}", confirmation.action_description);
         let title_len = title.len();
         lines.push(Line::from(vec![
             Span::raw("║ "),
@@ -406,7 +406,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
         if let Some(status) = &app.reading_file_status {
             lines.push(Line::from(vec![
                 Span::styled(
-                    "  📖 ",
+                    "  [READ] ",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -540,7 +540,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
                         Block::default()
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(Color::DarkGray))
-                            .title(" Commands (↑↓ to navigate, Enter to execute) "),
+                            .title(" Commands (up/down to navigate, Enter to execute) "),
                     );
 
                 frame.render_widget(hints_block, chunks[0]);
@@ -623,7 +623,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let mode_color = Color::Green;
 
     let status_text = if app.confirmation_state.is_some() {
-        "⚠️ Action pending: Alt+Y to approve, Alt+N to skip, Alt+A for always".to_string()
+        "[WARNING] Action pending: Alt+Y to approve, Alt+N to skip, Alt+A for always".to_string()
     } else if let Some(status) = &app.status_message {
         status.clone()
     } else if app.is_generating {

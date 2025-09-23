@@ -51,5 +51,5 @@ pub fn log_status(message: impl std::fmt::Display) {
 /// Progress indicator for startup sequence
 pub fn log_progress(step: usize, total: usize, message: impl std::fmt::Display) {
     let progress = format!("[{}/{}]", step, total);
-    eprintln!("{} {} {}", progress, "→".to_string(), message);
+    eprintln!("{} {} {}", progress, "->".to_string(), message);
 }

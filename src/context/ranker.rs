@@ -205,11 +205,11 @@ impl RepoRanker {
         let icon = match symbol.kind {
             SymbolKind::Function => "ƒ",
             SymbolKind::Class => "◆",
-            SymbolKind::Method => "→",
+            SymbolKind::Method => "->",
             SymbolKind::Interface => "◇",
             SymbolKind::Type => "τ",
             SymbolKind::Variable => "v",
-            SymbolKind::Import => "↓",
+            SymbolKind::Import => "v",
             SymbolKind::Module => "□",
         };
 

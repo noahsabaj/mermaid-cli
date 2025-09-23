@@ -75,9 +75,9 @@ impl HardwareStats {
 
         // GPU info
         if let Some(gpu) = &self.gpu {
-            let gpu_color = if gpu.usage_percent > 90.0 { "🔴" }
-                           else if gpu.usage_percent > 70.0 { "🟡" }
-                           else { "🟢" };
+            let gpu_color = if gpu.usage_percent > 90.0 { "[HIGH]" }
+                           else if gpu.usage_percent > 70.0 { "[WARN]" }
+                           else { "[OK]" };
 
             parts.push(format!(
                 "{} GPU: {:.0}% ({:.1}/{:.1}GB)",
@@ -89,16 +89,16 @@ impl HardwareStats {
         }
 
         // CPU info
-        let cpu_color = if self.cpu_usage_percent > 90.0 { "🔴" }
-                       else if self.cpu_usage_percent > 70.0 { "🟡" }
-                       else { "🟢" };
+        let cpu_color = if self.cpu_usage_percent > 90.0 { "[HIGH]" }
+                       else if self.cpu_usage_percent > 70.0 { "[WARN]" }
+                       else { "[OK]" };
         parts.push(format!("{} CPU: {:.0}%", cpu_color, self.cpu_usage_percent));
 
         // RAM info
         let ram_percent = (self.ram_used_gb / self.ram_total_gb) * 100.0;
-        let ram_color = if ram_percent > 90.0 { "🔴" }
-                       else if ram_percent > 70.0 { "🟡" }
-                       else { "🟢" };
+        let ram_color = if ram_percent > 90.0 { "[HIGH]" }
+                       else if ram_percent > 70.0 { "[WARN]" }
+                       else { "[OK]" };
         parts.push(format!(
             "{} RAM: {:.1}/{:.1}GB",
             ram_color,
@@ -108,7 +108,7 @@ impl HardwareStats {
 
         // Inference speed
         if let Some(speed) = self.inference_speed {
-            parts.push(format!("⚡ {:.1} tok/s", speed));
+            parts.push(format!("{:.1} tok/s", speed));
         }
 
         parts.join(" │ ")

@@ -1,27 +1,27 @@
 /// Detect OS and provide Ollama installation instructions
 pub fn detect_and_guide() {
-    println!("⚠️  Ollama not found on your system\n");
+    println!("[WARNING] Ollama not found on your system\n");
 
     #[cfg(target_os = "macos")]
     {
         println!("To use local models, install Ollama:");
-        println!("📦 macOS: brew install ollama");
+        println!("[INSTALL] macOS: brew install ollama");
         println!("   or");
-        println!("📦 Download: https://ollama.com/download/mac\n");
+        println!("[DOWNLOAD] Download: https://ollama.com/download/mac\n");
     }
 
     #[cfg(target_os = "linux")]
     {
         println!("To use local models, install Ollama:");
-        println!("📦 Linux: curl -fsSL https://ollama.com/install.sh | sh");
+        println!("[INSTALL] Linux: curl -fsSL https://ollama.com/install.sh | sh");
         println!("   or");
-        println!("📦 Download: https://ollama.com/download/linux\n");
+        println!("[DOWNLOAD] Download: https://ollama.com/download/linux\n");
     }
 
     #[cfg(target_os = "windows")]
     {
         println!("To use local models, install Ollama:");
-        println!("📦 Windows: Download from https://ollama.com/download/windows\n");
+        println!("[DOWNLOAD] Windows: Download from https://ollama.com/download/windows\n");
     }
 
     println!("After installing Ollama:");
