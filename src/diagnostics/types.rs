@@ -58,8 +58,8 @@ impl GpuType {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum DiagnosticsMode {
     Hidden,
-    Compact,   // Status line only
-    Detailed,  // Full panel
+    Compact,  // Status line only
+    Detailed, // Full panel
 }
 
 impl Default for DiagnosticsMode {
@@ -75,35 +75,42 @@ impl HardwareStats {
 
         // GPU info
         if let Some(gpu) = &self.gpu {
-            let gpu_color = if gpu.usage_percent > 90.0 { "[HIGH]" }
-                           else if gpu.usage_percent > 70.0 { "[WARN]" }
-                           else { "[OK]" };
+            let gpu_color = if gpu.usage_percent > 90.0 {
+                "[HIGH]"
+            } else if gpu.usage_percent > 70.0 {
+                "[WARN]"
+            } else {
+                "[OK]"
+            };
 
             parts.push(format!(
                 "{} GPU: {:.0}% ({:.1}/{:.1}GB)",
-                gpu_color,
-                gpu.usage_percent,
-                gpu.memory_used_gb,
-                gpu.memory_total_gb
+                gpu_color, gpu.usage_percent, gpu.memory_used_gb, gpu.memory_total_gb
             ));
         }
 
         // CPU info
-        let cpu_color = if self.cpu_usage_percent > 90.0 { "[HIGH]" }
-                       else if self.cpu_usage_percent > 70.0 { "[WARN]" }
-                       else { "[OK]" };
+        let cpu_color = if self.cpu_usage_percent > 90.0 {
+            "[HIGH]"
+        } else if self.cpu_usage_percent > 70.0 {
+            "[WARN]"
+        } else {
+            "[OK]"
+        };
         parts.push(format!("{} CPU: {:.0}%", cpu_color, self.cpu_usage_percent));
 
         // RAM info
         let ram_percent = (self.ram_used_gb / self.ram_total_gb) * 100.0;
-        let ram_color = if ram_percent > 90.0 { "[HIGH]" }
-                       else if ram_percent > 70.0 { "[WARN]" }
-                       else { "[OK]" };
+        let ram_color = if ram_percent > 90.0 {
+            "[HIGH]"
+        } else if ram_percent > 70.0 {
+            "[WARN]"
+        } else {
+            "[OK]"
+        };
         parts.push(format!(
             "{} RAM: {:.1}/{:.1}GB",
-            ram_color,
-            self.ram_used_gb,
-            self.ram_total_gb
+            ram_color, self.ram_used_gb, self.ram_total_gb
         ));
 
         // Inference speed
@@ -125,7 +132,8 @@ impl HardwareStats {
         }
 
         if let Some(gpu) = &self.gpu {
-            if gpu.usage_percent > 90.0 || (gpu.memory_used_gb / gpu.memory_total_gb) * 100.0 > 90.0 {
+            if gpu.usage_percent > 90.0 || (gpu.memory_used_gb / gpu.memory_total_gb) * 100.0 > 90.0
+            {
                 return true;
             }
         }

@@ -1,5 +1,4 @@
 /// Ollama integration module - Gateway
-
 mod detector;
 mod guide;
 mod installer;

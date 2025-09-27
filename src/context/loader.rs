@@ -135,10 +135,8 @@ impl ContextLoader {
         let files = self.collect_files(root_path)?;
 
         // Create lazy context with just paths
-        let lazy_context = crate::models::LazyProjectContext::new(
-            root_path.to_string_lossy().to_string(),
-            files,
-        );
+        let lazy_context =
+            crate::models::LazyProjectContext::new(root_path.to_string_lossy().to_string(), files);
 
         Ok(lazy_context)
     }
@@ -316,8 +314,7 @@ impl ContextLoader {
 
     /// Load a single file
     fn load_file(&self, path: &Path) -> Result<String> {
-        fs::read_to_string(path)
-            .with_context(|| format!("Failed to read file: {}", path.display()))
+        fs::read_to_string(path).with_context(|| format!("Failed to read file: {}", path.display()))
     }
 
     /// Count tokens in a string
@@ -359,9 +356,21 @@ impl ContextLoader {
         let important_files = match context.project_type.as_deref() {
             Some("rust") => vec!["Cargo.toml", "src/main.rs", "src/lib.rs"],
             Some("javascript") | Some("typescript") => {
-                vec!["package.json", "index.js", "index.ts", "src/index.js", "src/index.ts"]
-            }
-            Some("python") => vec!["requirements.txt", "setup.py", "main.py", "app.py", "__init__.py"],
+                vec![
+                    "package.json",
+                    "index.js",
+                    "index.ts",
+                    "src/index.js",
+                    "src/index.ts",
+                ]
+            },
+            Some("python") => vec![
+                "requirements.txt",
+                "setup.py",
+                "main.py",
+                "app.py",
+                "__init__.py",
+            ],
             Some("go") => vec!["go.mod", "main.go"],
             _ => vec!["README.md", "README.txt", "readme.md"],
         };
@@ -381,9 +390,9 @@ impl ContextLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs::File;
     use std::io::Write;
+    use tempfile::TempDir;
 
     #[test]
     fn test_detect_project_type() {

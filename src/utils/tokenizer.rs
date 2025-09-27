@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tiktoken_rs::{num_tokens_from_messages, ChatCompletionRequestMessage};
 use std::collections::HashMap;
+use tiktoken_rs::{num_tokens_from_messages, ChatCompletionRequestMessage};
 
 /// Token counting utility for various model families
 pub struct Tokenizer {
@@ -25,13 +25,13 @@ impl Tokenizer {
             Ok(bpe) => {
                 // Count tokens using the BPE tokenizer
                 Ok(bpe.encode_with_special_tokens(text).len())
-            }
+            },
             Err(_) => {
                 // Fallback to cl100k_base encoding (GPT-4/GPT-3.5-turbo)
                 tiktoken_rs::cl100k_base()
                     .map(|bpe| bpe.encode_with_special_tokens(text).len())
                     .or_else(|_| Ok(text.len() / 4))
-            }
+            },
         }
     }
 
@@ -40,13 +40,11 @@ impl Tokenizer {
         // Convert to tiktoken's ChatCompletionRequestMessage format
         let chat_messages: Vec<ChatCompletionRequestMessage> = messages
             .iter()
-            .map(|(role, content)| {
-                ChatCompletionRequestMessage {
-                    role: role.clone(),
-                    content: Some(content.clone()),
-                    name: None,
-                    function_call: None,
-                }
+            .map(|(role, content)| ChatCompletionRequestMessage {
+                role: role.clone(),
+                content: Some(content.clone()),
+                name: None,
+                function_call: None,
             })
             .collect();
 
@@ -57,15 +55,13 @@ impl Tokenizer {
             Ok(count) => Ok(count),
             Err(_) => {
                 // Fallback to GPT-3.5 encoding
-                num_tokens_from_messages("gpt-3.5-turbo", &chat_messages)
-                    .or_else(|_| {
-                        // Last resort: simple approximation
-                        let total_chars: usize = messages.iter()
-                            .map(|(_, content)| content.len())
-                            .sum();
-                        Ok(total_chars / 4)
-                    })
-            }
+                num_tokens_from_messages("gpt-3.5-turbo", &chat_messages).or_else(|_| {
+                    // Last resort: simple approximation
+                    let total_chars: usize =
+                        messages.iter().map(|(_, content)| content.len()).sum();
+                    Ok(total_chars / 4)
+                })
+            },
         }
     }
 
@@ -76,35 +72,35 @@ impl Tokenizer {
         // Return max tokens based on common models
         // These are approximate values for context window sizes
         if model_name.contains("gpt-4o") {
-            128000  // GPT-4o
+            128000 // GPT-4o
         } else if model_name.contains("gpt-4-turbo") || model_name.contains("gpt-4-1106") {
-            128000  // GPT-4 Turbo
+            128000 // GPT-4 Turbo
         } else if model_name.contains("gpt-4-32k") {
-            32768   // GPT-4 32k
+            32768 // GPT-4 32k
         } else if model_name.contains("gpt-4") {
-            8192    // GPT-4
+            8192 // GPT-4
         } else if model_name.contains("gpt-3.5-turbo-16k") {
-            16384   // GPT-3.5 Turbo 16k
+            16384 // GPT-3.5 Turbo 16k
         } else if model_name.contains("gpt-3.5-turbo") {
-            4096    // GPT-3.5 Turbo
+            4096 // GPT-3.5 Turbo
         } else if model_name.contains("claude-3") {
-            200000  // Claude 3
+            200000 // Claude 3
         } else if model_name.contains("claude") {
-            100000  // Claude 2
+            100000 // Claude 2
         } else if model_name.contains("llama-3") {
-            8192    // Llama 3
+            8192 // Llama 3
         } else if model_name.contains("llama-2") {
-            4096    // Llama 2
+            4096 // Llama 2
         } else if model_name.contains("codellama") {
-            16384   // Code Llama
+            16384 // Code Llama
         } else if model_name.contains("deepseek-coder") {
-            65536   // DeepSeek Coder
+            65536 // DeepSeek Coder
         } else if model_name.contains("qwen") {
-            32768   // Qwen models
+            32768 // Qwen models
         } else if model_name.contains("mistral") || model_name.contains("mixtral") {
-            32768   // Mistral/Mixtral
+            32768 // Mistral/Mixtral
         } else {
-            8192    // Conservative default
+            8192 // Conservative default
         }
     }
 
@@ -130,24 +126,24 @@ impl Tokenizer {
             ("gpt-4-turbo", "gpt-4-turbo"),
             ("gpt-4", "gpt-4"),
             ("gpt-3.5-turbo", "gpt-3.5-turbo"),
-
             // Claude models - use GPT-4 encoding as approximation
             ("claude-3", "gpt-4"),
             ("claude-3-opus", "gpt-4"),
             ("claude-3-sonnet", "gpt-4"),
             ("claude-3-haiku", "gpt-4"),
-
             // Llama models - use GPT-3.5 encoding as approximation
             ("llama3", "gpt-3.5-turbo"),
             ("llama2", "gpt-3.5-turbo"),
             ("codellama", "gpt-3.5-turbo"),
-
             // Other models - use GPT-3.5 as default
             ("deepseek", "gpt-3.5-turbo"),
             ("qwen", "gpt-3.5-turbo"),
             ("mistral", "gpt-3.5-turbo"),
             ("mixtral", "gpt-3.5-turbo"),
-        ].iter().cloned().collect();
+        ]
+        .iter()
+        .cloned()
+        .collect();
 
         // Find the best matching tokenizer
         for (pattern, tokenizer) in model_mappings {
@@ -164,7 +160,9 @@ impl Tokenizer {
 /// Count tokens in file contents (convenience function)
 pub fn count_file_tokens(content: &str, model_name: &str) -> usize {
     let tokenizer = Tokenizer::new(model_name);
-    tokenizer.count_tokens(content).unwrap_or_else(|_| content.len() / 4)
+    tokenizer
+        .count_tokens(content)
+        .unwrap_or_else(|_| content.len() / 4)
 }
 
 #[cfg(test)]

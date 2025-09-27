@@ -1,6 +1,6 @@
-use anyhow::Result;
 use super::detector;
 use super::guide;
+use anyhow::Result;
 
 /// Install an Ollama model with progress display
 pub async fn install_model(model: &str) -> Result<()> {

@@ -1,18 +1,19 @@
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use futures::StreamExt;
 
 use super::traits::Model;
-use super::types::{ChatMessage, MessageRole, ModelCapabilities, ModelConfig, ModelResponse, ProjectContext, StreamCallback};
+use super::types::{
+    ChatMessage, MessageRole, ModelCapabilities, ModelConfig, ModelResponse, ProjectContext,
+    StreamCallback,
+};
 use crate::constants::{
-    DEFAULT_LITELLM_PROXY_URL, HTTP_REQUEST_TIMEOUT_SECS,
-    GPT4_32K_CONTEXT, GPT4_TURBO_CONTEXT, GPT35_CONTEXT,
-    CLAUDE_3_OPUS_CONTEXT, CLAUDE_25_CONTEXT,
-    OLLAMA_DEFAULT_CONTEXT, GROQ_LLAMA_CONTEXT, GROQ_DEFAULT_CONTEXT,
-    GEMINI_15_PRO_CONTEXT,
+    CLAUDE_25_CONTEXT, CLAUDE_3_OPUS_CONTEXT, DEFAULT_LITELLM_PROXY_URL, GEMINI_15_PRO_CONTEXT,
+    GPT35_CONTEXT, GPT4_32K_CONTEXT, GPT4_TURBO_CONTEXT, GROQ_DEFAULT_CONTEXT, GROQ_LLAMA_CONTEXT,
+    HTTP_REQUEST_TIMEOUT_SECS, OLLAMA_DEFAULT_CONTEXT,
 };
 
 /// Unified model implementation using LiteLLM Proxy
@@ -52,7 +53,11 @@ impl UnifiedModel {
     fn get_capabilities(&self) -> ModelCapabilities {
         // Parse provider from model name (e.g., "openai/gpt-4" -> "openai")
         let provider = self.model_name.split('/').next().unwrap_or("");
-        let model = self.model_name.split('/').nth(1).unwrap_or(&self.model_name);
+        let model = self
+            .model_name
+            .split('/')
+            .nth(1)
+            .unwrap_or(&self.model_name);
 
         match provider {
             "openai" => ModelCapabilities {
@@ -107,9 +112,9 @@ impl UnifiedModel {
 
     /// Check if this model uses a local provider
     fn is_local_provider(&self) -> bool {
-        self.model_name.starts_with("ollama/") ||
-        self.model_name.starts_with("local/") ||
-        self.model_name.starts_with("llamafile/")
+        self.model_name.starts_with("ollama/")
+            || self.model_name.starts_with("local/")
+            || self.model_name.starts_with("llamafile/")
     }
 }
 
@@ -211,7 +216,9 @@ impl Model for UnifiedModel {
                         }
 
                         if let Ok(json_chunk) = serde_json::from_str::<StreamChunk>(data) {
-                            if let Some(delta) = json_chunk.choices.get(0)
+                            if let Some(delta) = json_chunk
+                                .choices
+                                .get(0)
                                 .and_then(|c| c.delta.content.as_ref())
                             {
                                 full_response.push_str(delta);
@@ -223,8 +230,8 @@ impl Model for UnifiedModel {
             }
 
             Ok(ModelResponse {
-                content: String::new(),  // Content already sent via callback, don't duplicate
-                usage: None,  // Usage stats not available in streaming
+                content: String::new(), // Content already sent via callback, don't duplicate
+                usage: None,            // Usage stats not available in streaming
                 model_name: self.model_name.clone(),
             })
         } else {
@@ -304,7 +311,7 @@ impl Model for UnifiedModel {
                     Ok(response) => Ok(response.status().is_success()),
                     Err(_) => Ok(false),
                 }
-            }
+            },
         }
     }
 }

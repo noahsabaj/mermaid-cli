@@ -1,5 +1,5 @@
 use super::mode::OperationMode;
-use crate::agents::{ModeAwareExecutor, AgentAction};
+use crate::agents::{AgentAction, ModeAwareExecutor};
 use crate::diagnostics::{DiagnosticsMode, HardwareMonitor, HardwareStats};
 use crate::models::{ChatMessage, MessageRole, Model, ProjectContext};
 use crate::session::{ConversationHistory, ConversationManager};
@@ -80,9 +80,9 @@ impl App {
 
         // Initialize conversation manager for the current directory
         let conversation_manager = ConversationManager::new(&working_dir).ok();
-        let current_conversation = conversation_manager.as_ref().map(|_| {
-            ConversationHistory::new(working_dir.clone(), model_name.clone())
-        });
+        let current_conversation = conversation_manager
+            .as_ref()
+            .map(|_| ConversationHistory::new(working_dir.clone(), model_name.clone()));
 
         // Initialize hardware monitor
         let hardware_monitor = Some(Arc::new(Mutex::new(HardwareMonitor::new())));
@@ -199,15 +199,13 @@ impl App {
     /// Scroll chat view up
     pub fn scroll_up(&mut self, amount: u16) {
         // Calculate max scroll: total lines minus viewport height
-        let viewport_height = 20;  // This should be passed in, but keeping for compatibility
+        let viewport_height = 20; // This should be passed in, but keeping for compatibility
         let max_scroll = self.calculate_max_scroll(viewport_height);
 
-        self.scroll_offset = self.scroll_offset
-            .saturating_add(amount)
-            .min(max_scroll);
+        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_scroll);
 
         // User is manually scrolling if they're not at the bottom
-        let threshold = 3;  // Allow small margin for rounding
+        let threshold = 3; // Allow small margin for rounding
         if self.scroll_offset < max_scroll.saturating_sub(threshold) {
             self.is_user_scrolling = true;
         }
@@ -218,12 +216,12 @@ impl App {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
 
         // If user scrolls close to bottom, resume auto-scrolling
-        let viewport_height = 20;  // Should be passed in
+        let viewport_height = 20; // Should be passed in
         let max_scroll = self.calculate_max_scroll(viewport_height);
         let threshold = 3;
         if self.scroll_offset >= max_scroll.saturating_sub(threshold) {
             self.is_user_scrolling = false;
-            self.scroll_offset = max_scroll;  // Snap to bottom
+            self.scroll_offset = max_scroll; // Snap to bottom
         }
     }
 
@@ -276,14 +274,19 @@ impl App {
 
     /// Build message history with token management
     /// Ensures the conversation doesn't exceed the model's context window
-    pub fn build_managed_message_history(&self, max_context_tokens: usize, reserve_tokens: usize) -> Vec<ChatMessage> {
+    pub fn build_managed_message_history(
+        &self,
+        max_context_tokens: usize,
+        reserve_tokens: usize,
+    ) -> Vec<ChatMessage> {
         use crate::utils::Tokenizer;
 
         let tokenizer = Tokenizer::new(&self.model_name);
         let available_tokens = max_context_tokens.saturating_sub(reserve_tokens);
 
         // Get all relevant messages
-        let all_messages: Vec<ChatMessage> = self.messages
+        let all_messages: Vec<ChatMessage> = self
+            .messages
             .iter()
             .filter(|msg| msg.role == MessageRole::User || msg.role == MessageRole::Assistant)
             .cloned()
@@ -307,7 +310,8 @@ impl App {
             })
             .collect();
 
-        let total_tokens = tokenizer.count_chat_tokens(&messages_for_counting)
+        let total_tokens = tokenizer
+            .count_chat_tokens(&messages_for_counting)
             .unwrap_or_else(|_| {
                 // Fallback: estimate 4 chars per token
                 all_messages.iter().map(|m| m.content.len() / 4).sum()
@@ -330,11 +334,13 @@ impl App {
                     MessageRole::User => "user",
                     MessageRole::Assistant => "assistant",
                     MessageRole::System => "system",
-                }.to_string(),
-                msg.content.clone()
+                }
+                .to_string(),
+                msg.content.clone(),
             )];
 
-            let msg_tokens = tokenizer.count_chat_tokens(&msg_text)
+            let msg_tokens = tokenizer
+                .count_chat_tokens(&msg_text)
                 .unwrap_or(msg.content.len() / 4);
 
             if current_tokens + msg_tokens <= available_tokens {
@@ -412,7 +418,7 @@ pub struct ConfirmationState {
     pub action_description: String,
     pub preview_lines: Vec<String>,  // First few lines for preview
     pub file_info: Option<FileInfo>, // Size, path, overwrite status
-    pub allow_always: bool,           // Can user select "always approve"?
+    pub allow_always: bool,          // Can user select "always approve"?
 }
 
 #[derive(Debug, Clone)]

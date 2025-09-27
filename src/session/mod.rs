@@ -1,5 +1,4 @@
 /// Session management module - Gateway
-
 mod conversation;
 mod selector;
 mod state;

@@ -308,7 +308,11 @@ impl RepoGraph {
         }
 
         // Sort by score
-        all_symbols.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        all_symbols.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Apply limit if specified
         if let Some(limit) = limit {
@@ -320,11 +324,9 @@ impl RepoGraph {
 
     /// Get symbols for specific files
     pub fn get_file_symbols(&self, path: &Path) -> Option<Vec<Symbol>> {
-        self.file_indices.get(path).and_then(|&idx| {
-            self.graph
-                .node_weight(idx)
-                .map(|node| node.symbols.clone())
-        })
+        self.file_indices
+            .get(path)
+            .and_then(|&idx| self.graph.node_weight(idx).map(|node| node.symbols.clone()))
     }
 
     /// Get graph statistics
@@ -332,11 +334,7 @@ impl RepoGraph {
         GraphStats {
             total_files: self.graph.node_count(),
             total_edges: self.graph.edge_count(),
-            total_symbols: self
-                .graph
-                .node_weights()
-                .map(|n| n.symbols.len())
-                .sum(),
+            total_symbols: self.graph.node_weights().map(|n| n.symbols.len()).sum(),
             unique_symbols: self.symbol_locations.len(),
         }
     }

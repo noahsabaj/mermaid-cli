@@ -1,6 +1,6 @@
-use tracing::{info, warn, error, debug};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use std::io;
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Initialize the logging system
 pub fn init_logger() {
@@ -16,7 +16,7 @@ pub fn init_logger() {
                 .with_target(false) // Don't show module paths
                 .with_thread_ids(false)
                 .with_thread_names(false)
-                .compact() // Use compact format
+                .compact(), // Use compact format
         )
         .init();
 }

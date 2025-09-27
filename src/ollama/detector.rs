@@ -8,10 +8,7 @@ pub fn is_installed() -> bool {
 
 /// Get list of installed Ollama models (async version)
 pub async fn list_models_async() -> Result<Vec<String>> {
-    let output = AsyncCommand::new("ollama")
-        .arg("list")
-        .output()
-        .await;
+    let output = AsyncCommand::new("ollama").arg("list").output().await;
 
     match output {
         Ok(output) if output.status.success() => {
@@ -25,7 +22,7 @@ pub async fn list_models_async() -> Result<Vec<String>> {
                 })
                 .collect();
             Ok(models)
-        }
+        },
         _ => Ok(Vec::new()),
     }
 }
@@ -34,9 +31,7 @@ pub async fn list_models_async() -> Result<Vec<String>> {
 pub fn list_models() -> Result<Vec<String>> {
     use std::process::Command;
 
-    let output = Command::new("ollama")
-        .arg("list")
-        .output();
+    let output = Command::new("ollama").arg("list").output();
 
     match output {
         Ok(output) if output.status.success() => {
@@ -50,7 +45,7 @@ pub fn list_models() -> Result<Vec<String>> {
                 })
                 .collect();
             Ok(models)
-        }
+        },
         _ => Ok(Vec::new()),
     }
 }

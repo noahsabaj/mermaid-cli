@@ -61,7 +61,7 @@ impl ModelFactory {
             Ok(response) if response.status().is_success() => {
                 let models_response: ModelsResponse = response.json().await?;
                 Ok(models_response.data.into_iter().map(|m| m.id).collect())
-            }
+            },
             _ => {
                 // Fallback to common models if proxy is not available
                 Ok(vec![
@@ -74,7 +74,7 @@ impl ModelFactory {
                     "anthropic/claude-3-sonnet".to_string(),
                     "groq/llama3-70b".to_string(),
                 ])
-            }
+            },
         }
     }
 

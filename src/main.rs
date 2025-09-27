@@ -2,11 +2,11 @@ use anyhow::Result;
 use clap::Parser;
 
 use mermaid::{
-    cli::Cli,
-    runtime::{Orchestrator, NonInteractiveRunner},
     app::load_config,
-    proxy::{ensure_proxy, is_proxy_running},
+    cli::Cli,
     ollama::ensure_model as ensure_ollama_model,
+    proxy::{ensure_proxy, is_proxy_running},
+    runtime::{NonInteractiveRunner, Orchestrator},
 };
 
 #[tokio::main]
@@ -16,8 +16,7 @@ async fn main() -> Result<()> {
 
     // Set up logging if verbose
     if cli.verbose {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-            .init();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
 
     // Check if running in non-interactive mode
@@ -46,8 +45,7 @@ async fn run_non_interactive(cli: Cli, prompt: String) -> Result<()> {
     } else {
         format!(
             "{}/{}",
-            config.default_model.provider,
-            config.default_model.name
+            config.default_model.provider, config.default_model.name
         )
     };
 
@@ -69,7 +67,8 @@ async fn run_non_interactive(cli: Cli, prompt: String) -> Result<()> {
         config,
         cli.no_execute,
         cli.max_tokens,
-    ).await?;
+    )
+    .await?;
 
     // Execute the prompt
     let result = runner.execute(prompt).await?;

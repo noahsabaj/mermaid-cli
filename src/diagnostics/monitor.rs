@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 use sysinfo::System;
+use tokio::sync::Mutex;
 
-use super::types::{HardwareStats, GpuType, ModelInfo};
 use super::gpu::{detect_gpu_type, get_gpu_info};
+use super::types::{GpuType, HardwareStats, ModelInfo};
 
 /// Hardware monitoring service
 pub struct HardwareMonitor {
@@ -25,7 +25,9 @@ impl HardwareMonitor {
         Self {
             system,
             gpu_type: detect_gpu_type(),
-            last_update: Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or(Instant::now()),
+            last_update: Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .unwrap_or(Instant::now()),
             update_interval: Duration::from_secs(2),
             cached_stats: None,
         }
@@ -41,7 +43,8 @@ impl HardwareMonitor {
         }
 
         // Refresh system info
-        self.system.refresh_cpu_specifics(sysinfo::CpuRefreshKind::everything());
+        self.system
+            .refresh_cpu_specifics(sysinfo::CpuRefreshKind::everything());
         self.system.refresh_memory();
 
         // Get CPU usage

@@ -88,7 +88,6 @@ fn extract_block(text: &str, block_type: &str) -> Option<Vec<String>> {
     }
 }
 
-
 /// Extract content from a block (everything between the tags)
 fn extract_content(block: &str) -> String {
     if let Some(header_end) = block.find(']') {

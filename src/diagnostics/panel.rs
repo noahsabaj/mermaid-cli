@@ -17,23 +17,18 @@ pub fn render_diagnostics_panel(frame: &mut Frame, area: Rect, stats: &HardwareS
     let x = (area.width.saturating_sub(panel_width)) / 2;
     let y = (area.height.saturating_sub(panel_height)) / 2;
 
-    let panel_area = Rect::new(
-        area.x + x,
-        area.y + y,
-        panel_width,
-        panel_height,
-    );
+    let panel_area = Rect::new(area.x + x, area.y + y, panel_width, panel_height);
 
     // Create layout for panel contents
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
-            Constraint::Length(5),  // GPU section
-            Constraint::Length(3),  // Model section
-            Constraint::Length(3),  // Performance section
-            Constraint::Length(3),  // System section
-            Constraint::Min(1),     // Help text
+            Constraint::Length(5), // GPU section
+            Constraint::Length(3), // Model section
+            Constraint::Length(3), // Performance section
+            Constraint::Length(3), // System section
+            Constraint::Min(1),    // Help text
         ])
         .split(panel_area);
 
@@ -49,8 +44,7 @@ pub fn render_diagnostics_panel(frame: &mut Frame, area: Rect, stats: &HardwareS
     if let Some(gpu) = &stats.gpu {
         render_gpu_section(frame, chunks[0], gpu);
     } else {
-        let no_gpu = Paragraph::new("No GPU detected")
-            .style(Style::default().fg(Color::DarkGray));
+        let no_gpu = Paragraph::new("No GPU detected").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(no_gpu, chunks[0]);
     }
 
@@ -82,16 +76,24 @@ fn render_gpu_section(frame: &mut Frame, area: Rect, gpu: &super::types::GpuInfo
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // GPU name
-            Constraint::Length(1),  // Usage gauge
-            Constraint::Length(1),  // VRAM gauge
-            Constraint::Length(1),  // Temperature
+            Constraint::Length(1), // GPU name
+            Constraint::Length(1), // Usage gauge
+            Constraint::Length(1), // VRAM gauge
+            Constraint::Length(1), // Temperature
         ])
         .split(area);
 
     // GPU name and type
-    let gpu_name = Paragraph::new(format!("GPU: {} [{}]", gpu.name, gpu.gpu_type.display_name()))
-        .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+    let gpu_name = Paragraph::new(format!(
+        "GPU: {} [{}]",
+        gpu.name,
+        gpu.gpu_type.display_name()
+    ))
+    .style(
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(gpu_name, chunks[0]);
 
     // GPU usage gauge
@@ -118,9 +120,13 @@ fn render_gpu_section(frame: &mut Frame, area: Rect, gpu: &super::types::GpuInfo
 
     // Temperature if available
     if let Some(temp) = gpu.temperature_celsius {
-        let temp_color = if temp > 85.0 { Color::Red }
-                        else if temp > 75.0 { Color::Yellow }
-                        else { Color::Green };
+        let temp_color = if temp > 85.0 {
+            Color::Red
+        } else if temp > 75.0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
 
         let temp_text = Paragraph::new(format!("Temperature: {:.0}°C", temp))
             .style(Style::default().fg(temp_color));
@@ -145,8 +151,8 @@ fn render_model_section(frame: &mut Frame, area: Rect, stats: &HardwareStats) {
         let model_info = Paragraph::new(lines);
         frame.render_widget(model_info, area);
     } else {
-        let no_model = Paragraph::new("No model loaded")
-            .style(Style::default().fg(Color::DarkGray));
+        let no_model =
+            Paragraph::new("No model loaded").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(no_model, area);
     }
 }
@@ -156,9 +162,13 @@ fn render_performance_section(frame: &mut Frame, area: Rect, stats: &HardwareSta
     let mut lines = vec![];
 
     if let Some(speed) = stats.inference_speed {
-        let speed_color = if speed > 50.0 { Color::Green }
-                         else if speed > 20.0 { Color::Yellow }
-                         else { Color::Red };
+        let speed_color = if speed > 50.0 {
+            Color::Green
+        } else if speed > 20.0 {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
 
         lines.push(Line::from(vec![
             Span::raw("Inference: "),
@@ -168,9 +178,10 @@ fn render_performance_section(frame: &mut Frame, area: Rect, stats: &HardwareSta
             ),
         ]));
     } else {
-        lines.push(Line::from(
-            Span::styled("No active inference", Style::default().fg(Color::DarkGray))
-        ));
+        lines.push(Line::from(Span::styled(
+            "No active inference",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
 
     let performance = Paragraph::new(lines);

@@ -102,7 +102,8 @@ impl FileCache {
         entry.metadata.last_accessed = SystemTime::now();
 
         // Decompress data
-        let decompressed = lz4::block::decompress(&entry.data, Some(entry.metadata.file_size as i32))?;
+        let decompressed =
+            lz4::block::decompress(&entry.data, Some(entry.metadata.file_size as i32))?;
 
         // Deserialize data
         let data: T = bincode::deserialize(&decompressed)?;
@@ -135,8 +136,10 @@ impl FileCache {
     fn cache_path(&self, key: &CacheKey) -> std::path::PathBuf {
         // Use first 2 chars of hash for directory sharding
         let hash_prefix = &key.file_hash[..2];
-        let cache_name = format!("{}_{}.cache",
-            key.file_path.file_name()
+        let cache_name = format!(
+            "{}_{}.cache",
+            key.file_path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown"),
             &key.file_hash[..8]

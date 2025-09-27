@@ -1,0 +1,38 @@
+# Rust formatting configuration for Mermaid
+# Using only stable features
+
+# Maximum line width
+max_width = 100
+
+# Use spaces instead of tabs
+hard_tabs = false
+
+# Number of spaces per tab
+tab_spaces = 4
+
+# Reorder import statements
+reorder_imports = true
+
+# Reorder module statements
+reorder_modules = true
+
+# Merge multiple imports from same module
+use_small_heuristics = "Default"
+
+# Match block trailing comma
+match_block_trailing_comma = true
+
+# Chain width
+chain_width = 60
+
+# Single line if-else max width
+single_line_if_else_max_width = 50
+
+# Use field init shorthand
+use_field_init_shorthand = true
+
+# Use try shorthand
+use_try_shorthand = true
+
+# Edition
+edition = "2021"

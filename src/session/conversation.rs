@@ -1,9 +1,9 @@
+use crate::models::{ChatMessage, MessageRole};
 use anyhow::Result;
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Local};
-use crate::models::{ChatMessage, MessageRole};
 
 /// A complete conversation history
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,9 +44,7 @@ impl ConversationHistory {
 
     /// Update the title based on the first user message
     fn update_title(&mut self) {
-        if let Some(first_user_msg) = self.messages.iter()
-            .find(|m| m.role == MessageRole::User)
-        {
+        if let Some(first_user_msg) = self.messages.iter().find(|m| m.role == MessageRole::User) {
             // Take first 60 chars of first user message as title
             let preview = if first_user_msg.content.len() > 60 {
                 format!("{}...", &first_user_msg.content[..60])

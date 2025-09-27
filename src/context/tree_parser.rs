@@ -175,9 +175,12 @@ impl TreeParser {
             .get_mut(&language)
             .context(format!("No parser for language: {}", language))?;
 
-        let tree = parser
-            .parse(content, None)
-            .with_context(|| format!("Failed to parse {} - file may contain syntax errors", path.display()))?;
+        let tree = parser.parse(content, None).with_context(|| {
+            format!(
+                "Failed to parse {} - file may contain syntax errors",
+                path.display()
+            )
+        })?;
 
         let query = self
             .queries
@@ -267,9 +270,12 @@ impl TreeParser {
             .get_mut(&language)
             .context(format!("No parser for language: {}", language))?;
 
-        let tree = parser
-            .parse(content, None)
-            .with_context(|| format!("Failed to parse {} - file may contain syntax errors", path.display()))?;
+        let tree = parser.parse(content, None).with_context(|| {
+            format!(
+                "Failed to parse {} - file may contain syntax errors",
+                path.display()
+            )
+        })?;
 
         // This is simplified - real implementation would need language-specific
         // queries to identify symbol references vs definitions

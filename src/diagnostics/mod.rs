@@ -9,10 +9,7 @@ mod types;
 
 // Public re-exports - the ONLY way to access diagnostics functionality
 pub use monitor::{
-    HardwareMonitor, SharedHardwareMonitor,
-    create_monitoring_task, estimate_model_memory
+    create_monitoring_task, estimate_model_memory, HardwareMonitor, SharedHardwareMonitor,
 };
 pub use panel::render_diagnostics_panel;
-pub use types::{
-    HardwareStats, GpuInfo, GpuType, ModelInfo, DiagnosticsMode
-};
+pub use types::{DiagnosticsMode, GpuInfo, GpuType, HardwareStats, ModelInfo};

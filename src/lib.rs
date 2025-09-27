@@ -13,7 +13,7 @@ pub mod session;
 pub mod tui;
 pub mod utils;
 
-pub use app::{Config, load_config};
+pub use app::{load_config, Config};
 pub use context::{ContextLoader, LoaderConfig};
 pub use models::{Model, ModelFactory, ProjectContext};
 pub use tui::run_ui;

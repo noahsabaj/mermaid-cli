@@ -17,7 +17,9 @@ use std::io;
 use super::conversation::ConversationHistory;
 
 /// Show a selection UI for choosing a conversation to resume
-pub fn select_conversation(conversations: Vec<ConversationHistory>) -> Result<Option<ConversationHistory>> {
+pub fn select_conversation(
+    conversations: Vec<ConversationHistory>,
+) -> Result<Option<ConversationHistory>> {
     if conversations.is_empty() {
         println!("No previous conversations found in this directory.");
         return Ok(None);
@@ -68,28 +70,28 @@ fn run_selector(
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
                     return Ok(None);
-                }
+                },
                 KeyCode::Enter => {
                     let selected = app.conversations[app.selected].clone();
                     return Ok(Some(selected));
-                }
+                },
                 KeyCode::Down | KeyCode::Char('j') => {
                     if app.selected < app.conversations.len() - 1 {
                         app.selected += 1;
                     }
-                }
+                },
                 KeyCode::Up | KeyCode::Char('k') => {
                     if app.selected > 0 {
                         app.selected -= 1;
                     }
-                }
+                },
                 KeyCode::Home => {
                     app.selected = 0;
-                }
+                },
                 KeyCode::End => {
                     app.selected = app.conversations.len() - 1;
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -107,8 +109,16 @@ fn render_selector(f: &mut Frame, app: &ConversationSelector) {
 
     // Title
     let title = Paragraph::new("Select a conversation to resume")
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-        .block(Block::default().borders(Borders::ALL).title(" Mermaid - Resume Session "));
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Mermaid - Resume Session "),
+        );
     f.render_widget(title, chunks[0]);
 
     // Conversation list
@@ -127,20 +137,16 @@ fn render_selector(f: &mut Frame, app: &ConversationSelector) {
             };
 
             let content = vec![
-                Line::from(vec![
-                    Span::styled(&conv.title, style),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        format!(
-                            "  {} | {} messages | Model: {}",
-                            conv.updated_at.format("%Y-%m-%d %H:%M"),
-                            conv.messages.len(),
-                            conv.model_name
-                        ),
-                        style.fg(Color::Gray),
+                Line::from(vec![Span::styled(&conv.title, style)]),
+                Line::from(vec![Span::styled(
+                    format!(
+                        "  {} | {} messages | Model: {}",
+                        conv.updated_at.format("%Y-%m-%d %H:%M"),
+                        conv.messages.len(),
+                        conv.model_name
                     ),
-                ]),
+                    style.fg(Color::Gray),
+                )]),
             ];
 
             ListItem::new(content)
@@ -159,15 +165,13 @@ fn render_selector(f: &mut Frame, app: &ConversationSelector) {
     f.render_widget(list, chunks[1]);
 
     // Help text
-    let help = vec![
-        Line::from(vec![
-            Span::raw("Up/k: Up  Down/j: Down  "),
-            Span::styled("Enter", Style::default().fg(Color::Green)),
-            Span::raw(": Select  "),
-            Span::styled("q/Esc", Style::default().fg(Color::Red)),
-            Span::raw(": Cancel"),
-        ]),
-    ];
+    let help = vec![Line::from(vec![
+        Span::raw("Up/k: Up  Down/j: Down  "),
+        Span::styled("Enter", Style::default().fg(Color::Green)),
+        Span::raw(": Select  "),
+        Span::styled("q/Esc", Style::default().fg(Color::Red)),
+        Span::raw(": Cancel"),
+    ])];
     let help_widget = Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL));

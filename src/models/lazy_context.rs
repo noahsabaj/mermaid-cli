@@ -1,8 +1,8 @@
+use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use anyhow::Result;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 /// A lazily-loaded project context that loads files on demand
@@ -63,7 +63,8 @@ impl LazyProjectContext {
 
             // Count tokens
             if let Some(ref cache) = self.cache {
-                if let Ok(tokens) = cache.get_or_compute_tokens(&full_path, &content, "cl100k_base") {
+                if let Ok(tokens) = cache.get_or_compute_tokens(&full_path, &content, "cl100k_base")
+                {
                     self.token_count.fetch_add(tokens, Ordering::Relaxed);
                 }
             }
@@ -169,7 +170,7 @@ pub fn get_priority_files(root_path: &str) -> Vec<String> {
         "readme.md",
         "README.rst",
         "README.txt",
-        "CLAUDE.md",      // Mermaid's own instructions file
+        "CLAUDE.md", // Mermaid's own instructions file
         "Cargo.toml",
         "package.json",
         "pyproject.toml",

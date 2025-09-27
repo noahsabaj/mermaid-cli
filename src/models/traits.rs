@@ -1,7 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::types::{ChatMessage, ModelCapabilities, ModelConfig, ModelResponse, ProjectContext, StreamCallback};
+use super::types::{
+    ChatMessage, ModelCapabilities, ModelConfig, ModelResponse, ProjectContext, StreamCallback,
+};
 
 /// Core trait that all model backends must implement
 #[async_trait]

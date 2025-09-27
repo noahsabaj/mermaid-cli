@@ -1,25 +1,24 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::agents;
 use crate::agents::ModeAwareExecutor;
-use crate::models::{MessageRole, ModelConfig, StreamCallback};
-use crate::tui::{App, ConfirmationState, FileInfo};
-use crate::tui::render::render_ui;
-use crate::utils::{FileSystemWatcher, count_file_tokens};
 use crate::context::ContextLoader;
+use crate::models::{MessageRole, ModelConfig, StreamCallback};
+use crate::tui::render::render_ui;
+use crate::tui::{App, ConfirmationState, FileInfo};
+use crate::utils::{count_file_tokens, FileSystemWatcher};
 
 /// Run the terminal UI
 pub async fn run_ui(mut app: App) -> Result<()> {
@@ -118,263 +117,283 @@ async fn run_app(
                     // Handle mouse wheel scrolling in all states
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
-                            app.scroll_down(3);  // Scroll up moves view down
-                            app.is_user_scrolling = true;  // User is scrolling
-                        }
+                            app.scroll_down(3); // Scroll up moves view down
+                            app.is_user_scrolling = true; // User is scrolling
+                        },
                         MouseEventKind::ScrollDown => {
-                            app.scroll_up(3);    // Scroll down moves view up
-                            // Check if scrolled to bottom
+                            app.scroll_up(3); // Scroll down moves view up
+                                              // Check if scrolled to bottom
                             let max_scroll = app.calculate_max_scroll(viewport_height);
                             if app.scroll_offset >= max_scroll.saturating_sub(3) {
                                 app.is_user_scrolling = false;
                                 app.scroll_offset = max_scroll;
                             }
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
-                }
+                },
                 Event::Key(key) => {
-                // Handle Alt+key combinations globally for confirmation
-                if key.modifiers == KeyModifiers::ALT && app.confirmation_state.is_some() {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            // Approve action
-                            if let Some(confirmation) = app.confirmation_state.take() {
-                                app.set_status(format!("Executing: {}...", confirmation.action_description));
+                    // Handle Alt+key combinations globally for confirmation
+                    if key.modifiers == KeyModifiers::ALT && app.confirmation_state.is_some() {
+                        match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                // Approve action
+                                if let Some(confirmation) = app.confirmation_state.take() {
+                                    app.set_status(format!(
+                                        "Executing: {}...",
+                                        confirmation.action_description
+                                    ));
 
-                                // Get the executor from pending_executor
-                                if let Some(mut executor) = app.pending_executor.take() {
-                                    let action_clone = confirmation.action.clone();
+                                    // Get the executor from pending_executor
+                                    if let Some(mut executor) = app.pending_executor.take() {
+                                        let action_clone = confirmation.action.clone();
 
-                                    // Execute the action
-                                    match executor.execute(confirmation.action).await {
-                                        Ok(agents::ActionResult::Success { output }) => {
-                                            handle_action_success(app, &action_clone, output, &tx).await;
-                                        }
-                                        Ok(agents::ActionResult::Error { error }) => {
-                                            app.set_status(format!("[FAILED] Action failed: {}", error));
-                                        }
-                                        Err(e) => {
-                                            app.set_status(format!("[ERROR] Error: {}", e));
-                                        }
-                                    }
-                                }
-                                app.pending_action = None;
-                            }
-                        }
-                        KeyCode::Char('n') | KeyCode::Char('N') => {
-                            // Skip action
-                            if let Some(_) = app.confirmation_state.take() {
-                                app.set_status("Action skipped");
-                                app.pending_action = None;
-                                app.pending_executor = None;
-                            }
-                        }
-                        KeyCode::Char('a') | KeyCode::Char('A') => {
-                            // Always approve - persistent preferences not yet implemented
-                            if let Some(confirmation) = app.confirmation_state.take() {
-                                app.set_status("Always approving similar actions");
-                                // For now, just approve this one
-                                if let Some(mut executor) = app.pending_executor.take() {
-                                    let action_clone = confirmation.action.clone();
-                                    match executor.execute(confirmation.action).await {
-                                        Ok(agents::ActionResult::Success { output }) => {
-                                            handle_action_success(app, &action_clone, output, &tx).await;
-                                        }
-                                        Ok(agents::ActionResult::Error { error }) => {
-                                            app.set_status(format!("[FAILED] Action failed: {}", error));
-                                        }
-                                        Err(e) => {
-                                            app.set_status(format!("[ERROR] Error: {}", e));
-                                        }
-                                    }
-                                }
-                                app.pending_action = None;
-                            }
-                        }
-                        KeyCode::Char('p') | KeyCode::Char('P') => {
-                            // Toggle preview - full preview expansion not yet implemented
-                            app.set_status("Preview toggled");
-                        }
-                        _ => {}
-                    }
-                    continue; // Skip normal key handling when confirmation is active
-                }
-
-                // Simplified key handling - no modes
-                match key.code {
-                    KeyCode::Esc => {
-                        use crate::diagnostics::DiagnosticsMode;
-
-                        // If diagnostics panel is open, close it
-                        if app.diagnostics_mode == DiagnosticsMode::Detailed {
-                            app.diagnostics_mode = DiagnosticsMode::Compact;
-                            app.set_status("Diagnostics panel closed");
-                        } else if app.is_generating {
-                            // If generating, abort the generation but keep what was generated
-                            if let Some(abort) = app.generation_abort.take() {
-                                abort.abort();
-                            }
-                            app.is_generating = false;
-
-                            // Save partial response instead of clearing it
-                            if !app.current_response.is_empty() {
-                                app.add_message(
-                                    MessageRole::Assistant,
-                                    app.current_response.clone(),
-                                );
-                                app.current_response.clear();
-                            }
-                            app.set_status("Generation stopped");
-                        } else if !app.input.is_empty() {
-                            // Clear input if not generating
-                            app.input.clear();
-                            app.cursor_position = 0;  // Reset cursor when clearing
-                            app.set_status("Input cleared");
-                        }
-                    }
-                    KeyCode::Enter => {
-                        if !app.input.is_empty() && !app.is_generating {
-                            // Check if this is a command (starts with ':')
-                            if app.input.starts_with(':') {
-                                // Execute command
-                                let command = app.input.trim_start_matches(':').to_string();
-                                handle_command(app, &command).await?;
-                                app.clear_input();
-                            } else {
-                                // Clear any stuck status messages when sending new message
-                                app.pending_file_read = false;
-                                app.reading_file_status = None;
-
-                                // Send message
-                                let input = app.input.clone();
-                                app.add_message(
-                                    MessageRole::User,
-                                    input.clone(),
-                                );
-                                app.clear_input();
-
-                                // Build message history including the new message
-                                let messages = app.build_message_history();
-
-                                // Auto-scroll to show the new user message
-                                app.auto_scroll_to_bottom(viewport_height);
-                                app.is_generating = true;
-                                app.current_response.clear();
-
-                                // Process message asynchronously
-                                let model = app.model.clone();
-                                let context = app.context.clone();
-                                let tx_clone = tx.clone();
-                                let tx_done = tx.clone();
-
-                                let handle = tokio::spawn(async move {
-                                    let config = ModelConfig::default();
-                                    let callback: StreamCallback = Arc::new(move |chunk| {
-                                        let _ = tx_clone.try_send(chunk.to_string());
-                                    });
-
-                                    let mut model = model.lock().await;
-                                    match model
-                                        .chat(&messages, &context, &config, Some(callback))
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            // Response is complete - content already streamed via callback
-                                            let _ = tx_done.send("[DONE]:".to_string()).await;
-                                        }
-                                        Err(e) => {
-                                            let _ = tx_done
-                                                .send(format!("[ERROR]:{}", e))
+                                        // Execute the action
+                                        match executor.execute(confirmation.action).await {
+                                            Ok(agents::ActionResult::Success { output }) => {
+                                                handle_action_success(
+                                                    app,
+                                                    &action_clone,
+                                                    output,
+                                                    &tx,
+                                                )
                                                 .await;
+                                            },
+                                            Ok(agents::ActionResult::Error { error }) => {
+                                                app.set_status(format!(
+                                                    "[FAILED] Action failed: {}",
+                                                    error
+                                                ));
+                                            },
+                                            Err(e) => {
+                                                app.set_status(format!("[ERROR] Error: {}", e));
+                                            },
                                         }
                                     }
-                                });
-                                app.generation_abort = Some(handle.abort_handle());
-                            }
+                                    app.pending_action = None;
+                                }
+                            },
+                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                // Skip action
+                                if let Some(_) = app.confirmation_state.take() {
+                                    app.set_status("Action skipped");
+                                    app.pending_action = None;
+                                    app.pending_executor = None;
+                                }
+                            },
+                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                                // Always approve - persistent preferences not yet implemented
+                                if let Some(confirmation) = app.confirmation_state.take() {
+                                    app.set_status("Always approving similar actions");
+                                    // For now, just approve this one
+                                    if let Some(mut executor) = app.pending_executor.take() {
+                                        let action_clone = confirmation.action.clone();
+                                        match executor.execute(confirmation.action).await {
+                                            Ok(agents::ActionResult::Success { output }) => {
+                                                handle_action_success(
+                                                    app,
+                                                    &action_clone,
+                                                    output,
+                                                    &tx,
+                                                )
+                                                .await;
+                                            },
+                                            Ok(agents::ActionResult::Error { error }) => {
+                                                app.set_status(format!(
+                                                    "[FAILED] Action failed: {}",
+                                                    error
+                                                ));
+                                            },
+                                            Err(e) => {
+                                                app.set_status(format!("[ERROR] Error: {}", e));
+                                            },
+                                        }
+                                    }
+                                    app.pending_action = None;
+                                }
+                            },
+                            KeyCode::Char('p') | KeyCode::Char('P') => {
+                                // Toggle preview - full preview expansion not yet implemented
+                                app.set_status("Preview toggled");
+                            },
+                            _ => {},
                         }
+                        continue; // Skip normal key handling when confirmation is active
                     }
-                    KeyCode::Char(c) => {
-                        // Insert character at cursor position
-                        app.input.insert(app.cursor_position, c);
-                        app.cursor_position += 1;
-                    }
-                    KeyCode::Backspace => {
-                        if app.cursor_position > 0 {
-                            app.cursor_position -= 1;
-                            app.input.remove(app.cursor_position);
-                        }
-                    }
-                    KeyCode::Delete => {
-                        if app.cursor_position < app.input.len() {
-                            app.input.remove(app.cursor_position);
-                        }
-                    }
-                    KeyCode::Left => {
-                        if app.cursor_position > 0 {
-                            app.cursor_position -= 1;
-                        }
-                    }
-                    KeyCode::Right => {
-                        if app.cursor_position < app.input.len() {
-                            app.cursor_position += 1;
-                        }
-                    }
-                    KeyCode::Home => {
-                        app.cursor_position = 0;
-                    }
-                    KeyCode::End => {
-                        app.cursor_position = app.input.len();
-                    }
-                    // Navigation keys always available
-                    KeyCode::Up => app.scroll_down(1),
-                    KeyCode::Down => app.scroll_up(1),
-                    KeyCode::PageUp => app.scroll_up(10),
-                    KeyCode::PageDown => app.scroll_down(10),
-                    KeyCode::Tab => app.toggle_sidebar(),
-                    _ => {}
-                }
 
-                // Global keyboard shortcuts that work in any state
-
-                // Handle Ctrl+C to quit
-                if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
-                    app.auto_save_conversation();
-                    app.quit();
-                    break;
-                }
-
-                // Handle Shift+Tab to cycle operation modes
-                // Note: Some terminals report Shift+Tab as BackTab, others as Tab with SHIFT modifier
-                if key.code == KeyCode::BackTab
-                    || (key.code == KeyCode::Tab && key.modifiers == KeyModifiers::SHIFT)
-                {
-                    app.cycle_mode();
-                }
-
-                // Handle Ctrl+Tab to cycle reverse (optional)
-                if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::CONTROL {
-                    app.cycle_mode_reverse();
-                }
-
-                // F2 to toggle diagnostics
-                if key.code == KeyCode::F(2) {
-                    app.toggle_diagnostics();
-                }
-
-                // Mode-specific shortcuts
-                if key.modifiers == KeyModifiers::CONTROL {
+                    // Simplified key handling - no modes
                     match key.code {
-                        KeyCode::Char('e') => app.set_mode(crate::tui::mode::OperationMode::AcceptEdits),
-                        KeyCode::Char('p') => app.set_mode(crate::tui::mode::OperationMode::PlanMode),
-                        KeyCode::Char('y') => app.toggle_bypass_mode(),
-                        _ => {}
-                    }
-                }
+                        KeyCode::Esc => {
+                            use crate::diagnostics::DiagnosticsMode;
 
+                            // If diagnostics panel is open, close it
+                            if app.diagnostics_mode == DiagnosticsMode::Detailed {
+                                app.diagnostics_mode = DiagnosticsMode::Compact;
+                                app.set_status("Diagnostics panel closed");
+                            } else if app.is_generating {
+                                // If generating, abort the generation but keep what was generated
+                                if let Some(abort) = app.generation_abort.take() {
+                                    abort.abort();
+                                }
+                                app.is_generating = false;
+
+                                // Save partial response instead of clearing it
+                                if !app.current_response.is_empty() {
+                                    app.add_message(
+                                        MessageRole::Assistant,
+                                        app.current_response.clone(),
+                                    );
+                                    app.current_response.clear();
+                                }
+                                app.set_status("Generation stopped");
+                            } else if !app.input.is_empty() {
+                                // Clear input if not generating
+                                app.input.clear();
+                                app.cursor_position = 0; // Reset cursor when clearing
+                                app.set_status("Input cleared");
+                            }
+                        },
+                        KeyCode::Enter => {
+                            if !app.input.is_empty() && !app.is_generating {
+                                // Check if this is a command (starts with ':')
+                                if app.input.starts_with(':') {
+                                    // Execute command
+                                    let command = app.input.trim_start_matches(':').to_string();
+                                    handle_command(app, &command).await?;
+                                    app.clear_input();
+                                } else {
+                                    // Clear any stuck status messages when sending new message
+                                    app.pending_file_read = false;
+                                    app.reading_file_status = None;
+
+                                    // Send message
+                                    let input = app.input.clone();
+                                    app.add_message(MessageRole::User, input.clone());
+                                    app.clear_input();
+
+                                    // Build message history including the new message
+                                    let messages = app.build_message_history();
+
+                                    // Auto-scroll to show the new user message
+                                    app.auto_scroll_to_bottom(viewport_height);
+                                    app.is_generating = true;
+                                    app.current_response.clear();
+
+                                    // Process message asynchronously
+                                    let model = app.model.clone();
+                                    let context = app.context.clone();
+                                    let tx_clone = tx.clone();
+                                    let tx_done = tx.clone();
+
+                                    let handle = tokio::spawn(async move {
+                                        let config = ModelConfig::default();
+                                        let callback: StreamCallback = Arc::new(move |chunk| {
+                                            let _ = tx_clone.try_send(chunk.to_string());
+                                        });
+
+                                        let mut model = model.lock().await;
+                                        match model
+                                            .chat(&messages, &context, &config, Some(callback))
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                // Response is complete - content already streamed via callback
+                                                let _ = tx_done.send("[DONE]:".to_string()).await;
+                                            },
+                                            Err(e) => {
+                                                let _ =
+                                                    tx_done.send(format!("[ERROR]:{}", e)).await;
+                                            },
+                                        }
+                                    });
+                                    app.generation_abort = Some(handle.abort_handle());
+                                }
+                            }
+                        },
+                        KeyCode::Char(c) => {
+                            // Insert character at cursor position
+                            app.input.insert(app.cursor_position, c);
+                            app.cursor_position += 1;
+                        },
+                        KeyCode::Backspace => {
+                            if app.cursor_position > 0 {
+                                app.cursor_position -= 1;
+                                app.input.remove(app.cursor_position);
+                            }
+                        },
+                        KeyCode::Delete => {
+                            if app.cursor_position < app.input.len() {
+                                app.input.remove(app.cursor_position);
+                            }
+                        },
+                        KeyCode::Left => {
+                            if app.cursor_position > 0 {
+                                app.cursor_position -= 1;
+                            }
+                        },
+                        KeyCode::Right => {
+                            if app.cursor_position < app.input.len() {
+                                app.cursor_position += 1;
+                            }
+                        },
+                        KeyCode::Home => {
+                            app.cursor_position = 0;
+                        },
+                        KeyCode::End => {
+                            app.cursor_position = app.input.len();
+                        },
+                        // Navigation keys always available
+                        KeyCode::Up => app.scroll_down(1),
+                        KeyCode::Down => app.scroll_up(1),
+                        KeyCode::PageUp => app.scroll_up(10),
+                        KeyCode::PageDown => app.scroll_down(10),
+                        KeyCode::Tab => app.toggle_sidebar(),
+                        _ => {},
+                    }
+
+                    // Global keyboard shortcuts that work in any state
+
+                    // Handle Ctrl+C to quit
+                    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+                        app.auto_save_conversation();
+                        app.quit();
+                        break;
+                    }
+
+                    // Handle Shift+Tab to cycle operation modes
+                    // Note: Some terminals report Shift+Tab as BackTab, others as Tab with SHIFT modifier
+                    if key.code == KeyCode::BackTab
+                        || (key.code == KeyCode::Tab && key.modifiers == KeyModifiers::SHIFT)
+                    {
+                        app.cycle_mode();
+                    }
+
+                    // Handle Ctrl+Tab to cycle reverse (optional)
+                    if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::CONTROL {
+                        app.cycle_mode_reverse();
+                    }
+
+                    // F2 to toggle diagnostics
+                    if key.code == KeyCode::F(2) {
+                        app.toggle_diagnostics();
+                    }
+
+                    // Mode-specific shortcuts
+                    if key.modifiers == KeyModifiers::CONTROL {
+                        match key.code {
+                            KeyCode::Char('e') => {
+                                app.set_mode(crate::tui::mode::OperationMode::AcceptEdits)
+                            },
+                            KeyCode::Char('p') => {
+                                app.set_mode(crate::tui::mode::OperationMode::PlanMode)
+                            },
+                            KeyCode::Char('y') => app.toggle_bypass_mode(),
+                            _ => {},
+                        }
+                    }
+                },
+                _ => {}, // Ignore other events (FocusGained, FocusLost, Paste, Resize)
             }
-            _ => {} // Ignore other events (FocusGained, FocusLost, Paste, Resize)
-        }
         } // Close the if event::poll(...) block
 
         // Handle streaming responses and check for completion
@@ -403,18 +422,15 @@ async fn run_app(
                     // Add the accumulated response from streaming
                     if !app.current_response.is_empty() {
                         let response_text = app.current_response.clone();
-                        app.add_message(
-                            MessageRole::Assistant,
-                            response_text.clone(),
-                        );
+                        app.add_message(MessageRole::Assistant, response_text.clone());
 
                         // Parse and execute any actions from the response
                         let actions = agents::parse_actions(&response_text);
 
                         // Check if any actions will trigger feedback loops
-                        let has_feedback_actions = actions.iter().any(|a| {
-                            matches!(a, agents::AgentAction::ReadFile { .. })
-                        });
+                        let has_feedback_actions = actions
+                            .iter()
+                            .any(|a| matches!(a, agents::AgentAction::ReadFile { .. }));
 
                         if has_feedback_actions {
                             app.pending_file_read = true;
@@ -437,7 +453,8 @@ async fn run_app(
                                 // Extract preview and file info for WriteFile actions
                                 let (preview_lines, file_info) = match &action {
                                     agents::AgentAction::WriteFile { path, content } => {
-                                        let lines: Vec<String> = content.lines()
+                                        let lines: Vec<String> = content
+                                            .lines()
                                             .take(5)
                                             .map(|s| s.to_string())
                                             .collect();
@@ -448,8 +465,8 @@ async fn run_app(
                                             language: detect_language(path),
                                         };
                                         (lines, Some(info))
-                                    }
-                                    _ => (vec![], None)
+                                    },
+                                    _ => (vec![], None),
                                 };
 
                                 // Set confirmation state
@@ -458,7 +475,10 @@ async fn run_app(
                                     action_description: action_desc,
                                     preview_lines,
                                     file_info,
-                                    allow_always: matches!(action, agents::AgentAction::WriteFile { .. }),
+                                    allow_always: matches!(
+                                        action,
+                                        agents::AgentAction::WriteFile { .. }
+                                    ),
                                 });
 
                                 // Store executor for later use
@@ -502,53 +522,77 @@ async fn run_app(
 
                                                 tokio::spawn(async move {
                                                     let config = ModelConfig::default();
-                                                    let callback: StreamCallback = Arc::new(move |chunk| {
-                                                        let _ = tx_clone.try_send(chunk.to_string());
-                                                    });
+                                                    let callback: StreamCallback =
+                                                        Arc::new(move |chunk| {
+                                                            let _ = tx_clone
+                                                                .try_send(chunk.to_string());
+                                                        });
 
                                                     let mut model = model.lock().await;
                                                     match model
-                                                        .chat(&messages, &context, &config, Some(callback))
+                                                        .chat(
+                                                            &messages,
+                                                            &context,
+                                                            &config,
+                                                            Some(callback),
+                                                        )
                                                         .await
                                                     {
                                                         Ok(_) => {
                                                             // Clear feedback flags after completion
-                                                            let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
-                                                        }
+                                                            let _ = tx_done
+                                                                .send(
+                                                                    "[DONE]:[FEEDBACK_COMPLETE]"
+                                                                        .to_string(),
+                                                                )
+                                                                .await;
+                                                        },
                                                         Err(e) => {
                                                             let _ = tx_done
                                                                 .send(format!("[ERROR]:{}", e))
                                                                 .await;
-                                                        }
+                                                        },
                                                     }
                                                 });
-                                            }
+                                            },
                                             agents::AgentAction::WriteFile { path, content } => {
                                                 app.set_status(format!("[OK] {}", output));
                                                 app.context.add_file(path.clone(), content.clone());
                                                 // Use proper tokenizer for accurate count
-                                                let tokens = count_file_tokens(content, &app.model_name);
+                                                let tokens =
+                                                    count_file_tokens(content, &app.model_name);
                                                 app.context.token_count += tokens;
-                                            }
+                                            },
                                             agents::AgentAction::DeleteFile { path } => {
                                                 app.set_status(format!("[OK] {}", output));
-                                                if let Some(content) = app.context.files.remove(path) {
+                                                if let Some(content) =
+                                                    app.context.files.remove(path)
+                                                {
                                                     // Use proper tokenizer for accurate count
-                                                    let tokens = count_file_tokens(&content, &app.model_name);
-                                                    app.context.token_count = app.context.token_count.saturating_sub(tokens);
+                                                    let tokens = count_file_tokens(
+                                                        &content,
+                                                        &app.model_name,
+                                                    );
+                                                    app.context.token_count = app
+                                                        .context
+                                                        .token_count
+                                                        .saturating_sub(tokens);
                                                 }
-                                            }
+                                            },
                                             _ => {
                                                 app.set_status(format!("[OK] {}", output));
-                                            }
+                                            },
                                         }
-                                    }
+                                    },
                                     Ok(agents::ActionResult::Error { error }) => {
-                                        app.set_status(format!("[FAILED] Action failed: {}", error));
-                                    }
+                                        app.set_status(format!(
+                                            "[FAILED] Action failed: {}",
+                                            error
+                                        ));
+                                    },
                                     Err(e) => {
                                         app.set_status(format!("[ERROR] Error: {}", e));
-                                    }
+                                    },
                                 }
                             }
                         }
@@ -558,15 +602,14 @@ async fn run_app(
                     // Error occurred
                     app.is_generating = false;
                     let error = chunk.strip_prefix("[ERROR]:").unwrap_or(&chunk);
-                    app.add_message(
-                        MessageRole::System,
-                        format!("Error: {}", error),
-                    );
+                    app.add_message(MessageRole::System, format!("Error: {}", error));
                     app.current_response.clear();
                 } else if chunk.starts_with("[HARDWARE_STATS]:") {
                     // Hardware stats update
                     if let Some(json_str) = chunk.strip_prefix("[HARDWARE_STATS]:") {
-                        if let Ok(stats) = serde_json::from_str::<crate::diagnostics::HardwareStats>(json_str) {
+                        if let Ok(stats) =
+                            serde_json::from_str::<crate::diagnostics::HardwareStats>(json_str)
+                        {
                             app.hardware_stats = Some(stats);
                         }
                     }
@@ -588,7 +631,9 @@ async fn run_app(
             if chunk.starts_with("[HARDWARE_STATS]:") {
                 // Hardware stats update
                 if let Some(json_str) = chunk.strip_prefix("[HARDWARE_STATS]:") {
-                    if let Ok(stats) = serde_json::from_str::<crate::diagnostics::HardwareStats>(json_str) {
+                    if let Ok(stats) =
+                        serde_json::from_str::<crate::diagnostics::HardwareStats>(json_str)
+                    {
                         app.hardware_stats = Some(stats);
                     }
                 }
@@ -608,9 +653,9 @@ async fn run_app(
                 // Reload the context to pick up external changes
                 if let Ok(loader) = ContextLoader::new() {
                     if let Ok(new_context) = loader.load(Path::new(".")) {
-                    // Update the context while preserving conversation history
-                    app.context.files = new_context.files;
-                    app.context.token_count = new_context.token_count;
+                        // Update the context while preserving conversation history
+                        app.context.files = new_context.files;
+                        app.context.token_count = new_context.token_count;
                         app.set_status("[OK] Files refreshed from disk");
                     }
                 }
@@ -682,11 +727,11 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
         Some("quit") | Some("q") => {
             app.auto_save_conversation();
             app.quit();
-        }
+        },
         Some("clear") => {
             app.messages.clear();
             app.set_status("Chat cleared");
-        }
+        },
         Some("model") => {
             if let Some(model_name) = parts.get(1) {
                 // Parse the model name (could be provider/model or just model)
@@ -700,15 +745,15 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
                 app.set_status(format!("Switching to model: {}...", model_id));
 
                 // Try to create the new model
-                use crate::models::ModelFactory;
                 use crate::app::load_config;
+                use crate::models::ModelFactory;
 
                 let config = match load_config() {
                     Ok(cfg) => cfg,
                     Err(e) => {
                         app.set_status(format!("Failed to load config: {}", e));
                         return Ok(());
-                    }
+                    },
                 };
 
                 // Create new model asynchronously
@@ -729,41 +774,43 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
                         let mut session = SessionState::load().unwrap_or_default();
                         session.set_model(model_id);
                         let _ = session.save();
-                    }
+                    },
                     Ok(Err(e)) => {
                         app.set_status(format!("Failed to switch model: {}", e));
-                    }
+                    },
                     Err(e) => {
                         app.set_status(format!("Failed to switch model: {}", e));
-                    }
+                    },
                 }
             } else {
                 app.set_status(format!("Current model: {}", app.model_name));
             }
-        }
+        },
         Some("sidebar") | Some("sb") => {
             app.toggle_sidebar();
-        }
+        },
         Some("refresh") | Some("r") => {
             // Manually refresh file context from disk
             match ContextLoader::new() {
                 Ok(loader) => match loader.load(Path::new(".")) {
-                Ok(new_context) => {
-                    app.context.files = new_context.files;
-                    app.context.token_count = new_context.token_count;
-                    app.set_status(format!("[OK] Refreshed: {} files, ~{} tokens",
-                        app.context.files.len(),
-                        app.context.token_count));
-                }
+                    Ok(new_context) => {
+                        app.context.files = new_context.files;
+                        app.context.token_count = new_context.token_count;
+                        app.set_status(format!(
+                            "[OK] Refreshed: {} files, ~{} tokens",
+                            app.context.files.len(),
+                            app.context.token_count
+                        ));
+                    },
                     Err(e) => {
                         app.set_status(format!("[FAILED] Failed to refresh: {}", e));
-                    }
+                    },
                 },
                 Err(e) => {
                     app.set_status(format!("[FAILED] Failed to create loader: {}", e));
-                }
+                },
             }
-        }
+        },
         Some("save") => {
             // Save conversation with optional name
             let name = parts.get(1).map(|s| s.to_string());
@@ -776,7 +823,7 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
                     "Conversation saved".to_string()
                 });
             }
-        }
+        },
         Some("load") => {
             // Load a conversation by name or show selector
             if let Some(ref manager) = app.conversation_manager {
@@ -785,10 +832,10 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
                     match manager.load_conversation(name) {
                         Ok(conv) => {
                             app.load_conversation(conv);
-                        }
+                        },
                         Err(e) => {
                             app.set_status(format!("Failed to load: {}", e));
-                        }
+                        },
                     }
                 } else {
                     // Show list of available conversations
@@ -807,18 +854,18 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
                                     format!("Available conversations:\n{}\n\nUse :load <id> to load a specific conversation", list),
                                 );
                             }
-                        }
+                        },
                         Err(e) => {
                             app.set_status(format!("Failed to list conversations: {}", e));
-                        }
+                        },
                     }
                 }
             }
-        }
+        },
         Some("stats") | Some("diag") | Some("diagnostics") => {
             // Toggle diagnostics display
             app.toggle_diagnostics();
-        }
+        },
         Some("list") => {
             // List saved conversations
             if let Some(ref manager) = app.conversation_manager {
@@ -837,13 +884,13 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
                                 format!("Saved conversations:\n{}", list),
                             );
                         }
-                    }
+                    },
                     Err(e) => {
                         app.set_status(format!("Failed to list conversations: {}", e));
-                    }
+                    },
                 }
             }
-        }
+        },
         Some("help") | Some("h") => {
             app.add_message(
                 MessageRole::System,
@@ -868,10 +915,10 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
                  Ctrl+C - Quit"
                     .to_string(),
             );
-        }
+        },
         _ => {
             app.set_status(format!("Unknown command: {}", command));
-        }
+        },
     }
 
     Ok(())
@@ -906,10 +953,7 @@ async fn handle_action_success(
             );
 
             // Add feedback as system message and build history
-            app.add_message(
-                MessageRole::System,
-                feedback_prompt.clone(),
-            );
+            app.add_message(MessageRole::System, feedback_prompt.clone());
             let messages = app.build_message_history();
 
             // Send feedback to model
@@ -932,22 +976,20 @@ async fn handle_action_success(
                     Ok(_) => {
                         // Clear feedback flags after completion
                         let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
-                    }
+                    },
                     Err(e) => {
-                        let _ = tx_done
-                            .send(format!("[ERROR]:{}", e))
-                            .await;
-                    }
+                        let _ = tx_done.send(format!("[ERROR]:{}", e)).await;
+                    },
                 }
             });
-        }
+        },
         agents::AgentAction::WriteFile { path, content } => {
             app.set_status(format!("[OK] {}", output));
             app.context.add_file(path.clone(), content.clone());
             // Use proper tokenizer for accurate count
             let tokens = count_file_tokens(content, &app.model_name);
             app.context.token_count += tokens;
-        }
+        },
         agents::AgentAction::DeleteFile { path } => {
             app.set_status(format!("[OK] {}", output));
             if let Some(content) = app.context.files.remove(path) {
@@ -955,18 +997,16 @@ async fn handle_action_success(
                 let tokens = count_file_tokens(&content, &app.model_name);
                 app.context.token_count = app.context.token_count.saturating_sub(tokens);
             }
-        }
+        },
         _ => {
             app.set_status(format!("[OK] {}", output));
-        }
+        },
     }
 }
 
 /// Detect language from file extension
 fn detect_language(path: &str) -> Option<String> {
-    let ext = Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())?;
+    let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
 
     match ext {
         "rs" => Some("Rust".to_string()),

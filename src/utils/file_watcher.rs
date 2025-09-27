@@ -46,7 +46,7 @@ impl FileSystemWatcher {
                     if !event.paths.is_empty() {
                         events.push(FileEvent::Created(event.paths));
                     }
-                }
+                },
                 EventKind::Modify(modify_kind) => {
                     // Filter out metadata-only changes
                     use notify::event::ModifyKind;
@@ -55,16 +55,16 @@ impl FileSystemWatcher {
                             if !event.paths.is_empty() {
                                 events.push(FileEvent::Modified(event.paths));
                             }
-                        }
-                        _ => {} // Ignore metadata changes
+                        },
+                        _ => {}, // Ignore metadata changes
                     }
-                }
+                },
                 EventKind::Remove(_) => {
                     if !event.paths.is_empty() {
                         events.push(FileEvent::Deleted(event.paths));
                     }
-                }
-                _ => {} // Ignore other events
+                },
+                _ => {}, // Ignore other events
             }
         }
 
@@ -87,9 +87,9 @@ impl FileSystemWatcher {
             if let Some(parent_name) = parent.file_name() {
                 if let Some(parent_str) = parent_name.to_str() {
                     match parent_str {
-                        "target" | "node_modules" | "__pycache__" | ".git" |
-                        "dist" | "build" | ".venv" | "venv" => return true,
-                        _ => {}
+                        "target" | "node_modules" | "__pycache__" | ".git" | "dist" | "build"
+                        | ".venv" | "venv" => return true,
+                        _ => {},
                     }
                 }
             }
@@ -100,10 +100,10 @@ impl FileSystemWatcher {
             if let Some(ext_str) = ext.to_str() {
                 match ext_str {
                     // Allow common text and code files
-                    "txt" | "md" | "rs" | "toml" | "yaml" | "yml" | "json" |
-                    "js" | "ts" | "jsx" | "tsx" | "py" | "go" | "java" | "c" |
-                    "cpp" | "h" | "hpp" | "sh" | "bash" | "zsh" | "fish" |
-                    "html" | "css" | "scss" | "xml" | "vue" | "svelte" => false,
+                    "txt" | "md" | "rs" | "toml" | "yaml" | "yml" | "json" | "js" | "ts"
+                    | "jsx" | "tsx" | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "sh"
+                    | "bash" | "zsh" | "fish" | "html" | "css" | "scss" | "xml" | "vue"
+                    | "svelte" => false,
                     // Ignore everything else (binaries, images, etc.)
                     _ => true,
                 }
@@ -124,13 +124,23 @@ mod tests {
 
     #[test]
     fn test_should_ignore_path() {
-        assert!(FileSystemWatcher::should_ignore_path(Path::new(".gitignore")));
-        assert!(FileSystemWatcher::should_ignore_path(Path::new("node_modules/package.json")));
-        assert!(FileSystemWatcher::should_ignore_path(Path::new("image.png")));
+        assert!(FileSystemWatcher::should_ignore_path(Path::new(
+            ".gitignore"
+        )));
+        assert!(FileSystemWatcher::should_ignore_path(Path::new(
+            "node_modules/package.json"
+        )));
+        assert!(FileSystemWatcher::should_ignore_path(Path::new(
+            "image.png"
+        )));
 
         assert!(!FileSystemWatcher::should_ignore_path(Path::new("main.rs")));
-        assert!(!FileSystemWatcher::should_ignore_path(Path::new("README.md")));
-        assert!(!FileSystemWatcher::should_ignore_path(Path::new("config.toml")));
+        assert!(!FileSystemWatcher::should_ignore_path(Path::new(
+            "README.md"
+        )));
+        assert!(!FileSystemWatcher::should_ignore_path(Path::new(
+            "config.toml"
+        )));
     }
 
     #[tokio::test]

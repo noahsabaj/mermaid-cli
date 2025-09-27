@@ -194,23 +194,23 @@ impl CacheManager {
                                 match self.get_or_compute_symbols(file, &content, &mut parser) {
                                     Ok((symbols, references)) => {
                                         Some((file.clone(), symbols, references))
-                                    }
+                                    },
                                     Err(e) => {
                                         eprintln!("Failed to parse {}: {}", file.display(), e);
                                         None
-                                    }
+                                    },
                                 }
-                            }
+                            },
                             Err(e) => {
                                 eprintln!("Failed to create parser for {}: {}", file.display(), e);
                                 None
-                            }
+                            },
                         }
-                    }
+                    },
                     Err(e) => {
                         eprintln!("Failed to read {}: {}", file.display(), e);
                         None
-                    }
+                    },
                 }
             })
             .collect()

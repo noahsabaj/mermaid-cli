@@ -9,8 +9,7 @@ pub fn read_file(path: &str) -> Result<String> {
     // Security check: ensure path is within current directory
     validate_path(&path)?;
 
-    fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read file: {}", path.display()))
+    fs::read_to_string(&path).with_context(|| format!("Failed to read file: {}", path.display()))
 }
 
 /// Write content to a file
@@ -22,8 +21,12 @@ pub fn write_file(path: &str, content: &str) -> Result<()> {
 
     // Create parent directories if they don't exist
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create parent directories for: {}", path.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create parent directories for: {}",
+                path.display()
+            )
+        })?;
     }
 
     // Create backup if file exists
@@ -33,8 +36,7 @@ pub fn write_file(path: &str, content: &str) -> Result<()> {
             .with_context(|| format!("Failed to create backup of: {}", path.display()))?;
     }
 
-    fs::write(&path, content)
-        .with_context(|| format!("Failed to write file: {}", path.display()))
+    fs::write(&path, content).with_context(|| format!("Failed to write file: {}", path.display()))
 }
 
 /// Delete a file
@@ -47,12 +49,15 @@ pub fn delete_file(path: &str) -> Result<()> {
     // Create backup before deletion
     if path.exists() {
         let backup_path = format!("{}.deleted", path.display());
-        fs::copy(&path, &backup_path)
-            .with_context(|| format!("Failed to create backup before deletion: {}", path.display()))?;
+        fs::copy(&path, &backup_path).with_context(|| {
+            format!(
+                "Failed to create backup before deletion: {}",
+                path.display()
+            )
+        })?;
     }
 
-    fs::remove_file(&path)
-        .with_context(|| format!("Failed to delete file: {}", path.display()))
+    fs::remove_file(&path).with_context(|| format!("Failed to delete file: {}", path.display()))
 }
 
 /// Create a directory
@@ -66,6 +71,15 @@ pub fn create_directory(path: &str) -> Result<()> {
         .with_context(|| format!("Failed to create directory: {}", path.display()))
 }
 
+/// Check if a path exists
+pub fn path_exists(path: &str) -> Result<bool> {
+    let path = normalize_path(path)?;
+
+    // Security check
+    validate_path(&path)?;
+
+    Ok(path.exists())
+}
 
 /// Normalize a path (resolve relative paths)
 fn normalize_path(path: &str) -> Result<PathBuf> {

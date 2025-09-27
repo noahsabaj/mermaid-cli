@@ -1,5 +1,4 @@
 /// CLI argument parsing and command handling - Gateway
-
 mod args;
 mod commands;
 

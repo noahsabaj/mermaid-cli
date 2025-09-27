@@ -1,3 +1,4 @@
+use once_cell::sync::Lazy;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -5,11 +6,77 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
 };
+use std::sync::Mutex;
 
+use crate::diagnostics::{render_diagnostics_panel, DiagnosticsMode};
+use crate::models::MessageRole;
 use crate::tui::app::App;
 use crate::tui::markdown::parse_markdown;
-use crate::diagnostics::{DiagnosticsMode, render_diagnostics_panel};
-use crate::models::MessageRole;
+
+/// Cache for layout calculations to improve performance
+struct LayoutCache {
+    main_layout: Option<(u16, u16, Vec<Rect>)>, // (width, height, rects)
+    content_layout: Option<(bool, Rect, Vec<Rect>)>, // (show_sidebar, area, rects)
+}
+
+impl LayoutCache {
+    fn new() -> Self {
+        Self {
+            main_layout: None,
+            content_layout: None,
+        }
+    }
+
+    fn get_main_layout(&mut self, area: Rect, input_height: u16) -> Vec<Rect> {
+        if let Some((w, h, ref rects)) = self.main_layout {
+            if w == area.width && h == input_height {
+                return rects.clone();
+            }
+        }
+
+        // Use negative spacing for overlapping borders (more compact UI)
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(0)
+            .spacing(-1)  // Overlapping borders for compact UI
+            .constraints([
+                Constraint::Length(3),  // Header
+                Constraint::Min(10),    // Main content
+                Constraint::Length(input_height),  // Dynamic input height
+                Constraint::Length(1),  // Status bar
+            ])
+            .split(area);
+
+        let layout_vec = layout.to_vec();
+        self.main_layout = Some((area.width, input_height, layout_vec.clone()));
+        layout_vec
+    }
+
+    fn get_content_layout(&mut self, show_sidebar: bool, area: Rect) -> Vec<Rect> {
+        if let Some((sidebar, cached_area, ref rects)) = self.content_layout {
+            if sidebar == show_sidebar && cached_area == area {
+                return rects.clone();
+            }
+        }
+
+        let layout = if show_sidebar {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .spacing(-1)  // Overlapping borders between sidebar and main content
+                .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+                .split(area)
+                .to_vec()
+        } else {
+            vec![Rect::default(), area]
+        };
+
+        self.content_layout = Some((show_sidebar, area, layout.clone()));
+        layout
+    }
+}
+
+// Global layout cache
+static LAYOUT_CACHE: Lazy<Mutex<LayoutCache>> = Lazy::new(|| Mutex::new(LayoutCache::new()));
 
 /// Render the main UI
 pub fn render_ui(frame: &mut Frame, app: &App) {
@@ -33,32 +100,19 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
     };
     let input_height = (input_lines + 2) as u16; // +2 for borders
 
-    // Create main layout with dynamic input height
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .margin(0)
-        .constraints(
-            [
-                Constraint::Length(3),  // Header
-                Constraint::Min(10),    // Main content
-                Constraint::Length(input_height),  // Dynamic input height
-                Constraint::Length(1),  // Status bar
-            ]
-            .as_ref(),
-        )
-        .split(frame.area());
+    // Use cached layout for better performance
+    let chunks = {
+        let mut cache = LAYOUT_CACHE.lock().unwrap();
+        cache.get_main_layout(frame.area(), input_height)
+    };
 
     // Render header
     render_header(frame, chunks[0], app);
 
-    // Split main content area
-    let content_chunks = if app.show_sidebar {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(25), Constraint::Percentage(75)].as_ref())
-            .split(chunks[1])
-    } else {
-        std::rc::Rc::new([Rect::default(), chunks[1]])
+    // Use cached content layout
+    let content_chunks = {
+        let mut cache = LAYOUT_CACHE.lock().unwrap();
+        cache.get_content_layout(app.show_sidebar, chunks[1])
     };
 
     // Render sidebar if visible
@@ -85,27 +139,19 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
 
 /// Render the header
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let header_text = vec![
-        Line::from(vec![
-            Span::styled("[MERMAID] ", Style::default().fg(Color::Cyan)),
-            Span::styled(
-                "Mermaid",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" | Model: "),
-            Span::styled(
-                &app.model_name,
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw(" | "),
-            Span::styled(
-                &app.working_dir,
-                Style::default().fg(Color::Gray),
-            ),
-        ]),
-    ];
+    let header_text = vec![Line::from(vec![
+        Span::styled("[MERMAID] ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            "Mermaid",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | Model: "),
+        Span::styled(&app.model_name, Style::default().fg(Color::Green)),
+        Span::raw(" | "),
+        Span::styled(&app.working_dir, Style::default().fg(Color::Gray)),
+    ])];
 
     let header = Paragraph::new(header_text)
         .block(
@@ -165,12 +211,13 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     if !app.sidebar_expanded && app.context.files.len() > 20 {
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(
-                format!("... and {} more (press 'e' to expand)", app.context.files.len() - 20),
-                Style::default().fg(Color::DarkGray),
+        items.push(ListItem::new(Line::from(vec![Span::styled(
+            format!(
+                "... and {} more (press 'e' to expand)",
+                app.context.files.len() - 20
             ),
-        ])));
+            Style::default().fg(Color::DarkGray),
+        )])));
     }
 
     let list = List::new(items)
@@ -199,14 +246,10 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
             MessageRole::System => ("System", Color::Yellow),
         };
 
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("[{}] ", role_span),
-                Style::default()
-                    .fg(role_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("[{}] ", role_span),
+            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+        )]));
 
         // Parse markdown for assistant messages, plain text for user messages
         if matches!(msg.role, MessageRole::Assistant) {
@@ -229,13 +272,10 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
             let width = area.width.saturating_sub(4) as usize; // Subtract for borders and padding
             let separator = "─".repeat(width);
 
-            lines.push(Line::from(vec![
-                Span::styled(
-                    separator,
-                    Style::default()
-                        .fg(Color::Rgb(100, 100, 100))  // More visible gray
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                separator,
+                Style::default().fg(Color::Rgb(100, 100, 100)), // More visible gray
+            )]));
 
             // Only show "Response Complete" if no FILE_READ is pending
             if !has_file_read {
@@ -276,13 +316,10 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
 
             // Add another separator for better visual separation
             let separator2 = "─".repeat(width);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    separator2,
-                    Style::default()
-                        .fg(Color::Rgb(100, 100, 100)),
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                separator2,
+                Style::default().fg(Color::Rgb(100, 100, 100)),
+            )]));
         }
 
         lines.push(Line::from("")); // Empty line between messages
@@ -306,7 +343,10 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("{}║", " ".repeat(width.saturating_sub(title_len + 3)))),
+            Span::raw(format!(
+                "{}║",
+                " ".repeat(width.saturating_sub(title_len + 3))
+            )),
         ]));
 
         // File info if available
@@ -319,16 +359,26 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(vec![
                 Span::raw("║"),
                 Span::raw(path_line.clone()),
-                Span::raw(format!("{}║", " ".repeat(width.saturating_sub(path_line.len() + 1)))),
+                Span::raw(format!(
+                    "{}║",
+                    " ".repeat(width.saturating_sub(path_line.len() + 1))
+                )),
             ]));
 
             // Size and status
-            let status = if info.exists { "Will overwrite" } else { "New file" };
+            let status = if info.exists {
+                "Will overwrite"
+            } else {
+                "New file"
+            };
             let size_line = format!("   Size: {} bytes | {}", info.size, status);
             lines.push(Line::from(vec![
                 Span::raw("║"),
                 Span::raw(size_line.clone()),
-                Span::raw(format!("{}║", " ".repeat(width.saturating_sub(size_line.len() + 1)))),
+                Span::raw(format!(
+                    "{}║",
+                    " ".repeat(width.saturating_sub(size_line.len() + 1))
+                )),
             ]));
 
             // Language if detected
@@ -337,7 +387,10 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from(vec![
                     Span::raw("║"),
                     Span::raw(lang_line.clone()),
-                    Span::raw(format!("{}║", " ".repeat(width.saturating_sub(lang_line.len() + 1)))),
+                    Span::raw(format!(
+                        "{}║",
+                        " ".repeat(width.saturating_sub(lang_line.len() + 1))
+                    )),
                 ]));
             }
 
@@ -361,7 +414,10 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                             truncated.clone(),
                             Style::default().fg(Color::Rgb(150, 150, 150)),
                         ),
-                        Span::raw(format!("{}║", " ".repeat(width.saturating_sub(truncated.len() + 1)))),
+                        Span::raw(format!(
+                            "{}║",
+                            " ".repeat(width.saturating_sub(truncated.len() + 1))
+                        )),
                     ]));
                 }
                 if confirmation.preview_lines.len() > 3 {
@@ -393,7 +449,10 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("{}║", " ".repeat(width.saturating_sub(shortcuts.len() + padding + 1)))),
+            Span::raw(format!(
+                "{}║",
+                " ".repeat(width.saturating_sub(shortcuts.len() + padding + 1))
+            )),
         ]));
 
         // Bottom border
@@ -424,23 +483,24 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
 
     // Add current response if generating
     if app.is_generating && !app.current_response.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "[Mermaid] ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "[Mermaid] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )]));
 
         for line in app.current_response.lines() {
             lines.push(Line::from(line.to_string()));
         }
 
         // Add typing indicator
-        lines.push(Line::from(vec![
-            Span::styled("▋", Style::default().fg(Color::Green).add_modifier(Modifier::SLOW_BLINK)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "▋",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::SLOW_BLINK),
+        )]));
     }
 
     // Use operation mode color for border to provide visual feedback
@@ -489,7 +549,9 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             commands
                 .into_iter()
                 .filter(|(cmd, _)| {
-                    cmd.trim_start_matches(':').to_lowercase().starts_with(&typed_command)
+                    cmd.trim_start_matches(':')
+                        .to_lowercase()
+                        .starts_with(&typed_command)
                 })
                 .collect()
         };
@@ -501,24 +563,17 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         if area.height > hints_height {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(hints_height),
-                    Constraint::Min(3),
-                ])
+                .constraints([Constraint::Length(hints_height), Constraint::Min(3)])
                 .split(area);
 
             // Render command hints in the hints area
             if !filtered_commands.is_empty() {
-                let mut hint_lines = vec![
-                    Line::from(vec![
-                        Span::styled(
-                            " Available Commands:",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                ];
+                let mut hint_lines = vec![Line::from(vec![Span::styled(
+                    " Available Commands:",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )])];
 
                 for (cmd, desc) in filtered_commands.iter().take(6) {
                     hint_lines.push(Line::from(vec![
@@ -528,20 +583,16 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            *desc,
-                            Style::default().fg(Color::Gray),
-                        ),
+                        Span::styled(*desc, Style::default().fg(Color::Gray)),
                     ]));
                 }
 
-                let hints_block = Paragraph::new(hint_lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::DarkGray))
-                            .title(" Commands (up/down to navigate, Enter to execute) "),
-                    );
+                let hints_block = Paragraph::new(hint_lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::DarkGray))
+                        .title(" Commands (up/down to navigate, Enter to execute) "),
+                );
 
                 frame.render_widget(hints_block, chunks[0]);
             }

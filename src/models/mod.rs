@@ -10,7 +10,7 @@ mod unified;
 
 // Public re-exports - the ONLY way to access model functionality
 pub use factory::ModelFactory;
-pub use lazy_context::{LazyProjectContext, get_priority_files};
+pub use lazy_context::{get_priority_files, LazyProjectContext};
 pub use traits::Model;
 pub use types::{
     ChatMessage, MessageRole, ModelCapabilities, ModelConfig, ModelResponse, ProjectContext,

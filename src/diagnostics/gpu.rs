@@ -1,6 +1,6 @@
+use super::types::{GpuInfo, GpuType};
 use anyhow::Result;
 use std::process::Command;
-use super::types::{GpuInfo, GpuType};
 
 /// Detect which type of GPU is available
 pub fn detect_gpu_type() -> GpuType {
@@ -58,7 +58,9 @@ fn get_nvidia_info() -> Result<GpuInfo> {
         .arg("--query-gpu=name")
         .arg("--format=csv,noheader")
         .output()?;
-    let name = String::from_utf8_lossy(&name_output.stdout).trim().to_string();
+    let name = String::from_utf8_lossy(&name_output.stdout)
+        .trim()
+        .to_string();
 
     // Query GPU utilization
     let util_output = Command::new("nvidia-smi")
@@ -76,18 +78,10 @@ fn get_nvidia_info() -> Result<GpuInfo> {
         .arg("--format=csv,noheader,nounits")
         .output()?;
     let mem_string = String::from_utf8_lossy(&mem_output.stdout);
-    let mem_parts: Vec<&str> = mem_string
-        .trim()
-        .split(',')
-        .map(|s| s.trim())
-        .collect();
+    let mem_parts: Vec<&str> = mem_string.trim().split(',').map(|s| s.trim()).collect();
 
-    let memory_used_mb: f32 = mem_parts.get(0)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
-    let memory_total_mb: f32 = mem_parts.get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1.0);
+    let memory_used_mb: f32 = mem_parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let memory_total_mb: f32 = mem_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1.0);
 
     // Query temperature
     let temp_output = Command::new("nvidia-smi")
@@ -142,9 +136,9 @@ fn is_apple_silicon() -> bool {
         .output()
         .map(|output| {
             let cpu_info = String::from_utf8_lossy(&output.stdout);
-            cpu_info.contains("Apple M1") ||
-            cpu_info.contains("Apple M2") ||
-            cpu_info.contains("Apple M3")
+            cpu_info.contains("Apple M1")
+                || cpu_info.contains("Apple M2")
+                || cpu_info.contains("Apple M3")
         })
         .unwrap_or(false)
 }
@@ -172,18 +166,24 @@ fn get_apple_silicon_info() -> Result<GpuInfo> {
         let mem_info = String::from_utf8_lossy(&mem_output.stdout);
 
         // Extract memory size (rough parsing)
-        let memory_gb = if mem_info.contains("64 GB") { 64.0 }
-            else if mem_info.contains("32 GB") { 32.0 }
-            else if mem_info.contains("16 GB") { 16.0 }
-            else if mem_info.contains("8 GB") { 8.0 }
-            else { 16.0 }; // Default
+        let memory_gb = if mem_info.contains("64 GB") {
+            64.0
+        } else if mem_info.contains("32 GB") {
+            32.0
+        } else if mem_info.contains("16 GB") {
+            16.0
+        } else if mem_info.contains("8 GB") {
+            8.0
+        } else {
+            16.0
+        }; // Default
 
         // For Apple Silicon, we can't easily get real-time GPU usage
         // This would require using Metal Performance Shaders
         Ok(GpuInfo {
             name: cpu_info,
             gpu_type: GpuType::AppleSilicon,
-            usage_percent: 0.0, // Would need Metal API
+            usage_percent: 0.0,  // Would need Metal API
             memory_used_gb: 0.0, // Unified memory - hard to separate
             memory_total_gb: memory_gb,
             temperature_celsius: None,

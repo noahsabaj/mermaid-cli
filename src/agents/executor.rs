@@ -8,10 +8,7 @@ use tokio::time::timeout;
 use crate::agents::ActionResult;
 
 /// Execute a shell command and capture output
-pub async fn execute_command(
-    command: &str,
-    working_dir: Option<&str>,
-) -> Result<ActionResult> {
+pub async fn execute_command(command: &str, working_dir: Option<&str>) -> Result<ActionResult> {
     // Security checks
     if contains_dangerous_command(command) {
         return Ok(ActionResult::Error {
@@ -54,19 +51,27 @@ pub async fn execute_command(
             error: format!("Command failed: {}", e),
         }),
         Err(_) => Ok(ActionResult::Error {
-            error: format!("Command timed out after {} seconds", timeout_duration.as_secs()),
+            error: format!(
+                "Command timed out after {} seconds",
+                timeout_duration.as_secs()
+            ),
         }),
     }
 }
 
 /// Run the command and stream output
 async fn run_command(mut cmd: Command) -> Result<String> {
-    let mut child = cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .context("Failed to execute command. Is the shell available?")?;
 
-    let stdout = child.stdout.take()
+    let stdout = child
+        .stdout
+        .take()
         .context("Command process stdout stream not available. This is likely a bug.")?;
-    let stderr = child.stderr.take()
+    let stderr = child
+        .stderr
+        .take()
         .context("Command process stderr stream not available. This is likely a bug.")?;
 
     let mut stdout_reader = BufReader::new(stdout).lines();
@@ -86,16 +91,16 @@ async fn run_command(mut cmd: Command) -> Result<String> {
     }
 
     // Read stderr
-    while let Some(line) = stderr_reader
-        .next_line()
-        .await
-        .context("Error reading command error output. The process may have terminated unexpectedly.")?
-    {
+    while let Some(line) = stderr_reader.next_line().await.context(
+        "Error reading command error output. The process may have terminated unexpectedly.",
+    )? {
         errors.push_str(&line);
         errors.push('\n');
     }
 
-    let status = child.wait().await
+    let status = child
+        .wait()
+        .await
         .context("Failed to wait for command to complete. Process may have crashed.")?;
 
     // Combine output and errors
@@ -161,7 +166,6 @@ fn contains_dangerous_command(command: &str) -> bool {
     false
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,7 +179,7 @@ mod tests {
         match result {
             ActionResult::Success { output } => {
                 assert!(output.contains("Hello, Mermaid!"));
-            }
+            },
             _ => panic!("Expected success"),
         }
     }
@@ -187,7 +191,7 @@ mod tests {
         match result {
             ActionResult::Error { error } => {
                 assert!(error.contains("Dangerous command blocked"));
-            }
+            },
             _ => panic!("Expected error"),
         }
     }

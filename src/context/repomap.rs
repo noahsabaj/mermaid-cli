@@ -110,24 +110,28 @@ impl RepoMap {
                                         Err(e) => {
                                             eprintln!("Failed to parse {}: {}", file.display(), e);
                                             None
-                                        }
+                                        },
                                     };
 
                                     // Extract references
                                     let references = parser.find_references(file, &content).ok();
 
                                     Some((file.clone(), symbols, references))
-                                }
+                                },
                                 Err(e) => {
-                                    eprintln!("Failed to create parser for {}: {}", file.display(), e);
+                                    eprintln!(
+                                        "Failed to create parser for {}: {}",
+                                        file.display(),
+                                        e
+                                    );
                                     None
-                                }
+                                },
                             }
-                        }
+                        },
                         Err(e) => {
                             eprintln!("Failed to read {}: {}", file.display(), e);
                             None
-                        }
+                        },
                     }
                 })
                 .collect();
@@ -299,5 +303,7 @@ pub async fn generate_repo_map(
 
     let mut repomap = RepoMap::new(Some(config))?;
     repomap.build_from_directory(root_path).await?;
-    repomap.generate_map(chat_files, &[], Some(token_budget)).await
+    repomap
+        .generate_map(chat_files, &[], Some(token_budget))
+        .await
 }

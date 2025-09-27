@@ -9,9 +9,9 @@ use crate::{
     models::{ModelFactory, ProjectContext},
     ollama::ensure_model as ensure_ollama_model,
     proxy::{count_mermaid_processes, ensure_proxy, is_proxy_running, stop_proxy},
-    session::{ConversationManager, SessionState, select_conversation},
+    session::{select_conversation, ConversationManager, SessionState},
     tui::{run_ui, App},
-    utils::{log_info, log_warn, log_error, log_progress},
+    utils::{log_error, log_info, log_progress, log_warn},
 };
 
 /// Main runtime orchestrator
@@ -33,9 +33,12 @@ impl Orchestrator {
             match load_config() {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    log_warn("WARNING", format!("Failed to load config: {}. Using defaults.", e));
+                    log_warn(
+                        "WARNING",
+                        format!("Failed to load config: {}. Using defaults.", e),
+                    );
                     Config::default()
-                }
+                },
             }
         };
 
@@ -94,7 +97,10 @@ impl Orchestrator {
             }
         }
 
-        log_info("MERMAID", format!("Starting Mermaid with model: {}", model_id.green()));
+        log_info(
+            "MERMAID",
+            format!("Starting Mermaid with model: {}", model_id.green()),
+        );
 
         // Ensure LiteLLM proxy is running (unless --no-auto-proxy is set)
         current_step += 1;
@@ -116,17 +122,16 @@ impl Orchestrator {
             Ok(m) => m,
             Err(e) => {
                 log_error("ERROR", format!("Failed to initialize model: {}", e));
-                log_error("", "Make sure the model is available and properly configured.");
+                log_error(
+                    "",
+                    "Make sure the model is available and properly configured.",
+                );
                 std::process::exit(1);
-            }
+            },
         };
 
         // Set up project context
-        let project_path = self
-            .cli
-            .path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("."));
+        let project_path = self.cli.path.clone().unwrap_or_else(|| PathBuf::from("."));
 
         // Load project structure quickly (no file contents)
         current_step += 1;
@@ -144,9 +149,7 @@ impl Orchestrator {
         let project_path_bg = project_path.clone();
         tokio::spawn(async move {
             // Load priority files first (README, config, etc.)
-            let priority = crate::models::get_priority_files(
-                &project_path_bg.to_string_lossy()
-            );
+            let priority = crate::models::get_priority_files(&project_path_bg.to_string_lossy());
             if !priority.is_empty() {
                 let _ = lazy_context_bg.load_files_batch(priority).await;
             }
@@ -167,7 +170,10 @@ impl Orchestrator {
             if self.cli.continue_conversation {
                 // Continue the last conversation
                 if let Some(last_conv) = conversation_manager.load_last_conversation()? {
-                    log_info("CONTINUE", format!("Continuing last conversation: {}", last_conv.title.green()));
+                    log_info(
+                        "CONTINUE",
+                        format!("Continuing last conversation: {}", last_conv.title.green()),
+                    );
                     app.load_conversation(last_conv);
                 } else {
                     log_info("INFO", "No previous conversations found in this directory");
@@ -176,7 +182,10 @@ impl Orchestrator {
                 // Show selection UI for resuming a conversation
                 if !conversations.is_empty() {
                     if let Some(selected) = select_conversation(conversations)? {
-                        log_info("RESUME", format!("Resuming conversation: {}", selected.title.green()));
+                        log_info(
+                            "RESUME",
+                            format!("Resuming conversation: {}", selected.title.green()),
+                        );
                         app.load_conversation(selected);
                     }
                 } else {
@@ -198,16 +207,26 @@ impl Orchestrator {
     }
 
     /// Load project structure quickly (no file contents)
-    fn load_project_structure(&self, project_path: &PathBuf) -> Result<crate::models::LazyProjectContext> {
+    fn load_project_structure(
+        &self,
+        project_path: &PathBuf,
+    ) -> Result<crate::models::LazyProjectContext> {
         let loader = ContextLoader::new()?;
 
-        log_info("FILES", format!("Loading project structure from: {}", project_path.display()));
+        log_info(
+            "FILES",
+            format!("Loading project structure from: {}", project_path.display()),
+        );
 
         let context = loader.load_structure(project_path)?;
 
-        log_info("STATS", format!("Found {} files (loading in background...)",
-            context.total_file_count()
-        ));
+        log_info(
+            "STATS",
+            format!(
+                "Found {} files (loading in background...)",
+                context.total_file_count()
+            ),
+        );
 
         Ok(context)
     }
@@ -216,14 +235,21 @@ impl Orchestrator {
     fn load_project_context(&self, project_path: &PathBuf) -> Result<ProjectContext> {
         let loader = ContextLoader::new()?;
 
-        log_info("FILES", format!("Loading project context from: {}", project_path.display()));
+        log_info(
+            "FILES",
+            format!("Loading project context from: {}", project_path.display()),
+        );
 
         let context = loader.load_context(project_path)?;
 
-        log_info("STATS", format!("Loaded {} files (~{} tokens)",
-            context.files.len(),
-            context.token_count
-        ));
+        log_info(
+            "STATS",
+            format!(
+                "Loaded {} files (~{} tokens)",
+                context.files.len(),
+                context.token_count
+            ),
+        );
 
         Ok(context)
     }
@@ -243,7 +269,10 @@ impl Orchestrator {
             };
 
             if should_stop {
-                log_info("STOP", "Stopping LiteLLM proxy (no other Mermaid instances running)...");
+                log_info(
+                    "STOP",
+                    "Stopping LiteLLM proxy (no other Mermaid instances running)...",
+                );
                 stop_proxy().await?;
             }
         }

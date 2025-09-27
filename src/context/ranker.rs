@@ -168,7 +168,7 @@ impl RepoRanker {
         let mut current_file = PathBuf::new();
 
         map.push_str("Repository Map\n");
-        map.push_str("=" . repeat(50).as_str());
+        map.push_str("=".repeat(50).as_str());
         map.push_str("\n\n");
 
         for ranked_symbol in symbols {
@@ -245,9 +245,7 @@ impl RepoRanker {
         RankingStats {
             total_symbols: all_symbols.len(),
             selected_symbols: optimal_symbols.len(),
-            estimated_tokens: self
-                .estimate_token_count(&optimal_symbols)
-                .unwrap_or(0),
+            estimated_tokens: self.estimate_token_count(&optimal_symbols).unwrap_or(0),
             max_token_budget: self.config.max_tokens,
         }
     }
@@ -261,4 +259,3 @@ pub struct RankingStats {
     pub estimated_tokens: usize,
     pub max_token_budget: usize,
 }
-

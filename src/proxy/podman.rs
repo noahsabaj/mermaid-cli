@@ -48,10 +48,7 @@ pub fn get_compose_dir() -> Result<PathBuf> {
 pub fn count_mermaid_processes() -> usize {
     use std::process::Command;
 
-    let output = Command::new("pgrep")
-        .arg("-c")
-        .arg("mermaid")
-        .output();
+    let output = Command::new("pgrep").arg("-c").arg("mermaid").output();
 
     match output {
         Ok(output) if output.status.success() => {
@@ -59,7 +56,7 @@ pub fn count_mermaid_processes() -> usize {
                 .trim()
                 .parse::<usize>()
                 .unwrap_or(1) // Default to 1 (ourselves) if parse fails
-        }
+        },
         _ => 1, // Assume just us if pgrep fails
     }
 }

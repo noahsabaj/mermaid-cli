@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use git2::{Repository, StatusOptions, DiffOptions};
+use git2::{DiffOptions, Repository, StatusOptions};
 use std::path::Path;
 
 /// Get git diff for the current repository
@@ -100,7 +100,8 @@ pub fn commit(message: &str, files: &[String]) -> Result<()> {
     // Add specified files to the index
     if !files.is_empty() {
         for file in files {
-            index.add_path(Path::new(file))
+            index
+                .add_path(Path::new(file))
                 .with_context(|| format!("Failed to add file to index: {}", file))?;
         }
     } else {
@@ -121,7 +122,8 @@ pub fn commit(message: &str, files: &[String]) -> Result<()> {
     };
 
     // Get signature
-    let signature = repo.signature()
+    let signature = repo
+        .signature()
         .or_else(|_| git2::Signature::now("Mermaid AI", "mermaid@ai.local"))?;
 
     // Create the commit
@@ -136,24 +138,33 @@ pub fn commit(message: &str, files: &[String]) -> Result<()> {
         )?;
     } else {
         // Initial commit
-        repo.commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            message,
-            &tree,
-            &[],
-        )?;
+        repo.commit(Some("HEAD"), &signature, &signature, message, &tree, &[])?;
     }
 
     Ok(())
 }
 
+/// Get the current branch name
+pub fn current_branch() -> Result<String> {
+    let repo = Repository::open_from_env()
+        .context("Failed to open git repository. Is this a git repo?")?;
+
+    let head = repo
+        .head()
+        .context("Failed to get HEAD reference")?;
+
+    if let Some(name) = head.shorthand() {
+        Ok(name.to_string())
+    } else {
+        Ok("HEAD (detached)".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_git_operations() {

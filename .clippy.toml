@@ -1,0 +1,41 @@
+# Clippy configuration for Mermaid
+
+# Specify MSRV (Minimum Supported Rust Version)
+msrv = "1.75.0"
+
+# Maximum cognitive complexity allowed for a single function
+cognitive-complexity-threshold = 30
+
+# Maximum number of lines allowed for a single function
+too-many-lines-threshold = 100
+
+# Maximum number of arguments allowed for a function
+too-many-arguments-threshold = 7
+
+# Maximum size for types on the stack
+type-complexity-threshold = 250
+
+# Maximum number of single character bindings in a scope
+single-char-binding-names-threshold = 4
+
+# Maximum nested control flow depth
+# Set to 8 to be less restrictive for complex logic
+excessive-nesting-threshold = 8
+
+# Maximum struct size that can be passed by value
+trivial-copy-size-limit = 8
+
+# Maximum allowed enum variant size difference
+enum-variant-size-threshold = 200
+
+# Maximum array size to avoid stack overflow
+array-size-threshold = 512
+
+# Allow common patterns
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+
+# Enforce documentation on public items
+missing-docs-in-crate-items = true

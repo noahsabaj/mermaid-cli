@@ -19,19 +19,19 @@ pub async fn handle_command(command: &Commands) -> Result<bool> {
             init_config()?;
             println!("Configuration initialized successfully!");
             Ok(true)
-        }
+        },
         Commands::List => {
             list_models().await?;
             Ok(true)
-        }
+        },
         Commands::Version => {
             show_version();
             Ok(true)
-        }
+        },
         Commands::Status => {
             show_status().await?;
             Ok(true)
-        }
+        },
         Commands::Chat => Ok(false), // Continue to chat interface
     }
 }

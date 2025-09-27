@@ -229,10 +229,22 @@ mod tests {
 
     #[test]
     fn test_mode_from_str() {
-        assert_eq!(OperationMode::from_str("normal"), Some(OperationMode::Normal));
-        assert_eq!(OperationMode::from_str("accept_edits"), Some(OperationMode::AcceptEdits));
-        assert_eq!(OperationMode::from_str("plan-mode"), Some(OperationMode::PlanMode));
-        assert_eq!(OperationMode::from_str("yolo"), Some(OperationMode::BypassAll));
+        assert_eq!(
+            OperationMode::from_str("normal"),
+            Some(OperationMode::Normal)
+        );
+        assert_eq!(
+            OperationMode::from_str("accept_edits"),
+            Some(OperationMode::AcceptEdits)
+        );
+        assert_eq!(
+            OperationMode::from_str("plan-mode"),
+            Some(OperationMode::PlanMode)
+        );
+        assert_eq!(
+            OperationMode::from_str("yolo"),
+            Some(OperationMode::BypassAll)
+        );
         assert_eq!(OperationMode::from_str("invalid"), None);
     }
 }

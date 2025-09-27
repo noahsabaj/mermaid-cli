@@ -1,3 +1,4 @@
+use crate::constants::{DEFAULT_LITELLM_PROXY_URL, DEFAULT_OLLAMA_PORT};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use figment::{
@@ -6,7 +7,6 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use crate::constants::{DEFAULT_LITELLM_PROXY_URL, DEFAULT_OLLAMA_PORT};
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,7 +363,10 @@ pub fn init_config() -> Result<()> {
     if !config_file.exists() {
         let default_config = Config::default();
         save_config(&default_config, Some(config_file.clone()))?;
-        println!("Created default configuration at: {}", config_file.display());
+        println!(
+            "Created default configuration at: {}",
+            config_file.display()
+        );
     }
 
     // Create example local config
@@ -387,7 +390,10 @@ max_context_tokens = 75000
 include_patterns = ["src/**/*.rs", "Cargo.toml"]
 "#;
         std::fs::write(&local_example, example_config)?;
-        println!("Created example configuration at: {}", local_example.display());
+        println!(
+            "Created example configuration at: {}",
+            local_example.display()
+        );
     }
 
     Ok(())

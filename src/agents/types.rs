@@ -39,10 +39,6 @@ pub enum AgentAction {
 /// Result of an agent action
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActionResult {
-    Success {
-        output: String,
-    },
-    Error {
-        error: String,
-    },
+    Success { output: String },
+    Error { error: String },
 }

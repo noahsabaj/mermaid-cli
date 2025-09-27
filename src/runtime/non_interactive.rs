@@ -6,11 +6,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::{
-    app::{Config},
+    agents::{execute_action, parse_actions, ActionResult as AgentActionResult, AgentAction},
+    app::Config,
     cli::OutputFormat,
     context::ContextLoader,
     models::{ChatMessage, MessageRole, Model, ModelConfig, ModelFactory, ProjectContext},
-    agents::{execute_action, parse_actions, AgentAction, ActionResult as AgentActionResult},
 };
 
 /// Result of a non-interactive run
@@ -116,7 +116,8 @@ impl NonInteractiveRunner {
                 "You can use [FILE_WRITE: path] ... [/FILE_WRITE] blocks to write files, and [COMMAND: cmd] ... [/COMMAND] blocks to run commands."
             )
         } else {
-            "You are a helpful AI assistant. Answer the user's question directly and concisely.".to_string()
+            "You are a helpful AI assistant. Answer the user's question directly and concisely."
+                .to_string()
         };
 
         let system_message = ChatMessage {
@@ -160,7 +161,9 @@ impl NonInteractiveRunner {
         let result = {
             let mut model = self.model.lock().await;
             model_name = model.name().to_string();
-            model.chat(&messages, &self.context, &model_config, Some(callback)).await
+            model
+                .chat(&messages, &self.context, &model_config, Some(callback))
+                .await
         };
 
         match result {
@@ -173,12 +176,12 @@ impl NonInteractiveRunner {
                     full_response = response.content;
                 }
                 tokens_used = response.usage.map(|u| u.total_tokens).unwrap_or(0);
-            }
+            },
             Err(e) => {
                 errors.push(format!("Model error: {}", e));
                 full_response = response_text.lock().unwrap().clone();
                 tokens_used = 0;
-            }
+            },
         }
 
         // Parse actions from response
@@ -198,9 +201,11 @@ impl NonInteractiveRunner {
                     AgentAction::GitCommit { message, .. } => ("git_commit", message.clone()),
                 };
 
-                let result = execute_action(&action).await.unwrap_or(AgentActionResult::Error {
-                    error: "Failed to execute action".to_string(),
-                });
+                let result = execute_action(&action)
+                    .await
+                    .unwrap_or(AgentActionResult::Error {
+                        error: "Failed to execute action".to_string(),
+                    });
 
                 let action_result = match result {
                     AgentActionResult::Success { output } => ActionResult {
@@ -262,11 +267,9 @@ impl NonInteractiveRunner {
     /// Format the result according to the output format
     pub fn format_result(&self, result: &NonInteractiveResult, format: OutputFormat) -> String {
         match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(result).unwrap_or_else(|e| {
-                    format!("{{\"error\": \"Failed to serialize result: {}\"}}", e)
-                })
-            }
+            OutputFormat::Json => serde_json::to_string_pretty(result).unwrap_or_else(|e| {
+                format!("{{\"error\": \"Failed to serialize result: {}\"}}", e)
+            }),
             OutputFormat::Text => {
                 let mut output = String::new();
                 output.push_str(&result.response);
@@ -294,7 +297,7 @@ impl NonInteractiveRunner {
                 }
 
                 output
-            }
+            },
             OutputFormat::Markdown => {
                 let mut output = String::new();
 
@@ -308,9 +311,7 @@ impl NonInteractiveRunner {
                         let status = if action.success { "SUCCESS" } else { "FAILED" };
                         output.push_str(&format!(
                             "- {} **{}**: `{}`\n",
-                            status,
-                            action.action_type,
-                            action.target
+                            status, action.action_type, action.target
                         ));
                         if let Some(ref out) = action.output {
                             output.push_str(&format!("  ```\n  {}\n  ```\n", out));
@@ -336,7 +337,7 @@ impl NonInteractiveRunner {
                 ));
 
                 output
-            }
+            },
         }
     }
 }

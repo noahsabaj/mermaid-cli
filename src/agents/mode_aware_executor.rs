@@ -1,7 +1,7 @@
-use anyhow::Result;
-use crate::tui::OperationMode;
 use super::action_executor::execute_action;
 use super::types::{ActionResult, AgentAction};
+use crate::tui::OperationMode;
+use anyhow::Result;
 
 /// Mode-aware action executor that respects operation modes
 pub struct ModeAwareExecutor {
@@ -33,30 +33,23 @@ impl ModeAwareExecutor {
 
         match action {
             // File operations
-            AgentAction::WriteFile { .. } |
-            AgentAction::DeleteFile { .. } => {
+            AgentAction::WriteFile { .. } | AgentAction::DeleteFile { .. } => {
                 !self.mode.auto_accept_files()
-            }
+            },
 
             // Shell commands
-            AgentAction::ExecuteCommand { .. } => {
-                !self.mode.auto_accept_commands()
-            }
+            AgentAction::ExecuteCommand { .. } => !self.mode.auto_accept_commands(),
 
             // Git operations
-            AgentAction::GitCommit { .. } => {
-                !self.mode.auto_accept_git()
-            }
+            AgentAction::GitCommit { .. } => !self.mode.auto_accept_git(),
 
             // Read operations are generally safe
-            AgentAction::ReadFile { .. } |
-            AgentAction::GitStatus |
-            AgentAction::GitDiff { .. } => false,
+            AgentAction::ReadFile { .. } | AgentAction::GitStatus | AgentAction::GitDiff { .. } => {
+                false
+            },
 
             // Directory creation needs confirmation unless in bypass mode
-            AgentAction::CreateDirectory { .. } => {
-                !self.mode.auto_accept_files()
-            }
+            AgentAction::CreateDirectory { .. } => !self.mode.auto_accept_files(),
         }
     }
 
@@ -65,11 +58,11 @@ impl ModeAwareExecutor {
         match action {
             AgentAction::DeleteFile { .. } => true,
             AgentAction::ExecuteCommand { command, .. } => {
-                command.contains("rm") ||
-                command.contains("del") ||
-                command.contains("drop") ||
-                command.contains("truncate")
-            }
+                command.contains("rm")
+                    || command.contains("del")
+                    || command.contains("drop")
+                    || command.contains("truncate")
+            },
             _ => false,
         }
     }
@@ -108,11 +101,9 @@ impl ModeAwareExecutor {
         // Add mode indicator to result if not in Normal mode
         if self.mode != OperationMode::Normal {
             match result {
-                ActionResult::Success { output } => {
-                    Ok(ActionResult::Success {
-                        output: format!("[{}] {}", self.mode.short_name(), output),
-                    })
-                }
+                ActionResult::Success { output } => Ok(ActionResult::Success {
+                    output: format!("[{}] {}", self.mode.short_name(), output),
+                }),
                 other => Ok(other),
             }
         } else {
@@ -125,40 +116,41 @@ impl ModeAwareExecutor {
         match action {
             AgentAction::ReadFile { path } => {
                 format!("Read file: {}", path)
-            }
+            },
             AgentAction::WriteFile { path, content } => {
                 format!("Write file: {} ({} bytes)", path, content.len())
-            }
+            },
             AgentAction::DeleteFile { path } => {
                 format!("Delete file: {}", path)
-            }
+            },
             AgentAction::CreateDirectory { path } => {
                 format!("Create directory: {}", path)
-            }
-            AgentAction::ExecuteCommand { command, working_dir } => {
+            },
+            AgentAction::ExecuteCommand {
+                command,
+                working_dir,
+            } => {
                 if let Some(dir) = working_dir {
                     format!("Execute command in {}: {}", dir, command)
                 } else {
                     format!("Execute command: {}", command)
                 }
-            }
+            },
             AgentAction::GitDiff { path } => {
                 if let Some(p) = path {
                     format!("Git diff for: {}", p)
                 } else {
                     format!("Git diff (all files)")
                 }
-            }
-            AgentAction::GitStatus => {
-                "Git status".to_string()
-            }
+            },
+            AgentAction::GitStatus => "Git status".to_string(),
             AgentAction::GitCommit { message, files } => {
                 if !files.is_empty() {
                     format!("Git commit ({} files): {}", files.len(), message)
                 } else {
                     format!("Git commit (all): {}", message)
                 }
-            }
+            },
         }
     }
 
