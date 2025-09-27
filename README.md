@@ -20,7 +20,7 @@ An open-source, model-agnostic AI pair programmer CLI that provides an interacti
 
 - Rust toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
 - Podman (`sudo apt-get install podman`) or Docker
-- Optional: Ollama for local models (`curl -fsSL https://ollama.ai/install.sh | sh`)
+- Ollama for local models (`curl -fsSL https://ollama.ai/install.sh | sh`)
 
 ### Installation
 
@@ -47,10 +47,8 @@ cargo install --path .
 # Use with any of 100+ models
 mermaid --model ollama/tinyllama         # Local tiny model
 mermaid --model ollama/deepseek-coder:33b # Local large model
-mermaid --model openai/gpt-4o            # OpenAI
-mermaid --model anthropic/claude-3-sonnet # Anthropic
 mermaid --model groq/llama3-70b          # Groq (fast!)
-mermaid --model google/gemini-pro        # Google
+mermaid --model ollama/qwen3-coder:30b # Excellent at coding
 
 # List all available models from proxy
 mermaid list
@@ -90,17 +88,6 @@ The primary configuration is through environment variables. Copy `.env.example` 
 # LiteLLM Proxy URL (default: http://localhost:4000)
 LITELLM_PROXY_URL=http://localhost:4000
 
-# API Keys - Add only the ones you need
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-api03-...
-GROQ_API_KEY=gsk_...
-GOOGLE_API_KEY=...
-AZURE_API_KEY=...
-COHERE_API_KEY=...
-MISTRAL_API_KEY=...
-# ... 90+ more providers supported
-
-# Default model (optional)
 MERMAID_DEFAULT_MODEL=ollama/tinyllama
 ```
 
@@ -137,12 +124,6 @@ All providers are accessed through the unified LiteLLM proxy using the format `p
 - **LlamaCPP**: `llamacpp/model-name`
 - **Local AI**: `localai/model-name`
 
-### Major Cloud Providers
-- **OpenAI**: `openai/gpt-4o`, `openai/gpt-4-turbo`, `openai/gpt-3.5-turbo`
-- **Anthropic**: `anthropic/claude-3-opus`, `anthropic/claude-3-sonnet`, `anthropic/claude-3-haiku`
-- **Google**: `google/gemini-pro`, `google/gemini-pro-vision`, `google/palm-2`
-- **Azure**: `azure/your-deployment-name`
-
 ### Fast Inference Providers
 - **Groq**: `groq/llama3-70b`, `groq/mixtral-8x7b` (Ultra-fast inference)
 - **Together AI**: `together/llama-2-70b`, `together/codellama-34b`
@@ -155,13 +136,6 @@ All providers are accessed through the unified LiteLLM proxy using the format `p
 - **Perplexity**: `perplexity/llama-3-sonar-large`, `perplexity/codellama-70b`
 - **Replicate**: `replicate/llama-2-70b`, `replicate/vicuna-13b`
 - **Hugging Face**: `huggingface/bigscience/bloom`, `huggingface/codegen`
-
-### Setup Instructions
-
-1. **Add API Keys**: Edit `.env` file with your provider keys
-2. **Start Proxy**: Run `./start_litellm.sh`
-3. **For Ollama**: Models are auto-detected if Ollama is running
-4. **Test Connection**: `curl http://localhost:4000/models`
 
 ## Example Workflows
 
@@ -326,15 +300,6 @@ dual licensed as above, without any additional terms or conditions.
 - Built with [Ratatui](https://github.com/ratatui-org/ratatui) for the TUI
 - Uses [Ollama](https://ollama.ai) for local model support
 - Inspired by [Aider](https://github.com/paul-gauthier/aider), [Gemini-CLI](https://github.com/google-gemini/gemini-cli), and Claude Code
-
-## Roadmap
-
-- [ ] Multi-agent collaboration
-- [ ] Plugin system
-- [ ] VSCode extension
-- [ ] Model fine-tuning support
-- [ ] Semantic code search
-- [ ] Code review mode
 
 ## Community
 
