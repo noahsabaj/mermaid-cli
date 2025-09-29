@@ -33,6 +33,44 @@ impl std::fmt::Debug for OllamaDirectModel {
     }
 }
 
+/// Normalize Ollama URL for client connections
+///
+/// Handles the edge case where OLLAMA_HOST is set to 0.0.0.0 (server bind address).
+/// 0.0.0.0 is used by the Ollama server to listen on all interfaces, but clients
+/// cannot connect TO 0.0.0.0 - they need an actual IP address like 127.0.0.1.
+///
+/// Transformations:
+/// - `0.0.0.0:11434` -> `http://127.0.0.1:11434`
+/// - `http://0.0.0.0:11434` -> `http://127.0.0.1:11434`
+/// - `0.0.0.0` -> `http://127.0.0.1:11434`
+/// - `localhost:11434` -> `http://localhost:11434` (add http prefix)
+/// - `http://localhost:11434` -> unchanged
+fn normalize_ollama_url(url: &str) -> String {
+    let mut normalized = url.trim().to_string();
+
+    // Replace 0.0.0.0 with 127.0.0.1 (bind address -> connect address)
+    if normalized.contains("0.0.0.0") {
+        normalized = normalized.replace("0.0.0.0", "127.0.0.1");
+    }
+
+    // Ensure http:// prefix
+    if !normalized.starts_with("http://") && !normalized.starts_with("https://") {
+        normalized = format!("http://{}", normalized);
+    }
+
+    // Add default port if missing
+    if !normalized.contains(':',) || normalized.matches(':').count() == 1 {
+        // Has protocol but no port
+        if normalized.starts_with("http://") && !normalized[7..].contains(':') {
+            normalized = format!("{}:11434", normalized);
+        } else if normalized.starts_with("https://") && !normalized[8..].contains(':') {
+            normalized = format!("{}:11434", normalized);
+        }
+    }
+
+    normalized
+}
+
 impl OllamaDirectModel {
     /// Create a new direct Ollama model instance
     ///
@@ -50,6 +88,9 @@ impl OllamaDirectModel {
         // Get Ollama base URL from environment or use default
         let base_url = std::env::var("OLLAMA_HOST")
             .unwrap_or_else(|_| "http://localhost:11434".to_string());
+
+        // Normalize URL (handles 0.0.0.0 bind addresses, adds http:// prefix, etc.)
+        let base_url = normalize_ollama_url(&base_url);
 
         // Create HTTP client with optimized settings
         let client = Client::builder()
@@ -314,6 +355,69 @@ mod tests {
         let model_id = "ollama/llama2:7b";
         let model_name = model_id.strip_prefix("ollama/").unwrap();
         assert_eq!(model_name, "llama2:7b");
+    }
+
+    #[test]
+    fn test_normalize_ollama_url() {
+        // Test 0.0.0.0 bind address transformation
+        assert_eq!(
+            normalize_ollama_url("0.0.0.0:11434"),
+            "http://127.0.0.1:11434"
+        );
+        assert_eq!(
+            normalize_ollama_url("http://0.0.0.0:11434"),
+            "http://127.0.0.1:11434"
+        );
+        assert_eq!(
+            normalize_ollama_url("0.0.0.0"),
+            "http://127.0.0.1:11434"
+        );
+
+        // Test adding http:// prefix
+        assert_eq!(
+            normalize_ollama_url("localhost:11434"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            normalize_ollama_url("127.0.0.1:11434"),
+            "http://127.0.0.1:11434"
+        );
+
+        // Test already valid URLs
+        assert_eq!(
+            normalize_ollama_url("http://localhost:11434"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            normalize_ollama_url("http://127.0.0.1:11434"),
+            "http://127.0.0.1:11434"
+        );
+
+        // Test adding default port
+        assert_eq!(
+            normalize_ollama_url("localhost"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            normalize_ollama_url("http://localhost"),
+            "http://localhost:11434"
+        );
+
+        // Test custom ports preserved
+        assert_eq!(
+            normalize_ollama_url("localhost:8080"),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            normalize_ollama_url("0.0.0.0:8080"),
+            "http://127.0.0.1:8080"
+        );
+
+        // Test whitespace trimming
+        assert_eq!(
+            normalize_ollama_url("  0.0.0.0:11434  "),
+            "http://127.0.0.1:11434"
+        );
     }
 
     #[tokio::test]
