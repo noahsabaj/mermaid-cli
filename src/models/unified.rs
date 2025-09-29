@@ -38,16 +38,37 @@ impl UnifiedModel {
             .ok()
             .or(config_master_key);
 
+        // Create client with connection pooling and optimized settings
+        let client = Client::builder()
+            .pool_max_idle_per_host(10) // Keep up to 10 connections per host
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .build()
+            .context("Failed to build HTTP client")?;
+
         Ok(Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
-                .build()?,
+            client,
             proxy_url,
             model_name: model_name.to_string(),
             master_key,
         })
     }
 
+    /// Create with custom client (for testing or advanced use)
+    pub fn with_client(
+        client: Client,
+        model_name: &str,
+        proxy_url: String,
+        master_key: Option<String>,
+    ) -> Self {
+        Self {
+            client,
+            proxy_url,
+            model_name: model_name.to_string(),
+            master_key,
+        }
+    }
     /// Get capabilities based on model name
     /// LiteLLM handles all the provider-specific details
     fn get_capabilities(&self) -> ModelCapabilities {
