@@ -1,29 +1,44 @@
 use anyhow::Result;
 
+use super::ollama_direct::OllamaDirectModel;
 use super::traits::Model;
 use super::unified::UnifiedModel;
 use crate::app::Config;
 
-/// Factory for creating model instances using the unified LLM interface
+/// Factory for creating model instances
+///
+/// Routes to appropriate implementation based on provider:
+/// - "ollama/*" -> Direct Ollama connection (no proxy needed)
+/// - Other providers -> LiteLLM proxy (requires proxy running)
 pub struct ModelFactory;
 
 impl ModelFactory {
     /// Create a model instance from a model identifier with optional config
-    /// Format: provider/model (e.g., "ollama/deepseek-coder:33b", "openai/gpt-4", "anthropic/claude-3-opus")
-    /// All models go through LiteLLM proxy which handles authentication
+    ///
+    /// Format: provider/model (e.g., "ollama/qwen3-coder:30b", "openai/gpt-4", "anthropic/claude-3-opus")
+    ///
+    /// Routing logic:
+    /// - Ollama models: Direct connection to localhost:11434 (no proxy, no API keys)
+    /// - API models: LiteLLM proxy handles authentication and routing
     pub async fn create(model_id: &str, config: Option<&Config>) -> Result<Box<dyn Model>> {
         // Validate format (provider/model)
         if !model_id.contains('/') {
-            anyhow::bail!("Invalid model format. Expected 'provider/model' (e.g., 'ollama/deepseek-coder:33b')");
+            anyhow::bail!("Invalid model format. Expected 'provider/model' (e.g., 'ollama/qwen3-coder:30b')");
         }
 
-        // Extract master_key from config if provided
-        let master_key = config.and_then(|c| c.litellm.master_key.clone());
-
-        // With LiteLLM proxy, we just pass the model ID directly
-        // LiteLLM handles all provider-specific authentication and routing
-        let model = UnifiedModel::new(model_id, master_key).await?;
-        Ok(Box::new(model))
+        // Route based on provider
+        if model_id.starts_with("ollama/") {
+            // DIRECT CONNECTION - No proxy needed
+            // This is the tested and working path
+            let model = OllamaDirectModel::new(model_id).await?;
+            Ok(Box::new(model))
+        } else {
+            // API MODELS - Use LiteLLM proxy
+            // Extract master_key from config if provided
+            let master_key = config.and_then(|c| c.litellm.master_key.clone());
+            let model = UnifiedModel::new(model_id, master_key).await?;
+            Ok(Box::new(model))
+        }
     }
 
     /// List available models from LiteLLM proxy

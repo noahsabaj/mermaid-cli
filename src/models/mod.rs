@@ -4,6 +4,7 @@
 // Private submodules - not directly accessible from outside
 mod factory;
 mod lazy_context;
+mod ollama_direct;
 mod traits;
 mod types;
 mod unified;

@@ -102,12 +102,16 @@ impl Orchestrator {
             format!("Starting Mermaid with model: {}", model_id.green()),
         );
 
-        // Ensure LiteLLM proxy is running (unless --no-auto-proxy is set)
+        // Ensure LiteLLM proxy is running ONLY for API models (not Ollama)
         current_step += 1;
-        log_progress(current_step, total_steps, "Checking LiteLLM proxy");
-        if !is_proxy_running().await {
-            ensure_proxy(self.cli.no_auto_proxy).await?;
-            self.proxy_started_by_us = !self.cli.no_auto_proxy;
+        if requires_proxy(&model_id) {
+            log_progress(current_step, total_steps, "Checking LiteLLM proxy");
+            if !is_proxy_running().await {
+                ensure_proxy(self.cli.no_auto_proxy).await?;
+                self.proxy_started_by_us = !self.cli.no_auto_proxy;
+            }
+        } else {
+            log_progress(current_step, total_steps, "Using direct Ollama connection");
         }
 
         // Ensure Ollama model is available (auto-install if needed)
@@ -256,4 +260,12 @@ impl Orchestrator {
 
         Ok(())
     }
+}
+
+/// Check if a model requires the LiteLLM proxy
+///
+/// Ollama models use direct connection (no proxy needed).
+/// All other models (OpenAI, Anthropic, etc.) require the proxy.
+fn requires_proxy(model_id: &str) -> bool {
+    !model_id.starts_with("ollama/")
 }

@@ -21,6 +21,38 @@ pub async fn start_proxy() -> Result<()> {
     // Get the directory with docker-compose.yml
     let compose_dir = get_compose_dir()?;
 
+    // Check if .env file exists, create from template if not
+    let env_path = compose_dir.join(".env");
+    if !env_path.exists() {
+        let env_example = compose_dir.join(".env.example");
+        if env_example.exists() {
+            log_warn(
+                "WARNING",
+                "No .env file found, creating from template...",
+            );
+            std::fs::copy(&env_example, &env_path)?;
+            log_info(
+                "SETUP",
+                format!("Created .env at: {}", env_path.display()),
+            );
+            log_info("", "Edit this file to add your API keys for non-Ollama models");
+        } else {
+            log_warn(
+                "WARNING",
+                format!("No .env file found at: {}", env_path.display()),
+            );
+            log_warn(
+                "",
+                format!(
+                    "Copy .env.example and add your API keys:\n  \
+                     cp {} {}",
+                    env_example.display(),
+                    env_path.display()
+                ),
+            );
+        }
+    }
+
     log_info(
         "START",
         format!("Starting LiteLLM proxy with {}...", runtime),
@@ -73,10 +105,19 @@ pub async fn start_proxy() -> Result<()> {
     }
 
     let compose_path = compose_dir.join("docker-compose.yml");
+    let env_path = compose_dir.join(".env");
+
     anyhow::bail!(
-        "LiteLLM proxy failed to start properly.\nCheck logs with: {} -f {} logs litellm",
+        "LiteLLM proxy failed to start properly.\n\
+         \n\
+         Troubleshooting:\n\
+         1. Check logs: {} -f {} logs litellm\n\
+         2. Verify .env file exists: {}\n\
+         3. For Ollama-only usage: Use Ollama models (e.g., ollama/qwen3-coder:30b)\n\
+         4. Manual start: ./start_litellm.sh",
         runtime,
-        compose_path.display()
+        compose_path.display(),
+        env_path.display()
     )
 }
 
