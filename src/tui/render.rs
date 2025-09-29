@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
@@ -151,18 +151,30 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(
             "Mermaid",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(app.theme.colors.header.to_color())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
-        Span::styled(&app.model_name, Style::default().fg(Color::Green)),
-        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
-        Span::styled(short_path, Style::default().fg(Color::Gray)),
+        Span::styled(
+            " • ",
+            Style::default().fg(app.theme.colors.text_disabled.to_color()),
+        ),
+        Span::styled(
+            &app.model_name,
+            Style::default().fg(app.theme.colors.success.to_color()),
+        ),
+        Span::styled(
+            " • ",
+            Style::default().fg(app.theme.colors.text_disabled.to_color()),
+        ),
+        Span::styled(
+            short_path,
+            Style::default().fg(app.theme.colors.text_secondary.to_color()),
+        ),
     ])];
 
     let header = Paragraph::new(header_text)
         .alignment(Alignment::Center)
-        .style(Style::default().bg(Color::Black));
+        .style(Style::default().bg(app.theme.colors.background.to_color()));
 
     frame.render_widget(header, area);
 }
@@ -177,7 +189,7 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw("[DIR] "),
             Span::styled(
                 format!("Project: {}", project_type),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(app.theme.colors.text_highlight.to_color()),
             ),
         ])));
     }
@@ -219,7 +231,7 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
                 "... and {} more (press 'e' to expand)",
                 app.context.files.len() - 20
             ),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.theme.colors.text_disabled.to_color()),
         )])));
     }
 
@@ -228,9 +240,9 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .title(format!("Files [{}] ", app.working_dir))
                 .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(app.theme.colors.border.to_color())),
         )
-        .style(Style::default().fg(Color::White));
+        .style(Style::default().fg(app.theme.colors.text_primary.to_color()));
 
     frame.render_widget(list, area);
 }
@@ -244,9 +256,9 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
         let _is_last_message = idx == message_count - 1;
         // Add role indicator
         let (role_span, role_color) = match msg.role {
-            MessageRole::User => ("You", Color::Blue),
-            MessageRole::Assistant => ("Mermaid", Color::Green),
-            MessageRole::System => ("System", Color::Yellow),
+            MessageRole::User => ("You", app.theme.colors.user_message.to_color()),
+            MessageRole::Assistant => ("Mermaid", app.theme.colors.assistant_message.to_color()),
+            MessageRole::System => ("System", app.theme.colors.system_message.to_color()),
         };
 
         lines.push(Line::from(vec![Span::styled(
@@ -277,7 +289,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
 
             lines.push(Line::from(vec![Span::styled(
                 separator,
-                Style::default().fg(Color::Rgb(100, 100, 100)), // More visible gray
+                Style::default().fg(app.theme.colors.border.to_color()),
             )]));
 
             // Only show "Response Complete" if no FILE_READ is pending
@@ -287,13 +299,13 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                     Span::styled(
                         "  [OK] ",
                         Style::default()
-                            .fg(Color::Green)
+                            .fg(app.theme.colors.success.to_color())
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         "Response Complete",
                         Style::default()
-                            .fg(Color::Rgb(150, 150, 150))  // Light gray text
+                            .fg(app.theme.colors.text_secondary.to_color())
                             .add_modifier(Modifier::ITALIC),
                     ),
                 ]));
@@ -304,13 +316,13 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                         Span::styled(
                             "  [READ] ",
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(app.theme.colors.info.to_color())
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             status,
                             Style::default()
-                                .fg(Color::Rgb(200, 200, 150))  // Warm yellow-gray
+                                .fg(app.theme.colors.info.to_color())
                                 .add_modifier(Modifier::ITALIC),
                         ),
                     ]));
@@ -321,7 +333,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
             let separator2 = "─".repeat(width);
             lines.push(Line::from(vec![Span::styled(
                 separator2,
-                Style::default().fg(Color::Rgb(100, 100, 100)),
+                Style::default().fg(app.theme.colors.border.to_color()),
             )]));
         }
 
@@ -343,7 +355,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(
                 title,
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(app.theme.colors.warning.to_color())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
@@ -415,7 +427,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                         Span::raw("║"),
                         Span::styled(
                             truncated.clone(),
-                            Style::default().fg(Color::Rgb(150, 150, 150)),
+                            Style::default().fg(app.theme.colors.text_secondary.to_color()),
                         ),
                         Span::raw(format!(
                             "{}║",
@@ -449,7 +461,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(
                 shortcuts,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(app.theme.colors.info.to_color())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
@@ -470,13 +482,13 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(
                     "  [READ] ",
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(app.theme.colors.info.to_color())
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     status,
                     Style::default()
-                        .fg(Color::Rgb(200, 200, 150))  // Warm yellow-gray
+                        .fg(app.theme.colors.info.to_color())
                         .add_modifier(Modifier::ITALIC | Modifier::SLOW_BLINK),
                 ),
             ]));
@@ -489,7 +501,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(vec![Span::styled(
             "[Mermaid] ",
             Style::default()
-                .fg(Color::Green)
+                .fg(app.theme.colors.assistant_message.to_color())
                 .add_modifier(Modifier::BOLD),
         )]));
 
@@ -501,7 +513,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(vec![Span::styled(
             "▋",
             Style::default()
-                .fg(Color::Green)
+                .fg(app.theme.colors.assistant_message.to_color())
                 .add_modifier(Modifier::SLOW_BLINK),
         )]));
     }
@@ -574,7 +586,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
                 let mut hint_lines = vec![Line::from(vec![Span::styled(
                     " Available Commands:",
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(app.theme.colors.info.to_color())
                         .add_modifier(Modifier::BOLD),
                 )])];
 
@@ -583,17 +595,20 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
                         Span::styled(
                             format!("  {:<20}", cmd),
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(app.theme.colors.text_highlight.to_color())
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(*desc, Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            *desc,
+                            Style::default().fg(app.theme.colors.text_secondary.to_color()),
+                        ),
                     ]));
                 }
 
                 let hints_block = Paragraph::new(hint_lines).block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::DarkGray))
+                        .border_style(Style::default().fg(app.theme.colors.border.to_color()))
                         .title(" Commands (up/down to navigate, Enter to execute) "),
                 );
 
@@ -609,7 +624,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     // Render the input box with text wrapping
-    let input_style = Style::default().fg(Color::White);
+    let input_style = Style::default().fg(app.theme.colors.text_primary.to_color());
     let title = if showing_command_hints {
         " Enter Command "
     } else {
@@ -623,13 +638,11 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(
-                    if showing_command_hints {
-                        Color::Yellow
-                    } else {
-                        Color::DarkGray
-                    }
-                ))
+                .border_style(Style::default().fg(if showing_command_hints {
+                    app.theme.colors.warning.to_color()
+                } else {
+                    app.theme.colors.border.to_color()
+                }))
                 .title(title),
         );
 
@@ -690,11 +703,14 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             format!(" {} ", app.operation_mode.display_name()),
             Style::default()
                 .bg(app.operation_mode.color())
-                .fg(Color::Black)
+                .fg(app.theme.colors.background.to_color())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(status_text, Style::default().fg(Color::White)),
+        Span::styled(
+            status_text,
+            Style::default().fg(app.theme.colors.text_primary.to_color()),
+        ),
     ];
 
     // Add hardware stats only in compact diagnostics mode
@@ -703,7 +719,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             line1_spans.push(Span::raw(" | "));
             line1_spans.push(Span::styled(
                 stats.to_status_line(),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.theme.colors.text_disabled.to_color()),
             ));
         }
     }
@@ -715,34 +731,55 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(
             " Shift+Tab: ",
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(app.theme.colors.text_disabled.to_color())
                 .add_modifier(Modifier::DIM),
         ),
-        Span::styled("modes", Style::default().fg(Color::Gray)),
-        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "modes",
+            Style::default().fg(app.theme.colors.text_secondary.to_color()),
+        ),
+        Span::styled(
+            " | ",
+            Style::default().fg(app.theme.colors.text_disabled.to_color()),
+        ),
         Span::styled(
             "Ctrl+S: ",
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(app.theme.colors.text_disabled.to_color())
                 .add_modifier(Modifier::DIM),
         ),
-        Span::styled("files", Style::default().fg(Color::Gray)),
-        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "files",
+            Style::default().fg(app.theme.colors.text_secondary.to_color()),
+        ),
+        Span::styled(
+            " | ",
+            Style::default().fg(app.theme.colors.text_disabled.to_color()),
+        ),
         Span::styled(
             "Ctrl+D: ",
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(app.theme.colors.text_disabled.to_color())
                 .add_modifier(Modifier::DIM),
         ),
-        Span::styled("diagnostics", Style::default().fg(Color::Gray)),
-        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "diagnostics",
+            Style::default().fg(app.theme.colors.text_secondary.to_color()),
+        ),
+        Span::styled(
+            " | ",
+            Style::default().fg(app.theme.colors.text_disabled.to_color()),
+        ),
         Span::styled(
             ":help",
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(app.theme.colors.text_disabled.to_color())
                 .add_modifier(Modifier::DIM),
         ),
-        Span::styled(" commands", Style::default().fg(Color::Gray)),
+        Span::styled(
+            " commands",
+            Style::default().fg(app.theme.colors.text_secondary.to_color()),
+        ),
     ]));
 
     // Line 3: Warnings/action prompts or empty
@@ -751,12 +788,12 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(
                 " WARNING: ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(app.theme.colors.warning.to_color())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "Alt+Y: approve | Alt+N: skip | Alt+P: preview",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(app.theme.colors.warning.to_color()),
             ),
         ]));
     } else if let Some(warning) = app.operation_mode.warning_level().message() {
@@ -772,7 +809,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let status_bar = Paragraph::new(lines)
-        .style(Style::default().bg(Color::Black))
+        .style(Style::default().bg(app.theme.colors.background.to_color()))
         .block(Block::default());
 
     frame.render_widget(status_bar, area);

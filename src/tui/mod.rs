@@ -6,12 +6,14 @@ mod app;
 mod markdown;
 mod mode;
 mod render;
+mod theme;
 mod ui;
 mod event_handler;
 mod command_handler;
 mod action_handler;
 mod stream_handler;
 mod loop_coordinator;
+mod widgets;
 
 // Public re-exports - the ONLY way to access TUI functionality
 pub use app::{App, ConfirmationState, FileInfo};

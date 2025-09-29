@@ -1,4 +1,5 @@
 use super::mode::OperationMode;
+use super::theme::Theme;
 use crate::agents::{AgentAction, ModeAwareExecutor};
 use crate::diagnostics::{DiagnosticsMode, HardwareMonitor, HardwareStats};
 use crate::models::{ChatMessage, MessageRole, Model, ProjectContext};
@@ -68,6 +69,8 @@ pub struct App {
     pub hardware_stats: Option<HardwareStats>,
     /// Diagnostics display mode
     pub diagnostics_mode: DiagnosticsMode,
+    /// UI theme
+    pub theme: Theme,
 }
 
 impl App {
@@ -118,6 +121,7 @@ impl App {
             hardware_monitor,
             hardware_stats: None,
             diagnostics_mode: DiagnosticsMode::Compact,
+            theme: Theme::dark(), // Default to dark theme
         }
     }
 
