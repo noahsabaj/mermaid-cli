@@ -52,9 +52,15 @@ fn validate_command(command: &str) -> Result<String, String> {
         return Err("Piping to shell interpreter is not allowed".to_string());
     }
 
-    // Check for command injection attempts
-    if command.contains("$(") || command.contains("`") || command.contains("&&") {
-        return Err("Command injection attempt detected".to_string());
+    // Check for command injection attempts (more precise matching)
+    if command.contains("$(") || command.contains("`") {
+        return Err("Command substitution detected".to_string());
+    }
+
+    // Check for command chaining (but allow it in some contexts)
+    // Block && only if it's standalone (not part of a word)
+    if command.contains(" && ") || command.ends_with("&&") || command.starts_with("&&") {
+        return Err("Command chaining detected".to_string());
     }
 
     Ok(command.to_string())

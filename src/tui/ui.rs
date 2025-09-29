@@ -817,8 +817,8 @@ async fn handle_command(app: &mut App, command: &str) -> Result<()> {
             if let Err(e) = app.save_conversation() {
                 app.set_status(format!("Failed to save: {}", e));
             } else {
-                app.set_status(if name.is_some() {
-                    format!("Conversation saved as: {}", name.unwrap())
+                app.set_status(if let Some(name) = name {
+                    format!("Conversation saved as: {}", name)
                 } else {
                     "Conversation saved".to_string()
                 });

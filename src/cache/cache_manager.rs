@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use super::file_cache::FileCache;
 use super::types::{CacheKey, CachedSymbols, CachedTokens};
 use crate::context::{Symbol, SymbolReference, TreeParser};
+use crate::utils::lock_arc_mutex_safe;
 
 /// Main cache manager for the application
 #[derive(Debug)]
@@ -60,7 +61,7 @@ impl CacheManager {
 
         // Check memory cache first
         {
-            let mut mem_cache = self.memory_cache.lock().unwrap();
+            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
             if let Some(cached) = mem_cache.symbols.get(&key).cloned() {
                 mem_cache.hits += 1;
                 return Ok((cached.symbols, cached.references));
@@ -72,7 +73,7 @@ impl CacheManager {
             // Validate cache
             if self.file_cache.is_valid(&key)? {
                 // Store in memory cache
-                let mut mem_cache = self.memory_cache.lock().unwrap();
+                let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
                 mem_cache.symbols.insert(key.clone(), cached.clone());
                 mem_cache.hits += 1;
                 return Ok((cached.symbols, cached.references));
@@ -84,7 +85,7 @@ impl CacheManager {
 
         // Cache miss - compute and cache
         {
-            let mut mem_cache = self.memory_cache.lock().unwrap();
+            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
             mem_cache.misses += 1;
         }
 
@@ -103,7 +104,7 @@ impl CacheManager {
 
         // Save to memory cache
         {
-            let mut mem_cache = self.memory_cache.lock().unwrap();
+            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
             mem_cache.symbols.insert(key, cached);
         }
 
@@ -122,7 +123,7 @@ impl CacheManager {
 
         // Check memory cache first
         {
-            let mut mem_cache = self.memory_cache.lock().unwrap();
+            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
             if let Some(cached) = mem_cache.tokens.get(&key).cloned() {
                 if cached.model_name == model_name {
                     mem_cache.hits += 1;
@@ -137,7 +138,7 @@ impl CacheManager {
                 // Validate cache
                 if self.file_cache.is_valid(&key)? {
                     // Store in memory cache
-                    let mut mem_cache = self.memory_cache.lock().unwrap();
+                    let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
                     mem_cache.tokens.insert(key.clone(), cached.clone());
                     mem_cache.hits += 1;
                     return Ok(cached.count);
@@ -150,7 +151,7 @@ impl CacheManager {
 
         // Cache miss - compute and cache
         {
-            let mut mem_cache = self.memory_cache.lock().unwrap();
+            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
             mem_cache.misses += 1;
         }
 
@@ -169,7 +170,7 @@ impl CacheManager {
 
         // Save to memory cache
         {
-            let mut mem_cache = self.memory_cache.lock().unwrap();
+            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
             mem_cache.tokens.insert(key, cached);
         }
 
@@ -222,7 +223,7 @@ impl CacheManager {
 
         // Remove from memory cache
         {
-            let mut mem_cache = self.memory_cache.lock().unwrap();
+            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
             mem_cache.symbols.remove(&key);
             mem_cache.tokens.remove(&key);
         }
@@ -237,7 +238,7 @@ impl CacheManager {
     pub fn clear_all(&self) -> Result<()> {
         // Clear memory cache
         {
-            let mut mem_cache = self.memory_cache.lock().unwrap();
+            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
             mem_cache.symbols.clear();
             mem_cache.tokens.clear();
             mem_cache.hits = 0;
@@ -258,7 +259,7 @@ impl CacheManager {
         let file_stats = self.file_cache.get_stats()?;
 
         let (memory_entries, hits, misses, hit_rate) = {
-            let mem_cache = self.memory_cache.lock().unwrap();
+            let mem_cache = lock_arc_mutex_safe(&self.memory_cache);
             let total_requests = mem_cache.hits + mem_cache.misses;
             let hit_rate = if total_requests > 0 {
                 (mem_cache.hits as f32 / total_requests as f32) * 100.0

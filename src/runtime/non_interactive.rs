@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::utils::MutexExt;
+
 use crate::{
     agents::{execute_action, parse_actions, ActionResult as AgentActionResult, AgentAction},
     app::Config,
@@ -151,7 +153,7 @@ impl NonInteractiveRunner {
         let response_text = Arc::new(std::sync::Mutex::new(String::new()));
         let response_clone = Arc::clone(&response_text);
         let callback = Arc::new(move |chunk: &str| {
-            let mut resp = response_clone.lock().unwrap();
+            let mut resp = response_clone.lock_mut_safe();
             resp.push_str(chunk);
         });
 
@@ -168,7 +170,7 @@ impl NonInteractiveRunner {
         match result {
             Ok(response) => {
                 // Try to get content from the callback first
-                let callback_content = response_text.lock().unwrap().clone();
+                let callback_content = response_text.lock_mut_safe().clone();
                 if !callback_content.is_empty() {
                     full_response = callback_content;
                 } else {
@@ -178,7 +180,7 @@ impl NonInteractiveRunner {
             },
             Err(e) => {
                 errors.push(format!("Model error: {}", e));
-                full_response = response_text.lock().unwrap().clone();
+                full_response = response_text.lock_mut_safe().clone();
                 tokens_used = 0;
             },
         }

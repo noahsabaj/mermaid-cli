@@ -1,4 +1,4 @@
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 /// Extension trait for Mutex to provide safe lock operations
 pub trait MutexExt<T> {
@@ -33,6 +33,17 @@ impl<T: Clone> MutexExt<T> for Mutex<T> {
                 eprintln!("[WARNING] Mutex was poisoned, recovering guard");
                 poisoned.into_inner()
             }
+        }
+    }
+}
+
+/// Safe lock for Arc<Mutex<T>> - standalone function since we can't impl on Arc
+pub fn lock_arc_mutex_safe<T>(mutex: &Arc<Mutex<T>>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            eprintln!("[WARNING] Arc<Mutex> was poisoned, recovering guard");
+            poisoned.into_inner()
         }
     }
 }
