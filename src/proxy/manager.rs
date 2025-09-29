@@ -72,9 +72,11 @@ pub async fn start_proxy() -> Result<()> {
         tokio::time::sleep(poll_interval).await;
     }
 
+    let compose_path = compose_dir.join("docker-compose.yml");
     anyhow::bail!(
-        "LiteLLM proxy failed to start properly. Check logs with: {} logs litellm",
-        runtime
+        "LiteLLM proxy failed to start properly.\nCheck logs with: {} -f {} logs litellm",
+        runtime,
+        compose_path.display()
     )
 }
 
