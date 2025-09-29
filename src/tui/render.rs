@@ -1,6 +1,6 @@
 use once_cell::sync::Lazy;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
@@ -45,7 +45,7 @@ impl LayoutCache {
                 Constraint::Length(1),  // Header (minimal, single line)
                 Constraint::Min(10),    // Main content (grows to fill)
                 Constraint::Length(input_height),  // Dynamic input height (3-8 lines)
-                Constraint::Length(3),  // Status bar (readable, 3 lines)
+                Constraint::Length(2),  // Status bar (compact, 2 lines)
             ])
             .split(area);
 
@@ -122,8 +122,12 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
         render_sidebar(frame, content_chunks[0], app);
     }
 
-    // Render chat area
-    render_chat(frame, content_chunks[1], app);
+    // Render chat area with horizontal padding for breathing room
+    let chat_area = content_chunks[1].inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    render_chat(frame, chat_area, app);
 
     // Render input area
     render_input(frame, chunks[2], app);
@@ -683,17 +687,17 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Render the status bar (3 lines: status, shortcuts, warnings)
+/// Render the status bar (2 lines: status + warnings, shortcuts)
 fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = Vec::new();
 
-    // Line 1: Mode badge + Status message
+    // Line 1: Mode badge + Status message + inline warnings
     let status_text = if app.confirmation_state.is_some() {
-        "Action pending confirmation".to_string()
+        "Action pending".to_string()
     } else if let Some(status) = &app.status_message {
         status.clone()
     } else if app.is_generating {
-        "Generating response...".to_string()
+        "Generating...".to_string()
     } else {
         "Ready".to_string()
     };
@@ -713,23 +717,36 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         ),
     ];
 
-    // Add hardware stats only in compact diagnostics mode
-    if app.diagnostics_mode == DiagnosticsMode::Compact {
-        if let Some(ref stats) = app.hardware_stats {
-            line1_spans.push(Span::raw(" | "));
+    // Add inline warnings/prompts to Line 1
+    if app.confirmation_state.is_some() {
+        line1_spans.push(Span::raw(" • "));
+        line1_spans.push(Span::styled(
+            "Alt+Y: approve, Alt+N: skip, Alt+P: preview",
+            Style::default()
+                .fg(app.theme.colors.warning.to_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        let warning_level = app.operation_mode.warning_level();
+        if let Some(warning) = warning_level.message() {
+            let warning_text = warning.to_string();
+            let warning_color = warning_level.color();
+            line1_spans.push(Span::raw(" • "));
             line1_spans.push(Span::styled(
-                stats.to_status_line(),
-                Style::default().fg(app.theme.colors.text_disabled.to_color()),
+                warning_text,
+                Style::default()
+                    .fg(warning_color)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
     }
 
     lines.push(Line::from(line1_spans));
 
-    // Line 2: Keyboard shortcuts (always visible)
+    // Line 2: Keyboard shortcuts (compact, always visible)
     lines.push(Line::from(vec![
         Span::styled(
-            " Shift+Tab: ",
+            " Shift+Tab ",
             Style::default()
                 .fg(app.theme.colors.text_disabled.to_color())
                 .add_modifier(Modifier::DIM),
@@ -739,25 +756,25 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(app.theme.colors.text_secondary.to_color()),
         ),
         Span::styled(
-            " | ",
+            " • ",
             Style::default().fg(app.theme.colors.text_disabled.to_color()),
         ),
         Span::styled(
-            "Ctrl+S: ",
+            "Ctrl+S ",
             Style::default()
                 .fg(app.theme.colors.text_disabled.to_color())
                 .add_modifier(Modifier::DIM),
         ),
         Span::styled(
-            "files",
+            "sidebar",
             Style::default().fg(app.theme.colors.text_secondary.to_color()),
         ),
         Span::styled(
-            " | ",
+            " • ",
             Style::default().fg(app.theme.colors.text_disabled.to_color()),
         ),
         Span::styled(
-            "Ctrl+D: ",
+            "Ctrl+D ",
             Style::default()
                 .fg(app.theme.colors.text_disabled.to_color())
                 .add_modifier(Modifier::DIM),
@@ -767,7 +784,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(app.theme.colors.text_secondary.to_color()),
         ),
         Span::styled(
-            " | ",
+            " • ",
             Style::default().fg(app.theme.colors.text_disabled.to_color()),
         ),
         Span::styled(
@@ -777,36 +794,10 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::DIM),
         ),
         Span::styled(
-            " commands",
+            " for commands",
             Style::default().fg(app.theme.colors.text_secondary.to_color()),
         ),
     ]));
-
-    // Line 3: Warnings/action prompts or empty
-    if app.confirmation_state.is_some() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                " WARNING: ",
-                Style::default()
-                    .fg(app.theme.colors.warning.to_color())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Alt+Y: approve | Alt+N: skip | Alt+P: preview",
-                Style::default().fg(app.theme.colors.warning.to_color()),
-            ),
-        ]));
-    } else if let Some(warning) = app.operation_mode.warning_level().message() {
-        lines.push(Line::from(vec![Span::styled(
-            format!(" {} ", warning),
-            Style::default()
-                .fg(app.operation_mode.warning_level().color())
-                .add_modifier(Modifier::BOLD),
-        )]));
-    } else {
-        // Empty line for breathing room
-        lines.push(Line::from(""));
-    }
 
     let status_bar = Paragraph::new(lines)
         .style(Style::default().bg(app.theme.colors.background.to_color()))

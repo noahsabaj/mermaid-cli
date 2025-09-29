@@ -101,7 +101,7 @@ impl App {
             is_generating: false,
             scroll_offset: 0,
             selected_message: None,
-            show_sidebar: true,
+            show_sidebar: false, // Hidden by default - press Ctrl+S to show
             sidebar_expanded: false,
             working_dir,
             model_name,
