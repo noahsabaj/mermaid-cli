@@ -1,9 +1,7 @@
 /// Constants module to avoid magic numbers in the codebase
-
 // Network Configuration
 pub const DEFAULT_LITELLM_PROXY_PORT: u16 = 4000;
 pub const DEFAULT_LITELLM_PROXY_URL: &str = "http://localhost:4000";
-pub const DEFAULT_LITELLM_MASTER_KEY: &str = "sk-mermaid-1234";
 pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 
 // Timeouts

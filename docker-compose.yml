@@ -3,13 +3,18 @@ services:
   litellm:
     image: ghcr.io/berriai/litellm:main-stable
     container_name: mermaid-litellm
-    network_mode: host
+    networks:
+      - litellm-network
+    ports:
+      - "127.0.0.1:4000:4000"  # Bind to localhost only for security
+    extra_hosts:
+      - "host.containers.internal:host-gateway"  # Podman-specific host access
     environment:
-      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-mermaid-1234}"
-      DATABASE_URL: "postgresql://mermaid:mermaid123@localhost:5433/litellm"
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
+      DATABASE_URL: "postgresql://mermaid:${POSTGRES_PASSWORD:-changeme}@db:5432/litellm"
       STORE_MODEL_IN_DB: "True"
-      # Ollama configuration - using localhost since we're in host network mode
-      OLLAMA_API_BASE: "http://localhost:11434"
+      # Ollama configuration - use host.containers.internal for Podman rootless
+      OLLAMA_API_BASE: "${OLLAMA_API_BASE:-http://host.containers.internal:11434}"
       # Pass through API keys from host environment
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
@@ -20,10 +25,16 @@ services:
       - ./litellm_config.yaml:/app/config.yaml:z  # :z for SELinux/Podman compatibility
     command: ["--config=/app/config.yaml", "--detailed_debug"]
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     restart: unless-stopped
     security_opt:
       - label=disable  # For rootless podman compatibility
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
 
   db:
     image: docker.io/library/postgres:16-alpine  # Fully qualified for Podman
@@ -31,14 +42,23 @@ services:
     environment:
       POSTGRES_DB: litellm
       POSTGRES_USER: mermaid
-      POSTGRES_PASSWORD: mermaid123
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changeme}"
     volumes:
       - litellm_data:/var/lib/postgresql/data:z
     ports:
-      - "5433:5432"  # Use 5433 to avoid conflicts with local postgres
+      - "127.0.0.1:5433:5432"  # Bind to localhost only, avoid conflicts
     restart: unless-stopped
     security_opt:
       - label=disable
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
     networks:
       - litellm-network
     healthcheck:
@@ -46,6 +66,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
 volumes:
   litellm_data:

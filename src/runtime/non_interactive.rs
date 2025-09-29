@@ -1,5 +1,4 @@
 use anyhow::Result;
-use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
