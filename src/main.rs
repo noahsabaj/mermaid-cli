@@ -7,6 +7,7 @@ use mermaid::{
     ollama::ensure_model as ensure_ollama_model,
     proxy::{ensure_proxy, is_proxy_running},
     runtime::{NonInteractiveRunner, Orchestrator},
+    utils::init_logger,
 };
 
 #[tokio::main]
@@ -14,10 +15,8 @@ async fn main() -> Result<()> {
     // Parse CLI arguments
     let cli = Cli::parse();
 
-    // Set up logging if verbose
-    if cli.verbose {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    }
+    // Initialize tracing subscriber (always, controlled by RUST_LOG env var)
+    init_logger();
 
     // Check if running in non-interactive mode
     if let Some(prompt) = cli.prompt.clone() {
