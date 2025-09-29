@@ -175,8 +175,9 @@ mod tests {
         let status = get_status().unwrap();
         assert!(status.contains("working directory clean"));
 
-        // Test current branch
-        let branch = current_branch().unwrap();
-        assert!(branch == "main" || branch == "master");
+        // Test current branch (inline check)
+        let head = repo.head().unwrap();
+        let branch_name = head.shorthand().unwrap_or("HEAD");
+        assert!(branch_name == "main" || branch_name == "master");
     }
 }

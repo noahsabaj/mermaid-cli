@@ -101,16 +101,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_retry_async_success_on_first_try() {
         let config = RetryConfig::default();
-        let mut call_count = 0;
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = Arc::clone(&call_count);
 
         let result = retry_async(
-            || async {
-                call_count += 1;
-                Ok::<_, anyhow::Error>(42)
+            move || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, anyhow::Error>(42)
+                }
             },
             &config,
         )
@@ -118,7 +124,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 42);
-        assert_eq!(call_count, 1);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -128,15 +134,19 @@ mod tests {
             initial_delay_ms: 10,
             ..Default::default()
         };
-        let mut call_count = 0;
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = Arc::clone(&call_count);
 
         let result = retry_async(
-            || async {
-                call_count += 1;
-                if call_count < 2 {
-                    Err(anyhow::anyhow!("Temporary error"))
-                } else {
-                    Ok(42)
+            move || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    let current = count.fetch_add(1, Ordering::SeqCst) + 1;
+                    if current < 2 {
+                        Err(anyhow::anyhow!("Temporary error"))
+                    } else {
+                        Ok(42)
+                    }
                 }
             },
             &config,
@@ -145,7 +155,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 42);
-        assert_eq!(call_count, 2);
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -155,18 +165,22 @@ mod tests {
             initial_delay_ms: 10,
             ..Default::default()
         };
-        let mut call_count = 0;
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = Arc::clone(&call_count);
 
         let result = retry_async(
-            || async {
-                call_count += 1;
-                Err::<i32, _>(anyhow::anyhow!("Persistent error"))
+            move || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Err::<i32, _>(anyhow::anyhow!("Persistent error"))
+                }
             },
             &config,
         )
         .await;
 
         assert!(result.is_err());
-        assert_eq!(call_count, 3);
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
     }
 }

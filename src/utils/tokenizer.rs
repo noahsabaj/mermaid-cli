@@ -120,33 +120,34 @@ impl Tokenizer {
         };
 
         // Map model variations to their base tokenizer
-        let model_mappings: HashMap<&str, &str> = [
-            // OpenAI models
+        // IMPORTANT: Order matters - check most specific patterns first!
+        let model_mappings: Vec<(&str, &str)> = vec![
+            // OpenAI models - most specific first
             ("gpt-4o", "gpt-4o"),
             ("gpt-4-turbo", "gpt-4-turbo"),
+            ("gpt-4-32k", "gpt-4-32k"),
             ("gpt-4", "gpt-4"),
+            ("gpt-3.5-turbo-16k", "gpt-3.5-turbo-16k"),
             ("gpt-3.5-turbo", "gpt-3.5-turbo"),
             // Claude models - use GPT-4 encoding as approximation
-            ("claude-3", "gpt-4"),
             ("claude-3-opus", "gpt-4"),
             ("claude-3-sonnet", "gpt-4"),
             ("claude-3-haiku", "gpt-4"),
+            ("claude-3", "gpt-4"),
+            ("claude", "gpt-4"),
             // Llama models - use GPT-3.5 encoding as approximation
+            ("codellama", "gpt-3.5-turbo"),
             ("llama3", "gpt-3.5-turbo"),
             ("llama2", "gpt-3.5-turbo"),
-            ("codellama", "gpt-3.5-turbo"),
             // Other models - use GPT-3.5 as default
             ("deepseek", "gpt-3.5-turbo"),
             ("qwen", "gpt-3.5-turbo"),
             ("mistral", "gpt-3.5-turbo"),
             ("mixtral", "gpt-3.5-turbo"),
-        ]
-        .iter()
-        .cloned()
-        .collect();
+        ];
 
-        // Find the best matching tokenizer
-        for (pattern, tokenizer) in model_mappings {
+        // Find the best matching tokenizer (checks in order)
+        for (pattern, tokenizer) in &model_mappings {
             if base_name.to_lowercase().contains(pattern) {
                 return tokenizer.to_string();
             }
@@ -193,9 +194,12 @@ mod tests {
     #[test]
     fn test_max_tokens() {
         let tokenizer = Tokenizer::new("gpt-4");
-        assert!(tokenizer.get_max_tokens() > 100000);
+        assert_eq!(tokenizer.get_max_tokens(), 8192); // GPT-4 standard
+
+        let tokenizer = Tokenizer::new("gpt-4o");
+        assert_eq!(tokenizer.get_max_tokens(), 128000); // GPT-4o
 
         let tokenizer = Tokenizer::new("gpt-3.5-turbo");
-        assert!(tokenizer.get_max_tokens() > 4000);
+        assert_eq!(tokenizer.get_max_tokens(), 4096); // GPT-3.5 Turbo
     }
 }
