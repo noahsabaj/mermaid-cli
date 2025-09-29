@@ -143,11 +143,6 @@ fn is_apple_silicon() -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn is_apple_silicon() -> bool {
-    false
-}
-
 /// Get Apple Silicon GPU information
 fn get_apple_silicon_info() -> Result<GpuInfo> {
     #[cfg(target_os = "macos")]

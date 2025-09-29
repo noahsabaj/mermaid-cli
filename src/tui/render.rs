@@ -12,8 +12,10 @@ use crate::diagnostics::{render_diagnostics_panel, DiagnosticsMode};
 use crate::models::MessageRole;
 use crate::tui::app::App;
 use crate::tui::markdown::parse_markdown;
+use crate::utils::MutexExt;
 
 /// Cache for layout calculations to improve performance
+#[derive(Clone)]
 struct LayoutCache {
     main_layout: Option<(u16, u16, Vec<Rect>)>, // (width, height, rects)
     content_layout: Option<(bool, Rect, Vec<Rect>)>, // (show_sidebar, area, rects)
@@ -102,7 +104,7 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
 
     // Use cached layout for better performance
     let chunks = {
-        let mut cache = LAYOUT_CACHE.lock().unwrap();
+        let mut cache = LAYOUT_CACHE.lock_mut_safe();
         cache.get_main_layout(frame.area(), input_height)
     };
 
@@ -111,7 +113,7 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
 
     // Use cached content layout
     let content_chunks = {
-        let mut cache = LAYOUT_CACHE.lock().unwrap();
+        let mut cache = LAYOUT_CACHE.lock_mut_safe();
         cache.get_content_layout(app.show_sidebar, chunks[1])
     };
 

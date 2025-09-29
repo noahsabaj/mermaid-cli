@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::tree_parser::{Symbol, SymbolKind, SymbolReference};
+use crate::utils::lock_arc_mutex_safe;
 
 /// Node in the repository graph representing a file
 #[derive(Debug, Clone)]
@@ -149,7 +150,7 @@ impl RepoGraph {
         // Initialize scores
         let initial_score = 1.0 / num_nodes as f64;
         let mut scores: Vec<f64> = vec![initial_score; num_nodes];
-        let mut new_scores = vec![0.0; num_nodes];
+        let mut new_scores;
 
         // Create index mapping for efficient access
         let index_to_position: HashMap<NodeIndex, usize> = self
@@ -185,7 +186,7 @@ impl RepoGraph {
 
             // Initialize with base score
             {
-                let mut ns = new_scores_mutex.lock().unwrap();
+                let mut ns = lock_arc_mutex_safe(&new_scores_mutex);
                 ns.fill((1.0 - damping) / num_nodes as f64);
             }
 
@@ -218,22 +219,22 @@ impl RepoGraph {
                         .collect();
 
                     // Apply updates with lock
-                    let mut ns = new_scores_mutex.lock().unwrap();
+                    let mut ns = lock_arc_mutex_safe(&new_scores_mutex);
                     for (target_pos, transfer) in updates {
                         ns[target_pos] += transfer;
                     }
                 } else {
                     // No outgoing edges - accumulate dangling mass
-                    let mut dm = dangling_mass.lock().unwrap();
+                    let mut dm = lock_arc_mutex_safe(&dangling_mass);
                     *dm += damping * score;
                 }
             });
 
             // Distribute dangling mass equally
-            let dm = *dangling_mass.lock().unwrap();
+            let dm = *lock_arc_mutex_safe(&dangling_mass);
             if dm > 0.0 {
                 let share = dm / num_nodes as f64;
-                let mut ns = new_scores_mutex.lock().unwrap();
+                let mut ns = lock_arc_mutex_safe(&new_scores_mutex);
                 for score in ns.iter_mut() {
                     *score += share;
                 }
@@ -241,8 +242,14 @@ impl RepoGraph {
 
             // Extract new scores from mutex
             new_scores = match Arc::try_unwrap(new_scores_mutex) {
-                Ok(mutex) => mutex.into_inner().unwrap(),
-                Err(arc) => arc.lock().unwrap().clone(),
+                Ok(mutex) => match mutex.into_inner() {
+                    Ok(vec) => vec,
+                    Err(poisoned) => {
+                        eprintln!("[WARNING] Mutex was poisoned during extraction, recovering data");
+                        poisoned.into_inner()
+                    }
+                },
+                Err(arc) => lock_arc_mutex_safe(&arc).clone(),
             };
 
             // Apply personalization in each iteration

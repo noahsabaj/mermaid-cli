@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tiktoken_rs::{cl100k_base, CoreBPE};
 
-use crate::cache::CacheManager;
 use crate::models::ProjectContext;
 
 /// Configuration for the context loader
@@ -100,27 +99,22 @@ impl Default for LoaderConfig {
 pub struct ContextLoader {
     config: LoaderConfig,
     tokenizer: CoreBPE,
-    cache: Option<Arc<CacheManager>>,
 }
 
 impl ContextLoader {
     /// Create a new context loader with default config
     pub fn new() -> Result<Self> {
-        let cache = CacheManager::new().ok().map(Arc::new);
         Ok(Self {
             config: LoaderConfig::default(),
             tokenizer: cl100k_base()?,
-            cache,
         })
     }
 
     /// Create with custom config
     pub fn with_config(config: LoaderConfig) -> Result<Self> {
-        let cache = CacheManager::new().ok().map(Arc::new);
         Ok(Self {
             config,
             tokenizer: cl100k_base()?,
-            cache,
         })
     }
 
@@ -315,11 +309,6 @@ impl ContextLoader {
     /// Load a single file
     fn load_file(&self, path: &Path) -> Result<String> {
         fs::read_to_string(path).with_context(|| format!("Failed to read file: {}", path.display()))
-    }
-
-    /// Count tokens in a string
-    fn count_tokens(&self, text: &str) -> usize {
-        self.tokenizer.encode_with_special_tokens(text).len()
     }
 
     /// Detect the project type based on configuration files

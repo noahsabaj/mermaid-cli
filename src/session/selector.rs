@@ -27,7 +27,7 @@ pub fn select_conversation(
 
     // If there's only one conversation, return it directly
     if conversations.len() == 1 {
-        return Ok(Some(conversations.into_iter().next().unwrap()));
+        return Ok(conversations.into_iter().next());
     }
 
     // Setup terminal

@@ -57,11 +57,20 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         current_line_spans.push(Span::styled(prefix, style));
                         style
                     },
-                    Tag::Emphasis => style_stack.last().unwrap().add_modifier(Modifier::ITALIC),
-                    Tag::Strong => style_stack.last().unwrap().add_modifier(Modifier::BOLD),
+                    Tag::Emphasis => style_stack
+                        .last()
+                        .copied()
+                        .unwrap_or_default()
+                        .add_modifier(Modifier::ITALIC),
+                    Tag::Strong => style_stack
+                        .last()
+                        .copied()
+                        .unwrap_or_default()
+                        .add_modifier(Modifier::BOLD),
                     Tag::Strikethrough => style_stack
                         .last()
-                        .unwrap()
+                        .copied()
+                        .unwrap_or_default()
                         .add_modifier(Modifier::CROSSED_OUT),
                     Tag::CodeBlock(kind) => {
                         in_code_block = true;
@@ -95,7 +104,7 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                             lines.push(Line::from(current_line_spans.clone()));
                             current_line_spans.clear();
                         }
-                        *style_stack.last().unwrap()
+                        style_stack.last().copied().unwrap_or_default()
                     },
                     Tag::Item => {
                         // Add bullet point with indentation
@@ -103,7 +112,7 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         current_line_spans.push(Span::raw(indent));
                         current_line_spans
                             .push(Span::styled("• ", Style::default().fg(Color::Yellow)));
-                        *style_stack.last().unwrap()
+                        style_stack.last().copied().unwrap_or_default()
                     },
                     Tag::Link { .. } => {
                         current_line_spans
@@ -123,7 +132,7 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                             .fg(Color::Gray)
                             .add_modifier(Modifier::ITALIC)
                     },
-                    _ => *style_stack.last().unwrap(),
+                    _ => style_stack.last().copied().unwrap_or_default(),
                 };
                 style_stack.push(new_style);
             },
@@ -171,7 +180,7 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                 if in_code_block {
                     code_block_content.push_str(&text);
                 } else {
-                    let style = *style_stack.last().unwrap();
+                    let style = style_stack.last().copied().unwrap_or_default();
                     current_line_spans.push(Span::styled(text.to_string(), style));
                 }
             },

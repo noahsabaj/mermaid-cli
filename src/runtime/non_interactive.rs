@@ -57,7 +57,6 @@ pub struct ExecutionMetadata {
 pub struct NonInteractiveRunner {
     model: Arc<Mutex<Box<dyn Model>>>,
     context: ProjectContext,
-    config: Config,
     no_execute: bool,
     max_tokens: Option<usize>,
 }
@@ -81,7 +80,6 @@ impl NonInteractiveRunner {
         Ok(Self {
             model: Arc::new(Mutex::new(model)),
             context,
-            config,
             no_execute,
             max_tokens,
         })
@@ -146,7 +144,7 @@ impl NonInteractiveRunner {
         };
 
         // Send prompt to model
-        let mut full_response = String::new();
+        let full_response;
         let tokens_used;
 
         // Create a callback to capture the response

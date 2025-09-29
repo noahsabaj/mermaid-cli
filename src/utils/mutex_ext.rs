@@ -57,10 +57,3 @@ macro_rules! lock_or_panic {
         })
     };
 }
-
-/// Helper to try locking a mutex with Result
-pub fn try_lock<'a, T>(mutex: &'a Mutex<T>, context: &str) -> anyhow::Result<std::sync::MutexGuard<'a, T>> {
-    mutex.lock().map_err(|e| {
-        anyhow::anyhow!("{}: failed to acquire lock: {}", context, e)
-    })
-}

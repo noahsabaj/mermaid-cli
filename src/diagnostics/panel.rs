@@ -215,23 +215,6 @@ fn render_system_section(frame: &mut Frame, area: Rect, stats: &HardwareStats) {
     frame.render_widget(system, area);
 }
 
-/// Render compact status line at bottom of screen
-pub fn render_status_line(frame: &mut Frame, area: Rect, stats: &HardwareStats) {
-    let status_text = stats.to_status_line();
-
-    let style = if stats.has_critical_usage() {
-        Style::default().bg(Color::Red).fg(Color::White)
-    } else {
-        Style::default().bg(Color::Black).fg(Color::Gray)
-    };
-
-    let status = Paragraph::new(status_text)
-        .style(style)
-        .alignment(Alignment::Center);
-
-    frame.render_widget(status, area);
-}
-
 /// Get color based on usage percentage
 fn get_usage_color(percent: f32) -> Color {
     if percent > 90.0 {

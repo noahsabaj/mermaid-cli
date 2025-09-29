@@ -6,7 +6,7 @@ use crate::{
     app::{load_config, Config},
     cli::{handle_command, Cli},
     context::ContextLoader,
-    models::{ModelFactory, ProjectContext},
+    models::ModelFactory,
     ollama::ensure_model as ensure_ollama_model,
     proxy::{count_mermaid_processes, ensure_proxy, is_proxy_running, stop_proxy},
     session::{select_conversation, ConversationManager, SessionState},
@@ -225,29 +225,6 @@ impl Orchestrator {
             format!(
                 "Found {} files (loading in background...)",
                 context.total_file_count()
-            ),
-        );
-
-        Ok(context)
-    }
-
-    /// Load project context (keeping for compatibility)
-    fn load_project_context(&self, project_path: &PathBuf) -> Result<ProjectContext> {
-        let loader = ContextLoader::new()?;
-
-        log_info(
-            "FILES",
-            format!("Loading project context from: {}", project_path.display()),
-        );
-
-        let context = loader.load_context(project_path)?;
-
-        log_info(
-            "STATS",
-            format!(
-                "Loaded {} files (~{} tokens)",
-                context.files.len(),
-                context.token_count
             ),
         );
 

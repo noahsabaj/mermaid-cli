@@ -144,22 +144,6 @@ pub fn commit(message: &str, files: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Get the current branch name
-pub fn current_branch() -> Result<String> {
-    let repo = Repository::open_from_env()
-        .context("Failed to open git repository. Is this a git repo?")?;
-
-    let head = repo
-        .head()
-        .context("Failed to get HEAD reference")?;
-
-    if let Some(name) = head.shorthand() {
-        Ok(name.to_string())
-    } else {
-        Ok("HEAD (detached)".to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

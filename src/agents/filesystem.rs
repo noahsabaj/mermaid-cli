@@ -71,16 +71,6 @@ pub fn create_directory(path: &str) -> Result<()> {
         .with_context(|| format!("Failed to create directory: {}", path.display()))
 }
 
-/// Check if a path exists
-pub fn path_exists(path: &str) -> Result<bool> {
-    let path = normalize_path(path)?;
-
-    // Security check
-    validate_path(&path)?;
-
-    Ok(path.exists())
-}
-
 /// Normalize a path (resolve relative paths)
 fn normalize_path(path: &str) -> Result<PathBuf> {
     let path = Path::new(path);

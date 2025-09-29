@@ -126,7 +126,7 @@ impl ConversationManager {
         }
 
         // Conversations are already sorted by modification time (newest first)
-        Ok(Some(conversations.into_iter().next().unwrap()))
+        Ok(conversations.into_iter().next())
     }
 
     /// List all conversations in the project
