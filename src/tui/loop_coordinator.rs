@@ -1,0 +1,216 @@
+use anyhow::Result;
+use crossterm::event;
+use ratatui::{backend::CrosstermBackend, Terminal};
+use std::io;
+use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+use crate::context::ContextLoader;
+use crate::models::{MessageRole, ModelConfig, StreamCallback};
+use crate::tui::render::render_ui;
+use crate::tui::App;
+use crate::utils::FileSystemWatcher;
+
+/// Import our specialized handlers
+use super::action_handler;
+use super::command_handler;
+use super::event_handler::{handle_event, EventAction};
+use super::stream_handler::{process_stream_chunks, StreamStatus};
+
+/// Run the main application event loop
+///
+/// This function coordinates all the specialized handlers and manages
+/// the lifecycle of the TUI application.
+///
+/// The loop performs these steps each iteration:
+/// 1. Render the UI
+/// 2. Poll for events (keyboard, mouse)
+/// 3. Process streaming chunks from LLM
+/// 4. Handle events and delegate to specialized handlers
+/// 5. Check for file system changes
+/// 6. Auto-scroll management
+pub async fn run_app_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    tx: mpsc::Sender<String>,
+    rx: &mut mpsc::Receiver<String>,
+) -> Result<()> {
+    // Initialize file watcher for the current directory
+    let watcher = FileSystemWatcher::new(Path::new("."))?;
+    let mut last_refresh = std::time::Instant::now();
+
+    // Start hardware monitoring if available
+    let hardware_monitor = app.hardware_monitor.clone();
+    let hardware_tx = tx.clone();
+    if let Some(monitor) = hardware_monitor {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+                let stats = {
+                    let mut m = monitor.lock().await;
+                    m.get_stats()
+                };
+                if let Ok(stats) = stats {
+                    // Send hardware stats as JSON
+                    if let Ok(json) = serde_json::to_string(&stats) {
+                        let _ = hardware_tx.send(format!("[HARDWARE_STATS]:{}", json)).await;
+                    }
+                }
+            }
+        });
+    }
+
+    // Main event loop
+    loop {
+        // Get viewport height for proper scrolling
+        let viewport_height = terminal.size()?.height.saturating_sub(8); // 3 header + 3 input + 1 status + 1 margin
+
+        // Draw UI
+        terminal.draw(|f| render_ui(f, app))?;
+
+        // Handle input events
+        if event::poll(std::time::Duration::from_millis(50))? {
+            let event = event::read()?;
+
+            // Use event_handler to process the event
+            match handle_event(app, event, viewport_height)? {
+                EventAction::Continue => {
+                    // Continue normal loop
+                },
+                EventAction::Quit => {
+                    break;
+                },
+                EventAction::SubmitMessage(input) => {
+                    // Submit message to model
+                    handle_message_submit(app, input, &tx, viewport_height).await;
+                },
+                EventAction::ExecuteCommand(command) => {
+                    // Execute slash command
+                    command_handler::handle_command(app, &command).await?;
+                },
+                EventAction::ConfirmAction(approved) => {
+                    // Confirm or reject pending action
+                    action_handler::confirm_action(app, approved, &tx).await?;
+                },
+                EventAction::AlwaysApprove => {
+                    // Always approve similar actions (not yet fully implemented)
+                    action_handler::confirm_action(app, true, &tx).await?;
+                },
+                EventAction::TogglePreview => {
+                    // Toggle action preview (not yet fully implemented)
+                    app.set_status("Preview toggled");
+                },
+            }
+        }
+
+        // Process streaming responses
+        match process_stream_chunks(app, rx).await? {
+            StreamStatus::Streaming => {
+                // Still streaming, auto-scroll if needed
+                if app.is_generating {
+                    app.auto_scroll_to_bottom(viewport_height);
+                }
+            },
+            StreamStatus::Complete { actions } => {
+                // Stream complete, execute any parsed actions
+                if !actions.is_empty() {
+                    action_handler::execute_actions(app, actions, &tx).await?;
+                }
+            },
+            StreamStatus::FeedbackComplete => {
+                // Feedback loop complete, nothing to do
+            },
+            StreamStatus::Error(_error) => {
+                // Error already handled by stream_handler (status message set)
+            },
+        }
+
+        // Check for external file system changes (throttled to once per second)
+        if last_refresh.elapsed() >= std::time::Duration::from_secs(1) {
+            let events = watcher.check_events();
+            if !events.is_empty() {
+                // Reload the context to pick up external changes
+                if let Ok(loader) = ContextLoader::new() {
+                    if let Ok(new_context) = loader.load(Path::new(".")) {
+                        // Update the context while preserving conversation history
+                        app.context.files = new_context.files;
+                        app.context.token_count = new_context.token_count;
+                        app.set_status("[OK] Files refreshed from disk");
+                    }
+                }
+                last_refresh = std::time::Instant::now();
+            }
+        }
+
+        // Clear stale file reading status after 5 seconds
+        if app.reading_file_status.is_some() && !app.is_generating {
+            if let Some(timestamp) = app.status_timestamp {
+                if timestamp.elapsed() >= std::time::Duration::from_secs(5) {
+                    app.reading_file_status = None;
+                    app.pending_file_read = false;
+                    app.status_timestamp = None;
+                }
+            }
+        }
+
+        // Check if app should quit
+        if !app.running {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle message submission to the model
+///
+/// This spawns an async task to stream the model's response.
+async fn handle_message_submit(
+    app: &mut App,
+    input: String,
+    tx: &mpsc::Sender<String>,
+    viewport_height: u16,
+) {
+    // Clear any stuck status messages when sending new message
+    app.pending_file_read = false;
+    app.reading_file_status = None;
+
+    // Add user message to history
+    app.add_message(MessageRole::User, input.clone());
+
+    // Build message history including the new message
+    let messages = app.build_message_history();
+
+    // Auto-scroll to show the new user message
+    app.auto_scroll_to_bottom(viewport_height);
+    app.is_generating = true;
+    app.current_response.clear();
+
+    // Process message asynchronously
+    let model = app.model.clone();
+    let context = app.context.clone();
+    let tx_clone = tx.clone();
+    let tx_done = tx.clone();
+
+    let handle = tokio::spawn(async move {
+        let config = ModelConfig::default();
+        let callback: StreamCallback = Arc::new(move |chunk| {
+            let _ = tx_clone.try_send(chunk.to_string());
+        });
+
+        let mut model = model.lock().await;
+        match model.chat(&messages, &context, &config, Some(callback)).await {
+            Ok(_) => {
+                // Response is complete - content already streamed via callback
+                let _ = tx_done.send("[DONE]:".to_string()).await;
+            },
+            Err(e) => {
+                let _ = tx_done.send(format!("[ERROR]:{}", e)).await;
+            },
+        }
+    });
+
+    app.generation_abort = Some(handle.abort_handle());
+}
