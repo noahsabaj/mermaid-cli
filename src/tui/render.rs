@@ -36,16 +36,16 @@ impl LayoutCache {
             }
         }
 
-        // Use negative spacing for overlapping borders (more compact UI)
+        // Clean layout with proper spacing (no overlap)
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
-            .spacing(-1)  // Overlapping borders for compact UI
+            .spacing(0)  // No negative spacing - prevents overlap
             .constraints([
-                Constraint::Length(3),  // Header
-                Constraint::Min(10),    // Main content
-                Constraint::Length(input_height),  // Dynamic input height
-                Constraint::Length(1),  // Status bar
+                Constraint::Length(1),  // Header (minimal, single line)
+                Constraint::Min(10),    // Main content (grows to fill)
+                Constraint::Length(input_height),  // Dynamic input height (3-8 lines)
+                Constraint::Length(3),  // Status bar (readable, 3 lines)
             ])
             .split(area);
 
@@ -64,7 +64,7 @@ impl LayoutCache {
         let layout = if show_sidebar {
             Layout::default()
                 .direction(Direction::Horizontal)
-                .spacing(-1)  // Overlapping borders between sidebar and main content
+                .spacing(1)  // Proper spacing between sidebar and main content
                 .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
                 .split(area)
                 .to_vec()
@@ -139,29 +139,30 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
     }
 }
 
-/// Render the header
+/// Render the header (minimal, single line)
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
+    // Shorten path for display (show just directory name, not full path)
+    let short_path = std::path::Path::new(&app.working_dir)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&app.working_dir);
+
     let header_text = vec![Line::from(vec![
-        Span::styled("[MERMAID] ", Style::default().fg(Color::Cyan)),
         Span::styled(
             "Mermaid",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" | Model: "),
+        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
         Span::styled(&app.model_name, Style::default().fg(Color::Green)),
-        Span::raw(" | "),
-        Span::styled(&app.working_dir, Style::default().fg(Color::Gray)),
+        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+        Span::styled(short_path, Style::default().fg(Color::Gray)),
     ])];
 
     let header = Paragraph::new(header_text)
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .alignment(Alignment::Center);
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(Color::Black));
 
     frame.render_widget(header, area);
 }
@@ -669,14 +670,13 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Render the status bar
+/// Render the status bar (3 lines: status, shortcuts, warnings)
 fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
-    // We're always in "chat" mode now
-    let mode_str = "CHAT";
-    let mode_color = Color::Green;
+    let mut lines = Vec::new();
 
+    // Line 1: Mode badge + Status message
     let status_text = if app.confirmation_state.is_some() {
-        "[WARNING] Action pending: Alt+Y to approve, Alt+N to skip, Alt+A for always".to_string()
+        "Action pending confirmation".to_string()
     } else if let Some(status) = &app.status_message {
         status.clone()
     } else if app.is_generating {
@@ -685,18 +685,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         "Ready".to_string()
     };
 
-    // Build status line - show only OperationMode now
-    let mut spans = vec![
-        // Always in chat mode
-        Span::styled(
-            format!(" {} ", mode_str),
-            Style::default()
-                .bg(mode_color)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" | "),
-        // OperationMode indicator
+    let mut line1_spans = vec![
         Span::styled(
             format!(" {} ", app.operation_mode.display_name()),
             Style::default()
@@ -704,50 +693,87 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" | "),
+        Span::raw(" "),
+        Span::styled(status_text, Style::default().fg(Color::White)),
     ];
 
-    // Add hardware stats if in compact mode
+    // Add hardware stats only in compact diagnostics mode
     if app.diagnostics_mode == DiagnosticsMode::Compact {
         if let Some(ref stats) = app.hardware_stats {
-            spans.push(Span::styled(
+            line1_spans.push(Span::raw(" | "));
+            line1_spans.push(Span::styled(
                 stats.to_status_line(),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(Color::DarkGray),
             ));
-            spans.push(Span::raw(" | "));
         }
     }
 
-    // Add warning message if in dangerous mode
-    let warning_level = app.operation_mode.warning_level();
-    if let Some(warning) = warning_level.message() {
-        spans.push(Span::styled(
-            warning,
+    lines.push(Line::from(line1_spans));
+
+    // Line 2: Keyboard shortcuts (always visible)
+    lines.push(Line::from(vec![
+        Span::styled(
+            " Shift+Tab: ",
             Style::default()
-                .fg(warning_level.color())
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled("modes", Style::default().fg(Color::Gray)),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "Ctrl+S: ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled("files", Style::default().fg(Color::Gray)),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "Ctrl+D: ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled("diagnostics", Style::default().fg(Color::Gray)),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            ":help",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled(" commands", Style::default().fg(Color::Gray)),
+    ]));
+
+    // Line 3: Warnings/action prompts or empty
+    if app.confirmation_state.is_some() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                " WARNING: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Alt+Y: approve | Alt+N: skip | Alt+P: preview",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    } else if let Some(warning) = app.operation_mode.warning_level().message() {
+        lines.push(Line::from(vec![Span::styled(
+            format!(" {} ", warning),
+            Style::default()
+                .fg(app.operation_mode.warning_level().color())
                 .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw(" | "));
+        )]));
+    } else {
+        // Empty line for breathing room
+        lines.push(Line::from(""));
     }
-    spans.push(Span::raw(status_text));
-    spans.push(Span::raw(" | "));
-    spans.push(Span::styled(
-        "Shift+Tab: cycle modes",
-        Style::default().fg(Color::DarkGray),
-    ));
-    spans.push(Span::raw(" | "));
-    spans.push(Span::styled(
-        "Ctrl+C: quit",
-        Style::default().fg(Color::DarkGray),
-    ));
 
-    // Create the status line and ensure it fills the entire width
-    let status_line = Line::from(spans);
-
-    // Use Block to ensure the entire area is cleared before rendering
-    let status_bar = Paragraph::new(vec![status_line])
+    let status_bar = Paragraph::new(lines)
         .style(Style::default().bg(Color::Black))
-        .block(Block::default()); // This ensures the entire area is cleared
+        .block(Block::default());
 
     frame.render_widget(status_bar, area);
 }
