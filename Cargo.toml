@@ -15,6 +15,7 @@ futures = "0.3"
 
 # TUI
 ratatui = { version = "0.29", features = ["scrolling-regions", "palette"] }
+ratatui-macros = "0.4"
 crossterm = "0.28"
 tui-textarea = "0.7"
 
@@ -66,6 +67,7 @@ colored = "2.1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 sysinfo = "0.31"  # System monitoring
 bytes = "1.8"
+dotenvy = "0.15"  # Load .env files
 
 # Git
 git2 = "0.19"
@@ -77,6 +79,7 @@ regex = "1.11"
 tiktoken-rs = "0.7"  # Token counting for context windows
 notify = "8.2"  # File system watching for external changes
 env_logger = "0.11.8"
+rustc-hash = "2.0"  # Faster non-cryptographic hash for HashMap
 
 [dev-dependencies]
 tempfile = "3.14"

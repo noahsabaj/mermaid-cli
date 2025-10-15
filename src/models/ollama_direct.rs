@@ -21,6 +21,11 @@ pub struct OllamaDirectModel {
     client: Client,
     model_name: String,
     base_url: String,
+    // Offloading configuration for large models
+    num_gpu: Option<i32>,
+    num_thread: Option<i32>,
+    num_ctx: Option<i32>,
+    numa: Option<bool>,
 }
 
 // Manual Debug implementation since reqwest::Client doesn't implement Debug
@@ -29,6 +34,10 @@ impl std::fmt::Debug for OllamaDirectModel {
         f.debug_struct("OllamaDirectModel")
             .field("model_name", &self.model_name)
             .field("base_url", &self.base_url)
+            .field("num_gpu", &self.num_gpu)
+            .field("num_thread", &self.num_thread)
+            .field("num_ctx", &self.num_ctx)
+            .field("numa", &self.numa)
             .finish_non_exhaustive()
     }
 }
@@ -76,7 +85,9 @@ impl OllamaDirectModel {
     ///
     /// model_id format: "ollama/qwen3-coder:30b"
     /// Extracts model name: "qwen3-coder:30b"
-    pub async fn new(model_id: &str) -> Result<Self> {
+    ///
+    /// Accepts optional config for offloading large models (GPU/CPU/RAM)
+    pub async fn new(model_id: &str, config: Option<&crate::app::Config>) -> Result<Self> {
         // Extract model name from provider/model format
         let model_name = model_id
             .strip_prefix("ollama/")
@@ -91,6 +102,18 @@ impl OllamaDirectModel {
 
         // Normalize URL (handles 0.0.0.0 bind addresses, adds http:// prefix, etc.)
         let base_url = normalize_ollama_url(&base_url);
+
+        // Extract offloading config from provided config
+        let (num_gpu, num_thread, num_ctx, numa) = if let Some(cfg) = config {
+            (
+                cfg.ollama.num_gpu,
+                cfg.ollama.num_thread,
+                cfg.ollama.num_ctx,
+                cfg.ollama.numa,
+            )
+        } else {
+            (None, None, None, None)
+        };
 
         // Create HTTP client with optimized settings
         let client = Client::builder()
@@ -108,6 +131,10 @@ impl OllamaDirectModel {
             client,
             model_name,
             base_url,
+            num_gpu,
+            num_thread,
+            num_ctx,
+            numa,
         })
     }
 
@@ -175,17 +202,35 @@ impl Model for OllamaDirectModel {
         if let Some(temp) = config.temperature {
             request_body["temperature"] = json!(temp);
         }
+
+        // Build options object with model parameters and offloading settings
+        let mut options = serde_json::Map::new();
+
         // Ollama doesn't use max_tokens, but has num_predict
         if let Some(max_tokens) = config.max_tokens {
-            request_body["options"] = json!({
-                "num_predict": max_tokens
-            });
+            options.insert("num_predict".to_string(), json!(max_tokens));
         }
         if let Some(top_p) = config.top_p {
-            if request_body.get("options").is_none() {
-                request_body["options"] = json!({});
-            }
-            request_body["options"]["top_p"] = json!(top_p);
+            options.insert("top_p".to_string(), json!(top_p));
+        }
+
+        // Add offloading parameters for large model support
+        if let Some(num_gpu) = self.num_gpu {
+            options.insert("num_gpu".to_string(), json!(num_gpu));
+        }
+        if let Some(num_thread) = self.num_thread {
+            options.insert("num_thread".to_string(), json!(num_thread));
+        }
+        if let Some(num_ctx) = self.num_ctx {
+            options.insert("num_ctx".to_string(), json!(num_ctx));
+        }
+        if let Some(numa) = self.numa {
+            options.insert("numa".to_string(), json!(numa));
+        }
+
+        // Only add options if we have any
+        if !options.is_empty() {
+            request_body["options"] = json!(options);
         }
 
         // Make request to Ollama API
@@ -423,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_format() {
         // Should fail without "ollama/" prefix
-        let result = OllamaDirectModel::new("qwen3-coder:30b").await;
+        let result = OllamaDirectModel::new("qwen3-coder:30b", None).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -435,7 +480,7 @@ mod tests {
     #[ignore] // Requires Ollama running
     async fn test_ollama_connection() {
         // Only runs if Ollama is actually running
-        let result = OllamaDirectModel::new("ollama/tinyllama").await;
+        let result = OllamaDirectModel::new("ollama/tinyllama", None).await;
         if result.is_ok() {
             let model = result.unwrap();
             assert_eq!(model.name(), "tinyllama");

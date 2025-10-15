@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::collections::HashMap;
 use tiktoken_rs::{num_tokens_from_messages, ChatCompletionRequestMessage};
 
 /// Token counting utility for various model families

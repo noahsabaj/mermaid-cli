@@ -42,7 +42,7 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     // Save session state before exiting
     use crate::session::SessionState;
     let mut session = SessionState::load().unwrap_or_default();
-    session.set_model(app.model_name.clone());
+    session.set_model(app.model_id.clone());
     if let Err(e) = session.save() {
         eprintln!("[WARNING] Failed to save session: {}", e);
     }

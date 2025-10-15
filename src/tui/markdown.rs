@@ -1,6 +1,7 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
+use ratatui_macros::{line, span};
 
 /// Parse markdown and convert to styled ratatui Lines
 pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
@@ -31,27 +32,27 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         let (prefix, style) = match level {
                             HeadingLevel::H1 => (
                                 "# ",
-                                Style::default()
+                                Style::new()
                                     .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD),
+                                    .bold(),
                             ),
                             HeadingLevel::H2 => (
                                 "## ",
-                                Style::default()
+                                Style::new()
                                     .fg(Color::Blue)
-                                    .add_modifier(Modifier::BOLD),
+                                    .bold(),
                             ),
                             HeadingLevel::H3 => (
                                 "### ",
-                                Style::default()
+                                Style::new()
                                     .fg(Color::Green)
-                                    .add_modifier(Modifier::BOLD),
+                                    .bold(),
                             ),
                             _ => (
                                 "#### ",
-                                Style::default()
+                                Style::new()
                                     .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
+                                    .bold(),
                             ),
                         };
                         current_line_spans.push(Span::styled(prefix, style));
@@ -61,17 +62,17 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         .last()
                         .copied()
                         .unwrap_or_default()
-                        .add_modifier(Modifier::ITALIC),
+                        .italic(),
                     Tag::Strong => style_stack
                         .last()
                         .copied()
                         .unwrap_or_default()
-                        .add_modifier(Modifier::BOLD),
+                        .bold(),
                     Tag::Strikethrough => style_stack
                         .last()
                         .copied()
                         .unwrap_or_default()
-                        .add_modifier(Modifier::CROSSED_OUT),
+                        .crossed_out(),
                     Tag::CodeBlock(kind) => {
                         in_code_block = true;
                         code_block_content.clear();
@@ -86,15 +87,14 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                             CodeBlockKind::Indented => "".to_string(),
                         };
                         if !lang.is_empty() {
-                            lines.push(Line::from(vec![
-                                Span::styled("```", Style::default().fg(Color::DarkGray)),
-                                Span::styled(lang, Style::default().fg(Color::Magenta)),
-                            ]));
+                            lines.push(line![
+                                span!(Color::DarkGray; "```"),
+                                span!(Color::Magenta; &lang),
+                            ]);
                         } else {
-                            lines.push(Line::from(vec![Span::styled(
-                                "```",
-                                Style::default().fg(Color::DarkGray),
-                            )]));
+                            lines.push(line![
+                                span!(Color::DarkGray; "```"),
+                            ]);
                         }
                         Style::default().fg(Color::Gray)
                     },

@@ -1,10 +1,10 @@
 use anyhow::Result;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use super::ranker::{RankerConfig, RepoRanker};
 use super::repo_graph::RepoGraph;
@@ -15,14 +15,14 @@ pub struct RepoMap {
     parser: TreeParser,
     graph: RepoGraph,
     ranker: RepoRanker,
-    cache: Arc<Mutex<RepoMapCache>>,
+    cache: Arc<RwLock<RepoMapCache>>,
 }
 
 /// Cache for parsed files and generated maps
 #[derive(Default)]
 struct RepoMapCache {
-    parsed_files: HashMap<PathBuf, Vec<Symbol>>,
-    file_references: HashMap<PathBuf, Vec<SymbolReference>>,
+    parsed_files: FxHashMap<PathBuf, Vec<Symbol>>,
+    file_references: FxHashMap<PathBuf, Vec<SymbolReference>>,
     last_map: Option<String>,
     last_token_budget: usize,
 }
@@ -34,7 +34,7 @@ impl RepoMap {
         let parser = TreeParser::new()?;
         let graph = RepoGraph::new();
         let ranker = RepoRanker::new(config)?;
-        let cache = Arc::new(Mutex::new(RepoMapCache::default()));
+        let cache = Arc::new(RwLock::new(RepoMapCache::default()));
 
         Ok(Self {
             parser,
@@ -82,7 +82,7 @@ impl RepoMap {
 
     /// Parse all files and extract symbols
     async fn parse_files(&mut self, files: &[PathBuf]) -> Result<()> {
-        let cache_lock = self.cache.lock().await;
+        let cache_lock = self.cache.read().await;
 
         // Filter out already cached files
         let files_to_parse: Vec<PathBuf> = files
@@ -137,7 +137,7 @@ impl RepoMap {
                 .collect();
 
         // Update cache with parsed results
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.cache.write().await;
         for (path, symbols, references) in parsed_results {
             if let Some(syms) = symbols {
                 cache.parsed_files.insert(path.clone(), syms);
@@ -152,7 +152,7 @@ impl RepoMap {
 
     /// Build the dependency graph from parsed data
     async fn build_graph(&mut self) -> Result<()> {
-        let cache = self.cache.lock().await;
+        let cache = self.cache.read().await;
 
         // Clear existing graph
         self.graph.clear();
@@ -183,7 +183,7 @@ impl RepoMap {
 
         // Check cache
         {
-            let cache = self.cache.lock().await;
+            let cache = self.cache.read().await;
             if let Some(ref last_map) = cache.last_map {
                 if cache.last_token_budget == budget {
                     return Ok(last_map.clone());
@@ -211,7 +211,7 @@ impl RepoMap {
 
         // Update cache
         {
-            let mut cache = self.cache.lock().await;
+            let mut cache = self.cache.write().await;
             cache.last_map = Some(map.clone());
             cache.last_token_budget = budget;
         }
@@ -221,7 +221,7 @@ impl RepoMap {
 
     /// Update map when files change
     pub async fn update_files(&mut self, changed_files: &[PathBuf]) -> Result<()> {
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.cache.write().await;
 
         for file in changed_files {
             // Remove from cache to force reparse
@@ -271,7 +271,7 @@ impl RepoMap {
 
     /// Clear all cached data
     pub async fn clear_cache(&mut self) {
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.cache.write().await;
         cache.parsed_files.clear();
         cache.file_references.clear();
         cache.last_map = None;

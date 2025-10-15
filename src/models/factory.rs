@@ -30,7 +30,8 @@ impl ModelFactory {
         if model_id.starts_with("ollama/") {
             // DIRECT CONNECTION - No proxy needed
             // This is the tested and working path
-            let model = OllamaDirectModel::new(model_id).await?;
+            // Pass config for offloading settings (num_gpu, num_thread, etc.)
+            let model = OllamaDirectModel::new(model_id, config).await?;
             Ok(Box::new(model))
         } else {
             // API MODELS - Use LiteLLM proxy

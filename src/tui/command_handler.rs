@@ -76,7 +76,7 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
         match new_model.await {
             Ok(Ok(model)) => {
                 // Update the model and model name
-                *app.model.lock().await = model;
+                *app.model.write().await = model;
                 app.model_name = model_id.clone();
                 app.set_status(format!("Switched to model: {}", model_id));
 

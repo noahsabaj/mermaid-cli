@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,8 +14,8 @@ pub struct LazyProjectContext {
     pub project_type: String,
     /// List of all file paths (loaded immediately)
     pub file_paths: Arc<Vec<PathBuf>>,
-    /// Lazily loaded file contents
-    pub files: Arc<RwLock<HashMap<String, String>>>,
+    /// Lazily loaded file contents (using FxHashMap for performance)
+    pub files: Arc<RwLock<FxHashMap<String, String>>>,
     /// Running token count (updated as files are loaded)
     pub token_count: Arc<AtomicUsize>,
     /// Files that have been requested for loading
@@ -33,7 +33,7 @@ impl LazyProjectContext {
             root_path: root_path.clone(),
             project_type: detect_project_type(&root_path),
             file_paths: Arc::new(file_paths),
-            files: Arc::new(RwLock::new(HashMap::new())),
+            files: Arc::new(RwLock::new(FxHashMap::default())),
             token_count: Arc::new(AtomicUsize::new(0)),
             loading_queue: Arc::new(Mutex::new(Vec::new())),
             cache,

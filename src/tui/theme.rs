@@ -1,4 +1,4 @@
-use ratatui::style::Color;
+use ratatui::style::{Color, Stylize};
 use serde::{Deserialize, Serialize};
 
 /// Theme configuration for the TUI

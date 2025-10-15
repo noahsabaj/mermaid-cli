@@ -14,5 +14,5 @@ mod types;
 pub use action_executor::execute_action;
 pub use filesystem::read_file;
 pub use mode_aware_executor::ModeAwareExecutor;
-pub use parser::parse_actions;
-pub use types::{ActionResult, AgentAction};
+pub use parser::{parse_actions, segment_message, strip_action_blocks, MessageSegment};
+pub use types::{ActionDisplay, ActionResult, AgentAction};

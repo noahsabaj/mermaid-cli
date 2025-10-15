@@ -49,7 +49,7 @@ pub async fn run_app_loop(
             loop {
                 interval.tick().await;
                 let stats = {
-                    let mut m = monitor.lock().await;
+                    let mut m = monitor.write().await;
                     m.get_stats()
                 };
                 if let Ok(stats) = stats {
@@ -200,7 +200,7 @@ async fn handle_message_submit(
             let _ = tx_clone.try_send(chunk.to_string());
         });
 
-        let mut model = model.lock().await;
+        let mut model = model.write().await;
         match model.chat(&messages, &context, &config, Some(callback)).await {
             Ok(_) => {
                 // Response is complete - content already streamed via callback

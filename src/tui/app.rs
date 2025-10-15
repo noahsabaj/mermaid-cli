@@ -1,11 +1,12 @@
 use super::mode::OperationMode;
 use super::theme::Theme;
+use super::widgets::{ChatState, InputState, SidebarState};
 use crate::agents::{AgentAction, ModeAwareExecutor};
 use crate::diagnostics::{DiagnosticsMode, HardwareMonitor, HardwareStats};
 use crate::models::{ChatMessage, MessageRole, Model, ProjectContext};
 use crate::session::{ConversationHistory, ConversationManager};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 /// Application state
 pub struct App {
@@ -17,16 +18,23 @@ pub struct App {
     pub cursor_position: usize,
     /// Is the app running?
     pub running: bool,
-    /// Current model
-    pub model: Arc<Mutex<Box<dyn Model>>>,
+    /// Current model (RwLock for concurrent reads during UI rendering)
+    pub model: Arc<RwLock<Box<dyn Model>>>,
     /// Project context
     pub context: ProjectContext,
     /// Current model response (for streaming)
     pub current_response: String,
     /// Is model currently generating?
     pub is_generating: bool,
-    /// Scroll offset for chat view
-    pub scroll_offset: u16,
+
+    // Widget States
+    /// Chat widget state (scroll, scrolling flag)
+    pub chat_state: ChatState,
+    /// Input widget state (cursor position for display)
+    pub input_state: InputState,
+    /// Sidebar widget state (table state, selection)
+    pub sidebar_state: SidebarState,
+
     /// Selected message index (for navigation)
     pub selected_message: Option<usize>,
     /// Show file tree sidebar
@@ -35,7 +43,9 @@ pub struct App {
     pub sidebar_expanded: bool,
     /// Current working directory
     pub working_dir: String,
-    /// Model name for display
+    /// Full model ID (e.g., "ollama/qwen3-coder:30b")
+    pub model_id: String,
+    /// Model name for display (short version)
     pub model_name: String,
     /// Status message
     pub status_message: Option<String>,
@@ -53,8 +63,6 @@ pub struct App {
     pub reading_file_status: Option<String>,
     /// Current confirmation state
     pub confirmation_state: Option<ConfirmationState>,
-    /// Track if user is manually scrolling (not at bottom)
-    pub is_user_scrolling: bool,
     /// Track last time status was set for timeout
     pub status_timestamp: Option<std::time::Instant>,
     /// Abort handle for canceling generation
@@ -63,8 +71,8 @@ pub struct App {
     pub conversation_manager: Option<ConversationManager>,
     /// Current conversation being tracked
     pub current_conversation: Option<ConversationHistory>,
-    /// Hardware monitor
-    pub hardware_monitor: Option<Arc<Mutex<HardwareMonitor>>>,
+    /// Hardware monitor (RwLock for concurrent reads every frame)
+    pub hardware_monitor: Option<Arc<RwLock<HardwareMonitor>>>,
     /// Current hardware stats
     pub hardware_stats: Option<HardwareStats>,
     /// Diagnostics display mode
@@ -75,7 +83,7 @@ pub struct App {
 
 impl App {
     /// Create a new app instance
-    pub fn new(model: Box<dyn Model>, context: ProjectContext) -> Self {
+    pub fn new(model: Box<dyn Model>, context: ProjectContext, model_id: String) -> Self {
         let model_name = model.name().to_string();
         let working_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -88,22 +96,25 @@ impl App {
             .map(|_| ConversationHistory::new(working_dir.clone(), model_name.clone()));
 
         // Initialize hardware monitor
-        let hardware_monitor = Some(Arc::new(Mutex::new(HardwareMonitor::new())));
+        let hardware_monitor = Some(Arc::new(RwLock::new(HardwareMonitor::new())));
 
         Self {
             messages: Vec::new(),
             input: String::new(),
             cursor_position: 0,
             running: true,
-            model: Arc::new(Mutex::new(model)),
+            model: Arc::new(RwLock::new(model)),
             context,
             current_response: String::new(),
             is_generating: false,
-            scroll_offset: 0,
+            chat_state: ChatState::new(),
+            input_state: InputState::new(),
+            sidebar_state: SidebarState::new(),
             selected_message: None,
             show_sidebar: false, // Hidden by default - press Ctrl+S to show
             sidebar_expanded: false,
             working_dir,
+            model_id,
             model_name,
             status_message: None,
             operation_mode: OperationMode::default(), // Starts in Normal mode
@@ -113,7 +124,6 @@ impl App {
             pending_file_read: false,
             reading_file_status: None,
             confirmation_state: None,
-            is_user_scrolling: false,
             status_timestamp: None,
             generation_abort: None,
             conversation_manager,
@@ -131,6 +141,7 @@ impl App {
             role,
             content,
             timestamp: chrono::Local::now(),
+            actions: Vec::new(),
         };
         self.messages.push(message.clone());
 
@@ -195,8 +206,8 @@ impl App {
 
     /// Auto-scroll to bottom of chat
     pub fn auto_scroll_to_bottom(&mut self, viewport_height: u16) {
-        if !self.is_user_scrolling {
-            self.scroll_offset = self.calculate_max_scroll(viewport_height);
+        if !self.chat_state.is_user_scrolling {
+            self.chat_state.scroll_offset = self.calculate_max_scroll(viewport_height);
         }
     }
 
@@ -206,26 +217,26 @@ impl App {
         let viewport_height = 20; // This should be passed in, but keeping for compatibility
         let max_scroll = self.calculate_max_scroll(viewport_height);
 
-        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_scroll);
+        self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_add(amount).min(max_scroll);
 
         // User is manually scrolling if they're not at the bottom
         let threshold = 3; // Allow small margin for rounding
-        if self.scroll_offset < max_scroll.saturating_sub(threshold) {
-            self.is_user_scrolling = true;
+        if self.chat_state.scroll_offset < max_scroll.saturating_sub(threshold) {
+            self.chat_state.is_user_scrolling = true;
         }
     }
 
     /// Scroll chat view down
     pub fn scroll_down(&mut self, amount: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_sub(amount);
 
         // If user scrolls close to bottom, resume auto-scrolling
         let viewport_height = 20; // Should be passed in
         let max_scroll = self.calculate_max_scroll(viewport_height);
         let threshold = 3;
-        if self.scroll_offset >= max_scroll.saturating_sub(threshold) {
-            self.is_user_scrolling = false;
-            self.scroll_offset = max_scroll; // Snap to bottom
+        if self.chat_state.scroll_offset >= max_scroll.saturating_sub(threshold) {
+            self.chat_state.is_user_scrolling = false;
+            self.chat_state.scroll_offset = max_scroll; // Snap to bottom
         }
     }
 

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::agents::{self, AgentAction, ModeAwareExecutor};
+use crate::agents::{self, ActionDisplay, ActionResult as AgentActionResult, AgentAction, ModeAwareExecutor};
 use crate::models::{MessageRole, ModelConfig, StreamCallback};
 use crate::tui::{App, ConfirmationState, FileInfo};
 use crate::utils::count_file_tokens;
@@ -132,12 +132,23 @@ pub async fn confirm_action(
 /// - WriteFile: Updates context with new file contents
 /// - DeleteFile: Updates context to remove file
 /// - Other actions: Just show success status
+///
+/// Also builds ActionDisplay and attaches to current message for UI rendering
 async fn handle_action_success(
     app: &mut App,
     action: &AgentAction,
     output: String,
     tx: &mpsc::Sender<String>,
 ) -> Result<()> {
+    // Build ActionDisplay for UI rendering
+    let action_display = build_action_display(action, &output);
+
+    // Attach ActionDisplay to the most recent assistant message
+    if let Some(last_msg) = app.messages.iter_mut().rev().find(|m| matches!(m.role, MessageRole::Assistant)) {
+        last_msg.actions.push(action_display);
+    }
+
+    // Perform action-specific post-processing
     match action {
         AgentAction::ReadFile { path } => {
             // Feedback loop: Send file contents back to model
@@ -175,7 +186,7 @@ async fn handle_action_success(
                     let _ = tx_clone.try_send(chunk.to_string());
                 });
 
-                let mut model = model.lock().await;
+                let mut model = model.write().await;
                 match model
                     .chat(&messages, &context, &config, Some(callback))
                     .await
@@ -211,6 +222,105 @@ async fn handle_action_success(
     }
 
     Ok(())
+}
+
+/// Build an ActionDisplay from an action and its output
+fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
+    match action {
+        AgentAction::WriteFile { path, content } => {
+            let line_count = content.lines().count();
+            ActionDisplay {
+                action_type: "Write".to_string(),
+                target: path.clone(),
+                result: AgentActionResult::Success { output: output.to_string() },
+                preview: None,
+                line_count: Some(line_count),
+                file_content: Some(content.clone()),
+            }
+        },
+        AgentAction::ReadFile { path } => {
+            let line_count = output.lines().count();
+            ActionDisplay {
+                action_type: "Read".to_string(),
+                target: path.clone(),
+                result: AgentActionResult::Success { output: output.to_string() },
+                preview: Some(truncate_output(output, 3)),
+                line_count: Some(line_count),
+                file_content: None,
+            }
+        },
+        AgentAction::ExecuteCommand { command, .. } => {
+            ActionDisplay {
+                action_type: "Bash".to_string(),
+                target: command.clone(),
+                result: AgentActionResult::Success { output: output.to_string() },
+                preview: Some(truncate_output(output, 5)),
+                line_count: Some(output.lines().count()),
+                file_content: None,
+            }
+        },
+        AgentAction::DeleteFile { path } => {
+            ActionDisplay {
+                action_type: "Delete".to_string(),
+                target: path.clone(),
+                result: AgentActionResult::Success { output: output.to_string() },
+                preview: None,
+                line_count: None,
+                file_content: None,
+            }
+        },
+        AgentAction::CreateDirectory { path } => {
+            ActionDisplay {
+                action_type: "CreateDir".to_string(),
+                target: path.clone(),
+                result: AgentActionResult::Success { output: output.to_string() },
+                preview: None,
+                line_count: None,
+                file_content: None,
+            }
+        },
+        AgentAction::GitDiff { path } => {
+            ActionDisplay {
+                action_type: "GitDiff".to_string(),
+                target: path.clone().unwrap_or_else(|| ".".to_string()),
+                result: AgentActionResult::Success { output: output.to_string() },
+                preview: Some(truncate_output(output, 10)),
+                line_count: Some(output.lines().count()),
+                file_content: None,
+            }
+        },
+        AgentAction::GitStatus => {
+            ActionDisplay {
+                action_type: "GitStatus".to_string(),
+                target: ".".to_string(),
+                result: AgentActionResult::Success { output: output.to_string() },
+                preview: Some(truncate_output(output, 10)),
+                line_count: Some(output.lines().count()),
+                file_content: None,
+            }
+        },
+        AgentAction::GitCommit { message, .. } => {
+            ActionDisplay {
+                action_type: "GitCommit".to_string(),
+                target: message.clone(),
+                result: AgentActionResult::Success { output: output.to_string() },
+                preview: Some(truncate_output(output, 3)),
+                line_count: None,
+                file_content: None,
+            }
+        },
+    }
+}
+
+/// Truncate output to N lines with ellipsis indicator
+fn truncate_output(output: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    if lines.len() <= max_lines {
+        output.to_string()
+    } else {
+        let truncated = lines[..max_lines].join("\n");
+        format!("{}\n... ({} more lines)", truncated, lines.len() - max_lines)
+    }
 }
 
 /// Detect programming language from file extension

@@ -344,6 +344,19 @@ dependencies = [
 
 [[package]]
 name = "compact_str"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86b9c4c00838774a6d902ef931eff7470720c51d90c2e32cfe15dc304737b3f"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "ryu",
+ "static_assertions",
+]
+
+[[package]]
+name = "compact_str"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b79c4069c6cad78e2e0cdfcbd26275770669fb39fd308a752dc110e83b9af32"
@@ -408,13 +421,29 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "crossterm"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f476fe445d41c9e991fd07515a6f463074b782242ccf4a5b7b1d1012e70824df"
+dependencies = [
+ "bitflags 2.9.4",
+ "crossterm_winapi",
+ "libc",
+ "mio 0.8.11",
+ "parking_lot",
+ "signal-hook",
+ "signal-hook-mio",
+ "winapi",
+]
+
+[[package]]
+name = "crossterm"
 version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags 2.9.4",
  "crossterm_winapi",
- "mio",
+ "mio 1.0.4",
  "parking_lot",
  "rustix 0.38.44",
  "signal-hook",
@@ -523,6 +552,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "downcast"
@@ -1487,8 +1522,9 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
- "crossterm",
+ "crossterm 0.28.1",
  "directories",
+ "dotenvy",
  "env_logger",
  "figment",
  "futures",
@@ -1502,10 +1538,12 @@ dependencies = [
  "petgraph",
  "pretty_assertions",
  "pulldown-cmark",
- "ratatui",
+ "ratatui 0.29.0",
+ "ratatui-macros",
  "rayon",
  "regex",
  "reqwest",
+ "rustc-hash 2.1.1",
  "serde",
  "serde_json",
  "sha2",
@@ -1544,6 +1582,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
+]
+
+[[package]]
+name = "mio"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4a650543ca06a924e8b371db273b2756685faae30f8487da1b56505a8f78b0c"
+dependencies = [
+ "libc",
+ "log",
+ "wasi 0.11.1+wasi-snapshot-preview1",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -1613,7 +1663,7 @@ dependencies = [
  "kqueue",
  "libc",
  "log",
- "mio",
+ "mio 1.0.4",
  "notify-types",
  "walkdir",
  "windows-sys 0.60.2",
@@ -2008,14 +2058,35 @@ checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
 name = "ratatui"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d16546c5b5962abf8ce6e2881e722b4e0ae3b6f1a08a26ae3573c55853ca68d3"
+dependencies = [
+ "bitflags 2.9.4",
+ "cassowary",
+ "compact_str 0.7.1",
+ "crossterm 0.27.0",
+ "itertools",
+ "lru",
+ "paste",
+ "stability",
+ "strum",
+ "strum_macros",
+ "unicode-segmentation",
+ "unicode-truncate",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "ratatui"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eabd94c2f37801c20583fc49dd5cd6b0ba68c716787c2dd6ed18571e1e63117b"
 dependencies = [
  "bitflags 2.9.4",
  "cassowary",
- "compact_str",
- "crossterm",
+ "compact_str 0.8.1",
+ "crossterm 0.28.1",
  "indoc",
  "instability",
  "itertools",
@@ -2026,6 +2097,15 @@ dependencies = [
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "ratatui-macros"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6eb998c66043d39b6e8c1ebb9db7227857eb180263a5f52dba2fafd19e6eb485"
+dependencies = [
+ "ratatui 0.27.0",
 ]
 
 [[package]]
@@ -2165,6 +2245,12 @@ name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
 
 [[package]]
 name = "rustix"
@@ -2391,7 +2477,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34db1a06d485c9142248b7a054f034b349b212551f3dfd19c94d45a754a217cd"
 dependencies = [
  "libc",
- "mio",
+ "mio 0.8.11",
+ "mio 1.0.4",
  "signal-hook",
 ]
 
@@ -2430,6 +2517,16 @@ checksum = "233504af464074f9d066d7b5416c5f9b894a5862a6506e306f7b816cdd6f1807"
 dependencies = [
  "libc",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "stability"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d904e7009df136af5297832a3ace3370cd14ff1546a232f4f185036c2736fcac"
+dependencies = [
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -2630,7 +2727,7 @@ dependencies = [
  "fancy-regex",
  "lazy_static",
  "regex",
- "rustc-hash",
+ "rustc-hash 1.1.0",
 ]
 
 [[package]]
@@ -2653,7 +2750,7 @@ dependencies = [
  "bytes",
  "io-uring",
  "libc",
- "mio",
+ "mio 1.0.4",
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
@@ -2966,8 +3063,8 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a5318dd619ed73c52a9417ad19046724effc1287fb75cdcc4eca1d6ac1acbae"
 dependencies = [
- "crossterm",
- "ratatui",
+ "crossterm 0.28.1",
+ "ratatui 0.29.0",
  "unicode-width 0.2.0",
 ]
 

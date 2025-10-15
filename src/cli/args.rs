@@ -14,6 +14,24 @@ pub struct Cli {
     #[arg(short, long)]
     pub config: Option<PathBuf>,
 
+    /// Number of GPU layers for Ollama (overrides config)
+    /// Lower values offload more layers to CPU/RAM, enabling larger models
+    #[arg(long)]
+    pub num_gpu: Option<i32>,
+
+    /// Number of CPU threads for Ollama (overrides config)
+    /// Higher values improve CPU inference speed for offloaded layers
+    #[arg(long)]
+    pub num_thread: Option<i32>,
+
+    /// Context window size for Ollama (overrides config)
+    #[arg(long)]
+    pub num_ctx: Option<i32>,
+
+    /// Enable NUMA optimization for Ollama (overrides config)
+    #[arg(long)]
+    pub numa: Option<bool>,
+
     /// Verbose output
     #[arg(short, long)]
     pub verbose: bool,

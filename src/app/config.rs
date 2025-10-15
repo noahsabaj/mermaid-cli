@@ -175,6 +175,17 @@ pub struct OllamaConfig {
     pub host: String,
     /// Ollama server port
     pub port: u16,
+    /// Number of GPU layers to offload (None = auto, 0 = CPU only, positive = specific count)
+    /// Lower values free up VRAM for larger models at the cost of speed
+    pub num_gpu: Option<i32>,
+    /// Number of CPU threads for processing offloaded layers
+    /// Higher values improve CPU inference speed for large models
+    pub num_thread: Option<i32>,
+    /// Context window size (number of tokens)
+    /// Larger values allow longer conversations but use more memory
+    pub num_ctx: Option<i32>,
+    /// Enable NUMA optimization for multi-CPU systems
+    pub numa: Option<bool>,
 }
 
 impl Default for OllamaConfig {
@@ -182,6 +193,10 @@ impl Default for OllamaConfig {
         Self {
             host: String::from("localhost"),
             port: DEFAULT_OLLAMA_PORT,
+            num_gpu: None,     // Let Ollama auto-detect
+            num_thread: None,  // Let Ollama auto-detect
+            num_ctx: None,     // Use model default
+            numa: None,        // Auto-detect
         }
     }
 }

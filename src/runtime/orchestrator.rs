@@ -26,7 +26,7 @@ impl Orchestrator {
     /// Create a new orchestrator from CLI args
     pub fn new(cli: Cli) -> Result<Self> {
         // Load configuration
-        let config = if let Some(config_path) = &cli.config {
+        let mut config = if let Some(config_path) = &cli.config {
             let toml_str = std::fs::read_to_string(config_path)?;
             toml::from_str::<Config>(&toml_str)?
         } else {
@@ -41,6 +41,20 @@ impl Orchestrator {
                 },
             }
         };
+
+        // Apply CLI overrides for Ollama offloading
+        if cli.num_gpu.is_some() {
+            config.ollama.num_gpu = cli.num_gpu;
+        }
+        if cli.num_thread.is_some() {
+            config.ollama.num_thread = cli.num_thread;
+        }
+        if cli.num_ctx.is_some() {
+            config.ollama.num_ctx = cli.num_ctx;
+        }
+        if cli.numa.is_some() {
+            config.ollama.numa = cli.numa;
+        }
 
         // Load session state
         let session = SessionState::load().unwrap_or_default();
@@ -146,7 +160,7 @@ impl Orchestrator {
         current_step += 1;
         log_progress(current_step, total_steps, "Starting UI");
         let context = lazy_context.to_project_context().await;
-        let mut app = App::new(model, context);
+        let mut app = App::new(model, context, model_id.clone());
 
         // Start loading files in background after UI is visible
         let lazy_context_bg = lazy_context.clone();

@@ -1,5 +1,6 @@
+use crate::agents::ActionDisplay;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Represents a chat message
@@ -8,6 +9,9 @@ pub struct ChatMessage {
     pub role: MessageRole,
     pub content: String,
     pub timestamp: chrono::DateTime<chrono::Local>,
+    /// Actions performed during this message (for display purposes)
+    #[serde(default)]
+    pub actions: Vec<ActionDisplay>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,8 +26,8 @@ pub enum MessageRole {
 pub struct ProjectContext {
     /// Root directory of the project
     pub root_path: String,
-    /// Map of file paths to their contents
-    pub files: HashMap<String, String>,
+    /// Map of file paths to their contents (using FxHashMap for performance)
+    pub files: FxHashMap<String, String>,
     /// Project type (e.g., "rust", "python", "javascript")
     pub project_type: Option<String>,
     /// Total token count of the context
@@ -36,7 +40,7 @@ impl ProjectContext {
     pub fn new(root_path: String) -> Self {
         Self {
             root_path,
-            files: HashMap::new(),
+            files: FxHashMap::default(),
             project_type: None,
             token_count: 0,
             included_files: Vec::new(),
@@ -50,19 +54,35 @@ impl ProjectContext {
 
     /// Get a formatted string of the project context for the model
     pub fn to_prompt_context(&self) -> String {
-        let mut context = String::new();
+        // Pre-calculate capacity to reduce allocations
+        let header_size = 100; // Approximate size of headers
+        let file_list_size = self.files.keys().map(|k| k.len() + 5).sum::<usize>(); // "  - path\n"
+        let content_size: usize = self.included_files.iter()
+            .filter_map(|path| self.files.get(path).map(|content| (path, content)))
+            .map(|(path, content)| content.len() + path.len() + 20) // path + decorators
+            .sum();
+
+        let capacity = header_size + file_list_size + content_size;
+        let mut context = String::with_capacity(capacity);
 
         if let Some(project_type) = &self.project_type {
-            context.push_str(&format!("Project type: {}\n", project_type));
+            context.push_str("Project type: ");
+            context.push_str(project_type);
+            context.push('\n');
         }
 
-        context.push_str(&format!("Project root: {}\n", self.root_path));
-        context.push_str(&format!("Files in context: {}\n\n", self.files.len()));
+        context.push_str("Project root: ");
+        context.push_str(&self.root_path);
+        context.push_str("\nFiles in context: ");
+        context.push_str(&self.files.len().to_string());
+        context.push_str("\n\n");
 
         // Add file tree structure
         context.push_str("Project structure:\n");
         for path in self.files.keys() {
-            context.push_str(&format!("  - {}\n", path));
+            context.push_str("  - ");
+            context.push_str(path);
+            context.push('\n');
         }
         context.push('\n');
 
@@ -71,7 +91,9 @@ impl ProjectContext {
             context.push_str("Relevant file contents:\n");
             for file_path in &self.included_files {
                 if let Some(content) = self.files.get(file_path) {
-                    context.push_str(&format!("\n=== {} ===\n", file_path));
+                    context.push_str("\n=== ");
+                    context.push_str(file_path);
+                    context.push_str(" ===\n");
                     context.push_str(content);
                     context.push_str("\n=== end ===\n");
                 }
@@ -106,7 +128,9 @@ impl Default for ModelConfig {
 
 ## IMPORTANT: Action Blocks
 
-You have the ability to perform actions by using special action blocks in your responses. These blocks will be automatically parsed and executed.
+You have the ability to perform actions by using special action blocks in your responses. Action blocks are automatically parsed and executed, and the results are displayed cleanly to the user.
+
+**Key point**: Action blocks themselves are NOT shown to the user. Instead, the system displays clean action summaries with results. This means you should write natural, explanatory text AROUND action blocks to provide context.
 
 ### File Operations
 
@@ -157,9 +181,20 @@ To see git diff:
 2. When asked to run commands, ALWAYS use the [COMMAND:] action block
 3. Be precise with file paths - use the exact paths shown in the project context
 4. After writing files, consider running relevant tests or build commands
-5. Explain what you're doing before and after each action block
+5. Provide natural explanatory text BEFORE and AFTER action blocks, since the blocks themselves won't be shown
+6. Don't repeat code content in your explanation - the action summary will show what was done
 
-Remember: You're not just showing code examples - you can actually create, modify, and execute files!"#.to_string()
+Example good response:
+"I'll create a new configuration file for you.
+
+[FILE_WRITE: config.toml]
+[database]
+host = "localhost"
+[/FILE_WRITE]
+
+The configuration file has been created with the default settings. You can modify the host value if needed."
+
+Remember: You're not just showing code examples - you can actually create, modify, and execute files! The user sees your explanations and clean action summaries, not the raw action blocks."#.to_string()
             ),
         }
     }

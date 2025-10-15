@@ -47,7 +47,7 @@ fn handle_mouse_event(
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             app.scroll_down(3); // Scroll up moves view down
-            app.is_user_scrolling = true;
+            app.chat_state.is_user_scrolling = true;
             Ok(EventAction::Continue)
         },
         MouseEventKind::ScrollDown => {
@@ -55,9 +55,9 @@ fn handle_mouse_event(
 
             // Check if scrolled to bottom
             let max_scroll = app.calculate_max_scroll(viewport_height);
-            if app.scroll_offset >= max_scroll.saturating_sub(3) {
-                app.is_user_scrolling = false;
-                app.scroll_offset = max_scroll;
+            if app.chat_state.scroll_offset >= max_scroll.saturating_sub(3) {
+                app.chat_state.is_user_scrolling = false;
+                app.chat_state.scroll_offset = max_scroll;
             }
             Ok(EventAction::Continue)
         },
@@ -173,12 +173,20 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
     // Mode-specific shortcuts
     if modifiers == KeyModifiers::CONTROL {
         match c {
+            'd' => {
+                app.toggle_diagnostics();
+                return EventAction::Continue;
+            },
             'e' => {
                 app.set_mode(crate::tui::mode::OperationMode::AcceptEdits);
                 return EventAction::Continue;
             },
             'p' => {
                 app.set_mode(crate::tui::mode::OperationMode::PlanMode);
+                return EventAction::Continue;
+            },
+            's' => {
+                app.toggle_sidebar();
                 return EventAction::Continue;
             },
             'y' => {

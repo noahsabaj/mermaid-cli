@@ -1,17 +1,13 @@
 use once_cell::sync::Lazy;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    layout::{Constraint, Direction, Flex, Layout, Margin, Rect},
     Frame,
 };
 use std::sync::Mutex;
 
 use crate::diagnostics::{render_diagnostics_panel, DiagnosticsMode};
-use crate::models::MessageRole;
 use crate::tui::app::App;
-use crate::tui::markdown::parse_markdown;
+use crate::tui::widgets::{ChatWidget, InputWidget, StatusWidget, HeaderWidget, SidebarWidget};
 use crate::utils::MutexExt;
 
 /// Cache for layout calculations to improve performance
@@ -30,9 +26,10 @@ impl LayoutCache {
     }
 
     fn get_main_layout(&mut self, area: Rect, input_height: u16) -> Vec<Rect> {
+        // Check if cached layout is still valid (cheap clone of Copy types)
         if let Some((w, h, ref rects)) = self.main_layout {
             if w == area.width && h == input_height {
-                return rects.clone();
+                return rects.clone(); // Cheap: Vec of Copy types (4 Rects = ~32 bytes)
             }
         }
 
@@ -41,6 +38,7 @@ impl LayoutCache {
             .direction(Direction::Vertical)
             .margin(0)
             .spacing(0)  // No negative spacing - prevents overlap
+            .flex(Flex::Start)  // Align to top
             .constraints([
                 Constraint::Length(1),  // Header (minimal, single line)
                 Constraint::Min(10),    // Main content (grows to fill)
@@ -55,9 +53,10 @@ impl LayoutCache {
     }
 
     fn get_content_layout(&mut self, show_sidebar: bool, area: Rect) -> Vec<Rect> {
+        // Check if cached layout is still valid (cheap clone of Copy types)
         if let Some((sidebar, cached_area, ref rects)) = self.content_layout {
             if sidebar == show_sidebar && cached_area == area {
-                return rects.clone();
+                return rects.clone(); // Cheap: Vec of Copy types (2 Rects = ~16 bytes)
             }
         }
 
@@ -65,7 +64,8 @@ impl LayoutCache {
             Layout::default()
                 .direction(Direction::Horizontal)
                 .spacing(1)  // Proper spacing between sidebar and main content
-                .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+                .flex(Flex::Start)  // Align to left
+                .constraints([Constraint::Min(20), Constraint::Fill(1)])
                 .split(area)
                 .to_vec()
         } else {
@@ -81,7 +81,7 @@ impl LayoutCache {
 static LAYOUT_CACHE: Lazy<Mutex<LayoutCache>> = Lazy::new(|| Mutex::new(LayoutCache::new()));
 
 /// Render the main UI
-pub fn render_ui(frame: &mut Frame, app: &App) {
+pub fn render_ui(frame: &mut Frame, app: &mut App) {
     // Calculate input area height based on content
     let terminal_width = frame.area().width.saturating_sub(4) as usize; // Account for borders
     let input_lines = if app.input.is_empty() {
@@ -108,8 +108,13 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
         cache.get_main_layout(frame.area(), input_height)
     };
 
-    // Render header
-    render_header(frame, chunks[0], app);
+    // Render header using new HeaderWidget
+    let header = HeaderWidget {
+        model_name: &app.model_name,
+        working_dir: &app.working_dir,
+        theme: &app.theme,
+    };
+    frame.render_widget(header, chunks[0]);
 
     // Use cached content layout
     let content_chunks = {
@@ -117,23 +122,51 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
         cache.get_content_layout(app.show_sidebar, chunks[1])
     };
 
-    // Render sidebar if visible
+    // Render sidebar if visible using new SidebarWidget
     if app.show_sidebar {
-        render_sidebar(frame, content_chunks[0], app);
+        let sidebar = SidebarWidget {
+            context: &app.context,
+            expanded: app.sidebar_expanded,
+            working_dir: &app.working_dir,
+            theme: &app.theme,
+        };
+        frame.render_stateful_widget(sidebar, content_chunks[0], &mut app.sidebar_state);
     }
 
-    // Render chat area with horizontal padding for breathing room
+    // Render chat area with horizontal padding using new ChatWidget
     let chat_area = content_chunks[1].inner(Margin {
         horizontal: 1,
         vertical: 0,
     });
-    render_chat(frame, chat_area, app);
+    let chat_widget = ChatWidget {
+        messages: &app.messages,
+        current_response: &app.current_response,
+        is_generating: app.is_generating,
+        confirmation_state: app.confirmation_state.as_ref(),
+        pending_file_read: app.pending_file_read,
+        reading_file_status: app.reading_file_status.as_deref(),
+        operation_mode: app.operation_mode,
+        theme: &app.theme,
+    };
+    frame.render_stateful_widget(chat_widget, chat_area, &mut app.chat_state);
 
-    // Render input area
-    render_input(frame, chunks[2], app);
+    // Render input area using new InputWidget
+    let input_widget = InputWidget {
+        input: &app.input,
+        showing_command_hints: app.input.starts_with(':'),
+        theme: &app.theme,
+    };
+    frame.render_stateful_widget(input_widget, chunks[2], &mut app.input_state);
 
-    // Render status bar
-    render_status_bar(frame, chunks[3], app);
+    // Render status bar using new StatusWidget
+    let status_widget = StatusWidget {
+        operation_mode: app.operation_mode,
+        status_message: app.status_message.as_deref(),
+        confirmation_pending: app.confirmation_state.is_some(),
+        is_generating: app.is_generating,
+        theme: &app.theme,
+    };
+    frame.render_widget(status_widget, chunks[3]);
 
     // Render diagnostics panel if in detailed mode
     if app.diagnostics_mode == DiagnosticsMode::Detailed {
@@ -141,667 +174,4 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
             render_diagnostics_panel(frame, frame.area(), stats);
         }
     }
-}
-
-/// Render the header (minimal, single line)
-fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    // Shorten path for display (show just directory name, not full path)
-    let short_path = std::path::Path::new(&app.working_dir)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(&app.working_dir);
-
-    let header_text = vec![Line::from(vec![
-        Span::styled(
-            "Mermaid",
-            Style::default()
-                .fg(app.theme.colors.header.to_color())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            " • ",
-            Style::default().fg(app.theme.colors.text_disabled.to_color()),
-        ),
-        Span::styled(
-            &app.model_name,
-            Style::default().fg(app.theme.colors.success.to_color()),
-        ),
-        Span::styled(
-            " • ",
-            Style::default().fg(app.theme.colors.text_disabled.to_color()),
-        ),
-        Span::styled(
-            short_path,
-            Style::default().fg(app.theme.colors.text_secondary.to_color()),
-        ),
-    ])];
-
-    let header = Paragraph::new(header_text)
-        .alignment(Alignment::Center)
-        .style(Style::default().bg(app.theme.colors.background.to_color()));
-
-    frame.render_widget(header, area);
-}
-
-/// Render the sidebar with file tree
-fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
-    let mut items = Vec::new();
-
-    // Add project info
-    if let Some(project_type) = &app.context.project_type {
-        items.push(ListItem::new(Line::from(vec![
-            Span::raw("[DIR] "),
-            Span::styled(
-                format!("Project: {}", project_type),
-                Style::default().fg(app.theme.colors.text_highlight.to_color()),
-            ),
-        ])));
-    }
-
-    items.push(ListItem::new(Line::from(vec![
-        Span::raw("[FILES] "),
-        Span::raw(format!("Files: {}", app.context.files.len())),
-    ])));
-
-    items.push(ListItem::new(Line::from(vec![
-        Span::raw("[TOKENS] "),
-        Span::raw(format!("Tokens: {}", app.context.token_count)),
-    ])));
-
-    items.push(ListItem::new(""));
-
-    // Add file list (truncated or expanded)
-    let max_files = if app.sidebar_expanded {
-        app.context.files.len()
-    } else {
-        20
-    };
-
-    for (path, _) in app.context.files.iter().take(max_files) {
-        let icon = if path.ends_with('/') {
-            "[DIR]"
-        } else {
-            "[FILE]"
-        };
-        items.push(ListItem::new(Line::from(vec![
-            Span::raw(format!("{} ", icon)),
-            Span::raw(path),
-        ])));
-    }
-
-    if !app.sidebar_expanded && app.context.files.len() > 20 {
-        items.push(ListItem::new(Line::from(vec![Span::styled(
-            format!(
-                "... and {} more (press 'e' to expand)",
-                app.context.files.len() - 20
-            ),
-            Style::default().fg(app.theme.colors.text_disabled.to_color()),
-        )])));
-    }
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(format!("Files [{}] ", app.working_dir))
-                .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(app.theme.colors.border.to_color())),
-        )
-        .style(Style::default().fg(app.theme.colors.text_primary.to_color()));
-
-    frame.render_widget(list, area);
-}
-
-/// Render the chat area
-fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
-    let mut lines = Vec::new();
-
-    let message_count = app.messages.len();
-    for (idx, msg) in app.messages.iter().enumerate() {
-        let _is_last_message = idx == message_count - 1;
-        // Add role indicator
-        let (role_span, role_color) = match msg.role {
-            MessageRole::User => ("You", app.theme.colors.user_message.to_color()),
-            MessageRole::Assistant => ("Mermaid", app.theme.colors.assistant_message.to_color()),
-            MessageRole::System => ("System", app.theme.colors.system_message.to_color()),
-        };
-
-        lines.push(Line::from(vec![Span::styled(
-            format!("[{}] ", role_span),
-            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
-        )]));
-
-        // Parse markdown for assistant messages, plain text for user messages
-        if matches!(msg.role, MessageRole::Assistant) {
-            // Use markdown parsing for assistant messages
-            let parsed_lines = parse_markdown(&msg.content);
-            lines.extend(parsed_lines);
-        } else {
-            // Plain text for user messages
-            for line in msg.content.lines() {
-                lines.push(Line::from(line.to_string()));
-            }
-        }
-
-        // Add completion indicator for assistant messages
-        if matches!(msg.role, MessageRole::Assistant) {
-            // Check if this message contains FILE_READ action
-            let has_file_read = msg.content.contains("[FILE_READ:");
-
-            // Create a separator line that spans most of the width (accounting for borders)
-            let width = area.width.saturating_sub(4) as usize; // Subtract for borders and padding
-            let separator = "─".repeat(width);
-
-            lines.push(Line::from(vec![Span::styled(
-                separator,
-                Style::default().fg(app.theme.colors.border.to_color()),
-            )]));
-
-            // Only show "Response Complete" if no FILE_READ is pending
-            if !has_file_read {
-                // Add completion message with checkmark
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "  [OK] ",
-                        Style::default()
-                            .fg(app.theme.colors.success.to_color())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "Response Complete",
-                        Style::default()
-                            .fg(app.theme.colors.text_secondary.to_color())
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ]));
-            } else {
-                // Show reading status instead - it will be set by the model's preceding text
-                if let Some(status) = &app.reading_file_status {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "  [READ] ",
-                            Style::default()
-                                .fg(app.theme.colors.info.to_color())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            status,
-                            Style::default()
-                                .fg(app.theme.colors.info.to_color())
-                                .add_modifier(Modifier::ITALIC),
-                        ),
-                    ]));
-                }
-            }
-
-            // Add another separator for better visual separation
-            let separator2 = "─".repeat(width);
-            lines.push(Line::from(vec![Span::styled(
-                separator2,
-                Style::default().fg(app.theme.colors.border.to_color()),
-            )]));
-        }
-
-        lines.push(Line::from("")); // Empty line between messages
-    }
-
-    // Show inline confirmation box if action pending
-    if let Some(ref confirmation) = app.confirmation_state {
-        let width = area.width.saturating_sub(4) as usize;
-
-        // Top border
-        lines.push(Line::from("╔".to_string() + &"═".repeat(width - 2) + "╗"));
-
-        // Title line
-        let title = format!("Action: {}", confirmation.action_description);
-        let title_len = title.len();
-        lines.push(Line::from(vec![
-            Span::raw("║ "),
-            Span::styled(
-                title,
-                Style::default()
-                    .fg(app.theme.colors.warning.to_color())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!(
-                "{}║",
-                " ".repeat(width.saturating_sub(title_len + 3))
-            )),
-        ]));
-
-        // File info if available
-        if let Some(ref info) = confirmation.file_info {
-            // Separator
-            lines.push(Line::from("╠".to_string() + &"─".repeat(width - 2) + "╣"));
-
-            // File path
-            let path_line = format!("   File: {}", info.path);
-            lines.push(Line::from(vec![
-                Span::raw("║"),
-                Span::raw(path_line.clone()),
-                Span::raw(format!(
-                    "{}║",
-                    " ".repeat(width.saturating_sub(path_line.len() + 1))
-                )),
-            ]));
-
-            // Size and status
-            let status = if info.exists {
-                "Will overwrite"
-            } else {
-                "New file"
-            };
-            let size_line = format!("   Size: {} bytes | {}", info.size, status);
-            lines.push(Line::from(vec![
-                Span::raw("║"),
-                Span::raw(size_line.clone()),
-                Span::raw(format!(
-                    "{}║",
-                    " ".repeat(width.saturating_sub(size_line.len() + 1))
-                )),
-            ]));
-
-            // Language if detected
-            if let Some(ref lang) = info.language {
-                let lang_line = format!("   Type: {}", lang);
-                lines.push(Line::from(vec![
-                    Span::raw("║"),
-                    Span::raw(lang_line.clone()),
-                    Span::raw(format!(
-                        "{}║",
-                        " ".repeat(width.saturating_sub(lang_line.len() + 1))
-                    )),
-                ]));
-            }
-
-            // Preview if available
-            if !confirmation.preview_lines.is_empty() {
-                lines.push(Line::from("╠".to_string() + &"─".repeat(width - 2) + "╣"));
-                lines.push(Line::from(vec![
-                    Span::raw("║ Preview:"),
-                    Span::raw(format!("{}║", " ".repeat(width.saturating_sub(10)))),
-                ]));
-                for line in confirmation.preview_lines.iter().take(3) {
-                    let preview_line = format!("   {}", line);
-                    let truncated = if preview_line.len() > width - 2 {
-                        format!("{}...", &preview_line[..width - 5])
-                    } else {
-                        preview_line
-                    };
-                    lines.push(Line::from(vec![
-                        Span::raw("║"),
-                        Span::styled(
-                            truncated.clone(),
-                            Style::default().fg(app.theme.colors.text_secondary.to_color()),
-                        ),
-                        Span::raw(format!(
-                            "{}║",
-                            " ".repeat(width.saturating_sub(truncated.len() + 1))
-                        )),
-                    ]));
-                }
-                if confirmation.preview_lines.len() > 3 {
-                    lines.push(Line::from(vec![
-                        Span::raw("║   ..."),
-                        Span::raw(format!("{}║", " ".repeat(width.saturating_sub(7)))),
-                    ]));
-                }
-            }
-        }
-
-        // Key shortcuts separator
-        lines.push(Line::from("╠".to_string() + &"═".repeat(width - 2) + "╣"));
-
-        // Key shortcuts
-        let shortcuts = if confirmation.allow_always {
-            " [Alt+Y] Approve   [Alt+N] Skip   [Alt+A] Always   [Alt+P] Preview "
-        } else {
-            " [Alt+Y] Approve   [Alt+N] Skip   [Alt+P] Preview "
-        };
-
-        let padding = (width.saturating_sub(shortcuts.len())) / 2;
-        lines.push(Line::from(vec![
-            Span::raw("║"),
-            Span::raw(" ".repeat(padding)),
-            Span::styled(
-                shortcuts,
-                Style::default()
-                    .fg(app.theme.colors.info.to_color())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!(
-                "{}║",
-                " ".repeat(width.saturating_sub(shortcuts.len() + padding + 1))
-            )),
-        ]));
-
-        // Bottom border
-        lines.push(Line::from("╚".to_string() + &"═".repeat(width - 2) + "╝"));
-        lines.push(Line::from(""));
-    }
-
-    // Show file reading status if active (when between FILE_READ and feedback)
-    if app.pending_file_read && app.reading_file_status.is_some() && !app.is_generating {
-        if let Some(status) = &app.reading_file_status {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "  [READ] ",
-                    Style::default()
-                        .fg(app.theme.colors.info.to_color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    status,
-                    Style::default()
-                        .fg(app.theme.colors.info.to_color())
-                        .add_modifier(Modifier::ITALIC | Modifier::SLOW_BLINK),
-                ),
-            ]));
-            lines.push(Line::from(""));
-        }
-    }
-
-    // Add current response if generating
-    if app.is_generating && !app.current_response.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            "[Mermaid] ",
-            Style::default()
-                .fg(app.theme.colors.assistant_message.to_color())
-                .add_modifier(Modifier::BOLD),
-        )]));
-
-        for line in app.current_response.lines() {
-            lines.push(Line::from(line.to_string()));
-        }
-
-        // Add typing indicator
-        lines.push(Line::from(vec![Span::styled(
-            "▋",
-            Style::default()
-                .fg(app.theme.colors.assistant_message.to_color())
-                .add_modifier(Modifier::SLOW_BLINK),
-        )]));
-    }
-
-    // Use operation mode color for border to provide visual feedback
-    let border_color = app.operation_mode.color();
-    let title = format!("Chat [{}]", app.operation_mode.display_name());
-
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color)),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((app.scroll_offset, 0));
-
-    frame.render_widget(paragraph, area);
-}
-
-/// Render the input area
-fn render_input(frame: &mut Frame, area: Rect, app: &App) {
-    // Check if we should show command hints
-    let showing_command_hints = app.input.starts_with(':');
-
-    // Adjust the input area height if showing command hints
-    let (_hints_area, input_area) = if showing_command_hints {
-        // Commands to show
-        let commands = vec![
-            (":quit", "Quit the application"),
-            (":q", "Quit (shortcut)"),
-            (":clear", "Clear chat history"),
-            (":model [name]", "Switch model or show current"),
-            (":sidebar", "Toggle file sidebar"),
-            (":sb", "Toggle sidebar (shortcut)"),
-            (":refresh", "Refresh file context from disk"),
-            (":r", "Refresh (shortcut)"),
-            (":help", "Show command help"),
-            (":h", "Help (shortcut)"),
-        ];
-
-        // Filter commands based on what user has typed
-        let typed_command = app.input.trim_start_matches(':').to_lowercase();
-        let filtered_commands: Vec<_> = if typed_command.is_empty() {
-            commands.clone()
-        } else {
-            commands
-                .into_iter()
-                .filter(|(cmd, _)| {
-                    cmd.trim_start_matches(':')
-                        .to_lowercase()
-                        .starts_with(&typed_command)
-                })
-                .collect()
-        };
-
-        // Calculate hints area height (max 6 lines to avoid taking too much space)
-        let hints_height = (filtered_commands.len() as u16 + 2).min(8);
-
-        // Split area for hints above input
-        if area.height > hints_height {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(hints_height), Constraint::Min(3)])
-                .split(area);
-
-            // Render command hints in the hints area
-            if !filtered_commands.is_empty() {
-                let mut hint_lines = vec![Line::from(vec![Span::styled(
-                    " Available Commands:",
-                    Style::default()
-                        .fg(app.theme.colors.info.to_color())
-                        .add_modifier(Modifier::BOLD),
-                )])];
-
-                for (cmd, desc) in filtered_commands.iter().take(6) {
-                    hint_lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {:<20}", cmd),
-                            Style::default()
-                                .fg(app.theme.colors.text_highlight.to_color())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            *desc,
-                            Style::default().fg(app.theme.colors.text_secondary.to_color()),
-                        ),
-                    ]));
-                }
-
-                let hints_block = Paragraph::new(hint_lines).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(app.theme.colors.border.to_color()))
-                        .title(" Commands (up/down to navigate, Enter to execute) "),
-                );
-
-                frame.render_widget(hints_block, chunks[0]);
-            }
-
-            (Some(chunks[0]), chunks[1])
-        } else {
-            (None, area)
-        }
-    } else {
-        (None, area)
-    };
-
-    // Render the input box with text wrapping
-    let input_style = Style::default().fg(app.theme.colors.text_primary.to_color());
-    let title = if showing_command_hints {
-        " Enter Command "
-    } else {
-        " Message (Esc to stop/clear • Type :help for commands) "
-    };
-    let input_text = app.input.clone();
-
-    let input = Paragraph::new(input_text.clone())
-        .style(input_style)
-        .wrap(Wrap { trim: false })  // Enable text wrapping
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(if showing_command_hints {
-                    app.theme.colors.warning.to_color()
-                } else {
-                    app.theme.colors.border.to_color()
-                }))
-                .title(title),
-        );
-
-    frame.render_widget(input, input_area);
-
-    // Calculate cursor position for wrapped text
-    {
-        let inner_width = input_area.width.saturating_sub(2) as usize; // Account for borders
-        let cursor_pos = app.cursor_position.min(app.input.len());
-
-        // Calculate which line and column the cursor is on
-        let mut current_line = 0;
-        let mut current_col = 0;
-        let mut char_count = 0;
-
-        for ch in app.input.chars() {
-            if char_count == cursor_pos {
-                break;
-            }
-
-            if ch == '\n' || current_col >= inner_width {
-                current_line += 1;
-                current_col = if ch == '\n' { 0 } else { 1 };
-            } else {
-                current_col += 1;
-            }
-            char_count += 1;
-        }
-
-        // Set cursor position
-        let cursor_x = input_area.x + 1 + (current_col as u16);
-        let cursor_y = input_area.y + 1 + (current_line as u16);
-
-        // Ensure cursor is within bounds
-        if cursor_y < input_area.y + input_area.height {
-            frame.set_cursor_position((cursor_x, cursor_y));
-        }
-    }
-}
-
-/// Render the status bar (2 lines: status + warnings, shortcuts)
-fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let mut lines = Vec::new();
-
-    // Line 1: Mode badge + Status message + inline warnings
-    let status_text = if app.confirmation_state.is_some() {
-        "Action pending".to_string()
-    } else if let Some(status) = &app.status_message {
-        status.clone()
-    } else if app.is_generating {
-        "Generating...".to_string()
-    } else {
-        "Ready".to_string()
-    };
-
-    let mut line1_spans = vec![
-        Span::styled(
-            format!(" {} ", app.operation_mode.display_name()),
-            Style::default()
-                .bg(app.operation_mode.color())
-                .fg(app.theme.colors.background.to_color())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            status_text,
-            Style::default().fg(app.theme.colors.text_primary.to_color()),
-        ),
-    ];
-
-    // Add inline warnings/prompts to Line 1
-    if app.confirmation_state.is_some() {
-        line1_spans.push(Span::raw(" • "));
-        line1_spans.push(Span::styled(
-            "Alt+Y: approve, Alt+N: skip, Alt+P: preview",
-            Style::default()
-                .fg(app.theme.colors.warning.to_color())
-                .add_modifier(Modifier::BOLD),
-        ));
-    } else {
-        let warning_level = app.operation_mode.warning_level();
-        if let Some(warning) = warning_level.message() {
-            let warning_text = warning.to_string();
-            let warning_color = warning_level.color();
-            line1_spans.push(Span::raw(" • "));
-            line1_spans.push(Span::styled(
-                warning_text,
-                Style::default()
-                    .fg(warning_color)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-    }
-
-    lines.push(Line::from(line1_spans));
-
-    // Line 2: Keyboard shortcuts (compact, always visible)
-    lines.push(Line::from(vec![
-        Span::styled(
-            " Shift+Tab ",
-            Style::default()
-                .fg(app.theme.colors.text_disabled.to_color())
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            "modes",
-            Style::default().fg(app.theme.colors.text_secondary.to_color()),
-        ),
-        Span::styled(
-            " • ",
-            Style::default().fg(app.theme.colors.text_disabled.to_color()),
-        ),
-        Span::styled(
-            "Ctrl+S ",
-            Style::default()
-                .fg(app.theme.colors.text_disabled.to_color())
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            "sidebar",
-            Style::default().fg(app.theme.colors.text_secondary.to_color()),
-        ),
-        Span::styled(
-            " • ",
-            Style::default().fg(app.theme.colors.text_disabled.to_color()),
-        ),
-        Span::styled(
-            "Ctrl+D ",
-            Style::default()
-                .fg(app.theme.colors.text_disabled.to_color())
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            "diagnostics",
-            Style::default().fg(app.theme.colors.text_secondary.to_color()),
-        ),
-        Span::styled(
-            " • ",
-            Style::default().fg(app.theme.colors.text_disabled.to_color()),
-        ),
-        Span::styled(
-            ":help",
-            Style::default()
-                .fg(app.theme.colors.text_disabled.to_color())
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            " for commands",
-            Style::default().fg(app.theme.colors.text_secondary.to_color()),
-        ),
-    ]));
-
-    let status_bar = Paragraph::new(lines)
-        .style(Style::default().bg(app.theme.colors.background.to_color()))
-        .block(Block::default());
-
-    frame.render_widget(status_bar, area);
 }

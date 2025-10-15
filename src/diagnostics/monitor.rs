@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sysinfo::System;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use super::gpu::{detect_gpu_type, get_gpu_info};
 use super::types::{GpuType, HardwareStats, ModelInfo};
@@ -105,7 +105,7 @@ impl HardwareMonitor {
 }
 
 /// Shared hardware monitor for the application
-pub type SharedHardwareMonitor = Arc<Mutex<HardwareMonitor>>;
+pub type SharedHardwareMonitor = Arc<RwLock<HardwareMonitor>>;
 
 /// Create a background monitoring task
 pub fn create_monitoring_task(
@@ -119,7 +119,7 @@ pub fn create_monitoring_task(
             interval.tick().await;
 
             let stats = {
-                let mut monitor = monitor.lock().await;
+                let mut monitor = monitor.write().await;
                 monitor.get_stats()
             };
 

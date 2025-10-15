@@ -9,6 +9,20 @@ use tiktoken_rs::{cl100k_base, CoreBPE};
 
 use crate::models::ProjectContext;
 
+// Static string slices for configuration (zero-allocation)
+const DEFAULT_PRIORITY_EXTENSIONS: &[&str] = &[
+    "rs", "py", "js", "ts", "jsx", "tsx", "go", "java", "cpp", "c", "h", "hpp",
+    "cs", "rb", "php", "swift", "kt", "scala", "r", "sql", "sh",
+    "yaml", "yml", "toml", "json", "xml", "html", "css", "scss", "md", "txt",
+];
+
+const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
+    "*.log", "*.tmp", "*.cache", "*.pyc", "*.pyo", "*.pyd",
+    "*.so", "*.dylib", "*.dll", "*.exe", "*.o", "*.a", "*.lib",
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.ico", "*.svg", "*.pdf",
+    "*.zip", "*.tar", "*.gz", "*.rar", "*.7z",
+];
+
 /// Configuration for the context loader
 #[derive(Debug, Clone)]
 pub struct LoaderConfig {
@@ -19,9 +33,9 @@ pub struct LoaderConfig {
     /// Maximum total context size in tokens
     pub max_context_tokens: usize,
     /// File extensions to prioritize
-    pub priority_extensions: Vec<String>,
+    pub priority_extensions: Vec<&'static str>,
     /// Additional patterns to ignore
-    pub ignore_patterns: Vec<String>,
+    pub ignore_patterns: Vec<&'static str>,
 }
 
 impl Default for LoaderConfig {
@@ -30,67 +44,8 @@ impl Default for LoaderConfig {
             max_file_size: 1024 * 1024, // 1MB
             max_files: 100,
             max_context_tokens: 50000,
-            priority_extensions: vec![
-                "rs".to_string(),
-                "py".to_string(),
-                "js".to_string(),
-                "ts".to_string(),
-                "jsx".to_string(),
-                "tsx".to_string(),
-                "go".to_string(),
-                "java".to_string(),
-                "cpp".to_string(),
-                "c".to_string(),
-                "h".to_string(),
-                "hpp".to_string(),
-                "cs".to_string(),
-                "rb".to_string(),
-                "php".to_string(),
-                "swift".to_string(),
-                "kt".to_string(),
-                "scala".to_string(),
-                "r".to_string(),
-                "sql".to_string(),
-                "sh".to_string(),
-                "yaml".to_string(),
-                "yml".to_string(),
-                "toml".to_string(),
-                "json".to_string(),
-                "xml".to_string(),
-                "html".to_string(),
-                "css".to_string(),
-                "scss".to_string(),
-                "md".to_string(),
-                "txt".to_string(),
-            ],
-            ignore_patterns: vec![
-                "*.log".to_string(),
-                "*.tmp".to_string(),
-                "*.cache".to_string(),
-                "*.pyc".to_string(),
-                "*.pyo".to_string(),
-                "*.pyd".to_string(),
-                "*.so".to_string(),
-                "*.dylib".to_string(),
-                "*.dll".to_string(),
-                "*.exe".to_string(),
-                "*.o".to_string(),
-                "*.a".to_string(),
-                "*.lib".to_string(),
-                "*.png".to_string(),
-                "*.jpg".to_string(),
-                "*.jpeg".to_string(),
-                "*.gif".to_string(),
-                "*.bmp".to_string(),
-                "*.ico".to_string(),
-                "*.svg".to_string(),
-                "*.pdf".to_string(),
-                "*.zip".to_string(),
-                "*.tar".to_string(),
-                "*.gz".to_string(),
-                "*.rar".to_string(),
-                "*.7z".to_string(),
-            ],
+            priority_extensions: DEFAULT_PRIORITY_EXTENSIONS.to_vec(),
+            ignore_patterns: DEFAULT_IGNORE_PATTERNS.to_vec(),
         }
     }
 }
@@ -246,7 +201,7 @@ impl ContextLoader {
                 // Prioritize certain extensions
                 if let Some(ext) = path.extension() {
                     let ext_str = ext.to_string_lossy().to_lowercase();
-                    if self.config.priority_extensions.contains(&ext_str) {
+                    if self.config.priority_extensions.iter().any(|&e| e == ext_str.as_str()) {
                         priority_files.push(path.to_path_buf());
                     } else {
                         other_files.push(path.to_path_buf());

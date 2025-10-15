@@ -1,7 +1,7 @@
 use anyhow::Result;
 use directories::ProjectDirs;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -21,8 +21,8 @@ pub struct CacheManager {
 /// In-memory cache for hot data
 #[derive(Debug, Default)]
 struct MemoryCache {
-    symbols: HashMap<CacheKey, CachedSymbols>,
-    tokens: HashMap<CacheKey, CachedTokens>,
+    symbols: FxHashMap<CacheKey, CachedSymbols>,
+    tokens: FxHashMap<CacheKey, CachedTokens>,
     hits: usize,
     misses: usize,
 }

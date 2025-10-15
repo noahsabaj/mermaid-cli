@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use crate::utils::MutexExt;
 
@@ -55,7 +55,7 @@ pub struct ExecutionMetadata {
 
 /// Non-interactive runner for executing single prompts
 pub struct NonInteractiveRunner {
-    model: Arc<Mutex<Box<dyn Model>>>,
+    model: Arc<RwLock<Box<dyn Model>>>,
     context: ProjectContext,
     no_execute: bool,
     max_tokens: Option<usize>,
@@ -78,7 +78,7 @@ impl NonInteractiveRunner {
         let context = loader.load_context(&project_path)?;
 
         Ok(Self {
-            model: Arc::new(Mutex::new(model)),
+            model: Arc::new(RwLock::new(model)),
             context,
             no_execute,
             max_tokens,
@@ -123,12 +123,14 @@ impl NonInteractiveRunner {
             role: MessageRole::System,
             content: system_content,
             timestamp: chrono::Local::now(),
+            actions: Vec::new(),
         };
 
         let user_message = ChatMessage {
             role: MessageRole::User,
             content: prompt.clone(),
             timestamp: chrono::Local::now(),
+            actions: Vec::new(),
         };
 
         let messages = vec![system_message, user_message];
@@ -158,7 +160,7 @@ impl NonInteractiveRunner {
         // Call the model
         let model_name;
         let result = {
-            let mut model = self.model.lock().await;
+            let mut model = self.model.write().await;
             model_name = model.name().to_string();
             model
                 .chat(&messages, &self.context, &model_config, Some(callback))

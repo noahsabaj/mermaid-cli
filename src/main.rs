@@ -15,6 +15,19 @@ async fn main() -> Result<()> {
     // Parse CLI arguments
     let cli = Cli::parse();
 
+    // Load .env file from proxy directory (if it exists)
+    // This provides LITELLM_MASTER_KEY and other proxy credentials
+    if let Some(config_dir) = directories::BaseDirs::new() {
+        let env_path = config_dir
+            .config_dir()
+            .join("mermaid")
+            .join("proxy")
+            .join(".env");
+        if env_path.exists() {
+            let _ = dotenvy::from_path(&env_path);
+        }
+    }
+
     // Initialize tracing subscriber (always, controlled by RUST_LOG env var)
     init_logger();
 

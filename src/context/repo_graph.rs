@@ -2,7 +2,7 @@ use anyhow::Result;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -26,16 +26,16 @@ pub struct DependencyEdge {
 /// Repository dependency graph
 pub struct RepoGraph {
     graph: DiGraph<FileNode, DependencyEdge>,
-    file_indices: HashMap<PathBuf, NodeIndex>,
-    symbol_locations: HashMap<String, Vec<PathBuf>>, // Symbol name -> files defining it
+    file_indices: FxHashMap<PathBuf, NodeIndex>,
+    symbol_locations: FxHashMap<String, Vec<PathBuf>>, // Symbol name -> files defining it
 }
 
 impl RepoGraph {
     pub fn new() -> Self {
         Self {
             graph: DiGraph::new(),
-            file_indices: HashMap::new(),
-            symbol_locations: HashMap::new(),
+            file_indices: FxHashMap::default(),
+            symbol_locations: FxHashMap::default(),
         }
     }
 
@@ -69,7 +69,7 @@ impl RepoGraph {
     /// Add references between files based on symbol usage
     pub fn add_references(&mut self, references: Vec<SymbolReference>) {
         // Group references by source file
-        let mut references_by_file: HashMap<PathBuf, Vec<SymbolReference>> = HashMap::new();
+        let mut references_by_file: FxHashMap<PathBuf, Vec<SymbolReference>> = FxHashMap::default();
         for reference in references {
             references_by_file
                 .entry(reference.from_file.clone())
@@ -85,7 +85,7 @@ impl RepoGraph {
             };
 
             // Count references to each target file
-            let mut reference_counts: HashMap<PathBuf, HashMap<String, usize>> = HashMap::new();
+            let mut reference_counts: FxHashMap<PathBuf, FxHashMap<String, usize>> = FxHashMap::default();
 
             for reference in refs {
                 // Try to resolve where this symbol is defined
@@ -95,7 +95,7 @@ impl RepoGraph {
                             // Don't create self-edges
                             reference_counts
                                 .entry(defining_file.clone())
-                                .or_insert_with(HashMap::new)
+                                .or_insert_with(FxHashMap::default)
                                 .entry(reference.symbol_name.clone())
                                 .and_modify(|c| *c += 1)
                                 .or_insert(1);
@@ -140,7 +140,7 @@ impl RepoGraph {
         &mut self,
         damping: f64,
         iterations: usize,
-        personalization: Option<HashMap<PathBuf, f64>>,
+        personalization: Option<FxHashMap<PathBuf, f64>>,
     ) -> Result<()> {
         let num_nodes = self.graph.node_count();
         if num_nodes == 0 {
@@ -153,7 +153,7 @@ impl RepoGraph {
         let mut new_scores;
 
         // Create index mapping for efficient access
-        let index_to_position: HashMap<NodeIndex, usize> = self
+        let index_to_position: FxHashMap<NodeIndex, usize> = self
             .graph
             .node_indices()
             .enumerate()
@@ -376,8 +376,8 @@ pub fn create_personalization(
     chat_files: &[PathBuf],
     mentioned_files: &[PathBuf],
     other_files: &[PathBuf],
-) -> HashMap<PathBuf, f64> {
-    let mut personalization = HashMap::new();
+) -> FxHashMap<PathBuf, f64> {
+    let mut personalization = FxHashMap::default();
 
     // Chat files get highest weight
     for file in chat_files {

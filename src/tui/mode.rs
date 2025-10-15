@@ -1,4 +1,4 @@
-use ratatui::style::Color;
+use ratatui::style::{Color, Stylize};
 use serde::{Deserialize, Serialize};
 
 /// The four operation modes for Mermaid, inspired by Claude Code's Shift+Tab cycling
