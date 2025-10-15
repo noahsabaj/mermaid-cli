@@ -28,34 +28,26 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                             current_line_spans.clear();
                         }
 
-                        // Add header prefix and style based on level
-                        let (prefix, style) = match level {
-                            HeadingLevel::H1 => (
-                                "# ",
-                                Style::new()
-                                    .fg(Color::Cyan)
-                                    .bold(),
-                            ),
-                            HeadingLevel::H2 => (
-                                "## ",
-                                Style::new()
-                                    .fg(Color::Blue)
-                                    .bold(),
-                            ),
-                            HeadingLevel::H3 => (
-                                "### ",
-                                Style::new()
-                                    .fg(Color::Green)
-                                    .bold(),
-                            ),
-                            _ => (
-                                "#### ",
-                                Style::new()
-                                    .fg(Color::Yellow)
-                                    .bold(),
-                            ),
+                        // Add blank line before heading (except for first heading)
+                        if !lines.is_empty() {
+                            lines.push(Line::from(""));
+                        }
+
+                        // Apply style based on level (without visible prefix)
+                        let style = match level {
+                            HeadingLevel::H1 => Style::new()
+                                .fg(Color::Cyan)
+                                .bold(),
+                            HeadingLevel::H2 => Style::new()
+                                .fg(Color::Blue)
+                                .bold(),
+                            HeadingLevel::H3 => Style::new()
+                                .fg(Color::Green)
+                                .bold(),
+                            _ => Style::new()
+                                .fg(Color::Yellow)
+                                .bold(),
                         };
-                        current_line_spans.push(Span::styled(prefix, style));
                         style
                     },
                     Tag::Emphasis => style_stack
@@ -139,7 +131,15 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
             Event::End(tag) => {
                 style_stack.pop();
                 match tag {
-                    TagEnd::Heading(_) | TagEnd::Paragraph | TagEnd::Item => {
+                    TagEnd::Heading(_) => {
+                        if !current_line_spans.is_empty() {
+                            lines.push(Line::from(current_line_spans.clone()));
+                            current_line_spans.clear();
+                        }
+                        // Add blank line after heading for spacing
+                        lines.push(Line::from(""));
+                    },
+                    TagEnd::Paragraph | TagEnd::Item => {
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(current_line_spans.clone()));
                             current_line_spans.clear();
