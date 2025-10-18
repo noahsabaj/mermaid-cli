@@ -40,10 +40,19 @@ impl<'a> Widget for StatusLineWidget<'a> {
 
         let info_color = self.theme.colors.info.to_color();
 
+        // Determine arrow direction based on state
+        let (arrow, flow_direction) = match self.status {
+            GenerationStatus::Sending |
+            GenerationStatus::Initializing |
+            GenerationStatus::Thinking => ("↑ ", "upstream"),
+            GenerationStatus::Streaming => ("↓ ", "downstream"),
+            GenerationStatus::Idle => ("", ""),
+        };
+
         let spans = vec![
-            // Play button indicator (cyan, no styling that affects alignment)
+            // Arrow indicator showing message direction (cyan)
             Span::styled(
-                "▶ ",
+                arrow,
                 Style::new().fg(info_color),
             ),
             // Status text with ellipsis (cyan)
@@ -53,7 +62,10 @@ impl<'a> Widget for StatusLineWidget<'a> {
             ),
             // Metadata in parentheses (dimmed)
             Span::styled(
-                format!("(esc to interrupt • {}s • ↓ {} tokens)", self.elapsed_secs, self.tokens_received),
+                format!("(esc to interrupt • {}s • {} {} tokens)",
+                    self.elapsed_secs,
+                    if flow_direction == "downstream" { "↓" } else { "↑" },
+                    self.tokens_received),
                 Style::new()
                     .fg(self.theme.colors.text_secondary.to_color())
                     .dim(),

@@ -72,8 +72,8 @@ pub async fn run_app_loop(
         // Draw UI
         terminal.draw(|f| render_ui(f, app))?;
 
-        // Check if we should transition from Initializing to Thinking (after 1 second with no chunks)
-        if app.generation_status == GenerationStatus::Initializing {
+        // Check if we should transition from Sending to Thinking (after 1 second with no chunks)
+        if app.generation_status == GenerationStatus::Sending {
             if let Some(start_time) = app.generation_start_time {
                 if start_time.elapsed().as_secs() >= 1 {
                     app.generation_status = GenerationStatus::Thinking;
@@ -213,7 +213,7 @@ async fn handle_message_submit(
     app.current_response.clear();
 
     // Initialize generation status tracking
-    app.generation_status = GenerationStatus::Initializing;
+    app.generation_status = GenerationStatus::Sending;
     app.generation_start_time = Some(Instant::now());
     app.tokens_received = 0;
 

@@ -363,34 +363,12 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             }
         }
 
-        // Add current response if generating
-        if self.is_generating && !self.current_response.is_empty() {
-            let clean_response = strip_action_blocks(&self.current_response);
-            let response_lines: Vec<_> = clean_response.lines().collect();
-
-            if let Some(first) = response_lines.first() {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "● ",
-                        Style::new()
-                            .fg(self.theme.colors.assistant_message.to_color())
-                            .bold(),
-                    ),
-                    Span::raw(first.to_string()),
-                ]));
-
-                for line in response_lines.iter().skip(1) {
-                    lines.push(Line::from(line.to_string()));
-                }
-            }
-
-            lines.push(Line::from(vec![Span::styled(
-                "▋",
-                Style::new()
-                    .fg(self.theme.colors.assistant_message.to_color())
-                    .slow_blink(),
-            )]));
-        }
+        // NOTE: current_response is NOT rendered during streaming (buffering mode).
+        // The response is buffered invisibly and only shown when generation is complete.
+        // This provides a Claude Code-like experience where the complete response
+        // appears instantly instead of streaming character-by-character.
+        //
+        // The status line shows progress: "↑ Sending..." → "↓ Streaming..." with timer
 
         let paragraph = Paragraph::new(lines)
             .block(Block::default())

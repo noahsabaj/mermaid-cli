@@ -14,6 +14,8 @@ use tokio::sync::RwLock;
 pub enum GenerationStatus {
     /// Not currently generating
     Idle,
+    /// Message sent upstream, waiting for model to start responding
+    Sending,
     /// Model is loading/initializing (before first token)
     Initializing,
     /// Waiting for first token from model (thinking/reasoning)
@@ -26,6 +28,7 @@ impl GenerationStatus {
     pub fn display_text(&self) -> &str {
         match self {
             GenerationStatus::Idle => "Idle",
+            GenerationStatus::Sending => "Sending",
             GenerationStatus::Initializing => "Initializing",
             GenerationStatus::Thinking => "Thinking",
             GenerationStatus::Streaming => "Streaming",

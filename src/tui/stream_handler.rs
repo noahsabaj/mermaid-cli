@@ -167,8 +167,8 @@ pub async fn process_stream_chunks(
             let prev_len = app.current_response.len();
             app.current_response.push_str(&chunk);
 
-            // Transition from Initializing to Streaming on first content chunk
-            if app.generation_status == GenerationStatus::Initializing {
+            // Transition to Streaming on first content chunk (from Sending or Thinking)
+            if app.generation_status != GenerationStatus::Streaming {
                 app.generation_status = GenerationStatus::Streaming;
             }
 
