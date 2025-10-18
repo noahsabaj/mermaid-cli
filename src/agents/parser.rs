@@ -1,81 +1,7 @@
+use super::extractor::{extract_block, extract_content, extract_path_from_header};
+pub use super::segmenter::{segment_message, MessageSegment};
 use super::types::AgentAction;
-use crate::constants::DANGEROUS_COMMANDS;
-use once_cell::sync::Lazy;
-use std::collections::HashMap;
-use std::path::Path;
-
-// Cache tag strings to avoid repeated allocations
-static TAG_CACHE: Lazy<HashMap<&'static str, (String, String)>> = Lazy::new(|| {
-    let mut tags = HashMap::new();
-    tags.insert("FILE_WRITE", (format!("[FILE_WRITE:"), format!("[/FILE_WRITE]")));
-    tags.insert("FILE_READ", (format!("[FILE_READ:"), format!("[/FILE_READ]")));
-    tags.insert("COMMAND", (format!("[COMMAND:"), format!("[/COMMAND]")));
-    tags
-});
-
-/// Validate file path to prevent directory traversal attacks
-fn validate_file_path(path: &str) -> Result<String, String> {
-    // Reject paths with directory traversal attempts
-    if path.contains("..") {
-        return Err(format!("Path contains directory traversal: {}", path));
-    }
-
-    // Reject absolute paths outside project
-    let path_obj = Path::new(path);
-    if path_obj.is_absolute() {
-        return Err(format!("Absolute paths not allowed: {}", path));
-    }
-
-    // Reject paths with null bytes
-    if path.contains('\0') {
-        return Err("Path contains null byte".to_string());
-    }
-
-    // Reject paths targeting sensitive files
-    let sensitive_patterns = [
-        ".ssh/", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-        ".aws/", "credentials", ".env", "config.toml",
-        "/etc/passwd", "/etc/shadow",
-    ];
-
-    for pattern in &sensitive_patterns {
-        if path.contains(pattern) {
-            return Err(format!("Access to sensitive file denied: {}", path));
-        }
-    }
-
-    Ok(path.to_string())
-}
-
-/// Validate command to prevent dangerous operations
-fn validate_command(command: &str) -> Result<String, String> {
-    // Check against known dangerous commands
-    for dangerous in DANGEROUS_COMMANDS {
-        if command.contains(dangerous) {
-            return Err(format!("Dangerous command blocked: {}", dangerous));
-        }
-    }
-
-    // Additional checks for pipe to bash/sh
-    if (command.contains('|') && (command.contains("bash") || command.contains("sh")))
-        || command.contains("eval")
-    {
-        return Err("Piping to shell interpreter is not allowed".to_string());
-    }
-
-    // Check for command injection attempts (more precise matching)
-    if command.contains("$(") || command.contains("`") {
-        return Err("Command substitution detected".to_string());
-    }
-
-    // Check for command chaining (but allow it in some contexts)
-    // Block && only if it's standalone (not part of a word)
-    if command.contains(" && ") || command.ends_with("&&") || command.starts_with("&&") {
-        return Err("Command chaining detected".to_string());
-    }
-
-    Ok(command.to_string())
-}
+use crate::utils::{validate_command, validate_file_path};
 
 /// Parse actions from AI response text
 pub fn parse_actions(response: &str) -> Vec<AgentAction> {
@@ -92,10 +18,10 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
                             path: validated_path,
                             content: extract_content(&capture),
                         });
-                    }
+                    },
                     Err(e) => {
                         eprintln!("[SECURITY] Rejected FILE_WRITE: {}", e);
-                    }
+                    },
                 }
             }
         }
@@ -111,10 +37,10 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
                         actions.push(AgentAction::ReadFile {
                             path: validated_path,
                         });
-                    }
+                    },
                     Err(e) => {
                         eprintln!("[SECURITY] Rejected FILE_READ: {}", e);
-                    }
+                    },
                 }
             }
         }
@@ -140,15 +66,18 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
                                         command: validated_cmd,
                                         working_dir: Some(validated_dir),
                                     });
-                                }
+                                },
                                 Err(e) => {
-                                    eprintln!("[SECURITY] Rejected COMMAND working directory: {}", e);
-                                }
+                                    eprintln!(
+                                        "[SECURITY] Rejected COMMAND working directory: {}",
+                                        e
+                                    );
+                                },
                             }
-                        }
+                        },
                         Err(e) => {
                             eprintln!("[SECURITY] Rejected COMMAND: {}", e);
-                        }
+                        },
                     }
                 } else {
                     match validate_command(&cmd) {
@@ -157,10 +86,10 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
                                 command: validated_cmd,
                                 working_dir: None,
                             });
-                        }
+                        },
                         Err(e) => {
                             eprintln!("[SECURITY] Rejected COMMAND: {}", e);
-                        }
+                        },
                     }
                 }
             }
@@ -206,149 +135,348 @@ pub fn strip_action_blocks(response: &str) -> String {
     cleaned.trim().to_string()
 }
 
-/// Extract blocks of a specific type from the response
-fn extract_block(text: &str, block_type: &str) -> Option<Vec<String>> {
-    // Use cached tags if available, otherwise fall back to format! (for unknown types)
-    let (start_tag, end_tag) = TAG_CACHE
-        .get(block_type)
-        .map(|(s, e)| (s.as_str(), e.as_str()))
-        .unwrap_or_else(|| {
-            // This should rarely happen since we cache all known types
-            (Box::leak(format!("[{}:", block_type).into_boxed_str()),
-             Box::leak(format!("[/{}]", block_type).into_boxed_str()))
-        });
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut blocks = Vec::new();
-    let mut remaining = text;
+    // File path validation tests
+    #[test]
+    fn test_validate_file_path_valid_paths() {
+        let valid_paths = vec![
+            "src/main.rs",
+            "appconfig.yaml", // Avoid "config.toml" pattern
+            "README.md",
+            "src/utils/helper.rs",
+            "docs/guide.md",
+        ];
 
-    while let Some(start) = remaining.find(start_tag) {
-        let block_start = start;
-        if let Some(end) = remaining[block_start..].find(end_tag) {
-            let block = remaining[block_start..block_start + end + end_tag.len()].to_string();
-            blocks.push(block);
-            remaining = &remaining[block_start + end + end_tag.len()..];
-        } else {
-            break;
+        for path in valid_paths {
+            let result = validate_file_path(path);
+            assert!(result.is_ok(), "Path should be valid: {}", path);
         }
     }
 
-    if blocks.is_empty() {
-        None
-    } else {
-        Some(blocks)
-    }
-}
+    #[test]
+    fn test_validate_file_path_directory_traversal() {
+        let invalid_paths = vec![
+            "../../etc/passwd",
+            "../.ssh/id_rsa",
+            "src/../../confidential.txt",
+            ".../.config/sensitive",
+        ];
 
-/// Extract content from a block (everything between the tags)
-fn extract_content(block: &str) -> String {
-    if let Some(header_end) = block.find(']') {
-        if let Some(footer_start) = block.rfind("[/") {
-            return block[header_end + 1..footer_start].trim().to_string();
-        }
-    }
-    String::new()
-}
-
-/// Extract path/command from header format [TYPE: path/command]
-fn extract_path_from_header(block: &str, block_type: &str) -> Option<String> {
-    // Use cached start tag
-    let start_tag = TAG_CACHE
-        .get(block_type)
-        .map(|(s, _)| s.as_str())
-        .unwrap_or_else(|| Box::leak(format!("[{}:", block_type).into_boxed_str()));
-
-    if let Some(start) = block.find(start_tag) {
-        let path_start = start + start_tag.len();
-        if let Some(end) = block[path_start..].find(']') {
-            let path = block[path_start..path_start + end].trim();
-            return Some(path.to_string());
-        }
-    }
-    None
-}
-
-/// Represents a segment of a message (either text or action marker)
-#[derive(Debug, Clone)]
-pub enum MessageSegment {
-    Text(String),
-    ActionMarker {
-        action_type: String,
-        target: String,
-    },
-}
-
-/// Segment a message into alternating text and action markers
-/// This allows for interleaved rendering where actions appear at their natural positions
-pub fn segment_message(content: &str) -> Vec<MessageSegment> {
-    let mut segments = Vec::new();
-
-    // Find all action blocks and their positions
-    let mut action_positions: Vec<(usize, usize, String, String)> = Vec::new();
-
-    // Find all blocks of each type
-    for block_type in ["FILE_WRITE", "FILE_READ", "COMMAND"] {
-        if let Some(blocks) = extract_block(content, block_type) {
-            let mut search_start = 0;
-            for block in blocks {
-                // Find this block's position starting from where we last found one
-                if let Some(relative_pos) = content[search_start..].find(&block) {
-                    let absolute_pos = search_start + relative_pos;
-                    if let Some(target) = extract_path_from_header(&block, block_type) {
-                        let action_type = match block_type {
-                            "FILE_WRITE" => "Write",
-                            "FILE_READ" => "Read",
-                            "COMMAND" => "Bash",
-                            _ => block_type,
-                        };
-                        action_positions.push((
-                            absolute_pos,
-                            absolute_pos + block.len(),
-                            action_type.to_string(),
-                            target,
-                        ));
-                        // Move search position past this block
-                        search_start = absolute_pos + block.len();
-                    }
-                }
-            }
+        for path in invalid_paths {
+            let result = validate_file_path(path);
+            assert!(
+                result.is_err(),
+                "Should reject directory traversal: {}",
+                path
+            );
+            assert!(result.unwrap_err().contains("directory traversal"));
         }
     }
 
-    // Sort by position
-    action_positions.sort_by_key(|(start, _, _, _)| *start);
+    #[test]
+    fn test_validate_file_path_absolute_paths() {
+        let absolute_paths = vec![
+            "/etc/passwd",
+            "/root/.ssh/id_rsa",
+            "/home/user/files",
+            "/.ssh/config",
+        ];
 
-    // Build segments
-    let mut last_end = 0;
-    for (start, end, action_type, target) in action_positions {
-        // Add text segment before this action
-        if start > last_end {
-            let text = content[last_end..start].to_string();
-            if !text.trim().is_empty() {
-                segments.push(MessageSegment::Text(text));
-            }
-        }
-
-        // Add action marker
-        segments.push(MessageSegment::ActionMarker {
-            action_type,
-            target,
-        });
-
-        last_end = end;
-    }
-
-    // Add remaining text after last action
-    if last_end < content.len() {
-        let text = content[last_end..].to_string();
-        if !text.trim().is_empty() {
-            segments.push(MessageSegment::Text(text));
+        for path in absolute_paths {
+            let result = validate_file_path(path);
+            assert!(result.is_err(), "Should reject absolute path: {}", path);
+            assert!(result.unwrap_err().contains("Absolute paths not allowed"));
         }
     }
 
-    // If no actions found, return entire content as single text segment
-    if segments.is_empty() {
-        segments.push(MessageSegment::Text(content.to_string()));
+    #[test]
+    fn test_validate_file_path_null_bytes() {
+        let result = validate_file_path("src/file\0.rs");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("null byte"));
     }
 
-    segments
+    #[test]
+    fn test_validate_file_path_sensitive_files() {
+        let sensitive_paths = vec![".ssh/id_rsa", "id_ed25519", ".aws/credentials", ".env"];
+
+        for path in sensitive_paths {
+            let result = validate_file_path(path);
+            assert!(result.is_err(), "Should reject sensitive file: {}", path);
+            let err = result.unwrap_err();
+            assert!(err.contains("sensitive") || err.contains("denied"));
+        }
+    }
+
+    // Command validation tests
+    #[test]
+    fn test_validate_command_safe_commands() {
+        let safe_commands = vec![
+            "cargo test",
+            "echo hello",
+            "ls -la",
+            "mkdir new_dir",
+            "git status",
+        ];
+
+        for cmd in safe_commands {
+            let result = validate_command(cmd);
+            assert!(result.is_ok(), "Command should be safe: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_validate_command_dangerous_keywords() {
+        let dangerous = vec![
+            "rm -rf /",
+            "dd if=/dev/zero",
+            "chmod -R 000 /", // Must match exact pattern
+        ];
+
+        for cmd in dangerous {
+            let result = validate_command(cmd);
+            assert!(result.is_err(), "Should block dangerous command: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_validate_command_shell_piping() {
+        let commands = vec!["command | bash", "something | sh", "eval dangerous_code"];
+
+        for cmd in commands {
+            let result = validate_command(cmd);
+            assert!(result.is_err(), "Should block shell piping: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_validate_command_injection_attempts() {
+        let commands = vec!["echo $(whoami)", "echo `id`", "echo $(rm -rf /)"];
+
+        for cmd in commands {
+            let result = validate_command(cmd);
+            assert!(
+                result.is_err(),
+                "Should block command substitution: {}",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_command_chaining() {
+        let commands = vec!["command1 && command2", "cmd1 && cmd2 && cmd3"];
+
+        for cmd in commands {
+            let result = validate_command(cmd);
+            assert!(result.is_err(), "Should block command chaining: {}", cmd);
+        }
+    }
+
+    // Parse actions tests
+    #[test]
+    fn test_parse_actions_file_write() {
+        let response =
+            "I will create a file:\n[FILE_WRITE: src/test.rs]\nfn main() {}\n[/FILE_WRITE]";
+        let actions = parse_actions(response);
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            AgentAction::WriteFile { path, content } => {
+                assert_eq!(path, "src/test.rs");
+                assert!(content.contains("fn main"));
+            },
+            _ => panic!("Expected WriteFile action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actions_file_read() {
+        let response = "Let me read:\n[FILE_READ: src/main.rs]\n[/FILE_READ]";
+        let actions = parse_actions(response);
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            AgentAction::ReadFile { path } => {
+                assert_eq!(path, "src/main.rs");
+            },
+            _ => panic!("Expected ReadFile action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actions_execute_command() {
+        let response = "Running:\n[COMMAND: cargo test]\n[/COMMAND]";
+        let actions = parse_actions(response);
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            AgentAction::ExecuteCommand {
+                command,
+                working_dir,
+            } => {
+                assert_eq!(command, "cargo test");
+                assert!(working_dir.is_none());
+            },
+            _ => panic!("Expected ExecuteCommand action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actions_command_with_dir() {
+        let response = r#"[COMMAND: cargo build dir="src"]\n[/COMMAND]"#;
+        let actions = parse_actions(response);
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            AgentAction::ExecuteCommand {
+                command,
+                working_dir,
+            } => {
+                assert_eq!(command, "cargo build");
+                assert_eq!(working_dir, &Some("src".to_string()));
+            },
+            _ => panic!("Expected ExecuteCommand with working_dir"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actions_git_operations() {
+        let response = "Status:\n[GIT_STATUS]\n\nDiff:\n[GIT_DIFF]";
+        let actions = parse_actions(response);
+
+        assert_eq!(actions.len(), 2);
+        // Git operations are detected by contains(), not extracted as blocks
+        // So order depends on which appears first in text
+        assert!(actions.iter().any(|a| matches!(a, AgentAction::GitStatus)));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, AgentAction::GitDiff { path: None })));
+    }
+
+    #[test]
+    fn test_parse_actions_reject_malicious_paths() {
+        let response = "[FILE_WRITE: ../../etc/passwd]\nmalicious\n[/FILE_WRITE]";
+        let actions = parse_actions(response);
+
+        assert_eq!(actions.len(), 0, "Should reject malicious path");
+    }
+
+    #[test]
+    fn test_parse_actions_multiple_actions() {
+        let response = "[FILE_WRITE: a.txt]\nA\n[/FILE_WRITE]\n[FILE_READ: b.txt]\n[/FILE_READ]\n[COMMAND: test]\n[/COMMAND]";
+        let actions = parse_actions(response);
+
+        assert_eq!(actions.len(), 3);
+    }
+
+    #[test]
+    fn test_strip_action_blocks() {
+        let response = "Hello\n[FILE_WRITE: test.rs]\ncode\n[/FILE_WRITE]\nWorld\n[COMMAND: test]\n[/COMMAND]\nEnd";
+        let cleaned = strip_action_blocks(response);
+
+        assert!(!cleaned.contains("[FILE_WRITE"));
+        assert!(!cleaned.contains("[/FILE_WRITE]"));
+        assert!(!cleaned.contains("[COMMAND"));
+        assert!(cleaned.contains("Hello"));
+        assert!(cleaned.contains("World"));
+        assert!(cleaned.contains("End"));
+    }
+
+    #[test]
+    fn test_strip_action_blocks_git_markers() {
+        let response = "Status:\n[GIT_STATUS]\n\nDiff:\n[GIT_DIFF]";
+        let cleaned = strip_action_blocks(response);
+
+        assert!(!cleaned.contains("[GIT_STATUS]"));
+        assert!(!cleaned.contains("[GIT_DIFF]"));
+    }
+
+    #[test]
+    fn test_strip_action_blocks_excess_newlines() {
+        let response = "Text\n[FILE_WRITE: f.rs]\n[/FILE_WRITE]\n\n\nMore";
+        let cleaned = strip_action_blocks(response);
+
+        assert!(!cleaned.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn test_segment_message_no_actions() {
+        let content = "Just plain text with no actions";
+        let segments = segment_message(content);
+
+        assert_eq!(segments.len(), 1);
+        match &segments[0] {
+            MessageSegment::Text(text) => assert_eq!(text, content),
+            _ => panic!("Expected text segment"),
+        }
+    }
+
+    #[test]
+    fn test_segment_message_with_actions() {
+        let content = "Start [FILE_WRITE: test.rs]\ncode\n[/FILE_WRITE] Middle [FILE_READ: data.json]\n[/FILE_READ] End";
+        let segments = segment_message(content);
+
+        assert!(segments.len() >= 3);
+        assert!(segments
+            .iter()
+            .any(|s| matches!(s, MessageSegment::Text(_))));
+        assert!(segments
+            .iter()
+            .any(|s| matches!(s, MessageSegment::ActionMarker { .. })));
+    }
+
+    #[test]
+    fn test_segment_message_action_types() {
+        let content = "[FILE_WRITE: a.txt]\n[/FILE_WRITE] [FILE_READ: b.txt]\n[/FILE_READ] [COMMAND: cmd]\n[/COMMAND]";
+        let segments = segment_message(content);
+
+        let action_types: Vec<String> = segments
+            .iter()
+            .filter_map(|s| match s {
+                MessageSegment::ActionMarker {
+                    action_type,
+                    target: _,
+                } => Some(action_type.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(action_types.contains(&"Write".to_string()));
+        assert!(action_types.contains(&"Read".to_string()));
+        assert!(action_types.contains(&"Bash".to_string()));
+    }
+
+    #[test]
+    fn test_extract_content_from_blocks() {
+        let block = "[FILE_WRITE: test.rs]\nfn main() {}\n[/FILE_WRITE]";
+        let content = extract_content(block);
+        assert!(content.contains("fn main"));
+    }
+
+    #[test]
+    fn test_extract_path_from_header() {
+        let block = "[FILE_READ: src/main.rs]\n[/FILE_READ]";
+        let path = extract_path_from_header(block, "FILE_READ");
+        assert_eq!(path, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_extract_block_multiple() {
+        let response = "[CMD: test1]\n[/CMD]\n[CMD: test2]\n[/CMD]";
+        let blocks = extract_block(response, "CMD");
+        assert!(blocks.is_some());
+        let blocks = blocks.unwrap();
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_block_none() {
+        let response = "No blocks here";
+        let blocks = extract_block(response, "FILE_WRITE");
+        assert!(blocks.is_none());
+    }
 }

@@ -19,21 +19,21 @@ fn test_null_byte_injection_blocked() {
 
 #[test]
 fn test_dangerous_command_blocked() {
-    let response = "[COMMAND: rm -rf /]";
+    let response = "[COMMAND: rm -rf /]\n[/COMMAND]";
     let actions = parse_actions(response);
     assert_eq!(actions.len(), 0, "Dangerous command should be blocked");
 }
 
 #[test]
 fn test_command_injection_blocked() {
-    let response = "[COMMAND: ls && rm -rf /]";
+    let response = "[COMMAND: ls && rm -rf /]\n[/COMMAND]";
     let actions = parse_actions(response);
     assert_eq!(actions.len(), 0, "Command injection should be blocked");
 }
 
 #[test]
 fn test_pipe_to_shell_blocked() {
-    let response = "[COMMAND: cat file | bash]";
+    let response = "[COMMAND: cat file | bash]\n[/COMMAND]";
     let actions = parse_actions(response);
     assert_eq!(actions.len(), 0, "Pipe to shell should be blocked");
 }
@@ -67,7 +67,7 @@ fn test_valid_file_operations_allowed() {
 #[test]
 fn test_valid_commands_allowed() {
     // Use simpler commands that won't trigger any heuristics
-    let response = "[COMMAND: ls]";
+    let response = "[COMMAND: ls]\n[/COMMAND]";
     let actions = parse_actions(response);
     assert_eq!(actions.len(), 1, "Simple safe commands should be allowed");
 }

@@ -2,13 +2,13 @@
 // All external access must go through this gateway
 
 mod chat;
-mod input;
-mod status;
 mod header;
+mod input;
 mod sidebar;
+mod status;
 
-pub use chat::{ChatWidget, ChatState};
-pub use input::{InputWidget, InputState};
-pub use status::StatusWidget;
+pub use chat::{ChatState, ChatWidget};
 pub use header::HeaderWidget;
-pub use sidebar::{SidebarWidget, SidebarState};
+pub use input::{InputState, InputWidget};
+pub use sidebar::{SidebarState, SidebarWidget};
+pub use status::StatusWidget;

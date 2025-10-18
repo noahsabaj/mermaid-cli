@@ -85,7 +85,8 @@ impl RepoGraph {
             };
 
             // Count references to each target file
-            let mut reference_counts: FxHashMap<PathBuf, FxHashMap<String, usize>> = FxHashMap::default();
+            let mut reference_counts: FxHashMap<PathBuf, FxHashMap<String, usize>> =
+                FxHashMap::default();
 
             for reference in refs {
                 // Try to resolve where this symbol is defined
@@ -245,9 +246,11 @@ impl RepoGraph {
                 Ok(mutex) => match mutex.into_inner() {
                     Ok(vec) => vec,
                     Err(poisoned) => {
-                        eprintln!("[WARNING] Mutex was poisoned during extraction, recovering data");
+                        eprintln!(
+                            "[WARNING] Mutex was poisoned during extraction, recovering data"
+                        );
                         poisoned.into_inner()
-                    }
+                    },
                 },
                 Err(arc) => lock_arc_mutex_safe(&arc).clone(),
             };

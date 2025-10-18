@@ -49,13 +49,19 @@ pub fn get_compose_dir() -> Result<PathBuf> {
         // If compose file doesn't exist, create it from embedded template
         if !compose_file.exists() {
             std::fs::write(&compose_file, include_str!("../../docker-compose.yml"))?;
-            eprintln!("[INFO] Created docker-compose.yml at: {}", compose_file.display());
+            eprintln!(
+                "[INFO] Created docker-compose.yml at: {}",
+                compose_file.display()
+            );
         }
 
         // If litellm config doesn't exist, create it from embedded template
         if !config_file.exists() {
             std::fs::write(&config_file, include_str!("../../litellm_config.yaml"))?;
-            eprintln!("[INFO] Created litellm_config.yaml at: {}", config_file.display());
+            eprintln!(
+                "[INFO] Created litellm_config.yaml at: {}",
+                config_file.display()
+            );
         }
 
         // Also ensure .env.example exists for reference

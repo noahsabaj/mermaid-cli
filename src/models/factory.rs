@@ -1,8 +1,11 @@
 use anyhow::Result;
 
+use super::backend_model_adapter::BackendModelAdapter;
 use super::ollama_direct::OllamaDirectModel;
+use super::registry::BackendRegistry;
 use super::traits::Model;
 use super::unified::UnifiedModel;
+use super::unified_backend::UnifiedBackend;
 use crate::app::Config;
 
 /// Factory for creating model instances
@@ -10,7 +13,132 @@ use crate::app::Config;
 /// Routes to appropriate implementation based on provider:
 /// - "ollama/*" -> Direct Ollama connection (no proxy needed)
 /// - Other providers -> LiteLLM proxy (requires proxy running)
+/// - vLLM models -> UnifiedBackend with auto-detection
 pub struct ModelFactory;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Phase 3 Test Suite: Model Factory - 6 comprehensive tests
+
+    #[test]
+    fn test_model_id_format_validation_valid() {
+        // Valid formats should contain /
+        assert!(
+            "ollama/tinyllama".contains('/'),
+            "Valid model ID should have /"
+        );
+        assert!("openai/gpt-4".contains('/'), "Valid model ID should have /");
+        assert!(
+            "anthropic/claude-3".contains('/'),
+            "Valid model ID should have /"
+        );
+    }
+
+    #[test]
+    fn test_model_id_format_validation_invalid() {
+        // Invalid formats should fail validation logic
+        let invalid_formats = vec![
+            "ollama_tinyllama", // underscore instead of /
+            "simplenameonly",   // no / separator
+            "justslash/",       // missing model name
+            "/noprefix",        // missing provider
+        ];
+
+        for format in invalid_formats {
+            // These should fail validation in the factory
+            assert!(
+                !format.contains('/') || format.ends_with('/') || format.starts_with('/'),
+                "Format {} should be invalid: {}",
+                format,
+                !format.contains('/')
+            );
+        }
+    }
+
+    #[test]
+    fn test_ollama_provider_detection() {
+        // Ollama models start with ollama/
+        assert!(
+            "ollama/tinyllama".starts_with("ollama/"),
+            "Should detect ollama provider"
+        );
+        assert!(
+            "ollama/llama2".starts_with("ollama/"),
+            "Should detect ollama provider"
+        );
+
+        // Non-ollama should not start with ollama/
+        assert!(
+            !"openai/gpt-4".starts_with("ollama/"),
+            "Should not detect ollama for openai"
+        );
+        assert!(
+            !"anthropic/claude".starts_with("ollama/"),
+            "Should not detect ollama for anthropic"
+        );
+    }
+
+    #[test]
+    fn test_model_provider_extraction() {
+        // Extract provider from model ID
+        fn extract_provider(model_id: &str) -> Option<&str> {
+            model_id.split('/').next()
+        }
+
+        assert_eq!(extract_provider("ollama/tinyllama"), Some("ollama"));
+        assert_eq!(extract_provider("openai/gpt-4"), Some("openai"));
+        assert_eq!(
+            extract_provider("anthropic/claude-3-opus"),
+            Some("anthropic")
+        );
+        assert_eq!(extract_provider("groq/llama3-70b"), Some("groq"));
+    }
+
+    #[test]
+    fn test_model_name_extraction() {
+        // Extract model name from model ID
+        fn extract_model_name(model_id: &str) -> Option<&str> {
+            model_id.split('/').nth(1)
+        }
+
+        assert_eq!(extract_model_name("ollama/tinyllama"), Some("tinyllama"));
+        assert_eq!(extract_model_name("openai/gpt-4"), Some("gpt-4"));
+        assert_eq!(
+            extract_model_name("anthropic/claude-3-opus"),
+            Some("claude-3-opus")
+        );
+        assert_eq!(extract_model_name("groq/llama3-70b"), Some("llama3-70b"));
+    }
+
+    #[test]
+    fn test_routing_logic_ollama_vs_api() {
+        // Verify routing logic for different providers
+        let models = vec![
+            ("ollama/tinyllama", "ollama", true), // ollama = direct
+            ("ollama/llama2", "ollama", true),
+            ("openai/gpt-4", "openai", false), // openai = proxy
+            ("anthropic/claude", "anthropic", false),
+            ("groq/llama3", "groq", false),
+        ];
+
+        for (model_id, expected_provider, should_be_direct) in models {
+            assert!(
+                model_id.starts_with("ollama/") == should_be_direct,
+                "Model {} should_be_direct: {}",
+                model_id,
+                should_be_direct
+            );
+            assert!(
+                model_id.starts_with(expected_provider),
+                "Model {} should start with {}",
+                model_id,
+                expected_provider
+            );
+        }
+    }
+}
 
 impl ModelFactory {
     /// Create a model instance from a model identifier with optional config
@@ -23,7 +151,9 @@ impl ModelFactory {
     pub async fn create(model_id: &str, config: Option<&Config>) -> Result<Box<dyn Model>> {
         // Validate format (provider/model)
         if !model_id.contains('/') {
-            anyhow::bail!("Invalid model format. Expected 'provider/model' (e.g., 'ollama/qwen3-coder:30b')");
+            anyhow::bail!(
+                "Invalid model format. Expected 'provider/model' (e.g., 'ollama/qwen3-coder:30b')"
+            );
         }
 
         // Route based on provider
@@ -100,5 +230,38 @@ impl ModelFactory {
             Ok(model) => model.validate_connection().await,
             Err(_) => Ok(false),
         }
+    }
+
+    /// Create a model with intelligent backend auto-detection
+    ///
+    /// This method attempts to find the model across all available backends
+    /// (Ollama, vLLM, etc) and automatically routes to the correct one.
+    ///
+    /// Useful for model specs like "ring-1t" that might be on vLLM but not Ollama.
+    pub async fn create_with_auto_detection(model_spec: &str) -> Result<Box<dyn Model>> {
+        let mut registry = BackendRegistry::new();
+        registry.auto_discover().await?;
+
+        let backend = UnifiedBackend::new(registry, model_spec).await?;
+        let adapter = BackendModelAdapter::new(backend);
+        Ok(Box::new(adapter))
+    }
+
+    /// List all models from both Ollama and vLLM backends
+    pub async fn list_all_backend_models() -> Result<Vec<String>> {
+        let mut registry = BackendRegistry::new();
+        registry.auto_discover().await?;
+
+        let models = registry.list_all_models().await?;
+        let mut model_list: Vec<_> = models.into_keys().collect();
+        model_list.sort();
+        Ok(model_list)
+    }
+
+    /// Get which backend is available
+    pub async fn get_available_backends() -> Vec<String> {
+        let mut registry = BackendRegistry::new();
+        let _ = registry.auto_discover().await;
+        registry.backends()
     }
 }

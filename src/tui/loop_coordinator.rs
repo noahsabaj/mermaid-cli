@@ -102,6 +102,14 @@ pub async fn run_app_loop(
                     // Toggle action preview (not yet fully implemented)
                     app.set_status("Preview toggled");
                 },
+                EventAction::ApprovePlan => {
+                    // Approve and start executing plan
+                    action_handler::approve_plan(app, &tx).await?;
+                },
+                EventAction::CancelPlan => {
+                    // Cancel pending plan
+                    action_handler::cancel_plan(app);
+                },
             }
         }
 
@@ -118,6 +126,11 @@ pub async fn run_app_loop(
                 if !actions.is_empty() {
                     action_handler::execute_actions(app, actions, &tx).await?;
                 }
+            },
+            StreamStatus::PlanReady { plan } => {
+                // Plan mode: store plan and wait for user approval
+                // Note: Message already added in stream_handler with full explanation + plan
+                app.set_plan(plan.clone());
             },
             StreamStatus::FeedbackComplete => {
                 // Feedback loop complete, nothing to do
@@ -194,14 +207,25 @@ async fn handle_message_submit(
     let tx_clone = tx.clone();
     let tx_done = tx.clone();
 
+    let operation_mode = app.operation_mode.clone();
+
     let handle = tokio::spawn(async move {
-        let config = ModelConfig::default();
+        // Use Plan Mode config if in Plan Mode, otherwise use default
+        let config = if operation_mode.is_planning_only() {
+            ModelConfig::with_plan_mode()
+        } else {
+            ModelConfig::default()
+        };
+
         let callback: StreamCallback = Arc::new(move |chunk| {
             let _ = tx_clone.try_send(chunk.to_string());
         });
 
         let mut model = model.write().await;
-        match model.chat(&messages, &context, &config, Some(callback)).await {
+        match model
+            .chat(&messages, &context, &config, Some(callback))
+            .await
+        {
             Ok(_) => {
                 // Response is complete - content already streamed via callback
                 let _ = tx_done.send("[DONE]:".to_string()).await;

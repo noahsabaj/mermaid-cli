@@ -65,88 +65,6 @@ model_list:
       api_base: http://localhost:11434
       stream: true
 
-  # ==========================================
-  # OpenAI Models
-  # ==========================================
-
-  - model_name: openai/gpt-4o
-    litellm_params:
-      model: gpt-4o
-      api_key: os.environ/OPENAI_API_KEY
-      temperature: 0.7
-      max_tokens: 4096
-
-  - model_name: openai/gpt-4-turbo
-    litellm_params:
-      model: gpt-4-turbo-preview
-      api_key: os.environ/OPENAI_API_KEY
-
-  - model_name: openai/gpt-3.5-turbo
-    litellm_params:
-      model: gpt-3.5-turbo
-      api_key: os.environ/OPENAI_API_KEY
-
-  # ==========================================
-  # Anthropic Claude Models
-  # ==========================================
-
-  - model_name: anthropic/claude-3-opus
-    litellm_params:
-      model: claude-3-opus-20240229
-      api_key: os.environ/ANTHROPIC_API_KEY
-      max_tokens: 4096
-
-  - model_name: anthropic/claude-3-sonnet
-    litellm_params:
-      model: claude-3-5-sonnet-20241022
-      api_key: os.environ/ANTHROPIC_API_KEY
-      max_tokens: 4096
-
-  - model_name: anthropic/claude-3-haiku
-    litellm_params:
-      model: claude-3-haiku-20240307
-      api_key: os.environ/ANTHROPIC_API_KEY
-      max_tokens: 4096
-
-  # ==========================================
-  # Groq (Fast Inference)
-  # ==========================================
-
-  - model_name: groq/llama3-70b
-    litellm_params:
-      model: llama3-70b-8192
-      api_key: os.environ/GROQ_API_KEY
-
-  - model_name: groq/mixtral-8x7b
-    litellm_params:
-      model: mixtral-8x7b-32768
-      api_key: os.environ/GROQ_API_KEY
-
-  # ==========================================
-  # Google Models
-  # ==========================================
-
-  - model_name: google/gemini-pro
-    litellm_params:
-      model: gemini-pro
-      api_key: os.environ/GOOGLE_API_KEY
-
-  - model_name: google/gemini-pro-vision
-    litellm_params:
-      model: gemini-pro-vision
-      api_key: os.environ/GOOGLE_API_KEY
-
-  # ==========================================
-  # Azure OpenAI (if configured)
-  # ==========================================
-
-  # Uncomment and configure if using Azure
-  # - model_name: azure/gpt-4
-  #   litellm_params:
-  #     model: azure/my-gpt4-deployment
-  #     api_base: os.environ/AZURE_API_BASE
-  #     api_key: os.environ/AZURE_API_KEY
-  #     api_version: "2024-02-15-preview"
 
 # ==========================================
 # General Settings
@@ -173,23 +91,14 @@ general_settings:
 # ==========================================
 
 router_settings:
-  routing_strategy: usage-based-routing  # or simple-shuffle, least-busy
+  routing_strategy: simple-shuffle
 
-  # Model fallbacks (if primary fails, try these)
-  model_fallbacks:
-    "openai/gpt-4o": ["openai/gpt-4-turbo", "anthropic/claude-3-sonnet"]
-    "anthropic/claude-3-opus": ["openai/gpt-4o", "anthropic/claude-3-sonnet"]
-
-  # Retry configuration
+  # Retry configuration for local models
   num_retries: 2
   retry_after: 5  # seconds
 
   # Request timeout
   timeout: 600  # seconds (10 minutes for long responses)
-
-  # Cache settings (optional)
-  # cache: true
-  # cache_ttl: 3600  # 1 hour
 
 # ==========================================
 # LiteLLM Settings

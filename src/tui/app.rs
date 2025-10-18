@@ -1,7 +1,7 @@
 use super::mode::OperationMode;
 use super::theme::Theme;
 use super::widgets::{ChatState, InputState, SidebarState};
-use crate::agents::{AgentAction, ModeAwareExecutor};
+use crate::agents::{AgentAction, ModeAwareExecutor, Plan};
 use crate::diagnostics::{DiagnosticsMode, HardwareMonitor, HardwareStats};
 use crate::models::{ChatMessage, MessageRole, Model, ProjectContext};
 use crate::session::{ConversationHistory, ConversationManager};
@@ -59,6 +59,14 @@ pub struct App {
     pub pending_executor: Option<ModeAwareExecutor>,
     /// Track if FILE_READ feedback is pending
     pub pending_file_read: bool,
+    /// Active plan awaiting approval or being executed
+    pub active_plan: Option<Plan>,
+    /// Current step index during plan execution (0-based)
+    pub plan_execution_index: Option<usize>,
+    /// Whether we're waiting for user to approve plan
+    pub awaiting_plan_approval: bool,
+    /// Track if plan mode was active when generation started
+    pub plan_mode_active_for_generation: bool,
     /// Status text to show during file reading
     pub reading_file_status: Option<String>,
     /// Current confirmation state
@@ -122,6 +130,10 @@ impl App {
             pending_action: None,
             pending_executor: None,
             pending_file_read: false,
+            active_plan: None,
+            plan_execution_index: None,
+            awaiting_plan_approval: false,
+            plan_mode_active_for_generation: false,
             reading_file_status: None,
             confirmation_state: None,
             status_timestamp: None,
@@ -217,7 +229,11 @@ impl App {
         let viewport_height = 20; // This should be passed in, but keeping for compatibility
         let max_scroll = self.calculate_max_scroll(viewport_height);
 
-        self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_add(amount).min(max_scroll);
+        self.chat_state.scroll_offset = self
+            .chat_state
+            .scroll_offset
+            .saturating_add(amount)
+            .min(max_scroll);
 
         // User is manually scrolling if they're not at the bottom
         let threshold = 3; // Allow small margin for rounding
@@ -262,6 +278,15 @@ impl App {
     /// Set a specific operation mode
     pub fn set_mode(&mut self, mode: OperationMode) {
         if self.operation_mode != mode {
+            // If switching away from PlanMode and a plan is awaiting approval, cancel it
+            if self.operation_mode == OperationMode::PlanMode && self.awaiting_plan_approval {
+                self.cancel_plan();
+                self.set_status(format!(
+                    "Plan cancelled - switched to {}",
+                    mode.display_name()
+                ));
+            }
+
             self.operation_mode = mode;
             self.bypass_confirmed = false;
             self.set_status(format!("Mode: {}", mode.display_name()));
@@ -421,6 +446,83 @@ impl App {
     /// Update hardware stats
     pub fn update_hardware_stats(&mut self, stats: HardwareStats) {
         self.hardware_stats = Some(stats);
+    }
+
+    /// Set active plan and enter approval state
+    pub fn set_plan(&mut self, plan: Plan) {
+        self.active_plan = Some(plan);
+        self.awaiting_plan_approval = true;
+        self.plan_execution_index = None;
+        self.set_status("Plan ready - Alt+Y to approve, Alt+N to cancel");
+    }
+
+    /// Cancel the active plan
+    pub fn cancel_plan(&mut self) {
+        self.active_plan = None;
+        self.awaiting_plan_approval = false;
+        self.plan_execution_index = None;
+        self.plan_mode_active_for_generation = false;
+        self.set_status("Plan cancelled");
+    }
+
+    /// Start executing the active plan
+    pub fn start_plan_execution(&mut self) {
+        if self.active_plan.is_some() {
+            self.plan_execution_index = Some(0);
+            self.awaiting_plan_approval = false;
+            self.set_status("Executing plan...");
+        }
+    }
+
+    /// Get the next pending action from the plan
+    pub fn plan_next_action(&self) -> Option<&crate::agents::PlannedAction> {
+        self.active_plan
+            .as_ref()
+            .and_then(|plan| plan.next_pending_action().map(|(_, action)| action))
+    }
+
+    /// Mark current plan action as completed
+    pub fn mark_plan_action_completed(&mut self, result: Option<crate::agents::ActionResult>) {
+        if let Some(plan) = self.active_plan.as_mut() {
+            if let Some(index) = self.plan_execution_index {
+                plan.update_action_status(
+                    index,
+                    crate::agents::ActionStatus::Completed,
+                    result,
+                    None,
+                );
+                self.plan_execution_index = Some(index + 1);
+            }
+        }
+    }
+
+    /// Mark current plan action as failed
+    pub fn mark_plan_action_failed(&mut self, error: String) {
+        if let Some(plan) = self.active_plan.as_mut() {
+            if let Some(index) = self.plan_execution_index {
+                plan.update_action_status(
+                    index,
+                    crate::agents::ActionStatus::Failed,
+                    None,
+                    Some(error),
+                );
+                self.plan_execution_index = Some(index + 1);
+            }
+        }
+    }
+
+    /// Check if plan execution is complete
+    pub fn is_plan_complete(&self) -> bool {
+        if let Some(plan) = self.active_plan.as_ref() {
+            plan.stats().is_complete()
+        } else {
+            false
+        }
+    }
+
+    /// Get plan statistics
+    pub fn get_plan_stats(&self) -> Option<crate::agents::PlanStats> {
+        self.active_plan.as_ref().map(|plan| plan.stats())
     }
 }
 

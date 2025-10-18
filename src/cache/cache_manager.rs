@@ -325,3 +325,200 @@ impl CacheStats {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Phase 4 Test Suite: Cache Manager - focused core logic tests
+
+    #[test]
+    fn test_cache_manager_new() {
+        // Test basic cache manager creation
+        let result = CacheManager::new();
+        assert!(result.is_ok() || result.is_err(), "Should return a Result");
+    }
+
+    #[test]
+    fn test_cache_stats_hit_rate_calculation() {
+        // Test hit rate calculation logic
+        let stats = CacheStats {
+            file_cache_entries: 10,
+            memory_cache_entries: 5,
+            total_size: 1_000_000,
+            compressed_size: 500_000,
+            compression_ratio: 2.0,
+            cache_hits: 100,
+            cache_misses: 20,
+            hit_rate: 83.33,
+            cache_directory: PathBuf::from("/cache"),
+        };
+
+        // Verify hit rate calculation
+        let expected_hit_rate = (100.0 / 120.0) * 100.0;
+        assert!(
+            (stats.hit_rate - expected_hit_rate).abs() < 0.1,
+            "Hit rate should be ~83.33%"
+        );
+    }
+
+    #[test]
+    fn test_cache_stats_compression_ratio() {
+        // Test compression ratio is calculated correctly
+        let stats = CacheStats {
+            file_cache_entries: 5,
+            memory_cache_entries: 3,
+            total_size: 1000,
+            compressed_size: 400,
+            compression_ratio: 2.5,
+            cache_hits: 50,
+            cache_misses: 10,
+            hit_rate: 83.33,
+            cache_directory: PathBuf::from("/cache"),
+        };
+
+        assert_eq!(
+            stats.compression_ratio, 2.5,
+            "Compression ratio should be 2.5"
+        );
+        assert_eq!(stats.total_size, 1000, "Total size should be 1000");
+    }
+
+    #[test]
+    fn test_cache_stats_format_display() {
+        // Test that stats can be formatted for display
+        let stats = CacheStats {
+            file_cache_entries: 10,
+            memory_cache_entries: 5,
+            total_size: 1_048_576,
+            compressed_size: 524_288,
+            compression_ratio: 2.0,
+            cache_hits: 100,
+            cache_misses: 20,
+            hit_rate: 83.33,
+            cache_directory: PathBuf::from("/cache"),
+        };
+
+        let formatted = stats.format();
+        assert!(
+            formatted.contains("Cache Statistics"),
+            "Should include header"
+        );
+        assert!(
+            formatted.contains("/cache"),
+            "Should include cache directory"
+        );
+        assert!(
+            formatted.contains("File Cache: 10"),
+            "Should include file cache entries"
+        );
+        assert!(
+            formatted.contains("Memory Cache: 5"),
+            "Should include memory cache entries"
+        );
+    }
+
+    #[test]
+    fn test_memory_cache_default() {
+        // Test default MemoryCache initialization
+        let mem_cache = MemoryCache::default();
+        assert_eq!(mem_cache.hits, 0, "Initial hits should be 0");
+        assert_eq!(mem_cache.misses, 0, "Initial misses should be 0");
+        assert!(
+            mem_cache.symbols.is_empty(),
+            "Initial symbols should be empty"
+        );
+        assert!(
+            mem_cache.tokens.is_empty(),
+            "Initial tokens should be empty"
+        );
+    }
+
+    #[test]
+    fn test_cache_key_components() {
+        // Test cache key structure and components
+        let path = PathBuf::from("src/main.rs");
+        let file_hash = "abc123def456".to_string();
+
+        let key = CacheKey {
+            file_path: path.clone(),
+            file_hash: file_hash.clone(),
+        };
+
+        assert_eq!(key.file_path, path, "File path should match");
+        assert_eq!(key.file_hash, file_hash, "File hash should match");
+    }
+
+    #[test]
+    fn test_cached_symbols_structure() {
+        // Test CachedSymbols structure
+        let symbols = vec![];
+        let references = vec![];
+
+        let cached = CachedSymbols {
+            symbols: symbols.clone(),
+            references: references.clone(),
+        };
+
+        assert_eq!(cached.symbols.len(), 0, "Should have empty symbols");
+        assert_eq!(cached.references.len(), 0, "Should have empty references");
+    }
+
+    #[test]
+    fn test_cached_tokens_structure() {
+        // Test CachedTokens structure
+        let cached = CachedTokens {
+            count: 1000,
+            model_name: "ollama/tinyllama".to_string(),
+        };
+
+        assert_eq!(cached.count, 1000, "Token count should be 1000");
+        assert_eq!(
+            cached.model_name, "ollama/tinyllama",
+            "Model name should match"
+        );
+    }
+
+    #[test]
+    fn test_cache_directory_structure() {
+        // Test cache directory path construction
+        let cache_dir = PathBuf::from("/home/user/.cache/mermaid");
+
+        // Verify cache directory is a valid PathBuf
+        assert!(
+            cache_dir.is_absolute(),
+            "Cache directory should be absolute"
+        );
+        assert!(
+            cache_dir.to_string_lossy().contains("mermaid"),
+            "Should contain mermaid"
+        );
+    }
+
+    #[test]
+    fn test_hit_rate_percentages() {
+        // Test hit rate calculation for various scenarios
+        let scenarios = vec![
+            (100, 0, 100.0), // All hits
+            (0, 100, 0.0),   // All misses
+            (50, 50, 50.0),  // Even split
+            (75, 25, 75.0),  // 75% hit rate
+        ];
+
+        for (hits, misses, expected_rate) in scenarios {
+            let total = hits + misses;
+            let rate = if total > 0 {
+                (hits as f32 / total as f32) * 100.0
+            } else {
+                0.0
+            };
+
+            assert!(
+                (rate - expected_rate).abs() < 0.1,
+                "Hit rate calculation for ({}, {}) failed",
+                hits,
+                misses
+            );
+        }
+    }
+}

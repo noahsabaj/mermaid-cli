@@ -2,7 +2,7 @@
 fn debug_cargo_test_parsing() {
     use mermaid::agents::parse_actions;
 
-    let response = "[COMMAND: cargo test]";
+    let response = "[COMMAND: cargo test]\n[/COMMAND]";
     let actions = parse_actions(response);
 
     eprintln!("Response: {}", response);

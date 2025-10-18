@@ -2,10 +2,13 @@
 // All external access must go through this gateway
 
 // Private submodules - not directly accessible from outside
+mod file_collector;
 mod loader;
+mod project_detector;
 mod ranker;
 mod repo_graph;
 mod repomap;
+mod token_counter;
 mod tree_parser;
 
 // Public re-exports - the ONLY way to access context functionality

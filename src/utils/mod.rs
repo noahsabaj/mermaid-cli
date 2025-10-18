@@ -8,6 +8,7 @@ mod logger;
 mod mutex_ext;
 mod retry;
 mod tokenizer;
+pub mod validation;
 
 // Public re-exports - the ONLY way to access utils functionality
 pub use errors::MermaidError;
@@ -16,3 +17,4 @@ pub use logger::{init_logger, log_debug, log_error, log_info, log_progress, log_
 pub use mutex_ext::{lock_arc_mutex_safe, MutexExt};
 pub use retry::{retry_async, retry_sync, RetryConfig};
 pub use tokenizer::{count_file_tokens, Tokenizer};
+pub use validation::{validate_command, validate_file_path};

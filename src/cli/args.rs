@@ -76,6 +76,19 @@ pub struct Cli {
     #[arg(long, requires = "prompt")]
     pub no_execute: bool,
 
+    /// Explicitly select backend (ollama or vllm)
+    /// If not specified, auto-detects based on model availability
+    #[arg(long)]
+    pub backend: Option<String>,
+
+    /// List all available models across all backends
+    #[arg(long)]
+    pub list_all_models: bool,
+
+    /// Show available backends
+    #[arg(long)]
+    pub backends: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

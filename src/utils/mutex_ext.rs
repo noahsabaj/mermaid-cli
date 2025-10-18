@@ -22,7 +22,7 @@ impl<T: Clone> MutexExt<T> for Mutex<T> {
                 // We can still access the data, but we log the issue
                 eprintln!("[WARNING] Mutex was poisoned, recovering data");
                 poisoned.into_inner().clone()
-            }
+            },
         }
     }
 
@@ -33,7 +33,7 @@ impl<T: Clone> MutexExt<T> for Mutex<T> {
                 // Mutex was poisoned, but we can still get the guard
                 eprintln!("[WARNING] Mutex was poisoned, recovering guard");
                 poisoned.into_inner()
-            }
+            },
         }
     }
 }
@@ -45,7 +45,7 @@ pub fn lock_arc_mutex_safe<T>(mutex: &Arc<Mutex<T>>) -> std::sync::MutexGuard<'_
         Err(poisoned) => {
             eprintln!("[WARNING] Arc<Mutex> was poisoned, recovering guard");
             poisoned.into_inner()
-        }
+        },
     }
 }
 
@@ -63,29 +63,45 @@ macro_rules! lock_or_panic {
 /// Unlike Mutex, RwLock doesn't poison, so no recovery logic needed
 pub trait RwLockExt<T> {
     /// Acquire a read lock (shared access, multiple readers allowed)
-    async fn read_safe<'a>(&'a self) -> RwLockReadGuard<'a, T> where T: 'a;
+    async fn read_safe<'a>(&'a self) -> RwLockReadGuard<'a, T>
+    where
+        T: 'a;
 
     /// Acquire a write lock (exclusive access, blocks all readers and writers)
-    async fn write_safe<'a>(&'a self) -> RwLockWriteGuard<'a, T> where T: 'a;
+    async fn write_safe<'a>(&'a self) -> RwLockWriteGuard<'a, T>
+    where
+        T: 'a;
 }
 
 impl<T> RwLockExt<T> for RwLock<T> {
-    async fn read_safe<'a>(&'a self) -> RwLockReadGuard<'a, T> where T: 'a {
+    async fn read_safe<'a>(&'a self) -> RwLockReadGuard<'a, T>
+    where
+        T: 'a,
+    {
         self.read().await
     }
 
-    async fn write_safe<'a>(&'a self) -> RwLockWriteGuard<'a, T> where T: 'a {
+    async fn write_safe<'a>(&'a self) -> RwLockWriteGuard<'a, T>
+    where
+        T: 'a,
+    {
         self.write().await
     }
 }
 
 /// Helper for Arc<RwLock<T>> - common pattern in concurrent code
 impl<T> RwLockExt<T> for Arc<RwLock<T>> {
-    async fn read_safe<'a>(&'a self) -> RwLockReadGuard<'a, T> where T: 'a {
+    async fn read_safe<'a>(&'a self) -> RwLockReadGuard<'a, T>
+    where
+        T: 'a,
+    {
         self.read().await
     }
 
-    async fn write_safe<'a>(&'a self) -> RwLockWriteGuard<'a, T> where T: 'a {
+    async fn write_safe<'a>(&'a self) -> RwLockWriteGuard<'a, T>
+    where
+        T: 'a,
+    {
         self.write().await
     }
 }

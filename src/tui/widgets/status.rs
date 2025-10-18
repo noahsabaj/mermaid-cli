@@ -7,8 +7,8 @@ use ratatui::{
 };
 use ratatui_macros::{line, span};
 
-use crate::tui::theme::Theme;
 use crate::tui::mode::OperationMode;
+use crate::tui::theme::Theme;
 
 /// Props for StatusWidget (stateless widget)
 pub struct StatusWidget<'a> {
@@ -54,9 +54,7 @@ impl<'a> Widget for StatusWidget<'a> {
             line1_spans.push(Span::raw(" • "));
             line1_spans.push(Span::styled(
                 "Alt+Y: approve, Alt+N: skip, Alt+P: preview",
-                Style::new()
-                    .fg(self.theme.colors.warning.to_color())
-                    .bold(),
+                Style::new().fg(self.theme.colors.warning.to_color()).bold(),
             ));
         } else {
             let warning_level = self.operation_mode.warning_level();
@@ -66,9 +64,7 @@ impl<'a> Widget for StatusWidget<'a> {
                 line1_spans.push(Span::raw(" • "));
                 line1_spans.push(Span::styled(
                     warning_text,
-                    Style::new()
-                        .fg(warning_color)
-                        .bold(),
+                    Style::new().fg(warning_color).bold(),
                 ));
             }
         }

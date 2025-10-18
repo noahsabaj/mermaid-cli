@@ -20,21 +20,30 @@ pub enum EventAction {
     AlwaysApprove,
     /// Toggle action preview
     TogglePreview,
+    /// Approve and start executing a pending plan
+    ApprovePlan,
+    /// Cancel/reject a pending plan
+    CancelPlan,
 }
 
 /// Handle a single event and return the appropriate action
 ///
 /// This function is pure event routing - it does NOT execute business logic.
 /// It just determines what action should be taken based on the event.
-pub fn handle_event(
-    app: &mut App,
-    event: Event,
-    viewport_height: u16,
-) -> Result<EventAction> {
+pub fn handle_event(app: &mut App, event: Event, viewport_height: u16) -> Result<EventAction> {
     match event {
         Event::Mouse(mouse) => handle_mouse_event(app, mouse, viewport_height),
         Event::Key(key) => handle_key_event(app, key, viewport_height),
         _ => Ok(EventAction::Continue), // Ignore FocusGained, FocusLost, Paste, Resize
+    }
+}
+
+/// Handle keyboard events for plan approval/cancellation during plan mode
+fn handle_plan_approval_keys(key_code: KeyCode) -> Result<EventAction> {
+    match key_code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => Ok(EventAction::ApprovePlan),
+        KeyCode::Char('n') | KeyCode::Char('N') => Ok(EventAction::CancelPlan),
+        _ => Ok(EventAction::Continue),
     }
 }
 
@@ -71,7 +80,12 @@ fn handle_key_event(
     key: crossterm::event::KeyEvent,
     _viewport_height: u16,
 ) -> Result<EventAction> {
-    // Handle Alt+key combinations globally for confirmation
+    // Handle Alt+key combinations globally for plan approval/cancellation
+    if key.modifiers == KeyModifiers::ALT && app.awaiting_plan_approval {
+        return handle_plan_approval_keys(key.code);
+    }
+
+    // Handle Alt+key combinations for confirmation
     if key.modifiers == KeyModifiers::ALT && app.confirmation_state.is_some() {
         return handle_confirmation_keys(key.code);
     }
@@ -111,7 +125,7 @@ fn handle_confirmation_keys(key_code: KeyCode) -> Result<EventAction> {
     }
 }
 
-/// Handle Escape key (close diagnostics, stop generation, or clear input)
+/// Handle Escape key (close diagnostics, stop generation, cancel plan, or clear input)
 fn handle_escape_key(app: &mut App) -> EventAction {
     use crate::diagnostics::DiagnosticsMode;
 
@@ -119,6 +133,10 @@ fn handle_escape_key(app: &mut App) -> EventAction {
     if app.diagnostics_mode == DiagnosticsMode::Detailed {
         app.diagnostics_mode = DiagnosticsMode::Compact;
         app.set_status("Diagnostics panel closed");
+    } else if app.awaiting_plan_approval {
+        // Cancel pending plan
+        app.cancel_plan();
+        return EventAction::Continue;
     } else if app.is_generating {
         // If generating, abort the generation but keep what was generated
         if let Some(abort) = app.generation_abort.take() {
@@ -145,6 +163,12 @@ fn handle_escape_key(app: &mut App) -> EventAction {
 
 /// Handle Enter key (submit message or command)
 fn handle_enter_key(app: &mut App) -> Result<EventAction> {
+    // If waiting for plan approval, block new messages
+    if app.awaiting_plan_approval {
+        app.set_status("Complete or cancel the plan first (Alt+Y to approve, Alt+N to cancel)");
+        return Ok(EventAction::Continue);
+    }
+
     if !app.input.is_empty() && !app.is_generating {
         // Check if this is a command (starts with ':')
         if app.input.starts_with(':') {

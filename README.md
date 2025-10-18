@@ -1,11 +1,11 @@
 # Mermaid - Open Source AI Pair Programmer
 
-An open-source, model-agnostic AI pair programmer CLI that provides an interactive chat interface with full agentic coding capabilities. Built with a unified interface supporting **100+ LLM providers** through LiteLLM proxy - from local Ollama models to every major cloud API.
+An open-source AI pair programmer CLI that provides an interactive chat interface with full agentic coding capabilities. Uses local Ollama models for fast, private coding assistance.
 
 ## Features
 
-- **100+ Model Support**: Single interface for OpenAI, Anthropic, Google, Groq, Ollama, Azure, Cohere, Mistral, and 90+ more
-- **Hot-Swappable Models**: Switch between any provider/model mid-session without losing context
+- **Local Model Support**: Use Ollama for fast, private code assistance
+- **Multiple Local Models**: Switch between different Ollama models mid-session without losing context
 - **Project Aware**: Automatically loads and understands your entire project context
 - **True Agency**: Can read, write, execute commands, and manage git
 - **Privacy First**: Run 100% locally with Ollama - your code never leaves your machine
@@ -29,13 +29,6 @@ An open-source, model-agnostic AI pair programmer CLI that provides an interacti
 git clone https://github.com/noahsabaj/mermaid-cli.git
 cd mermaid
 
-# Copy environment template and add your API keys
-cp .env.example .env
-# Edit .env with your favorite editor and add API keys
-
-# Start the LiteLLM proxy server (runs in background)
-./start_litellm.sh
-
 # Build and install Mermaid
 cargo build --release
 cargo install --path .
@@ -44,20 +37,13 @@ cargo install --path .
 ### Basic Usage
 
 ```bash
-# Use with any of 100+ models
-mermaid --model ollama/tinyllama         # Local tiny model
-mermaid --model ollama/deepseek-coder:33b # Local large model
-mermaid --model groq/llama3-70b          # Groq (fast!)
-mermaid --model ollama/qwen3-coder:30b # Excellent at coding
+# Use with any local Ollama model
+mermaid --model ollama/tinyllama         # Tiny model (fast)
+mermaid --model ollama/deepseek-coder:33b # Large model (best quality)
+mermaid --model ollama/qwen3-coder:30b   # Excellent at coding
 
-# List all available models from proxy
+# List available models
 mermaid list
-
-# Check proxy status
-./start_litellm.sh status
-
-# View proxy logs
-./start_litellm.sh logs
 ```
 
 ## Interactive Commands
@@ -82,12 +68,9 @@ Once in the chat interface:
 ## Configuration
 
 ### Environment Variables (`.env` file)
-The primary configuration is through environment variables. Copy `.env.example` to `.env`:
+Set your default model configuration:
 
 ```bash
-# LiteLLM Proxy URL (default: http://localhost:4000)
-LITELLM_PROXY_URL=http://localhost:4000
-
 MERMAID_DEFAULT_MODEL=ollama/tinyllama
 ```
 
@@ -99,9 +82,6 @@ Located at `~/.config/mermaid/config.toml`:
 name = "ollama/deepseek-coder:33b"  # provider/model format
 temperature = 0.7
 max_tokens = 4096
-
-[litellm]
-proxy_url = "http://localhost:4000"  # Override env var if needed
 
 [ui]
 theme = "dark"
@@ -115,27 +95,16 @@ max_context_tokens = 75000
 ### Project Configuration
 Create `.mermaid/config.toml` in your project root to override global settings.
 
-## Supported Providers (100+)
+## Supported Models
 
-All providers are accessed through the unified LiteLLM proxy using the format `provider/model`:
+Mermaid uses **Ollama** for local model support. Available models include:
+- `ollama/tinyllama` - Tiny, ultra-fast model for testing
+- `ollama/deepseek-coder:33b` - Best for coding tasks
+- `ollama/codellama` - Specialized code model
+- `ollama/mistral` - Balanced performance
+- `ollama/qwen3-coder:30b` - Excellent coding capabilities
 
-### Local Models (Privacy-First)
-- **Ollama**: `ollama/tinyllama`, `ollama/deepseek-coder:33b`, `ollama/codellama`, `ollama/mistral`
-- **LlamaCPP**: `llamacpp/model-name`
-- **Local AI**: `localai/model-name`
-
-### Fast Inference Providers
-- **Groq**: `groq/llama3-70b`, `groq/mixtral-8x7b` (Ultra-fast inference)
-- **Together AI**: `together/llama-2-70b`, `together/codellama-34b`
-- **Anyscale**: `anyscale/llama-2-70b-chat`
-- **DeepInfra**: `deepinfra/llama-2-70b`, `deepinfra/codellama-34b`
-
-### Specialized Providers
-- **Cohere**: `cohere/command`, `cohere/command-light`
-- **Mistral**: `mistral/mistral-large`, `mistral/mistral-medium`
-- **Perplexity**: `perplexity/llama-3-sonar-large`, `perplexity/codellama-70b`
-- **Replicate**: `replicate/llama-2-70b`, `replicate/vicuna-13b`
-- **Hugging Face**: `huggingface/bigscience/bloom`, `huggingface/codegen`
+Install any model with: `ollama pull model-name`
 
 ## Example Workflows
 
@@ -216,55 +185,46 @@ cargo build --release
 ### Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│   Mermaid   │────▶│ LiteLLM Proxy│────▶│ 100+ Providers  │
-│     CLI     │     │  (Port 4000) │     │ (Unified API)   │
-└─────────────┘     └──────────────┘     └─────────────────┘
-│                                          │
-│                                   ┌──────┴──────┐
-▼                                   ▼             ▼
-┌─────────┐                      ┌─────────┐   ┌─────────┐
-│  Local  │                      │  Cloud  │   │  Fast   │
-│ Context │                      │  APIs   │   │Inference│
-└─────────┘                      └─────────┘   └─────────┘
-                            OpenAI        Groq
-                            Anthropic     Together
-                            Google        Anyscale
-                            Azure         DeepInfra
+┌─────────────┐     ┌──────────────┐
+│   Mermaid   │────▶│    Ollama    │
+│     CLI     │     │  Local Server│
+└─────────────┘     └──────────────┘
+│                          │
+└──────────┬───────────────┘
+           ▼
+       ┌─────────┐
+       │  Local  │
+       │ Context │
+       └─────────┘
 ```
 
 **Key Components:**
 
-- `models/unified.rs` - Single unified model implementation using LiteLLM proxy
-- `models/factory.rs` - Model factory that queries available models from proxy
+- `models/ollama_direct.rs` - Direct Ollama connection
 - `agents/` - File system, command execution, git operations
 - `context/` - Project analysis and context loading
 - `tui/` - Terminal user interface with Ratatui
 - `app/` - Configuration and application state
 
-**Why LiteLLM Proxy?**
-- Single API format (OpenAI-compatible) for all providers
-- Automatic retry, fallback, and load balancing
-- Built-in caching and rate limiting
-- No need to maintain individual provider SDKs
+**Privacy First:**
+- All processing happens locally
+- Your code never leaves your machine
+- No external API calls or cloud dependencies
 
 ## Comparison
 
 | Feature | Mermaid | Aider | Claude Code | GitHub Copilot |
 |---------|---------|-------|-------------|----------------|
 | Open Source | Yes | Yes | No | No |
-| Local Models | Yes | Yes | No | No |
-| Model Providers | 100+ | ~10 | Claude only | OpenAI only |
-| Unified Interface | Yes (LiteLLM) | No | No | No |
+| Local Models Only | Yes | Yes | No | No |
+| Model Support | Ollama | Multiple | Claude only | OpenAI only |
 | Privacy | Full | Full | No | No |
 | File Operations | Yes | Yes | Yes | Limited |
 | Command Execution | Yes | Yes | Yes | No |
 | Git Integration | Yes | Yes | Yes | Yes |
 | Streaming UI | Yes | Yes | Yes | N/A |
 | Rootless Containers | Yes (Podman) | No | No | No |
-| Cost | Free* | Free* | $20/mo | $10/mo |
-
-*Free with local models, API costs apply for cloud models
+| Cost | Completely Free | Completely Free | $20/mo | $10/mo |
 
 ## FAQ
 
@@ -275,10 +235,10 @@ Yes! With local models (Ollama), your code never leaves your machine.
 Yes, with Ollama and local models.
 
 ### Can I add support for other models?
-Mermaid already supports 100+ models through LiteLLM proxy! If your provider isn't supported, you can:
-1. Request it in the LiteLLM repo (they add new providers regularly)
-2. Use the OpenAI-compatible endpoint if your provider supports it
-3. Run models locally with Ollama for complete control
+Mermaid uses Ollama for model support. To use additional models:
+1. Pull the model with Ollama: `ollama pull model-name`
+2. Use it with Mermaid: `mermaid --model ollama/model-name`
+3. Check available models at [ollama.ai](https://ollama.ai)
 
 ## License
 

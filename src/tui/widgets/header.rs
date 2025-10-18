@@ -23,15 +23,13 @@ impl<'a> Widget for HeaderWidget<'a> {
             .and_then(|n| n.to_str())
             .unwrap_or(self.working_dir);
 
-        let header_text = text![
-            line![
-                span!(Style::new().bold().fg(self.theme.colors.header.to_color()); "Mermaid"),
-                span!(self.theme.colors.text_disabled.to_color(); " • "),
-                span!(self.theme.colors.success.to_color(); self.model_name),
-                span!(self.theme.colors.text_disabled.to_color(); " • "),
-                span!(self.theme.colors.text_secondary.to_color(); short_path),
-            ]
-        ];
+        let header_text = text![line![
+            span!(Style::new().bold().fg(self.theme.colors.header.to_color()); "Mermaid"),
+            span!(self.theme.colors.text_disabled.to_color(); " • "),
+            span!(self.theme.colors.success.to_color(); self.model_name),
+            span!(self.theme.colors.text_disabled.to_color(); " • "),
+            span!(self.theme.colors.text_secondary.to_color(); short_path),
+        ]];
 
         let header = Paragraph::new(header_text)
             .alignment(Alignment::Center)

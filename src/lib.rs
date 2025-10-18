@@ -7,6 +7,7 @@ pub mod context;
 pub mod diagnostics;
 pub mod models;
 pub mod ollama;
+pub mod prompts;
 pub mod proxy;
 pub mod runtime;
 pub mod session;

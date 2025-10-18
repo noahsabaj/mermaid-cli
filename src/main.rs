@@ -4,6 +4,7 @@ use clap::Parser;
 use mermaid::{
     app::load_config,
     cli::Cli,
+    models::ModelFactory,
     ollama::ensure_model as ensure_ollama_model,
     proxy::{ensure_proxy, is_proxy_running},
     runtime::{NonInteractiveRunner, Orchestrator},
@@ -30,6 +31,43 @@ async fn main() -> Result<()> {
 
     // Initialize tracing subscriber (always, controlled by RUST_LOG env var)
     init_logger();
+
+    // Handle backend discovery commands
+    if cli.backends {
+        let backends = ModelFactory::get_available_backends().await;
+        if backends.is_empty() {
+            println!("No backends currently available");
+            println!("Ensure at least one of the following is running:");
+            println!("  - Ollama: ollama serve");
+            println!("  - vLLM: python -m vllm.entrypoints.openai.api_server");
+        } else {
+            println!("Available backends:");
+            for backend in backends {
+                println!("  - {}", backend);
+            }
+        }
+        return Ok(());
+    }
+
+    if cli.list_all_models {
+        match ModelFactory::list_all_backend_models().await {
+            Ok(models) => {
+                if models.is_empty() {
+                    println!("No models found across any backends");
+                } else {
+                    println!("Available models:");
+                    for model in models {
+                        println!("  - {}", model);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to list models: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
 
     // Check if running in non-interactive mode
     if let Some(prompt) = cli.prompt.clone() {

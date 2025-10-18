@@ -21,10 +21,7 @@ impl Default for RetryConfig {
 }
 
 /// Retry an async operation with exponential backoff
-pub async fn retry_async<F, Fut, T>(
-    operation: F,
-    config: &RetryConfig,
-) -> Result<T>
+pub async fn retry_async<F, Fut, T>(operation: F, config: &RetryConfig) -> Result<T>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
@@ -43,7 +40,7 @@ where
                     config.max_attempts,
                     e
                 ));
-            }
+            },
             Err(e) => {
                 eprintln!(
                     "[RETRY] Attempt {}/{} failed: {}. Retrying in {}ms...",
@@ -56,7 +53,7 @@ where
                 // Calculate next delay
                 delay_ms = ((delay_ms as f64) * config.backoff_multiplier) as u64;
                 delay_ms = delay_ms.min(config.max_delay_ms);
-            }
+            },
         }
     }
 }
@@ -80,7 +77,7 @@ where
                     config.max_attempts,
                     e
                 ));
-            }
+            },
             Err(e) => {
                 eprintln!(
                     "[RETRY] Attempt {}/{} failed: {}. Retrying in {}ms...",
@@ -93,7 +90,7 @@ where
                 // Calculate next delay
                 delay_ms = ((delay_ms as f64) * config.backoff_multiplier) as u64;
                 delay_ms = delay_ms.min(config.max_delay_ms);
-            }
+            },
         }
     }
 }

@@ -1,4 +1,5 @@
 use crate::agents::ActionDisplay;
+use crate::prompts;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -123,80 +124,24 @@ impl Default for ModelConfig {
             top_p: Some(1.0),
             frequency_penalty: None,
             presence_penalty: None,
-            system_prompt: Some(
-                r#"You are Mermaid, an AI pair programmer assistant that can read, write, and execute code.
-
-## IMPORTANT: Action Blocks
-
-You have the ability to perform actions by using special action blocks in your responses. Action blocks are automatically parsed and executed, and the results are displayed cleanly to the user.
-
-**Key point**: Action blocks themselves are NOT shown to the user. Instead, the system displays clean action summaries with results. This means you should write natural, explanatory text AROUND action blocks to provide context.
-
-### File Operations
-
-To write or create a file, use:
-```
-[FILE_WRITE: path/to/file.rs]
-fn main() {
-    println!("Hello, world!");
-}
-[/FILE_WRITE]
-```
-
-To read a file, use:
-```
-[FILE_READ: path/to/file.rs]
-[/FILE_READ]
-```
-
-### Shell Commands
-
-To execute shell commands, use:
-```
-[COMMAND: cargo test]
-[/COMMAND]
-```
-
-Or with a specific working directory:
-```
-[COMMAND: cargo build --release dir=/path/to/project]
-[/COMMAND]
-```
-
-### Git Operations
-
-To see git status:
-```
-[GIT_STATUS]
-```
-
-To see git diff:
-```
-[GIT_DIFF]
-```
-
-## Guidelines
-
-1. When asked to create or modify files, ALWAYS use the [FILE_WRITE:] action block
-2. When asked to run commands, ALWAYS use the [COMMAND:] action block
-3. Be precise with file paths - use the exact paths shown in the project context
-4. After writing files, consider running relevant tests or build commands
-5. Provide natural explanatory text BEFORE and AFTER action blocks, since the blocks themselves won't be shown
-6. Don't repeat code content in your explanation - the action summary will show what was done
-
-Example good response:
-"I'll create a new configuration file for you.
-
-[FILE_WRITE: config.toml]
-[database]
-host = "localhost"
-[/FILE_WRITE]
-
-The configuration file has been created with the default settings. You can modify the host value if needed."
-
-Remember: You're not just showing code examples - you can actually create, modify, and execute files! The user sees your explanations and clean action summaries, not the raw action blocks."#.to_string()
-            ),
+            system_prompt: Some(Self::get_base_prompt()),
         }
+    }
+}
+
+impl ModelConfig {
+    /// Get the base system prompt from the centralized prompts module
+    fn get_base_prompt() -> String {
+        prompts::get_system_prompt()
+    }
+
+    /// Create config with Plan Mode instructions appended to system prompt
+    pub fn with_plan_mode() -> Self {
+        let mut config = Self::default();
+        if let Some(ref mut prompt) = config.system_prompt {
+            prompt.push_str(prompts::PLAN_MODE_SUFFIX);
+        }
+        config
     }
 }
 
@@ -239,5 +184,179 @@ impl Default for ModelCapabilities {
             supports_functions: false,
             supports_vision: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Phase 3 Test Suite: Model Types - 8 comprehensive tests
+
+    #[test]
+    fn test_message_role_equality() {
+        let user1 = MessageRole::User;
+        let user2 = MessageRole::User;
+        let assistant = MessageRole::Assistant;
+
+        assert_eq!(user1, user2, "User roles should be equal");
+        assert_ne!(user1, assistant, "Different roles should not be equal");
+    }
+
+    #[test]
+    fn test_chat_message_creation() {
+        let message = ChatMessage {
+            role: MessageRole::User,
+            content: "Hello, assistant!".to_string(),
+            timestamp: chrono::Local::now(),
+            actions: vec![],
+        };
+
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(message.content, "Hello, assistant!");
+        assert!(message.actions.is_empty());
+    }
+
+    #[test]
+    fn test_project_context_new() {
+        let context = ProjectContext::new("/home/user/project".to_string());
+
+        assert_eq!(context.root_path, "/home/user/project");
+        assert!(context.files.is_empty());
+        assert_eq!(context.token_count, 0);
+        assert!(context.included_files.is_empty());
+        assert_eq!(context.project_type, None);
+    }
+
+    #[test]
+    fn test_project_context_add_file() {
+        let mut context = ProjectContext::new("/project".to_string());
+
+        context.add_file("src/main.rs".to_string(), "fn main() {}".to_string());
+        context.add_file("Cargo.toml".to_string(), "[package]".to_string());
+
+        assert_eq!(context.files.len(), 2);
+        assert_eq!(
+            context.files.get("src/main.rs"),
+            Some(&"fn main() {}".to_string())
+        );
+        assert_eq!(
+            context.files.get("Cargo.toml"),
+            Some(&"[package]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_project_context_prompt_formatting() {
+        let mut context = ProjectContext::new("/project".to_string());
+        context.project_type = Some("rust".to_string());
+        context.add_file("src/main.rs".to_string(), "fn main() {}".to_string());
+        context.add_file("Cargo.toml".to_string(), "[package]".to_string());
+        context.included_files = vec!["src/main.rs".to_string()];
+
+        let prompt = context.to_prompt_context();
+
+        assert!(
+            prompt.contains("Project type: rust"),
+            "Should include project type"
+        );
+        assert!(
+            prompt.contains("Project root: /project"),
+            "Should include project root"
+        );
+        assert!(
+            prompt.contains("Files in context: 2"),
+            "Should include file count"
+        );
+        assert!(
+            prompt.contains("src/main.rs"),
+            "Should include file structure"
+        );
+        assert!(
+            prompt.contains("Cargo.toml"),
+            "Should include file structure"
+        );
+        assert!(
+            prompt.contains("fn main() {}"),
+            "Should include file content"
+        );
+        // Check that included files section exists
+        assert!(
+            prompt.contains("Relevant file contents") || prompt.contains("==="),
+            "Should include section for relevant files"
+        );
+    }
+
+    #[test]
+    fn test_model_config_defaults() {
+        let config = ModelConfig::default();
+
+        assert_eq!(config.temperature, Some(0.7));
+        assert_eq!(config.max_tokens, Some(4096));
+        assert_eq!(config.top_p, Some(1.0));
+        assert_eq!(config.frequency_penalty, None);
+        assert_eq!(config.presence_penalty, None);
+        assert!(config.system_prompt.is_some());
+        assert!(config.system_prompt.as_ref().unwrap().contains("Mermaid"));
+    }
+
+    #[test]
+    fn test_model_config_with_plan_mode() {
+        let config = ModelConfig::with_plan_mode();
+
+        assert!(config.system_prompt.is_some());
+        let prompt = config.system_prompt.unwrap();
+        assert!(
+            prompt.contains("PLAN MODE ACTIVE"),
+            "Should include plan mode header"
+        );
+        assert!(
+            prompt.contains("user will review"),
+            "Should mention user review"
+        );
+        assert!(prompt.contains("Alt+Y"), "Should mention Alt+Y shortcut");
+    }
+
+    #[test]
+    fn test_token_usage_structure() {
+        let usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.total_tokens, 150);
+    }
+
+    #[test]
+    fn test_model_response_creation() {
+        let usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+
+        let response = ModelResponse {
+            content: "Hello, world!".to_string(),
+            usage: Some(usage),
+            model_name: "ollama/tinyllama".to_string(),
+        };
+
+        assert_eq!(response.content, "Hello, world!");
+        assert!(response.usage.is_some());
+        assert_eq!(response.model_name, "ollama/tinyllama");
+        assert_eq!(response.usage.unwrap().total_tokens, 150);
+    }
+
+    #[test]
+    fn test_model_capabilities_default() {
+        let caps = ModelCapabilities::default();
+
+        assert_eq!(caps.max_context_length, 4096);
+        assert!(caps.supports_streaming);
+        assert!(!caps.supports_functions);
+        assert!(!caps.supports_vision);
     }
 }

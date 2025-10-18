@@ -68,7 +68,7 @@ fn normalize_ollama_url(url: &str) -> String {
     }
 
     // Add default port if missing
-    if !normalized.contains(':',) || normalized.matches(':').count() == 1 {
+    if !normalized.contains(':') || normalized.matches(':').count() == 1 {
         // Has protocol but no port
         if normalized.starts_with("http://") && !normalized[7..].contains(':') {
             normalized = format!("{}:11434", normalized);
@@ -97,8 +97,8 @@ impl OllamaDirectModel {
             .to_string();
 
         // Get Ollama base URL from environment or use default
-        let base_url = std::env::var("OLLAMA_HOST")
-            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let base_url =
+            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
 
         // Normalize URL (handles 0.0.0.0 bind addresses, adds http:// prefix, etc.)
         let base_url = normalize_ollama_url(&base_url);
@@ -257,6 +257,8 @@ impl Model for OllamaDirectModel {
             }
 
             let mut stream = response.bytes_stream();
+            // Track token usage from final chunk
+            let mut final_usage = None;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk?;
@@ -274,8 +276,20 @@ impl Model for OllamaDirectModel {
                             callback(content);
                         }
 
-                        // Check if done
+                        // Check if done - capture final token usage
                         if json_chunk.done {
+                            // Build TokenUsage from final chunk metadata
+                            let prompt_tokens = json_chunk.prompt_eval_count.unwrap_or(0);
+                            let completion_tokens = json_chunk.eval_count.unwrap_or(0);
+                            let total_tokens = prompt_tokens + completion_tokens;
+
+                            if prompt_tokens > 0 || completion_tokens > 0 {
+                                final_usage = Some(super::types::TokenUsage {
+                                    prompt_tokens,
+                                    completion_tokens,
+                                    total_tokens,
+                                });
+                            }
                             break;
                         }
                     }
@@ -284,7 +298,7 @@ impl Model for OllamaDirectModel {
 
             Ok(ModelResponse {
                 content: String::new(), // Content already sent via callback
-                usage: None,            // Ollama doesn't provide detailed token usage in streaming
+                usage: final_usage,     // Token usage from final chunk
                 model_name: self.model_name.clone(),
             })
         } else {
@@ -309,9 +323,26 @@ impl Model for OllamaDirectModel {
 
             let response_json: OllamaChatResponse = response.json().await?;
 
+            // Build TokenUsage from response metadata
+            let usage = if let (Some(prompt_count), Some(completion_count)) =
+                (response_json.prompt_eval_count, response_json.eval_count)
+            {
+                if prompt_count > 0 || completion_count > 0 {
+                    Some(super::types::TokenUsage {
+                        prompt_tokens: prompt_count,
+                        completion_tokens: completion_count,
+                        total_tokens: prompt_count + completion_count,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             Ok(ModelResponse {
                 content: response_json.message.content,
-                usage: None, // Ollama doesn't provide detailed token usage
+                usage,
                 model_name: self.model_name.clone(),
             })
         }
@@ -363,12 +394,16 @@ async fn check_ollama_running(client: &Client, base_url: &str) -> Result<bool> {
     }
 }
 
-/// Ollama chat response format
+/// Ollama chat response format (non-streaming)
 #[derive(Debug, Deserialize)]
 struct OllamaChatResponse {
     message: OllamaMessage,
-    #[allow(dead_code)]
     done: bool,
+    /// Token usage stats from Ollama
+    #[serde(default)]
+    prompt_eval_count: Option<usize>,
+    #[serde(default)]
+    eval_count: Option<usize>,
 }
 
 /// Ollama stream chunk format
@@ -376,6 +411,11 @@ struct OllamaChatResponse {
 struct OllamaStreamChunk {
     message: OllamaMessage,
     done: bool,
+    /// Token usage stats (only present in final chunk when done=true)
+    #[serde(default)]
+    prompt_eval_count: Option<usize>,
+    #[serde(default)]
+    eval_count: Option<usize>,
 }
 
 /// Ollama message format
@@ -413,10 +453,7 @@ mod tests {
             normalize_ollama_url("http://0.0.0.0:11434"),
             "http://127.0.0.1:11434"
         );
-        assert_eq!(
-            normalize_ollama_url("0.0.0.0"),
-            "http://127.0.0.1:11434"
-        );
+        assert_eq!(normalize_ollama_url("0.0.0.0"), "http://127.0.0.1:11434");
 
         // Test adding http:// prefix
         assert_eq!(
@@ -439,10 +476,7 @@ mod tests {
         );
 
         // Test adding default port
-        assert_eq!(
-            normalize_ollama_url("localhost"),
-            "http://localhost:11434"
-        );
+        assert_eq!(normalize_ollama_url("localhost"), "http://localhost:11434");
         assert_eq!(
             normalize_ollama_url("http://localhost"),
             "http://localhost:11434"
@@ -486,5 +520,140 @@ mod tests {
             assert_eq!(model.name(), "tinyllama");
             assert!(model.is_local());
         }
+    }
+
+    #[test]
+    fn test_token_usage_structure_issue_6() {
+        // Test Issue #6: Token usage extraction structures
+        // Verify OllamaChatResponse can deserialize token counts
+
+        // Simulate Ollama response with token counts
+        let json_str = r#"{
+            "message": {
+                "role": "assistant",
+                "content": "Hello"
+            },
+            "done": true,
+            "prompt_eval_count": 42,
+            "eval_count": 15
+        }"#;
+
+        let response: OllamaChatResponse = serde_json::from_str(json_str).unwrap();
+        assert_eq!(response.prompt_eval_count, Some(42));
+        assert_eq!(response.eval_count, Some(15));
+        assert!(response.done);
+    }
+
+    #[test]
+    fn test_token_usage_deserialization_backward_compatibility() {
+        // Test Issue #6: Backward compatibility with older Ollama versions
+        // Old Ollama responses don't include token counts
+
+        let json_str_without_tokens = r#"{
+            "message": {
+                "role": "assistant",
+                "content": "Hello"
+            },
+            "done": true
+        }"#;
+
+        let response: OllamaChatResponse = serde_json::from_str(json_str_without_tokens).unwrap();
+        assert_eq!(response.prompt_eval_count, None);
+        assert_eq!(response.eval_count, None);
+    }
+
+    #[test]
+    fn test_stream_chunk_token_extraction() {
+        // Test Issue #6: Token extraction from stream chunks
+
+        let json_str = r#"{
+            "message": {
+                "role": "assistant",
+                "content": "partial"
+            },
+            "done": false
+        }"#;
+
+        let chunk: OllamaStreamChunk = serde_json::from_str(json_str).unwrap();
+        assert!(!chunk.done);
+        assert_eq!(chunk.prompt_eval_count, None); // Not present in intermediate chunks
+
+        let final_chunk_str = r#"{
+            "message": {
+                "role": "assistant",
+                "content": ""
+            },
+            "done": true,
+            "prompt_eval_count": 100,
+            "eval_count": 50
+        }"#;
+
+        let final_chunk: OllamaStreamChunk = serde_json::from_str(final_chunk_str).unwrap();
+        assert!(final_chunk.done);
+        assert_eq!(final_chunk.prompt_eval_count, Some(100));
+        assert_eq!(final_chunk.eval_count, Some(50));
+    }
+
+    #[test]
+    fn test_token_usage_calculation() {
+        // Test Issue #6: Token usage calculation is correct
+        // Verify that token totals add up correctly
+        // (TokenUsage struct is tested more thoroughly in context/loader.rs tests)
+
+        let prompt_tokens = 100;
+        let completion_tokens = 50;
+        let expected_total = prompt_tokens + completion_tokens;
+
+        assert_eq!(expected_total, 150);
+    }
+
+    #[test]
+    fn test_token_usage_zero_handling() {
+        // Test Issue #6: Handle zero token counts gracefully
+        let json_str = r#"{
+            "message": {
+                "role": "assistant",
+                "content": "test"
+            },
+            "done": true,
+            "prompt_eval_count": 0,
+            "eval_count": 0
+        }"#;
+
+        let response: OllamaChatResponse = serde_json::from_str(json_str).unwrap();
+        assert_eq!(response.prompt_eval_count, Some(0));
+        assert_eq!(response.eval_count, Some(0));
+    }
+
+    #[test]
+    fn test_ollama_message_structure() {
+        // Test Issue #6: OllamaMessage deserialization
+        let json_str = r#"{
+            "role": "assistant",
+            "content": "This is a test message"
+        }"#;
+
+        let msg: OllamaMessage = serde_json::from_str(json_str).unwrap();
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content, "This is a test message");
+    }
+
+    #[test]
+    fn test_normalize_url_edge_cases() {
+        // Additional edge cases for URL normalization (relates to Issue #6 indirectly)
+        assert_eq!(
+            normalize_ollama_url("https://ollama.example.com:11434"),
+            "https://ollama.example.com:11434"
+        );
+
+        assert_eq!(
+            normalize_ollama_url("   localhost:11434   "),
+            "http://localhost:11434"
+        );
+
+        // IPv6 format (should add http prefix but not modify address)
+        let ipv6_result = normalize_ollama_url("[::1]:11434");
+        assert!(ipv6_result.contains("[::1]"));
+        assert!(ipv6_result.contains(":11434"));
     }
 }

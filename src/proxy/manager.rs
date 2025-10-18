@@ -26,16 +26,13 @@ pub async fn start_proxy() -> Result<()> {
     if !env_path.exists() {
         let env_example = compose_dir.join(".env.example");
         if env_example.exists() {
-            log_warn(
-                "WARNING",
-                "No .env file found, creating from template...",
-            );
+            log_warn("WARNING", "No .env file found, creating from template...");
             std::fs::copy(&env_example, &env_path)?;
+            log_info("SETUP", format!("Created .env at: {}", env_path.display()));
             log_info(
-                "SETUP",
-                format!("Created .env at: {}", env_path.display()),
+                "",
+                "Edit this file to add your API keys for non-Ollama models",
             );
-            log_info("", "Edit this file to add your API keys for non-Ollama models");
         } else {
             log_warn(
                 "WARNING",

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use crate::diagnostics::{render_diagnostics_panel, DiagnosticsMode};
 use crate::tui::app::App;
-use crate::tui::widgets::{ChatWidget, InputWidget, StatusWidget, HeaderWidget, SidebarWidget};
+use crate::tui::widgets::{ChatWidget, HeaderWidget, InputWidget, SidebarWidget, StatusWidget};
 use crate::utils::MutexExt;
 
 /// Cache for layout calculations to improve performance

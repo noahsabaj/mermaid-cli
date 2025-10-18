@@ -18,13 +18,15 @@ pub struct InputState {
 impl InputState {
     /// Create a new input state
     pub fn new() -> Self {
-        Self {
-            cursor_position: 0,
-        }
+        Self { cursor_position: 0 }
     }
 
     /// Calculate cursor position for wrapped text
-    pub fn calculate_cursor_position(input: &str, cursor_pos: usize, inner_width: usize) -> (u16, u16) {
+    pub fn calculate_cursor_position(
+        input: &str,
+        cursor_pos: usize,
+        inner_width: usize,
+    ) -> (u16, u16) {
         let cursor_pos = cursor_pos.min(input.len());
         let mut current_line = 0;
         let mut current_col = 0;
@@ -104,9 +106,7 @@ impl<'a> StatefulWidget for InputWidget<'a> {
                 if !filtered_commands.is_empty() {
                     let mut hint_lines = vec![Line::from(vec![Span::styled(
                         " Available Commands:",
-                        Style::new()
-                            .fg(self.theme.colors.info.to_color())
-                            .bold(),
+                        Style::new().fg(self.theme.colors.info.to_color()).bold(),
                     )])];
 
                     for (cmd, desc) in filtered_commands.iter().take(6) {

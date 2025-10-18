@@ -6,8 +6,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 pub fn init_logger() {
     // Use RUST_LOG environment variable, default to warn level (quieter)
     // Set RUST_LOG=debug for verbose output during development
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn,mermaid=info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,mermaid=info"));
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(io::stderr) // Write to stderr to not interfere with TUI

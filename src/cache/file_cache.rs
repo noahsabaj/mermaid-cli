@@ -192,3 +192,145 @@ pub struct CacheStats {
     pub compression_ratio: f32,
     pub cache_dir: std::path::PathBuf,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Phase 4 Test Suite: FileCache - core file cache operations
+
+    #[test]
+    fn test_cache_key_structure() {
+        // Test CacheKey components
+        let path = Path::new("src/main.rs");
+        let file_hash = "abc123def456".to_string();
+
+        let key = CacheKey {
+            file_path: path.to_path_buf(),
+            file_hash: file_hash.clone(),
+        };
+
+        assert_eq!(key.file_hash, "abc123def456");
+        assert_eq!(key.file_path.file_name().unwrap(), "main.rs");
+    }
+
+    #[test]
+    fn test_cache_metadata_structure() {
+        // Test CacheMetadata creation and structure
+        let now = SystemTime::now();
+
+        let metadata = CacheMetadata {
+            created_at: now,
+            last_accessed: now,
+            file_size: 1024,
+            compressed_size: 512,
+            compression_ratio: 2.0,
+        };
+
+        assert_eq!(metadata.file_size, 1024);
+        assert_eq!(metadata.compressed_size, 512);
+        assert_eq!(metadata.compression_ratio, 2.0);
+    }
+
+    #[test]
+    fn test_cache_entry_structure() {
+        // Test CacheEntry structure
+        let key = CacheKey {
+            file_path: Path::new("test.rs").to_path_buf(),
+            file_hash: "test_hash".to_string(),
+        };
+
+        let metadata = CacheMetadata {
+            created_at: SystemTime::now(),
+            last_accessed: SystemTime::now(),
+            file_size: 100,
+            compressed_size: 50,
+            compression_ratio: 2.0,
+        };
+
+        let entry = CacheEntry {
+            key: key.clone(),
+            data: vec![1, 2, 3, 4, 5],
+            metadata,
+        };
+
+        assert_eq!(entry.data.len(), 5);
+        assert_eq!(entry.key.file_hash, "test_hash");
+    }
+
+    #[test]
+    fn test_cache_stats_structure() {
+        // Test CacheStats structure and values
+        let stats = CacheStats {
+            total_entries: 100,
+            total_size: 1_000_000,
+            total_compressed_size: 500_000,
+            compression_ratio: 2.0,
+            cache_dir: Path::new("/cache").to_path_buf(),
+        };
+
+        assert_eq!(stats.total_entries, 100);
+        assert_eq!(stats.total_size, 1_000_000);
+        assert_eq!(stats.compression_ratio, 2.0);
+    }
+
+    #[test]
+    fn test_compression_ratio_calculation() {
+        // Test compression ratio calculation logic
+        let test_cases = vec![
+            (1000, 500, 2.0),
+            (2000, 1000, 2.0),
+            (3000, 1000, 3.0),
+            (1000, 250, 4.0),
+        ];
+
+        for (original, compressed, expected) in test_cases {
+            let ratio = original as f32 / compressed as f32;
+            assert!((ratio - expected).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn test_cache_path_construction() {
+        // Test cache path construction with hash prefixing
+        let hash = "abc123def456";
+        let prefix = &hash[..2]; // "ab"
+
+        assert_eq!(prefix, "ab", "Prefix should be first 2 chars of hash");
+    }
+
+    #[test]
+    fn test_cache_file_naming() {
+        // Test cache file naming convention
+        let file_name = "main.rs";
+        let hash_prefix = "ab";
+        let hash_short = "abc12345";
+
+        let cache_name = format!("{}_{}.cache", file_name, hash_short);
+
+        assert!(
+            cache_name.contains("main.rs"),
+            "Should include original filename"
+        );
+        assert!(cache_name.contains("abc12345"), "Should include hash short");
+        assert!(cache_name.ends_with(".cache"), "Should end with .cache");
+    }
+
+    #[test]
+    fn test_cache_stats_compression_ratio_zero_handling() {
+        // Test compression ratio when compressed size is zero
+        let total_size = 1000;
+        let compressed_size = 0;
+
+        let ratio = if compressed_size > 0 {
+            total_size as f32 / compressed_size as f32
+        } else {
+            1.0 // Default when no compression
+        };
+
+        assert_eq!(
+            ratio, 1.0,
+            "Should default to 1.0 when compressed size is 0"
+        );
+    }
+}

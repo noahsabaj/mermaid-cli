@@ -3,7 +3,9 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::agents::{self, ActionDisplay, ActionResult as AgentActionResult, AgentAction, ModeAwareExecutor};
+use crate::agents::{
+    self, ActionDisplay, ActionResult as AgentActionResult, AgentAction, ModeAwareExecutor,
+};
 use crate::models::{MessageRole, ModelConfig, StreamCallback};
 use crate::tui::{App, ConfirmationState, FileInfo};
 use crate::utils::count_file_tokens;
@@ -29,11 +31,8 @@ pub async fn execute_actions(
             // Extract preview and file info for WriteFile actions
             let (preview_lines, file_info) = match &action {
                 AgentAction::WriteFile { path, content } => {
-                    let lines: Vec<String> = content
-                        .lines()
-                        .take(5)
-                        .map(|s| s.to_string())
-                        .collect();
+                    let lines: Vec<String> =
+                        content.lines().take(5).map(|s| s.to_string()).collect();
                     let info = FileInfo {
                         path: path.clone(),
                         size: content.len(),
@@ -144,7 +143,12 @@ async fn handle_action_success(
     let action_display = build_action_display(action, &output);
 
     // Attach ActionDisplay to the most recent assistant message
-    if let Some(last_msg) = app.messages.iter_mut().rev().find(|m| matches!(m.role, MessageRole::Assistant)) {
+    if let Some(last_msg) = app
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|m| matches!(m.role, MessageRole::Assistant))
+    {
         last_msg.actions.push(action_display);
     }
 
@@ -232,7 +236,9 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
             ActionDisplay {
                 action_type: "Write".to_string(),
                 target: path.clone(),
-                result: AgentActionResult::Success { output: output.to_string() },
+                result: AgentActionResult::Success {
+                    output: output.to_string(),
+                },
                 preview: None,
                 line_count: Some(line_count),
                 file_content: Some(content.clone()),
@@ -243,71 +249,73 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
             ActionDisplay {
                 action_type: "Read".to_string(),
                 target: path.clone(),
-                result: AgentActionResult::Success { output: output.to_string() },
+                result: AgentActionResult::Success {
+                    output: output.to_string(),
+                },
                 preview: Some(truncate_output(output, 3)),
                 line_count: Some(line_count),
                 file_content: None,
             }
         },
-        AgentAction::ExecuteCommand { command, .. } => {
-            ActionDisplay {
-                action_type: "Bash".to_string(),
-                target: command.clone(),
-                result: AgentActionResult::Success { output: output.to_string() },
-                preview: Some(truncate_output(output, 5)),
-                line_count: Some(output.lines().count()),
-                file_content: None,
-            }
+        AgentAction::ExecuteCommand { command, .. } => ActionDisplay {
+            action_type: "Bash".to_string(),
+            target: command.clone(),
+            result: AgentActionResult::Success {
+                output: output.to_string(),
+            },
+            preview: Some(truncate_output(output, 5)),
+            line_count: Some(output.lines().count()),
+            file_content: None,
         },
-        AgentAction::DeleteFile { path } => {
-            ActionDisplay {
-                action_type: "Delete".to_string(),
-                target: path.clone(),
-                result: AgentActionResult::Success { output: output.to_string() },
-                preview: None,
-                line_count: None,
-                file_content: None,
-            }
+        AgentAction::DeleteFile { path } => ActionDisplay {
+            action_type: "Delete".to_string(),
+            target: path.clone(),
+            result: AgentActionResult::Success {
+                output: output.to_string(),
+            },
+            preview: None,
+            line_count: None,
+            file_content: None,
         },
-        AgentAction::CreateDirectory { path } => {
-            ActionDisplay {
-                action_type: "CreateDir".to_string(),
-                target: path.clone(),
-                result: AgentActionResult::Success { output: output.to_string() },
-                preview: None,
-                line_count: None,
-                file_content: None,
-            }
+        AgentAction::CreateDirectory { path } => ActionDisplay {
+            action_type: "CreateDir".to_string(),
+            target: path.clone(),
+            result: AgentActionResult::Success {
+                output: output.to_string(),
+            },
+            preview: None,
+            line_count: None,
+            file_content: None,
         },
-        AgentAction::GitDiff { path } => {
-            ActionDisplay {
-                action_type: "GitDiff".to_string(),
-                target: path.clone().unwrap_or_else(|| ".".to_string()),
-                result: AgentActionResult::Success { output: output.to_string() },
-                preview: Some(truncate_output(output, 10)),
-                line_count: Some(output.lines().count()),
-                file_content: None,
-            }
+        AgentAction::GitDiff { path } => ActionDisplay {
+            action_type: "GitDiff".to_string(),
+            target: path.clone().unwrap_or_else(|| ".".to_string()),
+            result: AgentActionResult::Success {
+                output: output.to_string(),
+            },
+            preview: Some(truncate_output(output, 10)),
+            line_count: Some(output.lines().count()),
+            file_content: None,
         },
-        AgentAction::GitStatus => {
-            ActionDisplay {
-                action_type: "GitStatus".to_string(),
-                target: ".".to_string(),
-                result: AgentActionResult::Success { output: output.to_string() },
-                preview: Some(truncate_output(output, 10)),
-                line_count: Some(output.lines().count()),
-                file_content: None,
-            }
+        AgentAction::GitStatus => ActionDisplay {
+            action_type: "GitStatus".to_string(),
+            target: ".".to_string(),
+            result: AgentActionResult::Success {
+                output: output.to_string(),
+            },
+            preview: Some(truncate_output(output, 10)),
+            line_count: Some(output.lines().count()),
+            file_content: None,
         },
-        AgentAction::GitCommit { message, .. } => {
-            ActionDisplay {
-                action_type: "GitCommit".to_string(),
-                target: message.clone(),
-                result: AgentActionResult::Success { output: output.to_string() },
-                preview: Some(truncate_output(output, 3)),
-                line_count: None,
-                file_content: None,
-            }
+        AgentAction::GitCommit { message, .. } => ActionDisplay {
+            action_type: "GitCommit".to_string(),
+            target: message.clone(),
+            result: AgentActionResult::Success {
+                output: output.to_string(),
+            },
+            preview: Some(truncate_output(output, 3)),
+            line_count: None,
+            file_content: None,
         },
     }
 }
@@ -319,7 +327,11 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
         output.to_string()
     } else {
         let truncated = lines[..max_lines].join("\n");
-        format!("{}\n... ({} more lines)", truncated, lines.len() - max_lines)
+        format!(
+            "{}\n... ({} more lines)",
+            truncated,
+            lines.len() - max_lines
+        )
     }
 }
 
@@ -354,4 +366,91 @@ fn detect_language(path: &str) -> Option<String> {
         "md" => Some("Markdown".to_string()),
         _ => None,
     }
+}
+
+/// Approve a plan and start executing it
+pub async fn approve_plan(app: &mut App, tx: &mpsc::Sender<String>) -> Result<()> {
+    if app.active_plan.is_none() {
+        return Ok(());
+    }
+
+    app.start_plan_execution();
+
+    // Execute the first action in the plan
+    execute_plan_step(app, tx).await
+}
+
+/// Cancel a pending plan
+pub fn cancel_plan(app: &mut App) {
+    app.cancel_plan();
+}
+
+/// Execute the next step in a plan
+/// This is called repeatedly as each action completes
+pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Result<()> {
+    // Check if plan still exists and get the next action
+    let next_action = if let Some(plan) = app.active_plan.as_ref() {
+        plan.next_pending_action().map(|(_, action)| action.clone())
+    } else {
+        None
+    };
+
+    if let Some(planned_action) = next_action {
+        let action = planned_action.action.clone();
+        let action_clone = action.clone();
+        let mut executor = ModeAwareExecutor::new(app.operation_mode.clone());
+
+        // Execute action directly in plan mode
+        match executor.execute(action).await {
+            Ok(agents::ActionResult::Success { output }) => {
+                app.mark_plan_action_completed(Some(agents::ActionResult::Success {
+                    output: output.clone(),
+                }));
+
+                // Handle action-specific post-processing
+                handle_action_success(app, &action_clone, output, tx).await?;
+
+                // Update plan display and get stats for status message
+                if let Some(plan) = app.active_plan.as_mut() {
+                    let stats = plan.stats();
+                    if stats.is_complete() {
+                        app.set_status(format!(
+                            "Plan complete: {}/{} actions succeeded",
+                            stats.completed, stats.total
+                        ));
+                    } else {
+                        app.set_status(format!(
+                            "Plan executing: {}/{}",
+                            stats.completed + stats.failed + stats.skipped,
+                            stats.total
+                        ));
+                    }
+                }
+            },
+            Ok(agents::ActionResult::Error { error }) => {
+                app.mark_plan_action_failed(error.clone());
+                app.set_status(format!("Plan action failed: {}", error));
+            },
+            Err(e) => {
+                app.mark_plan_action_failed(e.to_string());
+                app.set_status(format!("Plan action error: {}", e));
+            },
+        }
+    } else {
+        // Plan is complete
+        if let Some(plan) = app.active_plan.as_ref() {
+            let stats = plan.stats();
+            let message = if stats.has_failures() {
+                format!(
+                    "Plan completed with {} failures ({}/{} successful)",
+                    stats.failed, stats.completed, stats.total
+                )
+            } else {
+                format!("Plan completed successfully ({} actions)", stats.total)
+            };
+            app.set_status(message);
+        }
+    }
+
+    Ok(())
 }
