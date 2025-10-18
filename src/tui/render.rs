@@ -161,6 +161,7 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
 
         let status_line_widget = StatusLineWidget {
             status: app.generation_status,
+            custom_status: app.custom_status.as_ref(),
             elapsed_secs,
             tokens_received: app.tokens_received,
             theme: &app.theme,

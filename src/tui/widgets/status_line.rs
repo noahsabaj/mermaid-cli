@@ -12,6 +12,7 @@ use crate::tui::theme::Theme;
 /// Props for StatusLineWidget (stateless widget showing generation progress)
 pub struct StatusLineWidget<'a> {
     pub status: GenerationStatus,
+    pub custom_status: Option<&'a String>,
     pub elapsed_secs: u64,
     pub tokens_received: usize,
     pub theme: &'a Theme,
@@ -30,24 +31,25 @@ impl<'a> Widget for StatusLineWidget<'a> {
         }
 
         // Build the status line
-        let status_text = self.status.display_text();
+        // Use custom status if provided, otherwise use the default status text
+        let status_text = if let Some(custom) = self.custom_status {
+            custom.as_str()
+        } else {
+            self.status.display_text()
+        };
+
         let info_color = self.theme.colors.info.to_color();
 
         let spans = vec![
-            // Activity indicator (cyan bullet)
+            // Play button indicator (cyan, no styling that affects alignment)
             Span::styled(
-                "• ",
-                Style::new().fg(info_color).bold(),
-            ),
-            // Status text (cyan)
-            Span::styled(
-                format!("{} ", status_text),
+                "▶ ",
                 Style::new().fg(info_color),
             ),
-            // Ellipsis/animation indicator
+            // Status text with ellipsis (cyan)
             Span::styled(
-                "▮ ",
-                Style::new().fg(info_color).dim(),
+                format!("{}... ", status_text),
+                Style::new().fg(info_color),
             ),
             // Metadata in parentheses (dimmed)
             Span::styled(

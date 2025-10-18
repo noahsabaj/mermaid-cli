@@ -55,6 +55,24 @@ To see git diff:
 [GIT_DIFF]
 ```
 
+### Status Indicator
+
+To show a custom status message in the UI status line, use the [STATUS:...] marker at the very start of your response:
+```
+[STATUS:Analyzing your code structure]
+```
+
+This will display in the status line as: `▶ Analyzing your code structure... (esc to interrupt · 2s · 15 tokens)`
+
+The status is optional. If you don't include it, the default will be used based on what you're doing.
+
+Examples of useful status messages:
+- `[STATUS:Analyzing the codebase]`
+- `[STATUS:Planning implementation]`
+- `[STATUS:Searching for patterns]`
+- `[STATUS:Generating code]`
+- `[STATUS:Running tests]`
+
 ## Guidelines
 
 1. When asked to create or modify files, ALWAYS use the [FILE_WRITE:] action block

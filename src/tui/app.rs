@@ -118,6 +118,8 @@ pub struct App {
     pub generation_start_time: Option<Instant>,
     /// Count of tokens received so far during streaming
     pub tokens_received: usize,
+    /// Custom status from LLM (e.g., "Analyzing", "Planning") - overrides generation_status text
+    pub custom_status: Option<String>,
 }
 
 impl App {
@@ -178,6 +180,7 @@ impl App {
             generation_status: GenerationStatus::Idle,
             generation_start_time: None,
             tokens_received: 0,
+            custom_status: None,
         }
     }
 

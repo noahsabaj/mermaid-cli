@@ -47,14 +47,34 @@ pub async fn process_stream_chunks(
 
     // Process all available messages from the channel
     while let Ok(chunk) = rx.try_recv() {
+        // Check for custom status marker (appears at start of response)
+        if chunk.starts_with("[STATUS:") {
+            // Extract status between [STATUS: and ]
+            if let Some(end_idx) = chunk.find(']') {
+                let status_text = chunk[8..end_idx].to_string(); // Skip "[STATUS:"
+                app.custom_status = Some(status_text);
+                // Remove the status marker from the chunk so it doesn't get added to response
+                let remaining = chunk[end_idx + 1..].to_string();
+                if remaining.is_empty() {
+                    continue; // Skip if nothing left after status marker
+                }
+                // Process the remaining part of the chunk
+                let chunk = remaining;
+                // Fall through to process rest of chunk
+            } else {
+                continue; // Incomplete status marker, skip for now
+            }
+        }
+
         if chunk.starts_with("[DONE]:") {
             // Check if this is feedback completion
             let is_feedback_complete = chunk.contains("[FEEDBACK_COMPLETE]");
 
-            // Generation complete - reset status
+            // Generation complete - reset all status fields
             app.is_generating = false;
             app.generation_status = GenerationStatus::Idle;
             app.generation_start_time = None;
+            app.custom_status = None;
 
             // Clear feedback flags if this was a feedback response
             if is_feedback_complete {
@@ -130,6 +150,7 @@ pub async fn process_stream_chunks(
             app.is_generating = false;
             app.generation_status = GenerationStatus::Idle;
             app.generation_start_time = None;
+            app.custom_status = None;
             app.current_response.clear();
             app.set_status(format!("[ERROR] {}", error_msg));
             return Ok(StreamStatus::Error(error_msg));
