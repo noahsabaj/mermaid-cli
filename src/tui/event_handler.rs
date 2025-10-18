@@ -223,6 +223,11 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
 
     // Normal character input (no modifiers or only SHIFT for uppercase)
     if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
+        // Reset history navigation when user starts typing
+        if app.history_index.is_some() {
+            app.history_index = None;
+            app.history_buffer.clear();
+        }
         app.input.insert(app.cursor_position, c);
         app.cursor_position += 1;
     }
@@ -275,14 +280,74 @@ fn handle_end(app: &mut App) -> EventAction {
     EventAction::Continue
 }
 
-/// Handle Up arrow (scroll down in chat)
+/// Navigate to previous input in history (older messages)
+fn navigate_history_backward(app: &mut App) {
+    if app.input_history.is_empty() {
+        return;
+    }
+
+    match app.history_index {
+        None => {
+            // First time pressing up - save current input and go to latest history entry
+            app.history_buffer = app.input.clone();
+            app.history_index = Some(app.input_history.len() - 1);
+            app.input = app.input_history[app.history_index.unwrap()].clone();
+            app.cursor_position = app.input.len();
+        }
+        Some(idx) if idx > 0 => {
+            // Go to older message
+            app.history_index = Some(idx - 1);
+            app.input = app.input_history[idx - 1].clone();
+            app.cursor_position = app.input.len();
+        }
+        Some(0) => {
+            // Already at oldest, do nothing
+        }
+        _ => {}
+    }
+}
+
+/// Navigate to next input in history (newer messages, or clear at end)
+fn navigate_history_forward(app: &mut App) {
+    match app.history_index {
+        Some(idx) if idx < app.input_history.len() - 1 => {
+            // Go to newer message
+            app.history_index = Some(idx + 1);
+            app.input = app.input_history[idx + 1].clone();
+            app.cursor_position = app.input.len();
+        }
+        Some(_) => {
+            // At newest - restore draft buffer and exit history mode
+            app.history_index = None;
+            app.input = app.history_buffer.clone();
+            app.cursor_position = app.input.len();
+        }
+        None => {
+            // Not in history mode, do nothing
+        }
+    }
+}
+
+/// Handle Up arrow (navigate history or scroll chat)
 fn handle_up_arrow(app: &mut App) -> EventAction {
+    // If not scrolling chat (input is focused), navigate history
+    if !app.chat_state.is_user_scrolling && !app.input_history.is_empty() {
+        navigate_history_backward(app);
+        return EventAction::Continue;
+    }
+    // Otherwise scroll chat
     app.scroll_down(1);
     EventAction::Continue
 }
 
-/// Handle Down arrow (scroll up in chat)
+/// Handle Down arrow (navigate history or scroll chat)
 fn handle_down_arrow(app: &mut App) -> EventAction {
+    // If not scrolling chat (input is focused), navigate history
+    if !app.chat_state.is_user_scrolling && !app.input_history.is_empty() {
+        navigate_history_forward(app);
+        return EventAction::Continue;
+    }
+    // Otherwise scroll chat
     app.scroll_up(1);
     EventAction::Continue
 }

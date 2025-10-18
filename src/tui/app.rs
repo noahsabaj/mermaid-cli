@@ -120,6 +120,12 @@ pub struct App {
     pub tokens_received: usize,
     /// Custom status from LLM (e.g., "Analyzing", "Planning") - overrides generation_status text
     pub custom_status: Option<String>,
+    /// Input history for arrow key navigation (loaded from session)
+    pub input_history: Vec<String>,
+    /// Current position in history (None = editing current input, Some(i) = viewing history[i])
+    pub history_index: Option<usize>,
+    /// Saved input when navigating away from current draft
+    pub history_buffer: String,
 }
 
 impl App {
@@ -138,6 +144,13 @@ impl App {
 
         // Initialize hardware monitor
         let hardware_monitor = Some(Arc::new(RwLock::new(HardwareMonitor::new())));
+
+        // Load input history from conversation if available
+        let input_history = conversation_manager
+            .as_ref()
+            .and_then(|_| current_conversation.as_ref())
+            .map(|conv| conv.input_history.clone())
+            .unwrap_or_default();
 
         Self {
             messages: Vec::new(),
@@ -181,6 +194,9 @@ impl App {
             generation_start_time: None,
             tokens_received: 0,
             custom_status: None,
+            input_history,
+            history_index: None,
+            history_buffer: String::new(),
         }
     }
 

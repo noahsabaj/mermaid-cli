@@ -16,6 +16,9 @@ pub struct ConversationHistory {
     pub created_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,
     pub total_tokens: Option<usize>,
+    /// History of user input prompts for navigation (up/down arrows)
+    #[serde(default)]
+    pub input_history: Vec<String>,
 }
 
 impl ConversationHistory {
@@ -32,6 +35,7 @@ impl ConversationHistory {
             created_at: now,
             updated_at: now,
             total_tokens: None,
+            input_history: Vec::new(),
         }
     }
 
@@ -40,6 +44,28 @@ impl ConversationHistory {
         self.messages.extend_from_slice(messages);
         self.updated_at = Local::now();
         self.update_title();
+    }
+
+    /// Add input to history (with deduplication of consecutive identical inputs)
+    pub fn add_to_input_history(&mut self, input: String) {
+        // Skip empty inputs
+        if input.trim().is_empty() {
+            return;
+        }
+
+        // Don't add if it's identical to the last entry
+        if let Some(last) = self.input_history.last() {
+            if last == &input {
+                return;
+            }
+        }
+
+        // Cap history at 100 entries to prevent unbounded growth
+        if self.input_history.len() >= 100 {
+            self.input_history.remove(0);
+        }
+
+        self.input_history.push(input);
     }
 
     /// Update the title based on the first user message

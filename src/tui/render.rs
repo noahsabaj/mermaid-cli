@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use crate::diagnostics::{render_diagnostics_panel, DiagnosticsMode};
 use crate::tui::app::App;
-use crate::tui::widgets::{ChatWidget, HeaderWidget, InputWidget, SidebarWidget, StatusLineWidget, StatusWidget};
+use crate::tui::widgets::{ChatWidget, HeaderWidget, InputState, InputWidget, SidebarWidget, StatusLineWidget, StatusWidget};
 use crate::utils::MutexExt;
 
 /// Cache for layout calculations to improve performance
@@ -176,6 +176,22 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         theme: &app.theme,
     };
     frame.render_stateful_widget(input_widget, chunks[3], &mut app.input_state);
+
+    // Set cursor position in input box (visible text cursor)
+    let input_area = chunks[3];
+    let inner_width = input_area.width.saturating_sub(2) as usize; // -2 for left+right borders
+    let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
+        &app.input,
+        app.cursor_position,
+        inner_width,
+    );
+
+    // Position cursor accounting for borders
+    // +1 for left border, +1 for top border
+    frame.set_cursor_position((
+        input_area.x + 1 + cursor_col,
+        input_area.y + 1 + cursor_row,
+    ));
 
     // Render status bar using new StatusWidget (now at chunks[4])
     let status_widget = StatusWidget {

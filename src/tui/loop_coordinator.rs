@@ -217,6 +217,19 @@ async fn handle_message_submit(
     app.generation_start_time = Some(Instant::now());
     app.tokens_received = 0;
 
+    // Save input to history and reset navigation
+    app.input_history.push(input.clone());
+    app.history_index = None;
+    app.history_buffer.clear();
+
+    // Persist to conversation if available
+    if let Some(ref mut conv) = app.current_conversation {
+        conv.add_to_input_history(input.clone());
+        if let Some(ref manager) = app.conversation_manager {
+            let _ = manager.save_conversation(conv);
+        }
+    }
+
     // Process message asynchronously
     let model = app.model.clone();
     let context = app.context.clone();
