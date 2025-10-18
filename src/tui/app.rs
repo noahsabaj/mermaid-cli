@@ -6,7 +6,32 @@ use crate::diagnostics::{DiagnosticsMode, HardwareMonitor, HardwareStats};
 use crate::models::{ChatMessage, MessageRole, Model, ProjectContext};
 use crate::session::{ConversationHistory, ConversationManager};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
+
+/// Generation status for the status line
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationStatus {
+    /// Not currently generating
+    Idle,
+    /// Model is loading/initializing (before first token)
+    Initializing,
+    /// Waiting for first token from model (thinking/reasoning)
+    Thinking,
+    /// Actively receiving and displaying tokens
+    Streaming,
+}
+
+impl GenerationStatus {
+    pub fn display_text(&self) -> &str {
+        match self {
+            GenerationStatus::Idle => "Idle",
+            GenerationStatus::Initializing => "Initializing",
+            GenerationStatus::Thinking => "Thinking",
+            GenerationStatus::Streaming => "Streaming",
+        }
+    }
+}
 
 /// Application state
 pub struct App {
@@ -87,6 +112,12 @@ pub struct App {
     pub diagnostics_mode: DiagnosticsMode,
     /// UI theme
     pub theme: Theme,
+    /// Current generation status (Idle, Initializing, Thinking, Streaming)
+    pub generation_status: GenerationStatus,
+    /// When generation started (for calculating elapsed time)
+    pub generation_start_time: Option<Instant>,
+    /// Count of tokens received so far during streaming
+    pub tokens_received: usize,
 }
 
 impl App {
@@ -144,6 +175,9 @@ impl App {
             hardware_stats: None,
             diagnostics_mode: DiagnosticsMode::Compact,
             theme: Theme::dark(), // Default to dark theme
+            generation_status: GenerationStatus::Idle,
+            generation_start_time: None,
+            tokens_received: 0,
         }
     }
 

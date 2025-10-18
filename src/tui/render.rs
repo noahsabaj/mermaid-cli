@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use crate::diagnostics::{render_diagnostics_panel, DiagnosticsMode};
 use crate::tui::app::App;
-use crate::tui::widgets::{ChatWidget, HeaderWidget, InputWidget, SidebarWidget, StatusWidget};
+use crate::tui::widgets::{ChatWidget, HeaderWidget, InputWidget, SidebarWidget, StatusLineWidget, StatusWidget};
 use crate::utils::MutexExt;
 
 /// Cache for layout calculations to improve performance
@@ -29,11 +29,12 @@ impl LayoutCache {
         // Check if cached layout is still valid (cheap clone of Copy types)
         if let Some((w, h, ref rects)) = self.main_layout {
             if w == area.width && h == input_height {
-                return rects.clone(); // Cheap: Vec of Copy types (4 Rects = ~32 bytes)
+                return rects.clone(); // Cheap: Vec of Copy types (5 Rects = ~40 bytes)
             }
         }
 
         // Clean layout with proper spacing (no overlap)
+        // Layout: Header | Chat Area | Status Line | Input Box | Status Bar
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
@@ -41,7 +42,8 @@ impl LayoutCache {
             .flex(Flex::Start)  // Align to top
             .constraints([
                 Constraint::Length(1),  // Header (minimal, single line)
-                Constraint::Min(10),    // Main content (grows to fill)
+                Constraint::Min(10),    // Main content / Chat area (grows to fill)
+                Constraint::Length(1),  // Status line (single line, only when generating)
                 Constraint::Length(input_height),  // Dynamic input height (3-8 lines)
                 Constraint::Length(2),  // Status bar (compact, 2 lines)
             ])
@@ -150,15 +152,31 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut app.chat_state);
 
-    // Render input area using new InputWidget
+    // Render status line when generating (shows progress: Thinking/Streaming, timer, token count)
+    if app.is_generating {
+        let elapsed_secs = app
+            .generation_start_time
+            .map(|start| start.elapsed().as_secs())
+            .unwrap_or(0);
+
+        let status_line_widget = StatusLineWidget {
+            status: app.generation_status,
+            elapsed_secs,
+            tokens_received: app.tokens_received,
+            theme: &app.theme,
+        };
+        frame.render_widget(status_line_widget, chunks[2]);
+    }
+
+    // Render input area using new InputWidget (now at chunks[3])
     let input_widget = InputWidget {
         input: &app.input,
         showing_command_hints: app.input.starts_with(':'),
         theme: &app.theme,
     };
-    frame.render_stateful_widget(input_widget, chunks[2], &mut app.input_state);
+    frame.render_stateful_widget(input_widget, chunks[3], &mut app.input_state);
 
-    // Render status bar using new StatusWidget
+    // Render status bar using new StatusWidget (now at chunks[4])
     let status_widget = StatusWidget {
         operation_mode: app.operation_mode,
         status_message: app.status_message.as_deref(),
@@ -166,7 +184,7 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         is_generating: app.is_generating,
         theme: &app.theme,
     };
-    frame.render_widget(status_widget, chunks[3]);
+    frame.render_widget(status_widget, chunks[4]);
 
     // Render diagnostics panel if in detailed mode
     if app.diagnostics_mode == DiagnosticsMode::Detailed {

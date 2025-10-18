@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::agents::{self, AgentAction, Plan};
 use crate::models::MessageRole;
+use crate::tui::app::GenerationStatus;
 use crate::tui::App;
 
 /// Maximum tokens allowed in a single response to prevent memory exhaustion
@@ -50,8 +51,10 @@ pub async fn process_stream_chunks(
             // Check if this is feedback completion
             let is_feedback_complete = chunk.contains("[FEEDBACK_COMPLETE]");
 
-            // Generation complete
+            // Generation complete - reset status
             app.is_generating = false;
+            app.generation_status = GenerationStatus::Idle;
+            app.generation_start_time = None;
 
             // Clear feedback flags if this was a feedback response
             if is_feedback_complete {
@@ -125,6 +128,8 @@ pub async fn process_stream_chunks(
             // Error during generation
             let error_msg = chunk.trim_start_matches("[ERROR]:").trim().to_string();
             app.is_generating = false;
+            app.generation_status = GenerationStatus::Idle;
+            app.generation_start_time = None;
             app.current_response.clear();
             app.set_status(format!("[ERROR] {}", error_msg));
             return Ok(StreamStatus::Error(error_msg));
@@ -140,6 +145,15 @@ pub async fn process_stream_chunks(
             // Regular streaming chunk - accumulate with size check
             let prev_len = app.current_response.len();
             app.current_response.push_str(&chunk);
+
+            // Transition from Initializing to Streaming on first content chunk
+            if app.generation_status == GenerationStatus::Initializing {
+                app.generation_status = GenerationStatus::Streaming;
+            }
+
+            // Estimate tokens in this chunk (simple: ~4 chars per token)
+            let chunk_tokens = (chunk.len() + 3) / 4; // Round up
+            app.tokens_received += chunk_tokens;
 
             // Check response size periodically to prevent memory exhaustion
             // Only check every N characters to avoid excessive computation

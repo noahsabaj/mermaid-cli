@@ -4,10 +4,12 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::context::ContextLoader;
 use crate::models::{MessageRole, ModelConfig, StreamCallback};
+use crate::tui::app::GenerationStatus;
 use crate::tui::render::render_ui;
 use crate::tui::App;
 use crate::utils::FileSystemWatcher;
@@ -69,6 +71,15 @@ pub async fn run_app_loop(
 
         // Draw UI
         terminal.draw(|f| render_ui(f, app))?;
+
+        // Check if we should transition from Initializing to Thinking (after 1 second with no chunks)
+        if app.generation_status == GenerationStatus::Initializing {
+            if let Some(start_time) = app.generation_start_time {
+                if start_time.elapsed().as_secs() >= 1 {
+                    app.generation_status = GenerationStatus::Thinking;
+                }
+            }
+        }
 
         // Handle input events
         if event::poll(std::time::Duration::from_millis(50))? {
@@ -200,6 +211,11 @@ async fn handle_message_submit(
     app.auto_scroll_to_bottom(viewport_height);
     app.is_generating = true;
     app.current_response.clear();
+
+    // Initialize generation status tracking
+    app.generation_status = GenerationStatus::Initializing;
+    app.generation_start_time = Some(Instant::now());
+    app.tokens_received = 0;
 
     // Process message asynchronously
     let model = app.model.clone();
