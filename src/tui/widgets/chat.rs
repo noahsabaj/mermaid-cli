@@ -6,12 +6,14 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, StatefulWidget, Widget, Wrap},
 };
 
-use crate::agents::{ActionDisplay, ActionResult, MessageSegment, segment_message, strip_action_blocks};
+use crate::agents::{
+    segment_message, strip_action_blocks, ActionDisplay, ActionResult, MessageSegment,
+};
 use crate::models::{ChatMessage, MessageRole};
 use crate::tui::app::ConfirmationState;
 use crate::tui::markdown::parse_markdown;
-use crate::tui::theme::Theme;
 use crate::tui::mode::OperationMode;
+use crate::tui::theme::Theme;
 
 /// State for the chat widget
 #[derive(Debug, Clone)]
@@ -32,7 +34,13 @@ impl ChatState {
     }
 
     /// Calculate the maximum scroll offset (bottom of content)
-    pub fn calculate_max_scroll(&self, messages: &[ChatMessage], current_response: &str, is_generating: bool, viewport_height: u16) -> u16 {
+    pub fn calculate_max_scroll(
+        &self,
+        messages: &[ChatMessage],
+        current_response: &str,
+        is_generating: bool,
+        viewport_height: u16,
+    ) -> u16 {
         let mut total_lines = 0u16;
 
         for msg in messages {
@@ -60,15 +68,34 @@ impl ChatState {
     }
 
     /// Auto-scroll to bottom of chat
-    pub fn auto_scroll_to_bottom(&mut self, messages: &[ChatMessage], current_response: &str, is_generating: bool, viewport_height: u16) {
+    pub fn auto_scroll_to_bottom(
+        &mut self,
+        messages: &[ChatMessage],
+        current_response: &str,
+        is_generating: bool,
+        viewport_height: u16,
+    ) {
         if !self.is_user_scrolling {
-            self.scroll_offset = self.calculate_max_scroll(messages, current_response, is_generating, viewport_height);
+            self.scroll_offset = self.calculate_max_scroll(
+                messages,
+                current_response,
+                is_generating,
+                viewport_height,
+            );
         }
     }
 
     /// Scroll chat view up
-    pub fn scroll_up(&mut self, amount: u16, messages: &[ChatMessage], current_response: &str, is_generating: bool, viewport_height: u16) {
-        let max_scroll = self.calculate_max_scroll(messages, current_response, is_generating, viewport_height);
+    pub fn scroll_up(
+        &mut self,
+        amount: u16,
+        messages: &[ChatMessage],
+        current_response: &str,
+        is_generating: bool,
+        viewport_height: u16,
+    ) {
+        let max_scroll =
+            self.calculate_max_scroll(messages, current_response, is_generating, viewport_height);
         self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_scroll);
 
         // User is manually scrolling if they're not at the bottom
@@ -79,11 +106,19 @@ impl ChatState {
     }
 
     /// Scroll chat view down
-    pub fn scroll_down(&mut self, amount: u16, messages: &[ChatMessage], current_response: &str, is_generating: bool, viewport_height: u16) {
+    pub fn scroll_down(
+        &mut self,
+        amount: u16,
+        messages: &[ChatMessage],
+        current_response: &str,
+        is_generating: bool,
+        viewport_height: u16,
+    ) {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
 
         // If user scrolls close to bottom, resume auto-scrolling
-        let max_scroll = self.calculate_max_scroll(messages, current_response, is_generating, viewport_height);
+        let max_scroll =
+            self.calculate_max_scroll(messages, current_response, is_generating, viewport_height);
         let threshold = 3;
         if self.scroll_offset >= max_scroll.saturating_sub(threshold) {
             self.is_user_scrolling = false;
@@ -147,16 +182,21 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                             }
 
                             lines.extend(parsed_lines);
-                        }
-                        MessageSegment::ActionMarker { action_type, target } => {
-                            if let Some(action_display) = msg.actions.iter().find(|a| {
-                                a.action_type == action_type && a.target == target
-                            }) {
+                        },
+                        MessageSegment::ActionMarker {
+                            action_type,
+                            target,
+                        } => {
+                            if let Some(action_display) = msg
+                                .actions
+                                .iter()
+                                .find(|a| a.action_type == action_type && a.target == target)
+                            {
                                 let actions_to_render = vec![action_display.clone()];
                                 render_actions(&actions_to_render, &mut lines, self.theme);
                             }
                             is_first_segment = false;
-                        }
+                        },
                     }
                 }
             } else {
@@ -191,9 +231,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 Span::raw("║ "),
                 Span::styled(
                     title,
-                    Style::new()
-                        .fg(self.theme.colors.warning.to_color())
-                        .bold(),
+                    Style::new().fg(self.theme.colors.warning.to_color()).bold(),
                 ),
                 Span::raw(format!(
                     "{}║",
@@ -293,9 +331,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 Span::raw(" ".repeat(padding)),
                 Span::styled(
                     shortcuts,
-                    Style::new()
-                        .fg(self.theme.colors.info.to_color())
-                        .bold(),
+                    Style::new().fg(self.theme.colors.info.to_color()).bold(),
                 ),
                 Span::raw(format!(
                     "{}║",
@@ -313,9 +349,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 lines.push(Line::from(vec![
                     Span::styled(
                         "  [READ] ",
-                        Style::new()
-                            .fg(self.theme.colors.info.to_color())
-                            .bold(),
+                        Style::new().fg(self.theme.colors.info.to_color()).bold(),
                     ),
                     Span::styled(
                         status,
@@ -358,16 +392,8 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             )]));
         }
 
-        let border_color = self.operation_mode.color();
-        let title = format!("Chat [{}]", self.operation_mode.display_name());
-
         let paragraph = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(Style::new().fg(border_color)),
-            )
+            .block(Block::default())
             .wrap(Wrap { trim: false })
             .scroll((state.scroll_offset, 0));
 
@@ -388,10 +414,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
         };
 
         lines.push(Line::from(vec![
-            Span::styled(
-                "  ● ",
-                Style::new().fg(action_color).bold(),
-            ),
+            Span::styled("  ● ", Style::new().fg(action_color).bold()),
             Span::styled(
                 format!("{}(", action.action_type),
                 Style::new().fg(action_color).bold(),
@@ -400,10 +423,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                 action.target.clone(),
                 Style::new().fg(theme.colors.text_secondary.to_color()),
             ),
-            Span::styled(
-                ")",
-                Style::new().fg(action_color).bold(),
-            ),
+            Span::styled(")", Style::new().fg(action_color).bold()),
         ]));
 
         match &action.result {
@@ -415,14 +435,14 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                         } else {
                             format!("Wrote {}", action.target)
                         }
-                    }
+                    },
                     "Read" => {
                         if let Some(count) = action.line_count {
                             format!("Read {} lines from {}", count, action.target)
                         } else {
                             format!("Read {}", action.target)
                         }
-                    }
+                    },
                     "Bash" | "Command" => {
                         if let Some(ref preview) = action.preview {
                             preview.clone()
@@ -431,7 +451,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                         } else {
                             "Command executed successfully".to_string()
                         }
-                    }
+                    },
                     "Delete" => format!("Deleted {}", action.target),
                     "CreateDir" => format!("Created directory {}", action.target),
                     "GitDiff" | "GitStatus" | "GitCommit" => {
@@ -440,7 +460,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                         } else {
                             "Operation completed".to_string()
                         }
-                    }
+                    },
                     _ => "Success".to_string(),
                 };
 
@@ -462,17 +482,18 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                         let total_lines = content.lines().count();
 
                         if !preview_lines.is_empty() {
-                            lines.push(Line::from(vec![
-                                Span::styled("      ", Style::new().fg(action_color)),
-                            ]));
+                            lines.push(Line::from(vec![Span::styled(
+                                "      ",
+                                Style::new().fg(action_color),
+                            )]));
 
                             let preview_content = preview_lines.join("\n");
-                            let mut parsed = parse_markdown(&format!("```\n{}\n```", preview_content));
+                            let mut parsed =
+                                parse_markdown(&format!("```\n{}\n```", preview_content));
 
                             for parsed_line in parsed.iter_mut() {
-                                let mut new_spans = vec![
-                                    Span::styled("      ", Style::new().fg(action_color)),
-                                ];
+                                let mut new_spans =
+                                    vec![Span::styled("      ", Style::new().fg(action_color))];
                                 new_spans.extend(parsed_line.spans.drain(..));
                                 parsed_line.spans = new_spans;
                             }
@@ -493,19 +514,16 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                         }
                     }
                 }
-            }
+            },
             ActionResult::Error { error } => {
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        "    ⎿ ",
-                        Style::new().fg(theme.colors.error.to_color()),
-                    ),
+                    Span::styled("    ⎿ ", Style::new().fg(theme.colors.error.to_color())),
                     Span::styled(
                         format!("Error: {}", error),
                         Style::new().fg(theme.colors.error.to_color()),
                     ),
                 ]));
-            }
+            },
         }
     }
 }
