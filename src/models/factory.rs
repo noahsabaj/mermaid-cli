@@ -41,7 +41,6 @@ mod tests {
         // Invalid formats should fail validation logic
         let invalid_formats = vec![
             "ollama_tinyllama", // underscore instead of /
-            "simplenameonly",   // no / separator
             "justslash/",       // missing model name
             "/noprefix",        // missing provider
         ];
@@ -49,11 +48,25 @@ mod tests {
         for format in invalid_formats {
             // These should fail validation in the factory
             assert!(
-                !format.contains('/') || format.ends_with('/') || format.starts_with('/'),
-                "Format {} should be invalid: {}",
-                format,
-                !format.contains('/')
+                format.ends_with('/') || format.starts_with('/') || format.contains('_'),
+                "Format {} should be invalid",
+                format
             );
+        }
+    }
+
+    #[test]
+    fn test_model_id_format_validation_auto_detect() {
+        // Models without provider prefix should be valid (auto-detect)
+        let valid_formats = vec![
+            "qwen3-coder:30b",      // no prefix, will auto-detect
+            "tinyllama",            // no prefix, will auto-detect
+            "mistral-7b-instruct",  // no prefix, will auto-detect
+        ];
+
+        for format in valid_formats {
+            // These should be valid and trigger auto-detection
+            assert!(!format.contains('/'), "Model name should not have /");
         }
     }
 
@@ -144,19 +157,23 @@ impl ModelFactory {
     /// Create a model instance from a model identifier with optional config
     ///
     /// Format: provider/model (e.g., "ollama/qwen3-coder:30b", "openai/gpt-4", "anthropic/claude-3-opus")
+    /// OR just model name (e.g., "qwen3-coder:30b") - auto-detects backend
     ///
     /// Routing logic:
-    /// - Ollama models: Direct connection to localhost:11434 (no proxy, no API keys)
-    /// - API models: LiteLLM proxy handles authentication and routing
+    /// - With provider prefix (e.g., ollama/model):
+    ///   - ollama/* -> Direct Ollama connection (localhost:11434)
+    ///   - Other providers -> LiteLLM proxy
+    /// - Without provider prefix (e.g., just model name):
+    ///   - Auto-detects available backends (Ollama, vLLM, etc)
+    ///   - Prefers vLLM if model exists on both
+    ///   - Falls back to Ollama or LiteLLM proxy as needed
     pub async fn create(model_id: &str, config: Option<&Config>) -> Result<Box<dyn Model>> {
-        // Validate format (provider/model)
+        // If no provider prefix, auto-detect backend
         if !model_id.contains('/') {
-            anyhow::bail!(
-                "Invalid model format. Expected 'provider/model' (e.g., 'ollama/qwen3-coder:30b')"
-            );
+            return Self::create_with_auto_detection(model_id).await;
         }
 
-        // Route based on provider
+        // Route based on explicit provider
         if model_id.starts_with("ollama/") {
             // DIRECT CONNECTION - No proxy needed
             // This is the tested and working path
