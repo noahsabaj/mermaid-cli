@@ -388,6 +388,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
             "Read" => theme.colors.info.to_color(),
             "Delete" => theme.colors.warning.to_color(),
             "GitDiff" | "GitStatus" | "GitCommit" => theme.colors.text_highlight.to_color(),
+            "WebSearch" => theme.colors.info.to_color(),
             _ => theme.colors.text_secondary.to_color(),
         };
 
@@ -437,6 +438,15 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                             preview.clone()
                         } else {
                             "Operation completed".to_string()
+                        }
+                    },
+                    "WebSearch" => {
+                        if let Some(ref preview) = action.preview {
+                            preview.clone()
+                        } else if let Some(count) = action.line_count {
+                            format!("Web Search: {} results for '{}'", count, action.target)
+                        } else {
+                            format!("Web Search: {}", action.target)
                         }
                     },
                     _ => "Success".to_string(),

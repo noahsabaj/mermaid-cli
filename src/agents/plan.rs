@@ -74,6 +74,7 @@ impl PlannedAction {
             },
             AgentAction::GitCommit { message, .. } => format!("Git commit: {}", message),
             AgentAction::GitStatus => "Git status".to_string(),
+            AgentAction::WebSearch { query, .. } => format!("Search: {}", query),
         }
     }
 
@@ -88,6 +89,7 @@ impl PlannedAction {
             AgentAction::GitDiff { .. } => "GitDiff",
             AgentAction::GitCommit { .. } => "GitCommit",
             AgentAction::GitStatus => "GitStatus",
+            AgentAction::WebSearch { .. } => "WebSearch",
         }
     }
 }
@@ -176,6 +178,9 @@ impl Plan {
                 AgentAction::GitDiff { .. }
                 | AgentAction::GitCommit { .. }
                 | AgentAction::GitStatus => git_actions.push(action),
+                AgentAction::WebSearch { .. } => {
+                    // Web search actions are executed inline
+                },
             }
         }
 
@@ -279,6 +284,9 @@ impl Plan {
                 AgentAction::GitDiff { .. }
                 | AgentAction::GitCommit { .. }
                 | AgentAction::GitStatus => git_actions.push(action),
+                AgentAction::WebSearch { .. } => {
+                    // Web search actions are executed inline, not categorized
+                },
             }
         }
 

@@ -50,6 +50,9 @@ impl ModeAwareExecutor {
 
             // Directory creation needs confirmation unless in bypass mode
             AgentAction::CreateDirectory { .. } => !self.mode.auto_accept_files(),
+
+            // Web search is safe
+            AgentAction::WebSearch { .. } => false,
         }
     }
 
@@ -150,6 +153,9 @@ impl ModeAwareExecutor {
                 } else {
                     format!("Git commit (all): {}", message)
                 }
+            },
+            AgentAction::WebSearch { query, result_count } => {
+                format!("Web search: '{}' ({} results)", query, result_count)
             },
         }
     }

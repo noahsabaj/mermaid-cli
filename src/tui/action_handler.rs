@@ -220,6 +220,11 @@ async fn handle_action_success(
                 app.context.token_count = app.context.token_count.saturating_sub(tokens);
             }
         },
+        AgentAction::WebSearch { query, .. } => {
+            // Add search results to conversation so model can reference them
+            app.set_status(format!("[OK] Search complete for: {}", query));
+            app.add_message(MessageRole::Assistant, output.clone());
+        },
         _ => {
             app.set_status(format!("[OK] {}", output));
         },
@@ -316,6 +321,19 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
             preview: Some(truncate_output(output, 3)),
             line_count: None,
             file_content: None,
+        },
+        AgentAction::WebSearch { query, .. } => {
+            let result_count = output.matches("Title:").count();
+            ActionDisplay {
+                action_type: "WebSearch".to_string(),
+                target: query.clone(),
+                result: AgentActionResult::Success {
+                    output: output.to_string(),
+                },
+                preview: Some(format!("Fetched {} search results", result_count)),
+                line_count: Some(result_count),
+                file_content: None,
+            }
         },
     }
 }

@@ -105,7 +105,60 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
         actions.push(AgentAction::GitStatus);
     }
 
+    // Parse web search actions
+    // Format: [WEB_SEARCH(N): query text here]
+    if let Some(web_searches) = parse_web_searches(response) {
+        actions.extend(web_searches);
+    }
+
     actions
+}
+
+/// Parse WEB_SEARCH(N): query format from response
+fn parse_web_searches(response: &str) -> Option<Vec<AgentAction>> {
+    let mut searches = Vec::new();
+
+    // Match [WEB_SEARCH(N): query] pattern
+    // N must be between 1-10
+    let mut remaining = response;
+
+    while let Some(start) = remaining.find("[WEB_SEARCH(") {
+        // Find the closing parenthesis
+        if let Some(paren_end) = remaining[start..].find("):") {
+            let count_str = &remaining[start + 12..start + paren_end];
+
+            // Parse count (must be 1-10)
+            if let Ok(count) = count_str.parse::<usize>() {
+                if count >= 1 && count <= 10 {
+                    // Find the closing bracket
+                    let search_start = start + paren_end + 2;
+                    if let Some(bracket_end) = remaining[search_start..].find(']') {
+                        let query = remaining[search_start..search_start + bracket_end].trim().to_string();
+
+                        if !query.is_empty() {
+                            searches.push(AgentAction::WebSearch {
+                                query,
+                                result_count: count,
+                            });
+                        }
+
+                        // Continue searching after this block
+                        remaining = &remaining[search_start + bracket_end..];
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Move past this invalid attempt
+        remaining = &remaining[start + 1..];
+    }
+
+    if searches.is_empty() {
+        None
+    } else {
+        Some(searches)
+    }
 }
 
 /// Strip all action blocks from response text for display
@@ -126,6 +179,9 @@ pub fn strip_action_blocks(response: &str) -> String {
     cleaned = cleaned.replace("[GIT_DIFF]", "");
     cleaned = cleaned.replace("[GIT_STATUS]", "");
 
+    // Remove WEB_SEARCH markers [WEB_SEARCH(N): query]
+    cleaned = remove_web_search_markers(&cleaned);
+
     // Clean up multiple consecutive newlines that may result from removal
     while cleaned.contains("\n\n\n") {
         cleaned = cleaned.replace("\n\n\n", "\n\n");
@@ -133,6 +189,24 @@ pub fn strip_action_blocks(response: &str) -> String {
 
     // Trim any leading/trailing whitespace
     cleaned.trim().to_string()
+}
+
+/// Remove WEB_SEARCH(N): query markers from text
+fn remove_web_search_markers(text: &str) -> String {
+    let mut result = text.to_string();
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("[WEB_SEARCH(") {
+        if let Some(bracket_end) = remaining[start..].find(']') {
+            let marker = &remaining[start..start + bracket_end + 1];
+            result = result.replace(marker, "");
+            remaining = &remaining[start + bracket_end + 1..];
+        } else {
+            break;
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

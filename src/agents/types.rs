@@ -34,6 +34,11 @@ pub enum AgentAction {
         files: Vec<String>,
     },
     GitStatus,
+    /// Web search via local Searxng
+    WebSearch {
+        query: String,
+        result_count: usize,
+    },
 }
 
 /// Result of an agent action

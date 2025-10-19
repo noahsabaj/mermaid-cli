@@ -4,6 +4,7 @@ use super::executor;
 use super::filesystem;
 use super::git;
 use super::types::{ActionResult, AgentAction};
+use super::web_search::WebSearchClient;
 
 /// Execute an agent action
 pub async fn execute_action(action: &AgentAction) -> Result<ActionResult> {
@@ -41,11 +42,40 @@ pub async fn execute_action(action: &AgentAction) -> Result<ActionResult> {
                 output: format!("Committed with message: {}", message),
             })
         },
+        AgentAction::WebSearch { query, result_count } => {
+            execute_web_search(query, *result_count).await
+        },
     }
     .map_err(|e| ActionResult::Error {
         error: e.to_string(),
     })
     .or_else(|e| Ok(e))
+}
+
+/// Execute a web search action
+async fn execute_web_search(query: &str, result_count: usize) -> Result<ActionResult> {
+    let searxng_url = std::env::var("MERMAID_SEARXNG_URL")
+        .unwrap_or_else(|_| "http://localhost:8888".to_string());
+
+    let mut client = WebSearchClient::new(searxng_url);
+
+    match client.search_cached(query, result_count).await {
+        Ok(results) => {
+            let formatted = client.format_results(&results);
+            Ok(ActionResult::Success { output: formatted })
+        }
+        Err(e) => {
+            let error_msg = format!(
+                "Web search failed: {}\n\nTroubleshooting:\n\
+                1. Ensure Searxng is running: podman-compose up -d searxng\n\
+                2. Check it's accessible at http://localhost:8888\n\
+                3. Verify MERMAID_SEARXNG_URL env var if custom location"
+            , e);
+            Ok(ActionResult::Success {
+                output: error_msg,
+            })
+        }
+    }
 }
 
 #[cfg(test)]

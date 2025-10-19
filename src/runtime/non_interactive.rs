@@ -200,6 +200,7 @@ impl NonInteractiveRunner {
                     AgentAction::GitDiff { .. } => ("git_diff", "git diff".to_string()),
                     AgentAction::GitStatus => ("git_status", "git status".to_string()),
                     AgentAction::GitCommit { message, .. } => ("git_commit", message.clone()),
+                    AgentAction::WebSearch { query, .. } => ("web_search", query.clone()),
                 };
 
                 let result = execute_action(&action)
@@ -237,6 +238,7 @@ impl NonInteractiveRunner {
                     AgentAction::GitDiff { .. } => ("git_diff", "git diff".to_string()),
                     AgentAction::GitStatus => ("git_status", "git status".to_string()),
                     AgentAction::GitCommit { message, .. } => ("git_commit", message),
+                    AgentAction::WebSearch { query, .. } => ("web_search", query),
                 };
 
                 actions.push(ActionResult {

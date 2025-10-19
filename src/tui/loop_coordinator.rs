@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Local;
 use crossterm::event;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
@@ -201,8 +202,12 @@ async fn handle_message_submit(
     app.pending_file_read = false;
     app.reading_file_status = None;
 
-    // Add user message to history
-    app.add_message(MessageRole::User, input.clone());
+    // Add timestamp to message for temporal awareness
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
+    let timestamped_input = format!("[Sent at: {}]\n{}", timestamp, input);
+
+    // Add user message to history with timestamp
+    app.add_message(MessageRole::User, timestamped_input);
 
     // Build message history including the new message
     let messages = app.build_message_history();

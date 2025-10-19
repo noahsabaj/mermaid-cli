@@ -12,6 +12,7 @@ mod parser;
 mod plan;
 mod segmenter;
 mod types;
+mod web_search;
 
 // Public re-exports - the ONLY way to access agent functionality
 pub use action_executor::execute_action;
@@ -20,3 +21,4 @@ pub use mode_aware_executor::ModeAwareExecutor;
 pub use parser::{parse_actions, segment_message, strip_action_blocks, MessageSegment};
 pub use plan::{ActionStatus, Plan, PlanStats, PlannedAction};
 pub use types::{ActionDisplay, ActionResult, AgentAction};
+pub use web_search::{SearchResult, WebSearchClient};
