@@ -4,6 +4,7 @@
 // Private submodules - not directly accessible from outside
 mod file_collector;
 mod loader;
+mod manager;
 mod project_detector;
 mod ranker;
 mod repo_graph;
@@ -13,6 +14,7 @@ mod tree_parser;
 
 // Public re-exports - the ONLY way to access context functionality
 pub use loader::{ContextLoader, LoaderConfig};
+pub use manager::ContextManager;
 pub use ranker::{RankerConfig, RepoRanker};
 pub use repo_graph::RepoGraph;
 pub use repomap::{generate_repo_map, RepoMap, RepoMapStats};

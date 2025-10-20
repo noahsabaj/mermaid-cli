@@ -16,7 +16,7 @@ pub mod tui;
 pub mod utils;
 
 pub use app::{load_config, Config};
-pub use context::{ContextLoader, LoaderConfig};
+pub use context::{ContextLoader, ContextManager, LoaderConfig};
 pub use models::{Model, ModelFactory, ProjectContext};
 pub use tui::run_ui;
 pub use utils::MermaidError;

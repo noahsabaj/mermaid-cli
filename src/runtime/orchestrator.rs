@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::{
     app::{load_config, Config},
     cli::{handle_command, Cli},
-    context::ContextLoader,
+    context::ContextManager,
     models::ModelFactory,
     ollama::ensure_model as ensure_ollama_model,
     proxy::{count_mermaid_processes, ensure_proxy, is_proxy_running, stop_proxy},
@@ -151,34 +151,17 @@ impl Orchestrator {
         // Set up project context
         let project_path = self.cli.path.clone().unwrap_or_else(|| PathBuf::from("."));
 
-        // Load project structure quickly (no file contents)
+        // Load project structure synchronously (file paths only, no contents)
         current_step += 1;
         log_progress(current_step, total_steps, "Loading project structure");
-        let lazy_context = self.load_project_structure(&project_path)?;
+        let mut context_manager = self.load_project_structure(&project_path)?;
 
-        // Create app instance with model and lazy context (converts to regular context)
+        // Build context with file tree (for immediate injection into model)
         current_step += 1;
         log_progress(current_step, total_steps, "Starting UI");
-        let context = lazy_context.to_project_context().await;
+        let context = context_manager.build_context();
         let mut app = App::new(model, context, model_id.clone());
-
-        // Start loading files in background after UI is visible
-        let lazy_context_bg = lazy_context.clone();
-        let project_path_bg = project_path.clone();
-        tokio::spawn(async move {
-            // Load priority files first (README, config, etc.)
-            let priority = crate::models::get_priority_files(&project_path_bg.to_string_lossy());
-            if !priority.is_empty() {
-                let _ = lazy_context_bg.load_files_batch(priority).await;
-            }
-
-            // Then load remaining files progressively
-            let all_files = lazy_context_bg.get_file_list();
-            for chunk in all_files.chunks(10) {
-                let _ = lazy_context_bg.load_files_batch(chunk.to_vec()).await;
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        });
+        app.set_context_manager(context_manager);
 
         // Handle --resume or --continue flags
         if self.cli.resume || self.cli.continue_conversation {
@@ -224,29 +207,28 @@ impl Orchestrator {
         result
     }
 
-    /// Load project structure quickly (no file contents)
+    /// Load project structure synchronously (file paths only)
     fn load_project_structure(
         &self,
         project_path: &PathBuf,
-    ) -> Result<crate::models::LazyProjectContext> {
-        let loader = ContextLoader::new()?;
-
+    ) -> Result<ContextManager> {
         log_info(
             "FILES",
             format!("Loading project structure from: {}", project_path.display()),
         );
 
-        let context = loader.load_structure(project_path)?;
+        let mut manager = ContextManager::new(project_path);
+        manager.reload()?;
 
         log_info(
             "STATS",
             format!(
-                "Found {} files (loading in background...)",
-                context.total_file_count()
+                "Found {} files in project",
+                manager.total_files()
             ),
         );
 
-        Ok(context)
+        Ok(manager)
     }
 
     /// Cleanup on exit

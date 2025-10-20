@@ -2,6 +2,7 @@ use super::mode::OperationMode;
 use super::theme::Theme;
 use super::widgets::{ChatState, InputState, SidebarState};
 use crate::agents::{AgentAction, ModeAwareExecutor, Plan};
+use crate::context::ContextManager;
 use crate::diagnostics::{DiagnosticsMode, HardwareMonitor, HardwareStats};
 use crate::models::{ChatMessage, MessageRole, Model, ProjectContext};
 use crate::session::{ConversationHistory, ConversationManager};
@@ -129,6 +130,8 @@ pub struct App {
     pub history_index: Option<usize>,
     /// Saved input when navigating away from current draft
     pub history_buffer: String,
+    /// Context manager for dynamic file tree reloading
+    pub context_manager: Option<ContextManager>,
 }
 
 impl App {
@@ -200,7 +203,24 @@ impl App {
             input_history,
             history_index: None,
             history_buffer: String::new(),
+            context_manager: None,
         }
+    }
+
+    /// Set the context manager for dynamic context reloading
+    pub fn set_context_manager(&mut self, manager: ContextManager) {
+        self.context_manager = Some(manager);
+    }
+
+    /// Update context if file tree has changed since last message
+    pub async fn reload_context_if_needed(&mut self) -> anyhow::Result<()> {
+        if let Some(ref mut manager) = self.context_manager {
+            if manager.reload_if_needed()? {
+                // Context changed, rebuild it
+                self.context = manager.build_context();
+            }
+        }
+        Ok(())
     }
 
     /// Add a message to the chat

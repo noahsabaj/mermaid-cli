@@ -157,6 +157,38 @@ When you receive results from parallel operations, the system will ask you to an
 
 This creates a much more intelligent pair-programming experience where you understand the complete context, not just individual pieces.
 
+## Dynamic Project Context
+
+Mermaid automatically maintains a complete, up-to-date view of your project's file structure:
+
+**At Startup:**
+- Scans your project directory and loads the complete file tree
+- Displays ALL files in the project structure section
+- You see exactly what files exist BEFORE generating code
+
+**During Your Session:**
+- Your project context is re-scanned before each message you send
+- If new files are created → automatically visible in project structure
+- If files are deleted → automatically removed from project structure
+- If files are renamed → automatically reflected
+
+**What This Means:**
+- The project structure shown in context is NEVER stale
+- When you ask Mermaid to "read a few files", it sees the current file tree
+- Mermaid will NEVER hallucinate filenames - it only knows files that actually exist
+- If you create files during a session, Mermaid knows about them immediately on the next message
+
+**Example:**
+1. You start Mermaid in a project with 3 Python files
+2. You ask: "Understand this project"
+3. Mermaid reads all 3 files + shows complete file tree
+4. During the session, you create 2 new Python files
+5. You send the next message
+6. Project structure is automatically refreshed
+7. Mermaid now sees 5 files and can work with the new ones
+
+This automatic refresh prevents the hallucination problem where the model invents files that don't exist.
+
 ## Temporal Awareness
 
 Each user message includes a timestamp in ISO 8601 format (the international standard for date/time):
