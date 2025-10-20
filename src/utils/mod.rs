@@ -7,6 +7,7 @@ mod file_watcher;
 mod logger;
 mod mutex_ext;
 mod retry;
+mod timestamp;
 mod tokenizer;
 pub mod validation;
 
@@ -16,5 +17,6 @@ pub use file_watcher::{FileEvent, FileSystemWatcher};
 pub use logger::{init_logger, log_debug, log_error, log_info, log_progress, log_status, log_warn};
 pub use mutex_ext::{lock_arc_mutex_safe, MutexExt};
 pub use retry::{retry_async, retry_sync, RetryConfig};
+pub use timestamp::format_relative_timestamp;
 pub use tokenizer::{count_file_tokens, Tokenizer};
 pub use validation::{validate_command, validate_file_path};

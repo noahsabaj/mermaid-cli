@@ -14,6 +14,7 @@ use crate::tui::app::ConfirmationState;
 use crate::tui::markdown::parse_markdown;
 use crate::tui::mode::OperationMode;
 use crate::tui::theme::Theme;
+use crate::utils::format_relative_timestamp;
 
 /// State for the chat widget
 #[derive(Debug, Clone)]
@@ -46,8 +47,13 @@ impl ChatState {
         for msg in messages {
             // Role line
             total_lines += 1;
-            // Content lines
-            total_lines += msg.content.lines().count() as u16;
+            // Content lines (stripped of timestamp for User messages)
+            let content_to_count = if matches!(msg.role, MessageRole::User) {
+                strip_timestamp_line(&msg.content)
+            } else {
+                msg.content.clone()
+            };
+            total_lines += content_to_count.lines().count() as u16;
             // Spacing
             if matches!(msg.role, MessageRole::Assistant) {
                 total_lines += 1;
@@ -200,16 +206,50 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     }
                 }
             } else {
-                let content_lines: Vec<_> = msg.content.lines().collect();
+                // For User messages: format timestamp and display on right edge
+                let formatted_timestamp = format_relative_timestamp(msg.timestamp);
+                let timestamp_width = formatted_timestamp.len() + 2; // +2 for spacing
+                let available_width = (area.width as usize).saturating_sub(timestamp_width + 3); // +3 for role prefix
+
+                // Strip the [Sent at: ...] line from message content
+                let cleaned_content = strip_timestamp_line(&msg.content);
+                let content_lines: Vec<_> = cleaned_content.lines().collect();
+
                 if let Some(first) = content_lines.first() {
-                    lines.push(Line::from(vec![
+                    // Build first line with role, message, and timestamp on right
+                    let first_line_text = first.to_string();
+                    let first_line_len = first_line_text.len();
+
+                    let mut spans = vec![
                         Span::styled(
                             format!("{} ", role_prefix),
                             Style::new().fg(role_color).bold(),
                         ),
-                        Span::raw(first.to_string()),
-                    ]));
+                    ];
 
+                    // Add message text (bounded to available width)
+                    if first_line_len > available_width {
+                        spans.push(Span::raw(first_line_text[..available_width].to_string()));
+                    } else {
+                        spans.push(Span::raw(first_line_text));
+                    }
+
+                    // Add padding and timestamp on right
+                    let message_and_prefix = role_prefix.len() + 1 + first_line_len;
+                    let padding_needed = (area.width as usize).saturating_sub(
+                        message_and_prefix.min(available_width + role_prefix.len() + 1) + timestamp_width,
+                    );
+                    if padding_needed > 0 {
+                        spans.push(Span::raw(" ".repeat(padding_needed)));
+                    }
+                    spans.push(Span::styled(
+                        formatted_timestamp,
+                        Style::new().fg(self.theme.colors.user_message.to_color()).dim(),
+                    ));
+
+                    lines.push(Line::from(spans));
+
+                    // Render remaining lines
                     for line in content_lines.iter().skip(1) {
                         lines.push(Line::from(line.to_string()));
                     }
@@ -513,5 +553,24 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                 ]));
             },
         }
+    }
+}
+
+/// Strip the [Sent at: ...] timestamp line from message content
+/// This line was added for the model but should be hidden from the user display
+fn strip_timestamp_line(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    // Check if first line is a timestamp marker
+    if lines[0].starts_with("[Sent at:") && lines[0].ends_with("]") {
+        // Skip the first line and rejoin remaining lines
+        lines[1..].join("\n")
+    } else {
+        // No timestamp line to strip, return as-is
+        content.to_string()
     }
 }

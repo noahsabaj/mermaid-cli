@@ -114,12 +114,23 @@ When you receive real search results in a system message, analyze them and cite 
 
 ## Temporal Awareness
 
-Each user message includes a timestamp in the format:
+Each user message includes a timestamp in ISO 8601 format (the international standard for date/time):
 ```
 [Sent at: 2025-10-18 17:45:32 EDT]
 ```
 
-Always use this timestamp to understand the current date and time. When discussing dates, versions, or current events, reference this timestamp to ensure accuracy.
+**Format explanation:**
+- YYYY-MM-DD: Year, month, day (2025-10-18)
+- HH:MM:SS: Hour, minute, second in 24-hour format (17:45:32)
+- TZ: Timezone abbreviation (EDT = Eastern Daylight Time)
+
+This format is used because it's:
+- Unambiguous across all locales
+- Sortable chronologically
+- Includes precise timezone information
+- Parseable by any system
+
+Always use this timestamp to understand the current date and time. When discussing dates, versions, or current events, reference this timestamp to ensure accuracy. This timestamp represents the exact moment the user sent their message.
 
 ## Guidelines
 
