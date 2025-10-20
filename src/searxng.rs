@@ -1,17 +1,20 @@
 use std::path::PathBuf;
 
 /// Auto-start Searxng if not already running
+///
+/// This runs silently in the background to avoid logging leaks into the TUI.
+/// If diagnostics are needed, run with RUST_LOG=debug to see tracing output.
 pub async fn ensure_searxng_running() {
     // Check if Searxng is already running
     let check_url = "http://localhost:8888/search?q=test&format=json";
 
     match reqwest::get(check_url).await {
         Ok(_) => {
-            tracing::debug!("Searxng is running and accessible");
+            // Already running, nothing to do
             return;
         }
         Err(_) => {
-            tracing::info!("Searxng not running, attempting to start automatically...");
+            // Not running, attempt to start
         }
     }
 
@@ -19,13 +22,11 @@ pub async fn ensure_searxng_running() {
     let compose_dir = find_compose_directory();
 
     if compose_dir.is_none() {
-        tracing::warn!("Could not find docker-compose.yml for Searxng");
-        tracing::info!("You can start it manually: podman-compose up -d searxng");
+        // Could not find compose file, silent failure
         return;
     }
 
     let compose_dir = compose_dir.unwrap();
-    tracing::debug!("Found docker-compose.yml at: {}", compose_dir.display());
 
     // Start Searxng via podman-compose
     match tokio::process::Command::new("podman-compose")
@@ -38,30 +39,27 @@ pub async fn ensure_searxng_running() {
     {
         Ok(output) => {
             if !output.status.success() {
-                tracing::warn!("Failed to start Searxng via podman-compose");
-                tracing::info!("You can start it manually: podman-compose up -d searxng");
+                // Start failed, silent failure
                 return;
             }
         }
-        Err(e) => {
-            tracing::warn!("Could not execute podman-compose: {}", e);
+        Err(_e) => {
+            // Could not execute command, silent failure
             return;
         }
     }
 
     // Wait for Searxng to be ready (poll up to 10 seconds)
-    for attempt in 1..=20 {
+    for _attempt in 1..=20 {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         if reqwest::get(check_url).await.is_ok() {
-            tracing::info!("Searxng started successfully and is responding");
+            // Searxng is responding, we're done
             return;
-        }
-        if attempt % 4 == 0 {
-            tracing::debug!("Waiting for Searxng to be ready... ({}/20 attempts)", attempt);
         }
     }
 
-    tracing::warn!("Searxng started but may not be responding yet. It will be available shortly.");
+    // Searxng may not be fully ready yet, but we tried our best
+    // First web search will just take a bit longer
 }
 
 /// Find directory containing docker-compose.yml by checking multiple locations

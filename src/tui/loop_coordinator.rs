@@ -135,13 +135,15 @@ pub async fn run_app_loop(
         // Process streaming responses
         match process_stream_chunks(app, rx).await? {
             StreamStatus::Streaming => {
-                // Still streaming, auto-scroll if needed
-                if app.is_generating {
-                    app.auto_scroll_to_bottom(viewport_height);
-                }
+                // During streaming: content is buffered and NOT rendered (block streaming mode)
+                // Don't scroll - scrolling will happen when the complete response is shown
+                // Scrolling here causes "ghost scrolling" with nothing visible to follow
             },
             StreamStatus::Complete { actions } => {
-                // Stream complete, execute any parsed actions
+                // Stream complete: response is now being rendered, auto-scroll to show it
+                app.auto_scroll_to_bottom(viewport_height);
+
+                // Execute any parsed actions
                 if !actions.is_empty() {
                     action_handler::execute_actions(app, actions, &tx).await?;
                 }
