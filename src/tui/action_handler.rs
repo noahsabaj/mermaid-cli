@@ -192,125 +192,49 @@ async fn handle_action_success(
 
     // Perform action-specific post-processing
     match action {
+        // Actions that need multi-step follow-through: Trigger unified feedback loop
         AgentAction::ReadFile { path } => {
-            // Feedback loop: Send file contents back to model
             app.set_status(format!("[OK] File read: {}", path));
-
-            // Set feedback tracking
-            app.pending_file_read = true;
-            if app.reading_file_status.is_none() {
-                app.reading_file_status = Some(format!("Processing {}...", path));
-                app.status_timestamp = Some(std::time::Instant::now());
-            }
-
-            app.is_generating = true;
-            app.current_response.clear();
-
-            // Create a prompt for the model to present the file contents
-            let feedback_prompt = format!(
-                "I've successfully read the file '{}'. Here are its contents:\n\n{}\n\nPlease present these contents to the user in a helpful way.",
-                path, output
-            );
-
-            // Add feedback as system message and build history
-            app.add_message(MessageRole::System, feedback_prompt.clone());
-            let messages = app.build_message_history();
-
-            // Send feedback to model
-            let model = app.model.clone();
-            let context = app.context.clone();
-            let tx_clone = tx.clone();
-            let tx_done = tx.clone();
-
-            tokio::spawn(async move {
-                let config = ModelConfig::default();
-                let callback: StreamCallback = Arc::new(move |chunk| {
-                    let _ = tx_clone.try_send(chunk.to_string());
-                });
-
-                let mut model = model.write().await;
-                match model
-                    .chat(&messages, &context, &config, Some(callback))
-                    .await
-                {
-                    Ok(_) => {
-                        // Clear feedback flags after completion
-                        let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
-                    },
-                    Err(e) => {
-                        let _ = tx_done.send(format!("[ERROR]:{}", e)).await;
-                    },
-                }
-            });
+            trigger_feedback_loop(app, action, output, tx).await;
         },
+        AgentAction::WebSearch { query, .. } => {
+            app.set_status(format!("[OK] Search completed, analyzing..."));
+            trigger_feedback_loop(app, action, output, tx).await;
+        },
+        AgentAction::ExecuteCommand { command, .. } => {
+            app.set_status(format!("[OK] Command executed"));
+            trigger_feedback_loop(app, action, output, tx).await;
+        },
+        AgentAction::GitDiff { .. } => {
+            app.set_status("[OK] Diff generated, analyzing...".to_string());
+            trigger_feedback_loop(app, action, output, tx).await;
+        },
+        AgentAction::GitStatus => {
+            app.set_status("[OK] Repository status retrieved, analyzing...".to_string());
+            trigger_feedback_loop(app, action, output, tx).await;
+        },
+
+        // Actions that just update context, no follow-through needed
         AgentAction::WriteFile { path, content } => {
-            app.set_status(format!("[OK] {}", output));
+            app.set_status(format!("[OK] File created: {}", path));
             app.context.add_file(path.clone(), content.clone());
             // Use proper tokenizer for accurate count
             let tokens = count_file_tokens(content, &app.model_name);
             app.context.token_count += tokens;
         },
         AgentAction::DeleteFile { path } => {
-            app.set_status(format!("[OK] {}", output));
+            app.set_status(format!("[OK] File deleted: {}", path));
             if let Some(content) = app.context.files.remove(path) {
                 // Use proper tokenizer for accurate count
                 let tokens = count_file_tokens(&content, &app.model_name);
                 app.context.token_count = app.context.token_count.saturating_sub(tokens);
             }
         },
-        AgentAction::WebSearch { query, .. } => {
-            // Feedback loop: Feed search results back to model for analysis
-            app.set_status(format!("[OK] Search results received, analyzing..."));
-
-            // Set feedback tracking
-            app.pending_file_read = true;
-            if app.reading_file_status.is_none() {
-                app.reading_file_status = Some(format!("Analyzing search results for '{}'...", query));
-                app.status_timestamp = Some(std::time::Instant::now());
-            }
-
-            app.is_generating = true;
-            app.current_response.clear();
-
-            // Create feedback prompt with search results
-            let feedback_prompt = format!(
-                "Here are the web search results for '{}':\n\n{}\n\nPlease analyze these results and respond to the user's original question. Cite your sources using [source: URL] format.",
-                query, output
-            );
-
-            // Add feedback as system message
-            app.add_message(MessageRole::System, feedback_prompt.clone());
-            let messages = app.build_message_history();
-
-            // Send feedback to model for re-generation with real results
-            let model = app.model.clone();
-            let context = app.context.clone();
-            let tx_clone = tx.clone();
-            let tx_done = tx.clone();
-
-            tokio::spawn(async move {
-                let config = ModelConfig::default();
-                let callback: StreamCallback = Arc::new(move |chunk| {
-                    let _ = tx_clone.try_send(chunk.to_string());
-                });
-
-                let mut model = model.write().await;
-                match model
-                    .chat(&messages, &context, &config, Some(callback))
-                    .await
-                {
-                    Ok(_) => {
-                        // Clear feedback flags after completion
-                        let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
-                    },
-                    Err(e) => {
-                        let _ = tx_done.send(format!("[ERROR]:{}", e)).await;
-                    },
-                }
-            });
+        AgentAction::CreateDirectory { path } => {
+            app.set_status(format!("[OK] Directory created: {}", path));
         },
-        _ => {
-            app.set_status(format!("[OK] {}", output));
+        AgentAction::GitCommit { message, .. } => {
+            app.set_status(format!("[OK] Changes committed"));
         },
     }
 
@@ -319,6 +243,14 @@ async fn handle_action_success(
 
 /// Build an ActionDisplay from an action and its output
 fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
+    build_action_display_with_timing(action, output, None)
+}
+
+fn build_action_display_with_timing(
+    action: &AgentAction,
+    output: &str,
+    duration_seconds: Option<f64>,
+) -> ActionDisplay {
     match action {
         AgentAction::WriteFile { path, content } => {
             let line_count = content.lines().count();
@@ -331,6 +263,7 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
                 preview: None,
                 line_count: Some(line_count),
                 file_content: Some(content.clone()),
+                duration_seconds: None,
             }
         },
         AgentAction::ReadFile { path } => {
@@ -344,6 +277,7 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
                 preview: Some(truncate_output(output, 3)),
                 line_count: Some(line_count),
                 file_content: None,
+                duration_seconds,
             }
         },
         AgentAction::ExecuteCommand { command, .. } => ActionDisplay {
@@ -355,6 +289,7 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
             preview: Some(truncate_output(output, 5)),
             line_count: Some(output.lines().count()),
             file_content: None,
+            duration_seconds,
         },
         AgentAction::DeleteFile { path } => ActionDisplay {
             action_type: "Delete".to_string(),
@@ -365,6 +300,7 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
             preview: None,
             line_count: None,
             file_content: None,
+            duration_seconds: None,
         },
         AgentAction::CreateDirectory { path } => ActionDisplay {
             action_type: "CreateDir".to_string(),
@@ -375,6 +311,7 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
             preview: None,
             line_count: None,
             file_content: None,
+            duration_seconds: None,
         },
         AgentAction::GitDiff { path } => ActionDisplay {
             action_type: "GitDiff".to_string(),
@@ -385,6 +322,7 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
             preview: Some(truncate_output(output, 10)),
             line_count: Some(output.lines().count()),
             file_content: None,
+            duration_seconds,
         },
         AgentAction::GitStatus => ActionDisplay {
             action_type: "GitStatus".to_string(),
@@ -395,6 +333,7 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
             preview: Some(truncate_output(output, 10)),
             line_count: Some(output.lines().count()),
             file_content: None,
+            duration_seconds,
         },
         AgentAction::GitCommit { message, .. } => ActionDisplay {
             action_type: "GitCommit".to_string(),
@@ -405,6 +344,7 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
             preview: Some(truncate_output(output, 3)),
             line_count: None,
             file_content: None,
+            duration_seconds: None,
         },
         AgentAction::WebSearch { query, .. } => {
             let result_count = output.matches("Title:").count();
@@ -417,6 +357,7 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
                 preview: Some(format!("Fetched {} search results", result_count)),
                 line_count: Some(result_count),
                 file_content: None,
+                duration_seconds,
             }
         },
     }
@@ -559,4 +500,119 @@ pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Resu
     }
 
     Ok(())
+}
+
+/// Determine if an action needs multi-step follow-through (synthesis/analysis)
+///
+/// ANALYZE actions: Model should synthesize/analyze the results
+/// SIMPLE actions: Just show brief confirmation, move on
+fn needs_analysis(action: &AgentAction) -> bool {
+    matches!(
+        action,
+        AgentAction::ReadFile { .. }
+            | AgentAction::WebSearch { .. }
+            | AgentAction::ExecuteCommand { .. }
+            | AgentAction::GitDiff { .. }
+            | AgentAction::GitStatus
+    )
+}
+
+/// Build feedback prompt for action results based on action type
+fn build_feedback_prompt(action: &AgentAction, output: &str) -> String {
+    match action {
+        AgentAction::ReadFile { path } => {
+            format!(
+                "I've successfully read the file '{}'. Here are its contents:\n\n{}\n\nPlease explain what this file contains and how it's relevant to the user's request.",
+                path, output
+            )
+        }
+        AgentAction::WebSearch { query, .. } => {
+            format!(
+                "Here are the web search results for '{}':\n\n{}\n\nPlease analyze these results and respond to the user's original question. Summarize the key findings with [source: URL] citations, dates, and author information where available.",
+                query, output
+            )
+        }
+        AgentAction::ExecuteCommand { command, .. } => {
+            format!(
+                "I executed the command '{}'. Here's the output:\n\n{}\n\nPlease interpret these results and explain what they mean in the context of the user's request.",
+                command, output
+            )
+        }
+        AgentAction::GitDiff { path } => {
+            let context = if let Some(p) = path {
+                format!("for {}", p)
+            } else {
+                "for the repository".to_string()
+            };
+            format!(
+                "Here's the git diff {}:\n\n{}\n\nPlease analyze these changes and explain their implications.",
+                context, output
+            )
+        }
+        AgentAction::GitStatus => {
+            format!(
+                "Here's the current repository status:\n\n{}\n\nPlease explain the repository state clearly to the user.",
+                output
+            )
+        }
+        _ => String::new(),
+    }
+}
+
+/// Trigger the unified multi-step feedback loop for action follow-through
+///
+/// This handles synthesizing/analyzing action results by sending them back
+/// to the model along with context, triggering re-generation with analysis.
+async fn trigger_feedback_loop(
+    app: &mut App,
+    action: &AgentAction,
+    output: String,
+    tx: &mpsc::Sender<String>,
+) {
+    // Build the feedback prompt
+    let feedback_prompt = build_feedback_prompt(action, &output);
+    if feedback_prompt.is_empty() {
+        // Action doesn't need follow-through
+        return;
+    }
+
+    // Set feedback tracking flags
+    app.pending_file_read = true;
+    if app.reading_file_status.is_none() {
+        app.reading_file_status = Some("Analyzing action results...".to_string());
+        app.status_timestamp = Some(std::time::Instant::now());
+    }
+
+    app.is_generating = true;
+    app.current_response.clear();
+
+    // Add feedback as system message
+    app.add_message(MessageRole::System, feedback_prompt.clone());
+    let messages = app.build_message_history();
+
+    // Send feedback to model for re-generation with analysis
+    let model = app.model.clone();
+    let context = app.context.clone();
+    let tx_clone = tx.clone();
+    let tx_done = tx.clone();
+
+    tokio::spawn(async move {
+        let config = ModelConfig::default();
+        let callback: StreamCallback = Arc::new(move |chunk| {
+            let _ = tx_clone.try_send(chunk.to_string());
+        });
+
+        let mut model = model.write().await;
+        match model
+            .chat(&messages, &context, &config, Some(callback))
+            .await
+        {
+            Ok(_) => {
+                let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
+            }
+            Err(e) => {
+                let _ = tx_done.send(format!("[ERROR]:{}", e)).await;
+            }
+        }
+    });
 }

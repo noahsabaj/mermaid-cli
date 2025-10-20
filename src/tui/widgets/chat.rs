@@ -504,6 +504,25 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                     ]));
                 }
 
+                // Show timing for long-running actions
+                if let Some(duration) = action.duration_seconds {
+                    // Only show timing for operations that typically take a few seconds
+                    if matches!(
+                        action.action_type.as_str(),
+                        "WebSearch" | "Bash" | "Command" | "GitDiff" | "GitStatus" | "Read"
+                    ) {
+                        lines.push(Line::from(vec![
+                            Span::styled("      ", Style::new().fg(action_color)),
+                            Span::styled(
+                                format!("Completed in {:.1} seconds", duration),
+                                Style::new()
+                                    .fg(theme.colors.text_disabled.to_color())
+                                    .italic(),
+                            ),
+                        ]));
+                    }
+                }
+
                 if action.action_type == "Write" {
                     if let Some(ref content) = action.file_content {
                         let preview_lines: Vec<&str> = content.lines().take(10).collect();

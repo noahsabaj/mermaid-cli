@@ -64,4 +64,6 @@ pub struct ActionDisplay {
     pub line_count: Option<usize>,
     /// Full file content (for Write actions, to show preview)
     pub file_content: Option<String>,
+    /// Duration of long-running actions in seconds (for display)
+    pub duration_seconds: Option<f64>,
 }
