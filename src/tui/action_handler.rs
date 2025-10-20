@@ -68,7 +68,26 @@ pub async fn execute_actions(
                     handle_action_success(app, &action_clone, output, tx).await?;
                 },
                 Ok(agents::ActionResult::Error { error }) => {
-                    app.set_status(format!("[FAILED] Action failed: {}", error));
+                    // Special handling for web search errors - display to user
+                    if matches!(&action_clone, AgentAction::WebSearch { .. }) {
+                        app.set_status("[FAILED] Web search could not be completed");
+
+                        // Add action display to show the failed search
+                        let action_display = build_action_display(&action_clone, &error);
+                        if let Some(last_msg) = app
+                            .messages
+                            .iter_mut()
+                            .rev()
+                            .find(|m| matches!(m.role, MessageRole::Assistant))
+                        {
+                            last_msg.actions.push(action_display);
+                        }
+
+                        // Add error message as Assistant message for user visibility
+                        app.add_message(MessageRole::Assistant, error);
+                    } else {
+                        app.set_status(format!("[FAILED] Action failed: {}", error));
+                    }
                 },
                 Err(e) => {
                     app.set_status(format!("[ERROR] Error: {}", e));
@@ -103,7 +122,26 @@ pub async fn confirm_action(
                         handle_action_success(app, &action_clone, output, tx).await?;
                     },
                     Ok(agents::ActionResult::Error { error }) => {
-                        app.set_status(format!("[FAILED] Action failed: {}", error));
+                        // Special handling for web search errors - display to user
+                        if matches!(&action_clone, AgentAction::WebSearch { .. }) {
+                            app.set_status("[FAILED] Web search could not be completed");
+
+                            // Add action display to show the failed search
+                            let action_display = build_action_display(&action_clone, &error);
+                            if let Some(last_msg) = app
+                                .messages
+                                .iter_mut()
+                                .rev()
+                                .find(|m| matches!(m.role, MessageRole::Assistant))
+                            {
+                                last_msg.actions.push(action_display);
+                            }
+
+                            // Add error message as Assistant message for user visibility
+                            app.add_message(MessageRole::Assistant, error);
+                        } else {
+                            app.set_status(format!("[FAILED] Action failed: {}", error));
+                        }
                     },
                     Err(e) => {
                         app.set_status(format!("[ERROR] Error: {}", e));
@@ -494,6 +532,10 @@ pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Resu
             Ok(agents::ActionResult::Error { error }) => {
                 app.mark_plan_action_failed(error.clone());
                 app.set_status(format!("Plan action failed: {}", error));
+                // For web search errors, also add to chat for user visibility
+                if error.contains("Web search") {
+                    app.add_message(MessageRole::Assistant, error);
+                }
             },
             Err(e) => {
                 app.mark_plan_action_failed(e.to_string());

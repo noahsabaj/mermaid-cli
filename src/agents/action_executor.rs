@@ -94,8 +94,8 @@ async fn execute_web_search(query: &str, result_count: usize) -> Result<ActionRe
                 )
             };
 
-            Ok(ActionResult::Success {
-                output: error_msg,
+            Ok(ActionResult::Error {
+                error: error_msg,
             })
         }
     }
