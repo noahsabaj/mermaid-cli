@@ -75,6 +75,9 @@ impl PlannedAction {
             AgentAction::GitCommit { message, .. } => format!("Git commit: {}", message),
             AgentAction::GitStatus => "Git status".to_string(),
             AgentAction::WebSearch { query, .. } => format!("Search: {}", query),
+            AgentAction::ParallelRead { paths } => format!("Read {} files", paths.len()),
+            AgentAction::ParallelWebSearch { queries } => format!("Search {} queries", queries.len()),
+            AgentAction::ParallelGitDiff { paths } => format!("Git diff {} paths", paths.len()),
         }
     }
 
@@ -90,6 +93,9 @@ impl PlannedAction {
             AgentAction::GitCommit { .. } => "GitCommit",
             AgentAction::GitStatus => "GitStatus",
             AgentAction::WebSearch { .. } => "WebSearch",
+            AgentAction::ParallelRead { .. } => "ReadFiles",
+            AgentAction::ParallelWebSearch { .. } => "WebSearches",
+            AgentAction::ParallelGitDiff { .. } => "GitDiffs",
         }
     }
 }
@@ -173,12 +179,15 @@ impl Plan {
                 AgentAction::ReadFile { .. }
                 | AgentAction::WriteFile { .. }
                 | AgentAction::DeleteFile { .. }
-                | AgentAction::CreateDirectory { .. } => file_actions.push(action),
+                | AgentAction::CreateDirectory { .. }
+                | AgentAction::ParallelRead { .. } => file_actions.push(action),
                 AgentAction::ExecuteCommand { .. } => command_actions.push(action),
                 AgentAction::GitDiff { .. }
                 | AgentAction::GitCommit { .. }
-                | AgentAction::GitStatus => git_actions.push(action),
-                AgentAction::WebSearch { .. } => {
+                | AgentAction::GitStatus
+                | AgentAction::ParallelGitDiff { .. } => git_actions.push(action),
+                AgentAction::WebSearch { .. }
+                | AgentAction::ParallelWebSearch { .. } => {
                     // Web search actions are executed inline
                 },
             }
@@ -279,12 +288,15 @@ impl Plan {
                 AgentAction::ReadFile { .. }
                 | AgentAction::WriteFile { .. }
                 | AgentAction::DeleteFile { .. }
-                | AgentAction::CreateDirectory { .. } => file_actions.push(action),
+                | AgentAction::CreateDirectory { .. }
+                | AgentAction::ParallelRead { .. } => file_actions.push(action),
                 AgentAction::ExecuteCommand { .. } => command_actions.push(action),
                 AgentAction::GitDiff { .. }
                 | AgentAction::GitCommit { .. }
-                | AgentAction::GitStatus => git_actions.push(action),
-                AgentAction::WebSearch { .. } => {
+                | AgentAction::GitStatus
+                | AgentAction::ParallelGitDiff { .. } => git_actions.push(action),
+                AgentAction::WebSearch { .. }
+                | AgentAction::ParallelWebSearch { .. } => {
                     // Web search actions are executed inline, not categorized
                 },
             }

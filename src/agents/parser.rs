@@ -111,7 +111,98 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
         actions.extend(web_searches);
     }
 
-    actions
+    // Group consecutive same-type actions for parallel execution
+    let grouped = group_parallel_actions(actions);
+    grouped
+}
+
+/// Group consecutive same-type actions for parallel execution
+/// Converts sequences like ReadFile, ReadFile, ReadFile -> ParallelRead
+fn group_parallel_actions(actions: Vec<AgentAction>) -> Vec<AgentAction> {
+    if actions.is_empty() {
+        return actions;
+    }
+
+    let mut grouped = Vec::new();
+    let mut i = 0;
+
+    while i < actions.len() {
+        match &actions[i] {
+            AgentAction::ReadFile { .. } => {
+                // Collect consecutive ReadFile actions
+                let mut paths = Vec::new();
+                while i < actions.len() {
+                    match &actions[i] {
+                        AgentAction::ReadFile { path } => {
+                            paths.push(path.clone());
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                // Group if 2+ files, otherwise keep as individual actions
+                if paths.len() >= 2 {
+                    grouped.push(AgentAction::ParallelRead { paths });
+                } else {
+                    for path in paths {
+                        grouped.push(AgentAction::ReadFile { path });
+                    }
+                }
+            }
+            AgentAction::WebSearch { query, result_count } => {
+                // Collect consecutive WebSearch actions
+                let mut queries = Vec::new();
+                while i < actions.len() {
+                    match &actions[i] {
+                        AgentAction::WebSearch { query, result_count } => {
+                            queries.push((query.clone(), *result_count));
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                // Group if 2+ searches, otherwise keep as individual actions
+                if queries.len() >= 2 {
+                    grouped.push(AgentAction::ParallelWebSearch { queries });
+                } else {
+                    for (query, result_count) in queries {
+                        grouped.push(AgentAction::WebSearch { query, result_count });
+                    }
+                }
+            }
+            AgentAction::GitDiff { path } => {
+                // Collect consecutive GitDiff actions
+                let mut paths = Vec::new();
+                while i < actions.len() {
+                    match &actions[i] {
+                        AgentAction::GitDiff { path } => {
+                            paths.push(path.clone());
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                // Group if 2+ diffs, otherwise keep as individual actions
+                if paths.len() >= 2 {
+                    grouped.push(AgentAction::ParallelGitDiff { paths });
+                } else {
+                    for path in paths {
+                        grouped.push(AgentAction::GitDiff { path });
+                    }
+                }
+            }
+            _ => {
+                // All other action types pass through as-is
+                grouped.push(actions[i].clone());
+                i += 1;
+            }
+        }
+    }
+
+    grouped
 }
 
 /// Parse WEB_SEARCH(N): query format from response

@@ -201,6 +201,9 @@ impl NonInteractiveRunner {
                     AgentAction::GitStatus => ("git_status", "git status".to_string()),
                     AgentAction::GitCommit { message, .. } => ("git_commit", message.clone()),
                     AgentAction::WebSearch { query, .. } => ("web_search", query.clone()),
+                    AgentAction::ParallelRead { paths } => ("parallel_read", format!("{} files", paths.len())),
+                    AgentAction::ParallelWebSearch { queries } => ("parallel_web_search", format!("{} queries", queries.len())),
+                    AgentAction::ParallelGitDiff { paths } => ("parallel_git_diff", format!("{} paths", paths.len())),
                 };
 
                 let result = execute_action(&action)
@@ -239,6 +242,9 @@ impl NonInteractiveRunner {
                     AgentAction::GitStatus => ("git_status", "git status".to_string()),
                     AgentAction::GitCommit { message, .. } => ("git_commit", message),
                     AgentAction::WebSearch { query, .. } => ("web_search", query),
+                    AgentAction::ParallelRead { paths } => ("parallel_read", format!("{} files", paths.len())),
+                    AgentAction::ParallelWebSearch { queries } => ("parallel_web_search", format!("{} queries", queries.len())),
+                    AgentAction::ParallelGitDiff { paths } => ("parallel_git_diff", format!("{} paths", paths.len())),
                 };
 
                 actions.push(ActionResult {

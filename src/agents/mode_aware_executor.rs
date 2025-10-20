@@ -53,6 +53,11 @@ impl ModeAwareExecutor {
 
             // Web search is safe
             AgentAction::WebSearch { .. } => false,
+
+            // Parallel operations are generally safe (read-only or informational)
+            AgentAction::ParallelRead { .. }
+                | AgentAction::ParallelWebSearch { .. }
+                | AgentAction::ParallelGitDiff { .. } => false,
         }
     }
 
@@ -156,6 +161,15 @@ impl ModeAwareExecutor {
             },
             AgentAction::WebSearch { query, result_count } => {
                 format!("Web search: '{}' ({} results)", query, result_count)
+            },
+            AgentAction::ParallelRead { paths } => {
+                format!("Read {} files in parallel", paths.len())
+            },
+            AgentAction::ParallelWebSearch { queries } => {
+                format!("Search web with {} queries in parallel", queries.len())
+            },
+            AgentAction::ParallelGitDiff { paths } => {
+                format!("Git diff for {} paths in parallel", paths.len())
             },
         }
     }

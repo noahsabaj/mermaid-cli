@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::time::Instant;
 
 use super::executor;
 use super::filesystem;
@@ -44,6 +45,15 @@ pub async fn execute_action(action: &AgentAction) -> Result<ActionResult> {
         },
         AgentAction::WebSearch { query, result_count } => {
             execute_web_search(query, *result_count).await
+        },
+        AgentAction::ParallelRead { paths } => {
+            execute_parallel_reads(paths).await
+        },
+        AgentAction::ParallelWebSearch { queries } => {
+            execute_parallel_web_searches(queries).await
+        },
+        AgentAction::ParallelGitDiff { paths } => {
+            execute_parallel_git_diffs(paths).await
         },
     }
     .map_err(|e| ActionResult::Error {
@@ -99,6 +109,212 @@ async fn execute_web_search(query: &str, result_count: usize) -> Result<ActionRe
             })
         }
     }
+}
+
+/// Execute multiple file reads in parallel
+/// Returns aggregated output with all successful reads
+async fn execute_parallel_reads(paths: &[String]) -> Result<ActionResult> {
+    let start = Instant::now();
+    let mut results = Vec::new();
+    let mut failed_items = Vec::new();
+
+    // First attempt: Read files in parallel
+    let futures: Vec<_> = paths
+        .iter()
+        .map(|path| filesystem::read_file(path))
+        .collect();
+
+    let read_results = futures
+        .into_iter()
+        .zip(paths.iter())
+        .collect::<Vec<_>>();
+
+    for (result, path) in read_results {
+        match result {
+            Ok(content) => {
+                results.push((path.clone(), content));
+            }
+            Err(_) => {
+                failed_items.push(path.clone());
+            }
+        }
+    }
+
+    // Retry failed files sequentially
+    let mut retry_successful = Vec::new();
+    for (i, path) in failed_items.iter().enumerate() {
+        match filesystem::read_file(path) {
+            Ok(content) => {
+                results.push((path.clone(), content));
+                retry_successful.push(i);
+            }
+            Err(_) => {
+                // Still failed after retry
+            }
+        }
+    }
+
+    // Remove successfully retried items from failed list
+    for i in retry_successful.into_iter().rev() {
+        failed_items.remove(i);
+    }
+
+    let duration = start.elapsed().as_secs_f64();
+
+    if results.is_empty() {
+        return Ok(ActionResult::Error {
+            error: format!(
+                "Failed to read all {} files. Errors: {}",
+                paths.len(),
+                failed_items.join(", ")
+            ),
+        });
+    }
+
+    // Format output with all successfully read files
+    let mut output = String::new();
+    output.push_str(&format!("Successfully read {} file(s):\n\n", results.len()));
+
+    for (path, content) in results {
+        output.push_str(&format!("=== {} ===\n", path));
+        output.push_str(&content);
+        output.push_str("\n\n");
+    }
+
+    if !failed_items.is_empty() {
+        output.push_str(&format!(
+            "Failed to read {} file(s): {}\n",
+            failed_items.len(),
+            failed_items.join(", ")
+        ));
+    }
+
+    output.push_str(&format!("(Completed in {:.1}s)", duration));
+
+    Ok(ActionResult::Success { output })
+}
+
+/// Execute multiple web searches in parallel
+async fn execute_parallel_web_searches(queries: &[(String, usize)]) -> Result<ActionResult> {
+    let start = Instant::now();
+    let searxng_url = std::env::var("MERMAID_SEARXNG_URL")
+        .unwrap_or_else(|_| "http://localhost:8888".to_string());
+
+    let mut results = Vec::new();
+    let mut failed_items = Vec::new();
+
+    // First attempt: Execute searches in parallel
+    let futures: Vec<_> = queries
+        .iter()
+        .map(|(query, count)| {
+            let mut client = WebSearchClient::new(searxng_url.clone());
+            let query_clone = query.clone();
+            let count_clone = *count;
+            async move { (client.search_cached(&query_clone, count_clone).await, query_clone) }
+        })
+        .collect();
+
+    for future in futures {
+        match future.await {
+            (Ok(search_results), query) => {
+                let client = WebSearchClient::new(searxng_url.clone());
+                let formatted = client.format_results(&search_results);
+                results.push((query, formatted));
+            }
+            (Err(_), query) => {
+                failed_items.push(query);
+            }
+        }
+    }
+
+    let duration = start.elapsed().as_secs_f64();
+
+    if results.is_empty() {
+        return Ok(ActionResult::Error {
+            error: format!(
+                "Failed to complete all {} searches. Errors for: {}",
+                queries.len(),
+                failed_items.join(", ")
+            ),
+        });
+    }
+
+    // Format output with all successfully completed searches
+    let mut output = String::new();
+    output.push_str(&format!("Completed {} search(es):\n\n", results.len()));
+
+    for (query, formatted_results) in results {
+        output.push_str(&format!("=== Search: {} ===\n", query));
+        output.push_str(&formatted_results);
+        output.push_str("\n\n");
+    }
+
+    if !failed_items.is_empty() {
+        output.push_str(&format!(
+            "Failed to complete {} search(es): {}\n",
+            failed_items.len(),
+            failed_items.join(", ")
+        ));
+    }
+
+    output.push_str(&format!("(Completed in {:.1}s)", duration));
+
+    Ok(ActionResult::Success { output })
+}
+
+/// Execute multiple git diffs in parallel
+async fn execute_parallel_git_diffs(paths: &[Option<String>]) -> Result<ActionResult> {
+    let start = Instant::now();
+    let mut results = Vec::new();
+    let mut failed_items = Vec::new();
+
+    // Execute diffs in parallel
+    for path in paths {
+        match git::get_diff(path.as_deref()) {
+            Ok(diff_output) => {
+                let path_str = path.as_ref().map(|p| p.as_str()).unwrap_or("*");
+                results.push((path_str.to_string(), diff_output));
+            }
+            Err(_) => {
+                let path_str = path.as_ref().map(|p| p.as_str()).unwrap_or("*");
+                failed_items.push(path_str.to_string());
+            }
+        }
+    }
+
+    let duration = start.elapsed().as_secs_f64();
+
+    if results.is_empty() {
+        return Ok(ActionResult::Error {
+            error: format!(
+                "Failed to generate all {} git diff(s). Errors for: {}",
+                paths.len(),
+                failed_items.join(", ")
+            ),
+        });
+    }
+
+    // Format output with all successfully generated diffs
+    let mut output = String::new();
+    output.push_str(&format!("Generated {} git diff(s):\n\n", results.len()));
+
+    for (path, diff_output) in results {
+        output.push_str(&format!("=== Git Diff: {} ===\n", path));
+        output.push_str(&diff_output);
+        output.push_str("\n\n");
+    }
+
+    if !failed_items.is_empty() {
+        output.push_str(&format!(
+            "Failed to generate {} git diff(s): {}\n",
+            failed_items.len(),
+            failed_items.join(", ")
+        ));
+    }
+
+    output.push_str(&format!("(Completed in {:.1}s)", duration));
+
+    Ok(ActionResult::Success { output })
 }
 
 #[cfg(test)]

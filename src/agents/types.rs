@@ -39,6 +39,18 @@ pub enum AgentAction {
         query: String,
         result_count: usize,
     },
+    /// Read multiple files in parallel
+    ParallelRead {
+        paths: Vec<String>,
+    },
+    /// Perform multiple web searches in parallel
+    ParallelWebSearch {
+        queries: Vec<(String, usize)>,
+    },
+    /// Perform multiple git diffs in parallel
+    ParallelGitDiff {
+        paths: Vec<Option<String>>,
+    },
 }
 
 /// Result of an agent action
@@ -52,7 +64,7 @@ pub enum ActionResult {
 /// Used to show action results in Claude Code style
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionDisplay {
-    /// Type of action (e.g., "Write", "Bash", "Read", "GitDiff")
+    /// Type of action (e.g., "Write", "Bash", "Read", "GitDiff", "ReadFiles")
     pub action_type: String,
     /// Target of the action (file path, command, etc.)
     pub target: String,
@@ -66,4 +78,10 @@ pub struct ActionDisplay {
     pub file_content: Option<String>,
     /// Duration of long-running actions in seconds (for display)
     pub duration_seconds: Option<f64>,
+    /// Multiple targets for parallel operations (e.g., multiple files, searches)
+    pub targets: Option<Vec<String>>,
+    /// Number of items in parallel operation
+    pub item_count: Option<usize>,
+    /// Items that failed initially but were retried
+    pub failed_items: Option<Vec<String>>,
 }

@@ -236,6 +236,18 @@ async fn handle_action_success(
         AgentAction::GitCommit { message, .. } => {
             app.set_status(format!("[OK] Changes committed"));
         },
+        AgentAction::ParallelRead { paths } => {
+            app.set_status(format!("[OK] Read {} files in parallel, analyzing...", paths.len()));
+            trigger_feedback_loop(app, action, output, tx).await;
+        },
+        AgentAction::ParallelWebSearch { queries } => {
+            app.set_status(format!("[OK] Completed {} searches in parallel, analyzing...", queries.len()));
+            trigger_feedback_loop(app, action, output, tx).await;
+        },
+        AgentAction::ParallelGitDiff { paths } => {
+            app.set_status(format!("[OK] Generated {} diffs in parallel, analyzing...", paths.len()));
+            trigger_feedback_loop(app, action, output, tx).await;
+        },
     }
 
     Ok(())
@@ -264,6 +276,9 @@ fn build_action_display_with_timing(
                 line_count: Some(line_count),
                 file_content: Some(content.clone()),
                 duration_seconds: None,
+                targets: None,
+                item_count: None,
+                failed_items: None,
             }
         },
         AgentAction::ReadFile { path } => {
@@ -278,6 +293,9 @@ fn build_action_display_with_timing(
                 line_count: Some(line_count),
                 file_content: None,
                 duration_seconds,
+                targets: None,
+                item_count: None,
+                failed_items: None,
             }
         },
         AgentAction::ExecuteCommand { command, .. } => ActionDisplay {
@@ -290,6 +308,9 @@ fn build_action_display_with_timing(
             line_count: Some(output.lines().count()),
             file_content: None,
             duration_seconds,
+            targets: None,
+            item_count: None,
+            failed_items: None,
         },
         AgentAction::DeleteFile { path } => ActionDisplay {
             action_type: "Delete".to_string(),
@@ -301,6 +322,9 @@ fn build_action_display_with_timing(
             line_count: None,
             file_content: None,
             duration_seconds: None,
+            targets: None,
+            item_count: None,
+            failed_items: None,
         },
         AgentAction::CreateDirectory { path } => ActionDisplay {
             action_type: "CreateDir".to_string(),
@@ -312,6 +336,9 @@ fn build_action_display_with_timing(
             line_count: None,
             file_content: None,
             duration_seconds: None,
+            targets: None,
+            item_count: None,
+            failed_items: None,
         },
         AgentAction::GitDiff { path } => ActionDisplay {
             action_type: "GitDiff".to_string(),
@@ -323,6 +350,9 @@ fn build_action_display_with_timing(
             line_count: Some(output.lines().count()),
             file_content: None,
             duration_seconds,
+            targets: None,
+            item_count: None,
+            failed_items: None,
         },
         AgentAction::GitStatus => ActionDisplay {
             action_type: "GitStatus".to_string(),
@@ -334,6 +364,9 @@ fn build_action_display_with_timing(
             line_count: Some(output.lines().count()),
             file_content: None,
             duration_seconds,
+            targets: None,
+            item_count: None,
+            failed_items: None,
         },
         AgentAction::GitCommit { message, .. } => ActionDisplay {
             action_type: "GitCommit".to_string(),
@@ -345,6 +378,9 @@ fn build_action_display_with_timing(
             line_count: None,
             file_content: None,
             duration_seconds: None,
+            targets: None,
+            item_count: None,
+            failed_items: None,
         },
         AgentAction::WebSearch { query, .. } => {
             let result_count = output.matches("Title:").count();
@@ -358,6 +394,60 @@ fn build_action_display_with_timing(
                 line_count: Some(result_count),
                 file_content: None,
                 duration_seconds,
+                targets: None,
+                item_count: None,
+                failed_items: None,
+            }
+        },
+        AgentAction::ParallelRead { .. } => {
+            // Parallel reads should be handled separately
+            ActionDisplay {
+                action_type: "ReadFiles".to_string(),
+                target: "[parallel operation]".to_string(),
+                result: AgentActionResult::Success {
+                    output: output.to_string(),
+                },
+                preview: None,
+                line_count: None,
+                file_content: None,
+                duration_seconds,
+                targets: None,
+                item_count: None,
+                failed_items: None,
+            }
+        },
+        AgentAction::ParallelWebSearch { .. } => {
+            // Parallel searches should be handled separately
+            ActionDisplay {
+                action_type: "WebSearches".to_string(),
+                target: "[parallel operation]".to_string(),
+                result: AgentActionResult::Success {
+                    output: output.to_string(),
+                },
+                preview: None,
+                line_count: None,
+                file_content: None,
+                duration_seconds,
+                targets: None,
+                item_count: None,
+                failed_items: None,
+            }
+        },
+        AgentAction::ParallelGitDiff { .. } => {
+            // Parallel diffs should be handled separately
+            ActionDisplay {
+                action_type: "GitDiffs".to_string(),
+                target: "[parallel operation]".to_string(),
+                result: AgentActionResult::Success {
+                    output: output.to_string(),
+                },
+                preview: None,
+                line_count: None,
+                file_content: None,
+                duration_seconds,
+                targets: None,
+                item_count: None,
+                failed_items: None,
             }
         },
     }
@@ -514,6 +604,9 @@ fn needs_analysis(action: &AgentAction) -> bool {
             | AgentAction::ExecuteCommand { .. }
             | AgentAction::GitDiff { .. }
             | AgentAction::GitStatus
+            | AgentAction::ParallelRead { .. }
+            | AgentAction::ParallelWebSearch { .. }
+            | AgentAction::ParallelGitDiff { .. }
     )
 }
 
@@ -553,6 +646,24 @@ fn build_feedback_prompt(action: &AgentAction, output: &str) -> String {
             format!(
                 "Here's the current repository status:\n\n{}\n\nPlease explain the repository state clearly to the user.",
                 output
+            )
+        }
+        AgentAction::ParallelRead { paths } => {
+            format!(
+                "I've successfully read {} files in parallel:\n\n{}\n\nPlease analyze these files together as a cohesive system:\n1. What patterns do you see across files?\n2. What's the overall flow or architecture?\n3. Are there inconsistencies or improvements needed?\n4. What could be optimized?",
+                paths.len(), output
+            )
+        }
+        AgentAction::ParallelWebSearch { queries } => {
+            format!(
+                "I've completed {} web searches in parallel:\n\n{}\n\nPlease analyze these results together and respond to the user's original question. Synthesize the findings with [source: URL] citations, dates, and author information where available.",
+                queries.len(), output
+            )
+        }
+        AgentAction::ParallelGitDiff { paths } => {
+            format!(
+                "Here are {} git diffs in parallel:\n\n{}\n\nPlease analyze these changes together and explain their collective implications and how they work together.",
+                paths.len(), output
             )
         }
         _ => String::new(),
