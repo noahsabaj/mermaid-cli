@@ -32,6 +32,9 @@ async fn main() -> Result<()> {
     // Initialize tracing subscriber (always, controlled by RUST_LOG env var)
     init_logger();
 
+    // Auto-start Searxng for web search capability
+    let _ = ensure_searxng_running().await;
+
     // Handle backend discovery commands
     if cli.backends {
         let backends = ModelFactory::get_available_backends().await;
@@ -77,6 +80,72 @@ async fn main() -> Result<()> {
         let orchestrator = Orchestrator::new(cli)?;
         orchestrator.run().await
     }
+}
+
+/// Auto-start Searxng if not already running
+async fn ensure_searxng_running() {
+    // Check if Searxng is already running
+    let check_url = "http://localhost:8888/search?q=test&format=json";
+
+    match reqwest::get(check_url).await {
+        Ok(_) => {
+            tracing::debug!("Searxng is running and accessible");
+            return;
+        }
+        Err(_) => {
+            tracing::info!("Searxng not running, attempting to start automatically...");
+        }
+    }
+
+    // Get project directory (where docker-compose.yml is)
+    let current_dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!("Could not get current directory: {}", e);
+            return;
+        }
+    };
+
+    let project_dir = current_dir
+        .ancestors()
+        .find(|p| p.join("docker-compose.yml").exists())
+        .unwrap_or(&current_dir);
+
+    // Start Searxng via podman-compose
+    match tokio::process::Command::new("podman-compose")
+        .arg("up")
+        .arg("-d")
+        .arg("searxng")
+        .current_dir(project_dir)
+        .output()
+        .await
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                tracing::warn!("Failed to start Searxng via podman-compose");
+                tracing::info!("You can start it manually: podman-compose up -d searxng");
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Could not execute podman-compose: {}", e);
+            return;
+        }
+    }
+
+    // Wait for Searxng to be ready (poll up to 10 seconds)
+    for attempt in 1..=20 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if reqwest::get(check_url).await.is_ok() {
+            tracing::info!("Searxng started successfully and is responding");
+            return;
+        }
+        if attempt % 4 == 0 {
+            tracing::debug!("Waiting for Searxng to be ready... ({}/20 attempts)", attempt);
+        }
+    }
+
+    tracing::warn!("Searxng started but may not be responding yet. It will be available shortly.");
 }
 
 /// Run in non-interactive mode

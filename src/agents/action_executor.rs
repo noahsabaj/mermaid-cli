@@ -57,7 +57,7 @@ async fn execute_web_search(query: &str, result_count: usize) -> Result<ActionRe
     let searxng_url = std::env::var("MERMAID_SEARXNG_URL")
         .unwrap_or_else(|_| "http://localhost:8888".to_string());
 
-    let mut client = WebSearchClient::new(searxng_url);
+    let mut client = WebSearchClient::new(searxng_url.clone());
 
     match client.search_cached(query, result_count).await {
         Ok(results) => {
@@ -65,12 +65,35 @@ async fn execute_web_search(query: &str, result_count: usize) -> Result<ActionRe
             Ok(ActionResult::Success { output: formatted })
         }
         Err(e) => {
-            let error_msg = format!(
-                "Web search failed: {}\n\nTroubleshooting:\n\
-                1. Ensure Searxng is running: podman-compose up -d searxng\n\
-                2. Check it's accessible at http://localhost:8888\n\
-                3. Verify MERMAID_SEARXNG_URL env var if custom location"
-            , e);
+            let error_str = e.to_string();
+            let error_msg = if error_str.contains("Searxng") || error_str.contains("localhost:8888") {
+                format!(
+                    "Web search unavailable: Searxng service not responding\n\n\
+                    Mermaid attempted to auto-start Searxng on application launch, but \
+                    it's still not responding at {}\n\n\
+                    Possible causes:\n\
+                    1. Podman/Docker not installed or not running\n\
+                    2. Internet connectivity issue (Searxng requires internet)\n\
+                    3. Searxng container failed to start due to resource constraints\n\n\
+                    Manual troubleshooting:\n\
+                    podman-compose up -d searxng        # Start manually\n\
+                    podman-compose logs searxng         # View container logs\n\
+                    curl http://localhost:8888/status   # Check if it's responding\n\n\
+                    Note: Web search will work once Searxng is available.",
+                    searxng_url
+                )
+            } else if error_str.contains("Result count") {
+                "Invalid search parameters: result count must be between 1 and 10".to_string()
+            } else {
+                format!(
+                    "Web search error: {}\n\n\
+                    This may be a temporary issue. Try again in a moment.\n\
+                    If the problem persists, check that Searxng is running:\n\
+                    podman-compose logs searxng",
+                    error_str
+                )
+            };
+
             Ok(ActionResult::Success {
                 output: error_msg,
             })

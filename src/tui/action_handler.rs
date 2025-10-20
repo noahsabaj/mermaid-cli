@@ -221,9 +221,55 @@ async fn handle_action_success(
             }
         },
         AgentAction::WebSearch { query, .. } => {
-            // Add search results to conversation so model can reference them
-            app.set_status(format!("[OK] Search complete for: {}", query));
-            app.add_message(MessageRole::Assistant, output.clone());
+            // Feedback loop: Feed search results back to model for analysis
+            app.set_status(format!("[OK] Search results received, analyzing..."));
+
+            // Set feedback tracking
+            app.pending_file_read = true;
+            if app.reading_file_status.is_none() {
+                app.reading_file_status = Some(format!("Analyzing search results for '{}'...", query));
+                app.status_timestamp = Some(std::time::Instant::now());
+            }
+
+            app.is_generating = true;
+            app.current_response.clear();
+
+            // Create feedback prompt with search results
+            let feedback_prompt = format!(
+                "Here are the web search results for '{}':\n\n{}\n\nPlease analyze these results and respond to the user's original question. Cite your sources using [source: URL] format.",
+                query, output
+            );
+
+            // Add feedback as system message
+            app.add_message(MessageRole::System, feedback_prompt.clone());
+            let messages = app.build_message_history();
+
+            // Send feedback to model for re-generation with real results
+            let model = app.model.clone();
+            let context = app.context.clone();
+            let tx_clone = tx.clone();
+            let tx_done = tx.clone();
+
+            tokio::spawn(async move {
+                let config = ModelConfig::default();
+                let callback: StreamCallback = Arc::new(move |chunk| {
+                    let _ = tx_clone.try_send(chunk.to_string());
+                });
+
+                let mut model = model.write().await;
+                match model
+                    .chat(&messages, &context, &config, Some(callback))
+                    .await
+                {
+                    Ok(_) => {
+                        // Clear feedback flags after completion
+                        let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
+                    },
+                    Err(e) => {
+                        let _ = tx_done.send(format!("[ERROR]:{}", e)).await;
+                    },
+                }
+            });
         },
         _ => {
             app.set_status(format!("[OK] {}", output));
