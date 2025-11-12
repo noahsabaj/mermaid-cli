@@ -18,11 +18,9 @@ pub async fn handle_command(app: &mut App, command: &str) -> Result<()> {
         Some("quit") | Some("q") => handle_quit(app),
         Some("clear") => handle_clear(app),
         Some("model") => handle_model(app, parts.get(1).copied()).await,
-        Some("sidebar") | Some("sb") => handle_sidebar(app),
         Some("refresh") | Some("r") => handle_refresh(app).await,
         Some("save") => handle_save(app, parts.get(1).copied()),
         Some("load") => handle_load(app, parts.get(1).copied()),
-        Some("stats") | Some("diag") | Some("diagnostics") => handle_diagnostics(app),
         Some("list") => handle_list(app),
         Some("help") | Some("h") => handle_help(app),
         _ => {
@@ -97,11 +95,6 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
     }
 }
 
-/// Toggle sidebar visibility
-fn handle_sidebar(app: &mut App) {
-    app.toggle_sidebar();
-}
-
 /// Refresh file context from disk
 async fn handle_refresh(app: &mut App) {
     match ContextLoader::new() {
@@ -110,17 +103,17 @@ async fn handle_refresh(app: &mut App) {
                 app.context.files = new_context.files;
                 app.context.token_count = new_context.token_count;
                 app.set_status(format!(
-                    "[OK] Refreshed: {} files, ~{} tokens",
+                    "Refreshed: {} files, ~{} tokens",
                     app.context.files.len(),
                     app.context.token_count
                 ));
             },
             Err(e) => {
-                app.set_status(format!("[FAILED] Failed to refresh: {}", e));
+                app.set_status(format!("Failed to refresh: {}", e));
             },
         },
         Err(e) => {
-            app.set_status(format!("[FAILED] Failed to create loader: {}", e));
+            app.set_status(format!("Failed to create loader: {}", e));
         },
     }
 }
@@ -178,11 +171,6 @@ fn handle_load(app: &mut App, name: Option<&str>) {
             }
         }
     }
-}
-
-/// Toggle diagnostics display
-fn handle_diagnostics(app: &mut App) {
-    app.toggle_diagnostics();
 }
 
 /// List saved conversations

@@ -110,7 +110,6 @@ fn handle_key_event(
         KeyCode::PageDown => handle_page_down(app),
         KeyCode::Tab => handle_tab(app, key.modifiers),
         KeyCode::BackTab => handle_backtab(app),
-        KeyCode::F(2) => handle_f2(app),
         _ => EventAction::Continue,
     };
 
@@ -128,15 +127,9 @@ fn handle_confirmation_keys(key_code: KeyCode) -> Result<EventAction> {
     }
 }
 
-/// Handle Escape key (close diagnostics, stop generation, cancel plan, or clear input)
+/// Handle Escape key (stop generation, cancel plan, or clear input)
 fn handle_escape_key(app: &mut App) -> EventAction {
-    use crate::diagnostics::DiagnosticsMode;
-
-    // If diagnostics panel is open, close it
-    if app.ui_state.diagnostics_mode == DiagnosticsMode::Detailed {
-        app.ui_state.diagnostics_mode = DiagnosticsMode::Compact;
-        app.set_status("Diagnostics panel closed");
-    } else if app.app_state.is_awaiting_plan_approval() {
+    if app.app_state.is_awaiting_plan_approval() {
         // Cancel pending plan
         app.cancel_plan();
         return EventAction::Continue;
@@ -199,20 +192,12 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
     // Mode-specific shortcuts
     if modifiers == KeyModifiers::CONTROL {
         match c {
-            'd' => {
-                app.toggle_diagnostics();
-                return EventAction::Continue;
-            },
             'e' => {
                 app.set_mode(crate::tui::mode::OperationMode::AcceptEdits);
                 return EventAction::Continue;
             },
             'p' => {
                 app.set_mode(crate::tui::mode::OperationMode::PlanMode);
-                return EventAction::Continue;
-            },
-            's' => {
-                app.toggle_sidebar();
                 return EventAction::Continue;
             },
             'y' => {
@@ -374,21 +359,13 @@ fn handle_tab(app: &mut App, modifiers: KeyModifiers) -> EventAction {
     } else if modifiers == KeyModifiers::CONTROL {
         // Ctrl+Tab cycles reverse
         app.cycle_mode_reverse();
-    } else {
-        // Plain Tab toggles sidebar
-        app.toggle_sidebar();
     }
+    // Plain Tab does nothing now
     EventAction::Continue
 }
 
 /// Handle BackTab (Shift+Tab on some terminals)
 fn handle_backtab(app: &mut App) -> EventAction {
     app.cycle_mode();
-    EventAction::Continue
-}
-
-/// Handle F2 key (toggle diagnostics)
-fn handle_f2(app: &mut App) -> EventAction {
-    app.toggle_diagnostics();
     EventAction::Continue
 }

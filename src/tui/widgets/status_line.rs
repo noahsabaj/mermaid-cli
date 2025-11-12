@@ -73,8 +73,7 @@ impl<'a> Widget for StatusLineWidget<'a> {
         ];
 
         let line = Line::from(spans);
-        let paragraph = Paragraph::new(line)
-            .style(Style::new().bg(self.theme.colors.background.to_color()));
+        let paragraph = Paragraph::new(line);
 
         paragraph.render(area, buf);
     }

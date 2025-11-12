@@ -69,9 +69,10 @@ impl NonInteractiveRunner {
         config: Config,
         no_execute: bool,
         max_tokens: Option<usize>,
+        backend: Option<&str>,
     ) -> Result<Self> {
-        // Create model instance
-        let model = ModelFactory::create(&model_id, Some(&config)).await?;
+        // Create model instance with optional backend preference
+        let model = ModelFactory::create_with_backend(&model_id, Some(&config), backend).await?;
 
         // Load project context
         let loader = ContextLoader::new()?;

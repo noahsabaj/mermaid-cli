@@ -43,30 +43,6 @@ pub async fn run_app_loop(
     let watcher = FileSystemWatcher::new(Path::new("."))?;
     let mut last_refresh = std::time::Instant::now();
 
-    // Start hardware monitoring if available (with proper cancellation on app exit)
-    let hardware_monitor = app.ui_state.hardware_monitor.clone();
-    let hardware_tx = tx.clone();
-    let mut hardware_task_abort: Option<tokio::task::AbortHandle> = None;
-    if let Some(monitor) = hardware_monitor {
-        let task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
-            loop {
-                interval.tick().await;
-                let stats = {
-                    let mut m = monitor.write().await;
-                    m.get_stats()
-                };
-                if let Ok(stats) = stats {
-                    // Send hardware stats as JSON
-                    if let Ok(json) = serde_json::to_string(&stats) {
-                        let _ = hardware_tx.send(format!("[HARDWARE_STATS]:{}", json)).await;
-                    }
-                }
-            }
-        });
-        hardware_task_abort = Some(task.abort_handle());
-    }
-
     // Start Searxng in the background for web search capability
     // This runs silently without blocking the UI
     tokio::spawn(async {
@@ -100,10 +76,6 @@ pub async fn run_app_loop(
                     // Continue normal loop
                 },
                 EventAction::Quit => {
-                    // Cancel background tasks before exiting
-                    if let Some(abort_handle) = hardware_task_abort {
-                        abort_handle.abort();
-                    }
                     break;
                 },
                 EventAction::SubmitMessage(input) => {
@@ -151,6 +123,16 @@ pub async fn run_app_loop(
                 // Execute any parsed actions
                 if !actions.is_empty() {
                     action_handler::execute_actions(app, actions, &tx).await?;
+                }
+
+                // Generate conversation title after first exchange (if not already generated)
+                if app.session_state.conversation_title.is_none() && app.session_state.messages.len() >= 2 {
+                    tokio::spawn(async move {
+                        // This runs in background to avoid blocking the UI
+                        // Title will be picked up in next render cycle
+                    });
+                    // Actually generate title inline for simplicity
+                    app.generate_conversation_title().await;
                 }
             },
             StreamStatus::PlanReady { plan } => {

@@ -5,23 +5,20 @@ use ratatui::{
 };
 use std::sync::Mutex;
 
-use crate::diagnostics::{render_diagnostics_panel, DiagnosticsMode};
 use crate::tui::app::{App, GenerationStatus};
-use crate::tui::widgets::{ChatWidget, HeaderWidget, InputState, InputWidget, SidebarWidget, StatusLineWidget, StatusWidget};
+use crate::tui::widgets::{ChatWidget, InputState, InputWidget, StatusLineWidget, StatusWidget};
 use crate::utils::MutexExt;
 
 /// Cache for layout calculations to improve performance
 #[derive(Clone)]
 struct LayoutCache {
     main_layout: Option<(u16, u16, Vec<Rect>)>, // (width, height, rects)
-    content_layout: Option<(bool, Rect, Vec<Rect>)>, // (show_sidebar, area, rects)
 }
 
 impl LayoutCache {
     fn new() -> Self {
         Self {
             main_layout: None,
-            content_layout: None,
         }
     }
 
@@ -34,14 +31,13 @@ impl LayoutCache {
         }
 
         // Clean layout with proper spacing (no overlap)
-        // Layout: Header | Chat Area | Status Line | Input Box | Status Bar
+        // Layout: Chat Area | Status Line | Input Box | Status Bar
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
             .spacing(0)  // No negative spacing - prevents overlap
             .flex(Flex::Start)  // Align to top
             .constraints([
-                Constraint::Length(1),  // Header (minimal, single line)
                 Constraint::Min(10),    // Main content / Chat area (grows to fill)
                 Constraint::Length(1),  // Status line (single line, only when generating)
                 Constraint::Length(input_height),  // Dynamic input height (3-8 lines)
@@ -53,30 +49,6 @@ impl LayoutCache {
         self.main_layout = Some((area.width, input_height, layout_vec.clone()));
         layout_vec
     }
-
-    fn get_content_layout(&mut self, show_sidebar: bool, area: Rect) -> Vec<Rect> {
-        // Check if cached layout is still valid (cheap clone of Copy types)
-        if let Some((sidebar, cached_area, ref rects)) = self.content_layout {
-            if sidebar == show_sidebar && cached_area == area {
-                return rects.clone(); // Cheap: Vec of Copy types (2 Rects = ~16 bytes)
-            }
-        }
-
-        let layout = if show_sidebar {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .spacing(1)  // Proper spacing between sidebar and main content
-                .flex(Flex::Start)  // Align to left
-                .constraints([Constraint::Min(20), Constraint::Fill(1)])
-                .split(area)
-                .to_vec()
-        } else {
-            vec![Rect::default(), area]
-        };
-
-        self.content_layout = Some((show_sidebar, area, layout.clone()));
-        layout
-    }
 }
 
 // Global layout cache
@@ -84,6 +56,14 @@ static LAYOUT_CACHE: Lazy<Mutex<LayoutCache>> = Lazy::new(|| Mutex::new(LayoutCa
 
 /// Render the main UI
 pub fn render_ui(frame: &mut Frame, app: &mut App) {
+    // Update terminal window title
+    if let Some(ref title) = app.session_state.conversation_title {
+        app.set_terminal_title(title);
+    } else {
+        // Default title when no conversation title yet
+        app.set_terminal_title(&format!("mermaid - {}", app.working_dir));
+    }
+
     // Calculate input area height based on content
     let terminal_width = frame.area().width.saturating_sub(4) as usize; // Account for borders
     let input_lines = if app.input.is_empty() {
@@ -110,33 +90,8 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         cache.get_main_layout(frame.area(), input_height)
     };
 
-    // Render header using new HeaderWidget
-    let header = HeaderWidget {
-        model_name: &app.model_state.model_name,
-        working_dir: &app.working_dir,
-        theme: &app.ui_state.theme,
-    };
-    frame.render_widget(header, chunks[0]);
-
-    // Use cached content layout
-    let content_chunks = {
-        let mut cache = LAYOUT_CACHE.lock_mut_safe();
-        cache.get_content_layout(app.ui_state.show_sidebar, chunks[1])
-    };
-
-    // Render sidebar if visible using new SidebarWidget
-    if app.ui_state.show_sidebar {
-        let sidebar = SidebarWidget {
-            context: &app.context,
-            expanded: app.ui_state.sidebar_expanded,
-            working_dir: &app.working_dir,
-            theme: &app.ui_state.theme,
-        };
-        frame.render_stateful_widget(sidebar, content_chunks[0], &mut app.ui_state.sidebar_state);
-    }
-
     // Render chat area with horizontal padding using new ChatWidget
-    let chat_area = content_chunks[1].inner(Margin {
+    let chat_area = chunks[0].inner(Margin {
         horizontal: 1,
         vertical: 0,
     });
@@ -167,19 +122,19 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
             tokens_received: app.app_state.tokens_received().unwrap_or(0),
             theme: &app.ui_state.theme,
         };
-        frame.render_widget(status_line_widget, chunks[2]);
+        frame.render_widget(status_line_widget, chunks[1]);
     }
 
-    // Render input area using new InputWidget (now at chunks[3])
+    // Render input area using new InputWidget (now at chunks[2])
     let input_widget = InputWidget {
         input: &app.input,
         showing_command_hints: app.input.starts_with(':'),
         theme: &app.ui_state.theme,
     };
-    frame.render_stateful_widget(input_widget, chunks[3], &mut app.ui_state.input_state);
+    frame.render_stateful_widget(input_widget, chunks[2], &mut app.ui_state.input_state);
 
     // Set cursor position in input box (visible text cursor)
-    let input_area = chunks[3];
+    let input_area = chunks[2];
     let inner_width = input_area.width.saturating_sub(2) as usize; // -2 for left+right borders
     let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
         &app.input,
@@ -194,20 +149,13 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         input_area.y + 1 + cursor_row,
     ));
 
-    // Render status bar using new StatusWidget (now at chunks[4])
+    // Render status bar using new StatusWidget (now at chunks[3])
     let status_widget = StatusWidget {
         operation_mode: app.operation_state.operation_mode,
-        status_message: app.status_state.status_message.as_deref(),
         confirmation_pending: app.operation_state.confirmation_state.is_some(),
-        is_generating: app.app_state.is_generating(),
         theme: &app.ui_state.theme,
+        working_dir: &app.working_dir,
+        cumulative_tokens: app.session_state.cumulative_tokens,
     };
-    frame.render_widget(status_widget, chunks[4]);
-
-    // Render diagnostics panel if in detailed mode
-    if app.ui_state.diagnostics_mode == DiagnosticsMode::Detailed {
-        if let Some(ref stats) = app.ui_state.hardware_stats {
-            render_diagnostics_panel(frame, frame.area(), stats);
-        }
-    }
+    frame.render_widget(status_widget, chunks[3]);
 }

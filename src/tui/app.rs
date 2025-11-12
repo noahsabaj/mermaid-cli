@@ -1,11 +1,10 @@
 use super::mode::OperationMode;
 use super::theme::Theme;
-use super::widgets::{ChatState, InputState, SidebarState};
+use super::widgets::{ChatState, InputState};
 use crate::agents::{AgentAction, ModeAwareExecutor, Plan};
 use crate::constants::{UI_DEFAULT_VIEWPORT_HEIGHT, UI_ERROR_LOG_MAX_SIZE, UI_STATUS_MESSAGE_THRESHOLD};
 use crate::context::ContextManager;
-use crate::diagnostics::{DiagnosticsMode, HardwareMonitor, HardwareStats};
-use crate::models::{ChatMessage, MessageRole, Model, ProjectContext};
+use crate::models::{ChatMessage, MessageRole, Model, ModelConfig, ProjectContext, StreamCallback};
 use crate::session::{ConversationHistory, ConversationManager};
 use std::sync::Arc;
 use std::time::Instant;
@@ -260,22 +259,10 @@ pub struct UIState {
     pub chat_state: ChatState,
     /// Input widget state (cursor position for display)
     pub input_state: InputState,
-    /// Sidebar widget state (table state, selection)
-    pub sidebar_state: SidebarState,
-    /// Show file tree sidebar
-    pub show_sidebar: bool,
-    /// Sidebar expanded to show all files
-    pub sidebar_expanded: bool,
-    /// Diagnostics display mode
-    pub diagnostics_mode: DiagnosticsMode,
     /// UI theme
     pub theme: Theme,
     /// Selected message index (for navigation)
     pub selected_message: Option<usize>,
-    /// Hardware monitor (RwLock for concurrent reads every frame)
-    pub hardware_monitor: Option<Arc<RwLock<HardwareMonitor>>>,
-    /// Current hardware stats
-    pub hardware_stats: Option<HardwareStats>,
 }
 
 impl UIState {
@@ -284,30 +271,8 @@ impl UIState {
         Self {
             chat_state: ChatState::default(),
             input_state: InputState::default(),
-            sidebar_state: SidebarState::default(),
-            show_sidebar: false,
-            sidebar_expanded: false,
-            diagnostics_mode: DiagnosticsMode::Compact,
             theme: Theme::dark(),
             selected_message: None,
-            hardware_monitor: None,
-            hardware_stats: None,
-        }
-    }
-
-    /// Create UIState with hardware monitor
-    pub fn with_hardware_monitor(hardware_monitor: Option<Arc<RwLock<HardwareMonitor>>>) -> Self {
-        Self {
-            chat_state: ChatState::default(),
-            input_state: InputState::default(),
-            sidebar_state: SidebarState::default(),
-            show_sidebar: false,
-            sidebar_expanded: false,
-            diagnostics_mode: DiagnosticsMode::Compact,
-            theme: Theme::dark(),
-            selected_message: None,
-            hardware_monitor,
-            hardware_stats: None,
         }
     }
 }
@@ -328,6 +293,10 @@ pub struct SessionState {
     pub history_buffer: String,
     /// Context manager for dynamic file tree reloading
     pub context_manager: Option<ContextManager>,
+    /// Cumulative token count for the entire conversation
+    pub cumulative_tokens: usize,
+    /// Auto-generated conversation title (like Claude Code)
+    pub conversation_title: Option<String>,
 }
 
 impl SessionState {
@@ -341,6 +310,8 @@ impl SessionState {
             history_index: None,
             history_buffer: String::new(),
             context_manager: None,
+            cumulative_tokens: 0,
+            conversation_title: None,
         }
     }
 
@@ -358,6 +329,8 @@ impl SessionState {
             history_index: None,
             history_buffer: String::new(),
             context_manager: None,
+            cumulative_tokens: 0,
+            conversation_title: None,
         }
     }
 }
@@ -478,9 +451,6 @@ impl App {
             .as_ref()
             .map(|_| ConversationHistory::new(working_dir.clone(), model_state.model_name.clone()));
 
-        // Initialize hardware monitor
-        let hardware_monitor = Some(Arc::new(RwLock::new(HardwareMonitor::new())));
-
         // Load input history from conversation if available
         let input_history = conversation_manager
             .as_ref()
@@ -488,18 +458,12 @@ impl App {
             .map(|conv| conv.input_history.clone())
             .unwrap_or_default();
 
-        // Initialize UIState with hardware monitor
+        // Initialize UIState
         let ui_state = UIState {
             chat_state: ChatState::new(),
             input_state: InputState::new(),
-            sidebar_state: SidebarState::new(),
-            show_sidebar: false, // Hidden by default - press Ctrl+S to show
-            sidebar_expanded: false,
-            diagnostics_mode: DiagnosticsMode::Compact,
             theme: Theme::dark(), // Default to dark theme
             selected_message: None,
-            hardware_monitor,
-            hardware_stats: None,
         };
 
         // Initialize SessionState with conversation management
@@ -511,6 +475,8 @@ impl App {
             history_index: None,
             history_buffer: String::new(),
             context_manager: None,
+            cumulative_tokens: 0,
+            conversation_title: None,
         };
 
         // Initialize OperationState
@@ -575,11 +541,6 @@ impl App {
         self.cursor_position = 0;
     }
 
-    /// Toggle sidebar visibility
-    pub fn toggle_sidebar(&mut self) {
-        self.ui_state.show_sidebar = !self.ui_state.show_sidebar;
-    }
-
     /// Set status message
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status_state.status_message = Some(message.into());
@@ -588,6 +549,74 @@ impl App {
     /// Clear status message
     pub fn clear_status(&mut self) {
         self.status_state.status_message = None;
+    }
+
+    /// Set terminal window title
+    pub fn set_terminal_title(&self, title: &str) {
+        use crossterm::{execute, terminal::SetTitle};
+        use std::io::stdout;
+        let _ = execute!(stdout(), SetTitle(title));
+    }
+
+    /// Generate conversation title from current messages
+    pub async fn generate_conversation_title(&mut self) {
+        // Don't generate if already have a title or less than 2 messages
+        if self.session_state.conversation_title.is_some() || self.session_state.messages.len() < 2 {
+            return;
+        }
+
+        // Build prompt for title generation
+        let mut conversation_summary = String::new();
+        for (i, msg) in self.session_state.messages.iter().take(4).enumerate() {
+            let role = match msg.role {
+                MessageRole::User => "User",
+                MessageRole::Assistant => "Assistant",
+                MessageRole::System => continue, // Skip system messages
+            };
+            conversation_summary.push_str(&format!("{}: {}\n\n", role, msg.content.chars().take(200).collect::<String>()));
+            if i >= 3 { break; } // Only use first 4 messages
+        }
+
+        let title_prompt = format!(
+            "Based on this conversation, generate a short, descriptive title (2-4 words maximum, no quotes):\n\n{}\n\nTitle:",
+            conversation_summary
+        );
+
+        // Send title generation request to model
+        let messages = vec![ChatMessage {
+            role: MessageRole::User,
+            content: title_prompt,
+            timestamp: chrono::Local::now(),
+            actions: Vec::new(),
+        }];
+
+        // Use the model to generate title
+        let title_string = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let title_clone = Arc::clone(&title_string);
+
+        let callback: StreamCallback = Arc::new(move |chunk: &str| {
+            if let Ok(mut title) = title_clone.try_lock() {
+                title.push_str(chunk);
+            }
+        });
+
+        let mut model = self.model_state.model.write().await;
+        let config = ModelConfig::default();
+
+        if let Ok(_) = model.chat(&messages, &self.context, &config, Some(callback)).await {
+            let final_title = title_string.lock().await;
+            // Clean up title (remove quotes, trim whitespace, take first line)
+            let title = final_title.lines().next().unwrap_or(&final_title)
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'' || c == '.' || c == ',')
+                .chars()
+                .take(50)
+                .collect::<String>();
+
+            if !title.is_empty() {
+                self.session_state.conversation_title = Some(title);
+            }
+        }
     }
 
     /// Log an error to the error log (no more silent failures!)
@@ -869,22 +898,6 @@ impl App {
         }
     }
 
-    /// Toggle diagnostics display mode
-    pub fn toggle_diagnostics(&mut self) {
-        self.ui_state.diagnostics_mode = match self.ui_state.diagnostics_mode {
-            DiagnosticsMode::Hidden => DiagnosticsMode::Compact,
-            DiagnosticsMode::Compact => DiagnosticsMode::Detailed,
-            DiagnosticsMode::Detailed => DiagnosticsMode::Hidden,
-        };
-
-        self.set_status(format!("Diagnostics: {:?}", self.ui_state.diagnostics_mode));
-    }
-
-    /// Update hardware stats
-    pub fn update_hardware_stats(&mut self, stats: HardwareStats) {
-        self.ui_state.hardware_stats = Some(stats);
-    }
-
     // ===== Generation State Transitions =====
 
     /// Start generation - transitions to Generating state with Sending status
@@ -930,6 +943,8 @@ impl App {
                 tokens_received: tokens_received + count,
                 abort_handle: abort_handle.clone(),
             };
+            // Also add to cumulative tokens for the entire conversation
+            self.session_state.cumulative_tokens += count;
         }
     }
 

@@ -156,14 +156,6 @@ pub async fn process_stream_chunks(
             app.current_response.clear();
             app.set_status(format!("[ERROR] {}", error_msg));
             return Ok(StreamStatus::Error(error_msg));
-        } else if chunk.starts_with("[HARDWARE_STATS]:") {
-            // Handle hardware stats update (don't add to response)
-            let json_str = chunk.trim_start_matches("[HARDWARE_STATS]:").trim();
-            if let Ok(stats) = serde_json::from_str::<crate::diagnostics::HardwareStats>(json_str) {
-                // Update app.hardware_stats directly
-                app.ui_state.hardware_stats = Some(stats);
-            }
-            continue; // Don't add to response
         } else {
             // Regular streaming chunk - accumulate with size check
             let prev_len = app.current_response.len();

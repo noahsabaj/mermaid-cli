@@ -154,7 +154,7 @@ mod tests {
 }
 
 impl ModelFactory {
-    /// Create a model instance from a model identifier with optional config
+    /// Create a model instance from a model identifier with optional config and backend preference
     ///
     /// Format: provider/model (e.g., "ollama/qwen3-coder:30b", "openai/gpt-4", "anthropic/claude-3-opus")
     /// OR just model name (e.g., "qwen3-coder:30b") - auto-detects backend
@@ -168,6 +168,20 @@ impl ModelFactory {
     ///   - Prefers vLLM if model exists on both
     ///   - Falls back to Ollama or LiteLLM proxy as needed
     pub async fn create(model_id: &str, config: Option<&Config>) -> Result<Box<dyn Model>> {
+        Self::create_with_backend(model_id, config, None).await
+    }
+
+    /// Create a model with explicit backend preference
+    pub async fn create_with_backend(
+        model_id: &str,
+        config: Option<&Config>,
+        backend: Option<&str>,
+    ) -> Result<Box<dyn Model>> {
+        // If backend explicitly specified, enforce it
+        if let Some(backend_name) = backend {
+            return Self::create_with_explicit_backend(model_id, config, backend_name).await;
+        }
+
         // If no provider prefix, auto-detect backend
         if !model_id.contains('/') {
             return Self::create_with_auto_detection(model_id).await;
@@ -246,6 +260,51 @@ impl ModelFactory {
         match Self::create(model_id, config).await {
             Ok(model) => model.validate_connection().await,
             Err(_) => Ok(false),
+        }
+    }
+
+    /// Create a model with explicit backend enforcement
+    ///
+    /// Forces the use of a specific backend (ollama or vllm) regardless of model_id format.
+    /// Useful with --backend CLI flag to override auto-detection.
+    async fn create_with_explicit_backend(
+        model_id: &str,
+        config: Option<&Config>,
+        backend: &str,
+    ) -> Result<Box<dyn Model>> {
+        match backend.to_lowercase().as_str() {
+            "ollama" => {
+                // Force Ollama backend
+                let ollama_model = if model_id.starts_with("ollama/") {
+                    model_id.to_string()
+                } else {
+                    format!("ollama/{}", model_id)
+                };
+                let model = OllamaDirectModel::new(&ollama_model, config).await?;
+                Ok(Box::new(model))
+            }
+            "vllm" => {
+                // Force vLLM backend - use registry to find model
+                let mut registry = BackendRegistry::new();
+                registry.auto_discover().await?;
+
+                // Strip any provider prefix for vLLM lookup
+                let model_name = if model_id.contains('/') {
+                    model_id.split('/').nth(1).unwrap_or(model_id)
+                } else {
+                    model_id
+                };
+
+                let backend = UnifiedBackend::new(registry, model_name).await?;
+                let adapter = BackendModelAdapter::new(backend);
+                Ok(Box::new(adapter))
+            }
+            _ => {
+                anyhow::bail!(
+                    "Unknown backend '{}'. Valid backends: ollama, vllm",
+                    backend
+                )
+            }
         }
     }
 

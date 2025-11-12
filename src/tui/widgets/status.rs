@@ -3,9 +3,8 @@ use ratatui::{
     layout::Rect,
     style::{Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Widget},
+    widgets::{Paragraph, Widget},
 };
-use ratatui_macros::{line, span};
 
 use crate::tui::mode::OperationMode;
 use crate::tui::theme::Theme;
@@ -13,82 +12,82 @@ use crate::tui::theme::Theme;
 /// Props for StatusWidget (stateless widget)
 pub struct StatusWidget<'a> {
     pub operation_mode: OperationMode,
-    pub status_message: Option<&'a str>,
     pub confirmation_pending: bool,
-    pub is_generating: bool,
     pub theme: &'a Theme,
+    pub working_dir: &'a str,
+    pub cumulative_tokens: usize,
 }
 
 impl<'a> Widget for StatusWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut lines = Vec::new();
+        // Get hostname and username for directory display
+        let hostname = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("HOST"))
+            .unwrap_or_else(|_| "localhost".to_string());
+        let username = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "user".to_string());
 
-        // Line 1: Mode badge + Status message + inline warnings
-        let status_text = if self.confirmation_pending {
-            "Action pending".to_string()
-        } else if let Some(status) = self.status_message {
-            status.to_string()
-        } else if self.is_generating {
-            "Generating...".to_string()
+        // Line 1: username@hostname:/path (left) | tokens (right, fixed position)
+        let directory_text = format!("{}@{}:{}", username, hostname, self.working_dir);
+        let token_text = format!("{} tokens", self.cumulative_tokens);
+
+        // Calculate padding to push tokens to right edge
+        let available_width = area.width as usize;
+        let padding_width = if available_width > directory_text.len() + token_text.len() + 1 {
+            available_width - directory_text.len() - token_text.len()
         } else {
-            "Ready".to_string()
+            1
         };
 
-        let mut line1_spans = vec![
+        let line1_spans = vec![
+            // Directory (fixed to left)
             Span::styled(
-                format!(" {} ", self.operation_mode.display_name()),
-                Style::new()
-                    .bg(self.operation_mode.color())
-                    .fg(self.theme.colors.background.to_color())
-                    .bold(),
+                format!("{}@{}", username, hostname),
+                Style::new().fg(ratatui::style::Color::Green).bold(),
             ),
-            Span::raw(" "),
+            Span::styled(":", Style::new().fg(self.theme.colors.text_primary.to_color())),
             Span::styled(
-                status_text,
-                Style::new().fg(self.theme.colors.text_primary.to_color()),
+                self.working_dir,
+                Style::new().fg(ratatui::style::Color::Cyan),
+            ),
+            // Padding
+            Span::raw(" ".repeat(padding_width)),
+            // Token count (fixed to right)
+            Span::styled(
+                token_text,
+                Style::new().fg(self.theme.colors.text_disabled.to_color()),
             ),
         ];
 
-        // Add inline warnings/prompts to Line 1
-        if self.confirmation_pending {
-            line1_spans.push(Span::raw(" • "));
-            line1_spans.push(Span::styled(
-                "Alt+Y: approve, Alt+N: skip, Alt+P: preview (Action Confirmation) | Ctrl+Y/N: Plan Approval",
-                Style::new().fg(self.theme.colors.warning.to_color()).bold(),
-            ));
+        // Line 2: operation mode (colored text only, no background badge)
+        let mode_text = match self.operation_mode {
+            OperationMode::Normal => {
+                if self.confirmation_pending {
+                    "action pending (alt+y/n/p)"
+                } else {
+                    ""  // No text in normal mode when not pending
+                }
+            },
+            OperationMode::AcceptEdits => "accept edits on (shift+tab to cycle)",
+            OperationMode::PlanMode => "plan mode on (shift+tab to cycle)",
+            OperationMode::BypassAll => "bypass permissions on (shift+tab to cycle)",
+        };
+
+        let line2_spans = if !mode_text.is_empty() {
+            vec![
+                Span::styled(
+                    mode_text,
+                    Style::new().fg(self.operation_mode.color()),
+                ),
+            ]
         } else {
-            let warning_level = self.operation_mode.warning_level();
-            if let Some(warning) = warning_level.message() {
-                let warning_text = warning.to_string();
-                let warning_color = warning_level.color();
-                line1_spans.push(Span::raw(" • "));
-                line1_spans.push(Span::styled(
-                    warning_text,
-                    Style::new().fg(warning_color).bold(),
-                ));
-            }
-        }
+            vec![Span::raw("")]  // Empty line when no mode text
+        };
 
-        lines.push(Line::from(line1_spans));
-
-        // Line 2: Keyboard shortcuts (compact, always visible)
-        lines.push(line![
-            span!(Style::new().fg(self.theme.colors.text_disabled.to_color()).dim(); " Shift+Tab "),
-            span!(self.theme.colors.text_secondary.to_color(); "modes"),
-            span!(self.theme.colors.text_disabled.to_color(); " • "),
-            span!(Style::new().fg(self.theme.colors.text_disabled.to_color()).dim(); "Ctrl+S "),
-            span!(self.theme.colors.text_secondary.to_color(); "sidebar"),
-            span!(self.theme.colors.text_disabled.to_color(); " • "),
-            span!(Style::new().fg(self.theme.colors.text_disabled.to_color()).dim(); "Ctrl+D "),
-            span!(self.theme.colors.text_secondary.to_color(); "diagnostics"),
-            span!(self.theme.colors.text_disabled.to_color(); " • "),
-            span!(Style::new().fg(self.theme.colors.text_disabled.to_color()).dim(); ":help"),
-            span!(self.theme.colors.text_secondary.to_color(); " for commands"),
-        ]);
-
-        let status_bar = Paragraph::new(lines)
-            .style(Style::new().bg(self.theme.colors.background.to_color()))
-            .block(Block::default());
+        let line1 = Line::from(line1_spans);
+        let line2 = Line::from(line2_spans);
+        let status_bar = Paragraph::new(vec![line1, line2]);
 
         status_bar.render(area, buf);
     }

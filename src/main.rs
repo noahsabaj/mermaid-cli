@@ -29,8 +29,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Initialize tracing subscriber (always, controlled by RUST_LOG env var)
-    init_logger();
+    // Initialize tracing subscriber (controlled by --verbose flag or RUST_LOG env var)
+    init_logger(cli.verbose);
 
     // Handle backend discovery commands
     if cli.backends {
@@ -117,6 +117,7 @@ async fn run_non_interactive(cli: Cli, prompt: String) -> Result<()> {
         config,
         cli.no_execute,
         cli.max_tokens,
+        cli.backend.as_deref(),
     )
     .await?;
 

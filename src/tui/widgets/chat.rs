@@ -246,7 +246,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     }
                     spans.push(Span::styled(
                         formatted_timestamp,
-                        Style::new().fg(self.theme.colors.user_message.to_color()).dim(),
+                        Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)), // Light gray (#888888)
                     ));
 
                     lines.push(Line::from(spans));

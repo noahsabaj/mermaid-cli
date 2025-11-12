@@ -133,10 +133,16 @@ impl Orchestrator {
         log_progress(current_step, total_steps, "Checking model availability");
         ensure_ollama_model(&model_id, self.cli.no_auto_install).await?;
 
-        // Create model instance with config for authentication
+        // Create model instance with config for authentication and optional backend override
         current_step += 1;
         log_progress(current_step, total_steps, "Initializing model");
-        let model = match ModelFactory::create(&model_id, Some(&self.config)).await {
+        let model = match ModelFactory::create_with_backend(
+            &model_id,
+            Some(&self.config),
+            self.cli.backend.as_deref(),
+        )
+        .await
+        {
             Ok(m) => m,
             Err(e) => {
                 log_error("ERROR", format!("Failed to initialize model: {}", e));

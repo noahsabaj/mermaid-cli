@@ -67,30 +67,24 @@ pub async fn execute_actions(
                     handle_action_success(app, &action_clone, output, tx).await?;
                 },
                 Ok(agents::ActionResult::Error { error }) => {
-                    // Special handling for web search errors - display to user
-                    if matches!(&action_clone, AgentAction::WebSearch { .. }) {
-                        app.set_status("[FAILED] Web search could not be completed");
-
-                        // Add action display to show the failed search
-                        let action_display = build_action_display(&action_clone, &error);
-                        if let Some(last_msg) = app
-                            .session_state
-                            .messages
-                            .iter_mut()
-                            .rev()
-                            .find(|m| matches!(m.role, MessageRole::Assistant))
-                        {
-                            last_msg.actions.push(action_display);
-                        }
-
-                        // Add error message as Assistant message for user visibility
-                        app.add_message(MessageRole::Assistant, error);
-                    } else {
-                        app.set_status(format!("[FAILED] Action failed: {}", error));
+                    // Add action display to show the failed action in chat
+                    let action_display = build_action_display(&action_clone, &error);
+                    if let Some(last_msg) = app
+                        .session_state
+                        .messages
+                        .iter_mut()
+                        .rev()
+                        .find(|m| matches!(m.role, MessageRole::Assistant))
+                    {
+                        last_msg.actions.push(action_display);
                     }
+
+                    // Add error message as Assistant message for user visibility
+                    app.add_message(MessageRole::Assistant, error);
                 },
                 Err(e) => {
-                    app.set_status(format!("[ERROR] Error: {}", e));
+                    // System error - add to chat as well
+                    app.add_message(MessageRole::Assistant, format!("Error: {}", e));
                 },
             }
         }
@@ -125,30 +119,24 @@ pub async fn confirm_action(
                         handle_action_success(app, &action_clone, output, tx).await?;
                     },
                     Ok(agents::ActionResult::Error { error }) => {
-                        // Special handling for web search errors - display to user
-                        if matches!(&action_clone, AgentAction::WebSearch { .. }) {
-                            app.set_status("[FAILED] Web search could not be completed");
-
-                            // Add action display to show the failed search
-                            let action_display = build_action_display(&action_clone, &error);
-                            if let Some(last_msg) = app
-                                .session_state
-                                .messages
-                                .iter_mut()
-                                .rev()
-                                .find(|m| matches!(m.role, MessageRole::Assistant))
-                            {
-                                last_msg.actions.push(action_display);
-                            }
-
-                            // Add error message as Assistant message for user visibility
-                            app.add_message(MessageRole::Assistant, error);
-                        } else {
-                            app.set_status(format!("[FAILED] Action failed: {}", error));
+                        // Add action display to show the failed action in chat
+                        let action_display = build_action_display(&action_clone, &error);
+                        if let Some(last_msg) = app
+                            .session_state
+                            .messages
+                            .iter_mut()
+                            .rev()
+                            .find(|m| matches!(m.role, MessageRole::Assistant))
+                        {
+                            last_msg.actions.push(action_display);
                         }
+
+                        // Add error message as Assistant message for user visibility
+                        app.add_message(MessageRole::Assistant, error);
                     },
                     Err(e) => {
-                        app.set_status(format!("[ERROR] Error: {}", e));
+                        // System error - add to chat as well
+                        app.add_message(MessageRole::Assistant, format!("Error: {}", e));
                     },
                 }
             }
@@ -196,59 +184,49 @@ async fn handle_action_success(
     // Perform action-specific post-processing
     match action {
         // Actions that need multi-step follow-through: Trigger unified feedback loop
-        AgentAction::ReadFile { path } => {
-            app.set_status(format!("[OK] File read: {}", path));
+        AgentAction::ReadFile { .. } => {
             trigger_feedback_loop(app, action, output, tx).await;
         },
         AgentAction::WebSearch {  .. } => {
-            app.set_status(format!("[OK] Search completed, analyzing..."));
             trigger_feedback_loop(app, action, output, tx).await;
         },
         AgentAction::ExecuteCommand {  .. } => {
-            app.set_status(format!("[OK] Command executed"));
             trigger_feedback_loop(app, action, output, tx).await;
         },
         AgentAction::GitDiff { .. } => {
-            app.set_status("[OK] Diff generated, analyzing...".to_string());
             trigger_feedback_loop(app, action, output, tx).await;
         },
         AgentAction::GitStatus => {
-            app.set_status("[OK] Repository status retrieved, analyzing...".to_string());
             trigger_feedback_loop(app, action, output, tx).await;
         },
 
         // Actions that just update context, no follow-through needed
         AgentAction::WriteFile { path, content } => {
-            app.set_status(format!("[OK] File created: {}", path));
             app.context.add_file(path.clone(), content.clone());
             // Use proper tokenizer for accurate count
             let tokens = count_file_tokens(content, &app.model_state.model_name);
             app.context.token_count += tokens;
         },
         AgentAction::DeleteFile { path } => {
-            app.set_status(format!("[OK] File deleted: {}", path));
             if let Some(content) = app.context.files.remove(path) {
                 // Use proper tokenizer for accurate count
                 let tokens = count_file_tokens(&content, &app.model_state.model_name);
                 app.context.token_count = app.context.token_count.saturating_sub(tokens);
             }
         },
-        AgentAction::CreateDirectory { path } => {
-            app.set_status(format!("[OK] Directory created: {}", path));
+        AgentAction::CreateDirectory { .. } => {
+            // Directory created, no additional action needed
         },
         AgentAction::GitCommit {  .. } => {
-            app.set_status(format!("[OK] Changes committed"));
+            // Changes committed, no additional action needed
         },
-        AgentAction::ParallelRead { paths } => {
-            app.set_status(format!("[OK] Read {} files in parallel, analyzing...", paths.len()));
+        AgentAction::ParallelRead { .. } => {
             trigger_feedback_loop(app, action, output, tx).await;
         },
-        AgentAction::ParallelWebSearch { queries } => {
-            app.set_status(format!("[OK] Completed {} searches in parallel, analyzing...", queries.len()));
+        AgentAction::ParallelWebSearch { .. } => {
             trigger_feedback_loop(app, action, output, tx).await;
         },
-        AgentAction::ParallelGitDiff { paths } => {
-            app.set_status(format!("[OK] Generated {} diffs in parallel, analyzing...", paths.len()));
+        AgentAction::ParallelGitDiff { .. } => {
             trigger_feedback_loop(app, action, output, tx).await;
         },
     }
