@@ -66,7 +66,7 @@ pub struct InputWidget<'a> {
 impl<'a> StatefulWidget for InputWidget<'a> {
     type State = InputState;
 
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+    fn render(self, area: Rect, buf: &mut Buffer, _state: &mut Self::State) {
         let (_hints_area, input_area) = if self.showing_command_hints {
             let commands = vec![
                 (":quit", "Quit the application"),

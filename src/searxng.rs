@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use crate::constants::DEFAULT_SEARXNG_PORT;
 
 /// Auto-start Searxng if not already running
 ///
@@ -6,9 +7,9 @@ use std::path::PathBuf;
 /// If diagnostics are needed, run with RUST_LOG=debug to see tracing output.
 pub async fn ensure_searxng_running() {
     // Check if Searxng is already running
-    let check_url = "http://localhost:8888/search?q=test&format=json";
+    let check_url = format!("http://localhost:{}/search?q=test&format=json", DEFAULT_SEARXNG_PORT);
 
-    match reqwest::get(check_url).await {
+    match reqwest::get(&check_url).await {
         Ok(_) => {
             // Already running, nothing to do
             return;
@@ -52,7 +53,7 @@ pub async fn ensure_searxng_running() {
     // Wait for Searxng to be ready (poll up to 10 seconds)
     for _attempt in 1..=20 {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        if reqwest::get(check_url).await.is_ok() {
+        if reqwest::get(&check_url).await.is_ok() {
             // Searxng is responding, we're done
             return;
         }
@@ -74,13 +75,7 @@ fn find_compose_directory() -> Option<PathBuf> {
         }
     }
 
-    // 2. Check mermaid project directory (common installation path)
-    let mermaid_project = PathBuf::from("/home/nsabaj/Code/mermaid");
-    if mermaid_project.join("docker-compose.yml").exists() {
-        return Some(mermaid_project);
-    }
-
-    // 3. Check common user directories
+    // 2. Check common user directories
     if let Some(home_dir) = directories::BaseDirs::new() {
         let home_path = home_dir.home_dir();
 

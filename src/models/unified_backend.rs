@@ -51,7 +51,7 @@ impl UnifiedBackend {
     /// List all available models across all backends
     pub async fn list_all_models(&self) -> Result<Vec<String>> {
         let models = self.registry.list_all_models().await?;
-        let mut model_list: Vec<_> = models.into_keys().collect();
+        let mut model_list: Vec<_> = models.keys().cloned().collect();
         model_list.sort();
         Ok(model_list)
     }

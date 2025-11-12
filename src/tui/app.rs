@@ -2,6 +2,7 @@ use super::mode::OperationMode;
 use super::theme::Theme;
 use super::widgets::{ChatState, InputState, SidebarState};
 use crate::agents::{AgentAction, ModeAwareExecutor, Plan};
+use crate::constants::{UI_DEFAULT_VIEWPORT_HEIGHT, UI_ERROR_LOG_MAX_SIZE, UI_STATUS_MESSAGE_THRESHOLD};
 use crate::context::ContextManager;
 use crate::diagnostics::{DiagnosticsMode, HardwareMonitor, HardwareStats};
 use crate::models::{ChatMessage, MessageRole, Model, ProjectContext};
@@ -37,93 +38,288 @@ impl GenerationStatus {
     }
 }
 
-/// Application state
-pub struct App {
-    /// Current chat messages
-    pub messages: Vec<ChatMessage>,
-    /// User input buffer
-    pub input: String,
-    /// Cursor position in the input string
-    pub cursor_position: usize,
-    /// Is the app running?
-    pub running: bool,
-    /// Current model (RwLock for concurrent reads during UI rendering)
-    pub model: Arc<RwLock<Box<dyn Model>>>,
-    /// Project context
-    pub context: ProjectContext,
-    /// Current model response (for streaming)
-    pub current_response: String,
-    /// Is model currently generating?
-    pub is_generating: bool,
+/// Error severity level
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorSeverity {
+    /// Informational (not really an error)
+    Info,
+    /// Warning - operation completed but with issues
+    Warning,
+    /// Error - operation failed
+    Error,
+    /// Security error - action was rejected
+    Security,
+}
 
-    // Widget States
+impl ErrorSeverity {
+    pub fn display(&self) -> &str {
+        match self {
+            ErrorSeverity::Info => "INFO",
+            ErrorSeverity::Warning => "WARN",
+            ErrorSeverity::Error => "ERROR",
+            ErrorSeverity::Security => "SECURITY",
+        }
+    }
+
+    pub fn color(&self) -> &str {
+        match self {
+            ErrorSeverity::Info => "cyan",
+            ErrorSeverity::Warning => "yellow",
+            ErrorSeverity::Error => "red",
+            ErrorSeverity::Security => "magenta",
+        }
+    }
+}
+
+/// An error entry in the error log
+#[derive(Debug, Clone)]
+pub struct ErrorEntry {
+    pub timestamp: Instant,
+    pub severity: ErrorSeverity,
+    pub message: String,
+    pub context: Option<String>,
+}
+
+impl ErrorEntry {
+    pub fn new(severity: ErrorSeverity, message: String) -> Self {
+        Self {
+            timestamp: Instant::now(),
+            severity,
+            message,
+            context: None,
+        }
+    }
+
+    pub fn with_context(severity: ErrorSeverity, message: String, context: String) -> Self {
+        Self {
+            timestamp: Instant::now(),
+            severity,
+            message,
+            context: Some(context),
+        }
+    }
+
+    pub fn display(&self) -> String {
+        match &self.context {
+            Some(ctx) => format!(
+                "[{}] {} - {}",
+                self.severity.display(),
+                self.message,
+                ctx
+            ),
+            None => format!("[{}] {}", self.severity.display(), self.message),
+        }
+    }
+}
+
+/// Comprehensive state machine for the application lifecycle
+/// Impossible states become impossible to represent
+#[derive(Debug, Clone)]
+pub enum AppState {
+    /// Idle - not doing anything, ready for input
+    Idle,
+
+    /// Currently generating a response from the model
+    Generating {
+        status: GenerationStatus,
+        start_time: Instant,
+        tokens_received: usize,
+        abort_handle: Option<tokio::task::AbortHandle>,
+    },
+
+    /// Generation complete, waiting for action confirmation
+    AwaitingActionConfirmation {
+        action: AgentAction,
+        executor: ModeAwareExecutor,
+    },
+
+    /// Executing an action
+    ExecutingAction {
+        action: AgentAction,
+        start_time: Instant,
+    },
+
+    /// Waiting for user to approve a plan
+    AwaitingPlanApproval {
+        plan: Plan,
+        explanation: Option<String>,
+    },
+
+    /// Executing a plan step-by-step
+    ExecutingPlan {
+        plan: Plan,
+        current_step: usize,
+        start_time: Instant,
+    },
+
+    /// Waiting for file read feedback from user
+    ReadingFileFeedback {
+        intent: Option<String>,
+        started_at: Instant,
+    },
+}
+
+impl AppState {
+    /// Get generation status if we're generating
+    pub fn generation_status(&self) -> Option<GenerationStatus> {
+        match self {
+            AppState::Generating { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// Check if we're currently generating
+    pub fn is_generating(&self) -> bool {
+        matches!(self, AppState::Generating { .. })
+    }
+
+    /// Check if we're idle
+    pub fn is_idle(&self) -> bool {
+        matches!(self, AppState::Idle)
+    }
+
+    /// Get generation start time if we're generating
+    pub fn generation_start_time(&self) -> Option<Instant> {
+        match self {
+            AppState::Generating { start_time, .. } => Some(*start_time),
+            _ => None,
+        }
+    }
+
+    /// Get tokens received if we're generating
+    pub fn tokens_received(&self) -> Option<usize> {
+        match self {
+            AppState::Generating { tokens_received, .. } => Some(*tokens_received),
+            _ => None,
+        }
+    }
+
+    /// Get abort handle if we're generating
+    pub fn abort_handle(&self) -> Option<&tokio::task::AbortHandle> {
+        match self {
+            AppState::Generating { abort_handle, .. } => abort_handle.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Get pending action if awaiting confirmation
+    pub fn pending_action(&self) -> Option<&AgentAction> {
+        match self {
+            AppState::AwaitingActionConfirmation { action, .. } => Some(action),
+            _ => None,
+        }
+    }
+
+    /// Get executor if awaiting confirmation
+    pub fn pending_executor(&self) -> Option<&ModeAwareExecutor> {
+        match self {
+            AppState::AwaitingActionConfirmation { executor, .. } => Some(executor),
+            _ => None,
+        }
+    }
+
+    /// Check if awaiting plan approval
+    pub fn is_awaiting_plan_approval(&self) -> bool {
+        matches!(self, AppState::AwaitingPlanApproval { .. })
+    }
+
+    /// Get active plan if in plan-related state
+    pub fn active_plan(&self) -> Option<&Plan> {
+        match self {
+            AppState::AwaitingPlanApproval { plan, .. } => Some(plan),
+            AppState::ExecutingPlan { plan, .. } => Some(plan),
+            _ => None,
+        }
+    }
+
+    /// Check if currently reading file feedback
+    pub fn is_reading_file_feedback(&self) -> bool {
+        matches!(self, AppState::ReadingFileFeedback { .. })
+    }
+
+    /// Get current plan step if executing plan
+    pub fn plan_current_step(&self) -> Option<usize> {
+        match self {
+            AppState::ExecutingPlan { current_step, .. } => Some(*current_step),
+            _ => None,
+        }
+    }
+
+    /// Get action start time if executing
+    pub fn action_start_time(&self) -> Option<Instant> {
+        match self {
+            AppState::ExecutingAction { start_time, .. } => Some(*start_time),
+            _ => None,
+        }
+    }
+}
+
+/// UI state - visual presentation and widget states
+pub struct UIState {
     /// Chat widget state (scroll, scrolling flag)
     pub chat_state: ChatState,
     /// Input widget state (cursor position for display)
     pub input_state: InputState,
     /// Sidebar widget state (table state, selection)
     pub sidebar_state: SidebarState,
-
-    /// Selected message index (for navigation)
-    pub selected_message: Option<usize>,
     /// Show file tree sidebar
     pub show_sidebar: bool,
     /// Sidebar expanded to show all files
     pub sidebar_expanded: bool,
-    /// Current working directory
-    pub working_dir: String,
-    /// Full model ID (e.g., "ollama/qwen3-coder:30b")
-    pub model_id: String,
-    /// Model name for display (short version)
-    pub model_name: String,
-    /// Status message
-    pub status_message: Option<String>,
-    /// Current operation mode (Normal, AcceptEdits, PlanMode, BypassAll)
-    pub operation_mode: OperationMode,
-    /// Flag for confirming destructive operations in BypassAll mode
-    pub bypass_confirmed: bool,
-    /// Pending action waiting for confirmation
-    pub pending_action: Option<AgentAction>,
-    /// Executor for pending action
-    pub pending_executor: Option<ModeAwareExecutor>,
-    /// Track if FILE_READ feedback is pending
-    pub pending_file_read: bool,
-    /// Active plan awaiting approval or being executed
-    pub active_plan: Option<Plan>,
-    /// Current step index during plan execution (0-based)
-    pub plan_execution_index: Option<usize>,
-    /// Whether we're waiting for user to approve plan
-    pub awaiting_plan_approval: bool,
-    /// Track if plan mode was active when generation started
-    pub plan_mode_active_for_generation: bool,
-    /// Status text to show during file reading
-    pub reading_file_status: Option<String>,
-    /// Current confirmation state
-    pub confirmation_state: Option<ConfirmationState>,
-    /// Track last time status was set for timeout
-    pub status_timestamp: Option<std::time::Instant>,
-    /// Abort handle for canceling generation
-    pub generation_abort: Option<tokio::task::AbortHandle>,
-    /// Conversation manager for persistence
-    pub conversation_manager: Option<ConversationManager>,
-    /// Current conversation being tracked
-    pub current_conversation: Option<ConversationHistory>,
-    /// Hardware monitor (RwLock for concurrent reads every frame)
-    pub hardware_monitor: Option<Arc<RwLock<HardwareMonitor>>>,
-    /// Current hardware stats
-    pub hardware_stats: Option<HardwareStats>,
     /// Diagnostics display mode
     pub diagnostics_mode: DiagnosticsMode,
     /// UI theme
     pub theme: Theme,
-    /// Current generation status (Idle, Initializing, Thinking, Streaming)
-    pub generation_status: GenerationStatus,
-    /// When generation started (for calculating elapsed time)
-    pub generation_start_time: Option<Instant>,
-    /// Count of tokens received so far during streaming
-    pub tokens_received: usize,
-    /// Custom status from LLM (e.g., "Analyzing", "Planning") - overrides generation_status text
-    pub custom_status: Option<String>,
+    /// Selected message index (for navigation)
+    pub selected_message: Option<usize>,
+    /// Hardware monitor (RwLock for concurrent reads every frame)
+    pub hardware_monitor: Option<Arc<RwLock<HardwareMonitor>>>,
+    /// Current hardware stats
+    pub hardware_stats: Option<HardwareStats>,
+}
+
+impl UIState {
+    /// Create a new UIState with default values
+    pub fn new() -> Self {
+        Self {
+            chat_state: ChatState::default(),
+            input_state: InputState::default(),
+            sidebar_state: SidebarState::default(),
+            show_sidebar: false,
+            sidebar_expanded: false,
+            diagnostics_mode: DiagnosticsMode::Compact,
+            theme: Theme::dark(),
+            selected_message: None,
+            hardware_monitor: None,
+            hardware_stats: None,
+        }
+    }
+
+    /// Create UIState with hardware monitor
+    pub fn with_hardware_monitor(hardware_monitor: Option<Arc<RwLock<HardwareMonitor>>>) -> Self {
+        Self {
+            chat_state: ChatState::default(),
+            input_state: InputState::default(),
+            sidebar_state: SidebarState::default(),
+            show_sidebar: false,
+            sidebar_expanded: false,
+            diagnostics_mode: DiagnosticsMode::Compact,
+            theme: Theme::dark(),
+            selected_message: None,
+            hardware_monitor,
+            hardware_stats: None,
+        }
+    }
+}
+
+/// Session state - conversation history and persistence
+pub struct SessionState {
+    /// Current chat messages
+    pub messages: Vec<ChatMessage>,
+    /// Conversation manager for persistence
+    pub conversation_manager: Option<ConversationManager>,
+    /// Current conversation being tracked
+    pub current_conversation: Option<ConversationHistory>,
     /// Input history for arrow key navigation (loaded from session)
     pub input_history: Vec<String>,
     /// Current position in history (None = editing current input, Some(i) = viewing history[i])
@@ -134,19 +330,153 @@ pub struct App {
     pub context_manager: Option<ContextManager>,
 }
 
+impl SessionState {
+    /// Create a new SessionState with default values
+    pub fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            conversation_manager: None,
+            current_conversation: None,
+            input_history: Vec::new(),
+            history_index: None,
+            history_buffer: String::new(),
+            context_manager: None,
+        }
+    }
+
+    /// Create SessionState with conversation management
+    pub fn with_conversation(
+        conversation_manager: Option<ConversationManager>,
+        current_conversation: Option<ConversationHistory>,
+        input_history: Vec<String>,
+    ) -> Self {
+        Self {
+            messages: Vec::new(),
+            conversation_manager,
+            current_conversation,
+            input_history,
+            history_index: None,
+            history_buffer: String::new(),
+            context_manager: None,
+        }
+    }
+}
+
+/// Operation state - mode, confirmations, and plan execution
+pub struct OperationState {
+    /// Current operation mode (Normal, AcceptEdits, PlanMode, BypassAll)
+    pub operation_mode: OperationMode,
+    /// Flag for confirming destructive operations in BypassAll mode
+    pub bypass_confirmed: bool,
+    /// Track if FILE_READ feedback is pending
+    pub pending_file_read: bool,
+    /// Current step index during plan execution (0-based)
+    pub plan_execution_index: Option<usize>,
+    /// Track if plan mode was active when generation started
+    pub plan_mode_active_for_generation: bool,
+    /// Status text to show during file reading
+    pub reading_file_status: Option<String>,
+    /// Current confirmation state
+    pub confirmation_state: Option<ConfirmationState>,
+}
+
+impl OperationState {
+    /// Create a new OperationState with default values
+    pub fn new() -> Self {
+        Self {
+            operation_mode: OperationMode::default(),
+            bypass_confirmed: false,
+            pending_file_read: false,
+            plan_execution_index: None,
+            plan_mode_active_for_generation: false,
+            reading_file_status: None,
+            confirmation_state: None,
+        }
+    }
+}
+
+/// Model state - LLM configuration and identity
+pub struct ModelState {
+    pub model: Arc<RwLock<Box<dyn Model>>>,
+    pub model_id: String,
+    pub model_name: String,
+}
+
+impl ModelState {
+    pub fn new(model: Box<dyn Model>, model_id: String) -> Self {
+        let model_name = model.name().to_string();
+        Self {
+            model: Arc::new(RwLock::new(model)),
+            model_id,
+            model_name,
+        }
+    }
+}
+
+/// Status state - UI status messages and timing
+#[derive(Debug)]
+pub struct StatusState {
+    pub status_message: Option<String>,
+    pub status_timestamp: Option<Instant>,
+    pub custom_status: Option<String>,
+}
+
+impl StatusState {
+    pub fn new() -> Self {
+        Self {
+            status_message: None,
+            status_timestamp: None,
+            custom_status: None,
+        }
+    }
+}
+
+/// Application state
+pub struct App {
+    /// User input buffer
+    pub input: String,
+    /// Cursor position in the input string
+    pub cursor_position: usize,
+    /// Is the app running?
+    pub running: bool,
+    /// Project context
+    pub context: ProjectContext,
+    /// Current model response (for streaming)
+    pub current_response: String,
+    /// Current working directory
+    pub working_dir: String,
+    /// Error log - keeps last N errors for visibility (no more silent failures!)
+    pub error_log: Vec<ErrorEntry>,
+    /// State machine for application lifecycle
+    pub app_state: AppState,
+
+    /// Model state - LLM configuration
+    pub model_state: ModelState,
+    /// UI state - visual presentation and widget states
+    pub ui_state: UIState,
+    /// Session state - conversation history and persistence
+    pub session_state: SessionState,
+    /// Operation state - mode, confirmations, and plan execution
+    pub operation_state: OperationState,
+    /// Status state - UI status messages
+    pub status_state: StatusState,
+}
+
 impl App {
     /// Create a new app instance
     pub fn new(model: Box<dyn Model>, context: ProjectContext, model_id: String) -> Self {
-        let model_name = model.name().to_string();
         let working_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string());
+
+        // Initialize model state
+        let model_state = ModelState::new(model, model_id);
 
         // Initialize conversation manager for the current directory
         let conversation_manager = ConversationManager::new(&working_dir).ok();
         let current_conversation = conversation_manager
             .as_ref()
-            .map(|_| ConversationHistory::new(working_dir.clone(), model_name.clone()));
+            .map(|_| ConversationHistory::new(working_dir.clone(), model_state.model_name.clone()));
 
         // Initialize hardware monitor
         let hardware_monitor = Some(Arc::new(RwLock::new(HardwareMonitor::new())));
@@ -158,64 +488,60 @@ impl App {
             .map(|conv| conv.input_history.clone())
             .unwrap_or_default();
 
-        Self {
-            messages: Vec::new(),
-            input: String::new(),
-            cursor_position: 0,
-            running: true,
-            model: Arc::new(RwLock::new(model)),
-            context,
-            current_response: String::new(),
-            is_generating: false,
+        // Initialize UIState with hardware monitor
+        let ui_state = UIState {
             chat_state: ChatState::new(),
             input_state: InputState::new(),
             sidebar_state: SidebarState::new(),
-            selected_message: None,
             show_sidebar: false, // Hidden by default - press Ctrl+S to show
             sidebar_expanded: false,
-            working_dir,
-            model_id,
-            model_name,
-            status_message: None,
-            operation_mode: OperationMode::default(), // Starts in Normal mode
-            bypass_confirmed: false,
-            pending_action: None,
-            pending_executor: None,
-            pending_file_read: false,
-            active_plan: None,
-            plan_execution_index: None,
-            awaiting_plan_approval: false,
-            plan_mode_active_for_generation: false,
-            reading_file_status: None,
-            confirmation_state: None,
-            status_timestamp: None,
-            generation_abort: None,
-            conversation_manager,
-            current_conversation,
-            hardware_monitor,
-            hardware_stats: None,
             diagnostics_mode: DiagnosticsMode::Compact,
             theme: Theme::dark(), // Default to dark theme
-            generation_status: GenerationStatus::Idle,
-            generation_start_time: None,
-            tokens_received: 0,
-            custom_status: None,
+            selected_message: None,
+            hardware_monitor,
+            hardware_stats: None,
+        };
+
+        // Initialize SessionState with conversation management
+        let session_state = SessionState {
+            messages: Vec::new(),
+            conversation_manager,
+            current_conversation,
             input_history,
             history_index: None,
             history_buffer: String::new(),
             context_manager: None,
+        };
+
+        // Initialize OperationState
+        let operation_state = OperationState::new();
+
+        Self {
+            input: String::new(),
+            cursor_position: 0,
+            running: true,
+            context,
+            current_response: String::new(),
+            working_dir,
+            error_log: Vec::new(),
+            app_state: AppState::Idle,
+            model_state,
+            ui_state,
+            session_state,
+            operation_state,
+            status_state: StatusState::new(),
         }
     }
 
     /// Set the context manager for dynamic context reloading
     pub fn set_context_manager(&mut self, manager: ContextManager) {
-        self.context_manager = Some(manager);
+        self.session_state.context_manager = Some(manager);
     }
 
     /// Update context if file tree has changed since last message
     pub async fn reload_context_if_needed(&mut self) -> anyhow::Result<()> {
-        if let Some(ref mut manager) = self.context_manager {
-            if manager.reload_if_needed()? {
+        if let Some(ref mut manager) = self.session_state.context_manager {
+            if manager.reload_if_needed().await? {
                 // Context changed, rebuild it
                 self.context = manager.build_context();
             }
@@ -231,10 +557,10 @@ impl App {
             timestamp: chrono::Local::now(),
             actions: Vec::new(),
         };
-        self.messages.push(message.clone());
+        self.session_state.messages.push(message.clone());
 
         // Update current conversation
-        if let Some(ref mut conv) = self.current_conversation {
+        if let Some(ref mut conv) = self.session_state.current_conversation {
             conv.add_messages(&[message]);
         }
 
@@ -251,24 +577,57 @@ impl App {
 
     /// Toggle sidebar visibility
     pub fn toggle_sidebar(&mut self) {
-        self.show_sidebar = !self.show_sidebar;
+        self.ui_state.show_sidebar = !self.ui_state.show_sidebar;
     }
 
     /// Set status message
     pub fn set_status(&mut self, message: impl Into<String>) {
-        self.status_message = Some(message.into());
+        self.status_state.status_message = Some(message.into());
     }
 
     /// Clear status message
     pub fn clear_status(&mut self) {
-        self.status_message = None;
+        self.status_state.status_message = None;
     }
 
+    /// Log an error to the error log (no more silent failures!)
+    pub fn log_error(&mut self, entry: ErrorEntry) {
+        // Also show in status bar
+        self.status_state.status_message = Some(entry.display());
+
+        // Keep last N errors in log
+        self.error_log.push(entry);
+        if self.error_log.len() > UI_ERROR_LOG_MAX_SIZE {
+            self.error_log.remove(0);
+        }
+    }
+
+    /// Convenience: log a simple error message
+    pub fn log_error_msg(&mut self, severity: ErrorSeverity, msg: impl Into<String>) {
+        self.log_error(ErrorEntry::new(severity, msg.into()));
+    }
+
+    /// Convenience: log error with context
+    pub fn log_error_with_context(
+        &mut self,
+        severity: ErrorSeverity,
+        msg: impl Into<String>,
+        context: impl Into<String>,
+    ) {
+        self.log_error(ErrorEntry::with_context(severity, msg.into(), context.into()));
+    }
+
+    /// Get recent errors (last N)
+    pub fn recent_errors(&self, count: usize) -> Vec<&ErrorEntry> {
+        self.error_log.iter().rev().take(count).collect()
+    }
+
+    
     /// Calculate the maximum scroll offset (bottom of content)
     pub fn calculate_max_scroll(&self, viewport_height: u16) -> u16 {
         let mut total_lines = 0u16;
 
-        for msg in &self.messages {
+        for msg in &self.session_state.messages {
             // Role line: [You] or [Mermaid]
             total_lines += 1;
             // Content lines (can be many for code blocks)
@@ -282,7 +641,7 @@ impl App {
         }
 
         // Add lines for current response if generating
-        if self.is_generating && !self.current_response.is_empty() {
+        if self.app_state.is_generating() && !self.current_response.is_empty() {
             total_lines += 1; // Role line
             total_lines += self.current_response.lines().count() as u16;
             total_lines += 1; // Typing indicator
@@ -294,41 +653,42 @@ impl App {
 
     /// Auto-scroll to bottom of chat
     pub fn auto_scroll_to_bottom(&mut self, viewport_height: u16) {
-        if !self.chat_state.is_user_scrolling {
-            self.chat_state.scroll_offset = self.calculate_max_scroll(viewport_height);
+        if !self.ui_state.chat_state.is_user_scrolling {
+            self.ui_state.chat_state.scroll_offset = self.calculate_max_scroll(viewport_height);
         }
     }
 
     /// Scroll chat view up
     pub fn scroll_up(&mut self, amount: u16) {
         // Calculate max scroll: total lines minus viewport height
-        let viewport_height = 20; // This should be passed in, but keeping for compatibility
+        let viewport_height = UI_DEFAULT_VIEWPORT_HEIGHT; // This should be passed in, but keeping for compatibility
         let max_scroll = self.calculate_max_scroll(viewport_height);
 
-        self.chat_state.scroll_offset = self
+        self.ui_state.chat_state.scroll_offset = self
+            .ui_state
             .chat_state
             .scroll_offset
             .saturating_add(amount)
             .min(max_scroll);
 
         // User is manually scrolling if they're not at the bottom
-        let threshold = 3; // Allow small margin for rounding
-        if self.chat_state.scroll_offset < max_scroll.saturating_sub(threshold) {
-            self.chat_state.is_user_scrolling = true;
+        let threshold = UI_STATUS_MESSAGE_THRESHOLD; // Allow small margin for rounding
+        if self.ui_state.chat_state.scroll_offset < max_scroll.saturating_sub(threshold) {
+            self.ui_state.chat_state.is_user_scrolling = true;
         }
     }
 
     /// Scroll chat view down
     pub fn scroll_down(&mut self, amount: u16) {
-        self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_sub(amount);
+        self.ui_state.chat_state.scroll_offset = self.ui_state.chat_state.scroll_offset.saturating_sub(amount);
 
         // If user scrolls close to bottom, resume auto-scrolling
-        let viewport_height = 20; // Should be passed in
+        let viewport_height = UI_DEFAULT_VIEWPORT_HEIGHT; // Should be passed in
         let max_scroll = self.calculate_max_scroll(viewport_height);
-        let threshold = 3;
-        if self.chat_state.scroll_offset >= max_scroll.saturating_sub(threshold) {
-            self.chat_state.is_user_scrolling = false;
-            self.chat_state.scroll_offset = max_scroll; // Snap to bottom
+        let threshold = UI_STATUS_MESSAGE_THRESHOLD;
+        if self.ui_state.chat_state.scroll_offset >= max_scroll.saturating_sub(threshold) {
+            self.ui_state.chat_state.is_user_scrolling = false;
+            self.ui_state.chat_state.scroll_offset = max_scroll; // Snap to bottom
         }
     }
 
@@ -339,23 +699,23 @@ impl App {
 
     /// Cycle to the next operation mode
     pub fn cycle_mode(&mut self) {
-        self.operation_mode = self.operation_mode.cycle();
-        self.bypass_confirmed = false; // Reset confirmation flag when changing modes
-        self.set_status(format!("Mode: {}", self.operation_mode.display_name()));
+        self.operation_state.operation_mode = self.operation_state.operation_mode.cycle();
+        self.operation_state.bypass_confirmed = false; // Reset confirmation flag when changing modes
+        self.set_status(format!("Mode: {}", self.operation_state.operation_mode.display_name()));
     }
 
     /// Cycle to the previous operation mode
     pub fn cycle_mode_reverse(&mut self) {
-        self.operation_mode = self.operation_mode.cycle_reverse();
-        self.bypass_confirmed = false;
-        self.set_status(format!("Mode: {}", self.operation_mode.display_name()));
+        self.operation_state.operation_mode = self.operation_state.operation_mode.cycle_reverse();
+        self.operation_state.bypass_confirmed = false;
+        self.set_status(format!("Mode: {}", self.operation_state.operation_mode.display_name()));
     }
 
     /// Set a specific operation mode
     pub fn set_mode(&mut self, mode: OperationMode) {
-        if self.operation_mode != mode {
+        if self.operation_state.operation_mode != mode {
             // If switching away from PlanMode and a plan is awaiting approval, cancel it
-            if self.operation_mode == OperationMode::PlanMode && self.awaiting_plan_approval {
+            if self.operation_state.operation_mode == OperationMode::PlanMode && self.app_state.is_awaiting_plan_approval() {
                 self.cancel_plan();
                 self.set_status(format!(
                     "Plan cancelled - switched to {}",
@@ -363,15 +723,15 @@ impl App {
                 ));
             }
 
-            self.operation_mode = mode;
-            self.bypass_confirmed = false;
+            self.operation_state.operation_mode = mode;
+            self.operation_state.bypass_confirmed = false;
             self.set_status(format!("Mode: {}", mode.display_name()));
         }
     }
 
     /// Toggle bypass mode (Ctrl+Y shortcut)
     pub fn toggle_bypass_mode(&mut self) {
-        if self.operation_mode == OperationMode::BypassAll {
+        if self.operation_state.operation_mode == OperationMode::BypassAll {
             self.set_mode(OperationMode::Normal);
         } else {
             self.set_mode(OperationMode::BypassAll);
@@ -381,7 +741,7 @@ impl App {
     /// Build message history for sending to the model
     /// Includes only user and assistant messages (not system messages from the UI)
     pub fn build_message_history(&self) -> Vec<ChatMessage> {
-        self.messages
+        self.session_state.messages
             .iter()
             .filter(|msg| msg.role == MessageRole::User || msg.role == MessageRole::Assistant)
             .cloned()
@@ -397,11 +757,12 @@ impl App {
     ) -> Vec<ChatMessage> {
         use crate::utils::Tokenizer;
 
-        let tokenizer = Tokenizer::new(&self.model_name);
+        let tokenizer = Tokenizer::new(&self.model_state.model_name);
         let available_tokens = max_context_tokens.saturating_sub(reserve_tokens);
 
         // Get all relevant messages
         let all_messages: Vec<ChatMessage> = self
+            .session_state
             .messages
             .iter()
             .filter(|msg| msg.role == MessageRole::User || msg.role == MessageRole::Assistant)
@@ -479,17 +840,17 @@ impl App {
     /// Load a conversation history
     pub fn load_conversation(&mut self, conversation: ConversationHistory) {
         // Load messages from the conversation
-        self.messages = conversation.messages.clone();
-        self.current_conversation = Some(conversation);
+        self.session_state.messages = conversation.messages.clone();
+        self.session_state.current_conversation = Some(conversation);
         self.set_status("Conversation loaded");
     }
 
     /// Save the current conversation
     pub fn save_conversation(&mut self) -> anyhow::Result<()> {
-        if let Some(ref manager) = self.conversation_manager {
-            if let Some(ref mut conv) = self.current_conversation {
+        if let Some(ref manager) = self.session_state.conversation_manager {
+            if let Some(ref mut conv) = self.session_state.current_conversation {
                 // Update messages in conversation
-                conv.messages = self.messages.clone();
+                conv.messages = self.session_state.messages.clone();
                 manager.save_conversation(conv)?;
                 self.set_status("Conversation saved");
             }
@@ -499,7 +860,7 @@ impl App {
 
     /// Auto-save the conversation (called on exit)
     pub fn auto_save_conversation(&mut self) {
-        if self.messages.is_empty() {
+        if self.session_state.messages.is_empty() {
             return; // Don't save empty conversations
         }
 
@@ -510,86 +871,187 @@ impl App {
 
     /// Toggle diagnostics display mode
     pub fn toggle_diagnostics(&mut self) {
-        self.diagnostics_mode = match self.diagnostics_mode {
+        self.ui_state.diagnostics_mode = match self.ui_state.diagnostics_mode {
             DiagnosticsMode::Hidden => DiagnosticsMode::Compact,
             DiagnosticsMode::Compact => DiagnosticsMode::Detailed,
             DiagnosticsMode::Detailed => DiagnosticsMode::Hidden,
         };
 
-        self.set_status(format!("Diagnostics: {:?}", self.diagnostics_mode));
+        self.set_status(format!("Diagnostics: {:?}", self.ui_state.diagnostics_mode));
     }
 
     /// Update hardware stats
     pub fn update_hardware_stats(&mut self, stats: HardwareStats) {
-        self.hardware_stats = Some(stats);
+        self.ui_state.hardware_stats = Some(stats);
     }
+
+    // ===== Generation State Transitions =====
+
+    /// Start generation - transitions to Generating state with Sending status
+    pub fn start_generation(&mut self, abort_handle: tokio::task::AbortHandle) {
+        self.app_state = AppState::Generating {
+            status: GenerationStatus::Sending,
+            start_time: std::time::Instant::now(),
+            tokens_received: 0,
+            abort_handle: Some(abort_handle),
+        };
+    }
+
+    /// Transition from Sending to Thinking status
+    pub fn transition_to_thinking(&mut self) {
+        if let AppState::Generating { start_time, tokens_received, ref abort_handle, .. } = self.app_state {
+            self.app_state = AppState::Generating {
+                status: GenerationStatus::Thinking,
+                start_time,
+                tokens_received,
+                abort_handle: abort_handle.clone(),
+            };
+        }
+    }
+
+    /// Transition from Thinking/Sending to Streaming status
+    pub fn transition_to_streaming(&mut self) {
+        if let AppState::Generating { start_time, tokens_received, ref abort_handle, .. } = self.app_state {
+            self.app_state = AppState::Generating {
+                status: GenerationStatus::Streaming,
+                start_time,
+                tokens_received,
+                abort_handle: abort_handle.clone(),
+            };
+        }
+    }
+
+    /// Increment tokens received during generation
+    pub fn increment_tokens(&mut self, count: usize) {
+        if let AppState::Generating { status, start_time, tokens_received, ref abort_handle } = self.app_state {
+            self.app_state = AppState::Generating {
+                status,
+                start_time,
+                tokens_received: tokens_received + count,
+                abort_handle: abort_handle.clone(),
+            };
+        }
+    }
+
+    /// Stop generation - transitions back to Idle state
+    pub fn stop_generation(&mut self) {
+        self.app_state = AppState::Idle;
+    }
+
+    /// Abort generation and return the abort handle if present
+    pub fn abort_generation(&mut self) -> Option<tokio::task::AbortHandle> {
+        if let AppState::Generating { abort_handle, .. } = &mut self.app_state {
+            let handle = abort_handle.take();
+            self.app_state = AppState::Idle;
+            handle
+        } else {
+            None
+        }
+    }
+
+    // ===== Action Confirmation State Transitions =====
+
+    /// Set pending action - transitions to AwaitingActionConfirmation state
+    pub fn set_pending_action(&mut self, action: crate::agents::AgentAction, executor: crate::agents::ModeAwareExecutor) {
+        self.app_state = AppState::AwaitingActionConfirmation {
+            action,
+            executor,
+        };
+    }
+
+    /// Clear pending action - transitions back to Idle state
+    pub fn clear_pending_action(&mut self) {
+        self.app_state = AppState::Idle;
+    }
+
+    // ===== Plan State Transitions =====
 
     /// Set active plan and enter approval state
     pub fn set_plan(&mut self, plan: Plan) {
-        self.active_plan = Some(plan);
-        self.awaiting_plan_approval = true;
-        self.plan_execution_index = None;
-        self.set_status("Plan ready - Alt+Y to approve, Alt+N to cancel");
+        self.app_state = AppState::AwaitingPlanApproval {
+            plan: plan.clone(),
+            explanation: plan.explanation.clone(),
+        };
+        self.operation_state.plan_execution_index = None;
+        self.set_status("Plan ready - Ctrl+Y to approve, Ctrl+N to cancel");
     }
 
     /// Cancel the active plan
     pub fn cancel_plan(&mut self) {
-        self.active_plan = None;
-        self.awaiting_plan_approval = false;
-        self.plan_execution_index = None;
-        self.plan_mode_active_for_generation = false;
+        self.app_state = AppState::Idle;
+        self.operation_state.plan_execution_index = None;
+        self.operation_state.plan_mode_active_for_generation = false;
         self.set_status("Plan cancelled");
     }
 
     /// Start executing the active plan
     pub fn start_plan_execution(&mut self) {
-        if self.active_plan.is_some() {
-            self.plan_execution_index = Some(0);
-            self.awaiting_plan_approval = false;
+        if let AppState::AwaitingPlanApproval { plan, .. } = &self.app_state {
+            let plan_clone = plan.clone();
+            self.app_state = AppState::ExecutingPlan {
+                plan: plan_clone,
+                current_step: 0,
+                start_time: std::time::Instant::now(),
+            };
+            self.operation_state.plan_execution_index = Some(0);
             self.set_status("Executing plan...");
         }
     }
 
     /// Get the next pending action from the plan
     pub fn plan_next_action(&self) -> Option<&crate::agents::PlannedAction> {
-        self.active_plan
-            .as_ref()
+        self.app_state
+            .active_plan()
             .and_then(|plan| plan.next_pending_action().map(|(_, action)| action))
     }
 
     /// Mark current plan action as completed
     pub fn mark_plan_action_completed(&mut self, result: Option<crate::agents::ActionResult>) {
-        if let Some(plan) = self.active_plan.as_mut() {
-            if let Some(index) = self.plan_execution_index {
-                plan.update_action_status(
+        if let AppState::ExecutingPlan { plan, current_step, start_time } = &mut self.app_state {
+            let mut plan_clone = plan.clone();
+            if let Some(index) = self.operation_state.plan_execution_index {
+                plan_clone.update_action_status(
                     index,
                     crate::agents::ActionStatus::Completed,
                     result,
                     None,
                 );
-                self.plan_execution_index = Some(index + 1);
+                self.operation_state.plan_execution_index = Some(index + 1);
+                // Update the plan in the state
+                self.app_state = AppState::ExecutingPlan {
+                    plan: plan_clone,
+                    current_step: *current_step + 1,
+                    start_time: *start_time,
+                };
             }
         }
     }
 
     /// Mark current plan action as failed
     pub fn mark_plan_action_failed(&mut self, error: String) {
-        if let Some(plan) = self.active_plan.as_mut() {
-            if let Some(index) = self.plan_execution_index {
-                plan.update_action_status(
+        if let AppState::ExecutingPlan { plan, current_step, start_time } = &mut self.app_state {
+            let mut plan_clone = plan.clone();
+            if let Some(index) = self.operation_state.plan_execution_index {
+                plan_clone.update_action_status(
                     index,
                     crate::agents::ActionStatus::Failed,
                     None,
                     Some(error),
                 );
-                self.plan_execution_index = Some(index + 1);
+                self.operation_state.plan_execution_index = Some(index + 1);
+                // Update the plan in the state
+                self.app_state = AppState::ExecutingPlan {
+                    plan: plan_clone,
+                    current_step: *current_step + 1,
+                    start_time: *start_time,
+                };
             }
         }
     }
 
     /// Check if plan execution is complete
     pub fn is_plan_complete(&self) -> bool {
-        if let Some(plan) = self.active_plan.as_ref() {
+        if let Some(plan) = self.app_state.active_plan() {
             plan.stats().is_complete()
         } else {
             false
@@ -598,7 +1060,7 @@ impl App {
 
     /// Get plan statistics
     pub fn get_plan_stats(&self) -> Option<crate::agents::PlanStats> {
-        self.active_plan.as_ref().map(|plan| plan.stats())
+        self.app_state.active_plan().map(|plan| plan.stats())
     }
 }
 

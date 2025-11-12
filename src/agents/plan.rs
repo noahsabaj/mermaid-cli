@@ -157,6 +157,7 @@ impl Plan {
     }
 
     /// Format plan actions for display as markdown
+    #[allow(dead_code)]
     fn format_display(actions: &[PlannedAction]) -> String {
         Self::format_display_actions(actions)
     }
@@ -232,7 +233,7 @@ impl Plan {
             output.push('\n');
         }
 
-        output.push_str("Approve with Alt+Y, Cancel with Alt+N");
+        output.push_str("Approve with Ctrl+Y, Cancel with Ctrl+N");
         output
     }
 

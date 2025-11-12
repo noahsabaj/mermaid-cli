@@ -2,6 +2,15 @@ use anyhow::{Context, Result};
 use git2::{DiffOptions, Repository, StatusOptions};
 use std::path::Path;
 
+/// Get git diff for the current repository asynchronously (for parallel operations)
+pub async fn get_diff_async(path: Option<String>) -> Result<String> {
+    tokio::task::spawn_blocking(move || {
+        get_diff(path.as_deref())
+    })
+    .await
+    .context("Failed to spawn blocking task for git diff")?
+}
+
 /// Get git diff for the current repository
 pub fn get_diff(path: Option<&str>) -> Result<String> {
     let repo = Repository::open_from_env()

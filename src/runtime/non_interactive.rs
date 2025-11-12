@@ -75,7 +75,7 @@ impl NonInteractiveRunner {
 
         // Load project context
         let loader = ContextLoader::new()?;
-        let context = loader.load_context(&project_path)?;
+        let context = loader.load_context(&project_path).await?;
 
         Ok(Self {
             model: Arc::new(RwLock::new(model)),

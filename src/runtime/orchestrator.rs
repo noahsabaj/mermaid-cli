@@ -151,10 +151,10 @@ impl Orchestrator {
         // Set up project context
         let project_path = self.cli.path.clone().unwrap_or_else(|| PathBuf::from("."));
 
-        // Load project structure synchronously (file paths only, no contents)
+        // Load project structure asynchronously (file paths only, no contents)
         current_step += 1;
         log_progress(current_step, total_steps, "Loading project structure");
-        let mut context_manager = self.load_project_structure(&project_path)?;
+        let context_manager = self.load_project_structure(&project_path).await?;
 
         // Build context with file tree (for immediate injection into model)
         current_step += 1;
@@ -207,8 +207,8 @@ impl Orchestrator {
         result
     }
 
-    /// Load project structure synchronously (file paths only)
-    fn load_project_structure(
+    /// Load project structure asynchronously (file paths only)
+    async fn load_project_structure(
         &self,
         project_path: &PathBuf,
     ) -> Result<ContextManager> {
@@ -218,7 +218,7 @@ impl Orchestrator {
         );
 
         let mut manager = ContextManager::new(project_path);
-        manager.reload()?;
+        manager.reload().await?;
 
         log_info(
             "STATS",

@@ -32,7 +32,19 @@ impl FileCollector {
 
     /// Collect all relevant files from the project
     /// Includes backpressure: stops early if file limit is reached
-    pub fn collect_files(&self, root_path: &Path) -> Result<Vec<PathBuf>> {
+    pub async fn collect_files(&self, root_path: &Path) -> Result<Vec<PathBuf>> {
+        let root_path = root_path.to_path_buf();
+        let config = self.config.clone();
+
+        // Run file collection in blocking thread pool (ignore crate is sync-only)
+        tokio::task::spawn_blocking(move || {
+            Self::collect_files_sync(&config, &root_path)
+        })
+        .await?
+    }
+
+    /// Synchronous file collection (called from spawn_blocking)
+    fn collect_files_sync(config: &CollectorConfig, root_path: &Path) -> Result<Vec<PathBuf>> {
         let mut priority_files = Vec::new();
         let mut other_files = Vec::new();
 
@@ -48,18 +60,18 @@ impl FileCollector {
             .git_exclude(true);
 
         // Add custom ignore patterns
-        for pattern in &self.config.ignore_patterns {
+        for pattern in &config.ignore_patterns {
             walker.add_custom_ignore_filename(pattern);
         }
 
         // Walk the directory with backpressure
         // Stop early if we've collected enough files (saves time on huge repos)
-        let file_limit_threshold = self.config.max_files * 2; // Collect 2x limit to account for prioritization
+        let file_limit_threshold = config.max_files * 2; // Collect 2x limit to account for prioritization
 
         for result in walker.build() {
             let entry = result?;
 
-            if !self.should_include_entry(&entry) {
+            if !Self::should_include_entry(&entry) {
                 continue;
             }
 
@@ -67,7 +79,7 @@ impl FileCollector {
             if path.is_file() {
                 // Check file size
                 if let Ok(metadata) = fs::metadata(path) {
-                    if metadata.len() > self.config.max_file_size as u64 {
+                    if metadata.len() > config.max_file_size as u64 {
                         continue;
                     }
                 }
@@ -75,8 +87,7 @@ impl FileCollector {
                 // Prioritize certain extensions
                 if let Some(ext) = path.extension() {
                     let ext_str = ext.to_string_lossy().to_lowercase();
-                    if self
-                        .config
+                    if config
                         .priority_extensions
                         .iter()
                         .any(|&e| e == ext_str.as_str())
@@ -105,7 +116,7 @@ impl FileCollector {
     }
 
     /// Check if a directory entry should be included
-    fn should_include_entry(&self, entry: &DirEntry) -> bool {
+    fn should_include_entry(entry: &DirEntry) -> bool {
         let path = entry.path();
 
         // Skip directories we don't want to traverse

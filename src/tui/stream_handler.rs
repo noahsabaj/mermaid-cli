@@ -1,10 +1,17 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
 
 use crate::agents::{self, AgentAction, Plan};
 use crate::models::MessageRole;
 use crate::tui::app::GenerationStatus;
 use crate::tui::App;
+
+/// Global tokenizer instance (lazy initialized)
+static TOKENIZER: Lazy<Mutex<Option<tiktoken_rs::CoreBPE>>> = Lazy::new(|| {
+    Mutex::new(tiktoken_rs::get_bpe_from_model("gpt-3.5-turbo").ok())
+});
 
 /// Maximum tokens allowed in a single response to prevent memory exhaustion
 /// Corresponds to roughly 400,000 characters (conservative estimate)
@@ -41,7 +48,7 @@ pub async fn process_stream_chunks(
     app: &mut App,
     rx: &mut mpsc::Receiver<String>,
 ) -> Result<StreamStatus> {
-    if !app.is_generating {
+    if !app.app_state.is_generating() {
         return Ok(StreamStatus::Streaming);
     }
 
@@ -52,14 +59,13 @@ pub async fn process_stream_chunks(
             // Extract status between [STATUS: and ]
             if let Some(end_idx) = chunk.find(']') {
                 let status_text = chunk[8..end_idx].to_string(); // Skip "[STATUS:"
-                app.custom_status = Some(status_text);
+                app.status_state.custom_status = Some(status_text);
                 // Remove the status marker from the chunk so it doesn't get added to response
                 let remaining = chunk[end_idx + 1..].to_string();
                 if remaining.is_empty() {
                     continue; // Skip if nothing left after status marker
                 }
                 // Process the remaining part of the chunk
-                let chunk = remaining;
                 // Fall through to process rest of chunk
             } else {
                 continue; // Incomplete status marker, skip for now
@@ -71,21 +77,19 @@ pub async fn process_stream_chunks(
             let is_feedback_complete = chunk.contains("[FEEDBACK_COMPLETE]");
 
             // Generation complete - reset all status fields
-            app.is_generating = false;
-            app.generation_status = GenerationStatus::Idle;
-            app.generation_start_time = None;
-            app.custom_status = None;
+            app.stop_generation();
+            app.status_state.custom_status = None;
 
             // Clear feedback flags if this was a feedback response
             if is_feedback_complete {
-                app.pending_file_read = false;
-                app.reading_file_status = None;
+                app.operation_state.pending_file_read = false;
+                app.operation_state.reading_file_status = None;
                 return Ok(StreamStatus::FeedbackComplete);
             }
 
             // Also clear any lingering file read status on normal completion
-            if !app.pending_file_read {
-                app.reading_file_status = None;
+            if !app.operation_state.pending_file_read {
+                app.operation_state.reading_file_status = None;
             }
 
             // Add the accumulated response from streaming
@@ -96,7 +100,7 @@ pub async fn process_stream_chunks(
                 let actions = agents::parse_actions(&response_text);
 
                 // Check if we're in PlanMode
-                if app.operation_mode.is_planning_only() {
+                if app.operation_state.operation_mode.is_planning_only() {
                     // Extract explanation text (everything except action blocks)
                     let explanation = agents::strip_action_blocks(&response_text);
                     let explanation = if explanation.is_empty() {
@@ -111,7 +115,7 @@ pub async fn process_stream_chunks(
                     // Add the full response as a message (will show explanation + plan together)
                     if !actions.is_empty() || explanation.is_some() {
                         let plan = Plan::with_explanation(explanation, actions);
-                        app.plan_mode_active_for_generation = true;
+                        app.operation_state.plan_mode_active_for_generation = true;
                         // Add plan display as assistant message (combines explanation + action summary)
                         app.add_message(MessageRole::Assistant, plan.display_text.clone());
                         return Ok(StreamStatus::PlanReady { plan });
@@ -128,11 +132,11 @@ pub async fn process_stream_chunks(
                     .any(|a| matches!(a, AgentAction::ReadFile { .. }));
 
                 if has_feedback_actions {
-                    app.pending_file_read = true;
+                    app.operation_state.pending_file_read = true;
                     // Extract the model's intent from text before [FILE_READ]
-                    app.reading_file_status = extract_reading_intent(&response_text);
-                    if app.reading_file_status.is_some() {
-                        app.status_timestamp = Some(std::time::Instant::now());
+                    app.operation_state.reading_file_status = extract_reading_intent(&response_text);
+                    if app.operation_state.reading_file_status.is_some() {
+                        app.status_state.status_timestamp = Some(std::time::Instant::now());
                     }
                 }
 
@@ -147,10 +151,8 @@ pub async fn process_stream_chunks(
         } else if chunk.starts_with("[ERROR]:") {
             // Error during generation
             let error_msg = chunk.trim_start_matches("[ERROR]:").trim().to_string();
-            app.is_generating = false;
-            app.generation_status = GenerationStatus::Idle;
-            app.generation_start_time = None;
-            app.custom_status = None;
+            app.stop_generation();
+            app.status_state.custom_status = None;
             app.current_response.clear();
             app.set_status(format!("[ERROR] {}", error_msg));
             return Ok(StreamStatus::Error(error_msg));
@@ -159,7 +161,7 @@ pub async fn process_stream_chunks(
             let json_str = chunk.trim_start_matches("[HARDWARE_STATS]:").trim();
             if let Ok(stats) = serde_json::from_str::<crate::diagnostics::HardwareStats>(json_str) {
                 // Update app.hardware_stats directly
-                app.hardware_stats = Some(stats);
+                app.ui_state.hardware_stats = Some(stats);
             }
             continue; // Don't add to response
         } else {
@@ -168,13 +170,13 @@ pub async fn process_stream_chunks(
             app.current_response.push_str(&chunk);
 
             // Transition to Streaming on first content chunk (from Sending or Thinking)
-            if app.generation_status != GenerationStatus::Streaming {
-                app.generation_status = GenerationStatus::Streaming;
+            if app.app_state.generation_status() != Some(GenerationStatus::Streaming) {
+                app.transition_to_streaming();
             }
 
-            // Estimate tokens in this chunk (simple: ~4 chars per token)
-            let chunk_tokens = (chunk.len() + 3) / 4; // Round up
-            app.tokens_received += chunk_tokens;
+            // Count actual tokens in this chunk using tiktoken
+            let chunk_tokens = count_tokens(&chunk);
+            app.increment_tokens(chunk_tokens);
 
             // Check response size periodically to prevent memory exhaustion
             // Only check every N characters to avoid excessive computation
@@ -189,34 +191,51 @@ pub async fn process_stream_chunks(
     Ok(StreamStatus::Streaming)
 }
 
+/// Count tokens in text using tiktoken (with fallback to estimation)
+fn count_tokens(text: &str) -> usize {
+    if let Ok(tokenizer_lock) = TOKENIZER.lock() {
+        if let Some(bpe) = tokenizer_lock.as_ref() {
+            // Use actual token count from tiktoken
+            bpe.encode_ordinary(text).len()
+        } else {
+            // Fallback to estimation if tokenizer unavailable
+            (text.len() + 3) / 4
+        }
+    } else {
+        // Fallback to estimation if lock poisoned
+        (text.len() + 3) / 4
+    }
+}
+
 /// Check if response has exceeded token limit and handle appropriately
 ///
 /// This function:
-/// 1. Estimates token count of current response
+/// 1. Counts actual tokens using tiktoken
 /// 2. Warns user if approaching limit (90%)
 /// 3. Truncates response if limit exceeded
-/// 4. Uses simple character-based estimation to avoid expensive token counting
 fn check_and_handle_response_size_limit(app: &mut App) {
-    // Use simple estimation: ~4 characters per token (conservative for safety)
-    let estimated_tokens = app.current_response.len() / 4;
+    // Use actual token count from tiktoken
+    let actual_tokens = count_tokens(&app.current_response);
 
-    if estimated_tokens > MAX_RESPONSE_TOKENS {
+    if actual_tokens > MAX_RESPONSE_TOKENS {
         // Truncate response to fit within limit (leave space for action markers)
-        let max_chars = (MAX_RESPONSE_TOKENS * 4) - 100;
-        if app.current_response.len() > max_chars {
-            app.current_response.truncate(max_chars);
-            app.current_response
-                .push_str("\n\n[TRUNCATED: Response exceeded token limit]\n");
-            app.set_status(format!(
-                "[WARNING] Response truncated ({}+ tokens limit reached)",
-                MAX_RESPONSE_TOKENS
-            ));
+        // Start by removing tokens from the end until we're under the limit
+        let mut truncated = app.current_response.clone();
+        while count_tokens(&truncated) > (MAX_RESPONSE_TOKENS - 50) && !truncated.is_empty() {
+            truncated.pop();
         }
-    } else if estimated_tokens > (MAX_RESPONSE_TOKENS * 9 / 10) {
+        app.current_response = truncated;
+        app.current_response
+            .push_str("\n\n[TRUNCATED: Response exceeded token limit]\n");
+        app.set_status(format!(
+            "[WARNING] Response truncated ({} tokens limit reached)",
+            MAX_RESPONSE_TOKENS
+        ));
+    } else if actual_tokens > (MAX_RESPONSE_TOKENS * 9 / 10) {
         // Warn when approaching limit (90%)
         app.set_status(format!(
-            "[WARNING] Large response (~{} tokens). Still accepting chunks...",
-            estimated_tokens
+            "[WARNING] Large response ({} tokens). Still accepting chunks...",
+            actual_tokens
         ));
     }
 }

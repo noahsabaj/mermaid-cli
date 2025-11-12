@@ -24,8 +24,8 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     Tag::Heading { level, .. } => {
                         // Start new line for headers
                         if !current_line_spans.is_empty() {
-                            lines.push(Line::from(current_line_spans.clone()));
-                            current_line_spans.clear();
+                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+
                         }
 
                         // Add blank line before heading (except for first heading)
@@ -54,8 +54,8 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         code_block_content.clear();
                         // Start new line for code block
                         if !current_line_spans.is_empty() {
-                            lines.push(Line::from(current_line_spans.clone()));
-                            current_line_spans.clear();
+                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+
                         }
                         // Add code block header
                         let lang = match kind {
@@ -75,8 +75,8 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     Tag::List(_) => {
                         list_depth += 1;
                         if !current_line_spans.is_empty() {
-                            lines.push(Line::from(current_line_spans.clone()));
-                            current_line_spans.clear();
+                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+
                         }
                         style_stack.last().copied().unwrap_or_default()
                     },
@@ -97,8 +97,8 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     },
                     Tag::BlockQuote(_) => {
                         if !current_line_spans.is_empty() {
-                            lines.push(Line::from(current_line_spans.clone()));
-                            current_line_spans.clear();
+                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+
                         }
                         current_line_spans
                             .push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
@@ -115,16 +115,16 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                 match tag {
                     TagEnd::Heading(_) => {
                         if !current_line_spans.is_empty() {
-                            lines.push(Line::from(current_line_spans.clone()));
-                            current_line_spans.clear();
+                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+
                         }
                         // Add blank line after heading for spacing
                         lines.push(Line::from(""));
                     },
                     TagEnd::Paragraph | TagEnd::Item => {
                         if !current_line_spans.is_empty() {
-                            lines.push(Line::from(current_line_spans.clone()));
-                            current_line_spans.clear();
+                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+
                         }
                     },
                     TagEnd::CodeBlock => {
@@ -151,8 +151,8 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     },
                     TagEnd::BlockQuote(_) => {
                         if !current_line_spans.is_empty() {
-                            lines.push(Line::from(current_line_spans.clone()));
-                            current_line_spans.clear();
+                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+
                         }
                     },
                     _ => {},
@@ -174,8 +174,8 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
             },
             Event::SoftBreak | Event::HardBreak => {
                 if !current_line_spans.is_empty() {
-                    lines.push(Line::from(current_line_spans.clone()));
-                    current_line_spans.clear();
+                    lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+
                 }
             },
             _ => {},

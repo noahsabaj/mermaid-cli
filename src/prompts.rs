@@ -268,7 +268,7 @@ pub const PLAN_MODE_SUFFIX: &str = r#"
 You are currently in Plan Mode. When responding:
 1. First explain what you plan to do and why
 2. Then provide the action blocks to accomplish it
-3. The user will review your plan and either approve it (Alt+Y) or cancel (Alt+N) before any execution
+3. The user will review your plan and either approve it (Ctrl+Y) or cancel (Ctrl+N) before any execution
 
 Format your response like this:
 "I'll [describe your goal]. Here's my plan:

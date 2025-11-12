@@ -1,8 +1,8 @@
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Constraint, Rect},
-    style::{Color, Style, Stylize},
-    widgets::{Block, Borders, Cell, Row, StatefulWidget, Table, TableState, Widget},
+    layout::{Constraint, Rect},
+    style::{Color, Style},
+    widgets::{Block, Borders, Cell, Row, StatefulWidget, Table, TableState},
 };
 use std::path::Path;
 

@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Stylize};
+use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
 /// Theme configuration for the TUI
@@ -309,11 +309,13 @@ impl Theme {
 }
 
 /// Theme manager for handling theme switching
+#[allow(dead_code)]
 pub struct ThemeManager {
     current_theme: Theme,
     available_themes: Vec<Theme>,
 }
 
+#[allow(dead_code)]
 impl ThemeManager {
     pub fn new() -> Self {
         Self {

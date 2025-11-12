@@ -18,6 +18,7 @@ pub struct SearchResult {
 struct SearxngResponse {
     results: Vec<SearxngResult>,
     #[serde(default)]
+    #[allow(dead_code)]
     answer: Option<String>,
 }
 
@@ -28,11 +29,13 @@ struct SearxngResult {
     content: String,
 }
 
+use std::sync::Arc;
+
 /// Web search client that queries local Searxng instance
 pub struct WebSearchClient {
     client: Client,
     searxng_url: String,
-    cache: HashMap<String, (Vec<SearchResult>, Instant)>,
+    cache: HashMap<String, (Arc<Vec<SearchResult>>, Instant)>,
     cache_ttl: Duration,
 }
 
@@ -51,13 +54,13 @@ impl WebSearchClient {
         &mut self,
         query: &str,
         count: usize,
-    ) -> Result<Vec<SearchResult>> {
+    ) -> Result<Arc<Vec<SearchResult>>> {
         let cache_key = format!("{}:{}", query, count);
 
         // Check cache first
         if let Some((results, timestamp)) = self.cache.get(&cache_key) {
             if timestamp.elapsed() < self.cache_ttl {
-                return Ok(results.clone());
+                return Ok(Arc::clone(results));
             } else {
                 // Cache expired, remove it
                 self.cache.remove(&cache_key);
@@ -66,8 +69,9 @@ impl WebSearchClient {
 
         // Cache miss or expired - fetch fresh
         let results = self.search(query, count).await?;
-        self.cache.insert(cache_key, (results.clone(), Instant::now()));
-        Ok(results)
+        let results_arc = Arc::new(results);
+        self.cache.insert(cache_key, (Arc::clone(&results_arc), Instant::now()));
+        Ok(results_arc)
     }
 
     /// Execute search and fetch full page content

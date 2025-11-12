@@ -1,8 +1,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Rect},
-    style::{Modifier, Style, Stylize},
-    text::{Line, Span},
+    style::{Style, Stylize},
     widgets::{Paragraph, Widget},
 };
 use ratatui_macros::{line, span, text};

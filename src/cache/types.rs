@@ -27,13 +27,6 @@ pub struct CacheEntry<T> {
     pub metadata: CacheMetadata,
 }
 
-/// Cached AST symbols
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedSymbols {
-    pub symbols: Vec<crate::context::Symbol>,
-    pub references: Vec<crate::context::SymbolReference>,
-}
-
 /// Cached token count
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedTokens {

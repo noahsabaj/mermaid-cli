@@ -4,6 +4,7 @@ use crate::tui::OperationMode;
 use anyhow::Result;
 
 /// Mode-aware action executor that respects operation modes
+#[derive(Debug, Clone)]
 pub struct ModeAwareExecutor {
     mode: OperationMode,
     bypass_confirmed: bool,

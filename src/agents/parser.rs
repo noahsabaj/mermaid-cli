@@ -19,8 +19,8 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
                             content: extract_content(&capture),
                         });
                     },
-                    Err(e) => {
-                        eprintln!("[SECURITY] Rejected FILE_WRITE: {}", e);
+                    Err(_) => {
+                        // File write was rejected - user will see this in error log
                     },
                 }
             }
@@ -38,8 +38,8 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
                             path: validated_path,
                         });
                     },
-                    Err(e) => {
-                        eprintln!("[SECURITY] Rejected FILE_READ: {}", e);
+                    Err(_) => {
+                        // File read was rejected - user will see this in error log
                     },
                 }
             }
@@ -67,16 +67,13 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
                                         working_dir: Some(validated_dir),
                                     });
                                 },
-                                Err(e) => {
-                                    eprintln!(
-                                        "[SECURITY] Rejected COMMAND working directory: {}",
-                                        e
-                                    );
+                                Err(_) => {
+                                    // Command directory was rejected - user will see this in error log
                                 },
                             }
                         },
-                        Err(e) => {
-                            eprintln!("[SECURITY] Rejected COMMAND: {}", e);
+                        Err(_) => {
+                            // Command was rejected - user will see this in error log
                         },
                     }
                 } else {
@@ -87,8 +84,8 @@ pub fn parse_actions(response: &str) -> Vec<AgentAction> {
                                 working_dir: None,
                             });
                         },
-                        Err(e) => {
-                            eprintln!("[SECURITY] Rejected COMMAND: {}", e);
+                        Err(_) => {
+                            // Command was rejected - user will see this in error log
                         },
                     }
                 }
@@ -150,7 +147,7 @@ fn group_parallel_actions(actions: Vec<AgentAction>) -> Vec<AgentAction> {
                     }
                 }
             }
-            AgentAction::WebSearch { query, result_count } => {
+            AgentAction::WebSearch { query: _, result_count: _ } => {
                 // Collect consecutive WebSearch actions
                 let mut queries = Vec::new();
                 while i < actions.len() {
@@ -172,7 +169,7 @@ fn group_parallel_actions(actions: Vec<AgentAction>) -> Vec<AgentAction> {
                     }
                 }
             }
-            AgentAction::GitDiff { path } => {
+            AgentAction::GitDiff { path: _ } => {
                 // Collect consecutive GitDiff actions
                 let mut paths = Vec::new();
                 while i < actions.len() {

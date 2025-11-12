@@ -6,7 +6,7 @@ use ratatui::{
 use std::sync::Mutex;
 
 use crate::diagnostics::{render_diagnostics_panel, DiagnosticsMode};
-use crate::tui::app::App;
+use crate::tui::app::{App, GenerationStatus};
 use crate::tui::widgets::{ChatWidget, HeaderWidget, InputState, InputWidget, SidebarWidget, StatusLineWidget, StatusWidget};
 use crate::utils::MutexExt;
 
@@ -112,27 +112,27 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
 
     // Render header using new HeaderWidget
     let header = HeaderWidget {
-        model_name: &app.model_name,
+        model_name: &app.model_state.model_name,
         working_dir: &app.working_dir,
-        theme: &app.theme,
+        theme: &app.ui_state.theme,
     };
     frame.render_widget(header, chunks[0]);
 
     // Use cached content layout
     let content_chunks = {
         let mut cache = LAYOUT_CACHE.lock_mut_safe();
-        cache.get_content_layout(app.show_sidebar, chunks[1])
+        cache.get_content_layout(app.ui_state.show_sidebar, chunks[1])
     };
 
     // Render sidebar if visible using new SidebarWidget
-    if app.show_sidebar {
+    if app.ui_state.show_sidebar {
         let sidebar = SidebarWidget {
             context: &app.context,
-            expanded: app.sidebar_expanded,
+            expanded: app.ui_state.sidebar_expanded,
             working_dir: &app.working_dir,
-            theme: &app.theme,
+            theme: &app.ui_state.theme,
         };
-        frame.render_stateful_widget(sidebar, content_chunks[0], &mut app.sidebar_state);
+        frame.render_stateful_widget(sidebar, content_chunks[0], &mut app.ui_state.sidebar_state);
     }
 
     // Render chat area with horizontal padding using new ChatWidget
@@ -141,30 +141,31 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         vertical: 0,
     });
     let chat_widget = ChatWidget {
-        messages: &app.messages,
+        messages: &app.session_state.messages,
         current_response: &app.current_response,
-        is_generating: app.is_generating,
-        confirmation_state: app.confirmation_state.as_ref(),
-        pending_file_read: app.pending_file_read,
-        reading_file_status: app.reading_file_status.as_deref(),
-        operation_mode: app.operation_mode,
-        theme: &app.theme,
+        is_generating: app.app_state.is_generating(),
+        confirmation_state: app.operation_state.confirmation_state.as_ref(),
+        pending_file_read: app.operation_state.pending_file_read,
+        reading_file_status: app.operation_state.reading_file_status.as_deref(),
+        operation_mode: app.operation_state.operation_mode,
+        theme: &app.ui_state.theme,
     };
-    frame.render_stateful_widget(chat_widget, chat_area, &mut app.chat_state);
+    frame.render_stateful_widget(chat_widget, chat_area, &mut app.ui_state.chat_state);
 
     // Render status line when generating (shows progress: Thinking/Streaming, timer, token count)
-    if app.is_generating {
+    if app.app_state.is_generating() {
         let elapsed_secs = app
-            .generation_start_time
+            .app_state
+            .generation_start_time()
             .map(|start| start.elapsed().as_secs())
             .unwrap_or(0);
 
         let status_line_widget = StatusLineWidget {
-            status: app.generation_status,
-            custom_status: app.custom_status.as_ref(),
+            status: app.app_state.generation_status().unwrap_or(GenerationStatus::Idle),
+            custom_status: app.status_state.custom_status.as_ref(),
             elapsed_secs,
-            tokens_received: app.tokens_received,
-            theme: &app.theme,
+            tokens_received: app.app_state.tokens_received().unwrap_or(0),
+            theme: &app.ui_state.theme,
         };
         frame.render_widget(status_line_widget, chunks[2]);
     }
@@ -173,9 +174,9 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
     let input_widget = InputWidget {
         input: &app.input,
         showing_command_hints: app.input.starts_with(':'),
-        theme: &app.theme,
+        theme: &app.ui_state.theme,
     };
-    frame.render_stateful_widget(input_widget, chunks[3], &mut app.input_state);
+    frame.render_stateful_widget(input_widget, chunks[3], &mut app.ui_state.input_state);
 
     // Set cursor position in input box (visible text cursor)
     let input_area = chunks[3];
@@ -195,17 +196,17 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
 
     // Render status bar using new StatusWidget (now at chunks[4])
     let status_widget = StatusWidget {
-        operation_mode: app.operation_mode,
-        status_message: app.status_message.as_deref(),
-        confirmation_pending: app.confirmation_state.is_some(),
-        is_generating: app.is_generating,
-        theme: &app.theme,
+        operation_mode: app.operation_state.operation_mode,
+        status_message: app.status_state.status_message.as_deref(),
+        confirmation_pending: app.operation_state.confirmation_state.is_some(),
+        is_generating: app.app_state.is_generating(),
+        theme: &app.ui_state.theme,
     };
     frame.render_widget(status_widget, chunks[4]);
 
     // Render diagnostics panel if in detailed mode
-    if app.diagnostics_mode == DiagnosticsMode::Detailed {
-        if let Some(ref stats) = app.hardware_stats {
+    if app.ui_state.diagnostics_mode == DiagnosticsMode::Detailed {
+        if let Some(ref stats) = app.ui_state.hardware_stats {
             render_diagnostics_panel(frame, frame.area(), stats);
         }
     }

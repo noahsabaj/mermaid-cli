@@ -61,6 +61,7 @@ macro_rules! lock_or_panic {
 
 /// Extension trait for RwLock to provide convenient async lock operations
 /// Unlike Mutex, RwLock doesn't poison, so no recovery logic needed
+#[allow(dead_code)]
 pub trait RwLockExt<T> {
     /// Acquire a read lock (shared access, multiple readers allowed)
     async fn read_safe<'a>(&'a self) -> RwLockReadGuard<'a, T>

@@ -1,6 +1,6 @@
 [package]
 name = "mermaid"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
 description = "An open-source, model-agnostic AI pair programmer CLI"
@@ -23,16 +23,6 @@ tui-textarea = "0.7"
 
 # Project context
 ignore = "0.4"  # For smart file tree scanning
-tree-sitter = "0.24"
-tree-sitter-rust = "0.23"
-tree-sitter-javascript = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-typescript = "0.23"
-tree-sitter-go = "0.23"
-tree-sitter-java = "0.23"
-tree-sitter-cpp = "0.23"
-streaming-iterator = "0.1"  # Required for tree-sitter 0.24
-petgraph = "0.6"  # Graph algorithms for PageRank
 
 # Config & Serialization
 serde = { version = "1.0", features = ["derive"] }

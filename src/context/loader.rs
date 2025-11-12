@@ -11,6 +11,7 @@ use super::file_collector::{CollectorConfig, FileCollector};
 use super::project_detector::{FileLoader, ProjectDetector};
 use super::token_counter::TokenCounter;
 use crate::models::ProjectContext;
+use crate::utils::MutexExt;
 
 // Static string slices for configuration (zero-allocation)
 const DEFAULT_PRIORITY_EXTENSIONS: &[&str] = &[
@@ -111,12 +112,12 @@ impl ContextLoader {
     }
 
     /// Load project context from the given path (alias for compatibility)
-    pub fn load(&self, root_path: &std::path::Path) -> Result<ProjectContext> {
-        self.load_context(root_path)
+    pub async fn load(&self, root_path: &std::path::Path) -> Result<ProjectContext> {
+        self.load_context(root_path).await
     }
 
     /// Load only the project structure without file contents (fast)
-    pub fn load_structure(
+    pub async fn load_structure(
         &self,
         root_path: &std::path::Path,
     ) -> Result<crate::models::LazyProjectContext> {
@@ -127,7 +128,7 @@ impl ContextLoader {
             ignore_patterns: self.config.ignore_patterns.clone(),
         };
         let collector = FileCollector::new(collector_config);
-        let files = collector.collect_files(root_path)?;
+        let files = collector.collect_files(root_path).await?;
 
         let lazy_context =
             crate::models::LazyProjectContext::new(root_path.to_string_lossy().to_string(), files);
@@ -136,7 +137,7 @@ impl ContextLoader {
     }
 
     /// Load project context from the given path
-    pub fn load_context(&self, root_path: &std::path::Path) -> Result<ProjectContext> {
+    pub async fn load_context(&self, root_path: &std::path::Path) -> Result<ProjectContext> {
         let mut context = ProjectContext::new(root_path.to_string_lossy().to_string());
 
         // Detect project type
@@ -150,7 +151,7 @@ impl ContextLoader {
             ignore_patterns: self.config.ignore_patterns.clone(),
         };
         let collector = FileCollector::new(collector_config);
-        let files = collector.collect_files(root_path)?;
+        let files = collector.collect_files(root_path).await?;
 
         // Use Mutex-protected state for thread-safe tracking
         let loading_state = Arc::new(Mutex::new(LoadingState::new()));
@@ -166,7 +167,7 @@ impl ContextLoader {
             .filter_map(|file_path| {
                 // Determine token budget for this file
                 let remaining_budget = {
-                    let state = loading_state.lock().unwrap();
+                    let state = loading_state.lock_mut_safe();
                     max_tokens.saturating_sub(state.tokens_used)
                 };
 
@@ -180,7 +181,7 @@ impl ContextLoader {
                     .ok()?;
 
                 // Try to add file with mutex protection
-                let mut state = loading_state.lock().unwrap();
+                let mut state = loading_state.lock_mut_safe();
                 if !state.try_add_file(tokens, max_files, max_tokens) {
                     return None;
                 }
@@ -245,8 +246,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_load_context() {
+    #[tokio::test]
+    async fn test_load_context() {
         let temp_dir = TempDir::new().unwrap();
         let loader = ContextLoader::new().unwrap();
 
@@ -261,7 +262,7 @@ mod tests {
         writeln!(main_file, "fn main() {{\n    println!(\"Hello\");\n}}").unwrap();
 
         // Load context
-        let context = loader.load_context(temp_dir.path()).unwrap();
+        let context = loader.load_context(temp_dir.path()).await.unwrap();
 
         assert_eq!(context.project_type, Some("rust".to_string()));
         assert!(context.files.contains_key("Cargo.toml"));

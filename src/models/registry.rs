@@ -30,7 +30,7 @@ impl std::fmt::Debug for BackendEntry {
 /// Cached model availability information
 #[derive(Clone, Debug)]
 struct ModelCache {
-    models: HashMap<String, String>,
+    models: Arc<HashMap<String, String>>,
     last_updated: std::time::Instant,
 }
 
@@ -96,12 +96,12 @@ impl BackendRegistry {
     }
 
     /// List all available models across all backends
-    pub async fn list_all_models(&self) -> Result<HashMap<String, String>> {
+    pub async fn list_all_models(&self) -> Result<Arc<HashMap<String, String>>> {
         let cache = self.model_cache.read().await;
 
         if let Some(cache) = cache.as_ref() {
             if cache.last_updated.elapsed() < self.cache_ttl {
-                return Ok(cache.models.clone());
+                return Ok(Arc::clone(&cache.models));
             }
         }
 
@@ -122,13 +122,15 @@ impl BackendRegistry {
             }
         }
 
+        let models_arc = Arc::new(models);
+
         let mut cache = self.model_cache.write().await;
         *cache = Some(ModelCache {
-            models: models.clone(),
+            models: Arc::clone(&models_arc),
             last_updated: std::time::Instant::now(),
         });
 
-        Ok(models)
+        Ok(models_arc)
     }
 
     /// Find the best backend for a specific model
@@ -174,7 +176,7 @@ impl BackendRegistry {
 
         let models = self.list_all_models().await?;
 
-        for (available_model, backend_name) in &models {
+        for (available_model, backend_name) in models.iter() {
             if available_model.contains(model_spec) || model_spec.contains(available_model) {
                 let backend = self.get_backend(backend_name)?;
                 return Ok((backend, available_model.clone()));

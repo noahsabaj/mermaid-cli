@@ -5,7 +5,6 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::context::ContextLoader;
@@ -44,11 +43,12 @@ pub async fn run_app_loop(
     let watcher = FileSystemWatcher::new(Path::new("."))?;
     let mut last_refresh = std::time::Instant::now();
 
-    // Start hardware monitoring if available
-    let hardware_monitor = app.hardware_monitor.clone();
+    // Start hardware monitoring if available (with proper cancellation on app exit)
+    let hardware_monitor = app.ui_state.hardware_monitor.clone();
     let hardware_tx = tx.clone();
+    let mut hardware_task_abort: Option<tokio::task::AbortHandle> = None;
     if let Some(monitor) = hardware_monitor {
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
             loop {
                 interval.tick().await;
@@ -64,6 +64,7 @@ pub async fn run_app_loop(
                 }
             }
         });
+        hardware_task_abort = Some(task.abort_handle());
     }
 
     // Start Searxng in the background for web search capability
@@ -81,10 +82,10 @@ pub async fn run_app_loop(
         terminal.draw(|f| render_ui(f, app))?;
 
         // Check if we should transition from Sending to Thinking (after 1 second with no chunks)
-        if app.generation_status == GenerationStatus::Sending {
-            if let Some(start_time) = app.generation_start_time {
+        if app.app_state.generation_status() == Some(GenerationStatus::Sending) {
+            if let Some(start_time) = app.app_state.generation_start_time() {
                 if start_time.elapsed().as_secs() >= 1 {
-                    app.generation_status = GenerationStatus::Thinking;
+                    app.transition_to_thinking();
                 }
             }
         }
@@ -99,6 +100,10 @@ pub async fn run_app_loop(
                     // Continue normal loop
                 },
                 EventAction::Quit => {
+                    // Cancel background tasks before exiting
+                    if let Some(abort_handle) = hardware_task_abort {
+                        abort_handle.abort();
+                    }
                     break;
                 },
                 EventAction::SubmitMessage(input) => {
@@ -167,7 +172,7 @@ pub async fn run_app_loop(
             if !events.is_empty() {
                 // Reload the context to pick up external changes
                 if let Ok(loader) = ContextLoader::new() {
-                    if let Ok(new_context) = loader.load(Path::new(".")) {
+                    if let Ok(new_context) = loader.load(Path::new(".")).await {
                         // Update the context while preserving conversation history
                         app.context.files = new_context.files;
                         app.context.token_count = new_context.token_count;
@@ -179,12 +184,12 @@ pub async fn run_app_loop(
         }
 
         // Clear stale file reading status after 5 seconds
-        if app.reading_file_status.is_some() && !app.is_generating {
-            if let Some(timestamp) = app.status_timestamp {
+        if app.operation_state.reading_file_status.is_some() && !app.app_state.is_generating() {
+            if let Some(timestamp) = app.status_state.status_timestamp {
                 if timestamp.elapsed() >= std::time::Duration::from_secs(5) {
-                    app.reading_file_status = None;
-                    app.pending_file_read = false;
-                    app.status_timestamp = None;
+                    app.operation_state.reading_file_status = None;
+                    app.operation_state.pending_file_read = false;
+                    app.status_state.status_timestamp = None;
                 }
             }
         }
@@ -208,8 +213,8 @@ async fn handle_message_submit(
     viewport_height: u16,
 ) {
     // Clear any stuck status messages when sending new message
-    app.pending_file_read = false;
-    app.reading_file_status = None;
+    app.operation_state.pending_file_read = false;
+    app.operation_state.reading_file_status = None;
 
     // Add timestamp to message for temporal awareness
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
@@ -223,34 +228,28 @@ async fn handle_message_submit(
 
     // Auto-scroll to show the new user message
     app.auto_scroll_to_bottom(viewport_height);
-    app.is_generating = true;
     app.current_response.clear();
 
-    // Initialize generation status tracking
-    app.generation_status = GenerationStatus::Sending;
-    app.generation_start_time = Some(Instant::now());
-    app.tokens_received = 0;
-
     // Save input to history and reset navigation
-    app.input_history.push(input.clone());
-    app.history_index = None;
-    app.history_buffer.clear();
+    app.session_state.input_history.push(input.clone());
+    app.session_state.history_index = None;
+    app.session_state.history_buffer.clear();
 
     // Persist to conversation if available
-    if let Some(ref mut conv) = app.current_conversation {
+    if let Some(ref mut conv) = app.session_state.current_conversation {
         conv.add_to_input_history(input.clone());
-        if let Some(ref manager) = app.conversation_manager {
+        if let Some(ref manager) = app.session_state.conversation_manager {
             let _ = manager.save_conversation(conv);
         }
     }
 
     // Process message asynchronously
-    let model = app.model.clone();
+    let model = app.model_state.model.clone();
     let context = app.context.clone();
     let tx_clone = tx.clone();
     let tx_done = tx.clone();
 
-    let operation_mode = app.operation_mode.clone();
+    let operation_mode = app.operation_state.operation_mode.clone();
 
     let handle = tokio::spawn(async move {
         // Use Plan Mode config if in Plan Mode, otherwise use default
@@ -279,5 +278,6 @@ async fn handle_message_submit(
         }
     });
 
-    app.generation_abort = Some(handle.abort_handle());
+    // Start generation state with abort handle
+    app.start_generation(handle.abort_handle());
 }

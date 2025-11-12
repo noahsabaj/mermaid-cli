@@ -3,6 +3,7 @@
 pub const DEFAULT_LITELLM_PROXY_PORT: u16 = 4000;
 pub const DEFAULT_LITELLM_PROXY_URL: &str = "http://localhost:4000";
 pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
+pub const DEFAULT_SEARXNG_PORT: u16 = 8888;
 
 // Timeouts
 pub const COMMAND_TIMEOUT_SECS: u64 = 30;
@@ -17,6 +18,7 @@ pub const UI_REFRESH_INTERVAL_MS: u64 = 50;
 pub const UI_SCROLL_LINES: u16 = 3;
 pub const UI_DEFAULT_VIEWPORT_HEIGHT: u16 = 20;
 pub const UI_STATUS_MESSAGE_THRESHOLD: u16 = 3; // For auto-scroll detection
+pub const UI_ERROR_LOG_MAX_SIZE: usize = 50; // Maximum number of errors to keep in log
 
 // Model Token Limits
 pub const GPT4_32K_CONTEXT: usize = 32768;

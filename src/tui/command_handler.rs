@@ -19,7 +19,7 @@ pub async fn handle_command(app: &mut App, command: &str) -> Result<()> {
         Some("clear") => handle_clear(app),
         Some("model") => handle_model(app, parts.get(1).copied()).await,
         Some("sidebar") | Some("sb") => handle_sidebar(app),
-        Some("refresh") | Some("r") => handle_refresh(app),
+        Some("refresh") | Some("r") => handle_refresh(app).await,
         Some("save") => handle_save(app, parts.get(1).copied()),
         Some("load") => handle_load(app, parts.get(1).copied()),
         Some("stats") | Some("diag") | Some("diagnostics") => handle_diagnostics(app),
@@ -41,7 +41,7 @@ fn handle_quit(app: &mut App) {
 
 /// Clear chat history
 fn handle_clear(app: &mut App) {
-    app.messages.clear();
+    app.session_state.messages.clear();
     app.set_status("Chat cleared");
 }
 
@@ -76,8 +76,8 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
         match new_model.await {
             Ok(Ok(model)) => {
                 // Update the model and model name
-                *app.model.write().await = model;
-                app.model_name = model_id.clone();
+                *app.model_state.model.write().await = model;
+                app.model_state.model_name = model_id.clone();
                 app.set_status(format!("Switched to model: {}", model_id));
 
                 // Save the model preference to session
@@ -93,7 +93,7 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
             },
         }
     } else {
-        app.set_status(format!("Current model: {}", app.model_name));
+        app.set_status(format!("Current model: {}", app.model_state.model_name));
     }
 }
 
@@ -103,9 +103,9 @@ fn handle_sidebar(app: &mut App) {
 }
 
 /// Refresh file context from disk
-fn handle_refresh(app: &mut App) {
+async fn handle_refresh(app: &mut App) {
     match ContextLoader::new() {
-        Ok(loader) => match loader.load(Path::new(".")) {
+        Ok(loader) => match loader.load(Path::new(".")).await {
             Ok(new_context) => {
                 app.context.files = new_context.files;
                 app.context.token_count = new_context.token_count;
@@ -140,7 +140,7 @@ fn handle_save(app: &mut App, name: Option<&str>) {
 
 /// Load a conversation by name or show selector
 fn handle_load(app: &mut App, name: Option<&str>) {
-    if let Some(ref manager) = app.conversation_manager {
+    if let Some(ref manager) = app.session_state.conversation_manager {
         if let Some(name) = name {
             // Load specific conversation
             match manager.load_conversation(name) {
@@ -187,7 +187,7 @@ fn handle_diagnostics(app: &mut App) {
 
 /// List saved conversations
 fn handle_list(app: &mut App) {
-    if let Some(ref manager) = app.conversation_manager {
+    if let Some(ref manager) = app.session_state.conversation_manager {
         match manager.list_conversations() {
             Ok(conversations) => {
                 if conversations.is_empty() {

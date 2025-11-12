@@ -53,7 +53,7 @@ impl<'a> Widget for StatusWidget<'a> {
         if self.confirmation_pending {
             line1_spans.push(Span::raw(" • "));
             line1_spans.push(Span::styled(
-                "Alt+Y: approve, Alt+N: skip, Alt+P: preview",
+                "Alt+Y: approve, Alt+N: skip, Alt+P: preview (Action Confirmation) | Ctrl+Y/N: Plan Approval",
                 Style::new().fg(self.theme.colors.warning.to_color()).bold(),
             ));
         } else {

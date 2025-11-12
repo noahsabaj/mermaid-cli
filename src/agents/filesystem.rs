@@ -12,7 +12,16 @@ pub fn read_file(path: &str) -> Result<String> {
     fs::read_to_string(&path).with_context(|| format!("Failed to read file: {}", path.display()))
 }
 
-/// Write content to a file
+/// Read a file from the filesystem asynchronously (for parallel operations)
+pub async fn read_file_async(path: String) -> Result<String> {
+    tokio::task::spawn_blocking(move || {
+        read_file(&path)
+    })
+    .await
+    .context("Failed to spawn blocking task for file read")?
+}
+
+/// Write content to a file atomically with timestamped backup
 pub fn write_file(path: &str, content: &str) -> Result<()> {
     let path = normalize_path(path)?;
 
@@ -29,32 +38,59 @@ pub fn write_file(path: &str, content: &str) -> Result<()> {
         })?;
     }
 
-    // Create backup if file exists
+    // Create timestamped backup if file exists
     if path.exists() {
-        let backup_path = format!("{}.backup", path.display());
-        fs::copy(&path, &backup_path)
-            .with_context(|| format!("Failed to create backup of: {}", path.display()))?;
+        create_timestamped_backup(&path)?;
     }
 
-    fs::write(&path, content).with_context(|| format!("Failed to write file: {}", path.display()))
+    // Atomic write: write to temporary file, then rename
+    let temp_path = format!("{}.tmp.{}", path.display(), std::process::id());
+    let temp_path = std::path::PathBuf::from(&temp_path);
+
+    // Write to temporary file
+    fs::write(&temp_path, content).with_context(|| {
+        format!("Failed to write to temporary file: {}", temp_path.display())
+    })?;
+
+    // Atomically rename temp file to target
+    fs::rename(&temp_path, &path).with_context(|| {
+        format!(
+            "Failed to finalize write to: {} (temp file: {})",
+            path.display(),
+            temp_path.display()
+        )
+    })?;
+
+    Ok(())
 }
 
-/// Delete a file
+/// Create a timestamped backup of a file
+/// Format: file.txt.backup.2025-10-20-01-45-32
+fn create_timestamped_backup(path: &std::path::Path) -> Result<()> {
+    let timestamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S");
+    let backup_path = format!("{}.backup.{}", path.display(), timestamp);
+
+    fs::copy(path, &backup_path).with_context(|| {
+        format!(
+            "Failed to create backup of: {} to {}",
+            path.display(),
+            backup_path
+        )
+    })?;
+
+    Ok(())
+}
+
+/// Delete a file with timestamped backup (for recovery)
 pub fn delete_file(path: &str) -> Result<()> {
     let path = normalize_path(path)?;
 
     // Security check
     validate_path(&path)?;
 
-    // Create backup before deletion
+    // Create timestamped backup before deletion
     if path.exists() {
-        let backup_path = format!("{}.deleted", path.display());
-        fs::copy(&path, &backup_path).with_context(|| {
-            format!(
-                "Failed to create backup before deletion: {}",
-                path.display()
-            )
-        })?;
+        create_timestamped_backup(&path)?;
     }
 
     fs::remove_file(&path).with_context(|| format!("Failed to delete file: {}", path.display()))

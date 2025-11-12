@@ -39,6 +39,7 @@ pub fn handle_event(app: &mut App, event: Event, viewport_height: u16) -> Result
 }
 
 /// Handle keyboard events for plan approval/cancellation during plan mode
+/// Uses Ctrl+Y/N to distinguish from action confirmation (Alt+Y/N)
 fn handle_plan_approval_keys(key_code: KeyCode) -> Result<EventAction> {
     match key_code {
         KeyCode::Char('y') | KeyCode::Char('Y') => Ok(EventAction::ApprovePlan),
@@ -55,18 +56,18 @@ fn handle_mouse_event(
 ) -> Result<EventAction> {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            app.scroll_down(3); // Scroll up moves view down
-            app.chat_state.is_user_scrolling = true;
+            app.scroll_up(3); // Scroll wheel up moves view up
+            app.ui_state.chat_state.is_user_scrolling = true;
             Ok(EventAction::Continue)
         },
         MouseEventKind::ScrollDown => {
-            app.scroll_up(3); // Scroll down moves view up
+            app.scroll_down(3); // Scroll wheel down moves view down
 
             // Check if scrolled to bottom
             let max_scroll = app.calculate_max_scroll(viewport_height);
-            if app.chat_state.scroll_offset >= max_scroll.saturating_sub(3) {
-                app.chat_state.is_user_scrolling = false;
-                app.chat_state.scroll_offset = max_scroll;
+            if app.ui_state.chat_state.scroll_offset >= max_scroll.saturating_sub(3) {
+                app.ui_state.chat_state.is_user_scrolling = false;
+                app.ui_state.chat_state.scroll_offset = max_scroll;
             }
             Ok(EventAction::Continue)
         },
@@ -80,13 +81,15 @@ fn handle_key_event(
     key: crossterm::event::KeyEvent,
     _viewport_height: u16,
 ) -> Result<EventAction> {
-    // Handle Alt+key combinations globally for plan approval/cancellation
-    if key.modifiers == KeyModifiers::ALT && app.awaiting_plan_approval {
+    // Handle Ctrl+Y/N for plan approval/cancellation during plan mode
+    // This is separate from action confirmation (Alt+Y/N) to avoid confusion
+    if key.modifiers == KeyModifiers::CONTROL && app.app_state.is_awaiting_plan_approval() {
         return handle_plan_approval_keys(key.code);
     }
 
-    // Handle Alt+key combinations for confirmation
-    if key.modifiers == KeyModifiers::ALT && app.confirmation_state.is_some() {
+    // Handle Alt+Y/N/A/P for action confirmation
+    // Alt distinguishes this from plan approval (Ctrl)
+    if key.modifiers == KeyModifiers::ALT && app.operation_state.confirmation_state.is_some() {
         return handle_confirmation_keys(key.code);
     }
 
@@ -130,19 +133,18 @@ fn handle_escape_key(app: &mut App) -> EventAction {
     use crate::diagnostics::DiagnosticsMode;
 
     // If diagnostics panel is open, close it
-    if app.diagnostics_mode == DiagnosticsMode::Detailed {
-        app.diagnostics_mode = DiagnosticsMode::Compact;
+    if app.ui_state.diagnostics_mode == DiagnosticsMode::Detailed {
+        app.ui_state.diagnostics_mode = DiagnosticsMode::Compact;
         app.set_status("Diagnostics panel closed");
-    } else if app.awaiting_plan_approval {
+    } else if app.app_state.is_awaiting_plan_approval() {
         // Cancel pending plan
         app.cancel_plan();
         return EventAction::Continue;
-    } else if app.is_generating {
+    } else if app.app_state.is_generating() {
         // If generating, abort the generation but keep what was generated
-        if let Some(abort) = app.generation_abort.take() {
+        if let Some(abort) = app.abort_generation() {
             abort.abort();
         }
-        app.is_generating = false;
 
         // Save partial response instead of clearing it
         if !app.current_response.is_empty() {
@@ -164,12 +166,12 @@ fn handle_escape_key(app: &mut App) -> EventAction {
 /// Handle Enter key (submit message or command)
 fn handle_enter_key(app: &mut App) -> Result<EventAction> {
     // If waiting for plan approval, block new messages
-    if app.awaiting_plan_approval {
-        app.set_status("Complete or cancel the plan first (Alt+Y to approve, Alt+N to cancel)");
+    if app.app_state.is_awaiting_plan_approval() {
+        app.set_status("Complete or cancel the plan first (Ctrl+Y to approve, Ctrl+N to cancel)");
         return Ok(EventAction::Continue);
     }
 
-    if !app.input.is_empty() && !app.is_generating {
+    if !app.input.is_empty() && !app.app_state.is_generating() {
         // Check if this is a command (starts with ':')
         if app.input.starts_with(':') {
             let command = app.input.trim_start_matches(':').to_string();
@@ -224,9 +226,9 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
     // Normal character input (no modifiers or only SHIFT for uppercase)
     if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
         // Reset history navigation when user starts typing
-        if app.history_index.is_some() {
-            app.history_index = None;
-            app.history_buffer.clear();
+        if app.session_state.history_index.is_some() {
+            app.session_state.history_index = None;
+            app.session_state.history_buffer.clear();
         }
         app.input.insert(app.cursor_position, c);
         app.cursor_position += 1;
@@ -282,22 +284,22 @@ fn handle_end(app: &mut App) -> EventAction {
 
 /// Navigate to previous input in history (older messages)
 fn navigate_history_backward(app: &mut App) {
-    if app.input_history.is_empty() {
+    if app.session_state.input_history.is_empty() {
         return;
     }
 
-    match app.history_index {
+    match app.session_state.history_index {
         None => {
             // First time pressing up - save current input and go to latest history entry
-            app.history_buffer = app.input.clone();
-            app.history_index = Some(app.input_history.len() - 1);
-            app.input = app.input_history[app.history_index.unwrap()].clone();
+            app.session_state.history_buffer = app.input.clone();
+            app.session_state.history_index = Some(app.session_state.input_history.len() - 1);
+            app.input = app.session_state.input_history[app.session_state.history_index.unwrap()].clone();
             app.cursor_position = app.input.len();
         }
         Some(idx) if idx > 0 => {
             // Go to older message
-            app.history_index = Some(idx - 1);
-            app.input = app.input_history[idx - 1].clone();
+            app.session_state.history_index = Some(idx - 1);
+            app.input = app.session_state.input_history[idx - 1].clone();
             app.cursor_position = app.input.len();
         }
         Some(0) => {
@@ -309,17 +311,17 @@ fn navigate_history_backward(app: &mut App) {
 
 /// Navigate to next input in history (newer messages, or clear at end)
 fn navigate_history_forward(app: &mut App) {
-    match app.history_index {
-        Some(idx) if idx < app.input_history.len() - 1 => {
+    match app.session_state.history_index {
+        Some(idx) if idx < app.session_state.input_history.len() - 1 => {
             // Go to newer message
-            app.history_index = Some(idx + 1);
-            app.input = app.input_history[idx + 1].clone();
+            app.session_state.history_index = Some(idx + 1);
+            app.input = app.session_state.input_history[idx + 1].clone();
             app.cursor_position = app.input.len();
         }
         Some(_) => {
             // At newest - restore draft buffer and exit history mode
-            app.history_index = None;
-            app.input = app.history_buffer.clone();
+            app.session_state.history_index = None;
+            app.input = app.session_state.history_buffer.clone();
             app.cursor_position = app.input.len();
         }
         None => {
@@ -331,7 +333,7 @@ fn navigate_history_forward(app: &mut App) {
 /// Handle Up arrow (navigate history or scroll chat)
 fn handle_up_arrow(app: &mut App) -> EventAction {
     // If not scrolling chat (input is focused), navigate history
-    if !app.chat_state.is_user_scrolling && !app.input_history.is_empty() {
+    if !app.ui_state.chat_state.is_user_scrolling && !app.session_state.input_history.is_empty() {
         navigate_history_backward(app);
         return EventAction::Continue;
     }
@@ -343,7 +345,7 @@ fn handle_up_arrow(app: &mut App) -> EventAction {
 /// Handle Down arrow (navigate history or scroll chat)
 fn handle_down_arrow(app: &mut App) -> EventAction {
     // If not scrolling chat (input is focused), navigate history
-    if !app.chat_state.is_user_scrolling && !app.input_history.is_empty() {
+    if !app.ui_state.chat_state.is_user_scrolling && !app.session_state.input_history.is_empty() {
         navigate_history_forward(app);
         return EventAction::Continue;
     }

@@ -8,7 +8,6 @@ use mermaid::{
     ollama::ensure_model as ensure_ollama_model,
     proxy::{ensure_proxy, is_proxy_running},
     runtime::{NonInteractiveRunner, Orchestrator},
-    searxng::ensure_searxng_running,
     utils::init_logger,
 };
 

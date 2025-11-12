@@ -1,13 +1,11 @@
 use anyhow::Result;
 use directories::ProjectDirs;
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::file_cache::FileCache;
-use super::types::{CacheKey, CachedSymbols, CachedTokens};
-use crate::context::{Symbol, SymbolReference, TreeParser};
+use super::types::{CacheKey, CachedTokens};
 use crate::utils::lock_arc_mutex_safe;
 
 /// Main cache manager for the application
@@ -21,7 +19,6 @@ pub struct CacheManager {
 /// In-memory cache for hot data
 #[derive(Debug, Default)]
 struct MemoryCache {
-    symbols: FxHashMap<CacheKey, CachedSymbols>,
     tokens: FxHashMap<CacheKey, CachedTokens>,
     hits: usize,
     misses: usize,
@@ -47,68 +44,6 @@ impl CacheManager {
             memory_cache,
             cache_dir,
         })
-    }
-
-    /// Get or compute symbols for a file
-    pub fn get_or_compute_symbols(
-        &self,
-        path: &Path,
-        content: &str,
-        parser: &mut TreeParser,
-    ) -> Result<(Vec<Symbol>, Vec<SymbolReference>)> {
-        // Generate cache key
-        let key = FileCache::generate_key(path)?;
-
-        // Check memory cache first
-        {
-            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
-            if let Some(cached) = mem_cache.symbols.get(&key).cloned() {
-                mem_cache.hits += 1;
-                return Ok((cached.symbols, cached.references));
-            }
-        }
-
-        // Check file cache
-        if let Some(cached) = self.file_cache.load::<CachedSymbols>(&key)? {
-            // Validate cache
-            if self.file_cache.is_valid(&key)? {
-                // Store in memory cache
-                let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
-                mem_cache.symbols.insert(key.clone(), cached.clone());
-                mem_cache.hits += 1;
-                return Ok((cached.symbols, cached.references));
-            } else {
-                // Invalid cache, remove it
-                self.file_cache.remove(&key)?;
-            }
-        }
-
-        // Cache miss - compute and cache
-        {
-            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
-            mem_cache.misses += 1;
-        }
-
-        // Parse the file
-        let symbols = parser.parse_file(path, content)?;
-        let references = parser.find_references(path, content).unwrap_or_default();
-
-        // Cache the results
-        let cached = CachedSymbols {
-            symbols: symbols.clone(),
-            references: references.clone(),
-        };
-
-        // Save to file cache
-        self.file_cache.save(&key, &cached)?;
-
-        // Save to memory cache
-        {
-            let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
-            mem_cache.symbols.insert(key, cached);
-        }
-
-        Ok((symbols, references))
     }
 
     /// Get or compute token count for content
@@ -177,46 +112,6 @@ impl CacheManager {
         Ok(count)
     }
 
-    /// Parse multiple files with caching
-    pub fn parse_files_cached(
-        &self,
-        files: &[PathBuf],
-    ) -> Vec<(PathBuf, Vec<Symbol>, Vec<SymbolReference>)> {
-        files
-            .par_iter()
-            .filter_map(|file| {
-                // Read file content
-                match std::fs::read_to_string(file) {
-                    Ok(content) => {
-                        // Create a parser for this thread
-                        match TreeParser::new() {
-                            Ok(mut parser) => {
-                                // Get or compute symbols with caching
-                                match self.get_or_compute_symbols(file, &content, &mut parser) {
-                                    Ok((symbols, references)) => {
-                                        Some((file.clone(), symbols, references))
-                                    },
-                                    Err(e) => {
-                                        eprintln!("Failed to parse {}: {}", file.display(), e);
-                                        None
-                                    },
-                                }
-                            },
-                            Err(e) => {
-                                eprintln!("Failed to create parser for {}: {}", file.display(), e);
-                                None
-                            },
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to read {}: {}", file.display(), e);
-                        None
-                    },
-                }
-            })
-            .collect()
-    }
-
     /// Invalidate cache for a specific file
     pub fn invalidate(&self, path: &Path) -> Result<()> {
         let key = FileCache::generate_key(path)?;
@@ -224,7 +119,6 @@ impl CacheManager {
         // Remove from memory cache
         {
             let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
-            mem_cache.symbols.remove(&key);
             mem_cache.tokens.remove(&key);
         }
 
@@ -239,7 +133,6 @@ impl CacheManager {
         // Clear memory cache
         {
             let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
-            mem_cache.symbols.clear();
             mem_cache.tokens.clear();
             mem_cache.hits = 0;
             mem_cache.misses = 0;
@@ -267,7 +160,7 @@ impl CacheManager {
                 0.0
             };
             (
-                mem_cache.symbols.len() + mem_cache.tokens.len(),
+                mem_cache.tokens.len(),
                 mem_cache.hits,
                 mem_cache.misses,
                 hit_rate,
@@ -425,10 +318,6 @@ mod tests {
         assert_eq!(mem_cache.hits, 0, "Initial hits should be 0");
         assert_eq!(mem_cache.misses, 0, "Initial misses should be 0");
         assert!(
-            mem_cache.symbols.is_empty(),
-            "Initial symbols should be empty"
-        );
-        assert!(
             mem_cache.tokens.is_empty(),
             "Initial tokens should be empty"
         );
@@ -447,21 +336,6 @@ mod tests {
 
         assert_eq!(key.file_path, path, "File path should match");
         assert_eq!(key.file_hash, file_hash, "File hash should match");
-    }
-
-    #[test]
-    fn test_cached_symbols_structure() {
-        // Test CachedSymbols structure
-        let symbols = vec![];
-        let references = vec![];
-
-        let cached = CachedSymbols {
-            symbols: symbols.clone(),
-            references: references.clone(),
-        };
-
-        assert_eq!(cached.symbols.len(), 0, "Should have empty symbols");
-        assert_eq!(cached.references.len(), 0, "Should have empty references");
     }
 
     #[test]

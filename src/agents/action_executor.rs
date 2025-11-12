@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::time::Instant;
+use futures::future::join_all;
 
 use super::executor;
 use super::filesystem;
@@ -118,18 +119,15 @@ async fn execute_parallel_reads(paths: &[String]) -> Result<ActionResult> {
     let mut results = Vec::new();
     let mut failed_items = Vec::new();
 
-    // First attempt: Read files in parallel
+    // Execute all reads in parallel using tokio::join_all
     let futures: Vec<_> = paths
         .iter()
-        .map(|path| filesystem::read_file(path))
+        .map(|path| filesystem::read_file_async(path.clone()))
         .collect();
 
-    let read_results = futures
-        .into_iter()
-        .zip(paths.iter())
-        .collect::<Vec<_>>();
+    let read_results = join_all(futures).await;
 
-    for (result, path) in read_results {
+    for (result, path) in read_results.into_iter().zip(paths.iter()) {
         match result {
             Ok(content) => {
                 results.push((path.clone(), content));
@@ -143,7 +141,7 @@ async fn execute_parallel_reads(paths: &[String]) -> Result<ActionResult> {
     // Retry failed files sequentially
     let mut retry_successful = Vec::new();
     for (i, path) in failed_items.iter().enumerate() {
-        match filesystem::read_file(path) {
+        match filesystem::read_file_async(path.clone()).await {
             Ok(content) => {
                 results.push((path.clone(), content));
                 retry_successful.push(i);
@@ -203,7 +201,7 @@ async fn execute_parallel_web_searches(queries: &[(String, usize)]) -> Result<Ac
     let mut results = Vec::new();
     let mut failed_items = Vec::new();
 
-    // First attempt: Execute searches in parallel
+    // Execute all searches in parallel using tokio::join_all
     let futures: Vec<_> = queries
         .iter()
         .map(|(query, count)| {
@@ -214,14 +212,16 @@ async fn execute_parallel_web_searches(queries: &[(String, usize)]) -> Result<Ac
         })
         .collect();
 
-    for future in futures {
-        match future.await {
-            (Ok(search_results), query) => {
+    let search_results = join_all(futures).await;
+
+    for (search_result, query) in search_results {
+        match search_result {
+            Ok(search_results) => {
                 let client = WebSearchClient::new(searxng_url.clone());
                 let formatted = client.format_results(&search_results);
                 results.push((query, formatted));
             }
-            (Err(_), query) => {
+            Err(_) => {
                 failed_items.push(query);
             }
         }
@@ -268,9 +268,22 @@ async fn execute_parallel_git_diffs(paths: &[Option<String>]) -> Result<ActionRe
     let mut results = Vec::new();
     let mut failed_items = Vec::new();
 
-    // Execute diffs in parallel
-    for path in paths {
-        match git::get_diff(path.as_deref()) {
+    // Execute all diffs in parallel using tokio::join_all
+    let futures: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            let path_clone = path.clone();
+            async move {
+                let diff_result = git::get_diff_async(path_clone.clone()).await;
+                (diff_result, path_clone)
+            }
+        })
+        .collect();
+
+    let diff_results = join_all(futures).await;
+
+    for (result, path) in diff_results {
+        match result {
             Ok(diff_output) => {
                 let path_str = path.as_ref().map(|p| p.as_str()).unwrap_or("*");
                 results.push((path_str.to_string(), diff_output));

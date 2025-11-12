@@ -20,7 +20,7 @@ pub async fn execute_actions(
     tx: &mpsc::Sender<String>,
 ) -> Result<()> {
     // Create mode-aware executor
-    let mut executor = ModeAwareExecutor::new(app.operation_mode.clone());
+    let mut executor = ModeAwareExecutor::new(app.operation_state.operation_mode.clone());
 
     for action in actions {
         // Check if action needs confirmation
@@ -45,7 +45,7 @@ pub async fn execute_actions(
             };
 
             // Set confirmation state
-            app.confirmation_state = Some(ConfirmationState {
+            app.operation_state.confirmation_state = Some(ConfirmationState {
                 action: action.clone(),
                 action_description: action_desc,
                 preview_lines,
@@ -53,9 +53,8 @@ pub async fn execute_actions(
                 allow_always: matches!(action, AgentAction::WriteFile { .. }),
             });
 
-            // Store executor for later use
-            app.pending_action = Some(action);
-            app.pending_executor = Some(executor);
+            // Store executor and action in AppState
+            app.set_pending_action(action, executor);
             break; // Wait for user confirmation
         } else {
             // Clone action to check type after execution
@@ -75,6 +74,7 @@ pub async fn execute_actions(
                         // Add action display to show the failed search
                         let action_display = build_action_display(&action_clone, &error);
                         if let Some(last_msg) = app
+                            .session_state
                             .messages
                             .iter_mut()
                             .rev()
@@ -109,12 +109,15 @@ pub async fn confirm_action(
 ) -> Result<()> {
     if approved {
         // Approve and execute the action
-        if let Some(confirmation) = app.confirmation_state.take() {
+        if let Some(confirmation) = app.operation_state.confirmation_state.take() {
             app.set_status(format!("Executing: {}...", confirmation.action_description));
 
-            // Get the executor from pending_executor
-            if let Some(mut executor) = app.pending_executor.take() {
+            // Get the executor from app_state
+            if let Some(mut executor) = app.app_state.pending_executor().cloned() {
                 let action_clone = confirmation.action.clone();
+
+                // Clear the pending action state
+                app.clear_pending_action();
 
                 // Execute the action
                 match executor.execute(confirmation.action).await {
@@ -129,6 +132,7 @@ pub async fn confirm_action(
                             // Add action display to show the failed search
                             let action_display = build_action_display(&action_clone, &error);
                             if let Some(last_msg) = app
+                                .session_state
                                 .messages
                                 .iter_mut()
                                 .rev()
@@ -148,14 +152,12 @@ pub async fn confirm_action(
                     },
                 }
             }
-            app.pending_action = None;
         }
     } else {
         // Reject the action
-        if app.confirmation_state.take().is_some() {
+        if app.operation_state.confirmation_state.take().is_some() {
             app.set_status("Action skipped");
-            app.pending_action = None;
-            app.pending_executor = None;
+            app.clear_pending_action();
         }
     }
 
@@ -182,6 +184,7 @@ async fn handle_action_success(
 
     // Attach ActionDisplay to the most recent assistant message
     if let Some(last_msg) = app
+        .session_state
         .messages
         .iter_mut()
         .rev()
@@ -197,11 +200,11 @@ async fn handle_action_success(
             app.set_status(format!("[OK] File read: {}", path));
             trigger_feedback_loop(app, action, output, tx).await;
         },
-        AgentAction::WebSearch { query, .. } => {
+        AgentAction::WebSearch {  .. } => {
             app.set_status(format!("[OK] Search completed, analyzing..."));
             trigger_feedback_loop(app, action, output, tx).await;
         },
-        AgentAction::ExecuteCommand { command, .. } => {
+        AgentAction::ExecuteCommand {  .. } => {
             app.set_status(format!("[OK] Command executed"));
             trigger_feedback_loop(app, action, output, tx).await;
         },
@@ -219,21 +222,21 @@ async fn handle_action_success(
             app.set_status(format!("[OK] File created: {}", path));
             app.context.add_file(path.clone(), content.clone());
             // Use proper tokenizer for accurate count
-            let tokens = count_file_tokens(content, &app.model_name);
+            let tokens = count_file_tokens(content, &app.model_state.model_name);
             app.context.token_count += tokens;
         },
         AgentAction::DeleteFile { path } => {
             app.set_status(format!("[OK] File deleted: {}", path));
             if let Some(content) = app.context.files.remove(path) {
                 // Use proper tokenizer for accurate count
-                let tokens = count_file_tokens(&content, &app.model_name);
+                let tokens = count_file_tokens(&content, &app.model_state.model_name);
                 app.context.token_count = app.context.token_count.saturating_sub(tokens);
             }
         },
         AgentAction::CreateDirectory { path } => {
             app.set_status(format!("[OK] Directory created: {}", path));
         },
-        AgentAction::GitCommit { message, .. } => {
+        AgentAction::GitCommit {  .. } => {
             app.set_status(format!("[OK] Changes committed"));
         },
         AgentAction::ParallelRead { paths } => {
@@ -503,7 +506,7 @@ fn detect_language(path: &str) -> Option<String> {
 
 /// Approve a plan and start executing it
 pub async fn approve_plan(app: &mut App, tx: &mpsc::Sender<String>) -> Result<()> {
-    if app.active_plan.is_none() {
+    if app.app_state.active_plan().is_none() {
         return Ok(());
     }
 
@@ -522,7 +525,7 @@ pub fn cancel_plan(app: &mut App) {
 /// This is called repeatedly as each action completes
 pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Result<()> {
     // Check if plan still exists and get the next action
-    let next_action = if let Some(plan) = app.active_plan.as_ref() {
+    let next_action = if let Some(plan) = app.app_state.active_plan() {
         plan.next_pending_action().map(|(_, action)| action.clone())
     } else {
         None
@@ -531,7 +534,7 @@ pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Resu
     if let Some(planned_action) = next_action {
         let action = planned_action.action.clone();
         let action_clone = action.clone();
-        let mut executor = ModeAwareExecutor::new(app.operation_mode.clone());
+        let mut executor = ModeAwareExecutor::new(app.operation_state.operation_mode.clone());
 
         // Execute action directly in plan mode
         match executor.execute(action).await {
@@ -544,7 +547,7 @@ pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Resu
                 handle_action_success(app, &action_clone, output, tx).await?;
 
                 // Update plan display and get stats for status message
-                if let Some(plan) = app.active_plan.as_mut() {
+                if let Some(plan) = app.app_state.active_plan() {
                     let stats = plan.stats();
                     if stats.is_complete() {
                         app.set_status(format!(
@@ -575,7 +578,7 @@ pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Resu
         }
     } else {
         // Plan is complete
-        if let Some(plan) = app.active_plan.as_ref() {
+        if let Some(plan) = app.app_state.active_plan() {
             let stats = plan.stats();
             let message = if stats.has_failures() {
                 format!(
@@ -596,6 +599,7 @@ pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Resu
 ///
 /// ANALYZE actions: Model should synthesize/analyze the results
 /// SIMPLE actions: Just show brief confirmation, move on
+#[allow(dead_code)]
 fn needs_analysis(action: &AgentAction) -> bool {
     matches!(
         action,
@@ -688,13 +692,12 @@ async fn trigger_feedback_loop(
     }
 
     // Set feedback tracking flags
-    app.pending_file_read = true;
-    if app.reading_file_status.is_none() {
-        app.reading_file_status = Some("Analyzing action results...".to_string());
-        app.status_timestamp = Some(std::time::Instant::now());
+    app.operation_state.pending_file_read = true;
+    if app.operation_state.reading_file_status.is_none() {
+        app.operation_state.reading_file_status = Some("Analyzing action results...".to_string());
+        app.status_state.status_timestamp = Some(std::time::Instant::now());
     }
 
-    app.is_generating = true;
     app.current_response.clear();
 
     // Add feedback as system message
@@ -702,12 +705,12 @@ async fn trigger_feedback_loop(
     let messages = app.build_message_history();
 
     // Send feedback to model for re-generation with analysis
-    let model = app.model.clone();
+    let model = app.model_state.model.clone();
     let context = app.context.clone();
     let tx_clone = tx.clone();
     let tx_done = tx.clone();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let config = ModelConfig::default();
         let callback: StreamCallback = Arc::new(move |chunk| {
             let _ = tx_clone.try_send(chunk.to_string());
@@ -726,4 +729,7 @@ async fn trigger_feedback_loop(
             }
         }
     });
+
+    // Start generation state with abort handle from the spawned task
+    app.start_generation(handle.abort_handle());
 }

@@ -3,11 +3,11 @@ use ratatui::{
     layout::Rect,
     style::{Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, StatefulWidget, Widget, Wrap},
+    widgets::{Block, Paragraph, StatefulWidget, Widget, Wrap},
 };
 
 use crate::agents::{
-    segment_message, strip_action_blocks, ActionDisplay, ActionResult, MessageSegment,
+    segment_message, ActionDisplay, ActionResult, MessageSegment,
 };
 use crate::models::{ChatMessage, MessageRole};
 use crate::tui::app::ConfirmationState;
@@ -142,11 +142,13 @@ impl Default for ChatState {
 /// Props for ChatWidget
 pub struct ChatWidget<'a> {
     pub messages: &'a [ChatMessage],
+    #[allow(dead_code)]
     pub current_response: &'a str,
     pub is_generating: bool,
     pub confirmation_state: Option<&'a ConfirmationState>,
     pub pending_file_read: bool,
     pub reading_file_status: Option<&'a str>,
+    #[allow(dead_code)]
     pub operation_mode: OperationMode,
     pub theme: &'a Theme,
 }

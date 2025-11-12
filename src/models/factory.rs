@@ -270,7 +270,7 @@ impl ModelFactory {
         registry.auto_discover().await?;
 
         let models = registry.list_all_models().await?;
-        let mut model_list: Vec<_> = models.into_keys().collect();
+        let mut model_list: Vec<_> = models.keys().cloned().collect();
         model_list.sort();
         Ok(model_list)
     }

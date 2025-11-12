@@ -123,6 +123,7 @@ impl TokenCounter {
     }
 
     /// Get the token count for content
+    #[allow(dead_code)]
     pub fn count_tokens(&self, content: &str) -> usize {
         self.tokenizer.encode_with_special_tokens(content).len()
     }

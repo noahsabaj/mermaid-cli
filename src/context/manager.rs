@@ -56,8 +56,8 @@ impl ContextManager {
     }
 
     /// Check if the file tree has changed since last load
-    pub fn needs_reload(&self) -> bool {
-        match self.compute_file_hash() {
+    pub async fn needs_reload(&self) -> bool {
+        match self.compute_file_hash().await {
             Ok(current_hash) => {
                 if let Some(last_hash) = self.last_file_hash {
                     current_hash != last_hash
@@ -71,9 +71,9 @@ impl ContextManager {
     }
 
     /// Reload the project context if needed
-    pub fn reload_if_needed(&mut self) -> Result<bool> {
-        if self.needs_reload() {
-            self.reload()?;
+    pub async fn reload_if_needed(&mut self) -> Result<bool> {
+        if self.needs_reload().await {
+            self.reload().await?;
             Ok(true)
         } else {
             Ok(false)
@@ -81,10 +81,10 @@ impl ContextManager {
     }
 
     /// Force a reload of the project context
-    pub fn reload(&mut self) -> Result<()> {
+    pub async fn reload(&mut self) -> Result<()> {
         // Collect files from the project
         let collector = FileCollector::new(self.collector_config.clone());
-        let files = collector.collect_files(&self.root_path)?;
+        let files = collector.collect_files(&self.root_path).await?;
 
         // Compute hash from the files we just collected (avoid re-scanning)
         let hash = self.compute_hash_from_files(&files)?;
@@ -145,10 +145,10 @@ impl ContextManager {
 
     /// Compute a hash of the current file tree for change detection
     /// This scans the filesystem directly to detect changes
-    fn compute_file_hash(&self) -> Result<u64> {
+    async fn compute_file_hash(&self) -> Result<u64> {
         // Scan the filesystem to get current state (not cached files)
         let collector = FileCollector::new(self.collector_config.clone());
-        let current_files = collector.collect_files(&self.root_path)?;
+        let current_files = collector.collect_files(&self.root_path).await?;
 
         self.compute_hash_from_files(&current_files)
     }
@@ -203,41 +203,41 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_context_manager_creation() {
+    #[tokio::test]
+    async fn test_context_manager_creation() {
         let temp_dir = TempDir::new().unwrap();
         let manager = ContextManager::new(temp_dir.path());
 
         assert_eq!(manager.root_path, temp_dir.path());
         assert_eq!(manager.total_files(), 0);
-        assert!(manager.needs_reload());
+        assert!(manager.needs_reload().await);
     }
 
-    #[test]
-    fn test_file_tree_change_detection() {
+    #[tokio::test]
+    async fn test_file_tree_change_detection() {
         let temp_dir = TempDir::new().unwrap();
         let mut manager = ContextManager::new(temp_dir.path());
 
         // Initial load
-        manager.reload().unwrap();
+        manager.reload().await.unwrap();
         let initial_hash = manager.last_file_hash;
 
         // No changes - should not need reload
-        assert!(!manager.needs_reload());
+        assert!(!manager.needs_reload().await);
 
         // Add a file - should need reload
         let test_file = temp_dir.path().join("test.py");
         fs::write(&test_file, "print('test')").unwrap();
 
-        assert!(manager.needs_reload());
+        assert!(manager.needs_reload().await);
 
         // Reload and verify hash changed
-        manager.reload().unwrap();
+        manager.reload().await.unwrap();
         assert_ne!(manager.last_file_hash, initial_hash);
     }
 
-    #[test]
-    fn test_project_context_building() {
+    #[tokio::test]
+    async fn test_project_context_building() {
         let temp_dir = TempDir::new().unwrap();
 
         // Create some test files including a requirements.txt to mark it as a Python project
@@ -246,7 +246,7 @@ mod tests {
         fs::write(temp_dir.path().join("requirements.txt"), "requests\n").unwrap();
 
         let mut manager = ContextManager::new(temp_dir.path());
-        manager.reload().unwrap();
+        manager.reload().await.unwrap();
 
         let context = manager.build_context();
         assert_eq!(context.root_path, temp_dir.path().to_string_lossy().to_string());

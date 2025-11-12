@@ -398,6 +398,7 @@ async fn check_ollama_running(client: &Client, base_url: &str) -> Result<bool> {
 #[derive(Debug, Deserialize)]
 struct OllamaChatResponse {
     message: OllamaMessage,
+    #[allow(dead_code)]
     done: bool,
     /// Token usage stats from Ollama
     #[serde(default)]
