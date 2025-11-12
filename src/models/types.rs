@@ -314,7 +314,7 @@ mod tests {
             prompt.contains("user will review"),
             "Should mention user review"
         );
-        assert!(prompt.contains("Alt+Y"), "Should mention Alt+Y shortcut");
+        assert!(prompt.contains("Ctrl+Y"), "Should mention Ctrl+Y shortcut");
     }
 
     #[test]

@@ -86,9 +86,12 @@ impl ContextManager {
         let collector = FileCollector::new(self.collector_config.clone());
         let files = collector.collect_files(&self.root_path)?;
 
+        // Compute hash from the files we just collected (avoid re-scanning)
+        let hash = self.compute_hash_from_files(&files)?;
+
         // Update cached state
         self.cached_files = files;
-        self.last_file_hash = Some(self.compute_file_hash()?);
+        self.last_file_hash = Some(hash);
         self.last_load_time = Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -141,12 +144,21 @@ impl ContextManager {
     }
 
     /// Compute a hash of the current file tree for change detection
+    /// This scans the filesystem directly to detect changes
     fn compute_file_hash(&self) -> Result<u64> {
+        // Scan the filesystem to get current state (not cached files)
+        let collector = FileCollector::new(self.collector_config.clone());
+        let current_files = collector.collect_files(&self.root_path)?;
+
+        self.compute_hash_from_files(&current_files)
+    }
+
+    /// Compute hash from a given list of files
+    fn compute_hash_from_files(&self, files: &[PathBuf]) -> Result<u64> {
         let mut hasher = DefaultHasher::new();
 
         // Hash all file paths (sorted for consistency)
-        let mut file_paths: Vec<_> = self
-            .cached_files
+        let mut file_paths: Vec<_> = files
             .iter()
             .filter_map(|p| {
                 p.strip_prefix(&self.root_path)
@@ -228,9 +240,10 @@ mod tests {
     fn test_project_context_building() {
         let temp_dir = TempDir::new().unwrap();
 
-        // Create some test files
+        // Create some test files including a requirements.txt to mark it as a Python project
         fs::write(temp_dir.path().join("main.py"), "print('hello')").unwrap();
         fs::write(temp_dir.path().join("lib.py"), "def helper(): pass").unwrap();
+        fs::write(temp_dir.path().join("requirements.txt"), "requests\n").unwrap();
 
         let mut manager = ContextManager::new(temp_dir.path());
         manager.reload().unwrap();
@@ -238,6 +251,6 @@ mod tests {
         let context = manager.build_context();
         assert_eq!(context.root_path, temp_dir.path().to_string_lossy().to_string());
         assert_eq!(context.project_type, Some("Python".to_string()));
-        assert_eq!(context.files.len(), 2); // Both files added to context
+        assert_eq!(context.files.len(), 3); // All three files added to context (main.py, lib.py, requirements.txt)
     }
 }

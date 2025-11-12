@@ -16,6 +16,6 @@ mod ui;
 mod widgets;
 
 // Public re-exports - the ONLY way to access TUI functionality
-pub use app::{App, ConfirmationState, FileInfo};
+pub use app::{App, AppState, ConfirmationState, ErrorEntry, ErrorSeverity, FileInfo, GenerationStatus};
 pub use mode::OperationMode;
 pub use ui::run_ui;
