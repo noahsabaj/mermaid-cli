@@ -119,8 +119,8 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
 
                         }
-                        // Add blank line after heading for spacing
-                        lines.push(Line::from(""));
+                        // Don't add blank line here - let lists flow directly from headings
+                        // Blank line before next heading is added by Tag::Heading
                     },
                     TagEnd::Paragraph | TagEnd::Item => {
                         if !current_line_spans.is_empty() {
@@ -145,6 +145,10 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     },
                     TagEnd::List(_) => {
                         list_depth = list_depth.saturating_sub(1);
+                        // Add blank line after list ends (when returning to depth 0)
+                        if list_depth == 0 {
+                            lines.push(Line::from(""));
+                        }
                     },
                     TagEnd::Link => {
                         current_line_spans

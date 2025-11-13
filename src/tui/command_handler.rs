@@ -102,6 +102,7 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
                 // Update the model and model name
                 *app.model_state.model.write().await = model;
                 app.model_state.model_name = model_id.clone();
+                app.model_state.model_id = model_id.clone();  // CRITICAL: Update model_id too!
                 app.set_status(format!("Switched to model: {}", model_id));
 
                 // Save the model preference to session

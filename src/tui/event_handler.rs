@@ -52,23 +52,15 @@ fn handle_plan_approval_keys(key_code: KeyCode) -> Result<EventAction> {
 fn handle_mouse_event(
     app: &mut App,
     mouse: crossterm::event::MouseEvent,
-    viewport_height: u16,
+    _viewport_height: u16,
 ) -> Result<EventAction> {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            app.scroll_up(3); // Scroll wheel up moves view up
-            app.ui_state.chat_state.is_user_scrolling = true;
+            app.scroll_down(3); // Scroll wheel up shows newer messages (scroll content up)
             Ok(EventAction::Continue)
         },
         MouseEventKind::ScrollDown => {
-            app.scroll_down(3); // Scroll wheel down moves view down
-
-            // Check if scrolled to bottom
-            let max_scroll = app.calculate_max_scroll(viewport_height);
-            if app.ui_state.chat_state.scroll_offset >= max_scroll.saturating_sub(3) {
-                app.ui_state.chat_state.is_user_scrolling = false;
-                app.ui_state.chat_state.scroll_offset = max_scroll;
-            }
+            app.scroll_up(3); // Scroll wheel down shows older messages (scroll content down)
             Ok(EventAction::Continue)
         },
         _ => Ok(EventAction::Continue),
@@ -318,7 +310,7 @@ fn navigate_history_forward(app: &mut App) {
 /// Handle Up arrow (navigate history or scroll chat)
 fn handle_up_arrow(app: &mut App) -> EventAction {
     // If not scrolling chat (input is focused), navigate history
-    if !app.ui_state.chat_state.is_user_scrolling && !app.session_state.input_history.is_empty() {
+    if !app.ui_state.chat_state.is_manually_scrolling() && !app.session_state.input_history.is_empty() {
         navigate_history_backward(app);
         return EventAction::Continue;
     }
@@ -330,7 +322,7 @@ fn handle_up_arrow(app: &mut App) -> EventAction {
 /// Handle Down arrow (navigate history or scroll chat)
 fn handle_down_arrow(app: &mut App) -> EventAction {
     // If not scrolling chat (input is focused), navigate history
-    if !app.ui_state.chat_state.is_user_scrolling && !app.session_state.input_history.is_empty() {
+    if !app.ui_state.chat_state.is_manually_scrolling() && !app.session_state.input_history.is_empty() {
         navigate_history_forward(app);
         return EventAction::Continue;
     }

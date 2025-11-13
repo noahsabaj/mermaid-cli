@@ -2,7 +2,7 @@ use super::mode::OperationMode;
 use super::theme::Theme;
 use super::widgets::{ChatState, InputState};
 use crate::agents::{AgentAction, ModeAwareExecutor, Plan};
-use crate::constants::{UI_DEFAULT_VIEWPORT_HEIGHT, UI_ERROR_LOG_MAX_SIZE, UI_STATUS_MESSAGE_THRESHOLD};
+use crate::constants::UI_ERROR_LOG_MAX_SIZE;
 use crate::context::ContextManager;
 use crate::models::{ChatMessage, MessageRole, Model, ModelConfig, ProjectContext, StreamCallback};
 use crate::session::{ConversationHistory, ConversationManager};
@@ -606,7 +606,8 @@ impl App {
         });
 
         let mut model = self.model_state.model.write().await;
-        let config = ModelConfig::default();
+        let mut config = ModelConfig::default();
+        config.model = self.model_state.model_id.clone();
 
         if let Ok(_) = model.chat(&messages, &self.context, &config, Some(callback)).await {
             let final_title = title_string.lock().await;
@@ -656,74 +657,14 @@ impl App {
         self.error_log.iter().rev().take(count).collect()
     }
 
-    
-    /// Calculate the maximum scroll offset (bottom of content)
-    pub fn calculate_max_scroll(&self, viewport_height: u16) -> u16 {
-        let mut total_lines = 0u16;
-
-        for msg in &self.session_state.messages {
-            // Role line: [You] or [Mermaid]
-            total_lines += 1;
-            // Content lines (can be many for code blocks)
-            total_lines += msg.content.lines().count() as u16;
-            // Assistant messages have completion indicator (3 lines)
-            if matches!(msg.role, MessageRole::Assistant) {
-                total_lines += 3;
-            }
-            // Empty line between messages
-            total_lines += 1;
-        }
-
-        // Add lines for current response if generating
-        if self.app_state.is_generating() && !self.current_response.is_empty() {
-            total_lines += 1; // Role line
-            total_lines += self.current_response.lines().count() as u16;
-            total_lines += 1; // Typing indicator
-        }
-
-        // Max scroll is total lines minus viewport height
-        total_lines.saturating_sub(viewport_height)
-    }
-
-    /// Auto-scroll to bottom of chat
-    pub fn auto_scroll_to_bottom(&mut self, viewport_height: u16) {
-        if !self.ui_state.chat_state.is_user_scrolling {
-            self.ui_state.chat_state.scroll_offset = self.calculate_max_scroll(viewport_height);
-        }
-    }
-
     /// Scroll chat view up
     pub fn scroll_up(&mut self, amount: u16) {
-        // Calculate max scroll: total lines minus viewport height
-        let viewport_height = UI_DEFAULT_VIEWPORT_HEIGHT; // This should be passed in, but keeping for compatibility
-        let max_scroll = self.calculate_max_scroll(viewport_height);
-
-        self.ui_state.chat_state.scroll_offset = self
-            .ui_state
-            .chat_state
-            .scroll_offset
-            .saturating_add(amount)
-            .min(max_scroll);
-
-        // User is manually scrolling if they're not at the bottom
-        let threshold = UI_STATUS_MESSAGE_THRESHOLD; // Allow small margin for rounding
-        if self.ui_state.chat_state.scroll_offset < max_scroll.saturating_sub(threshold) {
-            self.ui_state.chat_state.is_user_scrolling = true;
-        }
+        self.ui_state.chat_state.scroll_up(amount);
     }
 
     /// Scroll chat view down
     pub fn scroll_down(&mut self, amount: u16) {
-        self.ui_state.chat_state.scroll_offset = self.ui_state.chat_state.scroll_offset.saturating_sub(amount);
-
-        // If user scrolls close to bottom, resume auto-scrolling
-        let viewport_height = UI_DEFAULT_VIEWPORT_HEIGHT; // Should be passed in
-        let max_scroll = self.calculate_max_scroll(viewport_height);
-        let threshold = UI_STATUS_MESSAGE_THRESHOLD;
-        if self.ui_state.chat_state.scroll_offset >= max_scroll.saturating_sub(threshold) {
-            self.ui_state.chat_state.is_user_scrolling = false;
-            self.ui_state.chat_state.scroll_offset = max_scroll; // Snap to bottom
-        }
+        self.ui_state.chat_state.scroll_down(amount);
     }
 
     /// Quit the application

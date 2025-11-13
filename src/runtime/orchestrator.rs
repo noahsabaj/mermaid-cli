@@ -33,10 +33,19 @@ impl Orchestrator {
             match load_config() {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    log_warn(
-                        "WARNING",
-                        format!("Failed to load config: {}. Using defaults.", e),
-                    );
+                    // Check if this is an environment variable parsing issue
+                    let err_msg = format!("{:?}", e);
+                    if err_msg.contains("MERMAID_") && err_msg.contains("environment variable") {
+                        log_warn(
+                            "CONFIG",
+                            "Ignoring invalid MERMAID_* environment variables. Using config file and defaults.".to_string(),
+                        );
+                    } else {
+                        log_warn(
+                            "CONFIG",
+                            format!("Config load failed: {}. Using defaults.", e),
+                        );
+                    }
                     Config::default()
                 },
             }

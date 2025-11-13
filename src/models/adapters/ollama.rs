@@ -20,25 +20,13 @@ use crate::models::types::{ChatMessage, MessageRole, ModelResponse, ProjectConte
 pub struct OllamaAdapter {
     client: Client,
     base_url: String,
-    is_cloud: bool,
-    cloud_api_key: Option<String>,
     config: Arc<BackendConfig>,
 }
 
 impl OllamaAdapter {
     /// Create a new Ollama adapter
     pub async fn new(config: Arc<BackendConfig>) -> Result<Self> {
-        // Check for cloud API key (from env or future config)
-        let cloud_api_key = std::env::var("OLLAMA_API_KEY").ok();
-        let is_cloud = cloud_api_key.is_some();
-
-        // Determine base URL
-        let base_url = if is_cloud {
-            std::env::var("OLLAMA_CLOUD_URL")
-                .unwrap_or_else(|_| "https://api.ollama.com".to_string())
-        } else {
-            normalize_url(&config.ollama_url)
-        };
+        let base_url = normalize_url(&config.ollama_url);
 
         // Build HTTP client with connection pooling
         let client = Client::builder()
@@ -56,19 +44,8 @@ impl OllamaAdapter {
         Ok(Self {
             client,
             base_url,
-            is_cloud,
-            cloud_api_key,
             config,
         })
-    }
-
-    /// Build request with optional cloud authentication
-    fn build_request(&self, url: &str) -> reqwest::RequestBuilder {
-        let mut req = self.client.post(url);
-        if let Some(ref key) = self.cloud_api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
-        }
-        req
     }
 
     /// Handle streaming response
@@ -167,17 +144,15 @@ impl OllamaAdapter {
 #[async_trait]
 impl Backend for OllamaAdapter {
     fn name(&self) -> &str {
-        if self.is_cloud {
-            "ollama-cloud"
-        } else {
-            "ollama"
-        }
+        "ollama"
     }
 
     async fn health_check(&self) -> Result<()> {
         let url = format!("{}/api/tags", self.base_url);
 
-        let response = self.build_request(&url)
+        // Health check always goes to local Ollama
+        let response = self.client
+            .get(&url)
             .send()
             .await
             .map_err(|e| ModelError::Backend(BackendError::ConnectionFailed {
@@ -199,7 +174,9 @@ impl Backend for OllamaAdapter {
     async fn list_models(&self) -> Result<Vec<String>> {
         let url = format!("{}/api/tags", self.base_url);
 
-        let response = self.build_request(&url)
+        // List models always queries local Ollama
+        let response = self.client
+            .get(&url)
             .send()
             .await
             .map_err(|e| ModelError::Backend(BackendError::ConnectionFailed {
@@ -232,6 +209,7 @@ impl Backend for OllamaAdapter {
         config: &ModelConfig,
         stream_callback: Option<StreamCallback>,
     ) -> Result<ModelResponse> {
+        // Send all requests to local Ollama - it handles cloud routing internally
         let url = format!("{}/api/chat", self.base_url);
 
         // Extract Ollama-specific options
@@ -299,8 +277,9 @@ impl Backend for OllamaAdapter {
             request_body["options"] = options;
         }
 
-        // Send request
-        let response = self.build_request(&url)
+        // Send request to local Ollama (handles cloud routing internally)
+        let response = self.client
+            .post(&url)
             .json(&request_body)
             .send()
             .await
@@ -346,7 +325,7 @@ impl Backend for OllamaAdapter {
             supports_streaming: true,
             supports_functions: false,
             supports_vision: false,
-            is_local: !self.is_cloud,
+            is_local: true, // Ollama daemon is local, handles cloud routing internally
             version: None,
         }
     }

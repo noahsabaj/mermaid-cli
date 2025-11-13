@@ -113,12 +113,11 @@ pub async fn run_app_loop(
         match process_stream_chunks(app, rx).await? {
             StreamStatus::Streaming => {
                 // During streaming: content is buffered and NOT rendered (block streaming mode)
-                // Don't scroll - scrolling will happen when the complete response is shown
-                // Scrolling here causes "ghost scrolling" with nothing visible to follow
+                // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
             },
             StreamStatus::Complete { actions } => {
-                // Stream complete: response is now being rendered, auto-scroll to show it
-                app.auto_scroll_to_bottom(viewport_height);
+                // Stream complete: response is now rendered
+                // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
 
                 // Execute any parsed actions
                 if !actions.is_empty() {
@@ -192,7 +191,7 @@ async fn handle_message_submit(
     app: &mut App,
     input: String,
     tx: &mpsc::Sender<String>,
-    viewport_height: u16,
+    _viewport_height: u16,
 ) {
     // Clear any stuck status messages when sending new message
     app.operation_state.pending_file_read = false;
@@ -208,8 +207,7 @@ async fn handle_message_submit(
     // Build message history including the new message
     let messages = app.build_message_history();
 
-    // Auto-scroll to show the new user message
-    app.auto_scroll_to_bottom(viewport_height);
+    // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
     app.current_response.clear();
 
     // Save input to history and reset navigation
@@ -232,14 +230,17 @@ async fn handle_message_submit(
     let tx_done = tx.clone();
 
     let operation_mode = app.operation_state.operation_mode.clone();
+    let model_id = app.model_state.model_id.clone();
 
     let handle = tokio::spawn(async move {
         // Use Plan Mode config if in Plan Mode, otherwise use default
-        let config = if operation_mode.is_planning_only() {
+        let mut config = if operation_mode.is_planning_only() {
             ModelConfig::with_plan_mode()
         } else {
             ModelConfig::default()
         };
+
+        config.model = model_id;
 
         let callback: StreamCallback = Arc::new(move |chunk| {
             let _ = tx_clone.try_send(chunk.to_string());

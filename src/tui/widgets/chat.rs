@@ -19,14 +19,14 @@ use crate::utils::format_relative_timestamp;
 /// State for the chat widget
 #[derive(Debug, Clone)]
 pub struct ChatState {
-    /// Current scroll offset in the chat view
-    pub scroll_offset: u16,
-    /// Whether user is manually scrolling (not at bottom)
-    pub is_user_scrolling: bool,
+    /// Manual scroll offset (only used when is_user_scrolling = true)
+    scroll_offset: u16,
+    /// Whether user is manually scrolling (not following bottom)
+    is_user_scrolling: bool,
 }
 
 impl ChatState {
-    /// Create a new chat state
+    /// Create a new chat state (starts in auto-follow mode)
     pub fn new() -> Self {
         Self {
             scroll_offset: 0,
@@ -34,102 +34,40 @@ impl ChatState {
         }
     }
 
-    /// Calculate the maximum scroll offset (bottom of content)
-    pub fn calculate_max_scroll(
-        &self,
-        messages: &[ChatMessage],
-        current_response: &str,
-        is_generating: bool,
-        viewport_height: u16,
-    ) -> u16 {
-        let mut total_lines = 0u16;
-
-        for msg in messages {
-            // Role line
-            total_lines += 1;
-            // Content lines (stripped of timestamp for User messages)
-            let content_to_count = if matches!(msg.role, MessageRole::User) {
-                strip_timestamp_line(&msg.content)
-            } else {
-                msg.content.clone()
-            };
-            total_lines += content_to_count.lines().count() as u16;
-            // Spacing
-            if matches!(msg.role, MessageRole::Assistant) {
-                total_lines += 1;
-            }
-            // Empty line between messages
-            total_lines += 1;
-        }
-
-        // Add lines for current response if generating
-        if is_generating && !current_response.is_empty() {
-            total_lines += 1; // Role line
-            total_lines += current_response.lines().count() as u16;
-            total_lines += 1; // Typing indicator
-        }
-
-        // Max scroll is total lines minus viewport height
-        total_lines.saturating_sub(viewport_height)
-    }
-
-    /// Auto-scroll to bottom of chat
-    pub fn auto_scroll_to_bottom(
-        &mut self,
-        messages: &[ChatMessage],
-        current_response: &str,
-        is_generating: bool,
-        viewport_height: u16,
-    ) {
-        if !self.is_user_scrolling {
-            self.scroll_offset = self.calculate_max_scroll(
-                messages,
-                current_response,
-                is_generating,
-                viewport_height,
-            );
+    /// Get the scroll position for rendering
+    /// If auto-scrolling, returns the max scroll (clamped to content height - viewport)
+    pub fn get_scroll_position(&self, content_height: u16, viewport_height: u16) -> u16 {
+        if self.is_user_scrolling {
+            // Manual scroll: cap at max to prevent scrolling into void
+            let max_scroll = content_height.saturating_sub(viewport_height);
+            self.scroll_offset.min(max_scroll)
+        } else {
+            // Auto-scroll: show bottom of content
+            content_height.saturating_sub(viewport_height)
         }
     }
 
-    /// Scroll chat view up
-    pub fn scroll_up(
-        &mut self,
-        amount: u16,
-        messages: &[ChatMessage],
-        current_response: &str,
-        is_generating: bool,
-        viewport_height: u16,
-    ) {
-        let max_scroll =
-            self.calculate_max_scroll(messages, current_response, is_generating, viewport_height);
-        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_scroll);
-
-        // User is manually scrolling if they're not at the bottom
-        let threshold = 3;
-        if self.scroll_offset < max_scroll.saturating_sub(threshold) {
-            self.is_user_scrolling = true;
-        }
+    /// Scroll chat view up by amount
+    pub fn scroll_up(&mut self, amount: u16) {
+        self.is_user_scrolling = true;
+        self.scroll_offset = self.scroll_offset.saturating_add(amount);
     }
 
-    /// Scroll chat view down
-    pub fn scroll_down(
-        &mut self,
-        amount: u16,
-        messages: &[ChatMessage],
-        current_response: &str,
-        is_generating: bool,
-        viewport_height: u16,
-    ) {
+    /// Scroll chat view down by amount
+    pub fn scroll_down(&mut self, amount: u16) {
+        self.is_user_scrolling = true;
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+    }
 
-        // If user scrolls close to bottom, resume auto-scrolling
-        let max_scroll =
-            self.calculate_max_scroll(messages, current_response, is_generating, viewport_height);
-        let threshold = 3;
-        if self.scroll_offset >= max_scroll.saturating_sub(threshold) {
-            self.is_user_scrolling = false;
-            self.scroll_offset = max_scroll;
-        }
+    /// Force resume auto-scroll mode (jump to bottom)
+    pub fn resume_auto_scroll(&mut self) {
+        self.is_user_scrolling = false;
+        self.scroll_offset = 0;
+    }
+
+    /// Check if user is manually scrolling (not following bottom)
+    pub fn is_manually_scrolling(&self) -> bool {
+        self.is_user_scrolling
     }
 }
 
@@ -461,9 +399,13 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         // The status line shows progress: "↑ Sending..." → "↓ Streaming..." with timer
 
         // NOTE: Wrapping is disabled because we handle it manually with hanging indents
+        // Calculate content height and viewport for proper scroll clamping
+        let content_height = lines.len() as u16;
+        let viewport_height = area.height;
+
         let paragraph = Paragraph::new(lines)
             .block(Block::default())
-            .scroll((state.scroll_offset, 0));
+            .scroll((state.get_scroll_position(content_height, viewport_height), 0));
 
         paragraph.render(area, buf);
     }
