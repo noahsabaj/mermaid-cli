@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Paragraph, StatefulWidget, Widget, Wrap},
+    widgets::{Block, Paragraph, StatefulWidget, Widget},
 };
 
 use crate::agents::{
@@ -163,33 +163,83 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         for (idx, msg) in self.messages.iter().enumerate() {
             let _is_last_message = idx == message_count - 1;
             let (role_prefix, role_color) = match msg.role {
-                MessageRole::User => (">", self.theme.colors.user_message.to_color()),
-                MessageRole::Assistant => ("●", self.theme.colors.assistant_message.to_color()),
+                MessageRole::User => (">", ratatui::style::Color::White),
+                MessageRole::Assistant => ("●", ratatui::style::Color::White),
                 MessageRole::System => ("●", self.theme.colors.system_message.to_color()),
             };
 
             if matches!(msg.role, MessageRole::Assistant) {
+                // Render thinking block if present
+                if let Some(ref thinking) = msg.thinking {
+                    // Add "Thinking..." header in italic and dimmed with grayed white dot
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "● ",
+                            Style::new().fg(ratatui::style::Color::DarkGray),
+                        ),
+                        Span::styled(
+                            "Thinking...",
+                            Style::new()
+                                .fg(self.theme.colors.text_secondary.to_color())
+                                .italic()
+                                .dim(),
+                        ),
+                    ]));
+
+                    // Render thinking content with proper wrapping (2-space hanging indent)
+                    let wrapped = wrap_text_with_indent(
+                        thinking,
+                        area.width as usize,
+                        2, // first line indent (2 spaces)
+                        2, // continuation indent (2 spaces)
+                    );
+                    for wrapped_line in wrapped {
+                        lines.push(Line::from(Span::styled(
+                            wrapped_line,
+                            Style::new()
+                                .fg(self.theme.colors.text_secondary.to_color())
+                                .italic()
+                                .dim(),
+                        )));
+                    }
+
+                    // Add blank line after thinking block
+                    lines.push(Line::from(""));
+                }
+
                 let segments = segment_message(&msg.content);
                 let mut is_first_segment = true;
 
                 for segment in segments {
                     match segment {
                         MessageSegment::Text(text) => {
-                            let mut parsed_lines = parse_markdown(&text);
+                            let parsed_lines = parse_markdown(&text);
 
-                            if is_first_segment {
-                                if let Some(first_line) = parsed_lines.first_mut() {
+                            for (line_idx, mut parsed_line) in parsed_lines.into_iter().enumerate() {
+                                // Add role indicator to first line or 2-space margin to others
+                                if is_first_segment && line_idx == 0 {
+                                    // First line: prepend role indicator
                                     let mut spans = vec![Span::styled(
                                         format!("{} ", role_prefix),
                                         Style::new().fg(role_color).bold(),
                                     )];
-                                    spans.extend(first_line.spans.drain(..));
-                                    first_line.spans = spans;
+                                    spans.extend(parsed_line.spans);
+                                    parsed_line = Line::from(spans);
+                                } else {
+                                    // Other lines: prepend 2-space margin
+                                    let mut spans = vec![Span::raw("  ")];
+                                    spans.extend(parsed_line.spans);
+                                    parsed_line = Line::from(spans);
                                 }
-                                is_first_segment = false;
-                            }
 
-                            lines.extend(parsed_lines);
+                                // Now wrap the styled line if needed (continuation indent = 2)
+                                let wrapped = wrap_styled_line(parsed_line, area.width as usize, 2);
+                                lines.extend(wrapped);
+
+                                if is_first_segment && line_idx == 0 {
+                                    is_first_segment = false;
+                                }
+                            }
                         },
                         MessageSegment::ActionMarker {
                             action_type,
@@ -211,49 +261,47 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 // For User messages: format timestamp and display on right edge
                 let formatted_timestamp = format_relative_timestamp(msg.timestamp);
                 let timestamp_width = formatted_timestamp.len() + 2; // +2 for spacing
-                let available_width = (area.width as usize).saturating_sub(timestamp_width + 3); // +3 for role prefix
 
                 // Strip the [Sent at: ...] line from message content
                 let cleaned_content = strip_timestamp_line(&msg.content);
-                let content_lines: Vec<_> = cleaned_content.lines().collect();
 
-                if let Some(first) = content_lines.first() {
-                    // Build first line with role, message, and timestamp on right
-                    let first_line_text = first.to_string();
-                    let first_line_len = first_line_text.len();
+                // Manually wrap the user message with hanging indent (2 spaces)
+                let wrapped = wrap_text_with_indent(
+                    &cleaned_content,
+                    area.width as usize,
+                    2, // first line indent (for role prefix "  ")
+                    2, // continuation indent
+                );
 
-                    let mut spans = vec![
-                        Span::styled(
-                            format!("{} ", role_prefix),
-                            Style::new().fg(role_color).bold(),
-                        ),
-                    ];
+                for (line_idx, wrapped_line) in wrapped.iter().enumerate() {
+                    if line_idx == 0 {
+                        // First line: add role prefix and timestamp on right
+                        let text_content = wrapped_line.trim_start(); // Remove the indent we added
+                        let text_len = text_content.len();
 
-                    // Add message text (bounded to available width)
-                    if first_line_len > available_width {
-                        spans.push(Span::raw(first_line_text[..available_width].to_string()));
+                        let mut spans = vec![
+                            Span::styled(
+                                format!("{} ", role_prefix),
+                                Style::new().fg(role_color).bold(),
+                            ),
+                            Span::raw(text_content.to_string()),
+                        ];
+
+                        // Add padding and timestamp on right
+                        let content_width = role_prefix.len() + 1 + text_len;
+                        let padding_needed = (area.width as usize).saturating_sub(content_width + timestamp_width);
+                        if padding_needed > 0 {
+                            spans.push(Span::raw(" ".repeat(padding_needed)));
+                        }
+                        spans.push(Span::styled(
+                            formatted_timestamp.clone(),
+                            Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)),
+                        ));
+
+                        lines.push(Line::from(spans));
                     } else {
-                        spans.push(Span::raw(first_line_text));
-                    }
-
-                    // Add padding and timestamp on right
-                    let message_and_prefix = role_prefix.len() + 1 + first_line_len;
-                    let padding_needed = (area.width as usize).saturating_sub(
-                        message_and_prefix.min(available_width + role_prefix.len() + 1) + timestamp_width,
-                    );
-                    if padding_needed > 0 {
-                        spans.push(Span::raw(" ".repeat(padding_needed)));
-                    }
-                    spans.push(Span::styled(
-                        formatted_timestamp,
-                        Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)), // Light gray (#888888)
-                    ));
-
-                    lines.push(Line::from(spans));
-
-                    // Render remaining lines
-                    for line in content_lines.iter().skip(1) {
-                        lines.push(Line::from(line.to_string()));
+                        // Continuation lines: already have 2-space margin from wrap_text_with_indent
+                        lines.push(Line::from(wrapped_line.clone()));
                     }
                 }
             }
@@ -412,9 +460,9 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         //
         // The status line shows progress: "↑ Sending..." → "↓ Streaming..." with timer
 
+        // NOTE: Wrapping is disabled because we handle it manually with hanging indents
         let paragraph = Paragraph::new(lines)
             .block(Block::default())
-            .wrap(Wrap { trim: false })
             .scroll((state.scroll_offset, 0));
 
         paragraph.render(area, buf);
@@ -593,5 +641,128 @@ fn strip_timestamp_line(content: &str) -> String {
     } else {
         // No timestamp line to strip, return as-is
         content.to_string()
+    }
+}
+
+/// Wrap text with hanging indent support
+/// Returns a vector of strings, each representing a wrapped line
+fn wrap_text_with_indent(text: &str, width: usize, first_line_indent: usize, continuation_indent: usize) -> Vec<String> {
+    let mut wrapped_lines = Vec::new();
+
+    for (line_idx, line) in text.lines().enumerate() {
+        if line.is_empty() {
+            wrapped_lines.push(String::new());
+            continue;
+        }
+
+        let current_indent = if line_idx == 0 { first_line_indent } else { continuation_indent };
+        let available_width = width.saturating_sub(current_indent);
+
+        if available_width == 0 {
+            wrapped_lines.push(" ".repeat(current_indent));
+            continue;
+        }
+
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if words.is_empty() {
+            wrapped_lines.push(" ".repeat(current_indent));
+            continue;
+        }
+
+        let mut current_line = String::with_capacity(width);
+        current_line.push_str(&" ".repeat(current_indent));
+        let mut current_length = 0;
+
+        for (word_idx, word) in words.iter().enumerate() {
+            let word_len = word.len();
+
+            if word_idx == 0 {
+                // First word always fits on the line
+                current_line.push_str(word);
+                current_length = word_len;
+            } else if current_length + 1 + word_len <= available_width {
+                // Word fits on current line
+                current_line.push(' ');
+                current_line.push_str(word);
+                current_length += 1 + word_len;
+            } else {
+                // Word doesn't fit, start a new line
+                wrapped_lines.push(current_line);
+                current_line = String::with_capacity(width);
+                current_line.push_str(&" ".repeat(continuation_indent));
+                current_line.push_str(word);
+                current_length = word_len;
+            }
+        }
+
+        // Add the last line
+        if !current_line.trim().is_empty() {
+            wrapped_lines.push(current_line);
+        }
+    }
+
+    wrapped_lines
+}
+
+/// Wrap a styled Line with hanging indent, preserving all span styles
+/// Returns multiple Line objects with proper indentation
+fn wrap_styled_line(line: Line<'static>, width: usize, continuation_indent: usize) -> Vec<Line<'static>> {
+    // Calculate the total length of the line by summing all span lengths
+    let total_length: usize = line.spans.iter().map(|s| s.content.len()).sum();
+
+    // If the line fits within width, return as-is
+    if total_length <= width {
+        return vec![line];
+    }
+
+    // Line needs wrapping - extract all text and styles
+    let mut result_lines = Vec::new();
+    let mut current_line_spans = Vec::new();
+    let mut current_line_length = 0;
+    let available_width = width.saturating_sub(continuation_indent);
+
+    for span in line.spans.clone() {
+        let span_text = span.content.to_string();
+        let span_style = span.style;
+
+        // Split span text by words
+        let words: Vec<&str> = span_text.split_whitespace().collect();
+
+        for (word_idx, word) in words.iter().enumerate() {
+            let word_with_space = if word_idx > 0 || current_line_length > 0 {
+                format!(" {}", word)
+            } else {
+                word.to_string()
+            };
+
+            let word_len = word_with_space.len();
+
+            if current_line_length == 0 && result_lines.is_empty() {
+                // First word of first line - no indent
+                current_line_spans.push(Span::styled(word_with_space, span_style));
+                current_line_length += word_len;
+            } else if current_line_length + word_len <= available_width {
+                // Word fits on current line
+                current_line_spans.push(Span::styled(word_with_space, span_style));
+                current_line_length += word_len;
+            } else {
+                // Word doesn't fit - finish current line and start new one
+                result_lines.push(Line::from(current_line_spans));
+                current_line_spans = vec![Span::raw(" ".repeat(continuation_indent))];
+                current_line_spans.push(Span::styled(word.to_string(), span_style));
+                current_line_length = word.len();
+            }
+        }
+    }
+
+    // Add the last line if it has content
+    if !current_line_spans.is_empty() {
+        result_lines.push(Line::from(current_line_spans));
+    }
+
+    if result_lines.is_empty() {
+        vec![line]
+    } else {
+        result_lines
     }
 }

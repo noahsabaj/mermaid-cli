@@ -517,11 +517,15 @@ impl App {
 
     /// Add a message to the chat
     pub fn add_message(&mut self, role: MessageRole, content: String) {
+        // Extract thinking blocks if present
+        let (thinking, answer_content) = ChatMessage::extract_thinking(&content);
+
         let message = ChatMessage {
             role,
-            content,
+            content: answer_content,
             timestamp: chrono::Local::now(),
             actions: Vec::new(),
+            thinking,
         };
         self.session_state.messages.push(message.clone());
 
@@ -588,6 +592,7 @@ impl App {
             content: title_prompt,
             timestamp: chrono::Local::now(),
             actions: Vec::new(),
+            thinking: None,
         }];
 
         // Use the model to generate title

@@ -81,8 +81,9 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         style_stack.last().copied().unwrap_or_default()
                     },
                     Tag::Item => {
-                        // Add bullet point with indentation
-                        let indent = "  ".repeat(list_depth.saturating_sub(1));
+                        // Add bullet point with 2-space base indentation plus nesting levels
+                        // list_depth=1: 2 spaces, list_depth=2: 4 spaces, etc.
+                        let indent = "  ".repeat(list_depth);
                         current_line_spans.push(Span::raw(indent));
                         current_line_spans
                             .push(Span::styled("• ", Style::default().fg(Color::Yellow)));

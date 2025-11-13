@@ -73,10 +73,11 @@ impl<'a> StatefulWidget for InputWidget<'a> {
                 (":q", "Quit (shortcut)"),
                 (":clear", "Clear chat history"),
                 (":model [name]", "Switch model or show current"),
-                (":sidebar", "Toggle file sidebar"),
-                (":sb", "Toggle sidebar (shortcut)"),
                 (":refresh", "Refresh file context from disk"),
                 (":r", "Refresh (shortcut)"),
+                (":save [name]", "Save current conversation"),
+                (":load [name]", "Load a conversation"),
+                (":list", "List saved conversations"),
                 (":help", "Show command help"),
                 (":h", "Help (shortcut)"),
             ];

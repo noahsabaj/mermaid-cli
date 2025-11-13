@@ -125,6 +125,7 @@ impl NonInteractiveRunner {
             content: system_content,
             timestamp: chrono::Local::now(),
             actions: Vec::new(),
+            thinking: None,
         };
 
         let user_message = ChatMessage {
@@ -132,18 +133,26 @@ impl NonInteractiveRunner {
             content: prompt.clone(),
             timestamp: chrono::Local::now(),
             actions: Vec::new(),
+            thinking: None,
         };
 
         let messages = vec![system_message, user_message];
 
+        // Get model name from the model
+        let model_guard = self.model.read().await;
+        let model_name = model_guard.name().to_string();
+        drop(model_guard);
+
         // Create model config
         let model_config = ModelConfig {
-            temperature: Some(0.7),
-            max_tokens: self.max_tokens.or(Some(4096)),
+            model: model_name,
+            temperature: 0.7,
+            max_tokens: self.max_tokens.unwrap_or(4096),
             top_p: Some(1.0),
             frequency_penalty: None,
             presence_penalty: None,
             system_prompt: None,
+            backend_options: std::collections::HashMap::new(),
         };
 
         // Send prompt to model

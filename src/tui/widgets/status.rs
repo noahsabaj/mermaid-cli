@@ -16,6 +16,7 @@ pub struct StatusWidget<'a> {
     pub theme: &'a Theme,
     pub working_dir: &'a str,
     pub cumulative_tokens: usize,
+    pub model_name: &'a str,
 }
 
 impl<'a> Widget for StatusWidget<'a> {
@@ -60,7 +61,7 @@ impl<'a> Widget for StatusWidget<'a> {
             ),
         ];
 
-        // Line 2: operation mode (colored text only, no background badge)
+        // Line 2: operation mode (left) | model name (right)
         let mode_text = match self.operation_mode {
             OperationMode::Normal => {
                 if self.confirmation_pending {
@@ -74,16 +75,29 @@ impl<'a> Widget for StatusWidget<'a> {
             OperationMode::BypassAll => "bypass permissions on (shift+tab to cycle)",
         };
 
-        let line2_spans = if !mode_text.is_empty() {
-            vec![
-                Span::styled(
-                    mode_text,
-                    Style::new().fg(self.operation_mode.color()),
-                ),
-            ]
+        // Calculate padding to align model name with token count above
+        let mode_length = mode_text.len();
+        let model_display = self.model_name;
+        let padding_width_line2 = if available_width > mode_length + model_display.len() + 1 {
+            available_width - mode_length - model_display.len()
         } else {
-            vec![Span::raw("")]  // Empty line when no mode text
+            1
         };
+
+        let line2_spans = vec![
+            // Operation mode text (left)
+            Span::styled(
+                mode_text,
+                Style::new().fg(self.operation_mode.color()),
+            ),
+            // Padding
+            Span::raw(" ".repeat(padding_width_line2)),
+            // Model name (right, aligned with tokens above)
+            Span::styled(
+                model_display,
+                Style::new().fg(self.theme.colors.text_disabled.to_color()),
+            ),
+        ];
 
         let line1 = Line::from(line1_spans);
         let line2 = Line::from(line2_spans);

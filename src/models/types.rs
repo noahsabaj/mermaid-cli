@@ -1,5 +1,4 @@
 use crate::agents::ActionDisplay;
-use crate::prompts;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -13,6 +12,44 @@ pub struct ChatMessage {
     /// Actions performed during this message (for display purposes)
     #[serde(default)]
     pub actions: Vec<ActionDisplay>,
+    /// Thinking/reasoning content (for models that expose their thought process)
+    #[serde(default)]
+    pub thinking: Option<String>,
+}
+
+impl ChatMessage {
+    /// Extract thinking blocks from message content
+    /// Returns (thinking_content, answer_content)
+    pub fn extract_thinking(text: &str) -> (Option<String>, String) {
+        // Check if the text contains thinking blocks
+        if !text.contains("Thinking...") {
+            return (None, text.to_string());
+        }
+
+        // Find thinking block boundaries
+        if let Some(thinking_start) = text.find("Thinking...") {
+            if let Some(thinking_end) = text.find("...done thinking.") {
+                // Extract thinking content (everything between markers)
+                let thinking_content_start = thinking_start + "Thinking...".len();
+                let thinking_text = text[thinking_content_start..thinking_end].trim().to_string();
+
+                // Extract answer (everything after thinking block)
+                let answer_start = thinking_end + "...done thinking.".len();
+                let answer_text = text[answer_start..].trim().to_string();
+
+                return (Some(thinking_text), answer_text);
+            }
+        }
+
+        // If we found "Thinking..." but not the end marker, treat it all as thinking in progress
+        if let Some(thinking_start) = text.find("Thinking...") {
+            let thinking_content_start = thinking_start + "Thinking...".len();
+            let thinking_text = text[thinking_content_start..].trim().to_string();
+            return (Some(thinking_text), String::new());
+        }
+
+        (None, text.to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,46 +142,6 @@ impl ProjectContext {
     }
 }
 
-/// Configuration for model parameters
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfig {
-    pub temperature: Option<f32>,
-    pub max_tokens: Option<usize>,
-    pub top_p: Option<f32>,
-    pub frequency_penalty: Option<f32>,
-    pub presence_penalty: Option<f32>,
-    pub system_prompt: Option<String>,
-}
-
-impl Default for ModelConfig {
-    fn default() -> Self {
-        Self {
-            temperature: Some(0.7),
-            max_tokens: Some(4096),
-            top_p: Some(1.0),
-            frequency_penalty: None,
-            presence_penalty: None,
-            system_prompt: Some(Self::get_base_prompt()),
-        }
-    }
-}
-
-impl ModelConfig {
-    /// Get the base system prompt from the centralized prompts module
-    fn get_base_prompt() -> String {
-        prompts::get_system_prompt()
-    }
-
-    /// Create config with Plan Mode instructions appended to system prompt
-    pub fn with_plan_mode() -> Self {
-        let mut config = Self::default();
-        if let Some(ref mut prompt) = config.system_prompt {
-            prompt.push_str(prompts::PLAN_MODE_SUFFIX);
-        }
-        config
-    }
-}
-
 /// Response from a model
 #[derive(Debug, Clone)]
 pub struct ModelResponse {
@@ -154,6 +151,8 @@ pub struct ModelResponse {
     pub usage: Option<TokenUsage>,
     /// Model that generated the response
     pub model_name: String,
+    /// Thinking/reasoning content (for models that expose their thought process)
+    pub thinking: Option<String>,
 }
 
 /// Token usage statistics
@@ -166,26 +165,6 @@ pub struct TokenUsage {
 
 /// Stream callback type for real-time response streaming
 pub type StreamCallback = Arc<dyn Fn(&str) + Send + Sync>;
-
-/// Capabilities of a model
-#[derive(Debug, Clone)]
-pub struct ModelCapabilities {
-    pub max_context_length: usize,
-    pub supports_streaming: bool,
-    pub supports_functions: bool,
-    pub supports_vision: bool,
-}
-
-impl Default for ModelCapabilities {
-    fn default() -> Self {
-        Self {
-            max_context_length: 4096,
-            supports_streaming: true,
-            supports_functions: false,
-            supports_vision: false,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -210,11 +189,13 @@ mod tests {
             content: "Hello, assistant!".to_string(),
             timestamp: chrono::Local::now(),
             actions: vec![],
+            thinking: None,
         };
 
         assert_eq!(message.role, MessageRole::User);
         assert_eq!(message.content, "Hello, assistant!");
         assert!(message.actions.is_empty());
+        assert!(message.thinking.is_none());
     }
 
     #[test]
@@ -288,36 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn test_model_config_defaults() {
-        let config = ModelConfig::default();
-
-        assert_eq!(config.temperature, Some(0.7));
-        assert_eq!(config.max_tokens, Some(4096));
-        assert_eq!(config.top_p, Some(1.0));
-        assert_eq!(config.frequency_penalty, None);
-        assert_eq!(config.presence_penalty, None);
-        assert!(config.system_prompt.is_some());
-        assert!(config.system_prompt.as_ref().unwrap().contains("Mermaid"));
-    }
-
-    #[test]
-    fn test_model_config_with_plan_mode() {
-        let config = ModelConfig::with_plan_mode();
-
-        assert!(config.system_prompt.is_some());
-        let prompt = config.system_prompt.unwrap();
-        assert!(
-            prompt.contains("PLAN MODE ACTIVE"),
-            "Should include plan mode header"
-        );
-        assert!(
-            prompt.contains("user will review"),
-            "Should mention user review"
-        );
-        assert!(prompt.contains("Ctrl+Y"), "Should mention Ctrl+Y shortcut");
-    }
-
-    #[test]
     fn test_token_usage_structure() {
         let usage = TokenUsage {
             prompt_tokens: 100,
@@ -342,21 +293,12 @@ mod tests {
             content: "Hello, world!".to_string(),
             usage: Some(usage),
             model_name: "ollama/tinyllama".to_string(),
+            thinking: None,
         };
 
         assert_eq!(response.content, "Hello, world!");
         assert!(response.usage.is_some());
         assert_eq!(response.model_name, "ollama/tinyllama");
         assert_eq!(response.usage.unwrap().total_tokens, 150);
-    }
-
-    #[test]
-    fn test_model_capabilities_default() {
-        let caps = ModelCapabilities::default();
-
-        assert_eq!(caps.max_context_length, 4096);
-        assert!(caps.supports_streaming);
-        assert!(!caps.supports_functions);
-        assert!(!caps.supports_vision);
     }
 }

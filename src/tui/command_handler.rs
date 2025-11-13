@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::app::load_config;
 use crate::context::ContextLoader;
 use crate::models::{MessageRole, ModelFactory};
+use crate::ollama;
 use crate::session::SessionState;
 use crate::tui::App;
 
@@ -22,6 +23,7 @@ pub async fn handle_command(app: &mut App, command: &str) -> Result<()> {
         Some("save") => handle_save(app, parts.get(1).copied()),
         Some("load") => handle_load(app, parts.get(1).copied()),
         Some("list") => handle_list(app),
+        Some("cloud-setup") => handle_cloud_setup(app),
         Some("help") | Some("h") => handle_help(app),
         _ => {
             app.set_status(format!("Unknown command: {}", command));
@@ -53,6 +55,30 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
             // Assume ollama if no provider specified
             format!("ollama/{}", model_name)
         };
+
+        // Check if this is a cloud model and if cloud is configured
+        if ollama::is_cloud_model(&model_id) && !ollama::is_cloud_configured() {
+            app.add_message(
+                MessageRole::System,
+                "Cloud model requested but Ollama Cloud is not configured.\n\n\
+                To use cloud models:\n\
+                1. Get an API key from https://ollama.com/cloud\n\
+                2. Run :cloud-setup to configure interactively\n\
+                   OR\n\
+                3. Set environment variable: export OLLAMA_API_KEY=your_key\n\
+                   OR\n\
+                4. Add to config: ~/.config/mermaid/config.toml\n\
+                   [ollama]\n\
+                   cloud_api_key = \"your_key\"\n\n\
+                Available cloud models:\n\
+                - kimi-k2-thinking:cloud\n\
+                - qwen3-coder:480b-cloud\n\
+                - deepseek-v3.1:671b-cloud\n\
+                - gpt-oss:120b-cloud"
+                    .to_string(),
+            );
+            return;
+        }
 
         app.set_status(format!("Switching to model: {}...", model_id));
 
@@ -199,29 +225,78 @@ fn handle_list(app: &mut App) {
     }
 }
 
+/// Setup Ollama cloud interactively
+fn handle_cloud_setup(app: &mut App) {
+    app.add_message(
+        MessageRole::System,
+        "Ollama Cloud Setup\n\n\
+        To configure Ollama Cloud, you have two options:\n\n\
+        1. Exit Mermaid and run the setup in your terminal:\n\
+           mermaid (then type :cloud-setup)\n\n\
+        2. Manually configure:\n\
+           a) Get API key from: https://ollama.com/cloud\n\
+           b) Add to ~/.config/mermaid/config.toml:\n\
+              [ollama]\n\
+              cloud_api_key = \"your_key_here\"\n\
+           c) OR set environment variable:\n\
+              export OLLAMA_API_KEY=your_key_here\n\n\
+        After configuration, you can use cloud models:\n\
+        - :model kimi-k2-thinking:cloud\n\
+        - :model qwen3-coder:480b-cloud\n\
+        - :model deepseek-v3.1:671b-cloud"
+            .to_string(),
+    );
+}
+
 /// Show help message
 fn handle_help(app: &mut App) {
     app.add_message(
         MessageRole::System,
-        "Commands:\n\
+        "COMMANDS:\n\
          :quit/:q - Quit the application\n\
          :clear - Clear chat history\n\
          :model [name] - Switch model or show current\n\
-         :sidebar/:sb - Toggle file sidebar\n\
+         :cloud-setup - Configure Ollama Cloud API key\n\
          :refresh/:r - Refresh file context from disk\n\
          :save [name] - Save current conversation\n\
          :load [name] - Load a conversation\n\
          :list - List saved conversations\n\
-         :stats/:diag - Toggle hardware diagnostics\n\
          :help/:h - Show this help\n\
          \n\
-         Keys:\n\
-         i - Enter insert mode (type messages)\n\
-         Esc - Return to normal mode / Close diagnostics\n\
-         : - Enter command mode\n\
-         Tab - Toggle sidebar\n\
-         F2 - Toggle hardware diagnostics\n\
-         Ctrl+C - Quit"
+         OPERATION MODES (Shift+Tab to cycle):\n\
+         Normal - Confirms all operations (default)\n\
+         Accept Edits - Auto-accepts file edits only\n\
+         Plan Mode - Preview actions without execution\n\
+         Bypass All - Auto-accepts everything (use with caution)\n\
+         \n\
+         MODE SHORTCUTS:\n\
+         Shift+Tab - Cycle modes forward\n\
+         Ctrl+Tab - Cycle modes backward\n\
+         Ctrl+E - Switch to Accept Edits mode\n\
+         Ctrl+P - Switch to Plan mode\n\
+         Ctrl+Y - Toggle Bypass All mode\n\
+         \n\
+         INPUT & NAVIGATION:\n\
+         Enter - Submit message or execute command\n\
+         Esc - Cancel generation/plan or clear input\n\
+         Up/Down - Navigate input history or scroll chat\n\
+         Left/Right - Move cursor in input\n\
+         Home/End - Jump to start/end of input\n\
+         Page Up/Down - Scroll chat\n\
+         Mouse Wheel - Scroll chat\n\
+         \n\
+         ACTION CONFIRMATION (when prompted):\n\
+         Alt+Y - Approve action\n\
+         Alt+N - Reject action\n\
+         Alt+A - Always approve similar actions\n\
+         Alt+P - Toggle action preview\n\
+         \n\
+         PLAN APPROVAL (Plan Mode):\n\
+         Ctrl+Y - Approve and execute plan\n\
+         Ctrl+N - Cancel plan\n\
+         \n\
+         OTHER:\n\
+         Ctrl+C - Quit application"
             .to_string(),
     );
 }

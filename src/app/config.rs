@@ -119,6 +119,10 @@ pub struct OllamaConfig {
     pub host: String,
     /// Ollama server port
     pub port: u16,
+    /// Ollama cloud API key (for :cloud models)
+    /// Set this to use Ollama's cloud inference service
+    /// Get your key at: https://ollama.com/cloud
+    pub cloud_api_key: Option<String>,
     /// Number of GPU layers to offload (None = auto, 0 = CPU only, positive = specific count)
     /// Lower values free up VRAM for larger models at the cost of speed
     pub num_gpu: Option<i32>,
@@ -137,6 +141,7 @@ impl Default for OllamaConfig {
         Self {
             host: String::from("localhost"),
             port: DEFAULT_OLLAMA_PORT,
+            cloud_api_key: None,
             num_gpu: None,    // Let Ollama auto-detect
             num_thread: None, // Let Ollama auto-detect
             num_ctx: None,    // Use model default

@@ -156,6 +156,7 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         theme: &app.ui_state.theme,
         working_dir: &app.working_dir,
         cumulative_tokens: app.session_state.cumulative_tokens,
+        model_name: &app.model_state.model_name,
     };
     frame.render_widget(status_widget, chunks[3]);
 }
