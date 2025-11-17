@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, StatefulWidget, Widget, Wrap},
+    widgets::{Block, Borders, Paragraph, StatefulWidget, Widget},
 };
 
 use crate::tui::theme::Theme;
@@ -144,29 +144,99 @@ impl<'a> StatefulWidget for InputWidget<'a> {
         };
 
         let input_style = Style::new().fg(self.theme.colors.text_primary.to_color());
-        let title = if self.showing_command_hints {
-            " Enter Command "
-        } else {
-            " Message (Esc to stop/clear • Type :help for commands) "
+
+        // Manually wrap input text with proper indentation (Claude Code style)
+        // First line: "> text"
+        // Continuation lines: "  text" (2 spaces to align with first line content)
+        // Always show "> " prompt, even when input is empty
+        let input_text = {
+            let width = input_area.width.saturating_sub(2) as usize; // Account for top/bottom borders
+            wrap_input_with_prompt(self.input, width)
         };
 
-        let input = Paragraph::new(self.input)
+        // Build block - only add title when showing command hints
+        // Use top and bottom borders to span full width like Claude Code
+        let block = if self.showing_command_hints {
+            Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::new().fg(self.theme.colors.warning.to_color()))
+                .title(" Enter Command ")
+        } else {
+            Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::new().fg(self.theme.colors.border.to_color()))
+        };
+
+        let input = Paragraph::new(input_text)
             .style(input_style)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::new().fg(if self.showing_command_hints {
-                        self.theme.colors.warning.to_color()
-                    } else {
-                        self.theme.colors.border.to_color()
-                    }))
-                    .title(title),
-            );
+            .block(block);
 
         input.render(input_area, buf);
 
         // Note: Cursor positioning is handled in the main render loop after all widgets are rendered
         // The Frame::set_cursor_position() is called there with the calculated position
     }
+}
+
+/// Wrap input text with "> " prefix on first line and "  " on continuation lines (Claude Code style)
+/// Always returns at least "> " even when input is empty
+fn wrap_input_with_prompt(input: &str, width: usize) -> String {
+    if width < 3 {
+        // Not enough space for "> " prefix
+        return input.to_string();
+    }
+
+    // Always start with "> " prompt
+    let mut result = String::from("> ");
+
+    // If input is empty, just return the prompt
+    if input.is_empty() {
+        return result;
+    }
+
+    let first_line_width = width.saturating_sub(2); // Reserve 2 chars for "> "
+    let continuation_width = width.saturating_sub(2); // Reserve 2 chars for "  "
+
+    let mut chars_remaining = input;
+    let mut is_first_line = true;
+
+    while !chars_remaining.is_empty() {
+        let line_width = if is_first_line {
+            first_line_width
+        } else {
+            continuation_width
+        };
+
+        // Find where to break the line
+        let break_point = if chars_remaining.len() <= line_width {
+            // Entire remaining text fits on this line
+            chars_remaining.len()
+        } else {
+            // Find last space before width limit for nice wrapping
+            chars_remaining[..line_width]
+                .rfind(char::is_whitespace)
+                .map(|pos| pos + 1) // Include the space
+                .unwrap_or(line_width) // No space found, hard break
+        };
+
+        // Extract this line's text
+        let line_text = &chars_remaining[..break_point];
+
+        // Add line text (prefix already added for first line, or add it for continuation)
+        if is_first_line {
+            // First line: "> " already in result, just add the text
+            result.push_str(line_text.trim_end());
+        } else {
+            // Continuation line: add newline + "  " prefix + text
+            result.push('\n');
+            result.push_str("  ");
+            result.push_str(line_text.trim_end());
+        }
+
+        // Move to next line
+        chars_remaining = &chars_remaining[break_point..].trim_start();
+        is_first_line = false;
+    }
+
+    result
 }

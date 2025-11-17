@@ -526,6 +526,8 @@ impl App {
             timestamp: chrono::Local::now(),
             actions: Vec::new(),
             thinking,
+            images: None,
+            tool_calls: None,
         };
         self.session_state.messages.push(message.clone());
 
@@ -593,6 +595,8 @@ impl App {
             timestamp: chrono::Local::now(),
             actions: Vec::new(),
             thinking: None,
+            images: None,
+            tool_calls: None,
         }];
 
         // Use the model to generate title

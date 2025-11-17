@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::agents::{
-    segment_message, ActionDisplay, ActionResult, MessageSegment,
+    ActionDisplay, ActionResult,
 };
 use crate::models::{ChatMessage, MessageRole};
 use crate::tui::app::ConfirmationState;
@@ -145,55 +145,35 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     lines.push(Line::from(""));
                 }
 
-                let segments = segment_message(&msg.content);
-                let mut is_first_segment = true;
+                // With tool calling, message content is just text (no embedded action blocks)
+                // Parse and render the markdown content
+                let parsed_lines = parse_markdown(&msg.content);
 
-                for segment in segments {
-                    match segment {
-                        MessageSegment::Text(text) => {
-                            let parsed_lines = parse_markdown(&text);
-
-                            for (line_idx, mut parsed_line) in parsed_lines.into_iter().enumerate() {
-                                // Add role indicator to first line or 2-space margin to others
-                                if is_first_segment && line_idx == 0 {
-                                    // First line: prepend role indicator
-                                    let mut spans = vec![Span::styled(
-                                        format!("{} ", role_prefix),
-                                        Style::new().fg(role_color).bold(),
-                                    )];
-                                    spans.extend(parsed_line.spans);
-                                    parsed_line = Line::from(spans);
-                                } else {
-                                    // Other lines: prepend 2-space margin
-                                    let mut spans = vec![Span::raw("  ")];
-                                    spans.extend(parsed_line.spans);
-                                    parsed_line = Line::from(spans);
-                                }
-
-                                // Now wrap the styled line if needed (continuation indent = 2)
-                                let wrapped = wrap_styled_line(parsed_line, area.width as usize, 2);
-                                lines.extend(wrapped);
-
-                                if is_first_segment && line_idx == 0 {
-                                    is_first_segment = false;
-                                }
-                            }
-                        },
-                        MessageSegment::ActionMarker {
-                            action_type,
-                            target,
-                        } => {
-                            if let Some(action_display) = msg
-                                .actions
-                                .iter()
-                                .find(|a| a.action_type == action_type && a.target == target)
-                            {
-                                let actions_to_render = vec![action_display.clone()];
-                                render_actions(&actions_to_render, &mut lines, self.theme);
-                            }
-                            is_first_segment = false;
-                        },
+                for (line_idx, mut parsed_line) in parsed_lines.into_iter().enumerate() {
+                    // Add role indicator to first line or 2-space margin to others
+                    if line_idx == 0 {
+                        // First line: prepend role indicator
+                        let mut spans = vec![Span::styled(
+                            format!("{} ", role_prefix),
+                            Style::new().fg(role_color).bold(),
+                        )];
+                        spans.extend(parsed_line.spans);
+                        parsed_line = Line::from(spans);
+                    } else {
+                        // Other lines: prepend 2-space margin
+                        let mut spans = vec![Span::raw("  ")];
+                        spans.extend(parsed_line.spans);
+                        parsed_line = Line::from(spans);
                     }
+
+                    // Wrap the styled line if needed (continuation indent = 2)
+                    let wrapped = wrap_styled_line(parsed_line, area.width as usize, 2);
+                    lines.extend(wrapped);
+                }
+
+                // Render all actions at the end of the message
+                if !msg.actions.is_empty() {
+                    render_actions(&msg.actions, &mut lines, self.theme);
                 }
             } else {
                 // For User messages: format timestamp and display on right edge

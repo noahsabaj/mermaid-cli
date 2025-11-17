@@ -135,17 +135,17 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
 
     // Set cursor position in input box (visible text cursor)
     let input_area = chunks[2];
-    let inner_width = input_area.width.saturating_sub(2) as usize; // -2 for left+right borders
+    let inner_width = input_area.width as usize; // Full width now (no side borders)
     let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
         &app.input,
         app.cursor_position,
         inner_width,
     );
 
-    // Position cursor accounting for borders
-    // +1 for left border, +1 for top border
+    // Position cursor accounting for "> " prefix and top border
+    // No left border anymore (spans full width), +1 for top border, +2 for "> " prefix
     frame.set_cursor_position((
-        input_area.x + 1 + cursor_col,
+        input_area.x + cursor_col + 2,
         input_area.y + 1 + cursor_row,
     ));
 
