@@ -4,34 +4,72 @@ An open-source AI pair programmer CLI that provides an interactive chat interfac
 
 ## Features
 
+- **Native Tool Calling**: Ollama's tool calling API for structured, reliable actions (v0.2.0+)
 - **Local Model Support**: Use Ollama for fast, private code assistance
 - **Multiple Local Models**: Switch between different Ollama models mid-session without losing context
 - **Project Aware**: Automatically loads and understands your entire project context
 - **True Agency**: Can read, write, execute commands, and manage git
 - **Privacy First**: Run 100% locally with Ollama - your code never leaves your machine
-- **Interactive TUI**: Beautiful terminal interface with syntax highlighting
+- **Interactive TUI**: Beautiful terminal interface with Claude Code-inspired aesthetics
 - **Real-time Streaming**: See responses as they're generated
 - **Smart Context**: Respects .gitignore and intelligently manages token limits
-- **Rootless Containers**: Secure Podman/Docker deployment with no daemon overhead
+- **Web Search**: Integrated local Searxng for documentation and current information
+- **Rootless Containers**: Secure Podman deployment with no daemon overhead
 
 ## Quick Start
 
 ### Prerequisites
 
-- Rust toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
-- Podman (`sudo apt-get install podman`) or Docker
-- Ollama for local models (`curl -fsSL https://ollama.ai/install.sh | sh`)
+- **Rust toolchain** (required for building from source)
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  source $HOME/.cargo/env
+  ```
+
+- **Ollama** (required for running local AI models)
+  ```bash
+  curl -fsSL https://ollama.ai/install.sh | sh
+  ```
+
+- **Podman** (optional, for web search via Searxng)
+  ```bash
+  # Ubuntu/Debian/Linux Mint
+  sudo apt-get update && sudo apt-get install -y podman podman-compose
+  ```
 
 ### Installation
+
+#### Option 1: Install from GitHub (Recommended)
 
 ```bash
 # Clone the repository
 git clone https://github.com/noahsabaj/mermaid-cli.git
-cd mermaid
+cd mermaid-cli
 
-# Build and install Mermaid
-cargo build --release
-cargo install --path .
+# Build and install (installs to ~/.cargo/bin/mermaid)
+cargo install --path . --force
+
+# Verify installation
+mermaid --version
+```
+
+#### Option 2: Install from crates.io (Coming Soon)
+
+```bash
+cargo install mermaid-cli
+```
+
+### First Run
+
+```bash
+# Pull a compatible model (see Model Compatibility below)
+ollama pull llama3.1:8b
+
+# Start Mermaid
+mermaid --model llama3.1:8b
+
+# Or use Mermaid's default model (tinyllama)
+mermaid
 ```
 
 ### Basic Usage
@@ -95,16 +133,56 @@ max_context_tokens = 75000
 ### Project Configuration
 Create `.mermaid/config.toml` in your project root to override global settings.
 
-## Supported Models
+## Model Compatibility
 
-Mermaid uses **Ollama** for local model support. Available models include:
-- `ollama/tinyllama` - Tiny, ultra-fast model for testing
-- `ollama/deepseek-coder:33b` - Best for coding tasks
-- `ollama/codellama` - Specialized code model
-- `ollama/mistral` - Balanced performance
-- `ollama/qwen3-coder:30b` - Excellent coding capabilities
+Mermaid uses **Ollama** for local model support with native tool calling (v0.2.0+).
 
-Install any model with: `ollama pull model-name`
+### Verified Compatible Models (Tool Calling Support)
+
+Models with native Ollama tool calling support that can execute file operations, commands, and git actions:
+
+**Recommended for Coding:**
+- `llama3.1:8b` - Fast, excellent tool calling (4.7GB)
+- `llama3.1:70b` - Best quality, slower (40GB)
+- `qwen2.5-coder:7b` - Optimized for code (4.7GB)
+- `qwen2.5-coder:14b` - Excellent coding (9.0GB)
+- `qwen2.5-coder:32b` - Elite coding (19GB)
+- `mistral-nemo:12b` - Balanced performance (7.1GB)
+
+**Other Compatible Models:**
+- `llama3.2:1b` - Ultra-fast, limited capabilities (1.3GB)
+- `llama3.2:3b` - Fast, decent quality (2.0GB)
+- `firefunction-v2:70b` - Specialized for function calling (40GB)
+
+### Models Without Tool Calling
+
+These models can chat but cannot execute actions (coming in v0.2.1 with text fallback):
+- `deepseek-coder:33b` - Excellent for code, no tool support
+- `codellama` - Good for code, no tool support
+- `tinyllama` - Ultra-fast, no tool support
+- Most other Ollama models
+
+### Installing Models
+
+```bash
+# Install a compatible model
+ollama pull llama3.1:8b
+
+# List installed models
+ollama list
+
+# Use with Mermaid
+mermaid --model llama3.1:8b
+```
+
+### Cloud Models (Ollama Cloud)
+
+Access massive models on datacenter hardware:
+- `qwen3-coder:480b-cloud` - 480B params, elite coding
+- `kimi-k2-thinking:cloud` - 1T params, advanced reasoning
+- `deepseek-v3.1:671b-cloud` - 671B params, largest
+
+**Note:** Cloud models require an API key from [ollama.com/cloud](https://ollama.com/cloud)
 
 ## Example Workflows
 
@@ -146,13 +224,27 @@ Mermaid: I'll refactor this function to use async/await pattern.
 
 ## Features in Action
 
-### Agent Capabilities
+### Agent Capabilities (Native Tool Calling)
 
-Mermaid can perform various actions by parsing special blocks in its responses:
+Mermaid uses Ollama's native tool calling API for structured, reliable actions:
 
-- **File Operations**: Create, read, update, delete files
-- **Command Execution**: Run shell commands and see output
-- **Git Operations**: Check status, view diffs, commit changes
+**Available Tools:**
+- `read_file` - Read any file (text, PDF, images with vision models)
+- `write_file` - Create or update files in the project
+- `run_command` - Execute shell commands and see output
+- `git_status` - Check git working tree status
+- `git_diff` - View changes in files
+- `git_commit` - Create commits with proper messages
+- `web_search` - Search the web via local Searxng
+- `list_directory` - Browse project structure
+- `get_file_info` - Get file metadata (size, modified time, etc.)
+
+**How It Works:**
+1. Model receives tool definitions as JSON Schema
+2. Model calls tools when needed (structured function calls)
+3. Mermaid executes the tool and returns results
+4. Model continues with the context of results
+5. All tool calls are shown in the UI with clear summaries
 
 ### Project Context
 

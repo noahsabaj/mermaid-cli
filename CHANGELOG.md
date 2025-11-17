@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2025-11-16
+
+### Added
+- Native Ollama tool calling support with JSON Schema tool definitions
+  - 9 tools: read_file, write_file, run_command, git_status, git_diff, git_commit, web_search, list_directory, get_file_info
+  - Structured tool definitions with detailed parameter descriptions
+  - Tool calls parsed from streaming chunks in real-time
+- Enhanced input widget UI matching Claude Code aesthetics
+  - Always-visible "> " prompt prefix
+  - Full-width input bar with top/bottom borders only
+  - Proper text wrapping with 2-space indentation on continuation lines
+  - Blank line after "Thinking..." marker for better visual spacing
+- Model compatibility framework for tool calling detection
+
+### Changed
+- Migrated from text-based action blocks to Ollama native tool calling API
+- Completely rewrote system prompt (76% reduction: 353 to 86 lines)
+- Tool definitions now provide comprehensive usage guidance
+- Cleaner, more maintainable architecture with dedicated tools module
+- Updated all backend adapters to support tool_calls in responses
+- Stream handler now accumulates tool calls from streaming chunks
+
+### Removed
+- Legacy text-based parsers (parser.rs, extractor.rs, segmenter.rs)
+- Verbose system prompt with action block examples
+- Text-based action block parsing (temporarily, will be restored as fallback)
+
+### Fixed
+- Cursor positioning now accounts for "> " prefix and border changes
+- Text wrapping alignment issues with continuation lines
+- Input widget rendering for empty input states
+
+### Breaking Changes
+- Models without native Ollama tool calling support will not execute actions
+- Next release (v0.2.1) will restore text-based fallback for universal compatibility
+- Compatible models: llama3.1, llama3.2, qwen2.5-coder, mistral-nemo, firefunction-v2
+
 ## [0.1.1] - 2025-09-27
 
 ### Added
@@ -61,6 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/noahsabaj/mermaid-cli/releases/tag/v0.1.0
