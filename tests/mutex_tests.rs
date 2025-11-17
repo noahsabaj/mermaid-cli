@@ -1,6 +1,6 @@
 // Tests for mutex safety utilities
 
-use mermaid::utils::{lock_arc_mutex_safe, MutexExt};
+use mermaid_cli::utils::{lock_arc_mutex_safe, MutexExt};
 use std::sync::{Arc, Mutex};
 
 #[test]

@@ -1,6 +1,6 @@
 #[test]
 fn debug_cargo_test_parsing() {
-    use mermaid::agents::parse_actions;
+    use mermaid_cli::agents::parse_actions;
 
     let response = "[COMMAND: cargo test]\n[/COMMAND]";
     let actions = parse_actions(response);

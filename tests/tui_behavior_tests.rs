@@ -5,8 +5,8 @@
 // NOTE: Due to module visibility, we'll test the public interfaces rather than internal state
 // This is actually better practice - testing public behavior rather than implementation details
 
-use mermaid::agents::AgentAction;
-use mermaid::tui::{AppState, GenerationStatus, OperationMode};
+use mermaid_cli::agents::AgentAction;
+use mermaid_cli::tui::{AppState, GenerationStatus, OperationMode};
 
 // ===== APP STATE ENUM TESTS =====
 
@@ -258,7 +258,7 @@ fn test_operation_mode_variants() {
 
 #[test]
 fn test_message_roles_exist() {
-    use mermaid::models::MessageRole;
+    use mermaid_cli::models::MessageRole;
 
     // Verify all roles can be created
     let user = MessageRole::User;

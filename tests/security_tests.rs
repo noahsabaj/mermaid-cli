@@ -1,6 +1,6 @@
 // Integration tests for security features
 
-use mermaid::agents::parse_actions;
+use mermaid_cli::agents::parse_actions;
 
 #[test]
 fn test_directory_traversal_blocked() {

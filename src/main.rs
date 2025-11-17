@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use mermaid::{
+use mermaid_cli::{
     app::load_config,
     cli::Cli,
     models::ModelFactory,

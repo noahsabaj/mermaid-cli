@@ -1,6 +1,6 @@
 // Integration tests for proxy configuration
 
-use mermaid::proxy::{get_compose_dir, is_container_runtime_available};
+use mermaid_cli::proxy::{get_compose_dir, is_container_runtime_available};
 use std::env;
 
 #[test]
