@@ -1,11 +1,20 @@
 [package]
-name = "mermaid"
+name = "mermaid-cli"
 version = "0.2.0"
 edition = "2021"
 authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
-description = "An open-source, model-agnostic AI pair programmer CLI"
+description = "Open-source AI pair programmer with agentic capabilities. Local-first with Ollama, native tool calling, and beautiful TUI."
 repository = "https://github.com/noahsabaj/mermaid-cli"
+homepage = "https://github.com/noahsabaj/mermaid-cli"
+documentation = "https://github.com/noahsabaj/mermaid-cli#readme"
+readme = "README.md"
 license = "MIT OR Apache-2.0"
+keywords = ["ai", "coding-assistant", "ollama", "tui", "pair-programming"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "mermaid"
+path = "src/main.rs"
 
 [dependencies]
 # Async runtime
