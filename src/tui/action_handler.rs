@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::agents::{
     self, ActionDisplay, ActionResult as AgentActionResult, AgentAction, ModeAwareExecutor,
 };
-use crate::models::{MessageRole, ModelConfig, StreamCallback};
+use crate::models::{ChatMessage, MessageRole, ModelConfig, StreamCallback};
 use crate::tui::{App, ConfirmationState, FileInfo};
 use crate::utils::count_file_tokens;
 
@@ -184,8 +184,26 @@ async fn handle_action_success(
     // Perform action-specific post-processing
     match action {
         // Actions that need multi-step follow-through: Trigger unified feedback loop
-        AgentAction::ReadFile { .. } => {
-            trigger_feedback_loop(app, action, output, tx).await;
+        AgentAction::ReadFile { path } => {
+            // Check if this is a binary file (PDF, image, etc.)
+            if crate::agents::is_binary_file(path) {
+                // For binary files, read as base64 and trigger multimodal feedback
+                match crate::agents::read_binary_file(path) {
+                    Ok(base64_data) => {
+                        trigger_multimodal_feedback_loop(app, action, base64_data, tx).await;
+                    }
+                    Err(e) => {
+                        // Fall back to error message
+                        app.add_message(
+                            MessageRole::Assistant,
+                            format!("Failed to read binary file: {}", e),
+                        );
+                    }
+                }
+            } else {
+                // Text files use normal feedback loop
+                trigger_feedback_loop(app, action, output, tx).await;
+            }
         },
         AgentAction::WebSearch {  .. } => {
             trigger_feedback_loop(app, action, output, tx).await;
@@ -681,6 +699,82 @@ async fn trigger_feedback_loop(
     // Add feedback as system message
     app.add_message(MessageRole::System, feedback_prompt.clone());
     let messages = app.build_message_history();
+
+    // Send feedback to model for re-generation with analysis
+    let model = app.model_state.model.clone();
+    let context = app.context.clone();
+    let tx_clone = tx.clone();
+    let tx_done = tx.clone();
+
+    let handle = tokio::spawn(async move {
+        let config = ModelConfig::default();
+        let callback: StreamCallback = Arc::new(move |chunk| {
+            let _ = tx_clone.try_send(chunk.to_string());
+        });
+
+        let mut model = model.write().await;
+        match model
+            .chat(&messages, &context, &config, Some(callback))
+            .await
+        {
+            Ok(_) => {
+                let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
+            }
+            Err(e) => {
+                let _ = tx_done.send(format!("[ERROR]:{}", e)).await;
+            }
+        }
+    });
+
+    // Start generation state with abort handle from the spawned task
+    app.start_generation(handle.abort_handle());
+}
+
+/// Trigger multimodal feedback loop for binary files (PDFs, images)
+///
+/// This attaches the base64-encoded file to the message's images array
+/// so vision-capable models can analyze it natively.
+async fn trigger_multimodal_feedback_loop(
+    app: &mut App,
+    action: &AgentAction,
+    base64_data: String,
+    tx: &mpsc::Sender<String>,
+) {
+    // Build the feedback prompt for binary files
+    let feedback_prompt = match action {
+        AgentAction::ReadFile { path } => {
+            format!(
+                "I've successfully read the file '{}'. Please analyze this document and tell the user what it contains.",
+                path
+            )
+        }
+        _ => return, // Only handle ReadFile for now
+    };
+
+    // Set feedback tracking flags
+    app.operation_state.pending_file_read = true;
+    if app.operation_state.reading_file_status.is_none() {
+        app.operation_state.reading_file_status = Some("Analyzing document...".to_string());
+        app.status_state.status_timestamp = Some(std::time::Instant::now());
+    }
+
+    app.current_response.clear();
+
+    // Add feedback as system message with images attached
+    let mut messages = app.build_message_history();
+
+    // Create a new message with the base64 image attached
+    let feedback_message = ChatMessage {
+        role: MessageRole::System,
+        content: feedback_prompt,
+        timestamp: chrono::Local::now(),
+        actions: Vec::new(),
+        thinking: None,
+        images: Some(vec![base64_data]),
+        tool_calls: None,
+    };
+
+    messages.push(feedback_message);
 
     // Send feedback to model for re-generation with analysis
     let model = app.model_state.model.clone();

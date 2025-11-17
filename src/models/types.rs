@@ -15,6 +15,12 @@ pub struct ChatMessage {
     /// Thinking/reasoning content (for models that expose their thought process)
     #[serde(default)]
     pub thinking: Option<String>,
+    /// Base64-encoded images/PDFs for multimodal models
+    #[serde(default)]
+    pub images: Option<Vec<String>>,
+    /// Tool calls from the model (Ollama native function calling)
+    #[serde(default)]
+    pub tool_calls: Option<Vec<crate::models::tool_call::ToolCall>>,
 }
 
 impl ChatMessage {
@@ -153,6 +159,8 @@ pub struct ModelResponse {
     pub model_name: String,
     /// Thinking/reasoning content (for models that expose their thought process)
     pub thinking: Option<String>,
+    /// Tool calls from the model (Ollama native function calling)
+    pub tool_calls: Option<Vec<crate::models::tool_call::ToolCall>>,
 }
 
 /// Token usage statistics
@@ -190,12 +198,16 @@ mod tests {
             timestamp: chrono::Local::now(),
             actions: vec![],
             thinking: None,
+            images: None,
+            tool_calls: None,
         };
 
         assert_eq!(message.role, MessageRole::User);
         assert_eq!(message.content, "Hello, assistant!");
         assert!(message.actions.is_empty());
         assert!(message.thinking.is_none());
+        assert!(message.images.is_none());
+        assert!(message.tool_calls.is_none());
     }
 
     #[test]

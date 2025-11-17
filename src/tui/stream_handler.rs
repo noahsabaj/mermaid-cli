@@ -3,8 +3,8 @@ use tokio::sync::mpsc;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
-use crate::agents::{self, AgentAction, Plan};
-use crate::models::MessageRole;
+use crate::agents::{AgentAction, Plan};
+use crate::models::{parse_tool_calls, group_parallel_reads, MessageRole};
 use crate::tui::app::GenerationStatus;
 use crate::tui::App;
 
@@ -52,6 +52,9 @@ pub async fn process_stream_chunks(
         return Ok(StreamStatus::Streaming);
     }
 
+    // Accumulate tool calls from streaming
+    let mut accumulated_tool_calls: Vec<crate::models::ToolCall> = Vec::new();
+
     // Process all available messages from the channel
     while let Ok(chunk) = rx.try_recv() {
         // Check for custom status marker (appears at start of response)
@@ -69,6 +72,18 @@ pub async fn process_stream_chunks(
                 // Fall through to process rest of chunk
             } else {
                 continue; // Incomplete status marker, skip for now
+            }
+        }
+
+        // Check for tool calls marker from Ollama adapter
+        if chunk.starts_with("[TOOL_CALLS:") {
+            if let Some(end_idx) = chunk.find(']') {
+                let json_str = &chunk[12..end_idx]; // Skip "[TOOL_CALLS:"
+                if let Ok(tool_calls) = serde_json::from_str::<Vec<crate::models::ToolCall>>(json_str) {
+                    accumulated_tool_calls.extend(tool_calls);
+                }
+                // Don't add tool call markers to response text
+                continue;
             }
         }
 
@@ -96,17 +111,21 @@ pub async fn process_stream_chunks(
             if !app.current_response.is_empty() {
                 let response_text = app.current_response.clone();
 
-                // Parse and execute any actions from the response
-                let actions = agents::parse_actions(&response_text);
+                // Parse actions from accumulated tool calls (Ollama native function calling)
+                let actions = if !accumulated_tool_calls.is_empty() {
+                    let parsed = parse_tool_calls(&accumulated_tool_calls);
+                    group_parallel_reads(parsed)
+                } else {
+                    vec![]
+                };
 
                 // Check if we're in PlanMode
                 if app.operation_state.operation_mode.is_planning_only() {
-                    // Extract explanation text (everything except action blocks)
-                    let explanation = agents::strip_action_blocks(&response_text);
-                    let explanation = if explanation.is_empty() {
+                    // With tool calling, the response text IS the explanation (no action blocks to strip)
+                    let explanation = if response_text.trim().is_empty() {
                         None
                     } else {
-                        Some(explanation)
+                        Some(response_text.clone())
                     };
 
                     // Clear the accumulated response
@@ -133,11 +152,10 @@ pub async fn process_stream_chunks(
 
                 if has_feedback_actions {
                     app.operation_state.pending_file_read = true;
-                    // Extract the model's intent from text before [FILE_READ]
-                    app.operation_state.reading_file_status = extract_reading_intent(&response_text);
-                    if app.operation_state.reading_file_status.is_some() {
-                        app.status_state.status_timestamp = Some(std::time::Instant::now());
-                    }
+                    // With tool calling, we don't have text before actions to extract intent
+                    // Just set a generic status message
+                    app.operation_state.reading_file_status = Some("Reading files...".to_string());
+                    app.status_state.status_timestamp = Some(std::time::Instant::now());
                 }
 
                 // Clear the accumulated response

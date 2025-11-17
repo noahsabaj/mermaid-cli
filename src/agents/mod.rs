@@ -4,21 +4,17 @@
 // Private submodules - not directly accessible from outside
 mod action_executor;
 mod executor;
-mod extractor;
 mod filesystem;
 mod git;
 mod mode_aware_executor;
-mod parser;
 mod plan;
-mod segmenter;
 mod types;
 mod web_search;
 
 // Public re-exports - the ONLY way to access agent functionality
 pub use action_executor::execute_action;
-pub use filesystem::read_file;
+pub use filesystem::{is_binary_file, read_binary_file, read_file};
 pub use mode_aware_executor::ModeAwareExecutor;
-pub use parser::{parse_actions, segment_message, strip_action_blocks, MessageSegment};
 pub use plan::{ActionStatus, Plan, PlanStats, PlannedAction};
 pub use types::{ActionDisplay, ActionResult, AgentAction};
 pub use web_search::{SearchResult, WebSearchClient};

@@ -66,6 +66,7 @@ impl OllamaAdapter {
         let mut stream = response.bytes_stream();
         let mut full_content = String::new();
         let mut full_thinking = String::new();
+        let mut accumulated_tool_calls: Vec<crate::models::ToolCall> = Vec::new();
         let mut in_thinking_phase = false;
         let mut prompt_tokens = 0;
         let mut completion_tokens = 0;
@@ -90,12 +91,21 @@ impl OllamaAdapter {
                 // Handle thinking content (if present)
                 if let Some(ref thinking_chunk) = json_chunk.message.thinking {
                     if !in_thinking_phase {
-                        callback("Thinking...\n");
+                        callback("Thinking...\n\n");
                         in_thinking_phase = true;
                     }
                     if !thinking_chunk.is_empty() {
                         callback(thinking_chunk);
                         full_thinking.push_str(thinking_chunk);
+                    }
+                }
+
+                // Handle tool calls (if present)
+                if let Some(tool_calls) = json_chunk.message.tool_calls {
+                    accumulated_tool_calls.extend(tool_calls.clone());
+                    // Send tool calls to stream handler as special marker
+                    if let Ok(tool_calls_json) = serde_json::to_string(&tool_calls) {
+                        callback(&format!("[TOOL_CALLS:{}]", tool_calls_json));
                     }
                 }
 
@@ -128,6 +138,12 @@ impl OllamaAdapter {
             Some(full_thinking)
         };
 
+        let tool_calls = if accumulated_tool_calls.is_empty() {
+            None
+        } else {
+            Some(accumulated_tool_calls)
+        };
+
         Ok(ModelResponse {
             content: full_content,
             usage: Some(TokenUsage {
@@ -137,6 +153,7 @@ impl OllamaAdapter {
             }),
             model_name: "ollama".to_string(),
             thinking,
+            tool_calls,
         })
     }
 }
@@ -242,17 +259,32 @@ impl Backend for OllamaAdapter {
                 MessageRole::Assistant => "assistant",
                 MessageRole::System => "system",
             };
-            json_messages.push(json!({
+
+            let mut json_msg = json!({
                 "role": role,
                 "content": msg.content
-            }));
+            });
+
+            // Add images if present (for multimodal models)
+            if let Some(ref images) = msg.images {
+                if !images.is_empty() {
+                    json_msg["images"] = json!(images);
+                }
+            }
+
+            json_messages.push(json_msg);
         }
 
-        // Build request body
+        // Add Ollama native tools for function calling
+        let tool_registry = crate::models::ToolRegistry::mermaid_tools();
+        let tools = tool_registry.to_ollama_format();
+
+        // Build request body with tools
         let mut request_body = json!({
             "model": model_name,
             "messages": json_messages,
             "stream": stream_callback.is_some(),
+            "tools": tools,
         });
 
         // Add model parameters
@@ -309,12 +341,14 @@ impl Backend for OllamaAdapter {
                 })?;
 
             let thinking = json.message.thinking.filter(|t| !t.is_empty());
+            let tool_calls = json.message.tool_calls.filter(|tc| !tc.is_empty());
 
             Ok(ModelResponse {
                 content: json.message.content,
                 usage: None,
                 model_name: model_name.to_string(),
                 thinking,
+                tool_calls,
             })
         }
     }
@@ -323,8 +357,8 @@ impl Backend for OllamaAdapter {
         BackendMetadata {
             max_context_length: 8192, // Default, varies by model
             supports_streaming: true,
-            supports_functions: false,
-            supports_vision: false,
+            supports_functions: true, // Ollama supports native function calling via tools API
+            supports_vision: true, // Ollama supports vision/multimodal models
             is_local: true, // Ollama daemon is local, handles cloud routing internally
             version: None,
         }
@@ -354,6 +388,8 @@ struct OllamaMessage {
     content: String,
     #[serde(default)]
     thinking: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<crate::models::ToolCall>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
