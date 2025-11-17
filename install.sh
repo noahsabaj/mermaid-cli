@@ -72,14 +72,9 @@ if command_exists mermaid; then
     echo -e "${YELLOW}Mermaid already installed. Updating to latest version...${RESET}"
 fi
 
-# Install from crates.io if published, otherwise from GitHub
-if cargo search mermaid-cli 2>/dev/null | grep -q "^mermaid-cli"; then
-    echo -e "${BLUE}Installing from crates.io...${RESET}"
-    cargo install mermaid-cli --force
-else
-    echo -e "${BLUE}Installing from GitHub (latest version)...${RESET}"
-    cargo install --git https://github.com/noahsabaj/mermaid-cli --force
-fi
+# Install from crates.io (official releases)
+echo -e "${BLUE}Installing from crates.io (v0.2.0)...${RESET}"
+cargo install mermaid-cli --force
 
 echo -e "${GREEN}Mermaid CLI installed successfully!${RESET}\n"
 
