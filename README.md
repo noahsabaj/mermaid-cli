@@ -39,46 +39,79 @@ An open-source AI pair programmer CLI that provides an interactive chat interfac
 
 ### Installation
 
-#### Option 1: Install from GitHub (Recommended)
+#### Quick Install (Recommended)
+
+One command installs everything (Rust, Ollama, Mermaid, and a compatible model):
 
 ```bash
-# Clone the repository
-git clone https://github.com/noahsabaj/mermaid-cli.git
-cd mermaid-cli
-
-# Build and install (installs to ~/.cargo/bin/mermaid)
-cargo install --path . --force
-
-# Verify installation
-mermaid --version
+curl -fsSL https://raw.githubusercontent.com/noahsabaj/mermaid-cli/main/install.sh | bash
 ```
 
-#### Option 2: Install from crates.io (Coming Soon)
+This will:
+- Install Rust if needed
+- Install Ollama if needed
+- Install Mermaid CLI
+- Download llama3.1:8b (4.7GB, tool calling compatible)
+- Set up your PATH
+
+After installation:
+
+```bash
+# Reload your shell
+source ~/.cargo/env
+
+# Run Mermaid
+mermaid
+```
+
+#### Manual Install (Advanced)
+
+If you prefer manual control:
+
+```bash
+# 1. Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# 2. Install Ollama
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# 3. Install Mermaid
+cargo install --git https://github.com/noahsabaj/mermaid-cli
+
+# 4. Download a model
+ollama pull llama3.1:8b
+
+# 5. Run Mermaid
+mermaid
+```
+
+#### Install from crates.io (Coming Soon)
 
 ```bash
 cargo install mermaid-cli
 ```
 
-### First Run
+### Updating Mermaid
+
+To update to the latest version:
 
 ```bash
-# Pull a compatible model (see Model Compatibility below)
-ollama pull llama3.1:8b
+# Quick update
+curl -fsSL https://raw.githubusercontent.com/noahsabaj/mermaid-cli/main/install.sh | bash
 
-# Start Mermaid
-mermaid --model llama3.1:8b
-
-# Or use Mermaid's default model (tinyllama)
-mermaid
+# Or manually
+cargo install --git https://github.com/noahsabaj/mermaid-cli --force
 ```
 
 ### Basic Usage
 
 ```bash
-# Use with any local Ollama model
-mermaid --model ollama/tinyllama         # Tiny model (fast)
-mermaid --model ollama/deepseek-coder:33b # Large model (best quality)
-mermaid --model ollama/qwen3-coder:30b   # Excellent at coding
+# Start Mermaid with default model
+mermaid
+
+# Use a specific model
+mermaid --model llama3.1:8b
 
 # List available models
 mermaid list
