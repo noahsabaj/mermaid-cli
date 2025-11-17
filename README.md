@@ -41,32 +41,34 @@ An open-source AI pair programmer CLI that provides an interactive chat interfac
 
 #### Quick Install (Recommended)
 
-One command installs everything (Rust, Ollama, Mermaid, and a compatible model):
+**If you already have Rust:**
+
+```bash
+cargo install mermaid-cli
+```
+
+**If starting from scratch (installs everything):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/noahsabaj/mermaid-cli/main/install.sh | bash
 ```
 
-This will:
-- Install Rust if needed
-- Install Ollama if needed
-- Install Mermaid CLI
-- Download llama3.1:8b (4.7GB, tool calling compatible)
-- Set up your PATH
+This one-liner installs:
+- Rust (if needed)
+- Ollama (if needed)
+- Mermaid CLI from crates.io
+- llama3.1:8b model (4.7GB, tool calling compatible)
+- Configures your PATH
 
-After installation:
+After installation, just run:
 
 ```bash
-# Reload your shell
-source ~/.cargo/env
-
-# Run Mermaid
 mermaid
 ```
 
 #### Manual Install (Advanced)
 
-If you prefer manual control:
+Step-by-step installation with full control:
 
 ```bash
 # 1. Install Rust
@@ -76,20 +78,14 @@ source $HOME/.cargo/env
 # 2. Install Ollama
 curl -fsSL https://ollama.ai/install.sh | sh
 
-# 3. Install Mermaid
-cargo install --git https://github.com/noahsabaj/mermaid-cli
+# 3. Install Mermaid from crates.io
+cargo install mermaid-cli
 
-# 4. Download a model
+# 4. Download a compatible model
 ollama pull llama3.1:8b
 
 # 5. Run Mermaid
 mermaid
-```
-
-#### Install from crates.io (Coming Soon)
-
-```bash
-cargo install mermaid-cli
 ```
 
 ### Updating Mermaid
@@ -97,11 +93,11 @@ cargo install mermaid-cli
 To update to the latest version:
 
 ```bash
-# Quick update
-curl -fsSL https://raw.githubusercontent.com/noahsabaj/mermaid-cli/main/install.sh | bash
+# Update from crates.io
+cargo install mermaid-cli --force
 
-# Or manually
-cargo install --git https://github.com/noahsabaj/mermaid-cli --force
+# Or use the one-liner installer (also updates Ollama if needed)
+curl -fsSL https://raw.githubusercontent.com/noahsabaj/mermaid-cli/main/install.sh | bash
 ```
 
 ### Basic Usage
