@@ -72,6 +72,7 @@ env_logger = "0.11.8"
 rustc-hash = "2.0"  # Faster non-cryptographic hash for HashMap
 html2md = "0.2"  # Convert HTML to markdown for search results
 urlencoding = "2.1"  # URL encoding for search queries
+base64 = "0.22"  # Base64 encoding for binary files (PDFs, images)
 
 [dev-dependencies]
 tempfile = "3.14"

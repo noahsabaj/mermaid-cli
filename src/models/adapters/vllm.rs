@@ -102,6 +102,7 @@ impl VLLMAdapter {
             usage: None, // vLLM streaming doesn't provide usage stats
             model_name: "vllm".to_string(),
             thinking: None,
+            tool_calls: None, // vLLM adapter doesn't support tool calling yet
         })
     }
 }
@@ -269,6 +270,7 @@ impl Backend for VLLMAdapter {
                 usage,
                 model_name: model_name.to_string(),
                 thinking: None,
+                tool_calls: None, // vLLM adapter doesn't support tool calling yet
             })
         }
     }

@@ -1,13 +1,14 @@
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose, Engine as _};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Read a file from the filesystem
 pub fn read_file(path: &str) -> Result<String> {
-    let path = normalize_path(path)?;
+    let path = normalize_path_for_read(path)?;
 
-    // Security check: ensure path is within current directory
-    validate_path(&path)?;
+    // Security check: block sensitive files but allow reading outside project
+    validate_path_for_read(&path)?;
 
     fs::read_to_string(&path).with_context(|| format!("Failed to read file: {}", path.display()))
 }
@@ -19,6 +20,42 @@ pub async fn read_file_async(path: String) -> Result<String> {
     })
     .await
     .context("Failed to spawn blocking task for file read")?
+}
+
+/// Check if a file is a binary format that should be base64-encoded
+pub fn is_binary_file(path: &str) -> bool {
+    let path = Path::new(path);
+    if let Some(ext) = path.extension() {
+        let ext_str = ext.to_string_lossy().to_lowercase();
+        matches!(
+            ext_str.as_str(),
+            "pdf" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tiff"
+        )
+    } else {
+        false
+    }
+}
+
+/// Read a binary file and encode it as base64
+pub fn read_binary_file(path: &str) -> Result<String> {
+    let path = normalize_path_for_read(path)?;
+
+    // Security check: block sensitive files but allow reading outside project
+    validate_path_for_read(&path)?;
+
+    let bytes = fs::read(&path)
+        .with_context(|| format!("Failed to read binary file: {}", path.display()))?;
+
+    Ok(general_purpose::STANDARD.encode(&bytes))
+}
+
+/// Read a binary file asynchronously and encode it as base64
+pub async fn read_binary_file_async(path: String) -> Result<String> {
+    tokio::task::spawn_blocking(move || {
+        read_binary_file(&path)
+    })
+    .await
+    .context("Failed to spawn blocking task for binary file read")?
 }
 
 /// Write content to a file atomically with timestamped backup
@@ -107,7 +144,21 @@ pub fn create_directory(path: &str) -> Result<()> {
         .with_context(|| format!("Failed to create directory: {}", path.display()))
 }
 
-/// Normalize a path (resolve relative paths)
+/// Normalize a path for reading (allows absolute paths anywhere)
+fn normalize_path_for_read(path: &str) -> Result<PathBuf> {
+    let path = Path::new(path);
+
+    if path.is_absolute() {
+        // For absolute paths, return as-is (user has specified exact location)
+        Ok(path.to_path_buf())
+    } else {
+        // For relative paths, resolve from current directory
+        let current_dir = std::env::current_dir()?;
+        Ok(current_dir.join(path))
+    }
+}
+
+/// Normalize a path (resolve relative paths) - strict version for writes
 fn normalize_path(path: &str) -> Result<PathBuf> {
     let path = Path::new(path);
 
@@ -125,7 +176,34 @@ fn normalize_path(path: &str) -> Result<PathBuf> {
     }
 }
 
-/// Validate that a path is safe to access
+/// Validate that a path is safe to read from (blocks sensitive files only)
+fn validate_path_for_read(path: &Path) -> Result<()> {
+    // Check for sensitive files (but allow reading from anywhere)
+    let sensitive_patterns = [
+        ".ssh",
+        ".aws",
+        ".env",
+        "id_rsa",
+        "id_ed25519",
+        ".git/config",
+        ".npmrc",
+        ".pypirc",
+    ];
+
+    let path_str = path.to_string_lossy();
+    for pattern in &sensitive_patterns {
+        if path_str.contains(pattern) {
+            anyhow::bail!(
+                "Security error: attempted to access potentially sensitive file: {}",
+                path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate that a path is safe to write to (strict - must be in project)
 fn validate_path(path: &Path) -> Result<()> {
     let current_dir = std::env::current_dir()?;
 

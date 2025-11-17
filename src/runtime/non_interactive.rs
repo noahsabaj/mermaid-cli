@@ -7,11 +7,11 @@ use tokio::sync::RwLock;
 use crate::utils::MutexExt;
 
 use crate::{
-    agents::{execute_action, parse_actions, ActionResult as AgentActionResult, AgentAction},
+    agents::{execute_action, ActionResult as AgentActionResult, AgentAction},
     app::Config,
     cli::OutputFormat,
     context::ContextLoader,
-    models::{ChatMessage, MessageRole, Model, ModelConfig, ModelFactory, ProjectContext},
+    models::{ChatMessage, MessageRole, Model, ModelConfig, ModelFactory, ProjectContext, parse_tool_calls, group_parallel_reads},
 };
 
 /// Result of a non-interactive run
@@ -126,6 +126,8 @@ impl NonInteractiveRunner {
             timestamp: chrono::Local::now(),
             actions: Vec::new(),
             thinking: None,
+            images: None,
+            tool_calls: None,
         };
 
         let user_message = ChatMessage {
@@ -134,6 +136,8 @@ impl NonInteractiveRunner {
             timestamp: chrono::Local::now(),
             actions: Vec::new(),
             thinking: None,
+            images: None,
+            tool_calls: None,
         };
 
         let messages = vec![system_message, user_message];
@@ -177,7 +181,8 @@ impl NonInteractiveRunner {
                 .await
         };
 
-        match result {
+        // Parse actions from tool calls (Ollama native function calling)
+        let parsed_actions = match result {
             Ok(response) => {
                 // Try to get content from the callback first
                 let callback_content = response_text.lock_mut_safe().clone();
@@ -187,16 +192,22 @@ impl NonInteractiveRunner {
                     full_response = response.content;
                 }
                 tokens_used = response.usage.map(|u| u.total_tokens).unwrap_or(0);
+
+                // Parse actions from tool_calls
+                if let Some(tool_calls) = response.tool_calls {
+                    let parsed = parse_tool_calls(&tool_calls);
+                    group_parallel_reads(parsed)
+                } else {
+                    vec![]
+                }
             },
             Err(e) => {
                 errors.push(format!("Model error: {}", e));
                 full_response = response_text.lock_mut_safe().clone();
                 tokens_used = 0;
+                vec![]
             },
-        }
-
-        // Parse actions from response
-        let parsed_actions = parse_actions(&full_response);
+        };
 
         // Execute actions if not in no-execute mode
         if !self.no_execute && !parsed_actions.is_empty() {
