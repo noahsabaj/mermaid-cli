@@ -37,7 +37,7 @@ pub struct Cli {
     pub verbose: bool,
 
     /// Project directory (defaults to current directory)
-    #[arg(short, long)]
+    #[arg( long)]
     pub path: Option<PathBuf>,
 
     /// Skip automatic model installation
@@ -53,11 +53,11 @@ pub struct Cli {
     pub stop_proxy_on_exit: bool,
 
     /// Resume a previous conversation in this directory (shows selection UI)
-    #[arg(long, conflicts_with = "continue_conversation")]
+    #[arg(long)] //conflicts_with = "continue_conversation"
     pub resume: bool,
 
     /// Continue the last conversation in this directory
-    #[arg(long, name = "continue", conflicts_with = "resume")]
+    #[arg(long, name = "continue")] // conflicts_with = "resume"
     pub continue_conversation: bool,
 
     /// Non-interactive prompt to execute
