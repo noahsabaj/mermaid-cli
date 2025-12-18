@@ -23,10 +23,18 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Resolve project root (one level up from this script)
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+INFRA_DIR="$PROJECT_ROOT/infra"
+
+# Change to project root to ensure .env loading works correctly
+cd "$PROJECT_ROOT"
+
 # Detect container runtime (prefer podman over docker)
 if command -v podman &> /dev/null; then
     RUNTIME="podman"
-    COMPOSE="podman-compose"
+    COMPOSE="podman-compose -f $INFRA_DIR/docker-compose.yml"
     print_info "Using Podman (rootless containers)"
 
     # Set up podman socket for rootless operation
@@ -35,7 +43,12 @@ if command -v podman &> /dev/null; then
     fi
 elif command -v docker &> /dev/null; then
     RUNTIME="docker"
-    COMPOSE="docker-compose"
+    # Check if "docker compose" (v2) or "docker-compose" (v1) is available
+    if docker compose version &> /dev/null; then
+        COMPOSE="docker compose -f $INFRA_DIR/docker-compose.yml"
+    else
+        COMPOSE="docker-compose -f $INFRA_DIR/docker-compose.yml"
+    fi
     print_info "Using Docker"
 else
     print_error "Neither Podman nor Docker found. Please install one of them."
@@ -44,17 +57,12 @@ else
     exit 1
 fi
 
-# Check if compose is installed
-if ! command -v $COMPOSE &> /dev/null; then
-    if [ "$RUNTIME" = "podman" ]; then
-        print_error "podman-compose not found. Installing..."
-        pip install --user podman-compose
-        if [ $? -ne 0 ]; then
-            print_error "Failed to install podman-compose"
-            exit 1
-        fi
-    else
-        print_error "docker-compose not found. Please install it."
+# Check if compose is installed (only needed for podman-compose or legacy docker-compose)
+if [[ "$COMPOSE" == *"podman-compose"* ]] && ! command -v podman-compose &> /dev/null; then
+    print_error "podman-compose not found. Installing..."
+    pip install --user podman-compose
+    if [ $? -ne 0 ]; then
+        print_error "Failed to install podman-compose"
         exit 1
     fi
 fi
@@ -185,11 +193,11 @@ fi
 if [[ "$COMMAND" == "up -d" ]]; then
     echo ""
     print_info "Useful commands:"
-    echo "  ./start_litellm.sh stop       - Stop the proxy"
-    echo "  ./start_litellm.sh restart    - Restart the proxy"
-    echo "  ./start_litellm.sh logs       - View logs"
-    echo "  ./start_litellm.sh status     - Check status"
-    echo "  ./start_litellm.sh -f         - Start and follow logs"
+    echo "  ./scripts/start_litellm.sh stop       - Stop the proxy"
+    echo "  ./scripts/start_litellm.sh restart    - Restart the proxy"
+    echo "  ./scripts/start_litellm.sh logs       - View logs"
+    echo "  ./scripts/start_litellm.sh status     - Check status"
+    echo "  ./scripts/start_litellm.sh -f         - Start and follow logs"
     echo ""
     print_info "Test with Mermaid:"
     echo "  cargo run -- --model ollama/tinyllama"

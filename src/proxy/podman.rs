@@ -48,7 +48,7 @@ pub fn get_compose_dir() -> Result<PathBuf> {
 
         // If compose file doesn't exist, create it from embedded template
         if !compose_file.exists() {
-            std::fs::write(&compose_file, include_str!("../../docker-compose.yml"))?;
+            std::fs::write(&compose_file, include_str!("../../infra/docker-compose.yml"))?;
             eprintln!(
                 "[INFO] Created docker-compose.yml at: {}",
                 compose_file.display()
@@ -57,7 +57,7 @@ pub fn get_compose_dir() -> Result<PathBuf> {
 
         // If litellm config doesn't exist, create it from embedded template
         if !config_file.exists() {
-            std::fs::write(&config_file, include_str!("../../litellm_config.yaml"))?;
+            std::fs::write(&config_file, include_str!("../../infra/litellm_config.yaml"))?;
             eprintln!(
                 "[INFO] Created litellm_config.yaml at: {}",
                 config_file.display()
@@ -84,10 +84,10 @@ pub fn get_compose_dir() -> Result<PathBuf> {
 
     // Priority 3: Development directory (current dir) - only for development
     let current_dir = std::env::current_dir()?;
-    let compose_file = current_dir.join("docker-compose.yml");
+    let compose_file = current_dir.join("infra").join("docker-compose.yml");
     if compose_file.exists() {
-        eprintln!("[DEV] Using docker-compose.yml from current directory");
-        return Ok(current_dir);
+        eprintln!("[DEV] Using docker-compose.yml from infra/ directory");
+        return Ok(current_dir.join("infra"));
     }
 
     anyhow::bail!(

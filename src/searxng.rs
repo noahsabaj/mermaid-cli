@@ -69,8 +69,14 @@ fn find_compose_directory() -> Option<PathBuf> {
     if let Ok(current_dir) = std::env::current_dir() {
         if let Some(dir) = current_dir
             .ancestors()
-            .find(|p| p.join("docker-compose.yml").exists())
+            .find(|p| {
+                p.join("docker-compose.yml").exists() || p.join("infra/docker-compose.yml").exists()
+            })
         {
+            // If found in infra subdir, return the infra subdir
+            if dir.join("infra/docker-compose.yml").exists() {
+                return Some(dir.join("infra"));
+            }
             return Some(dir.to_path_buf());
         }
     }

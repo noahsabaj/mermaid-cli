@@ -50,7 +50,7 @@ cargo install mermaid-cli
 **If starting from scratch (installs everything):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/noahsabaj/mermaid-cli/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/noahsabaj/mermaid-cli/main/scripts/install.sh | bash
 ```
 
 This one-liner installs:
@@ -97,7 +97,7 @@ To update to the latest version:
 cargo install mermaid-cli --force
 
 # Or use the one-liner installer (also updates Ollama if needed)
-curl -fsSL https://raw.githubusercontent.com/noahsabaj/mermaid-cli/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/noahsabaj/mermaid-cli/main/scripts/install.sh | bash
 ```
 
 ### Basic Usage

@@ -111,7 +111,7 @@ pub async fn start_proxy() -> Result<()> {
          1. Check logs: {} -f {} logs litellm\n\
          2. Verify .env file exists: {}\n\
          3. For Ollama-only usage: Use Ollama models (e.g., ollama/qwen3-coder:30b)\n\
-         4. Manual start: ./start_litellm.sh",
+         4. Manual start: ./scripts/start_litellm.sh",
         runtime,
         compose_path.display(),
         env_path.display()
