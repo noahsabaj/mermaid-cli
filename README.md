@@ -1,6 +1,6 @@
 # Mermaid - Open Source AI Pair Programmer
 
-An open-source AI pair programmer CLI that provides an interactive chat interface with full agentic coding capabilities. Uses local Ollama models for fast, private coding assistance.
+An open-source AI pair programmer CLI that provides an interactive chat interface with full agentic coding capabilities. Uses local Ollama models for fast, private, and efficient coding assistance.
 
 ## Features
 
