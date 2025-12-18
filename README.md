@@ -260,13 +260,13 @@ Mermaid uses Ollama's native tool calling API for structured, reliable actions:
 **Available Tools:**
 - `read_file` - Read any file (text, PDF, images with vision models)
 - `write_file` - Create or update files in the project
-- `run_command` - Execute shell commands and see output
+- `delete_file` - Delete a file from the project directory
+- `create_directory` - Create a new directory
+- `execute_command` - Execute shell commands and see output
 - `git_status` - Check git working tree status
 - `git_diff` - View changes in files
 - `git_commit` - Create commits with proper messages
 - `web_search` - Search the web via local Searxng
-- `list_directory` - Browse project structure
-- `get_file_info` - Get file metadata (size, modified time, etc.)
 
 **How It Works:**
 1. Model receives tool definitions as JSON Schema
