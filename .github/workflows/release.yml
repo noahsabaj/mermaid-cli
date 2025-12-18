@@ -141,8 +141,11 @@ jobs:
     name: Publish to crates.io
     needs: [release]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     # Only run if explicitly enabled (requires CARGO_REGISTRY_TOKEN secret)
-    if: ${{ vars.PUBLISH_TO_CRATES_IO == 'true' }}
+    # if: ${{ vars.PUBLISH_TO_CRATES_IO == 'true' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -150,4 +153,4 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish

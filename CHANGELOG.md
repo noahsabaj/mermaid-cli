@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2025-12-18
+
+### Added
+- NixOS support via `flake.nix` and `flake.lock`
+- `delete_file` and `create_directory` tools for agent
+- `.vs/` to `.gitignore`
+
+### Changed
+- Organized project root directory structure:
+  - Moved scripts to `scripts/`
+  - Moved infrastructure files to `infra/`
+- Updated README to accurately reflect available tools (renamed `run_command` to `execute_command`)
+
+### Fixed
+- CLI argument conflict: `prompt` now uses `-P` short flag, `path` retains `-p`
+- `resume` argument `conflicts_with` validation logic
+- Compilation errors due to relative paths in `include_str!` macros
+
 ## [0.2.0] - 2025-11-16
 
 ### Added
