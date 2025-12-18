@@ -52,8 +52,8 @@ pub struct Cli {
     #[arg(long)]
     pub stop_proxy_on_exit: bool,
 
-    /// Resume a previous conversation in this directory (shows selection UI)
-    #[arg(long, conflicts_with = "continue_conversation")]
+    /// Reuse a previous conversation in this directory (shows selection UI)
+    #[arg(long, conflicts_with = "continue")]
     pub resume: bool,
 
     /// Continue the last conversation in this directory
@@ -61,7 +61,7 @@ pub struct Cli {
     pub continue_conversation: bool,
 
     /// Non-interactive prompt to execute
-    #[arg(short, long, conflicts_with_all = &["resume", "continue"])]
+    #[arg(short = 'P', long, conflicts_with_all = &["resume", "continue"])]
     pub prompt: Option<String>,
 
     /// Output format for non-interactive mode

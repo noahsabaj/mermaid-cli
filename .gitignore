@@ -35,6 +35,7 @@ CLAUDE.md
 .mermaid/logs/
 
 # IDE directories
+.vs/
 .vscode/
 .idea/
 *.swp
