@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use crate::tui::App;
 
@@ -73,6 +73,13 @@ fn handle_key_event(
     key: crossterm::event::KeyEvent,
     _viewport_height: u16,
 ) -> Result<EventAction> {
+    // Only handle key press events, not release or repeat.
+    // On Windows, crossterm sends both Press and Release events for each keystroke,
+    // which would cause duplicate character input without this filter.
+    if key.kind != KeyEventKind::Press {
+        return Ok(EventAction::Continue);
+    }
+
     // Handle Ctrl+Y/N for plan approval/cancellation during plan mode
     // This is separate from action confirmation (Alt+Y/N) to avoid confusion
     if key.modifiers == KeyModifiers::CONTROL && app.app_state.is_awaiting_plan_approval() {
