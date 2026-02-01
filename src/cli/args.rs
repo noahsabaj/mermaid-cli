@@ -6,88 +6,25 @@ use std::path::PathBuf;
 #[command(version = "0.1.0")]
 #[command(about = "An open-source, model-agnostic AI pair programmer", long_about = None)]
 pub struct Cli {
-    /// Model to use (e.g., ollama/codellama, openai/gpt-4, anthropic/claude-3)
+    /// Model to use (e.g., ollama/codellama, openai/gpt-4)
     #[arg(short, long)]
     pub model: Option<String>,
-
-    /// Path to configuration file
-    #[arg(short, long)]
-    pub config: Option<PathBuf>,
-
-    /// Number of GPU layers for Ollama (overrides config)
-    /// Lower values offload more layers to CPU/RAM, enabling larger models
-    #[arg(long)]
-    pub num_gpu: Option<i32>,
-
-    /// Number of CPU threads for Ollama (overrides config)
-    /// Higher values improve CPU inference speed for offloaded layers
-    #[arg(long)]
-    pub num_thread: Option<i32>,
-
-    /// Context window size for Ollama (overrides config)
-    #[arg(long)]
-    pub num_ctx: Option<i32>,
-
-    /// Enable NUMA optimization for Ollama (overrides config)
-    #[arg(long)]
-    pub numa: Option<bool>,
-
-    /// Verbose output
-    #[arg(short, long)]
-    pub verbose: bool,
 
     /// Project directory (defaults to current directory)
     #[arg(short, long)]
     pub path: Option<PathBuf>,
 
-    /// Skip automatic model installation
-    #[arg(long)]
-    pub no_auto_install: bool,
+    /// Verbose output
+    #[arg(short, long)]
+    pub verbose: bool,
 
-    /// Don't auto-start LiteLLM proxy
-    #[arg(long)]
-    pub no_auto_proxy: bool,
+    /// Show session picker to choose a previous conversation
+    #[arg(long, conflicts_with = "new")]
+    pub sessions: bool,
 
-    /// Stop LiteLLM proxy on exit
-    #[arg(long)]
-    pub stop_proxy_on_exit: bool,
-
-    /// Reuse a previous conversation in this directory (shows selection UI)
-    #[arg(long, conflicts_with = "continue")]
-    pub resume: bool,
-
-    /// Continue the last conversation in this directory
-    #[arg(long, name = "continue", conflicts_with = "resume")]
-    pub continue_conversation: bool,
-
-    /// Non-interactive prompt to execute
-    #[arg(short = 'P', long, conflicts_with_all = &["resume", "continue"])]
-    pub prompt: Option<String>,
-
-    /// Output format for non-interactive mode
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text, requires = "prompt")]
-    pub output_format: OutputFormat,
-
-    /// Maximum tokens to generate in response (non-interactive mode)
-    #[arg(long, requires = "prompt")]
-    pub max_tokens: Option<usize>,
-
-    /// Don't execute agent actions automatically (non-interactive mode)
-    #[arg(long, requires = "prompt")]
-    pub no_execute: bool,
-
-    /// Explicitly select backend (ollama or vllm)
-    /// If not specified, auto-detects based on model availability
-    #[arg(long)]
-    pub backend: Option<String>,
-
-    /// List all available models across all backends
-    #[arg(long)]
-    pub list_all_models: bool,
-
-    /// Show available backends
-    #[arg(long)]
-    pub backends: bool,
+    /// Start a fresh conversation (don't auto-resume)
+    #[arg(long, conflicts_with = "sessions")]
+    pub new: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -103,11 +40,28 @@ pub enum Commands {
     Chat,
     /// Show version information
     Version,
-    /// Check status of dependencies
+    /// Check status of dependencies and backends
     Status,
+    /// Run a single prompt non-interactively
+    Run {
+        /// The prompt to execute
+        prompt: String,
+
+        /// Output format (text, json, markdown)
+        #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+
+        /// Maximum tokens to generate
+        #[arg(long)]
+        max_tokens: Option<usize>,
+
+        /// Don't execute agent actions (dry run)
+        #[arg(long)]
+        no_execute: bool,
+    },
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputFormat {
     /// Plain text output
     Text,

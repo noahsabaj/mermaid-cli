@@ -10,7 +10,7 @@ use crate::{
     agents::{execute_action, ActionResult as AgentActionResult, AgentAction},
     app::Config,
     cli::OutputFormat,
-    context::ContextLoader,
+    context::Context,
     models::{ChatMessage, MessageRole, Model, ModelConfig, ModelFactory, ProjectContext, parse_tool_calls, group_parallel_reads},
 };
 
@@ -75,8 +75,7 @@ impl NonInteractiveRunner {
         let model = ModelFactory::create_with_backend(&model_id, Some(&config), backend).await?;
 
         // Load project context
-        let loader = ContextLoader::new()?;
-        let context = loader.load_context(&project_path).await?;
+        let context = Context::load(&project_path).await?;
 
         Ok(Self {
             model: Arc::new(RwLock::new(model)),
@@ -128,6 +127,8 @@ impl NonInteractiveRunner {
             thinking: None,
             images: None,
             tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
         };
 
         let user_message = ChatMessage {
@@ -138,6 +139,8 @@ impl NonInteractiveRunner {
             thinking: None,
             images: None,
             tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
         };
 
         let messages = vec![system_message, user_message];
@@ -174,7 +177,7 @@ impl NonInteractiveRunner {
         // Call the model
         let model_name;
         let result = {
-            let mut model = self.model.write().await;
+            let model = self.model.write().await;
             model_name = model.name().to_string();
             model
                 .chat(&messages, &self.context, &model_config, Some(callback))
@@ -215,23 +218,34 @@ impl NonInteractiveRunner {
                 let (action_type, target) = match &action {
                     AgentAction::WriteFile { path, .. } => ("file_write", path.clone()),
                     AgentAction::ExecuteCommand { command, .. } => ("command", command.clone()),
-                    AgentAction::ReadFile { path } => ("file_read", path.clone()),
+                    AgentAction::ReadFile { paths } => {
+                        if paths.len() == 1 {
+                            ("file_read", paths[0].clone())
+                        } else {
+                            ("file_read", format!("{} files", paths.len()))
+                        }
+                    }
                     AgentAction::CreateDirectory { path } => ("create_dir", path.clone()),
                     AgentAction::DeleteFile { path } => ("delete_file", path.clone()),
-                    AgentAction::GitDiff { .. } => ("git_diff", "git diff".to_string()),
+                    AgentAction::GitDiff { paths } => {
+                        if paths.len() == 1 {
+                            ("git_diff", paths[0].as_deref().unwrap_or("*").to_string())
+                        } else {
+                            ("git_diff", format!("{} paths", paths.len()))
+                        }
+                    }
                     AgentAction::GitStatus => ("git_status", "git status".to_string()),
                     AgentAction::GitCommit { message, .. } => ("git_commit", message.clone()),
-                    AgentAction::WebSearch { query, .. } => ("web_search", query.clone()),
-                    AgentAction::ParallelRead { paths } => ("parallel_read", format!("{} files", paths.len())),
-                    AgentAction::ParallelWebSearch { queries } => ("parallel_web_search", format!("{} queries", queries.len())),
-                    AgentAction::ParallelGitDiff { paths } => ("parallel_git_diff", format!("{} paths", paths.len())),
+                    AgentAction::WebSearch { queries } => {
+                        if queries.len() == 1 {
+                            ("web_search", queries[0].0.clone())
+                        } else {
+                            ("web_search", format!("{} queries", queries.len()))
+                        }
+                    }
                 };
 
-                let result = execute_action(&action)
-                    .await
-                    .unwrap_or(AgentActionResult::Error {
-                        error: "Failed to execute action".to_string(),
-                    });
+                let result = execute_action(&action).await;
 
                 let action_result = match result {
                     AgentActionResult::Success { output } => ActionResult {
@@ -253,19 +267,34 @@ impl NonInteractiveRunner {
         } else if !parsed_actions.is_empty() {
             // Actions were found but not executed (no-execute mode)
             for action in parsed_actions {
-                let (action_type, target) = match action {
-                    AgentAction::WriteFile { path, .. } => ("file_write", path),
-                    AgentAction::ExecuteCommand { command, .. } => ("command", command),
-                    AgentAction::ReadFile { path } => ("file_read", path),
-                    AgentAction::CreateDirectory { path } => ("create_dir", path),
-                    AgentAction::DeleteFile { path } => ("delete_file", path),
-                    AgentAction::GitDiff { .. } => ("git_diff", "git diff".to_string()),
+                let (action_type, target) = match &action {
+                    AgentAction::WriteFile { path, .. } => ("file_write", path.clone()),
+                    AgentAction::ExecuteCommand { command, .. } => ("command", command.clone()),
+                    AgentAction::ReadFile { paths } => {
+                        if paths.len() == 1 {
+                            ("file_read", paths[0].clone())
+                        } else {
+                            ("file_read", format!("{} files", paths.len()))
+                        }
+                    }
+                    AgentAction::CreateDirectory { path } => ("create_dir", path.clone()),
+                    AgentAction::DeleteFile { path } => ("delete_file", path.clone()),
+                    AgentAction::GitDiff { paths } => {
+                        if paths.len() == 1 {
+                            ("git_diff", paths[0].as_deref().unwrap_or("*").to_string())
+                        } else {
+                            ("git_diff", format!("{} paths", paths.len()))
+                        }
+                    }
                     AgentAction::GitStatus => ("git_status", "git status".to_string()),
-                    AgentAction::GitCommit { message, .. } => ("git_commit", message),
-                    AgentAction::WebSearch { query, .. } => ("web_search", query),
-                    AgentAction::ParallelRead { paths } => ("parallel_read", format!("{} files", paths.len())),
-                    AgentAction::ParallelWebSearch { queries } => ("parallel_web_search", format!("{} queries", queries.len())),
-                    AgentAction::ParallelGitDiff { paths } => ("parallel_git_diff", format!("{} paths", paths.len())),
+                    AgentAction::GitCommit { message, .. } => ("git_commit", message.clone()),
+                    AgentAction::WebSearch { queries } => {
+                        if queries.len() == 1 {
+                            ("web_search", queries[0].0.clone())
+                        } else {
+                            ("web_search", format!("{} queries", queries.len()))
+                        }
+                    }
                 };
 
                 actions.push(ActionResult {
