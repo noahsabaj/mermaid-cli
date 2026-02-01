@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::{
-    app::{load_config, Config},
+    app::{load_config, persist_last_model, Config},
     cli::{handle_command, Cli},
     context::Context,
     models::ModelFactory,
-    ollama::ensure_model as ensure_ollama_model,
+    ollama::{ensure_model as ensure_ollama_model, require_any_model},
     session::{select_conversation, ConversationManager},
     tui::{run_ui, App},
     utils::{check_ollama_available, log_error, log_info, log_progress, log_warn},
@@ -52,16 +52,30 @@ impl Orchestrator {
             // Continue to chat for Commands::Chat
         }
 
-        // Determine model to use (CLI arg > config default)
+        // Determine model to use (CLI arg > last_used > default_model)
         current_step += 1;
         log_progress(current_step, total_steps, "Configuring model");
+
+        let cli_model_provided = self.cli.model.is_some();
         let model_id = if let Some(model) = &self.cli.model {
+            // CLI flag takes precedence
             model.clone()
-        } else {
+        } else if let Some(last_model) = &self.config.last_used_model {
+            // Use last used model from config
+            last_model.clone()
+        } else if !self.config.default_model.provider.is_empty()
+            && !self.config.default_model.name.is_empty()
+        {
+            // Fall back to default_model if set
             format!(
                 "{}/{}",
                 self.config.default_model.provider, self.config.default_model.name
             )
+        } else {
+            // No model configured - check if any models are available
+            let available = require_any_model().await?;
+            // Use first available model
+            format!("ollama/{}", available[0])
         };
 
         log_info(
@@ -86,11 +100,17 @@ impl Orchestrator {
             log_progress(current_step, total_steps, "Using API provider");
         }
 
-        // Ensure Ollama model is available (auto-install if needed)
+        // Validate model exists
         current_step += 1;
         log_progress(current_step, total_steps, "Checking model availability");
-        // Use config.behavior.auto_install_models (inverted for ensure_ollama_model's skip param)
-        ensure_ollama_model(&model_id, !self.config.behavior.auto_install_models).await?;
+        ensure_ollama_model(&model_id, true).await?;
+
+        // Persist model if CLI flag was used
+        if cli_model_provided {
+            if let Err(e) = persist_last_model(&model_id) {
+                log_warn("CONFIG", format!("Failed to persist model choice: {}", e));
+            }
+        }
 
         // Create model instance with config for authentication and optional backend override
         current_step += 1;

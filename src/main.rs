@@ -2,9 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 
 use mermaid_cli::{
-    app::load_config,
+    app::{load_config, persist_last_model},
     cli::{Cli, Commands, OutputFormat},
-    ollama::ensure_model as ensure_ollama_model,
+    ollama::{ensure_model as ensure_ollama_model, require_any_model},
     runtime::{NonInteractiveRunner, Orchestrator},
     utils::init_logger,
 };
@@ -44,18 +44,32 @@ async fn run_non_interactive(
     // Load configuration
     let config = load_config().unwrap_or_default();
 
-    // Determine model to use
+    // Determine model to use (CLI arg > last_used > default_model)
+    let cli_model_provided = cli.model.is_some();
     let model_id = if let Some(model) = &cli.model {
         model.clone()
-    } else {
+    } else if let Some(last_model) = &config.last_used_model {
+        last_model.clone()
+    } else if !config.default_model.provider.is_empty()
+        && !config.default_model.name.is_empty()
+    {
         format!(
             "{}/{}",
             config.default_model.provider, config.default_model.name
         )
+    } else {
+        // No model configured - check if any models are available
+        let available = require_any_model().await?;
+        format!("ollama/{}", available[0])
     };
 
-    // Ensure Ollama model is available (use config for auto_install behavior)
-    ensure_ollama_model(&model_id, !config.behavior.auto_install_models).await?;
+    // Validate model exists
+    ensure_ollama_model(&model_id, true).await?;
+
+    // Persist model if CLI flag was used
+    if cli_model_provided {
+        let _ = persist_last_model(&model_id);
+    }
 
     // Determine project path
     let project_path = cli

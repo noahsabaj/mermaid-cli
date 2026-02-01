@@ -56,11 +56,11 @@ fn handle_mouse_event(
 ) -> Result<EventAction> {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            app.scroll_up(3); // Scroll up shows older messages (viewport moves up)
+            app.scroll_up(3); // Wheel up shows older messages (viewport moves up)
             Ok(EventAction::Continue)
         },
         MouseEventKind::ScrollDown => {
-            app.scroll_down(3); // Scroll down shows newer messages (viewport moves down)
+            app.scroll_down(3); // Wheel down shows newer messages (viewport moves down)
             Ok(EventAction::Continue)
         },
         _ => Ok(EventAction::Continue),

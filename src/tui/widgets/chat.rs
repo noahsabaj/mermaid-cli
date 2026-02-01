@@ -34,15 +34,17 @@ impl ChatState {
     }
 
     /// Get the scroll position for rendering
-    /// If auto-scrolling, returns the max scroll (clamped to content height - viewport)
+    /// scroll_offset represents distance from bottom, convert to ratatui scroll position
     pub fn get_scroll_position(&self, content_height: u16, viewport_height: u16) -> u16 {
+        let max_scroll = content_height.saturating_sub(viewport_height);
         if self.is_user_scrolling {
-            // Manual scroll: cap at max to prevent scrolling into void
-            let max_scroll = content_height.saturating_sub(viewport_height);
-            self.scroll_offset.min(max_scroll)
+            // Manual scroll: convert "distance from bottom" to scroll position
+            // scroll_offset=0 → show bottom (max_scroll), scroll_offset=max → show top (0)
+            let capped_offset = self.scroll_offset.min(max_scroll);
+            max_scroll.saturating_sub(capped_offset)
         } else {
             // Auto-scroll: show bottom of content
-            content_height.saturating_sub(viewport_height)
+            max_scroll
         }
     }
 

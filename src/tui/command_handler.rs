@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::app::load_config;
+use crate::app::{load_config, persist_last_model};
 use crate::context::Context;
 use crate::models::{MessageRole, ModelFactory};
 use crate::ollama;
@@ -102,7 +102,13 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
                 *app.model_state.model.write().await = model;
                 app.model_state.model_name = model_id.clone();
                 app.model_state.model_id = model_id.clone();
-                app.set_status(format!("Switched to model: {}", model_id));
+
+                // Persist the model choice to config
+                if let Err(e) = persist_last_model(&model_id) {
+                    app.set_status(format!("Switched to {} (failed to save: {})", model_id, e));
+                } else {
+                    app.set_status(format!("Switched to model: {}", model_id));
+                }
             },
             Ok(Err(e)) => {
                 app.set_status(format!("Failed to switch model: {}", e));

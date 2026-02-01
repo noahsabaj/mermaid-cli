@@ -8,6 +8,10 @@ use std::path::PathBuf;
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Last used model (persisted between sessions)
+    #[serde(default)]
+    pub last_used_model: Option<String>,
+
     /// Default model configuration
     #[serde(default)]
     pub default_model: ModelSettings,
@@ -48,6 +52,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            last_used_model: None,
             default_model: ModelSettings::default(),
             ollama: OllamaConfig::default(),
             openai: OpenAIConfig::default(),
@@ -87,8 +92,8 @@ impl ModelSettings {
 impl Default for ModelSettings {
     fn default() -> Self {
         Self {
-            provider: String::from("ollama"),
-            name: String::from("tinyllama"),
+            provider: String::new(),
+            name: String::new(),
             temperature: 0.7,
             max_tokens: 4096,
             system_prompt: Some(Self::default_system_prompt()),
@@ -355,4 +360,11 @@ pub fn init_config() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Persist the last used model to config file
+pub fn persist_last_model(model: &str) -> Result<()> {
+    let mut config = load_config().unwrap_or_default();
+    config.last_used_model = Some(model.to_string());
+    save_config(&config, None)
 }
