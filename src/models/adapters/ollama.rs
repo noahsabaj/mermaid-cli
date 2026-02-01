@@ -83,11 +83,6 @@ impl OllamaAdapter {
                     continue;
                 }
 
-                // Log raw chunk for debugging tool call issues
-                if line.contains("tool_calls") || line.contains("\"done\":true") {
-                    tracing::info!("Raw chunk (tool_calls or done): {}", line);
-                }
-
                 let json_chunk: OllamaStreamChunk = serde_json::from_str(line)
                     .map_err(|e| ModelError::ParseError {
                         message: format!("Failed to parse Ollama response: {}", e),
@@ -108,10 +103,6 @@ impl OllamaAdapter {
 
                 // Handle tool calls (if present)
                 if let Some(tool_calls) = json_chunk.message.tool_calls {
-                    tracing::info!("Received {} tool calls from Ollama", tool_calls.len());
-                    for tc in &tool_calls {
-                        tracing::info!("Tool call: {} with args: {}", tc.function.name, tc.function.arguments);
-                    }
                     accumulated_tool_calls.extend(tool_calls.clone());
                     // Send tool calls to stream handler as special marker
                     if let Ok(tool_calls_json) = serde_json::to_string(&tool_calls) {
@@ -132,7 +123,6 @@ impl OllamaAdapter {
 
                 // Capture token usage
                 if json_chunk.done {
-                    tracing::info!("Final chunk received (done=true)");
                     if let Some(count) = json_chunk.prompt_eval_count {
                         prompt_tokens = count;
                     }
@@ -150,10 +140,8 @@ impl OllamaAdapter {
         };
 
         let tool_calls = if accumulated_tool_calls.is_empty() {
-            tracing::info!("Stream complete: NO tool calls received from model");
             None
         } else {
-            tracing::info!("Stream complete: {} tool calls accumulated", accumulated_tool_calls.len());
             Some(accumulated_tool_calls)
         };
 

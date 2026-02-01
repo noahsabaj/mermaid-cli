@@ -84,15 +84,8 @@ pub async fn process_stream_chunks(
             // Use rfind to find the LAST ] which closes the marker (not the JSON array's ])
             if let Some(end_idx) = chunk.rfind(']') {
                 let json_str = &chunk[12..end_idx]; // Skip "[TOOL_CALLS:" to get JSON array
-                tracing::debug!("Parsing tool calls JSON: {}", json_str);
-                match serde_json::from_str::<Vec<crate::models::ToolCall>>(json_str) {
-                    Ok(tool_calls) => {
-                        tracing::info!("stream_handler: Parsed {} tool calls", tool_calls.len());
-                        accumulated_tool_calls.extend(tool_calls);
-                    }
-                    Err(e) => {
-                        tracing::error!("stream_handler: Failed to parse tool calls: {} - JSON was: {}", e, json_str);
-                    }
+                if let Ok(tool_calls) = serde_json::from_str::<Vec<crate::models::ToolCall>>(json_str) {
+                    accumulated_tool_calls.extend(tool_calls);
                 }
                 // Don't add tool call markers to response text
                 continue;

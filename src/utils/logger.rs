@@ -1,6 +1,14 @@
-use std::io;
+use std::fs::OpenOptions;
+use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+/// Get the log file path (~/.mermaid/mermaid.log)
+fn get_log_file_path() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".mermaid").join("mermaid.log"))
+}
 
 /// Initialize the logging system with tracing
 pub fn init_logger(verbose: bool) {
@@ -12,18 +20,39 @@ pub fn init_logger(verbose: bool) {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,mermaid=info"))
     };
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_writer(io::stderr) // Write to stderr to not interfere with TUI
-        .with_target(false) // Don't show module paths in compact mode
-        .with_thread_ids(false)
-        .with_thread_names(false)
-        .with_file(false) // Don't show file locations
-        .with_line_number(false) // Don't show line numbers
-        .compact(); // Use compact format for cleaner output
+    // Try to write logs to a file to avoid corrupting the TUI
+    // Falls back to no logging if file creation fails (TUI takes priority)
+    if let Some(log_path) = get_log_file_path() {
+        // Ensure parent directory exists
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
 
+        // Open log file for appending
+        if let Ok(file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .with_writer(file)
+                .with_target(false)
+                .with_thread_ids(false)
+                .with_thread_names(false)
+                .with_ansi(false) // No ANSI colors in file
+                .compact();
+
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(fmt_layer)
+                .init();
+            return;
+        }
+    }
+
+    // Fallback: no logging if file creation fails (don't corrupt TUI)
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt_layer)
         .init();
 }
 
