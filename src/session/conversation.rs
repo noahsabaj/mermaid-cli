@@ -101,24 +101,18 @@ impl ConversationHistory {
 
 /// Manages conversation persistence for a project
 pub struct ConversationManager {
-    #[allow(dead_code)]
-    project_dir: PathBuf,
     conversations_dir: PathBuf,
 }
 
 impl ConversationManager {
     /// Create a new conversation manager for a project directory
     pub fn new(project_dir: impl AsRef<Path>) -> Result<Self> {
-        let project_dir = project_dir.as_ref().to_path_buf();
-        let conversations_dir = project_dir.join(".mermaid").join("conversations");
+        let conversations_dir = project_dir.as_ref().join(".mermaid").join("conversations");
 
         // Create conversations directory if it doesn't exist
         fs::create_dir_all(&conversations_dir)?;
 
-        Ok(Self {
-            project_dir,
-            conversations_dir,
-        })
+        Ok(Self { conversations_dir })
     }
 
     /// Save a conversation to disk

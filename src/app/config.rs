@@ -1,11 +1,7 @@
-use crate::constants::{DEFAULT_LITELLM_PROXY_URL, DEFAULT_OLLAMA_PORT};
+use crate::constants::DEFAULT_OLLAMA_PORT;
 use crate::prompts;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use figment::{
-    providers::{Env, Format, Serialized, Toml},
-    Figment,
-};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -16,19 +12,15 @@ pub struct Config {
     #[serde(default)]
     pub default_model: ModelSettings,
 
-    /// LiteLLM proxy configuration
-    #[serde(default)]
-    pub litellm: LiteLLMConfig,
-
     /// Ollama configuration
     #[serde(default)]
     pub ollama: OllamaConfig,
 
-    /// OpenAI configuration
+    /// OpenAI configuration (for direct OpenAI API access)
     #[serde(default)]
     pub openai: OpenAIConfig,
 
-    /// Anthropic configuration
+    /// Anthropic configuration (for direct Anthropic API access)
     #[serde(default)]
     pub anthropic: AnthropicConfig,
 
@@ -43,25 +35,35 @@ pub struct Config {
     /// Operation mode configuration
     #[serde(default)]
     pub mode: ModeConfig,
+
+    /// Behavior configuration (auto-install, etc.)
+    #[serde(default)]
+    pub behavior: BehaviorConfig,
+
+    /// Non-interactive mode configuration
+    #[serde(default)]
+    pub non_interactive: NonInteractiveConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             default_model: ModelSettings::default(),
-            litellm: LiteLLMConfig::default(),
             ollama: OllamaConfig::default(),
             openai: OpenAIConfig::default(),
             anthropic: AnthropicConfig::default(),
             ui: UIConfig::default(),
             context: ContextConfig::default(),
             mode: ModeConfig::default(),
+            behavior: BehaviorConfig::default(),
+            non_interactive: NonInteractiveConfig::default(),
         }
     }
 }
 
 /// Default model settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ModelSettings {
     /// Model provider (ollama, openai, anthropic)
     pub provider: String,
@@ -94,26 +96,9 @@ impl Default for ModelSettings {
     }
 }
 
-/// LiteLLM proxy configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LiteLLMConfig {
-    /// Proxy server URL
-    pub proxy_url: String,
-    /// Master key for authentication
-    pub master_key: Option<String>,
-}
-
-impl Default for LiteLLMConfig {
-    fn default() -> Self {
-        Self {
-            proxy_url: DEFAULT_LITELLM_PROXY_URL.to_string(),
-            master_key: None,
-        }
-    }
-}
-
 /// Ollama configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OllamaConfig {
     /// Ollama server host
     pub host: String,
@@ -152,6 +137,7 @@ impl Default for OllamaConfig {
 
 /// OpenAI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OpenAIConfig {
     /// Environment variable containing API key
     pub api_key_env: String,
@@ -170,6 +156,7 @@ impl Default for OpenAIConfig {
 
 /// Anthropic configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AnthropicConfig {
     /// Environment variable containing API key
     pub api_key_env: String,
@@ -185,6 +172,7 @@ impl Default for AnthropicConfig {
 
 /// UI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UIConfig {
     /// Color theme
     pub theme: String,
@@ -209,6 +197,7 @@ impl Default for UIConfig {
 
 /// Context loader configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContextConfig {
     /// Maximum file size to load (in bytes)
     pub max_file_size: usize,
@@ -236,6 +225,7 @@ impl Default for ContextConfig {
 
 /// Operation mode configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ModeConfig {
     /// Default operation mode (normal, accept_edits, plan_mode, bypass_all)
     pub default_mode: String,
@@ -258,33 +248,66 @@ impl Default for ModeConfig {
     }
 }
 
-/// Load configuration from multiple sources
+/// Behavior configuration (formerly CLI flags)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BehaviorConfig {
+    /// Automatically install missing Ollama models
+    pub auto_install_models: bool,
+    /// Preferred backend (ollama only)
+    pub backend: String,
+}
+
+impl Default for BehaviorConfig {
+    fn default() -> Self {
+        Self {
+            auto_install_models: true,
+            backend: String::from("auto"),
+        }
+    }
+}
+
+/// Non-interactive mode configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NonInteractiveConfig {
+    /// Output format (text, json, markdown)
+    pub output_format: String,
+    /// Maximum tokens to generate
+    pub max_tokens: usize,
+    /// Don't execute agent actions (dry run)
+    pub no_execute: bool,
+}
+
+impl Default for NonInteractiveConfig {
+    fn default() -> Self {
+        Self {
+            output_format: String::from("text"),
+            max_tokens: 4096,
+            no_execute: false,
+        }
+    }
+}
+
+/// Load configuration from single config file
+/// Priority: config file > defaults (that's it - no merging, no env vars)
 pub fn load_config() -> Result<Config> {
-    // Get config directories
-    let config_dir = get_config_dir()?;
-    let global_config = config_dir.join("config.toml");
-    let local_config = PathBuf::from(".mermaid/config.toml");
+    let config_path = get_config_path()?;
 
-    // Build figment configuration
-    let mut figment = Figment::from(Serialized::defaults(Config::default()));
-
-    // Add global config if it exists
-    if global_config.exists() {
-        figment = figment.merge(Toml::file(&global_config));
+    if config_path.exists() {
+        let toml_str = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        let config: Config = toml::from_str(&toml_str)
+            .with_context(|| format!("Failed to parse {}. Run 'mermaid init' to regenerate.", config_path.display()))?;
+        Ok(config)
+    } else {
+        Ok(Config::default())
     }
+}
 
-    // Add local config if it exists
-    if local_config.exists() {
-        figment = figment.merge(Toml::file(&local_config));
-    }
-
-    // Add environment variables (MERMAID_ prefix)
-    figment = figment.merge(Env::prefixed("MERMAID_"));
-
-    // Extract and return config
-    figment
-        .extract()
-        .context("Failed to load configuration. Check that config files are valid TOML format.")
+/// Get the path to the single config file
+pub fn get_config_path() -> Result<PathBuf> {
+    Ok(get_config_dir()?.join("config.toml"))
 }
 
 /// Get the configuration directory
@@ -321,43 +344,14 @@ pub fn save_config(config: &Config, path: Option<PathBuf>) -> Result<()> {
 
 /// Create a default configuration file if it doesn't exist
 pub fn init_config() -> Result<()> {
-    let config_dir = get_config_dir()?;
-    let config_file = config_dir.join("config.toml");
+    let config_file = get_config_path()?;
 
-    if !config_file.exists() {
+    if config_file.exists() {
+        println!("Configuration already exists at: {}", config_file.display());
+    } else {
         let default_config = Config::default();
         save_config(&default_config, Some(config_file.clone()))?;
-        println!(
-            "Created default configuration at: {}",
-            config_file.display()
-        );
-    }
-
-    // Create example local config
-    let local_example = PathBuf::from(".mermaid/config.toml.example");
-    if !local_example.exists() {
-        if let Some(parent) = local_example.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let example_config = r#"# Mermaid Project Configuration
-# This file overrides global settings for this project
-
-[default_model]
-provider = "ollama"
-name = "tinyllama"
-temperature = 0.7
-max_tokens = 4096
-
-[context]
-max_files = 150
-max_context_tokens = 75000
-include_patterns = ["src/**/*.rs", "Cargo.toml"]
-"#;
-        std::fs::write(&local_example, example_config)?;
-        println!(
-            "Created example configuration at: {}",
-            local_example.display()
-        );
+        println!("Created configuration at: {}", config_file.display());
     }
 
     Ok(())

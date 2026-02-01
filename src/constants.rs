@@ -1,17 +1,11 @@
 /// Constants module to avoid magic numbers in the codebase
 // Network Configuration
-pub const DEFAULT_LITELLM_PROXY_PORT: u16 = 4000;
-pub const DEFAULT_LITELLM_PROXY_URL: &str = "http://localhost:4000";
 pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 pub const DEFAULT_SEARXNG_PORT: u16 = 8888;
 
 // Timeouts
 pub const COMMAND_TIMEOUT_SECS: u64 = 30;
 pub const HTTP_REQUEST_TIMEOUT_SECS: u64 = 600; // 10 minutes for large model requests
-pub const PROXY_STARTUP_WAIT_SECS: u64 = 3;
-pub const PROXY_CHECK_INTERVAL_SECS: u64 = 1;
-pub const PROXY_POLL_INTERVAL_MS: u64 = 100; // Fast polling for proxy startup
-pub const PROXY_MAX_STARTUP_ATTEMPTS: usize = 10;
 
 // UI Configuration
 pub const UI_REFRESH_INTERVAL_MS: u64 = 50;

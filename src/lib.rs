@@ -7,7 +7,6 @@ pub mod context;
 pub mod models;
 pub mod ollama;
 pub mod prompts;
-pub mod proxy;
 pub mod runtime;
 pub mod searxng;
 pub mod session;
@@ -15,7 +14,7 @@ pub mod tui;
 pub mod utils;
 
 pub use app::{load_config, Config};
-pub use context::{ContextLoader, ContextManager, LoaderConfig};
+pub use context::{Context, ContextConfig};
 pub use models::{Model, ModelFactory, ProjectContext};
 pub use tui::run_ui;
 pub use utils::MermaidError;

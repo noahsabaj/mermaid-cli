@@ -3,10 +3,8 @@ use clap::Parser;
 
 use mermaid_cli::{
     app::load_config,
-    cli::Cli,
-    models::ModelFactory,
+    cli::{Cli, Commands, OutputFormat},
     ollama::ensure_model as ensure_ollama_model,
-    proxy::{ensure_proxy, is_proxy_running},
     runtime::{NonInteractiveRunner, Orchestrator},
     utils::init_logger,
 };
@@ -16,78 +14,35 @@ async fn main() -> Result<()> {
     // Parse CLI arguments
     let cli = Cli::parse();
 
-    // Load .env file from proxy directory (if it exists)
-    // This provides LITELLM_MASTER_KEY and other proxy credentials
-    if let Some(config_dir) = directories::BaseDirs::new() {
-        let env_path = config_dir
-            .config_dir()
-            .join("mermaid")
-            .join("proxy")
-            .join(".env");
-        if env_path.exists() {
-            let _ = dotenvy::from_path(&env_path);
-        }
-    }
-
     // Initialize tracing subscriber (controlled by --verbose flag or RUST_LOG env var)
     init_logger(cli.verbose);
 
-    // Handle backend discovery commands
-    if cli.backends {
-        let backends = ModelFactory::get_available_backends().await;
-        if backends.is_empty() {
-            println!("No backends currently available");
-            println!("Ensure at least one of the following is running:");
-            println!("  - Ollama: ollama serve");
-            println!("  - vLLM: python -m vllm.entrypoints.openai.api_server");
-        } else {
-            println!("Available backends:");
-            for backend in backends {
-                println!("  - {}", backend);
-            }
-        }
-        return Ok(());
+    // Check for Run subcommand (non-interactive mode)
+    if let Some(Commands::Run {
+        prompt,
+        format,
+        max_tokens,
+        no_execute,
+    }) = &cli.command
+    {
+        return run_non_interactive(&cli, prompt.clone(), *format, *max_tokens, *no_execute).await;
     }
 
-    if cli.list_all_models {
-        match ModelFactory::list_all_backend_models().await {
-            Ok(models) => {
-                if models.is_empty() {
-                    println!("No models found across any backends");
-                } else {
-                    println!("Available models:");
-                    for model in models {
-                        println!("  - {}", model);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to list models: {}", e);
-                std::process::exit(1);
-            }
-        }
-        return Ok(());
-    }
-
-    // Check if running in non-interactive mode
-    if let Some(prompt) = cli.prompt.clone() {
-        run_non_interactive(cli, prompt).await
-    } else {
-        // Create and run the orchestrator for interactive mode
-        let orchestrator = Orchestrator::new(cli)?;
-        orchestrator.run().await
-    }
+    // Create and run the orchestrator for interactive mode
+    let orchestrator = Orchestrator::new(cli)?;
+    orchestrator.run().await
 }
 
 /// Run in non-interactive mode
-async fn run_non_interactive(cli: Cli, prompt: String) -> Result<()> {
+async fn run_non_interactive(
+    cli: &Cli,
+    prompt: String,
+    format: OutputFormat,
+    max_tokens: Option<usize>,
+    no_execute: bool,
+) -> Result<()> {
     // Load configuration
-    let config = if let Some(config_path) = &cli.config {
-        let toml_str = std::fs::read_to_string(config_path)?;
-        toml::from_str(&toml_str)?
-    } else {
-        load_config().unwrap_or_default()
-    };
+    let config = load_config().unwrap_or_default();
 
     // Determine model to use
     let model_id = if let Some(model) = &cli.model {
@@ -99,25 +54,35 @@ async fn run_non_interactive(cli: Cli, prompt: String) -> Result<()> {
         )
     };
 
-    // Ensure LiteLLM proxy is running
-    if !is_proxy_running().await {
-        ensure_proxy(cli.no_auto_proxy).await?;
-    }
-
-    // Ensure Ollama model is available
-    ensure_ollama_model(&model_id, cli.no_auto_install).await?;
+    // Ensure Ollama model is available (use config for auto_install behavior)
+    ensure_ollama_model(&model_id, !config.behavior.auto_install_models).await?;
 
     // Determine project path
-    let project_path = cli.path.unwrap_or_else(|| std::path::PathBuf::from("."));
+    let project_path = cli
+        .path
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    // Use CLI args if provided, otherwise fall back to config
+    let effective_max_tokens = max_tokens.or(Some(config.non_interactive.max_tokens));
+    let effective_no_execute = no_execute || config.non_interactive.no_execute;
+
+    // Get backend from config (clone to avoid borrow issues)
+    let backend_str = config.behavior.backend.clone();
+    let backend = if backend_str == "auto" {
+        None
+    } else {
+        Some(backend_str.as_str())
+    };
 
     // Create and run the non-interactive runner
     let runner = NonInteractiveRunner::new(
         model_id,
         project_path,
         config,
-        cli.no_execute,
-        cli.max_tokens,
-        cli.backend.as_deref(),
+        effective_no_execute,
+        effective_max_tokens,
+        backend,
     )
     .await?;
 
@@ -125,7 +90,7 @@ async fn run_non_interactive(cli: Cli, prompt: String) -> Result<()> {
     let result = runner.execute(prompt).await?;
 
     // Format and output the result
-    let formatted = runner.format_result(&result, cli.output_format);
+    let formatted = runner.format_result(&result, format);
     println!("{}", formatted);
 
     // Exit with appropriate code
