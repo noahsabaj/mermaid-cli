@@ -10,8 +10,6 @@ use tokio::sync::RwLock;
 pub struct LazyProjectContext {
     /// Root path of the project
     pub root_path: String,
-    /// Detected project type (Rust, Python, JavaScript, etc.)
-    pub project_type: String,
     /// List of all file paths (loaded immediately)
     pub file_paths: Arc<Vec<PathBuf>>,
     /// Lazily loaded file contents (using FxHashMap for performance)
@@ -30,8 +28,7 @@ impl LazyProjectContext {
         let cache = crate::cache::CacheManager::new().ok().map(Arc::new);
 
         Self {
-            root_path: root_path.clone(),
-            project_type: detect_project_type(&root_path),
+            root_path,
             file_paths: Arc::new(file_paths),
             files: Arc::new(RwLock::new(FxHashMap::default())),
             token_count: Arc::new(AtomicUsize::new(0)),
@@ -126,7 +123,6 @@ impl LazyProjectContext {
     pub async fn to_project_context(&self) -> crate::models::ProjectContext {
         let files = self.files.read().await;
         let mut context = crate::models::ProjectContext::new(self.root_path.clone());
-        context.project_type = Some(self.project_type.clone());
         context.token_count = self.token_count.load(Ordering::Relaxed);
 
         for (path, content) in files.iter() {
@@ -134,32 +130,6 @@ impl LazyProjectContext {
         }
 
         context
-    }
-}
-
-/// Detect project type from root path
-fn detect_project_type(root_path: &str) -> String {
-    let path = Path::new(root_path);
-
-    // Check for various project files
-    if path.join("Cargo.toml").exists() {
-        "Rust".to_string()
-    } else if path.join("package.json").exists() {
-        "JavaScript/TypeScript".to_string()
-    } else if path.join("requirements.txt").exists() || path.join("setup.py").exists() {
-        "Python".to_string()
-    } else if path.join("go.mod").exists() {
-        "Go".to_string()
-    } else if path.join("pom.xml").exists() || path.join("build.gradle").exists() {
-        "Java".to_string()
-    } else if path.join("*.csproj").exists() || path.join("*.sln").exists() {
-        "C#/.NET".to_string()
-    } else if path.join("Gemfile").exists() {
-        "Ruby".to_string()
-    } else if path.join("composer.json").exists() {
-        "PHP".to_string()
-    } else {
-        "Unknown".to_string()
     }
 }
 

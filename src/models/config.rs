@@ -119,17 +119,6 @@ pub struct BackendConfig {
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
 
-    /// vLLM server URL (default: http://localhost:8000)
-    #[serde(default = "default_vllm_url")]
-    pub vllm_url: String,
-
-    /// LiteLLM proxy URL (for API providers)
-    #[serde(default = "default_litellm_url")]
-    pub litellm_url: String,
-
-    /// LiteLLM master key (optional)
-    pub litellm_master_key: Option<String>,
-
     /// Connection timeout in seconds
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
@@ -151,9 +140,6 @@ impl Default for BackendConfig {
     fn default() -> Self {
         Self {
             ollama_url: default_ollama_url(),
-            vllm_url: default_vllm_url(),
-            litellm_url: default_litellm_url(),
-            litellm_master_key: None,
             timeout_secs: default_timeout(),
             request_timeout_secs: default_request_timeout(),
             max_idle_per_host: default_max_idle(),
@@ -177,14 +163,6 @@ fn default_top_p() -> f32 {
 
 fn default_ollama_url() -> String {
     std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string())
-}
-
-fn default_vllm_url() -> String {
-    std::env::var("VLLM_API_BASE").unwrap_or_else(|_| "http://localhost:8000".to_string())
-}
-
-fn default_litellm_url() -> String {
-    std::env::var("LITELLM_PROXY_URL").unwrap_or_else(|_| "http://localhost:4000".to_string())
 }
 
 fn default_timeout() -> u64 {

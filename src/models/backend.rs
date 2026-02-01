@@ -1,179 +1,107 @@
-/// Core backend abstraction layer
+/// Model factory - creates model instances from identifiers
 ///
-/// This module defines the internal Backend trait that all provider adapters implement.
-/// It provides a clean, provider-agnostic interface for model inference operations.
+/// Parses model identifiers like "ollama/llama3" or "openrouter/gpt-4"
+/// and creates the appropriate adapter implementing the Model trait.
 
-use async_trait::async_trait;
 use std::sync::Arc;
 
-use super::config::{BackendConfig, ModelConfig};
-use super::error::Result;
-use super::types::{ChatMessage, ModelResponse, ProjectContext, StreamCallback};
+use super::config::BackendConfig;
+use super::error::{ModelError, Result};
+use super::traits::Model;
 
-/// Core backend trait - implemented by all provider adapters
-///
-/// This is the internal abstraction. External code uses the Model trait,
-/// which is implemented by wrapping Backend implementations.
-#[async_trait]
-pub trait Backend: Send + Sync {
-    /// Get the backend name (e.g., "ollama", "vllm", "openai")
-    fn name(&self) -> &str;
-
-    /// Check if this backend is available (running, reachable)
-    async fn health_check(&self) -> Result<()>;
-
-    /// List available models from this backend
-    async fn list_models(&self) -> Result<Vec<String>>;
-
-    /// Check if a specific model is available
-    async fn has_model(&self, model_name: &str) -> Result<bool> {
-        Ok(self.list_models().await?.contains(&model_name.to_string()))
-    }
-
-    /// Send a chat request to the model
-    async fn chat(
-        &self,
-        model_name: &str,
-        messages: &[ChatMessage],
-        context: &ProjectContext,
-        config: &ModelConfig,
-        stream_callback: Option<StreamCallback>,
-    ) -> Result<ModelResponse>;
-
-    /// Get backend-specific metadata
-    fn metadata(&self) -> BackendMetadata {
-        BackendMetadata::default()
-    }
-
-    /// Shutdown the backend gracefully
-    async fn shutdown(&self) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// Backend metadata (capabilities, limits, etc)
-#[derive(Debug, Clone)]
-pub struct BackendMetadata {
-    /// Maximum context length supported
-    pub max_context_length: usize,
-
-    /// Supports streaming responses
-    pub supports_streaming: bool,
-
-    /// Supports function calling
-    pub supports_functions: bool,
-
-    /// Supports vision/images
-    pub supports_vision: bool,
-
-    /// Is a local backend (no API calls to external services)
-    pub is_local: bool,
-
-    /// Backend version (if available)
-    pub version: Option<String>,
-}
-
-impl Default for BackendMetadata {
-    fn default() -> Self {
-        Self {
-            max_context_length: 4096,
-            supports_streaming: true,
-            supports_functions: false,
-            supports_vision: false,
-            is_local: false,
-            version: None,
-        }
-    }
-}
-
-/// Backend factory - creates backend instances
-pub struct BackendFactory {
+/// Model factory - creates model instances
+pub struct ModelFactory {
     config: Arc<BackendConfig>,
 }
 
-impl BackendFactory {
-    /// Create a new backend factory
+impl ModelFactory {
+    /// Create a new model factory
     pub fn new(config: BackendConfig) -> Self {
         Self {
             config: Arc::new(config),
         }
     }
 
-    /// Create a backend by name
-    pub async fn create_backend(&self, backend_name: &str) -> Result<Arc<dyn Backend>> {
-        match backend_name.to_lowercase().as_str() {
+    /// Create a model from a full identifier (e.g., "ollama/llama3", "openrouter/gpt-4")
+    pub async fn create_model(&self, model_id: &str) -> Result<Box<dyn Model>> {
+        // Parse model identifier: "provider/model_name" or just "model_name" (defaults to ollama)
+        let (provider, model_name) = parse_model_id(model_id);
+
+        match provider.to_lowercase().as_str() {
             "ollama" => {
                 use super::adapters::ollama::OllamaAdapter;
-                let adapter = OllamaAdapter::new(self.config.clone()).await?;
-                Ok(Arc::new(adapter))
+                let adapter = OllamaAdapter::new(model_name, self.config.clone()).await?;
+                Ok(Box::new(adapter))
             }
-            "vllm" => {
-                use super::adapters::vllm::VLLMAdapter;
-                let adapter = VLLMAdapter::new(self.config.clone()).await?;
-                Ok(Arc::new(adapter))
-            }
-            _ => Err(super::error::ModelError::InvalidRequest(
-                format!("Unknown backend: {}", backend_name),
+            _ => Err(ModelError::InvalidRequest(
+                format!("Unknown provider: {}. Only ollama/ is supported.", provider),
             )),
         }
     }
 
-    /// Get all available backends
-    pub async fn available_backends(&self) -> Vec<String> {
-        let mut backends = Vec::new();
+    /// List available providers
+    pub async fn available_providers(&self) -> Vec<String> {
+        let mut providers = Vec::new();
 
-        // Try Ollama
-        if let Ok(backend) = self.create_backend("ollama").await {
-            if backend.health_check().await.is_ok() {
-                backends.push("ollama".to_string());
+        // Check Ollama
+        if let Ok(model) = self.create_model("ollama/test").await {
+            if model.health_check().await.is_ok() {
+                providers.push("ollama".to_string());
             }
         }
 
-        // Try vLLM
-        if let Ok(backend) = self.create_backend("vllm").await {
-            if backend.health_check().await.is_ok() {
-                backends.push("vllm".to_string());
-            }
-        }
-
-        backends
+        providers
     }
 }
 
-/// Connection pool wrapper for backends
+/// Parse a model identifier into provider and model name
 ///
-/// Handles connection lifecycle, pooling, and health monitoring
-pub struct PooledBackend {
-    inner: Arc<dyn Backend>,
-    pool_config: PoolConfig,
-}
-
-#[derive(Debug, Clone)]
-pub struct PoolConfig {
-    pub max_connections: usize,
-    pub idle_timeout_secs: u64,
-    pub health_check_interval_secs: u64,
-}
-
-impl Default for PoolConfig {
-    fn default() -> Self {
-        Self {
-            max_connections: 10,
-            idle_timeout_secs: 90,
-            health_check_interval_secs: 30,
-        }
+/// Formats:
+/// - "ollama/llama3" -> ("ollama", "llama3")
+/// - "openrouter/gpt-4" -> ("openrouter", "gpt-4")
+/// - "llama3" -> ("ollama", "llama3")  // defaults to ollama
+/// - "llama3:latest" -> ("ollama", "llama3:latest")  // ollama tag format
+fn parse_model_id(model_id: &str) -> (&str, &str) {
+    if let Some(idx) = model_id.find('/') {
+        let provider = &model_id[..idx];
+        let model = &model_id[idx + 1..];
+        (provider, model)
+    } else {
+        // Default to ollama for bare model names
+        ("ollama", model_id)
     }
 }
 
-impl PooledBackend {
-    pub fn new(backend: Arc<dyn Backend>, pool_config: PoolConfig) -> Self {
-        Self {
-            inner: backend,
-            pool_config,
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_model_id_with_provider() {
+        let (provider, model) = parse_model_id("ollama/llama3");
+        assert_eq!(provider, "ollama");
+        assert_eq!(model, "llama3");
     }
 
-    pub fn inner(&self) -> &Arc<dyn Backend> {
-        &self.inner
+
+    #[test]
+    fn test_parse_model_id_bare_name() {
+        let (provider, model) = parse_model_id("llama3");
+        assert_eq!(provider, "ollama");
+        assert_eq!(model, "llama3");
+    }
+
+    #[test]
+    fn test_parse_model_id_with_tag() {
+        let (provider, model) = parse_model_id("ollama/llama3:latest");
+        assert_eq!(provider, "ollama");
+        assert_eq!(model, "llama3:latest");
+    }
+
+    #[test]
+    fn test_parse_model_id_bare_with_tag() {
+        let (provider, model) = parse_model_id("llama3:7b");
+        assert_eq!(provider, "ollama");
+        assert_eq!(model, "llama3:7b");
     }
 }

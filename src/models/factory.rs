@@ -1,12 +1,11 @@
-/// Factory for creating model instances with unified backend architecture
+/// Factory for creating model instances
 ///
-/// This factory provides a simple API for creating models that automatically
-/// handle backend discovery, routing, and configuration.
+/// This factory provides the public API for creating models. It handles
+/// configuration conversion and delegates to the internal ModelFactory.
 
+use super::backend::ModelFactory as InternalFactory;
 use super::config::BackendConfig;
 use super::error::Result;
-use super::model::{create_model, create_model_default};
-use super::router::BackendRouter;
 use super::traits::Model;
 use crate::app::Config;
 
@@ -17,12 +16,9 @@ impl ModelFactory {
     /// Create a model instance from a model identifier
     ///
     /// Format examples:
-    /// - "ollama/qwen3-coder:30b" - Explicit backend
-    /// - "qwen3-coder:30b" - Auto-detect backend
-    /// - "gpt-4" - Search backends (likely vLLM or LiteLLM)
-    ///
-    /// The factory will automatically discover available backends and route
-    /// the request appropriately.
+    /// - "ollama/qwen3-coder:30b" - Explicit Ollama provider
+    /// - "qwen3-coder:30b" - Defaults to Ollama
+    /// - "kimi-k2.5:cloud" - Ollama cloud model
     pub async fn create(model_id: &str, config: Option<&Config>) -> Result<Box<dyn Model>> {
         let backend_config = if let Some(cfg) = config {
             Self::config_to_backend_config(cfg)
@@ -30,25 +26,26 @@ impl ModelFactory {
             BackendConfig::default()
         };
 
-        create_model(model_id, backend_config).await
+        let factory = InternalFactory::new(backend_config);
+        factory.create_model(model_id).await
     }
 
     /// Create a model with default configuration
     pub async fn create_default(model_id: &str) -> Result<Box<dyn Model>> {
-        create_model_default(model_id).await
+        let factory = InternalFactory::new(BackendConfig::default());
+        factory.create_model(model_id).await
     }
 
-    /// Create a model with explicit backend preference
+    /// Create a model with explicit provider preference
     ///
-    /// If backend is specified, the model_id will be prefixed with the backend name
+    /// If provider is specified, the model_id will be prefixed with the provider name
     /// if it's not already specified. For example:
-    /// - backend="ollama", model_id="tinyllama" -> "ollama/tinyllama"
-    /// - backend="vllm", model_id="gpt-4" -> "vllm/gpt-4"
-    /// - backend=None, model_id="qwen3-coder:30b" -> auto-detect backend
-    pub async fn create_with_backend(
+    /// - provider="ollama", model_id="tinyllama" -> "ollama/tinyllama"
+    /// - provider=None, model_id="qwen3-coder:30b" -> defaults to ollama
+    pub async fn create_with_provider(
         model_id: &str,
         config: Option<&Config>,
-        backend: Option<&str>,
+        provider: Option<&str>,
     ) -> Result<Box<dyn Model>> {
         let backend_config = if let Some(cfg) = config {
             Self::config_to_backend_config(cfg)
@@ -56,56 +53,62 @@ impl ModelFactory {
             BackendConfig::default()
         };
 
-        // If backend is explicitly specified, prefix the model_id
-        let final_model_id = if let Some(backend_name) = backend {
+        // If provider is explicitly specified, prefix the model_id
+        let final_model_id = if let Some(provider_name) = provider {
             if model_id.contains('/') {
                 // Already has a provider prefix
                 model_id.to_string()
             } else {
-                // Add backend prefix
-                format!("{}/{}", backend_name, model_id)
+                // Add provider prefix
+                format!("{}/{}", provider_name, model_id)
             }
         } else {
             model_id.to_string()
         };
 
-        create_model(&final_model_id, backend_config).await
+        let factory = InternalFactory::new(backend_config);
+        factory.create_model(&final_model_id).await
     }
 
-    /// List all available models from all backends
-    pub async fn list_all_backend_models() -> Result<Vec<String>> {
-        let router = BackendRouter::new(BackendConfig::default());
-        let all_models = router.list_all_models().await?;
+    /// Create a model with explicit backend preference (alias for create_with_provider)
+    pub async fn create_with_backend(
+        model_id: &str,
+        config: Option<&Config>,
+        backend: Option<&str>,
+    ) -> Result<Box<dyn Model>> {
+        Self::create_with_provider(model_id, config, backend).await
+    }
 
-        // Flatten the backend -> models map into a single list with backend prefix
-        let mut model_list = Vec::new();
-        for (backend_name, models) in all_models {
-            for model in models {
-                model_list.push(format!("{}/{}", backend_name, model));
+    /// Get available backends (providers)
+    pub async fn get_available_backends() -> Vec<String> {
+        let factory = InternalFactory::new(BackendConfig::default());
+        factory.available_providers().await
+    }
+
+    /// List all models from all available backends
+    ///
+    /// Returns a list of model identifiers in "provider/model" format.
+    /// Only includes backends that are currently available.
+    pub async fn list_all_backend_models() -> Result<Vec<String>> {
+        let factory = InternalFactory::new(BackendConfig::default());
+        let providers = factory.available_providers().await;
+
+        let mut all_models = Vec::new();
+
+        for provider in providers {
+            // Create a dummy model to list models from this provider
+            let dummy_model_id = format!("{}/dummy", provider);
+            if let Ok(model) = factory.create_model(&dummy_model_id).await {
+                if let Ok(models) = model.list_models().await {
+                    for model_name in models {
+                        all_models.push(format!("{}/{}", provider, model_name));
+                    }
+                }
             }
         }
 
-        model_list.sort();
-        Ok(model_list)
-    }
-
-    /// List available models (alias for list_all_backend_models)
-    pub async fn list_available() -> Result<Vec<String>> {
-        Self::list_all_backend_models().await
-    }
-
-    /// Get available backends
-    pub async fn get_available_backends() -> Vec<String> {
-        let router = BackendRouter::new(BackendConfig::default());
-        router.available_backends().await
-    }
-
-    /// Validate that a model is accessible
-    pub async fn validate(model_id: &str, config: Option<&Config>) -> Result<bool> {
-        match Self::create(model_id, config).await {
-            Ok(model) => model.validate_connection().await,
-            Err(_) => Ok(false),
-        }
+        all_models.sort();
+        Ok(all_models)
     }
 
     /// Convert app::Config to BackendConfig
@@ -115,10 +118,6 @@ impl ModelFactory {
 
         BackendConfig {
             ollama_url,
-            vllm_url: std::env::var("VLLM_API_BASE")
-                .unwrap_or_else(|_| "http://localhost:8000".to_string()),
-            litellm_url: config.litellm.proxy_url.clone(),
-            litellm_master_key: config.litellm.master_key.clone(),
             timeout_secs: 10,
             request_timeout_secs: 120,
             max_idle_per_host: 10,
@@ -129,35 +128,25 @@ impl ModelFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_model_spec_parsing() {
         // Test various model spec formats
         let specs = vec![
             ("ollama/tinyllama", Some("ollama"), "tinyllama"),
             ("qwen3-coder:30b", None, "qwen3-coder:30b"),
-            ("gpt-4", None, "gpt-4"),
+            ("kimi-k2.5:cloud", None, "kimi-k2.5:cloud"),
         ];
 
-        for (spec, expected_backend, expected_model) in specs {
+        for (spec, expected_provider, expected_model) in specs {
             let parts: Vec<&str> = spec.split('/').collect();
             if parts.len() == 2 {
-                assert_eq!(Some(parts[0]), expected_backend);
+                assert_eq!(Some(parts[0]), expected_provider);
                 assert_eq!(parts[1], expected_model);
             } else {
-                assert_eq!(None, expected_backend);
+                assert_eq!(None, expected_provider);
                 assert_eq!(spec, expected_model);
             }
         }
-    }
-
-    #[test]
-    fn test_ollama_provider_detection() {
-        assert!("ollama/tinyllama".starts_with("ollama/"));
-        assert!("ollama/llama2".starts_with("ollama/"));
-        assert!(!"openai/gpt-4".starts_with("ollama/"));
-        assert!(!"qwen3-coder:30b".starts_with("ollama/"));
     }
 
     #[test]
@@ -167,22 +156,6 @@ mod tests {
         }
 
         assert_eq!(extract_provider("ollama/tinyllama"), Some("ollama"));
-        assert_eq!(extract_provider("vllm/gpt-4"), Some("vllm"));
         assert_eq!(extract_provider("qwen3-coder:30b"), None);
-    }
-
-    #[test]
-    fn test_model_name_extraction() {
-        fn extract_model(spec: &str) -> &str {
-            if let Some(pos) = spec.find('/') {
-                &spec[pos + 1..]
-            } else {
-                spec
-            }
-        }
-
-        assert_eq!(extract_model("ollama/tinyllama"), "tinyllama");
-        assert_eq!(extract_model("vllm/gpt-4"), "gpt-4");
-        assert_eq!(extract_model("qwen3-coder:30b"), "qwen3-coder:30b");
     }
 }

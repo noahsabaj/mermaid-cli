@@ -3,7 +3,40 @@
 /// Replaces scattered anyhow::Error usage with structured, actionable errors
 /// that enable proper recovery, retry logic, and user-friendly messages.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
+
+/// User-facing error information with actionable suggestions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserFacingError {
+    /// Short summary for status bar (e.g., "Connection failed")
+    pub summary: String,
+    /// Detailed message for chat display
+    pub message: String,
+    /// Actionable suggestion for the user
+    pub suggestion: String,
+    /// Error category for styling/icons
+    pub category: ErrorCategory,
+    /// Whether this error is recoverable (user can retry)
+    pub recoverable: bool,
+}
+
+/// Error categories for visual differentiation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ErrorCategory {
+    /// Connection/network issues
+    Connection,
+    /// Authentication/authorization issues
+    Auth,
+    /// Configuration issues
+    Config,
+    /// Resource not found
+    NotFound,
+    /// Temporary issue (rate limit, timeout)
+    Temporary,
+    /// Internal/unexpected error
+    Internal,
+}
 
 /// Top-level error type for all model operations
 #[derive(Debug)]
@@ -69,6 +102,187 @@ impl fmt::Display for ModelError {
 }
 
 impl std::error::Error for ModelError {}
+
+impl ModelError {
+    /// Convert to user-facing error with actionable suggestions
+    pub fn to_user_facing(&self) -> UserFacingError {
+        match self {
+            ModelError::Backend(BackendError::ConnectionFailed { backend, url, .. }) => {
+                UserFacingError {
+                    summary: format!("{} connection failed", backend),
+                    message: format!("Could not connect to {} at {}", backend, url),
+                    suggestion: if backend == "ollama" {
+                        "Run 'ollama serve' to start Ollama, or check if it's running on the correct port".to_string()
+                    } else {
+                        format!("Check if {} is running and accessible", backend)
+                    },
+                    category: ErrorCategory::Connection,
+                    recoverable: true,
+                }
+            }
+            ModelError::Backend(BackendError::NotAvailable { backend, reason }) => {
+                UserFacingError {
+                    summary: format!("{} unavailable", backend),
+                    message: format!("{} is not available: {}", backend, reason),
+                    suggestion: if backend == "ollama" {
+                        "Start Ollama with 'ollama serve' or pull the model with 'ollama pull <model>'".to_string()
+                    } else {
+                        format!("Ensure {} service is running and healthy", backend)
+                    },
+                    category: ErrorCategory::Connection,
+                    recoverable: true,
+                }
+            }
+            ModelError::Backend(BackendError::HttpError { status, message }) => {
+                let (summary, suggestion) = match status {
+                    401 | 403 => ("Authentication failed", "Check your API key in ~/.config/mermaid/config.toml"),
+                    404 => ("Resource not found", "The requested model or endpoint does not exist"),
+                    429 => ("Rate limited", "Wait a moment before retrying, or switch to a local model"),
+                    500..=599 => ("Server error", "The backend service is experiencing issues - try again later"),
+                    _ => ("Request failed", "Check your network connection and backend configuration"),
+                };
+                UserFacingError {
+                    summary: summary.to_string(),
+                    message: format!("HTTP {}: {}", status, message),
+                    suggestion: suggestion.to_string(),
+                    category: if *status == 401 || *status == 403 {
+                        ErrorCategory::Auth
+                    } else if *status == 429 {
+                        ErrorCategory::Temporary
+                    } else {
+                        ErrorCategory::Internal
+                    },
+                    recoverable: *status == 429 || *status >= 500,
+                }
+            }
+            ModelError::Backend(BackendError::UnexpectedResponse { backend, message }) => {
+                UserFacingError {
+                    summary: "Unexpected response".to_string(),
+                    message: format!("Received unexpected response from {}: {}", backend, message),
+                    suggestion: "This might be a version mismatch - try updating the backend".to_string(),
+                    category: ErrorCategory::Internal,
+                    recoverable: false,
+                }
+            }
+            ModelError::Backend(BackendError::ProviderError { provider, code, message }) => {
+                let code_str = code.as_deref().unwrap_or("unknown");
+                UserFacingError {
+                    summary: format!("{} error", provider),
+                    message: format!("{} returned error {}: {}", provider, code_str, message),
+                    suggestion: format!("Check {} documentation for error code {}", provider, code_str),
+                    category: ErrorCategory::Internal,
+                    recoverable: false,
+                }
+            }
+            ModelError::Config(ConfigError::MissingRequired(field)) => {
+                UserFacingError {
+                    summary: "Missing configuration".to_string(),
+                    message: format!("Required configuration '{}' is missing", field),
+                    suggestion: format!("Add '{}' to ~/.config/mermaid/config.toml", field),
+                    category: ErrorCategory::Config,
+                    recoverable: false,
+                }
+            }
+            ModelError::Config(ConfigError::InvalidValue { field, value, reason }) => {
+                UserFacingError {
+                    summary: "Invalid configuration".to_string(),
+                    message: format!("Invalid value '{}' for '{}': {}", value, field, reason),
+                    suggestion: format!("Fix '{}' in ~/.config/mermaid/config.toml", field),
+                    category: ErrorCategory::Config,
+                    recoverable: false,
+                }
+            }
+            ModelError::Config(ConfigError::FileError { path, reason }) => {
+                UserFacingError {
+                    summary: "Config file error".to_string(),
+                    message: format!("Cannot read config file '{}': {}", path, reason),
+                    suggestion: "Check file permissions and syntax".to_string(),
+                    category: ErrorCategory::Config,
+                    recoverable: false,
+                }
+            }
+            ModelError::ModelNotFound { model, searched } => {
+                UserFacingError {
+                    summary: "Model not found".to_string(),
+                    message: format!("Model '{}' not found in: {}", model, searched.join(", ")),
+                    suggestion: format!(
+                        "Pull the model with 'ollama pull {}' or check if the model name is correct",
+                        model
+                    ),
+                    category: ErrorCategory::NotFound,
+                    recoverable: false,
+                }
+            }
+            ModelError::Timeout { operation, duration_secs } => {
+                UserFacingError {
+                    summary: "Request timed out".to_string(),
+                    message: format!("'{}' timed out after {} seconds", operation, duration_secs),
+                    suggestion: "The model might be overloaded - try a smaller model or wait and retry".to_string(),
+                    category: ErrorCategory::Temporary,
+                    recoverable: true,
+                }
+            }
+            ModelError::RateLimit { retry_after } => {
+                let wait_msg = retry_after
+                    .map(|s| format!("Wait {} seconds", s))
+                    .unwrap_or_else(|| "Wait a moment".to_string());
+                UserFacingError {
+                    summary: "Rate limited".to_string(),
+                    message: "Too many requests - rate limit exceeded".to_string(),
+                    suggestion: format!("{}. Consider using a local Ollama model to avoid rate limits", wait_msg),
+                    category: ErrorCategory::Temporary,
+                    recoverable: true,
+                }
+            }
+            ModelError::InvalidRequest(msg) => {
+                UserFacingError {
+                    summary: "Invalid request".to_string(),
+                    message: format!("The request was invalid: {}", msg),
+                    suggestion: "Check your message format or try rephrasing".to_string(),
+                    category: ErrorCategory::Internal,
+                    recoverable: false,
+                }
+            }
+            ModelError::ParseError { message, .. } => {
+                UserFacingError {
+                    summary: "Parse error".to_string(),
+                    message: format!("Failed to parse response: {}", message),
+                    suggestion: "The model returned an unexpected format - try sending the message again".to_string(),
+                    category: ErrorCategory::Internal,
+                    recoverable: true,
+                }
+            }
+            ModelError::StreamError(msg) => {
+                UserFacingError {
+                    summary: "Stream interrupted".to_string(),
+                    message: format!("Connection lost during streaming: {}", msg),
+                    suggestion: "Check your network connection and try again".to_string(),
+                    category: ErrorCategory::Connection,
+                    recoverable: true,
+                }
+            }
+            ModelError::Authentication(msg) => {
+                UserFacingError {
+                    summary: "Authentication failed".to_string(),
+                    message: format!("Authentication error: {}", msg),
+                    suggestion: "Check your API key in ~/.config/mermaid/config.toml or environment variables".to_string(),
+                    category: ErrorCategory::Auth,
+                    recoverable: false,
+                }
+            }
+        }
+    }
+
+    /// Serialize error for channel transmission
+    pub fn to_channel_message(&self) -> String {
+        let user_facing = self.to_user_facing();
+        // Use JSON for structured transmission
+        serde_json::to_string(&user_facing).unwrap_or_else(|_| {
+            // Fallback to simple format if serialization fails
+            format!("{}|{}|{}", user_facing.summary, user_facing.message, user_facing.suggestion)
+        })
+    }
+}
 
 /// Backend-specific errors
 #[derive(Debug)]
