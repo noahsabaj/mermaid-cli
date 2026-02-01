@@ -17,10 +17,9 @@ use crate::tui::App;
 pub async fn run_ui(mut app: App) -> Result<()> {
     // Check if we have an interactive terminal
     if !crossterm::tty::IsTty::is_tty(&io::stdout()) {
-        eprintln!("[ERROR] Mermaid requires an interactive terminal.");
-        eprintln!("   Cannot run in non-interactive mode (pipes, redirects, etc.)");
-        eprintln!("   Try running directly in your terminal: mermaid");
-        return Err(anyhow::anyhow!("No interactive terminal available"));
+        return Err(anyhow::anyhow!(
+            "Mermaid requires an interactive terminal. Cannot run in non-interactive mode (pipes, redirects, etc.). Try running directly in your terminal: mermaid"
+        ));
     }
 
     // Setup terminal
@@ -39,14 +38,6 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     // Run the UI loop using the loop coordinator
     let res = super::loop_coordinator::run_app_loop(&mut terminal, &mut app, tx, &mut rx).await;
 
-    // Save session state before exiting
-    use crate::session::SessionState;
-    let mut session = SessionState::load().unwrap_or_default();
-    session.set_model(app.model_state.model_id.clone());
-    if let Err(e) = session.save() {
-        eprintln!("[WARNING] Failed to save session: {}", e);
-    }
-
     // Restore terminal
     disable_raw_mode()?;
     execute!(
@@ -56,9 +47,5 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = res {
-        eprintln!("Error: {:?}", err);
-    }
-
-    Ok(())
+    res
 }

@@ -2,10 +2,9 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::app::load_config;
-use crate::context::ContextLoader;
+use crate::context::Context;
 use crate::models::{MessageRole, ModelFactory};
 use crate::ollama;
-use crate::session::SessionState;
 use crate::tui::App;
 
 /// Handle slash commands (e.g., :model, :save, :load, :clear, etc.)
@@ -102,13 +101,8 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
                 // Update the model and model name
                 *app.model_state.model.write().await = model;
                 app.model_state.model_name = model_id.clone();
-                app.model_state.model_id = model_id.clone();  // CRITICAL: Update model_id too!
+                app.model_state.model_id = model_id.clone();
                 app.set_status(format!("Switched to model: {}", model_id));
-
-                // Save the model preference to session
-                let mut session = SessionState::load().unwrap_or_default();
-                session.set_model(model_id);
-                let _ = session.save();
             },
             Ok(Err(e)) => {
                 app.set_status(format!("Failed to switch model: {}", e));
@@ -124,23 +118,18 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
 
 /// Refresh file context from disk
 async fn handle_refresh(app: &mut App) {
-    match ContextLoader::new() {
-        Ok(loader) => match loader.load(Path::new(".")).await {
-            Ok(new_context) => {
-                app.context.files = new_context.files;
-                app.context.token_count = new_context.token_count;
-                app.set_status(format!(
-                    "Refreshed: {} files, ~{} tokens",
-                    app.context.files.len(),
-                    app.context.token_count
-                ));
-            },
-            Err(e) => {
-                app.set_status(format!("Failed to refresh: {}", e));
-            },
+    match Context::load(Path::new(".")).await {
+        Ok(new_context) => {
+            app.context.files = new_context.files;
+            app.context.token_count = new_context.token_count;
+            app.set_status(format!(
+                "Refreshed: {} files, ~{} tokens",
+                app.context.files.len(),
+                app.context.token_count
+            ));
         },
         Err(e) => {
-            app.set_status(format!("Failed to create loader: {}", e));
+            app.set_status(format!("Failed to refresh: {}", e));
         },
     }
 }
@@ -270,13 +259,6 @@ fn handle_help(app: &mut App) {
          Plan Mode - Preview actions without execution\n\
          Bypass All - Auto-accepts everything (use with caution)\n\
          \n\
-         MODE SHORTCUTS:\n\
-         Shift+Tab - Cycle modes forward\n\
-         Ctrl+Tab - Cycle modes backward\n\
-         Ctrl+E - Switch to Accept Edits mode\n\
-         Ctrl+P - Switch to Plan mode\n\
-         Ctrl+Y - Toggle Bypass All mode\n\
-         \n\
          INPUT & NAVIGATION:\n\
          Enter - Submit message or execute command\n\
          Esc - Cancel generation/plan or clear input\n\
@@ -292,9 +274,9 @@ fn handle_help(app: &mut App) {
          Alt+A - Always approve similar actions\n\
          Alt+P - Toggle action preview\n\
          \n\
-         PLAN APPROVAL (Plan Mode):\n\
-         Ctrl+Y - Approve and execute plan\n\
-         Ctrl+N - Cancel plan\n\
+         PLAN APPROVAL (when plan is ready):\n\
+         Y - Approve and execute plan\n\
+         N - Cancel plan\n\
          \n\
          OTHER:\n\
          Ctrl+C - Quit application"

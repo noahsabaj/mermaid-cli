@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-use crate::tui::app::GenerationStatus;
+use super::super::state::GenerationStatus;
 use crate::tui::theme::Theme;
 
 /// Props for StatusLineWidget (stateless widget showing generation progress)

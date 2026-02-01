@@ -108,12 +108,8 @@ impl OperationMode {
 
     /// Get the keyboard hint for this mode
     pub fn keyboard_hint(&self) -> &str {
-        match self {
-            Self::Normal => "Shift+Tab to cycle modes",
-            Self::AcceptEdits => "Ctrl+E for Accept Edits mode",
-            Self::PlanMode => "Ctrl+P for Plan mode",
-            Self::BypassAll => "Ctrl+Y to toggle Bypass All",
-        }
+        // Unified: Shift+Tab is the only way to change modes
+        "Shift+Tab to cycle modes"
     }
 
     /// Parse mode from string (for config files)

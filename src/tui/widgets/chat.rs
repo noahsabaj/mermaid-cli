@@ -10,7 +10,7 @@ use crate::agents::{
     ActionDisplay, ActionResult,
 };
 use crate::models::{ChatMessage, MessageRole};
-use crate::tui::app::ConfirmationState;
+use super::super::state::ConfirmationState;
 use crate::tui::markdown::parse_markdown;
 use crate::tui::mode::OperationMode;
 use crate::tui::theme::Theme;
@@ -47,13 +47,13 @@ impl ChatState {
         }
     }
 
-    /// Scroll chat view up by amount
+    /// Scroll viewport up (shows older messages further from bottom)
     pub fn scroll_up(&mut self, amount: u16) {
         self.is_user_scrolling = true;
         self.scroll_offset = self.scroll_offset.saturating_add(amount);
     }
 
-    /// Scroll chat view down by amount
+    /// Scroll viewport down (shows newer messages closer to bottom)
     pub fn scroll_down(&mut self, amount: u16) {
         self.is_user_scrolling = true;
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
@@ -104,6 +104,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 MessageRole::User => (">", ratatui::style::Color::White),
                 MessageRole::Assistant => ("●", ratatui::style::Color::White),
                 MessageRole::System => ("●", self.theme.colors.system_message.to_color()),
+                MessageRole::Tool => ("*", ratatui::style::Color::Cyan), // Tool results in cyan
             };
 
             if matches!(msg.role, MessageRole::Assistant) {

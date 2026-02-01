@@ -1,11 +1,11 @@
-use once_cell::sync::Lazy;
 use ratatui::{
     layout::{Constraint, Direction, Flex, Layout, Margin, Rect},
     Frame,
 };
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
-use crate::tui::app::{App, GenerationStatus};
+use super::app::App;
+use super::state::GenerationStatus;
 use crate::tui::widgets::{ChatWidget, InputState, InputWidget, StatusLineWidget, StatusWidget};
 use crate::utils::MutexExt;
 
@@ -52,7 +52,7 @@ impl LayoutCache {
 }
 
 // Global layout cache
-static LAYOUT_CACHE: Lazy<Mutex<LayoutCache>> = Lazy::new(|| Mutex::new(LayoutCache::new()));
+static LAYOUT_CACHE: LazyLock<Mutex<LayoutCache>> = LazyLock::new(|| Mutex::new(LayoutCache::new()));
 
 /// Render the main UI
 pub fn render_ui(frame: &mut Frame, app: &mut App) {
@@ -72,7 +72,7 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         // Calculate how many lines the input will take
         let mut lines = 1;
         let mut current_line_length = 0;
-        for ch in app.input.chars() {
+        for ch in app.input.get().chars() {
             if ch == '\n' || current_line_length >= terminal_width {
                 lines += 1;
                 current_line_length = if ch == '\n' { 0 } else { 1 };
@@ -127,8 +127,8 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
 
     // Render input area using new InputWidget (now at chunks[2])
     let input_widget = InputWidget {
-        input: &app.input,
-        showing_command_hints: app.input.starts_with(':'),
+        input: app.input.get(),
+        showing_command_hints: app.input.get().starts_with(':'),
         theme: &app.ui_state.theme,
     };
     frame.render_stateful_widget(input_widget, chunks[2], &mut app.ui_state.input_state);
@@ -137,8 +137,8 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
     let input_area = chunks[2];
     let inner_width = input_area.width as usize; // Full width now (no side borders)
     let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
-        &app.input,
-        app.cursor_position,
+        app.input.get(),
+        app.input.cursor_position,
         inner_width,
     );
 

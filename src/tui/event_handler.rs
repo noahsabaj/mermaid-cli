@@ -39,7 +39,7 @@ pub fn handle_event(app: &mut App, event: Event, viewport_height: u16) -> Result
 }
 
 /// Handle keyboard events for plan approval/cancellation during plan mode
-/// Uses Ctrl+Y/N to distinguish from action confirmation (Alt+Y/N)
+/// Uses plain Y/N keys when in plan approval state
 fn handle_plan_approval_keys(key_code: KeyCode) -> Result<EventAction> {
     match key_code {
         KeyCode::Char('y') | KeyCode::Char('Y') => Ok(EventAction::ApprovePlan),
@@ -56,11 +56,11 @@ fn handle_mouse_event(
 ) -> Result<EventAction> {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            app.scroll_down(3); // Scroll wheel up shows newer messages (scroll content up)
+            app.scroll_up(3); // Scroll up shows older messages (viewport moves up)
             Ok(EventAction::Continue)
         },
         MouseEventKind::ScrollDown => {
-            app.scroll_up(3); // Scroll wheel down shows older messages (scroll content down)
+            app.scroll_down(3); // Scroll down shows newer messages (viewport moves down)
             Ok(EventAction::Continue)
         },
         _ => Ok(EventAction::Continue),
@@ -80,10 +80,14 @@ fn handle_key_event(
         return Ok(EventAction::Continue);
     }
 
-    // Handle Ctrl+Y/N for plan approval/cancellation during plan mode
-    // This is separate from action confirmation (Alt+Y/N) to avoid confusion
-    if key.modifiers == KeyModifiers::CONTROL && app.app_state.is_awaiting_plan_approval() {
-        return handle_plan_approval_keys(key.code);
+    // Handle Y/N for plan approval/cancellation during plan mode
+    // Plain keys (no modifiers) when in plan approval state
+    if app.app_state.is_awaiting_plan_approval() && key.modifiers.is_empty() {
+        if let result @ Ok(EventAction::ApprovePlan | EventAction::CancelPlan) =
+            handle_plan_approval_keys(key.code)
+        {
+            return result;
+        }
     }
 
     // Handle Alt+Y/N/A/P for action confirmation
@@ -148,7 +152,6 @@ fn handle_escape_key(app: &mut App) -> EventAction {
     } else if !app.input.is_empty() {
         // Clear input if not generating
         app.input.clear();
-        app.cursor_position = 0;
         app.set_status("Input cleared");
     }
 
@@ -159,18 +162,18 @@ fn handle_escape_key(app: &mut App) -> EventAction {
 fn handle_enter_key(app: &mut App) -> Result<EventAction> {
     // If waiting for plan approval, block new messages
     if app.app_state.is_awaiting_plan_approval() {
-        app.set_status("Complete or cancel the plan first (Ctrl+Y to approve, Ctrl+N to cancel)");
+        app.set_status("Complete or cancel the plan first (Y to approve, N to cancel)");
         return Ok(EventAction::Continue);
     }
 
     if !app.input.is_empty() && !app.app_state.is_generating() {
         // Check if this is a command (starts with ':')
-        if app.input.starts_with(':') {
-            let command = app.input.trim_start_matches(':').to_string();
+        if app.input.get().starts_with(':') {
+            let command = app.input.get().trim_start_matches(':').to_string();
             app.clear_input();
             Ok(EventAction::ExecuteCommand(command))
         } else {
-            let input = app.input.clone();
+            let input = app.input.get().to_string();
             app.clear_input();
             Ok(EventAction::SubmitMessage(input))
         }
@@ -188,25 +191,6 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
         return EventAction::Quit;
     }
 
-    // Mode-specific shortcuts
-    if modifiers == KeyModifiers::CONTROL {
-        match c {
-            'e' => {
-                app.set_mode(crate::tui::mode::OperationMode::AcceptEdits);
-                return EventAction::Continue;
-            },
-            'p' => {
-                app.set_mode(crate::tui::mode::OperationMode::PlanMode);
-                return EventAction::Continue;
-            },
-            'y' => {
-                app.toggle_bypass_mode();
-                return EventAction::Continue;
-            },
-            _ => {},
-        }
-    }
-
     // Normal character input (no modifiers or only SHIFT for uppercase)
     if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
         // Reset history navigation when user starts typing
@@ -214,8 +198,7 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
             app.session_state.history_index = None;
             app.session_state.history_buffer.clear();
         }
-        app.input.insert(app.cursor_position, c);
-        app.cursor_position += 1;
+        app.input.insert(c);
     }
 
     EventAction::Continue
@@ -223,46 +206,37 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
 
 /// Handle Backspace key
 fn handle_backspace(app: &mut App) -> EventAction {
-    if app.cursor_position > 0 {
-        app.cursor_position -= 1;
-        app.input.remove(app.cursor_position);
-    }
+    app.input.backspace();
     EventAction::Continue
 }
 
 /// Handle Delete key
 fn handle_delete(app: &mut App) -> EventAction {
-    if app.cursor_position < app.input.len() {
-        app.input.remove(app.cursor_position);
-    }
+    app.input.delete();
     EventAction::Continue
 }
 
 /// Handle Left arrow key
 fn handle_left_arrow(app: &mut App) -> EventAction {
-    if app.cursor_position > 0 {
-        app.cursor_position -= 1;
-    }
+    app.input.move_left();
     EventAction::Continue
 }
 
 /// Handle Right arrow key
 fn handle_right_arrow(app: &mut App) -> EventAction {
-    if app.cursor_position < app.input.len() {
-        app.cursor_position += 1;
-    }
+    app.input.move_right();
     EventAction::Continue
 }
 
 /// Handle Home key
 fn handle_home(app: &mut App) -> EventAction {
-    app.cursor_position = 0;
+    app.input.move_home();
     EventAction::Continue
 }
 
 /// Handle End key
 fn handle_end(app: &mut App) -> EventAction {
-    app.cursor_position = app.input.len();
+    app.input.move_end();
     EventAction::Continue
 }
 
@@ -275,16 +249,14 @@ fn navigate_history_backward(app: &mut App) {
     match app.session_state.history_index {
         None => {
             // First time pressing up - save current input and go to latest history entry
-            app.session_state.history_buffer = app.input.clone();
+            app.session_state.history_buffer = app.input.get().to_string();
             app.session_state.history_index = Some(app.session_state.input_history.len() - 1);
-            app.input = app.session_state.input_history[app.session_state.history_index.unwrap()].clone();
-            app.cursor_position = app.input.len();
+            app.input.set(&app.session_state.input_history[app.session_state.history_index.unwrap()]);
         }
         Some(idx) if idx > 0 => {
             // Go to older message
             app.session_state.history_index = Some(idx - 1);
-            app.input = app.session_state.input_history[idx - 1].clone();
-            app.cursor_position = app.input.len();
+            app.input.set(&app.session_state.input_history[idx - 1]);
         }
         Some(0) => {
             // Already at oldest, do nothing
@@ -299,14 +271,12 @@ fn navigate_history_forward(app: &mut App) {
         Some(idx) if idx < app.session_state.input_history.len() - 1 => {
             // Go to newer message
             app.session_state.history_index = Some(idx + 1);
-            app.input = app.session_state.input_history[idx + 1].clone();
-            app.cursor_position = app.input.len();
+            app.input.set(&app.session_state.input_history[idx + 1]);
         }
         Some(_) => {
             // At newest - restore draft buffer and exit history mode
             app.session_state.history_index = None;
-            app.input = app.session_state.history_buffer.clone();
-            app.cursor_position = app.input.len();
+            app.input.set(&app.session_state.history_buffer);
         }
         None => {
             // Not in history mode, do nothing
@@ -321,8 +291,8 @@ fn handle_up_arrow(app: &mut App) -> EventAction {
         navigate_history_backward(app);
         return EventAction::Continue;
     }
-    // Otherwise scroll chat
-    app.scroll_down(1);
+    // Otherwise scroll chat up (shows older messages)
+    app.scroll_up(1);
     EventAction::Continue
 }
 
@@ -333,8 +303,8 @@ fn handle_down_arrow(app: &mut App) -> EventAction {
         navigate_history_forward(app);
         return EventAction::Continue;
     }
-    // Otherwise scroll chat
-    app.scroll_up(1);
+    // Otherwise scroll chat down (shows newer messages)
+    app.scroll_down(1);
     EventAction::Continue
 }
 
