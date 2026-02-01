@@ -230,17 +230,10 @@ async fn handle_message_submit(
     let tx_clone = tx.clone();
     let tx_done = tx.clone();
 
-    let operation_mode = app.operation_state.operation_mode.clone();
     let model_id = app.model_state.model_id.clone();
 
     let handle = tokio::spawn(async move {
-        // Use Plan Mode config if in Plan Mode, otherwise use default
-        let mut config = if operation_mode.is_planning_only() {
-            ModelConfig::with_plan_mode()
-        } else {
-            ModelConfig::default()
-        };
-
+        let mut config = ModelConfig::default();
         config.model = model_id.clone();
 
         let callback: StreamCallback = Arc::new(move |chunk| {
@@ -332,14 +325,9 @@ async fn run_agent_loop(
         let tx_clone = tx.clone();
         let tx_done = tx.clone();
         let model_id = app.model_state.model_id.clone();
-        let operation_mode = app.operation_state.operation_mode.clone();
 
         let handle = tokio::spawn(async move {
-            let mut config = if operation_mode.is_planning_only() {
-                ModelConfig::with_plan_mode()
-            } else {
-                ModelConfig::default()
-            };
+            let mut config = ModelConfig::default();
             config.model = model_id;
 
             let callback: StreamCallback = Arc::new(move |chunk| {

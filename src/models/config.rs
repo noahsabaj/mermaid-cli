@@ -93,13 +93,6 @@ impl ModelConfig {
             cloud_api_key: self.get_backend_option("ollama", "cloud_api_key").cloned(),
         }
     }
-
-    /// Create config with Plan Mode instructions appended to system prompt
-    pub fn with_plan_mode() -> Self {
-        let mut config = Self::default();
-        config.system_prompt = Some(prompts::get_system_prompt_with_plan_mode());
-        config
-    }
 }
 
 /// Ollama-specific options (extracted from backend_options)
