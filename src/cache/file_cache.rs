@@ -303,7 +303,6 @@ mod tests {
     fn test_cache_file_naming() {
         // Test cache file naming convention
         let file_name = "main.rs";
-        let hash_prefix = "ab";
         let hash_short = "abc12345";
 
         let cache_name = format!("{}_{}.cache", file_name, hash_short);

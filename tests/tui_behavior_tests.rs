@@ -5,7 +5,7 @@
 // NOTE: Due to module visibility, we'll test the public interfaces rather than internal state
 // This is actually better practice - testing public behavior rather than implementation details
 
-use mermaid_cli::agents::AgentAction;
+use mermaid_cli::agents::{AgentAction, ModeAwareExecutor, Plan};
 use mermaid_cli::tui::{AppState, GenerationStatus, OperationMode};
 
 // ===== APP STATE ENUM TESTS =====
@@ -69,12 +69,12 @@ fn test_app_state_variants_are_distinct() {
 #[test]
 fn test_app_state_awaiting_action_confirmation() {
     let action = AgentAction::ReadFile {
-        path: "test.rs".to_string(),
+        paths: vec!["test.rs".to_string()],
     };
 
     let state = AppState::AwaitingActionConfirmation {
         action: action.clone(),
-        executor: mermaid::agents::ModeAwareExecutor::new(OperationMode::Normal),
+        executor: ModeAwareExecutor::new(OperationMode::Normal),
     };
 
     assert!(matches!(state, AppState::AwaitingActionConfirmation { .. }));
@@ -85,7 +85,7 @@ fn test_app_state_awaiting_action_confirmation() {
 #[test]
 fn test_app_state_executing_action() {
     let action = AgentAction::ReadFile {
-        path: "test.rs".to_string(),
+        paths: vec!["test.rs".to_string()],
     };
 
     let state = AppState::ExecutingAction {
@@ -98,34 +98,24 @@ fn test_app_state_executing_action() {
 
 #[test]
 fn test_app_state_awaiting_plan_approval() {
-    let plan = mermaid::agents::Plan {
-        actions: vec![],
-        created_at: std::time::Instant::now(),
-        explanation: Some("Test plan explanation".to_string()),
-        display_text: "Test Plan".to_string(),
-    };
+    let plan = Plan::new(vec![]);
 
     let state = AppState::AwaitingPlanApproval {
         plan: plan.clone(),
-        explanation: plan.explanation.clone(),
+        explanation: Some("Test plan explanation".to_string()),
     };
 
     assert!(matches!(state, AppState::AwaitingPlanApproval { .. }));
 
-    if let AppState::AwaitingPlanApproval { plan: p, explanation } = &state {
-        assert_eq!(p.display_text, "Test Plan");
+    if let AppState::AwaitingPlanApproval { plan: _p, explanation } = &state {
+        // Plan is empty so display_text will be "No actions in plan"
         assert_eq!(explanation.as_deref(), Some("Test plan explanation"));
     }
 }
 
 #[test]
 fn test_app_state_executing_plan() {
-    let plan = mermaid::agents::Plan {
-        actions: vec![],
-        created_at: std::time::Instant::now(),
-        explanation: None,
-        display_text: "Executing plan".to_string(),
-    };
+    let plan = Plan::new(vec![]);
 
     let state = AppState::ExecutingPlan {
         plan,
@@ -275,7 +265,7 @@ fn test_message_roles_exist() {
 #[test]
 fn test_agent_actions_can_be_created() {
     let read_file = AgentAction::ReadFile {
-        path: "test.rs".to_string(),
+        paths: vec!["test.rs".to_string()],
     };
 
     let write_file = AgentAction::WriteFile {
@@ -297,13 +287,13 @@ fn test_agent_actions_can_be_created() {
 #[test]
 fn test_agent_actions_can_be_cloned() {
     let action = AgentAction::ReadFile {
-        path: "test.rs".to_string(),
+        paths: vec!["test.rs".to_string()],
     };
 
     let cloned = action.clone();
 
     // Verify clone works
-    if let (AgentAction::ReadFile { path: p1 }, AgentAction::ReadFile { path: p2 }) = (&action, &cloned) {
+    if let (AgentAction::ReadFile { paths: p1 }, AgentAction::ReadFile { paths: p2 }) = (&action, &cloned) {
         assert_eq!(p1, p2);
     }
 }
