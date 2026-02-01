@@ -102,7 +102,7 @@ impl OllamaAdapter {
                 }
 
                 // Handle tool calls (if present)
-                if let Some(tool_calls) = json_chunk.message.tool_calls {
+                if let Some(ref tool_calls) = json_chunk.message.tool_calls {
                     accumulated_tool_calls.extend(tool_calls.clone());
                     // Send tool calls to stream handler as special marker
                     if let Ok(tool_calls_json) = serde_json::to_string(&tool_calls) {

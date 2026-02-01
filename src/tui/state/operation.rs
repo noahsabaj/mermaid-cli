@@ -21,6 +21,8 @@ pub struct OperationState {
     pub reading_file_status: Option<String>,
     /// Current confirmation state
     pub confirmation_state: Option<ConfirmationState>,
+    /// Accumulated tool calls during streaming (persists across process_stream_chunks calls)
+    pub accumulated_tool_calls: Vec<crate::models::ToolCall>,
 }
 
 impl OperationState {
@@ -34,6 +36,7 @@ impl OperationState {
             plan_mode_active_for_generation: false,
             reading_file_status: None,
             confirmation_state: None,
+            accumulated_tool_calls: Vec::new(),
         }
     }
 }
