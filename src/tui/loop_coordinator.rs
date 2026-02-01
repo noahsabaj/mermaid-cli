@@ -119,13 +119,19 @@ pub async fn run_app_loop(
                 // Stream complete: response is now rendered
                 // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
 
+                tracing::info!("StreamStatus::Complete - actions: {}, tool_calls: {}", actions.len(), tool_calls.len());
+
                 // AGENT LOOP: Execute tool calls and continue until no more tool_calls
                 if !tool_calls.is_empty() {
+                    tracing::info!("Starting agent loop with {} tool calls", tool_calls.len());
                     // Execute the agent loop
                     run_agent_loop(app, tool_calls, &tx, rx).await?;
                 } else if !actions.is_empty() {
+                    tracing::info!("Legacy path: {} actions without tool_calls", actions.len());
                     // Legacy path: actions without tool_calls (backwards compatibility)
                     action_handler::execute_actions(app, actions, &tx).await?;
+                } else {
+                    tracing::info!("No tool calls or actions to execute");
                 }
 
                 // Generate conversation title after first exchange (if not already generated)
@@ -289,10 +295,12 @@ async fn run_agent_loop(
 
     while !current_tool_calls.is_empty() {
         iteration += 1;
+        tracing::info!("Agent loop iteration {} with {} tool calls", iteration, current_tool_calls.len());
         app.set_status(format!("Agent loop iteration {}", iteration));
 
         // Execute tool calls and get results
         let results = action_handler::execute_tool_calls_for_agent_loop(app, &current_tool_calls).await;
+        tracing::info!("Tool execution returned {} results", results.len());
 
         // Update the last assistant message to include tool_calls
         // (This is needed for the API to understand the conversation flow)

@@ -83,6 +83,11 @@ impl OllamaAdapter {
                     continue;
                 }
 
+                // Log raw chunk for debugging tool call issues
+                if line.contains("tool_calls") || line.contains("\"done\":true") {
+                    tracing::info!("Raw chunk (tool_calls or done): {}", line);
+                }
+
                 let json_chunk: OllamaStreamChunk = serde_json::from_str(line)
                     .map_err(|e| ModelError::ParseError {
                         message: format!("Failed to parse Ollama response: {}", e),
@@ -103,6 +108,10 @@ impl OllamaAdapter {
 
                 // Handle tool calls (if present)
                 if let Some(tool_calls) = json_chunk.message.tool_calls {
+                    tracing::info!("Received {} tool calls from Ollama", tool_calls.len());
+                    for tc in &tool_calls {
+                        tracing::info!("Tool call: {} with args: {}", tc.function.name, tc.function.arguments);
+                    }
                     accumulated_tool_calls.extend(tool_calls.clone());
                     // Send tool calls to stream handler as special marker
                     if let Ok(tool_calls_json) = serde_json::to_string(&tool_calls) {
@@ -123,6 +132,7 @@ impl OllamaAdapter {
 
                 // Capture token usage
                 if json_chunk.done {
+                    tracing::info!("Final chunk received (done=true)");
                     if let Some(count) = json_chunk.prompt_eval_count {
                         prompt_tokens = count;
                     }
@@ -140,8 +150,10 @@ impl OllamaAdapter {
         };
 
         let tool_calls = if accumulated_tool_calls.is_empty() {
+            tracing::info!("Stream complete: NO tool calls received from model");
             None
         } else {
+            tracing::info!("Stream complete: {} tool calls accumulated", accumulated_tool_calls.len());
             Some(accumulated_tool_calls)
         };
 
@@ -287,13 +299,19 @@ impl Model for OllamaAdapter {
                 "content": msg.content
             });
 
-            // Add tool_call_id and tool_name for tool result messages (required by Ollama API)
-            if msg.role == MessageRole::Tool {
-                if let Some(ref tool_call_id) = msg.tool_call_id {
-                    json_msg["tool_call_id"] = json!(tool_call_id);
+            // Add tool_calls for assistant messages (required for agent loop)
+            // The assistant message must include the tool_calls it made
+            if msg.role == MessageRole::Assistant {
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    json_msg["tool_calls"] = json!(tool_calls);
                 }
+            }
+
+            // Add tool_name for tool result messages (required by Ollama API)
+            // Per Ollama docs: messages.append({'role': 'tool', 'tool_name': tc.function.name, 'content': str(result)})
+            if msg.role == MessageRole::Tool {
                 if let Some(ref tool_name) = msg.tool_name {
-                    json_msg["name"] = json!(tool_name);
+                    json_msg["tool_name"] = json!(tool_name);
                 }
             }
 
@@ -312,12 +330,18 @@ impl Model for OllamaAdapter {
         let tools = tool_registry.to_ollama_format();
 
         // Build request body
+        // Enable think=true for models that support extended thinking (like kimi, qwen3)
+        // This is required for proper tool calling behavior per Ollama docs
         let mut request_body = json!({
             "model": self.model_name,
             "messages": json_messages,
             "stream": stream_callback.is_some(),
             "tools": tools,
+            "think": true,
         });
+
+        tracing::debug!("Sending {} tools to Ollama", tools.len());
+        tracing::debug!("Request body tools: {}", serde_json::to_string_pretty(&tools).unwrap_or_default());
 
         // Add model parameters
         let mut options = json!({});
