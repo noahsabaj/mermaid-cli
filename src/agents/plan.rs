@@ -284,12 +284,6 @@ impl Plan {
         output
     }
 
-    /// Format plan actions for display as markdown
-    #[allow(dead_code)]
-    fn format_display(actions: &[PlannedAction]) -> String {
-        Self::format_display_actions(actions)
-    }
-
     /// Format only the actions portion of the plan
     fn format_display_actions(actions: &[PlannedAction]) -> String {
         if actions.is_empty() {

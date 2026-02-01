@@ -76,8 +76,6 @@ base64 = "0.22"  # Base64 encoding for binary files (PDFs, images)
 
 [dev-dependencies]
 tempfile = "3.14"
-pretty_assertions = "1.4"
-mockall = "0.13"
 
 [profile.release]
 lto = true

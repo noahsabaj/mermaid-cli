@@ -588,22 +588,6 @@ pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Resu
     Ok(())
 }
 
-/// Determine if an action needs multi-step follow-through (synthesis/analysis)
-///
-/// ANALYZE actions: Model should synthesize/analyze the results
-/// SIMPLE actions: Just show brief confirmation, move on
-#[allow(dead_code)]
-fn needs_analysis(action: &AgentAction) -> bool {
-    matches!(
-        action,
-        AgentAction::ReadFile { .. }
-            | AgentAction::WebSearch { .. }
-            | AgentAction::ExecuteCommand { .. }
-            | AgentAction::GitDiff { .. }
-            | AgentAction::GitStatus
-    )
-}
-
 /// Build feedback prompt for action results based on action type
 fn build_feedback_prompt(action: &AgentAction, output: &str) -> String {
     match action {

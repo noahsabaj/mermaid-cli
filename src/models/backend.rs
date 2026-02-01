@@ -1,7 +1,7 @@
 /// Model factory - creates model instances from identifiers
 ///
-/// Parses model identifiers like "ollama/llama3" or "openrouter/gpt-4"
-/// and creates the appropriate adapter implementing the Model trait.
+/// Parses model identifiers like "ollama/llama3" and creates
+/// the appropriate adapter implementing the Model trait.
 
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ impl ModelFactory {
         }
     }
 
-    /// Create a model from a full identifier (e.g., "ollama/llama3", "openrouter/gpt-4")
+    /// Create a model from a full identifier (e.g., "ollama/llama3")
     pub async fn create_model(&self, model_id: &str) -> Result<Box<dyn Model>> {
         // Parse model identifier: "provider/model_name" or just "model_name" (defaults to ollama)
         let (provider, model_name) = parse_model_id(model_id);
@@ -58,7 +58,6 @@ impl ModelFactory {
 ///
 /// Formats:
 /// - "ollama/llama3" -> ("ollama", "llama3")
-/// - "openrouter/gpt-4" -> ("openrouter", "gpt-4")
 /// - "llama3" -> ("ollama", "llama3")  // defaults to ollama
 /// - "llama3:latest" -> ("ollama", "llama3:latest")  // ollama tag format
 fn parse_model_id(model_id: &str) -> (&str, &str) {

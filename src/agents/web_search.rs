@@ -20,9 +20,6 @@ pub struct SearchResult {
 #[derive(Debug, Deserialize)]
 struct SearxngResponse {
     results: Vec<SearxngResult>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    answer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

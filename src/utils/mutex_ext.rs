@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::warn;
 
 /// Extension trait for Mutex to provide safe lock operations
@@ -60,50 +59,3 @@ macro_rules! lock_or_panic {
     };
 }
 
-/// Extension trait for RwLock to provide convenient async lock operations
-/// Unlike Mutex, RwLock doesn't poison, so no recovery logic needed
-#[allow(dead_code)]
-pub trait RwLockExt<T> {
-    /// Acquire a read lock (shared access, multiple readers allowed)
-    async fn read_safe<'a>(&'a self) -> RwLockReadGuard<'a, T>
-    where
-        T: 'a;
-
-    /// Acquire a write lock (exclusive access, blocks all readers and writers)
-    async fn write_safe<'a>(&'a self) -> RwLockWriteGuard<'a, T>
-    where
-        T: 'a;
-}
-
-impl<T> RwLockExt<T> for RwLock<T> {
-    async fn read_safe<'a>(&'a self) -> RwLockReadGuard<'a, T>
-    where
-        T: 'a,
-    {
-        self.read().await
-    }
-
-    async fn write_safe<'a>(&'a self) -> RwLockWriteGuard<'a, T>
-    where
-        T: 'a,
-    {
-        self.write().await
-    }
-}
-
-/// Helper for Arc<RwLock<T>> - common pattern in concurrent code
-impl<T> RwLockExt<T> for Arc<RwLock<T>> {
-    async fn read_safe<'a>(&'a self) -> RwLockReadGuard<'a, T>
-    where
-        T: 'a,
-    {
-        self.read().await
-    }
-
-    async fn write_safe<'a>(&'a self) -> RwLockWriteGuard<'a, T>
-    where
-        T: 'a,
-    {
-        self.write().await
-    }
-}

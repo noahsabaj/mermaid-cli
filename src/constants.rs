@@ -14,24 +14,9 @@ pub const UI_DEFAULT_VIEWPORT_HEIGHT: u16 = 20;
 pub const UI_STATUS_MESSAGE_THRESHOLD: u16 = 3; // For auto-scroll detection
 pub const UI_ERROR_LOG_MAX_SIZE: usize = 50; // Maximum number of errors to keep in log
 
-// Model Token Limits
-pub const GPT4_32K_CONTEXT: usize = 32768;
-pub const GPT4_TURBO_CONTEXT: usize = 128000;
-pub const GPT35_CONTEXT: usize = 16384;
-pub const CLAUDE_3_OPUS_CONTEXT: usize = 200000;
-pub const CLAUDE_3_SONNET_CONTEXT: usize = 200000;
-pub const CLAUDE_3_HAIKU_CONTEXT: usize = 200000;
-pub const CLAUDE_25_CONTEXT: usize = 100000;
-pub const OLLAMA_DEFAULT_CONTEXT: usize = 32768;
-pub const GROQ_LLAMA_CONTEXT: usize = 32768;
-pub const GROQ_MIXTRAL_CONTEXT: usize = 32768;
-pub const GROQ_DEFAULT_CONTEXT: usize = 8192;
-pub const GEMINI_15_PRO_CONTEXT: usize = 1048576; // 1M tokens
-
 // Default Model Configuration
 pub const DEFAULT_TEMPERATURE: f32 = 0.7;
 pub const DEFAULT_MAX_TOKENS: usize = 4096;
-pub const DEFAULT_TOP_P: f32 = 1.0;
 
 // File Patterns
 pub const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[

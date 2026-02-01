@@ -97,12 +97,10 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
     });
     let chat_widget = ChatWidget {
         messages: &app.session_state.messages,
-        current_response: &app.current_response,
         is_generating: app.app_state.is_generating(),
         confirmation_state: app.operation_state.confirmation_state.as_ref(),
         pending_file_read: app.operation_state.pending_file_read,
         reading_file_status: app.operation_state.reading_file_status.as_deref(),
-        operation_mode: app.operation_state.operation_mode,
         theme: &app.ui_state.theme,
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut app.ui_state.chat_state);

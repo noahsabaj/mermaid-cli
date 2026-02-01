@@ -12,7 +12,6 @@ use crate::agents::{
 use crate::models::{ChatMessage, MessageRole};
 use super::super::state::ConfirmationState;
 use crate::tui::markdown::parse_markdown;
-use crate::tui::mode::OperationMode;
 use crate::tui::theme::Theme;
 use crate::utils::format_relative_timestamp;
 
@@ -80,14 +79,10 @@ impl Default for ChatState {
 /// Props for ChatWidget
 pub struct ChatWidget<'a> {
     pub messages: &'a [ChatMessage],
-    #[allow(dead_code)]
-    pub current_response: &'a str,
     pub is_generating: bool,
     pub confirmation_state: Option<&'a ConfirmationState>,
     pub pending_file_read: bool,
     pub reading_file_status: Option<&'a str>,
-    #[allow(dead_code)]
-    pub operation_mode: OperationMode,
     pub theme: &'a Theme,
 }
 
