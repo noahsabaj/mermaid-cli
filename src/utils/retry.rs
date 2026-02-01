@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::time::Duration;
+use tracing::debug;
 
 /// Retry configuration
 pub struct RetryConfig {
@@ -42,9 +43,12 @@ where
                 ));
             },
             Err(e) => {
-                eprintln!(
-                    "[RETRY] Attempt {}/{} failed: {}. Retrying in {}ms...",
-                    attempt, config.max_attempts, e, delay_ms
+                debug!(
+                    attempt = attempt,
+                    max_attempts = config.max_attempts,
+                    delay_ms = delay_ms,
+                    "Retry attempt failed: {}",
+                    e
                 );
 
                 // Sleep with exponential backoff
@@ -79,9 +83,12 @@ where
                 ));
             },
             Err(e) => {
-                eprintln!(
-                    "[RETRY] Attempt {}/{} failed: {}. Retrying in {}ms...",
-                    attempt, config.max_attempts, e, delay_ms
+                debug!(
+                    attempt = attempt,
+                    max_attempts = config.max_attempts,
+                    delay_ms = delay_ms,
+                    "Retry attempt failed: {}",
+                    e
                 );
 
                 // Sleep with exponential backoff

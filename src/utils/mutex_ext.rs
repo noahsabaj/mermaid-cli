@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tracing::warn;
 
 /// Extension trait for Mutex to provide safe lock operations
 pub trait MutexExt<T> {
@@ -20,7 +21,7 @@ impl<T: Clone> MutexExt<T> for Mutex<T> {
             Err(poisoned) => {
                 // Mutex was poisoned due to a panic in another thread
                 // We can still access the data, but we log the issue
-                eprintln!("[WARNING] Mutex was poisoned, recovering data");
+                warn!("Mutex was poisoned, recovering data");
                 poisoned.into_inner().clone()
             },
         }
@@ -31,7 +32,7 @@ impl<T: Clone> MutexExt<T> for Mutex<T> {
             Ok(guard) => guard,
             Err(poisoned) => {
                 // Mutex was poisoned, but we can still get the guard
-                eprintln!("[WARNING] Mutex was poisoned, recovering guard");
+                warn!("Mutex was poisoned, recovering guard");
                 poisoned.into_inner()
             },
         }
@@ -43,7 +44,7 @@ pub fn lock_arc_mutex_safe<T>(mutex: &Arc<Mutex<T>>) -> std::sync::MutexGuard<'_
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            eprintln!("[WARNING] Arc<Mutex> was poisoned, recovering guard");
+            warn!("Arc<Mutex> was poisoned, recovering guard");
             poisoned.into_inner()
         },
     }
