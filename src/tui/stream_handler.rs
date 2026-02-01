@@ -49,35 +49,7 @@ pub async fn process_stream_chunks(
     // (tool call chunks and [DONE] may arrive in separate calls)
 
     // Process all available messages from the channel
-    while let Ok(mut chunk) = rx.try_recv() {
-        // Check for custom status marker (appears at start of response)
-        if chunk.starts_with("[STATUS:") {
-            // Extract status between [STATUS: and ]
-            if let Some(end_idx) = chunk.find(']') {
-                let status_text = chunk[8..end_idx].to_string(); // Skip "[STATUS:"
-                app.status_state.custom_status = Some(status_text);
-                // Remove the status marker from the chunk
-                chunk = chunk[end_idx + 1..].to_string();
-                if chunk.is_empty() {
-                    continue; // Skip if nothing left after status marker
-                }
-                // Fall through to process remaining content
-            } else {
-                continue; // Incomplete status marker, skip for now
-            }
-        }
-
-        // Strip any [STATUS:...] markers from middle of content too
-        while let Some(start) = chunk.find("[STATUS:") {
-            if let Some(end) = chunk[start..].find(']') {
-                let status_text = chunk[start + 8..start + end].to_string();
-                app.status_state.custom_status = Some(status_text);
-                chunk = format!("{}{}", &chunk[..start], &chunk[start + end + 1..]);
-            } else {
-                break;
-            }
-        }
-
+    while let Ok(chunk) = rx.try_recv() {
         // Check for tool calls marker from Ollama adapter
         // Format: [TOOL_CALLS:[{...},{...}]]  (marker wraps JSON array)
         if chunk.starts_with("[TOOL_CALLS:") {
