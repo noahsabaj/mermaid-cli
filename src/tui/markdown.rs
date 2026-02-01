@@ -1,7 +1,7 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui_macros::{line, span};
+use ratatui::macros::{line, span};
 
 /// Parse markdown and convert to styled ratatui Lines
 pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {

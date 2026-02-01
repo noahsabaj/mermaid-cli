@@ -23,8 +23,7 @@ tokio-stream = "0.1"
 futures = "0.3"
 
 # TUI
-ratatui = { version = "0.29", features = ["scrolling-regions", "palette"] }
-ratatui-macros = "0.4"
+ratatui = { version = "0.30", features = ["scrolling-regions", "palette", "macros"] }
 crossterm = "0.28"
 tui-textarea = "0.7"
 
