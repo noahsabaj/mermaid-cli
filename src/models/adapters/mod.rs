@@ -1,6 +1,5 @@
 /// Provider adapters module
 ///
-/// Contains implementations of the Backend trait for different providers.
+/// Contains implementations of the Model trait for Ollama.
 
 pub mod ollama;
-pub mod vllm;
