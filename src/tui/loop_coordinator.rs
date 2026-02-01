@@ -7,10 +7,10 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::context::ContextLoader;
+use crate::context::Context;
 use crate::models::{MessageRole, ModelConfig, StreamCallback};
 use crate::searxng::ensure_searxng_running;
-use crate::tui::app::GenerationStatus;
+use super::state::GenerationStatus;
 use crate::tui::render::render_ui;
 use crate::tui::App;
 use crate::utils::FileSystemWatcher;
@@ -115,12 +115,16 @@ pub async fn run_app_loop(
                 // During streaming: content is buffered and NOT rendered (block streaming mode)
                 // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
             },
-            StreamStatus::Complete { actions } => {
+            StreamStatus::Complete { actions, tool_calls } => {
                 // Stream complete: response is now rendered
                 // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
 
-                // Execute any parsed actions
-                if !actions.is_empty() {
+                // AGENT LOOP: Execute tool calls and continue until no more tool_calls
+                if !tool_calls.is_empty() {
+                    // Execute the agent loop
+                    run_agent_loop(app, tool_calls, &tx, rx).await?;
+                } else if !actions.is_empty() {
+                    // Legacy path: actions without tool_calls (backwards compatibility)
                     action_handler::execute_actions(app, actions, &tx).await?;
                 }
 
@@ -152,13 +156,11 @@ pub async fn run_app_loop(
             let events = watcher.check_events();
             if !events.is_empty() {
                 // Reload the context to pick up external changes
-                if let Ok(loader) = ContextLoader::new() {
-                    if let Ok(new_context) = loader.load(Path::new(".")).await {
-                        // Update the context while preserving conversation history
-                        app.context.files = new_context.files;
-                        app.context.token_count = new_context.token_count;
-                        app.set_status("[OK] Files refreshed from disk");
-                    }
+                if let Ok(new_context) = Context::load(Path::new(".")).await {
+                    // Update the context while preserving conversation history
+                    app.context.files = new_context.files;
+                    app.context.token_count = new_context.token_count;
+                    app.set_status("[OK] Files refreshed from disk");
                 }
                 last_refresh = std::time::Instant::now();
             }
@@ -240,27 +242,164 @@ async fn handle_message_submit(
             ModelConfig::default()
         };
 
-        config.model = model_id;
+        config.model = model_id.clone();
 
         let callback: StreamCallback = Arc::new(move |chunk| {
             let _ = tx_clone.try_send(chunk.to_string());
         });
 
-        let mut model = model.write().await;
+        let model = model.write().await;
         match model
             .chat(&messages, &context, &config, Some(callback))
             .await
         {
-            Ok(_) => {
-                // Response is complete - content already streamed via callback
+            Ok(_response) => {
                 let _ = tx_done.send("[DONE]:".to_string()).await;
             },
             Err(e) => {
-                let _ = tx_done.send(format!("[ERROR]:{}", e)).await;
+                // Send structured error for rich UX display
+                let error_json = e.to_channel_message();
+                let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
             },
         }
     });
 
     // Start generation state with abort handle
     app.start_generation(handle.abort_handle());
+}
+
+/// Run the agent loop for tool calling
+///
+/// This implements the proper agent loop pattern:
+/// 1. Execute tool calls
+/// 2. Add Tool messages for each result
+/// 3. Call the model again
+/// 4. Loop until no more tool_calls
+///
+/// This follows the Ollama API pattern documented at:
+/// https://ollama.com/blog/tool-support
+async fn run_agent_loop(
+    app: &mut App,
+    initial_tool_calls: Vec<crate::models::ToolCall>,
+    tx: &mpsc::Sender<String>,
+    rx: &mut mpsc::Receiver<String>,
+) -> Result<()> {
+    let mut current_tool_calls = initial_tool_calls;
+    let mut iteration = 0;
+
+    while !current_tool_calls.is_empty() {
+        iteration += 1;
+        app.set_status(format!("Agent loop iteration {}", iteration));
+
+        // Execute tool calls and get results
+        let results = action_handler::execute_tool_calls_for_agent_loop(app, &current_tool_calls).await;
+
+        // Update the last assistant message to include tool_calls
+        // (This is needed for the API to understand the conversation flow)
+        if let Some(last_assistant) = app
+            .session_state
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m.role, MessageRole::Assistant))
+        {
+            last_assistant.tool_calls = Some(current_tool_calls.clone());
+        }
+
+        // Add Tool messages for each result
+        for result in &results {
+            app.add_tool_result(
+                result.tool_call_id.clone(),
+                result.tool_name.clone(),
+                result.content.clone(),
+            );
+        }
+
+        // Check if any results failed in a way that should stop the loop
+        let all_failed = results.iter().all(|r| !r.success);
+        if all_failed && !results.is_empty() {
+            app.set_status("Agent loop stopped: all tool calls failed");
+            break;
+        }
+
+        // Call the model again with the updated message history
+        let messages = app.build_message_history();
+        app.current_response.clear();
+
+        let model = app.model_state.model.clone();
+        let context = app.context.clone();
+        let tx_clone = tx.clone();
+        let tx_done = tx.clone();
+        let model_id = app.model_state.model_id.clone();
+        let operation_mode = app.operation_state.operation_mode.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut config = if operation_mode.is_planning_only() {
+                ModelConfig::with_plan_mode()
+            } else {
+                ModelConfig::default()
+            };
+            config.model = model_id;
+
+            let callback: StreamCallback = Arc::new(move |chunk| {
+                let _ = tx_clone.try_send(chunk.to_string());
+            });
+
+            let model = model.write().await;
+            match model
+                .chat(&messages, &context, &config, Some(callback))
+                .await
+            {
+                Ok(_response) => {
+                    let _ = tx_done.send("[DONE]:".to_string()).await;
+                },
+                Err(e) => {
+                    let error_json = e.to_channel_message();
+                    let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
+                },
+            }
+        });
+
+        app.start_generation(handle.abort_handle());
+
+        // Wait for the model response by processing stream chunks until Complete
+        loop {
+            match process_stream_chunks(app, rx).await? {
+                StreamStatus::Streaming => {
+                    // Continue processing
+                },
+                StreamStatus::Complete { actions: _, tool_calls: new_tool_calls } => {
+                    // Got a new response - check if there are more tool calls
+                    if new_tool_calls.is_empty() {
+                        // No more tool calls - agent loop complete
+                        app.set_status(format!("Agent loop complete after {} iterations", iteration));
+                        return Ok(());
+                    } else {
+                        // More tool calls - continue the loop
+                        current_tool_calls = new_tool_calls;
+                        break; // Break inner loop to continue outer agent loop
+                    }
+                },
+                StreamStatus::PlanReady { plan } => {
+                    // Plan mode response - store and exit
+                    app.set_plan(plan);
+                    return Ok(());
+                },
+                StreamStatus::FeedbackComplete => {
+                    // Feedback complete - exit loop
+                    return Ok(());
+                },
+                StreamStatus::Error(error) => {
+                    // Error occurred - display and exit
+                    app.display_error(&error.summary, &error.message);
+                    return Ok(());
+                },
+            }
+
+            // Yield to allow UI updates
+            tokio::task::yield_now().await;
+        }
+    }
+
+    Ok(())
 }

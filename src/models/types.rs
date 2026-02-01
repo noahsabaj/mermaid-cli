@@ -21,6 +21,14 @@ pub struct ChatMessage {
     /// Tool calls from the model (Ollama native function calling)
     #[serde(default)]
     pub tool_calls: Option<Vec<crate::models::tool_call::ToolCall>>,
+    /// Tool call ID for tool result messages (OpenAI-compatible format)
+    /// This links the tool result back to the original tool_call from the assistant
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    /// Tool name for tool result messages (required by Ollama API)
+    /// This tells the model which function's result is being returned
+    #[serde(default)]
+    pub tool_name: Option<String>,
 }
 
 impl ChatMessage {
@@ -63,6 +71,8 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    /// Tool result message (OpenAI-compatible format for function calling)
+    Tool,
 }
 
 /// Represents the context of the current project
@@ -72,8 +82,6 @@ pub struct ProjectContext {
     pub root_path: String,
     /// Map of file paths to their contents (using FxHashMap for performance)
     pub files: FxHashMap<String, String>,
-    /// Project type (e.g., "rust", "python", "javascript")
-    pub project_type: Option<String>,
     /// Total token count of the context
     pub token_count: usize,
     /// Files to explicitly include in context
@@ -85,7 +93,6 @@ impl ProjectContext {
         Self {
             root_path,
             files: FxHashMap::default(),
-            project_type: None,
             token_count: 0,
             included_files: Vec::new(),
         }
@@ -108,12 +115,6 @@ impl ProjectContext {
 
         let capacity = header_size + file_list_size + content_size;
         let mut context = String::with_capacity(capacity);
-
-        if let Some(project_type) = &self.project_type {
-            context.push_str("Project type: ");
-            context.push_str(project_type);
-            context.push('\n');
-        }
 
         context.push_str("Project root: ");
         context.push_str(&self.root_path);
@@ -200,6 +201,8 @@ mod tests {
             thinking: None,
             images: None,
             tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
         };
 
         assert_eq!(message.role, MessageRole::User);
@@ -208,6 +211,8 @@ mod tests {
         assert!(message.thinking.is_none());
         assert!(message.images.is_none());
         assert!(message.tool_calls.is_none());
+        assert!(message.tool_call_id.is_none());
+        assert!(message.tool_name.is_none());
     }
 
     #[test]
@@ -218,7 +223,6 @@ mod tests {
         assert!(context.files.is_empty());
         assert_eq!(context.token_count, 0);
         assert!(context.included_files.is_empty());
-        assert_eq!(context.project_type, None);
     }
 
     #[test]
@@ -242,17 +246,12 @@ mod tests {
     #[test]
     fn test_project_context_prompt_formatting() {
         let mut context = ProjectContext::new("/project".to_string());
-        context.project_type = Some("rust".to_string());
         context.add_file("src/main.rs".to_string(), "fn main() {}".to_string());
         context.add_file("Cargo.toml".to_string(), "[package]".to_string());
         context.included_files = vec!["src/main.rs".to_string()];
 
         let prompt = context.to_prompt_context();
 
-        assert!(
-            prompt.contains("Project type: rust"),
-            "Should include project type"
-        );
         assert!(
             prompt.contains("Project root: /project"),
             "Should include project root"
@@ -306,11 +305,13 @@ mod tests {
             usage: Some(usage),
             model_name: "ollama/tinyllama".to_string(),
             thinking: None,
+            tool_calls: None,
         };
 
         assert_eq!(response.content, "Hello, world!");
         assert!(response.usage.is_some());
         assert_eq!(response.model_name, "ollama/tinyllama");
         assert_eq!(response.usage.unwrap().total_tokens, 150);
+        assert!(response.tool_calls.is_none());
     }
 }

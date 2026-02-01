@@ -5,6 +5,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::agents::AgentAction;
 
@@ -31,7 +32,7 @@ impl ToolCall {
         let action = match self.function.name.as_str() {
             "read_file" => {
                 let path = Self::get_string_arg(args, "path")?;
-                AgentAction::ReadFile { path }
+                AgentAction::ReadFile { paths: vec![path] }
             }
 
             "write_file" => {
@@ -61,7 +62,7 @@ impl ToolCall {
 
             "git_diff" => {
                 let path = Self::get_optional_string_arg(args, "path");
-                AgentAction::GitDiff { path }
+                AgentAction::GitDiff { paths: vec![path] }
             }
 
             "git_status" => AgentAction::GitStatus,
@@ -78,8 +79,7 @@ impl ToolCall {
                     .unwrap_or(5)
                     .clamp(1, 10);
                 AgentAction::WebSearch {
-                    query,
-                    result_count,
+                    queries: vec![(query, result_count)],
                 }
             }
 
@@ -133,14 +133,15 @@ pub fn parse_tool_calls(tool_calls: &[ToolCall]) -> Vec<AgentAction> {
         .filter_map(|tc| match tc.to_agent_action() {
             Ok(action) => Some(action),
             Err(e) => {
-                eprintln!("Failed to parse tool call '{}': {}", tc.function.name, e);
+                warn!(tool = %tc.function.name, "Failed to parse tool call: {}", e);
                 None
             }
         })
         .collect()
 }
 
-/// Group consecutive same-type read operations into parallel reads
+/// Group consecutive same-type read operations into a single ReadFile action
+/// The executor will decide whether to parallelize based on the number of paths
 pub fn group_parallel_reads(actions: Vec<AgentAction>) -> Vec<AgentAction> {
     if actions.is_empty() {
         return actions;
@@ -151,35 +152,25 @@ pub fn group_parallel_reads(actions: Vec<AgentAction>) -> Vec<AgentAction> {
 
     for action in actions {
         match action {
-            AgentAction::ReadFile { path } => {
-                current_group.push(path);
+            AgentAction::ReadFile { paths } => {
+                current_group.extend(paths);
             }
             other => {
-                // Flush current read group if it has multiple items
-                if current_group.len() > 1 {
-                    result.push(AgentAction::ParallelRead {
-                        paths: current_group.clone(),
-                    });
-                } else if current_group.len() == 1 {
+                // Flush current read group
+                if !current_group.is_empty() {
                     result.push(AgentAction::ReadFile {
-                        path: current_group[0].clone(),
+                        paths: std::mem::take(&mut current_group),
                     });
                 }
-                current_group.clear();
-
                 result.push(other);
             }
         }
     }
 
     // Flush remaining read group
-    if current_group.len() > 1 {
-        result.push(AgentAction::ParallelRead {
-            paths: current_group,
-        });
-    } else if current_group.len() == 1 {
+    if !current_group.is_empty() {
         result.push(AgentAction::ReadFile {
-            path: current_group[0].clone(),
+            paths: current_group,
         });
     }
 
@@ -205,7 +196,10 @@ mod tests {
 
         let action = tool_call.to_agent_action().unwrap();
         match action {
-            AgentAction::ReadFile { path } => assert_eq!(path, "src/main.rs"),
+            AgentAction::ReadFile { paths } => {
+                assert_eq!(paths.len(), 1);
+                assert_eq!(paths[0], "src/main.rs");
+            }
             _ => panic!("Expected ReadFile action"),
         }
     }
@@ -274,12 +268,10 @@ mod tests {
 
         let action = tool_call.to_agent_action().unwrap();
         match action {
-            AgentAction::WebSearch {
-                query,
-                result_count,
-            } => {
-                assert_eq!(query, "Rust async features");
-                assert_eq!(result_count, 5);
+            AgentAction::WebSearch { queries } => {
+                assert_eq!(queries.len(), 1);
+                assert_eq!(queries[0].0, "Rust async features");
+                assert_eq!(queries[0].1, 5);
             }
             _ => panic!("Expected WebSearch action"),
         }
@@ -302,13 +294,13 @@ mod tests {
     fn test_group_parallel_reads() {
         let actions = vec![
             AgentAction::ReadFile {
-                path: "file1.rs".to_string(),
+                paths: vec!["file1.rs".to_string()],
             },
             AgentAction::ReadFile {
-                path: "file2.rs".to_string(),
+                paths: vec!["file2.rs".to_string()],
             },
             AgentAction::ReadFile {
-                path: "file3.rs".to_string(),
+                paths: vec!["file3.rs".to_string()],
             },
         ];
 
@@ -316,25 +308,29 @@ mod tests {
         assert_eq!(grouped.len(), 1);
 
         match &grouped[0] {
-            AgentAction::ParallelRead { paths } => {
+            AgentAction::ReadFile { paths } => {
                 assert_eq!(paths.len(), 3);
+                assert_eq!(paths[0], "file1.rs");
+                assert_eq!(paths[1], "file2.rs");
+                assert_eq!(paths[2], "file3.rs");
             }
-            _ => panic!("Expected ParallelRead action"),
+            _ => panic!("Expected ReadFile action"),
         }
     }
 
     #[test]
     fn test_group_parallel_reads_single_read() {
         let actions = vec![AgentAction::ReadFile {
-            path: "file1.rs".to_string(),
+            paths: vec!["file1.rs".to_string()],
         }];
 
         let grouped = group_parallel_reads(actions);
         assert_eq!(grouped.len(), 1);
 
         match &grouped[0] {
-            AgentAction::ReadFile { path } => {
-                assert_eq!(path, "file1.rs");
+            AgentAction::ReadFile { paths } => {
+                assert_eq!(paths.len(), 1);
+                assert_eq!(paths[0], "file1.rs");
             }
             _ => panic!("Expected ReadFile action"),
         }

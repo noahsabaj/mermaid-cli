@@ -6,9 +6,23 @@ use tokio::sync::mpsc;
 use crate::agents::{
     self, ActionDisplay, ActionResult as AgentActionResult, AgentAction, ModeAwareExecutor,
 };
-use crate::models::{ChatMessage, MessageRole, ModelConfig, StreamCallback};
+use crate::models::{ChatMessage, MessageRole, ModelConfig, StreamCallback, ToolCall};
 use crate::tui::{App, ConfirmationState, FileInfo};
 use crate::utils::count_file_tokens;
+
+/// Result of executing a tool call
+/// Used for building proper Tool messages in the agent loop
+#[derive(Debug, Clone)]
+pub struct ToolExecutionResult {
+    /// The original tool call ID (for linking result back to call)
+    pub tool_call_id: String,
+    /// The function name that was called
+    pub tool_name: String,
+    /// The result content (success output or error message)
+    pub content: String,
+    /// Whether the execution succeeded
+    pub success: bool,
+}
 
 /// Execute a list of agent actions
 ///
@@ -79,12 +93,12 @@ pub async fn execute_actions(
                         last_msg.actions.push(action_display);
                     }
 
-                    // Add error message as Assistant message for user visibility
-                    app.add_message(MessageRole::Assistant, error);
+                    // Use unified error display (status bar + chat)
+                    app.display_error_simple(&error);
                 },
                 Err(e) => {
-                    // System error - add to chat as well
-                    app.add_message(MessageRole::Assistant, format!("Error: {}", e));
+                    // System error - use unified error display
+                    app.display_error_simple(e.to_string());
                 },
             }
         }
@@ -131,12 +145,12 @@ pub async fn confirm_action(
                             last_msg.actions.push(action_display);
                         }
 
-                        // Add error message as Assistant message for user visibility
-                        app.add_message(MessageRole::Assistant, error);
+                        // Use unified error display (status bar + chat)
+                        app.display_error_simple(&error);
                     },
                     Err(e) => {
-                        // System error - add to chat as well
-                        app.add_message(MessageRole::Assistant, format!("Error: {}", e));
+                        // System error - use unified error display
+                        app.display_error_simple(e.to_string());
                     },
                 }
             }
@@ -184,16 +198,14 @@ async fn handle_action_success(
     // Perform action-specific post-processing
     match action {
         // Actions that need multi-step follow-through: Trigger unified feedback loop
-        AgentAction::ReadFile { path } => {
-            // Check if this is a binary file (PDF, image, etc.)
-            if crate::agents::is_binary_file(path) {
-                // For binary files, read as base64 and trigger multimodal feedback
-                match crate::agents::read_binary_file(path) {
+        AgentAction::ReadFile { paths } => {
+            // For single file reads, check if binary
+            if paths.len() == 1 && crate::agents::is_binary_file(&paths[0]) {
+                match crate::agents::read_binary_file(&paths[0]) {
                     Ok(base64_data) => {
                         trigger_multimodal_feedback_loop(app, action, base64_data, tx).await;
                     }
                     Err(e) => {
-                        // Fall back to error message
                         app.add_message(
                             MessageRole::Assistant,
                             format!("Failed to read binary file: {}", e),
@@ -201,14 +213,13 @@ async fn handle_action_success(
                     }
                 }
             } else {
-                // Text files use normal feedback loop
                 trigger_feedback_loop(app, action, output, tx).await;
             }
         },
-        AgentAction::WebSearch {  .. } => {
+        AgentAction::WebSearch { .. } => {
             trigger_feedback_loop(app, action, output, tx).await;
         },
-        AgentAction::ExecuteCommand {  .. } => {
+        AgentAction::ExecuteCommand { .. } => {
             trigger_feedback_loop(app, action, output, tx).await;
         },
         AgentAction::GitDiff { .. } => {
@@ -221,32 +232,17 @@ async fn handle_action_success(
         // Actions that just update context, no follow-through needed
         AgentAction::WriteFile { path, content } => {
             app.context.add_file(path.clone(), content.clone());
-            // Use proper tokenizer for accurate count
             let tokens = count_file_tokens(content, &app.model_state.model_name);
             app.context.token_count += tokens;
         },
         AgentAction::DeleteFile { path } => {
             if let Some(content) = app.context.files.remove(path) {
-                // Use proper tokenizer for accurate count
                 let tokens = count_file_tokens(&content, &app.model_state.model_name);
                 app.context.token_count = app.context.token_count.saturating_sub(tokens);
             }
         },
-        AgentAction::CreateDirectory { .. } => {
-            // Directory created, no additional action needed
-        },
-        AgentAction::GitCommit {  .. } => {
-            // Changes committed, no additional action needed
-        },
-        AgentAction::ParallelRead { .. } => {
-            trigger_feedback_loop(app, action, output, tx).await;
-        },
-        AgentAction::ParallelWebSearch { .. } => {
-            trigger_feedback_loop(app, action, output, tx).await;
-        },
-        AgentAction::ParallelGitDiff { .. } => {
-            trigger_feedback_loop(app, action, output, tx).await;
-        },
+        AgentAction::CreateDirectory { .. } => {},
+        AgentAction::GitCommit { .. } => {},
     }
 
     Ok(())
@@ -280,21 +276,38 @@ fn build_action_display_with_timing(
                 failed_items: None,
             }
         },
-        AgentAction::ReadFile { path } => {
+        AgentAction::ReadFile { paths } => {
             let line_count = output.lines().count();
-            ActionDisplay {
-                action_type: "Read".to_string(),
-                target: path.clone(),
-                result: AgentActionResult::Success {
-                    output: output.to_string(),
-                },
-                preview: Some(truncate_output(output, 3)),
-                line_count: Some(line_count),
-                file_content: None,
-                duration_seconds,
-                targets: None,
-                item_count: None,
-                failed_items: None,
+            if paths.len() == 1 {
+                ActionDisplay {
+                    action_type: "Read".to_string(),
+                    target: paths[0].clone(),
+                    result: AgentActionResult::Success {
+                        output: output.to_string(),
+                    },
+                    preview: Some(truncate_output(output, 3)),
+                    line_count: Some(line_count),
+                    file_content: None,
+                    duration_seconds,
+                    targets: None,
+                    item_count: None,
+                    failed_items: None,
+                }
+            } else {
+                ActionDisplay {
+                    action_type: "ReadFiles".to_string(),
+                    target: format!("{} files", paths.len()),
+                    result: AgentActionResult::Success {
+                        output: output.to_string(),
+                    },
+                    preview: Some(truncate_output(output, 5)),
+                    line_count: Some(line_count),
+                    file_content: None,
+                    duration_seconds,
+                    targets: Some(paths.clone()),
+                    item_count: Some(paths.len()),
+                    failed_items: None,
+                }
             }
         },
         AgentAction::ExecuteCommand { command, .. } => ActionDisplay {
@@ -339,19 +352,38 @@ fn build_action_display_with_timing(
             item_count: None,
             failed_items: None,
         },
-        AgentAction::GitDiff { path } => ActionDisplay {
-            action_type: "GitDiff".to_string(),
-            target: path.clone().unwrap_or_else(|| ".".to_string()),
-            result: AgentActionResult::Success {
-                output: output.to_string(),
-            },
-            preview: Some(truncate_output(output, 10)),
-            line_count: Some(output.lines().count()),
-            file_content: None,
-            duration_seconds,
-            targets: None,
-            item_count: None,
-            failed_items: None,
+        AgentAction::GitDiff { paths } => {
+            if paths.len() == 1 {
+                ActionDisplay {
+                    action_type: "GitDiff".to_string(),
+                    target: paths[0].clone().unwrap_or_else(|| ".".to_string()),
+                    result: AgentActionResult::Success {
+                        output: output.to_string(),
+                    },
+                    preview: Some(truncate_output(output, 10)),
+                    line_count: Some(output.lines().count()),
+                    file_content: None,
+                    duration_seconds,
+                    targets: None,
+                    item_count: None,
+                    failed_items: None,
+                }
+            } else {
+                ActionDisplay {
+                    action_type: "GitDiffs".to_string(),
+                    target: format!("{} paths", paths.len()),
+                    result: AgentActionResult::Success {
+                        output: output.to_string(),
+                    },
+                    preview: Some(truncate_output(output, 10)),
+                    line_count: Some(output.lines().count()),
+                    file_content: None,
+                    duration_seconds,
+                    targets: Some(paths.iter().map(|p| p.clone().unwrap_or_else(|| "*".to_string())).collect()),
+                    item_count: Some(paths.len()),
+                    failed_items: None,
+                }
+            }
         },
         AgentAction::GitStatus => ActionDisplay {
             action_type: "GitStatus".to_string(),
@@ -381,72 +413,38 @@ fn build_action_display_with_timing(
             item_count: None,
             failed_items: None,
         },
-        AgentAction::WebSearch { query, .. } => {
+        AgentAction::WebSearch { queries } => {
             let result_count = output.matches("Title:").count();
-            ActionDisplay {
-                action_type: "WebSearch".to_string(),
-                target: query.clone(),
-                result: AgentActionResult::Success {
-                    output: output.to_string(),
-                },
-                preview: Some(format!("Fetched {} search results", result_count)),
-                line_count: Some(result_count),
-                file_content: None,
-                duration_seconds,
-                targets: None,
-                item_count: None,
-                failed_items: None,
-            }
-        },
-        AgentAction::ParallelRead { .. } => {
-            // Parallel reads should be handled separately
-            ActionDisplay {
-                action_type: "ReadFiles".to_string(),
-                target: "[parallel operation]".to_string(),
-                result: AgentActionResult::Success {
-                    output: output.to_string(),
-                },
-                preview: None,
-                line_count: None,
-                file_content: None,
-                duration_seconds,
-                targets: None,
-                item_count: None,
-                failed_items: None,
-            }
-        },
-        AgentAction::ParallelWebSearch { .. } => {
-            // Parallel searches should be handled separately
-            ActionDisplay {
-                action_type: "WebSearches".to_string(),
-                target: "[parallel operation]".to_string(),
-                result: AgentActionResult::Success {
-                    output: output.to_string(),
-                },
-                preview: None,
-                line_count: None,
-                file_content: None,
-                duration_seconds,
-                targets: None,
-                item_count: None,
-                failed_items: None,
-            }
-        },
-        AgentAction::ParallelGitDiff { .. } => {
-            // Parallel diffs should be handled separately
-            ActionDisplay {
-                action_type: "GitDiffs".to_string(),
-                target: "[parallel operation]".to_string(),
-                result: AgentActionResult::Success {
-                    output: output.to_string(),
-                },
-                preview: None,
-                line_count: None,
-                file_content: None,
-                duration_seconds,
-                targets: None,
-                item_count: None,
-                failed_items: None,
+            if queries.len() == 1 {
+                ActionDisplay {
+                    action_type: "WebSearch".to_string(),
+                    target: queries[0].0.clone(),
+                    result: AgentActionResult::Success {
+                        output: output.to_string(),
+                    },
+                    preview: Some(format!("Fetched {} search results", result_count)),
+                    line_count: Some(result_count),
+                    file_content: None,
+                    duration_seconds,
+                    targets: None,
+                    item_count: None,
+                    failed_items: None,
+                }
+            } else {
+                ActionDisplay {
+                    action_type: "WebSearches".to_string(),
+                    target: format!("{} queries", queries.len()),
+                    result: AgentActionResult::Success {
+                        output: output.to_string(),
+                    },
+                    preview: Some(format!("Fetched {} search results", result_count)),
+                    line_count: Some(result_count),
+                    file_content: None,
+                    duration_seconds,
+                    targets: Some(queries.iter().map(|(q, _)| q.clone()).collect()),
+                    item_count: Some(queries.len()),
+                    failed_items: None,
+                }
             }
         },
     }
@@ -561,15 +559,14 @@ pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Resu
             },
             Ok(agents::ActionResult::Error { error }) => {
                 app.mark_plan_action_failed(error.clone());
-                app.set_status(format!("Plan action failed: {}", error));
-                // For web search errors, also add to chat for user visibility
-                if error.contains("Web search") {
-                    app.add_message(MessageRole::Assistant, error);
-                }
+                // Use unified error display (status bar + chat)
+                app.display_error("Plan action failed", &error);
             },
             Err(e) => {
-                app.mark_plan_action_failed(e.to_string());
-                app.set_status(format!("Plan action error: {}", e));
+                let error_msg = e.to_string();
+                app.mark_plan_action_failed(error_msg.clone());
+                // Use unified error display (status bar + chat)
+                app.display_error("Plan action error", error_msg);
             },
         }
     } else {
@@ -604,26 +601,37 @@ fn needs_analysis(action: &AgentAction) -> bool {
             | AgentAction::ExecuteCommand { .. }
             | AgentAction::GitDiff { .. }
             | AgentAction::GitStatus
-            | AgentAction::ParallelRead { .. }
-            | AgentAction::ParallelWebSearch { .. }
-            | AgentAction::ParallelGitDiff { .. }
     )
 }
 
 /// Build feedback prompt for action results based on action type
 fn build_feedback_prompt(action: &AgentAction, output: &str) -> String {
     match action {
-        AgentAction::ReadFile { path } => {
-            format!(
-                "I've successfully read the file '{}'. Here are its contents:\n\n{}\n\nPlease explain what this file contains and how it's relevant to the user's request.",
-                path, output
-            )
+        AgentAction::ReadFile { paths } => {
+            if paths.len() == 1 {
+                format!(
+                    "I've successfully read the file '{}'. Here are its contents:\n\n{}\n\nPlease explain what this file contains and how it's relevant to the user's request.",
+                    paths[0], output
+                )
+            } else {
+                format!(
+                    "I've successfully read {} files:\n\n{}\n\nPlease analyze these files together as a cohesive system:\n1. What patterns do you see across files?\n2. What's the overall flow or architecture?\n3. Are there inconsistencies or improvements needed?\n4. What could be optimized?",
+                    paths.len(), output
+                )
+            }
         }
-        AgentAction::WebSearch { query, .. } => {
-            format!(
-                "Here are the web search results for '{}':\n\n{}\n\nPlease analyze these results and respond to the user's original question. Summarize the key findings with [source: URL] citations, dates, and author information where available.",
-                query, output
-            )
+        AgentAction::WebSearch { queries } => {
+            if queries.len() == 1 {
+                format!(
+                    "Here are the web search results for '{}':\n\n{}\n\nPlease analyze these results and respond to the user's original question. Summarize the key findings with [source: URL] citations, dates, and author information where available.",
+                    queries[0].0, output
+                )
+            } else {
+                format!(
+                    "I've completed {} web searches:\n\n{}\n\nPlease analyze these results together and respond to the user's original question. Synthesize the findings with [source: URL] citations, dates, and author information where available.",
+                    queries.len(), output
+                )
+            }
         }
         AgentAction::ExecuteCommand { command, .. } => {
             format!(
@@ -631,39 +639,28 @@ fn build_feedback_prompt(action: &AgentAction, output: &str) -> String {
                 command, output
             )
         }
-        AgentAction::GitDiff { path } => {
-            let context = if let Some(p) = path {
-                format!("for {}", p)
+        AgentAction::GitDiff { paths } => {
+            if paths.len() == 1 {
+                let context = if let Some(p) = &paths[0] {
+                    format!("for {}", p)
+                } else {
+                    "for the repository".to_string()
+                };
+                format!(
+                    "Here's the git diff {}:\n\n{}\n\nPlease analyze these changes and explain their implications.",
+                    context, output
+                )
             } else {
-                "for the repository".to_string()
-            };
-            format!(
-                "Here's the git diff {}:\n\n{}\n\nPlease analyze these changes and explain their implications.",
-                context, output
-            )
+                format!(
+                    "Here are {} git diffs:\n\n{}\n\nPlease analyze these changes together and explain their collective implications and how they work together.",
+                    paths.len(), output
+                )
+            }
         }
         AgentAction::GitStatus => {
             format!(
                 "Here's the current repository status:\n\n{}\n\nPlease explain the repository state clearly to the user.",
                 output
-            )
-        }
-        AgentAction::ParallelRead { paths } => {
-            format!(
-                "I've successfully read {} files in parallel:\n\n{}\n\nPlease analyze these files together as a cohesive system:\n1. What patterns do you see across files?\n2. What's the overall flow or architecture?\n3. Are there inconsistencies or improvements needed?\n4. What could be optimized?",
-                paths.len(), output
-            )
-        }
-        AgentAction::ParallelWebSearch { queries } => {
-            format!(
-                "I've completed {} web searches in parallel:\n\n{}\n\nPlease analyze these results together and respond to the user's original question. Synthesize the findings with [source: URL] citations, dates, and author information where available.",
-                queries.len(), output
-            )
-        }
-        AgentAction::ParallelGitDiff { paths } => {
-            format!(
-                "Here are {} git diffs in parallel:\n\n{}\n\nPlease analyze these changes together and explain their collective implications and how they work together.",
-                paths.len(), output
             )
         }
         _ => String::new(),
@@ -712,7 +709,7 @@ async fn trigger_feedback_loop(
             let _ = tx_clone.try_send(chunk.to_string());
         });
 
-        let mut model = model.write().await;
+        let model = model.write().await;
         match model
             .chat(&messages, &context, &config, Some(callback))
             .await
@@ -721,7 +718,9 @@ async fn trigger_feedback_loop(
                 let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
             }
             Err(e) => {
-                let _ = tx_done.send(format!("[ERROR]:{}", e)).await;
+                // Send structured error for rich UX display
+                let error_json = e.to_channel_message();
+                let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
             }
         }
     });
@@ -742,11 +741,18 @@ async fn trigger_multimodal_feedback_loop(
 ) {
     // Build the feedback prompt for binary files
     let feedback_prompt = match action {
-        AgentAction::ReadFile { path } => {
-            format!(
-                "I've successfully read the file '{}'. Please analyze this document and tell the user what it contains.",
-                path
-            )
+        AgentAction::ReadFile { paths } => {
+            if paths.len() == 1 {
+                format!(
+                    "I've successfully read the file '{}'. Please analyze this document and tell the user what it contains.",
+                    paths[0]
+                )
+            } else {
+                format!(
+                    "I've successfully read {} files. Please analyze these documents and tell the user what they contain.",
+                    paths.len()
+                )
+            }
         }
         _ => return, // Only handle ReadFile for now
     };
@@ -772,6 +778,8 @@ async fn trigger_multimodal_feedback_loop(
         thinking: None,
         images: Some(vec![base64_data]),
         tool_calls: None,
+        tool_call_id: None,
+        tool_name: None,
     };
 
     messages.push(feedback_message);
@@ -788,7 +796,7 @@ async fn trigger_multimodal_feedback_loop(
             let _ = tx_clone.try_send(chunk.to_string());
         });
 
-        let mut model = model.write().await;
+        let model = model.write().await;
         match model
             .chat(&messages, &context, &config, Some(callback))
             .await
@@ -797,11 +805,145 @@ async fn trigger_multimodal_feedback_loop(
                 let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
             }
             Err(e) => {
-                let _ = tx_done.send(format!("[ERROR]:{}", e)).await;
+                // Send structured error for rich UX display
+                let error_json = e.to_channel_message();
+                let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
             }
         }
     });
 
     // Start generation state with abort handle from the spawned task
     app.start_generation(handle.abort_handle());
+}
+
+/// Execute tool calls and return results for the agent loop
+///
+/// This is the main function for the agentic flow. It:
+/// 1. Takes tool_calls from the model response
+/// 2. Converts each to an AgentAction
+/// 3. Executes the action
+/// 4. Returns ToolExecutionResult for each, which will be added as Tool messages
+///
+/// The loop_coordinator then adds these as Tool messages and calls the model again.
+pub async fn execute_tool_calls_for_agent_loop(
+    app: &mut App,
+    tool_calls: &[ToolCall],
+) -> Vec<ToolExecutionResult> {
+    let mut results = Vec::new();
+    let mut executor = ModeAwareExecutor::new(app.operation_state.operation_mode.clone());
+
+    for tool_call in tool_calls {
+        let tool_call_id = tool_call.id.clone().unwrap_or_else(|| {
+            // Generate a unique ID if not provided (timestamp + random component)
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("call_{:x}", timestamp)
+        });
+        let tool_name = tool_call.function.name.clone();
+
+        // Convert tool call to AgentAction
+        let action = match tool_call.to_agent_action() {
+            Ok(action) => action,
+            Err(e) => {
+                // Return error result for invalid tool call
+                results.push(ToolExecutionResult {
+                    tool_call_id,
+                    tool_name,
+                    content: format!("Error: {}", e),
+                    success: false,
+                });
+                continue;
+            }
+        };
+
+        // Check if action needs confirmation
+        if executor.needs_confirmation(&action) {
+            // For now, return a message indicating confirmation is needed
+            // In a full implementation, this would pause and wait for user input
+            let action_desc = executor.describe_action(&action);
+            results.push(ToolExecutionResult {
+                tool_call_id,
+                tool_name,
+                content: format!("Action requires user confirmation: {}", action_desc),
+                success: false,
+            });
+            continue;
+        }
+
+        // Execute the action
+        let action_clone = action.clone();
+        match executor.execute(action).await {
+            Ok(agents::ActionResult::Success { output }) => {
+                // Build ActionDisplay for UI rendering
+                let action_display = build_action_display(&action_clone, &output);
+
+                // Attach ActionDisplay to the most recent assistant message
+                if let Some(last_msg) = app
+                    .session_state
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| matches!(m.role, MessageRole::Assistant))
+                {
+                    last_msg.actions.push(action_display);
+                }
+
+                // Update context for write/delete operations
+                match &action_clone {
+                    AgentAction::WriteFile { path, content } => {
+                        app.context.add_file(path.clone(), content.clone());
+                        let tokens = count_file_tokens(content, &app.model_state.model_name);
+                        app.context.token_count += tokens;
+                    }
+                    AgentAction::DeleteFile { path } => {
+                        if let Some(content) = app.context.files.remove(path) {
+                            let tokens = count_file_tokens(&content, &app.model_state.model_name);
+                            app.context.token_count = app.context.token_count.saturating_sub(tokens);
+                        }
+                    }
+                    _ => {}
+                }
+
+                results.push(ToolExecutionResult {
+                    tool_call_id,
+                    tool_name,
+                    content: output,
+                    success: true,
+                });
+            }
+            Ok(agents::ActionResult::Error { error }) => {
+                // Add action display to show the failed action in chat
+                let action_display = build_action_display(&action_clone, &error);
+                if let Some(last_msg) = app
+                    .session_state
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| matches!(m.role, MessageRole::Assistant))
+                {
+                    last_msg.actions.push(action_display);
+                }
+
+                results.push(ToolExecutionResult {
+                    tool_call_id,
+                    tool_name,
+                    content: format!("Error: {}", error),
+                    success: false,
+                });
+            }
+            Err(e) => {
+                results.push(ToolExecutionResult {
+                    tool_call_id,
+                    tool_name,
+                    content: format!("System error: {}", e),
+                    success: false,
+                });
+            }
+        }
+    }
+
+    results
 }

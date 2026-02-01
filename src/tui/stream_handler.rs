@@ -1,15 +1,14 @@
 use anyhow::Result;
+use std::sync::{LazyLock, Mutex};
 use tokio::sync::mpsc;
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
 
 use crate::agents::{AgentAction, Plan};
-use crate::models::{parse_tool_calls, group_parallel_reads, MessageRole};
-use crate::tui::app::GenerationStatus;
+use crate::models::{parse_tool_calls, group_parallel_reads, ErrorCategory, MessageRole, UserFacingError};
+use super::state::GenerationStatus;
 use crate::tui::App;
 
 /// Global tokenizer instance (lazy initialized)
-static TOKENIZER: Lazy<Mutex<Option<tiktoken_rs::CoreBPE>>> = Lazy::new(|| {
+static TOKENIZER: LazyLock<Mutex<Option<tiktoken_rs::CoreBPE>>> = LazyLock::new(|| {
     Mutex::new(tiktoken_rs::get_bpe_from_model("gpt-3.5-turbo").ok())
 });
 
@@ -26,14 +25,18 @@ const RESPONSE_CHECK_INTERVAL: usize = 1000;
 pub enum StreamStatus {
     /// Still streaming, no action needed
     Streaming,
-    /// Generation complete with parsed actions
-    Complete { actions: Vec<AgentAction> },
+    /// Generation complete with parsed actions and tool calls
+    Complete {
+        actions: Vec<AgentAction>,
+        /// Original tool calls from the model (for building proper Tool messages)
+        tool_calls: Vec<crate::models::ToolCall>,
+    },
     /// Plan ready for approval (PlanMode only)
     PlanReady { plan: Plan },
     /// Feedback loop complete (ReadFile response)
     FeedbackComplete,
-    /// Error occurred during streaming
-    Error(String),
+    /// Error occurred during streaming with structured error info
+    Error(UserFacingError),
 }
 
 /// Process streaming chunks from the LLM response channel
@@ -139,41 +142,73 @@ pub async fn process_stream_chunks(
                         app.add_message(MessageRole::Assistant, plan.display_text.clone());
                         return Ok(StreamStatus::PlanReady { plan });
                     }
-                    return Ok(StreamStatus::Complete { actions: vec![] });
+                    return Ok(StreamStatus::Complete { actions: vec![], tool_calls: vec![] });
                 }
 
                 // In normal mode, add message with full response
+                // Note: We do NOT add tool_calls here yet - that's done in loop_coordinator
+                // after we know whether we're continuing the agent loop
                 app.add_message(MessageRole::Assistant, response_text.clone());
-
-                // Check if any actions will trigger feedback loops
-                let has_feedback_actions = actions
-                    .iter()
-                    .any(|a| matches!(a, AgentAction::ReadFile { .. }));
-
-                if has_feedback_actions {
-                    app.operation_state.pending_file_read = true;
-                    // With tool calling, we don't have text before actions to extract intent
-                    // Just set a generic status message
-                    app.operation_state.reading_file_status = Some("Reading files...".to_string());
-                    app.status_state.status_timestamp = Some(std::time::Instant::now());
-                }
 
                 // Clear the accumulated response
                 app.current_response.clear();
 
-                // Return actions for execution
-                return Ok(StreamStatus::Complete { actions });
+                // Return actions and tool_calls for execution in the agent loop
+                return Ok(StreamStatus::Complete {
+                    actions,
+                    tool_calls: accumulated_tool_calls.clone(),
+                });
             }
 
-            return Ok(StreamStatus::Complete { actions: vec![] });
-        } else if chunk.starts_with("[ERROR]:") {
-            // Error during generation
-            let error_msg = chunk.trim_start_matches("[ERROR]:").trim().to_string();
+            return Ok(StreamStatus::Complete { actions: vec![], tool_calls: vec![] });
+        } else if chunk.starts_with("[ERROR_JSON]:") {
+            // Structured error with rich UX information
+            let error_json = chunk.trim_start_matches("[ERROR_JSON]:").trim();
+            let user_error = parse_user_facing_error(error_json);
+
             app.stop_generation();
             app.status_state.custom_status = None;
             app.current_response.clear();
-            app.set_status(format!("[ERROR] {}", error_msg));
-            return Ok(StreamStatus::Error(error_msg));
+
+            // Display summary in status bar with category-appropriate prefix
+            let status_prefix = match user_error.category {
+                ErrorCategory::Connection => "Connection",
+                ErrorCategory::Auth => "Auth",
+                ErrorCategory::Config => "Config",
+                ErrorCategory::NotFound => "Not Found",
+                ErrorCategory::Temporary => "Temporary",
+                ErrorCategory::Internal => "Error",
+            };
+            app.set_status(format!("[{}] {}", status_prefix, user_error.summary));
+
+            // Add detailed error message to chat with suggestion
+            let error_display = format!(
+                "{}\n\nSuggestion: {}",
+                user_error.message,
+                user_error.suggestion
+            );
+            app.add_message(MessageRole::System, error_display);
+
+            return Ok(StreamStatus::Error(user_error));
+        } else if chunk.starts_with("[ERROR]:") {
+            // Legacy error format (fallback for non-ModelError sources)
+            let error_msg = chunk.trim_start_matches("[ERROR]:").trim().to_string();
+            let user_error = UserFacingError {
+                summary: "Error".to_string(),
+                message: error_msg.clone(),
+                suggestion: "Try the operation again or check logs for details".to_string(),
+                category: ErrorCategory::Internal,
+                recoverable: false,
+            };
+
+            app.stop_generation();
+            app.status_state.custom_status = None;
+            app.current_response.clear();
+
+            // Use unified error display (status bar + chat) for consistency
+            app.display_error_simple(&error_msg);
+
+            return Ok(StreamStatus::Error(user_error));
         } else {
             // Regular streaming chunk - accumulate with size check
             let prev_len = app.current_response.len();
@@ -199,6 +234,31 @@ pub async fn process_stream_chunks(
     }
 
     Ok(StreamStatus::Streaming)
+}
+
+/// Parse user-facing error from JSON with graceful fallback
+fn parse_user_facing_error(json_str: &str) -> UserFacingError {
+    serde_json::from_str(json_str).unwrap_or_else(|_| {
+        // Fallback: try to parse pipe-delimited format or use raw string
+        let parts: Vec<&str> = json_str.splitn(3, '|').collect();
+        if parts.len() == 3 {
+            UserFacingError {
+                summary: parts[0].to_string(),
+                message: parts[1].to_string(),
+                suggestion: parts[2].to_string(),
+                category: ErrorCategory::Internal,
+                recoverable: false,
+            }
+        } else {
+            UserFacingError {
+                summary: "Error".to_string(),
+                message: json_str.to_string(),
+                suggestion: "Check the error details and try again".to_string(),
+                category: ErrorCategory::Internal,
+                recoverable: false,
+            }
+        }
+    })
 }
 
 /// Count tokens in text using tiktoken (with fallback to estimation)
@@ -250,50 +310,6 @@ fn check_and_handle_response_size_limit(app: &mut App) {
     }
 }
 
-/// Extract the model's reading intent from the text before [FILE_READ]
-///
-/// This function analyzes the text before a [FILE_READ:] action block
-/// to determine what the model intends to do with the file, and generates
-/// an appropriate status message.
-///
-/// Returns Some(status_message) if a FILE_READ action is found, None otherwise.
-fn extract_reading_intent(text: &str) -> Option<String> {
-    // Find the FILE_READ action block
-    if let Some(idx) = text.find("[FILE_READ:") {
-        // Get the text before the action
-        let before = &text[..idx];
-
-        // Find the file path from the action block
-        let file_path = if let Some(end_idx) = text[idx..].find(']') {
-            let path_part = &text[idx + 11..idx + end_idx]; // Skip "[FILE_READ:"
-            path_part.trim()
-        } else {
-            "the file"
-        };
-
-        // Generate contextual status based on the model's preceding text
-        let status = if before.contains("read") || before.contains("Read") {
-            format!("Reading {}...", file_path)
-        } else if before.contains("check") || before.contains("Check") {
-            format!("Checking {}...", file_path)
-        } else if before.contains("look") || before.contains("Look") {
-            format!("Looking at {}...", file_path)
-        } else if before.contains("open") || before.contains("Open") {
-            format!("Opening {}...", file_path)
-        } else if before.contains("examine") || before.contains("Examine") {
-            format!("Examining {}...", file_path)
-        } else if before.contains("load") || before.contains("Load") {
-            format!("Loading {}...", file_path)
-        } else {
-            format!("Processing {}...", file_path)
-        };
-
-        Some(status)
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,63 +340,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_reading_intent_with_various_verbs() {
-        // Test Issue #2: Reading intent extraction
-        let test_cases = vec![
-            (
-                "Let me read the config file [FILE_READ: config.toml]",
-                "Reading config.toml...",
-            ),
-            (
-                "I need to check the error [FILE_READ: error.log]",
-                "Checking error.log...",
-            ),
-            (
-                "Let me look at this [FILE_READ: main.rs]",
-                "Looking at main.rs...",
-            ),
-            (
-                "I should open it [FILE_READ: src/lib.rs]",
-                "Opening src/lib.rs...",
-            ),
-            (
-                "Let me examine the code [FILE_READ: app.rs]",
-                "Examining app.rs...",
-            ),
-            (
-                "Loading the config [FILE_READ: config.yaml]",
-                "Loading config.yaml...",
-            ),
-            (
-                "Processing data [FILE_READ: data.json]",
-                "Processing data.json...",
-            ),
-        ];
-
-        for (input, expected) in test_cases {
-            let result = extract_reading_intent(input);
-            assert_eq!(result, Some(expected.to_string()), "Failed for: {}", input);
-        }
-    }
-
-    #[test]
-    fn test_extract_reading_intent_edge_cases() {
-        // Test edge cases for reading intent extraction
-
-        // No FILE_READ action
-        assert_eq!(extract_reading_intent("Just some text"), None);
-
-        // FILE_READ without closing bracket - still finds it and uses "the file" as path
-        // The function looks for "[FILE_READ:" and when no ']' is found, it uses "the file"
-        let result = extract_reading_intent("Let me read [FILE_READ: file.txt");
-        assert_eq!(result, Some("Reading the file...".to_string()));
-
-        // FILE_READ with empty path
-        let result = extract_reading_intent("Reading [FILE_READ:]");
-        assert_eq!(result, Some("Reading ...".to_string()));
-    }
-
-    #[test]
     fn test_response_truncation_threshold() {
         // Test Issue #2: Response is truncated when exceeding token limit
         // Verify the truncation behavior is correctly gated
@@ -403,7 +362,7 @@ mod tests {
         let streaming = StreamStatus::Streaming;
         assert!(matches!(streaming, StreamStatus::Streaming));
 
-        let complete = StreamStatus::Complete { actions: vec![] };
+        let complete = StreamStatus::Complete { actions: vec![], tool_calls: vec![] };
         assert!(matches!(complete, StreamStatus::Complete { .. }));
 
         let plan_ready = StreamStatus::PlanReady {
@@ -414,7 +373,13 @@ mod tests {
         let feedback_complete = StreamStatus::FeedbackComplete;
         assert!(matches!(feedback_complete, StreamStatus::FeedbackComplete));
 
-        let error = StreamStatus::Error("test error".to_string());
+        let error = StreamStatus::Error(UserFacingError {
+            summary: "Test error".to_string(),
+            message: "A test error occurred".to_string(),
+            suggestion: "This is just a test".to_string(),
+            category: ErrorCategory::Internal,
+            recoverable: false,
+        });
         assert!(matches!(error, StreamStatus::Error(_)));
     }
 }

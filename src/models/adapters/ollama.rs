@@ -1,4 +1,4 @@
-/// Ollama backend adapter
+/// Ollama model adapter
 ///
 /// Provides unified interface to Ollama (both local and cloud) with connection pooling,
 /// health monitoring, and zero-unwrap error handling.
@@ -11,21 +11,22 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::models::backend::{Backend, BackendMetadata};
 use crate::models::config::{BackendConfig, ModelConfig};
 use crate::models::error::{BackendError, ModelError, Result};
+use crate::models::traits::{Model, ModelCapabilities};
 use crate::models::types::{ChatMessage, MessageRole, ModelResponse, ProjectContext, StreamCallback, TokenUsage};
+use crate::utils::{retry_async, RetryConfig};
 
-/// Ollama adapter with connection pooling
+/// Ollama model adapter
 pub struct OllamaAdapter {
     client: Client,
     base_url: String,
-    config: Arc<BackendConfig>,
+    model_name: String,
 }
 
 impl OllamaAdapter {
-    /// Create a new Ollama adapter
-    pub async fn new(config: Arc<BackendConfig>) -> Result<Self> {
+    /// Create a new Ollama adapter for a specific model
+    pub async fn new(model_name: &str, config: Arc<BackendConfig>) -> Result<Self> {
         let base_url = normalize_url(&config.ollama_url);
 
         // Build HTTP client with connection pooling
@@ -44,7 +45,7 @@ impl OllamaAdapter {
         Ok(Self {
             client,
             base_url,
-            config,
+            model_name: model_name.to_string(),
         })
     }
 
@@ -151,7 +152,7 @@ impl OllamaAdapter {
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
             }),
-            model_name: "ollama".to_string(),
+            model_name: self.model_name.clone(),
             thinking,
             tool_calls,
         })
@@ -159,39 +160,61 @@ impl OllamaAdapter {
 }
 
 #[async_trait]
-impl Backend for OllamaAdapter {
+impl Model for OllamaAdapter {
     fn name(&self) -> &str {
-        "ollama"
+        &self.model_name
+    }
+
+    fn is_local(&self) -> bool {
+        // Ollama daemon is local, even if it routes to cloud
+        true
     }
 
     async fn health_check(&self) -> Result<()> {
         let url = format!("{}/api/tags", self.base_url);
+        let base_url = self.base_url.clone();
 
-        // Health check always goes to local Ollama
-        let response = self.client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ModelError::Backend(BackendError::ConnectionFailed {
-                backend: "ollama".to_string(),
-                url: self.base_url.clone(),
-                reason: format!("Health check failed: {}", e),
-            }))?;
+        // Retry config for health checks (3 attempts with quick backoff)
+        let retry_config = RetryConfig {
+            max_attempts: 3,
+            initial_delay_ms: 500,
+            max_delay_ms: 3000,
+            backoff_multiplier: 2.0,
+        };
 
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(ModelError::Backend(BackendError::NotAvailable {
-                backend: "ollama".to_string(),
-                reason: format!("HTTP {}", response.status()),
-            }))
-        }
+        let client = self.client.clone();
+        let health_result = retry_async(
+            || {
+                let client = client.clone();
+                let url = url.clone();
+                async move {
+                    let response = client
+                        .get(&url)
+                        .send()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Health check failed: {}", e))?;
+
+                    if response.status().is_success() {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("HTTP {}", response.status()))
+                    }
+                }
+            },
+            &retry_config,
+        )
+        .await;
+
+        health_result.map_err(|e| ModelError::Backend(BackendError::ConnectionFailed {
+            backend: "ollama".to_string(),
+            url: base_url,
+            reason: e.to_string(),
+        }))
     }
 
     async fn list_models(&self) -> Result<Vec<String>> {
         let url = format!("{}/api/tags", self.base_url);
 
-        // List models always queries local Ollama
         let response = self.client
             .get(&url)
             .send()
@@ -220,13 +243,11 @@ impl Backend for OllamaAdapter {
 
     async fn chat(
         &self,
-        model_name: &str,
         messages: &[ChatMessage],
         context: &ProjectContext,
         config: &ModelConfig,
         stream_callback: Option<StreamCallback>,
     ) -> Result<ModelResponse> {
-        // Send all requests to local Ollama - it handles cloud routing internally
         let url = format!("{}/api/chat", self.base_url);
 
         // Extract Ollama-specific options
@@ -258,12 +279,23 @@ impl Backend for OllamaAdapter {
                 MessageRole::User => "user",
                 MessageRole::Assistant => "assistant",
                 MessageRole::System => "system",
+                MessageRole::Tool => "tool",
             };
 
             let mut json_msg = json!({
                 "role": role,
                 "content": msg.content
             });
+
+            // Add tool_call_id and tool_name for tool result messages (required by Ollama API)
+            if msg.role == MessageRole::Tool {
+                if let Some(ref tool_call_id) = msg.tool_call_id {
+                    json_msg["tool_call_id"] = json!(tool_call_id);
+                }
+                if let Some(ref tool_name) = msg.tool_name {
+                    json_msg["name"] = json!(tool_name);
+                }
+            }
 
             // Add images if present (for multimodal models)
             if let Some(ref images) = msg.images {
@@ -279,9 +311,9 @@ impl Backend for OllamaAdapter {
         let tool_registry = crate::models::ToolRegistry::mermaid_tools();
         let tools = tool_registry.to_ollama_format();
 
-        // Build request body with tools
+        // Build request body
         let mut request_body = json!({
-            "model": model_name,
+            "model": self.model_name,
             "messages": json_messages,
             "stream": stream_callback.is_some(),
             "tools": tools,
@@ -309,7 +341,7 @@ impl Backend for OllamaAdapter {
             request_body["options"] = options;
         }
 
-        // Send request to local Ollama (handles cloud routing internally)
+        // Send request
         let response = self.client
             .post(&url)
             .json(&request_body)
@@ -346,27 +378,20 @@ impl Backend for OllamaAdapter {
             Ok(ModelResponse {
                 content: json.message.content,
                 usage: None,
-                model_name: model_name.to_string(),
+                model_name: self.model_name.clone(),
                 thinking,
                 tool_calls,
             })
         }
     }
 
-    fn metadata(&self) -> BackendMetadata {
-        BackendMetadata {
-            max_context_length: 8192, // Default, varies by model
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            max_context_length: 8192,
             supports_streaming: true,
-            supports_functions: true, // Ollama supports native function calling via tools API
-            supports_vision: true, // Ollama supports vision/multimodal models
-            is_local: true, // Ollama daemon is local, handles cloud routing internally
-            version: None,
+            supports_functions: true,
+            supports_vision: true,
         }
-    }
-
-    async fn shutdown(&self) -> Result<()> {
-        // No persistent connections to clean up (handled by Drop)
-        Ok(())
     }
 }
 
