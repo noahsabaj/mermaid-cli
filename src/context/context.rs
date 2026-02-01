@@ -12,7 +12,6 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tiktoken_rs::{cl100k_base, CoreBPE};
 
 use super::file_collector::{CollectorConfig, FileCollector};
 use super::token_counter::TokenCounter;
@@ -101,8 +100,6 @@ pub struct Context {
     root_path: PathBuf,
     /// Configuration
     config: ContextConfig,
-    /// Tokenizer for counting tokens
-    tokenizer: CoreBPE,
     /// Cache manager for token caching
     cache_manager: Option<Arc<crate::cache::CacheManager>>,
     /// Last computed hash of the file tree
@@ -131,7 +128,6 @@ impl Context {
         Ok(Self {
             root_path: root_path.as_ref().to_path_buf(),
             config: ContextConfig::default(),
-            tokenizer: cl100k_base()?,
             cache_manager: crate::cache::CacheManager::new().ok().map(Arc::new),
             last_file_hash: None,
             last_load_time: None,
@@ -144,7 +140,6 @@ impl Context {
         Ok(Self {
             root_path: root_path.as_ref().to_path_buf(),
             config,
-            tokenizer: cl100k_base()?,
             cache_manager: crate::cache::CacheManager::new().ok().map(Arc::new),
             last_file_hash: None,
             last_load_time: None,
@@ -171,7 +166,7 @@ impl Context {
 
         // Use Mutex-protected state for thread-safe tracking
         let loading_state = Arc::new(Mutex::new(LoadingState::new()));
-        let token_counter = TokenCounter::new(self.tokenizer.clone(), self.cache_manager.clone());
+        let token_counter = TokenCounter::new(self.cache_manager.clone());
 
         // Configuration for convenient access
         let max_files = self.config.max_files;

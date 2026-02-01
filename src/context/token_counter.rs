@@ -1,27 +1,27 @@
 /// Token counting and caching logic
 ///
-/// Responsible for counting tokens in files and caching results to improve
-/// performance on repeated loads.
+/// Uses character-based estimation (~4 chars per token) for simplicity.
+/// For accurate token counts, Ollama provides real counts in API responses.
 use anyhow::{Context, Result};
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
-use tiktoken_rs::CoreBPE;
 
 /// Manages token counting with caching support
 pub struct TokenCounter {
-    tokenizer: CoreBPE,
     cache_manager: Option<Arc<crate::cache::CacheManager>>,
 }
 
 impl TokenCounter {
-    pub fn new(tokenizer: CoreBPE, cache_manager: Option<Arc<crate::cache::CacheManager>>) -> Self {
-        Self {
-            tokenizer,
-            cache_manager,
-        }
+    pub fn new(cache_manager: Option<Arc<crate::cache::CacheManager>>) -> Self {
+        Self { cache_manager }
+    }
+
+    /// Estimate tokens from text (~4 chars per token)
+    fn estimate_tokens(text: &str) -> usize {
+        (text.len() + 3) / 4
     }
 
     /// Load a single file
@@ -34,10 +34,6 @@ impl TokenCounter {
     /// This method streams the file in lines, counting tokens as it reads.
     /// If the token budget is exceeded mid-read, it stops reading and returns
     /// what has been accumulated so far.
-    ///
-    /// For small files (<100KB), this is equivalent to regular loading.
-    /// For large files (>100KB), this provides significant memory savings by
-    /// not loading the entire file before counting tokens.
     ///
     /// Returns: (content, tokens_used)
     pub fn load_file_with_token_limit(
@@ -55,7 +51,7 @@ impl TokenCounter {
         if metadata.len() < 100 * 1024 {
             let content = fs::read_to_string(path)
                 .with_context(|| format!("Failed to read file: {}", path.display()))?;
-            let tokens = self.tokenizer.encode_with_special_tokens(&content).len();
+            let tokens = Self::estimate_tokens(&content);
             return Ok((content, tokens));
         }
 
@@ -75,15 +71,11 @@ impl TokenCounter {
                 break; // EOF
             }
 
-            // Count tokens in this line
-            let line_tokens = self
-                .tokenizer
-                .encode_with_special_tokens(&line_buffer)
-                .len();
+            // Estimate tokens in this line
+            let line_tokens = Self::estimate_tokens(&line_buffer);
 
             // Check if adding this line would exceed budget
             if total_tokens + line_tokens > token_budget {
-                // Return what we've accumulated so far
                 break;
             }
 
@@ -95,16 +87,11 @@ impl TokenCounter {
     }
 
     /// Load file content and token count with caching
-    ///
-    /// Checks the cache first before loading or counting tokens.
-    /// Significantly speeds up repeated project loads (50-80% faster).
     pub fn load_file_cached(&self, path: &Path, token_budget: usize) -> Result<(String, usize)> {
         // Try to get cached token count first
         if let Some(ref cache) = self.cache_manager {
-            if let Ok(cached_tokens) = cache.get_or_compute_tokens(path, "", "cl100k_base") {
-                // If cached tokens fit within budget, use cached value
+            if let Ok(cached_tokens) = cache.get_or_compute_tokens(path, "", "estimate") {
                 if cached_tokens <= token_budget {
-                    // Load content separately (cache only stores token count)
                     let content = self.load_file(path)?;
                     return Ok((content, cached_tokens));
                 }
@@ -116,7 +103,7 @@ impl TokenCounter {
 
         // Cache the result for next time
         if let Some(ref cache) = self.cache_manager {
-            let _ = cache.get_or_compute_tokens(path, &content, "cl100k_base");
+            let _ = cache.get_or_compute_tokens(path, &content, "estimate");
         }
 
         Ok((content, tokens))
@@ -125,6 +112,6 @@ impl TokenCounter {
     /// Get the token count for content
     #[allow(dead_code)]
     pub fn count_tokens(&self, content: &str) -> usize {
-        self.tokenizer.encode_with_special_tokens(content).len()
+        Self::estimate_tokens(content)
     }
 }

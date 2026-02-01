@@ -533,6 +533,9 @@ impl App {
     // ===== Generation State Transitions =====
 
     pub fn start_generation(&mut self, abort_handle: tokio::task::AbortHandle) {
+        // Clear accumulated tool calls from any previous generation
+        self.operation_state.accumulated_tool_calls.clear();
+
         self.app_state = AppState::Generating {
             status: GenerationStatus::Sending,
             start_time: std::time::Instant::now(),
@@ -563,12 +566,13 @@ impl App {
         }
     }
 
-    pub fn increment_tokens(&mut self, count: usize) {
-        if let AppState::Generating { status, start_time, tokens_received, ref abort_handle } = self.app_state {
+    /// Set the final token count from Ollama's actual response
+    pub fn set_final_tokens(&mut self, count: usize) {
+        if let AppState::Generating { status, start_time, ref abort_handle, .. } = self.app_state {
             self.app_state = AppState::Generating {
                 status,
                 start_time,
-                tokens_received: tokens_received + count,
+                tokens_received: count,
                 abort_handle: abort_handle.clone(),
             };
             self.session_state.add_tokens(count);

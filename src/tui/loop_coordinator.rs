@@ -252,14 +252,16 @@ async fn handle_message_submit(
             .chat(&messages, &context, &config, Some(callback))
             .await
         {
-            Ok(_response) => {
-                let _ = tx_done.send("[DONE]:".to_string()).await;
+            Ok(response) => {
+                // Send real token count from Ollama with [DONE] message
+                let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
+                let _ = tx_done.send(format!("[DONE]:tokens={}", tokens)).await;
             },
             Err(e) => {
                 // Send structured error for rich UX display
                 let error_json = e.to_channel_message();
                 let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
-            }, 
+            },
         }
     });
 
@@ -349,8 +351,10 @@ async fn run_agent_loop(
                 .chat(&messages, &context, &config, Some(callback))
                 .await
             {
-                Ok(_response) => {
-                    let _ = tx_done.send("[DONE]:".to_string()).await;
+                Ok(response) => {
+                    // Send real token count from Ollama with [DONE] message
+                    let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
+                    let _ = tx_done.send(format!("[DONE]:tokens={}", tokens)).await;
                 },
                 Err(e) => {
                     let error_json = e.to_channel_message();

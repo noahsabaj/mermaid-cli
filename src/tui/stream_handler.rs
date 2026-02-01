@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::sync::{LazyLock, Mutex};
 use tokio::sync::mpsc;
 
 use crate::agents::{AgentAction, Plan};
@@ -7,18 +6,8 @@ use crate::models::{parse_tool_calls, group_parallel_reads, ErrorCategory, Messa
 use super::state::GenerationStatus;
 use crate::tui::App;
 
-/// Global tokenizer instance (lazy initialized)
-static TOKENIZER: LazyLock<Mutex<Option<tiktoken_rs::CoreBPE>>> = LazyLock::new(|| {
-    Mutex::new(tiktoken_rs::get_bpe_from_model("gpt-3.5-turbo").ok())
-});
-
-/// Maximum tokens allowed in a single response to prevent memory exhaustion
-/// Corresponds to roughly 400,000 characters (conservative estimate)
-const MAX_RESPONSE_TOKENS: usize = 100_000;
-
-/// How often to check response size (check every N characters)
-/// This prevents excessive token counting while maintaining safety
-const RESPONSE_CHECK_INTERVAL: usize = 1000;
+/// Maximum response size in characters to prevent memory exhaustion
+const MAX_RESPONSE_CHARS: usize = 400_000;
 
 /// Result of processing streaming chunks
 #[derive(Debug, Clone)]
@@ -55,8 +44,9 @@ pub async fn process_stream_chunks(
         return Ok(StreamStatus::Streaming);
     }
 
-    // Accumulate tool calls from streaming
-    let mut accumulated_tool_calls: Vec<crate::models::ToolCall> = Vec::new();
+    // Tool calls are accumulated in app.operation_state.accumulated_tool_calls
+    // This persists across multiple calls to process_stream_chunks()
+    // (tool call chunks and [DONE] may arrive in separate calls)
 
     // Process all available messages from the channel
     while let Ok(chunk) = rx.try_recv() {
@@ -85,7 +75,8 @@ pub async fn process_stream_chunks(
             if let Some(end_idx) = chunk.rfind(']') {
                 let json_str = &chunk[12..end_idx]; // Skip "[TOOL_CALLS:" to get JSON array
                 if let Ok(tool_calls) = serde_json::from_str::<Vec<crate::models::ToolCall>>(json_str) {
-                    accumulated_tool_calls.extend(tool_calls);
+                    // Accumulate in app state so tool calls persist across process_stream_chunks calls
+                    app.operation_state.accumulated_tool_calls.extend(tool_calls);
                 }
                 // Don't add tool call markers to response text
                 continue;
@@ -93,6 +84,14 @@ pub async fn process_stream_chunks(
         }
 
         if chunk.starts_with("[DONE]:") {
+            // Parse real token count from Ollama (format: [DONE]:tokens=123)
+            if let Some(tokens_str) = chunk.strip_prefix("[DONE]:tokens=") {
+                let tokens_part = tokens_str.split('[').next().unwrap_or(tokens_str);
+                if let Ok(tokens) = tokens_part.trim().parse::<usize>() {
+                    app.set_final_tokens(tokens);
+                }
+            }
+
             // Check if this is feedback completion
             let is_feedback_complete = chunk.contains("[FEEDBACK_COMPLETE]");
 
@@ -112,18 +111,21 @@ pub async fn process_stream_chunks(
                 app.operation_state.reading_file_status = None;
             }
 
-            // Add the accumulated response from streaming
-            if !app.current_response.is_empty() {
-                let response_text = app.current_response.clone();
+            // Take accumulated tool calls from app state (clears them for next generation)
+            // Do this BEFORE checking current_response so we don't lose tool_calls
+            let accumulated_tool_calls = std::mem::take(&mut app.operation_state.accumulated_tool_calls);
 
-                // Parse actions from accumulated tool calls (Ollama native function calling)
-                let actions = if !accumulated_tool_calls.is_empty() {
-                    let parsed = parse_tool_calls(&accumulated_tool_calls);
-                    group_parallel_reads(parsed)
-                } else {
-                    vec![]
-                };
+            // Parse actions from accumulated tool calls (Ollama native function calling)
+            let actions = if !accumulated_tool_calls.is_empty() {
+                let parsed = parse_tool_calls(&accumulated_tool_calls);
+                group_parallel_reads(parsed)
+            } else {
+                vec![]
+            };
 
+            // Add the accumulated response from streaming (if any)
+            let response_text = app.current_response.clone();
+            if !response_text.is_empty() {
                 // Check if we're in PlanMode
                 if app.operation_state.operation_mode.is_planning_only() {
                     // With tool calling, the response text IS the explanation (no action blocks to strip)
@@ -154,15 +156,14 @@ pub async fn process_stream_chunks(
 
                 // Clear the accumulated response
                 app.current_response.clear();
-
-                // Return actions and tool_calls for execution in the agent loop
-                return Ok(StreamStatus::Complete {
-                    actions,
-                    tool_calls: accumulated_tool_calls.clone(),
-                });
             }
 
-            return Ok(StreamStatus::Complete { actions: vec![], tool_calls: vec![] });
+            // Return actions and tool_calls for execution in the agent loop
+            // (even if response was empty, we might have tool_calls)
+            return Ok(StreamStatus::Complete {
+                actions,
+                tool_calls: accumulated_tool_calls,
+            });
         } else if chunk.starts_with("[ERROR_JSON]:") {
             // Structured error with rich UX information
             let error_json = chunk.trim_start_matches("[ERROR_JSON]:").trim();
@@ -213,7 +214,6 @@ pub async fn process_stream_chunks(
             return Ok(StreamStatus::Error(user_error));
         } else {
             // Regular streaming chunk - accumulate with size check
-            let prev_len = app.current_response.len();
             app.current_response.push_str(&chunk);
 
             // Transition to Streaming on first content chunk (from Sending or Thinking)
@@ -221,16 +221,12 @@ pub async fn process_stream_chunks(
                 app.transition_to_streaming();
             }
 
-            // Count actual tokens in this chunk using tiktoken
-            let chunk_tokens = count_tokens(&chunk);
-            app.increment_tokens(chunk_tokens);
-
-            // Check response size periodically to prevent memory exhaustion
-            // Only check every N characters to avoid excessive computation
-            if app.current_response.len() - prev_len > RESPONSE_CHECK_INTERVAL
-                || app.current_response.len() % RESPONSE_CHECK_INTERVAL == 0
-            {
-                check_and_handle_response_size_limit(app);
+            // Check response size to prevent memory exhaustion
+            if app.current_response.len() > MAX_RESPONSE_CHARS {
+                app.current_response.truncate(MAX_RESPONSE_CHARS);
+                app.current_response
+                    .push_str("\n\n[TRUNCATED: Response exceeded size limit]\n");
+                app.set_status("[WARNING] Response truncated (size limit reached)".to_string());
             }
         }
     }
@@ -263,98 +259,14 @@ fn parse_user_facing_error(json_str: &str) -> UserFacingError {
     })
 }
 
-/// Count tokens in text using tiktoken (with fallback to estimation)
-fn count_tokens(text: &str) -> usize {
-    if let Ok(tokenizer_lock) = TOKENIZER.lock() {
-        if let Some(bpe) = tokenizer_lock.as_ref() {
-            // Use actual token count from tiktoken
-            bpe.encode_ordinary(text).len()
-        } else {
-            // Fallback to estimation if tokenizer unavailable
-            (text.len() + 3) / 4
-        }
-    } else {
-        // Fallback to estimation if lock poisoned
-        (text.len() + 3) / 4
-    }
-}
-
-/// Check if response has exceeded token limit and handle appropriately
-///
-/// This function:
-/// 1. Counts actual tokens using tiktoken
-/// 2. Warns user if approaching limit (90%)
-/// 3. Truncates response if limit exceeded
-fn check_and_handle_response_size_limit(app: &mut App) {
-    // Use actual token count from tiktoken
-    let actual_tokens = count_tokens(&app.current_response);
-
-    if actual_tokens > MAX_RESPONSE_TOKENS {
-        // Truncate response to fit within limit (leave space for action markers)
-        // Start by removing tokens from the end until we're under the limit
-        let mut truncated = app.current_response.clone();
-        while count_tokens(&truncated) > (MAX_RESPONSE_TOKENS - 50) && !truncated.is_empty() {
-            truncated.pop();
-        }
-        app.current_response = truncated;
-        app.current_response
-            .push_str("\n\n[TRUNCATED: Response exceeded token limit]\n");
-        app.set_status(format!(
-            "[WARNING] Response truncated ({} tokens limit reached)",
-            MAX_RESPONSE_TOKENS
-        ));
-    } else if actual_tokens > (MAX_RESPONSE_TOKENS * 9 / 10) {
-        // Warn when approaching limit (90%)
-        app.set_status(format!(
-            "[WARNING] Large response ({} tokens). Still accepting chunks...",
-            actual_tokens
-        ));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_response_size_estimation() {
-        // Test Issue #2: Response size limit calculations
-        // 4 characters per token is the estimation formula
-
-        let small_response = "hello world";
-        let small_tokens = small_response.len() / 4; // ~3 tokens
-        assert!(small_tokens < MAX_RESPONSE_TOKENS);
-
-        let large_response = "a".repeat(MAX_RESPONSE_TOKENS * 4);
-        let large_tokens = large_response.len() / 4;
-        assert_eq!(large_tokens, MAX_RESPONSE_TOKENS);
-    }
-
-    #[test]
-    fn test_token_limit_constants() {
-        // Verify Issue #2 constants are properly configured
-        assert_eq!(MAX_RESPONSE_TOKENS, 100_000);
-        assert_eq!(RESPONSE_CHECK_INTERVAL, 1000);
-
-        // Max char limit should be 4x tokens minus buffer
-        let max_chars = (MAX_RESPONSE_TOKENS * 4) - 100;
-        assert_eq!(max_chars, 399_900);
-    }
-
-    #[test]
-    fn test_response_truncation_threshold() {
-        // Test Issue #2: Response is truncated when exceeding token limit
-        // Verify the truncation behavior is correctly gated
-
-        let max_chars = (MAX_RESPONSE_TOKENS * 4) - 100;
-
-        // Response at 90% of limit should warn but not truncate
-        let warning_threshold = MAX_RESPONSE_TOKENS * 9 / 10;
-        let warning_chars = warning_threshold * 4;
-        assert!(warning_chars < max_chars);
-
-        // Response at 100% of limit should truncate
-        assert!(max_chars < (MAX_RESPONSE_TOKENS * 4));
+    fn test_response_size_limit() {
+        // Verify response size limit constant
+        assert_eq!(MAX_RESPONSE_CHARS, 400_000);
     }
 
     #[test]
