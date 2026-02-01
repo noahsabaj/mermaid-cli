@@ -99,10 +99,10 @@ impl<'a> StatefulWidget for InputWidget<'a> {
             let hints_height = (filtered_commands.len() as u16 + 2).min(8);
 
             if area.height > hints_height {
-                let chunks = Layout::default()
+                let layout = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(hints_height), Constraint::Min(3)])
-                    .split(area);
+                    .constraints([Constraint::Length(hints_height), Constraint::Min(3)]);
+                let [hints_area, input_area] = area.layout(&layout);
 
                 if !filtered_commands.is_empty() {
                     let mut hint_lines = vec![Line::from(vec![Span::styled(
@@ -132,10 +132,10 @@ impl<'a> StatefulWidget for InputWidget<'a> {
                             .title(" Commands (up/down to navigate, Enter to execute) "),
                     );
 
-                    hints_block.render(chunks[0], buf);
+                    hints_block.render(hints_area, buf);
                 }
 
-                (Some(chunks[0]), chunks[1])
+                (Some(hints_area), input_area)
             } else {
                 (None, area)
             }

@@ -98,14 +98,14 @@ fn run_selector(
 }
 
 fn render_selector(f: &mut Frame, app: &ConversationSelector) {
-    let chunks = Layout::default()
+    let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
             Constraint::Length(3),
-        ])
-        .split(f.area());
+        ]);
+    let [title_area, list_area, help_area] = f.area().layout(&layout);
 
     // Title
     let title = Paragraph::new("Select a conversation to resume")
@@ -119,7 +119,7 @@ fn render_selector(f: &mut Frame, app: &ConversationSelector) {
                 .borders(Borders::ALL)
                 .title(" Mermaid - Resume Session "),
         );
-    f.render_widget(title, chunks[0]);
+    f.render_widget(title, title_area);
 
     // Conversation list
     let items: Vec<ListItem> = app
@@ -162,7 +162,7 @@ fn render_selector(f: &mut Frame, app: &ConversationSelector) {
         .highlight_style(Style::default())
         .highlight_symbol("");
 
-    f.render_widget(list, chunks[1]);
+    f.render_widget(list, list_area);
 
     // Help text
     let help = vec![Line::from(vec![
@@ -175,5 +175,5 @@ fn render_selector(f: &mut Frame, app: &ConversationSelector) {
     let help_widget = Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL));
-    f.render_widget(help_widget, chunks[2]);
+    f.render_widget(help_widget, help_area);
 }
