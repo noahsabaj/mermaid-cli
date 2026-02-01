@@ -154,10 +154,10 @@ impl Orchestrator {
         app.set_context(ctx);
 
         // Handle session loading
-        // Default: auto-resume last conversation
+        // Default: start fresh (no history)
+        // --continue: resume last conversation
         // --sessions: show picker to choose a previous conversation
-        // --new: skip auto-resume, start fresh
-        if !self.cli.new {
+        if self.cli.continue_session || self.cli.sessions {
             let conversation_manager = ConversationManager::new(&project_path)?;
 
             if self.cli.sessions {
@@ -175,15 +175,16 @@ impl Orchestrator {
                     log_info("INFO", "No previous conversations found in this directory");
                 }
             } else {
-                // Default: auto-resume last conversation
+                // --continue: resume last conversation
                 if let Some(last_conv) = conversation_manager.load_last_conversation()? {
                     log_info(
                         "RESUME",
                         format!("Resuming: {}", last_conv.title),
                     );
                     app.load_conversation(last_conv);
+                } else {
+                    log_info("INFO", "No previous conversation to continue");
                 }
-                // If no previous conversation, silently start fresh
             }
         }
 

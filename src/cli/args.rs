@@ -19,12 +19,12 @@ pub struct Cli {
     pub verbose: bool,
 
     /// Show session picker to choose a previous conversation
-    #[arg(long, conflicts_with = "new")]
+    #[arg(long, conflicts_with = "continue_session")]
     pub sessions: bool,
 
-    /// Start a fresh conversation (don't auto-resume)
-    #[arg(long, conflicts_with = "sessions")]
-    pub new: bool,
+    /// Resume the last conversation instead of starting fresh
+    #[arg(long = "continue", conflicts_with = "sessions")]
+    pub continue_session: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
