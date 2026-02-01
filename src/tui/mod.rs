@@ -10,12 +10,17 @@ mod loop_coordinator;
 mod markdown;
 mod mode;
 mod render;
+pub mod state;
 mod stream_handler;
 mod theme;
 mod ui;
 mod widgets;
 
 // Public re-exports - the ONLY way to access TUI functionality
-pub use app::{App, AppState, ConfirmationState, ErrorEntry, ErrorSeverity, FileInfo, GenerationStatus};
+pub use app::App;
 pub use mode::OperationMode;
+pub use state::{
+    AppState, ConfirmationState, ConversationState, ErrorEntry, ErrorSeverity,
+    FileInfo, GenerationStatus, InputBuffer, ModelState, OperationState, StatusState, UIState,
+};
 pub use ui::run_ui;
