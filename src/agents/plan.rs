@@ -1,6 +1,31 @@
 use crate::agents::types::{ActionResult, AgentAction};
 use std::time::Instant;
 
+/// Category of action for display grouping
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionCategory {
+    /// File operations (read, write, delete, create dir)
+    File,
+    /// Shell commands
+    Command,
+    /// Git operations (diff, commit, status)
+    Git,
+    /// Web search (not displayed in plan, executed inline)
+    WebSearch,
+}
+
+impl ActionCategory {
+    /// Get display header for this category
+    pub fn header(&self) -> &str {
+        match self {
+            ActionCategory::File => "File Operations:",
+            ActionCategory::Command => "Commands:",
+            ActionCategory::Git => "Git Operations:",
+            ActionCategory::WebSearch => "Web Searches:",
+        }
+    }
+}
+
 /// The status of a planned action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionStatus {
@@ -64,39 +89,142 @@ impl PlannedAction {
     /// Get a short description of this action for display
     pub fn description(&self) -> String {
         match &self.action {
-            AgentAction::ReadFile { path } => format!("Read {}", path),
+            AgentAction::ReadFile { paths } => {
+                if paths.len() == 1 {
+                    format!("Read {}", paths[0])
+                } else {
+                    format!("Read {} files", paths.len())
+                }
+            }
             AgentAction::WriteFile { path, .. } => format!("Write {}", path),
             AgentAction::DeleteFile { path } => format!("Delete {}", path),
             AgentAction::CreateDirectory { path } => format!("Create dir {}", path),
             AgentAction::ExecuteCommand { command, .. } => format!("Run: {}", command),
-            AgentAction::GitDiff { path } => {
-                format!("Git diff {}", path.as_deref().unwrap_or("*"))
-            },
+            AgentAction::GitDiff { paths } => {
+                if paths.len() == 1 {
+                    format!("Git diff {}", paths[0].as_deref().unwrap_or("*"))
+                } else {
+                    format!("Git diff {} paths", paths.len())
+                }
+            }
             AgentAction::GitCommit { message, .. } => format!("Git commit: {}", message),
             AgentAction::GitStatus => "Git status".to_string(),
-            AgentAction::WebSearch { query, .. } => format!("Search: {}", query),
-            AgentAction::ParallelRead { paths } => format!("Read {} files", paths.len()),
-            AgentAction::ParallelWebSearch { queries } => format!("Search {} queries", queries.len()),
-            AgentAction::ParallelGitDiff { paths } => format!("Git diff {} paths", paths.len()),
+            AgentAction::WebSearch { queries } => {
+                if queries.len() == 1 {
+                    format!("Search: {}", queries[0].0)
+                } else {
+                    format!("Search {} queries", queries.len())
+                }
+            }
         }
     }
 
     /// Get action type for display
     pub fn action_type(&self) -> &str {
         match &self.action {
-            AgentAction::ReadFile { .. } => "Read",
+            AgentAction::ReadFile { paths } => {
+                if paths.len() == 1 { "Read" } else { "ReadFiles" }
+            }
             AgentAction::WriteFile { .. } => "Write",
             AgentAction::DeleteFile { .. } => "Delete",
             AgentAction::CreateDirectory { .. } => "Create",
             AgentAction::ExecuteCommand { .. } => "Bash",
-            AgentAction::GitDiff { .. } => "GitDiff",
+            AgentAction::GitDiff { paths } => {
+                if paths.len() == 1 { "GitDiff" } else { "GitDiffs" }
+            }
             AgentAction::GitCommit { .. } => "GitCommit",
             AgentAction::GitStatus => "GitStatus",
-            AgentAction::WebSearch { .. } => "WebSearch",
-            AgentAction::ParallelRead { .. } => "ReadFiles",
-            AgentAction::ParallelWebSearch { .. } => "WebSearches",
-            AgentAction::ParallelGitDiff { .. } => "GitDiffs",
+            AgentAction::WebSearch { queries } => {
+                if queries.len() == 1 { "WebSearch" } else { "WebSearches" }
+            }
         }
+    }
+
+    /// Get the category of this action for display grouping
+    pub fn category(&self) -> ActionCategory {
+        match &self.action {
+            AgentAction::ReadFile { .. }
+            | AgentAction::WriteFile { .. }
+            | AgentAction::DeleteFile { .. }
+            | AgentAction::CreateDirectory { .. } => ActionCategory::File,
+            AgentAction::ExecuteCommand { .. } => ActionCategory::Command,
+            AgentAction::GitDiff { .. }
+            | AgentAction::GitCommit { .. }
+            | AgentAction::GitStatus => ActionCategory::Git,
+            AgentAction::WebSearch { .. } => ActionCategory::WebSearch,
+        }
+    }
+}
+
+/// Categorized actions for display
+#[derive(Debug, Default)]
+struct CategorizedActions<'a> {
+    file: Vec<&'a PlannedAction>,
+    command: Vec<&'a PlannedAction>,
+    git: Vec<&'a PlannedAction>,
+}
+
+impl<'a> CategorizedActions<'a> {
+    /// Categorize actions from a slice (web search actions are excluded)
+    fn from_actions(actions: &'a [PlannedAction]) -> Self {
+        let mut categorized = Self::default();
+        for action in actions {
+            match action.category() {
+                ActionCategory::File => categorized.file.push(action),
+                ActionCategory::Command => categorized.command.push(action),
+                ActionCategory::Git => categorized.git.push(action),
+                ActionCategory::WebSearch => {} // Excluded from display
+            }
+        }
+        categorized
+    }
+
+    /// Render all categories to output string
+    fn render(&self, output: &mut String, numbered: bool, show_errors: bool) {
+        self.render_category(output, &self.file, ActionCategory::File, numbered, show_errors);
+        self.render_category(output, &self.command, ActionCategory::Command, numbered, show_errors);
+        self.render_category(output, &self.git, ActionCategory::Git, numbered, show_errors);
+    }
+
+    /// Render a single category of actions
+    fn render_category(
+        &self,
+        output: &mut String,
+        actions: &[&PlannedAction],
+        category: ActionCategory,
+        numbered: bool,
+        show_errors: bool,
+    ) {
+        if actions.is_empty() {
+            return;
+        }
+
+        output.push_str(category.header());
+        output.push('\n');
+
+        for (i, action) in actions.iter().enumerate() {
+            if numbered {
+                output.push_str(&format!(
+                    "  {}. {} {}\n",
+                    i + 1,
+                    action.status.indicator(),
+                    action.description()
+                ));
+            } else {
+                output.push_str(&format!(
+                    "  {} {}\n",
+                    action.status.indicator(),
+                    action.description()
+                ));
+            }
+
+            if show_errors {
+                if let Some(ref err) = action.error {
+                    output.push_str(&format!("    Error: {}\n", err));
+                }
+            }
+        }
+        output.push('\n');
     }
 }
 
@@ -171,69 +299,10 @@ impl Plan {
         let mut output = String::new();
         output.push_str("Plan: Ready to execute\n\n");
 
-        let mut file_actions = Vec::new();
-        let mut command_actions = Vec::new();
-        let mut git_actions = Vec::new();
+        let categorized = CategorizedActions::from_actions(actions);
+        categorized.render(&mut output, true, false); // numbered, no errors
 
-        for action in actions {
-            match &action.action {
-                AgentAction::ReadFile { .. }
-                | AgentAction::WriteFile { .. }
-                | AgentAction::DeleteFile { .. }
-                | AgentAction::CreateDirectory { .. }
-                | AgentAction::ParallelRead { .. } => file_actions.push(action),
-                AgentAction::ExecuteCommand { .. } => command_actions.push(action),
-                AgentAction::GitDiff { .. }
-                | AgentAction::GitCommit { .. }
-                | AgentAction::GitStatus
-                | AgentAction::ParallelGitDiff { .. } => git_actions.push(action),
-                AgentAction::WebSearch { .. }
-                | AgentAction::ParallelWebSearch { .. } => {
-                    // Web search actions are executed inline
-                },
-            }
-        }
-
-        if !file_actions.is_empty() {
-            output.push_str("File Operations:\n");
-            for (i, action) in file_actions.iter().enumerate() {
-                output.push_str(&format!(
-                    "  {}. {} {}\n",
-                    i + 1,
-                    action.status.indicator(),
-                    action.description()
-                ));
-            }
-            output.push('\n');
-        }
-
-        if !command_actions.is_empty() {
-            output.push_str("Commands:\n");
-            for (i, action) in command_actions.iter().enumerate() {
-                output.push_str(&format!(
-                    "  {}. {} {}\n",
-                    i + 1,
-                    action.status.indicator(),
-                    action.description()
-                ));
-            }
-            output.push('\n');
-        }
-
-        if !git_actions.is_empty() {
-            output.push_str("Git Operations:\n");
-            for (i, action) in git_actions.iter().enumerate() {
-                output.push_str(&format!(
-                    "  {}. {} {}\n",
-                    i + 1,
-                    action.status.indicator(),
-                    action.description()
-                ));
-            }
-            output.push('\n');
-        }
-
-        output.push_str("Approve with Ctrl+Y, Cancel with Ctrl+N");
+        output.push_str("Approve with Y, Cancel with N");
         output
     }
 
@@ -255,100 +324,33 @@ impl Plan {
 
     /// Regenerate the display text with current action statuses
     fn regenerate_display(&mut self) {
+        let stats = self.stats();
         let mut output = String::new();
 
-        let completed = self
-            .actions
-            .iter()
-            .filter(|a| a.status == ActionStatus::Completed)
-            .count();
-        let failed = self
-            .actions
-            .iter()
-            .filter(|a| a.status == ActionStatus::Failed)
-            .count();
-        let total = self.actions.len();
-
-        if completed == total {
-            output.push_str(&format!("Plan: Completed ({}/{})\n\n", completed, total));
-        } else if failed > 0 {
+        // Header with progress
+        if stats.completed == stats.total {
+            output.push_str(&format!(
+                "Plan: Completed ({}/{})\n\n",
+                stats.completed, stats.total
+            ));
+        } else if stats.failed > 0 {
             output.push_str(&format!(
                 "Plan: In Progress ({}/{}, {} failed)\n\n",
-                completed, total, failed
+                stats.completed, stats.total, stats.failed
             ));
         } else {
-            output.push_str(&format!("Plan: In Progress ({}/{})\n\n", completed, total));
+            output.push_str(&format!(
+                "Plan: In Progress ({}/{})\n\n",
+                stats.completed, stats.total
+            ));
         }
 
-        let mut file_actions = Vec::new();
-        let mut command_actions = Vec::new();
-        let mut git_actions = Vec::new();
+        // Render categorized actions (unnumbered, with errors)
+        let categorized = CategorizedActions::from_actions(&self.actions);
+        categorized.render(&mut output, false, true);
 
-        for action in &self.actions {
-            match &action.action {
-                AgentAction::ReadFile { .. }
-                | AgentAction::WriteFile { .. }
-                | AgentAction::DeleteFile { .. }
-                | AgentAction::CreateDirectory { .. }
-                | AgentAction::ParallelRead { .. } => file_actions.push(action),
-                AgentAction::ExecuteCommand { .. } => command_actions.push(action),
-                AgentAction::GitDiff { .. }
-                | AgentAction::GitCommit { .. }
-                | AgentAction::GitStatus
-                | AgentAction::ParallelGitDiff { .. } => git_actions.push(action),
-                AgentAction::WebSearch { .. }
-                | AgentAction::ParallelWebSearch { .. } => {
-                    // Web search actions are executed inline, not categorized
-                },
-            }
-        }
-
-        if !file_actions.is_empty() {
-            output.push_str("File Operations:\n");
-            for action in file_actions {
-                output.push_str(&format!(
-                    "  {} {}\n",
-                    action.status.indicator(),
-                    action.description()
-                ));
-                if let Some(ref err) = action.error {
-                    output.push_str(&format!("    Error: {}\n", err));
-                }
-            }
-            output.push('\n');
-        }
-
-        if !command_actions.is_empty() {
-            output.push_str("Commands:\n");
-            for action in command_actions {
-                output.push_str(&format!(
-                    "  {} {}\n",
-                    action.status.indicator(),
-                    action.description()
-                ));
-                if let Some(ref err) = action.error {
-                    output.push_str(&format!("    Error: {}\n", err));
-                }
-            }
-            output.push('\n');
-        }
-
-        if !git_actions.is_empty() {
-            output.push_str("Git Operations:\n");
-            for action in git_actions {
-                output.push_str(&format!(
-                    "  {} {}\n",
-                    action.status.indicator(),
-                    action.description()
-                ));
-                if let Some(ref err) = action.error {
-                    output.push_str(&format!("    Error: {}\n", err));
-                }
-            }
-            output.push('\n');
-        }
-
-        if completed + failed == total {
+        // Footer
+        if stats.is_complete() {
             output.push_str("Plan: Complete");
         } else {
             output.push_str("Executing plan... Alt+Esc to abort");
@@ -459,7 +461,7 @@ mod tests {
     #[test]
     fn test_planned_action_new() {
         let action = AgentAction::ReadFile {
-            path: "test.txt".to_string(),
+            paths: vec!["test.txt".to_string()],
         };
         let planned = PlannedAction::new(action);
         assert_eq!(planned.status, ActionStatus::Pending);
@@ -471,7 +473,7 @@ mod tests {
     fn test_plan_stats() {
         let mut plan = Plan::new(vec![
             AgentAction::ReadFile {
-                path: "a.txt".to_string(),
+                paths: vec!["a.txt".to_string()],
             },
             AgentAction::WriteFile {
                 path: "b.txt".to_string(),

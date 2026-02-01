@@ -54,11 +54,6 @@ impl ModeAwareExecutor {
 
             // Web search is safe
             AgentAction::WebSearch { .. } => false,
-
-            // Parallel operations are generally safe (read-only or informational)
-            AgentAction::ParallelRead { .. }
-                | AgentAction::ParallelWebSearch { .. }
-                | AgentAction::ParallelGitDiff { .. } => false,
         }
     }
 
@@ -100,7 +95,7 @@ impl ModeAwareExecutor {
         }
 
         // Execute the action
-        let result = execute_action(&action).await?;
+        let result = execute_action(&action).await;
 
         // Reset bypass confirmation after successful execution
         if self.bypass_confirmed {
@@ -123,8 +118,12 @@ impl ModeAwareExecutor {
     /// Get a human-readable description of an action
     pub fn describe_action(&self, action: &AgentAction) -> String {
         match action {
-            AgentAction::ReadFile { path } => {
-                format!("Read file: {}", path)
+            AgentAction::ReadFile { paths } => {
+                if paths.len() == 1 {
+                    format!("Read file: {}", paths[0])
+                } else {
+                    format!("Read {} files", paths.len())
+                }
             },
             AgentAction::WriteFile { path, content } => {
                 format!("Write file: {} ({} bytes)", path, content.len())
@@ -145,11 +144,15 @@ impl ModeAwareExecutor {
                     format!("Execute command: {}", command)
                 }
             },
-            AgentAction::GitDiff { path } => {
-                if let Some(p) = path {
-                    format!("Git diff for: {}", p)
+            AgentAction::GitDiff { paths } => {
+                if paths.len() == 1 {
+                    if let Some(p) = &paths[0] {
+                        format!("Git diff for: {}", p)
+                    } else {
+                        "Git diff (all files)".to_string()
+                    }
                 } else {
-                    format!("Git diff (all files)")
+                    format!("Git diff for {} paths", paths.len())
                 }
             },
             AgentAction::GitStatus => "Git status".to_string(),
@@ -160,17 +163,12 @@ impl ModeAwareExecutor {
                     format!("Git commit (all): {}", message)
                 }
             },
-            AgentAction::WebSearch { query, result_count } => {
-                format!("Web search: '{}' ({} results)", query, result_count)
-            },
-            AgentAction::ParallelRead { paths } => {
-                format!("Read {} files in parallel", paths.len())
-            },
-            AgentAction::ParallelWebSearch { queries } => {
-                format!("Search web with {} queries in parallel", queries.len())
-            },
-            AgentAction::ParallelGitDiff { paths } => {
-                format!("Git diff for {} paths in parallel", paths.len())
+            AgentAction::WebSearch { queries } => {
+                if queries.len() == 1 {
+                    format!("Web search: '{}' ({} results)", queries[0].0, queries[0].1)
+                } else {
+                    format!("Web search with {} queries", queries.len())
+                }
             },
         }
     }
@@ -207,7 +205,7 @@ mod tests {
 
         // Normal mode doesn't need confirmation for reads
         assert!(!executor.needs_confirmation(&AgentAction::ReadFile {
-            path: "test.txt".to_string(),
+            paths: vec!["test.txt".to_string()],
         }));
     }
 

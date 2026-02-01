@@ -49,15 +49,6 @@ pub fn read_binary_file(path: &str) -> Result<String> {
     Ok(general_purpose::STANDARD.encode(&bytes))
 }
 
-/// Read a binary file asynchronously and encode it as base64
-pub async fn read_binary_file_async(path: String) -> Result<String> {
-    tokio::task::spawn_blocking(move || {
-        read_binary_file(&path)
-    })
-    .await
-    .context("Failed to spawn blocking task for binary file read")?
-}
-
 /// Write content to a file atomically with timestamped backup
 pub fn write_file(path: &str, content: &str) -> Result<()> {
     let path = normalize_path(path)?;
@@ -260,7 +251,6 @@ fn validate_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     // Phase 2 Test Suite: Filesystem Operations - 10 comprehensive tests
 

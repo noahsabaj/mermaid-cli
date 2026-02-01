@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 /// Represents an action that the AI wants to perform
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentAction {
-    /// Read a file
+    /// Read one or more files (executor decides parallelization)
     ReadFile {
-        path: String,
+        paths: Vec<String>,
     },
     /// Write or create a file
     WriteFile {
@@ -25,31 +25,18 @@ pub enum AgentAction {
         command: String,
         working_dir: Option<String>,
     },
-    /// Git operations
+    /// Git diff for one or more paths (executor decides parallelization)
     GitDiff {
-        path: Option<String>,
+        paths: Vec<Option<String>>,
     },
     GitCommit {
         message: String,
         files: Vec<String>,
     },
     GitStatus,
-    /// Web search via local Searxng
+    /// Web search via local Searxng (executor decides parallelization)
     WebSearch {
-        query: String,
-        result_count: usize,
-    },
-    /// Read multiple files in parallel
-    ParallelRead {
-        paths: Vec<String>,
-    },
-    /// Perform multiple web searches in parallel
-    ParallelWebSearch {
         queries: Vec<(String, usize)>,
-    },
-    /// Perform multiple git diffs in parallel
-    ParallelGitDiff {
-        paths: Vec<Option<String>>,
     },
 }
 

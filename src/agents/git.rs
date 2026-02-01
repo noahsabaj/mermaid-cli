@@ -156,7 +156,6 @@ pub fn commit(message: &str, files: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
     // Phase 2 Test Suite: Git Operations - 8 comprehensive tests

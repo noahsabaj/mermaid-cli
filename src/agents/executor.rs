@@ -8,12 +8,14 @@ use tokio::time::timeout;
 use crate::agents::ActionResult;
 
 /// Execute a shell command and capture output
-pub async fn execute_command(command: &str, working_dir: Option<&str>) -> Result<ActionResult> {
+///
+/// Returns ActionResult directly - errors are captured in ActionResult::Error.
+pub async fn execute_command(command: &str, working_dir: Option<&str>) -> ActionResult {
     // Security checks
     if contains_dangerous_command(command) {
-        return Ok(ActionResult::Error {
+        return ActionResult::Error {
             error: format!("Dangerous command blocked: {}", command),
-        });
+        };
     }
 
     // Parse the command
@@ -46,16 +48,16 @@ pub async fn execute_command(command: &str, working_dir: Option<&str>) -> Result
     let timeout_duration = Duration::from_secs(30);
 
     match timeout(timeout_duration, run_command(cmd)).await {
-        Ok(Ok(output)) => Ok(ActionResult::Success { output }),
-        Ok(Err(e)) => Ok(ActionResult::Error {
+        Ok(Ok(output)) => ActionResult::Success { output },
+        Ok(Err(e)) => ActionResult::Error {
             error: format!("Command failed: {}", e),
-        }),
-        Err(_) => Ok(ActionResult::Error {
+        },
+        Err(_) => ActionResult::Error {
             error: format!(
                 "Command timed out after {} seconds",
                 timeout_duration.as_secs()
             ),
-        }),
+        },
     }
 }
 
@@ -172,9 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_safe_command() {
-        let result = execute_command("echo 'Hello, Mermaid!'", None)
-            .await
-            .unwrap();
+        let result = execute_command("echo 'Hello, Mermaid!'", None).await;
 
         match result {
             ActionResult::Success { output } => {
@@ -186,7 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dangerous_command_blocked() {
-        let result = execute_command("rm -rf /", None).await.unwrap();
+        let result = execute_command("rm -rf /", None).await;
 
         match result {
             ActionResult::Error { error } => {

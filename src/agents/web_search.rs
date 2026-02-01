@@ -3,6 +3,9 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use tracing::warn;
+
+use crate::utils::{retry_async, RetryConfig};
 
 /// Result from a web search
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,32 +84,51 @@ impl WebSearchClient {
             return Err(anyhow!("Result count must be between 1 and 10, got {}", count));
         }
 
-        // Query Searxng
+        // Query Searxng with retry logic
         let encoded_query = urlencoding::encode(query);
         let url = format!(
             "{}/search?q={}&format=json&pageno=1",
             self.searxng_url, encoded_query
         );
 
-        let response = self
-            .client
-            .get(&url)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to reach Searxng (is it running?): {}", e))?;
+        // Retry config for Searxng queries (3 attempts, quick backoff)
+        let retry_config = RetryConfig {
+            max_attempts: 3,
+            initial_delay_ms: 500,
+            max_delay_ms: 5000,
+            backoff_multiplier: 2.0,
+        };
 
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "Searxng returned error status: {}",
-                response.status()
-            ));
-        }
+        let client = self.client.clone();
+        let url_clone = url.clone();
+        let searxng_response: SearxngResponse = retry_async(
+            || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                async move {
+                    let response = client
+                        .get(&url)
+                        .timeout(Duration::from_secs(30))
+                        .send()
+                        .await
+                        .map_err(|e| anyhow!("Failed to reach Searxng (is it running?): {}", e))?;
 
-        let searxng_response: SearxngResponse = response
-            .json()
-            .await
-            .map_err(|e| anyhow!("Failed to parse Searxng response: {}", e))?;
+                    if !response.status().is_success() {
+                        return Err(anyhow!(
+                            "Searxng returned error status: {}",
+                            response.status()
+                        ));
+                    }
+
+                    response
+                        .json::<SearxngResponse>()
+                        .await
+                        .map_err(|e| anyhow!("Failed to parse Searxng response: {}", e))
+                }
+            },
+            &retry_config,
+        )
+        .await?;
 
         // Take top N results
         let mut search_results = Vec::new();
@@ -123,7 +145,7 @@ impl WebSearchClient {
                 }
                 Err(e) => {
                     // If full page fetch fails, use snippet only
-                    eprintln!("[WARN] Failed to fetch full page {}: {}", result.url, e);
+                    warn!(url = %result.url, "Failed to fetch full page: {}", e);
                     search_results.push(SearchResult {
                         title: result.title.clone(),
                         url: result.url.clone(),
@@ -148,22 +170,41 @@ impl WebSearchClient {
             return Err(anyhow!("Invalid URL: {}", url));
         }
 
-        let response = self
-            .client
-            .get(url)
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to fetch {}: {}", url, e))?;
+        // Retry config for page fetches (2 attempts, shorter timeout)
+        let retry_config = RetryConfig {
+            max_attempts: 2,
+            initial_delay_ms: 200,
+            max_delay_ms: 2000,
+            backoff_multiplier: 2.0,
+        };
 
-        if !response.status().is_success() {
-            return Err(anyhow!("Failed to fetch {}: {}", url, response.status()));
-        }
+        let client = self.client.clone();
+        let url_owned = url.to_string();
+        let html = retry_async(
+            || {
+                let client = client.clone();
+                let url = url_owned.clone();
+                async move {
+                    let response = client
+                        .get(&url)
+                        .timeout(Duration::from_secs(15))
+                        .send()
+                        .await
+                        .map_err(|e| anyhow!("Failed to fetch {}: {}", url, e))?;
 
-        let html = response
-            .text()
-            .await
-            .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
+                    if !response.status().is_success() {
+                        return Err(anyhow!("Failed to fetch {}: {}", url, response.status()));
+                    }
+
+                    response
+                        .text()
+                        .await
+                        .map_err(|e| anyhow!("Failed to read response body: {}", e))
+                }
+            },
+            &retry_config,
+        )
+        .await?;
 
         // Convert HTML to markdown
         let markdown = html2md::parse_html(&html);
