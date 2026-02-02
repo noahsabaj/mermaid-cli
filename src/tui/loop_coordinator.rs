@@ -110,7 +110,7 @@ pub async fn run_app_loop(
                 // Process any queued messages after generation completes
                 // This handles the case where user typed messages while model was generating
                 // and there were no tool calls to trigger the agent loop
-                while app.operation_state.has_queued_message() {
+                'queue_loop: while app.operation_state.has_queued_message() {
                     if let Some(queued_msg) = app.operation_state.take_queued_message() {
                         // Submit the queued message as if user pressed Enter
                         handle_message_submit(app, queued_msg, &tx, viewport_height).await;
@@ -119,6 +119,52 @@ pub async fn run_app_loop(
                         loop {
                             // Draw UI while waiting
                             terminal.draw(|f| render_ui(f, app))?;
+
+                            // Check for Esc or Ctrl+C to interrupt queued message processing
+                            if event::poll(Duration::from_millis(10))? {
+                                if let event::Event::Key(key) = event::read()? {
+                                    if key.kind == crossterm::event::KeyEventKind::Press {
+                                        match key.code {
+                                            crossterm::event::KeyCode::Esc => {
+                                                // Abort current generation
+                                                if let Some(abort) = app.abort_generation() {
+                                                    abort.abort();
+                                                }
+                                                // Save partial response
+                                                if !app.current_response.is_empty() {
+                                                    app.add_message(MessageRole::Assistant, app.current_response.clone());
+                                                    app.current_response.clear();
+                                                }
+                                                // Clear remaining queued messages
+                                                let cleared = app.operation_state.queued_message_count();
+                                                while app.operation_state.take_queued_message().is_some() {}
+                                                if cleared > 0 {
+                                                    app.set_status(format!("Interrupted - cleared {} queued message(s)", cleared));
+                                                } else {
+                                                    app.set_status("Generation stopped");
+                                                }
+                                                break 'queue_loop;
+                                            },
+                                            crossterm::event::KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                                                // Ctrl+C: same as Esc
+                                                if let Some(abort) = app.abort_generation() {
+                                                    abort.abort();
+                                                }
+                                                if !app.current_response.is_empty() {
+                                                    app.add_message(MessageRole::Assistant, app.current_response.clone());
+                                                    app.current_response.clear();
+                                                }
+                                                while app.operation_state.take_queued_message().is_some() {}
+                                                app.set_status("Interrupted");
+                                                break 'queue_loop;
+                                            },
+                                            _ => {
+                                                // Ignore other keys during queue processing
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             match process_stream_chunks(app, rx).await? {
                                 StreamStatus::Streaming => {
@@ -141,9 +187,6 @@ pub async fn run_app_loop(
                                     break;
                                 },
                             }
-
-                            // Brief sleep to avoid busy-wait
-                            tokio::time::sleep(Duration::from_millis(10)).await;
                         }
                     }
                 }
