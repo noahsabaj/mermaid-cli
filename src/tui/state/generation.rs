@@ -4,7 +4,7 @@
 
 use std::time::Instant;
 
-use crate::agents::{AgentAction, ModeAwareExecutor, Plan};
+use crate::agents::AgentAction;
 
 /// Generation status for the status line
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,28 +48,9 @@ pub enum AppState {
         abort_handle: Option<tokio::task::AbortHandle>,
     },
 
-    /// Generation complete, waiting for action confirmation
-    AwaitingActionConfirmation {
-        action: AgentAction,
-        executor: ModeAwareExecutor,
-    },
-
     /// Executing an action
     ExecutingAction {
         action: AgentAction,
-        start_time: Instant,
-    },
-
-    /// Waiting for user to approve a plan
-    AwaitingPlanApproval {
-        plan: Plan,
-        explanation: Option<String>,
-    },
-
-    /// Executing a plan step-by-step
-    ExecutingPlan {
-        plan: Plan,
-        current_step: usize,
         start_time: Instant,
     },
 
@@ -123,47 +104,9 @@ impl AppState {
         }
     }
 
-    /// Get pending action if awaiting confirmation
-    pub fn pending_action(&self) -> Option<&AgentAction> {
-        match self {
-            AppState::AwaitingActionConfirmation { action, .. } => Some(action),
-            _ => None,
-        }
-    }
-
-    /// Get executor if awaiting confirmation
-    pub fn pending_executor(&self) -> Option<&ModeAwareExecutor> {
-        match self {
-            AppState::AwaitingActionConfirmation { executor, .. } => Some(executor),
-            _ => None,
-        }
-    }
-
-    /// Check if awaiting plan approval
-    pub fn is_awaiting_plan_approval(&self) -> bool {
-        matches!(self, AppState::AwaitingPlanApproval { .. })
-    }
-
-    /// Get active plan if in plan-related state
-    pub fn active_plan(&self) -> Option<&Plan> {
-        match self {
-            AppState::AwaitingPlanApproval { plan, .. } => Some(plan),
-            AppState::ExecutingPlan { plan, .. } => Some(plan),
-            _ => None,
-        }
-    }
-
     /// Check if currently reading file feedback
     pub fn is_reading_file_feedback(&self) -> bool {
         matches!(self, AppState::ReadingFileFeedback { .. })
-    }
-
-    /// Get current plan step if executing plan
-    pub fn plan_current_step(&self) -> Option<usize> {
-        match self {
-            AppState::ExecutingPlan { current_step, .. } => Some(*current_step),
-            _ => None,
-        }
     }
 
     /// Get action start time if executing

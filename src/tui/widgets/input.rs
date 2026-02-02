@@ -61,6 +61,8 @@ pub struct InputWidget<'a> {
     pub input: &'a str,
     pub showing_command_hints: bool,
     pub theme: &'a Theme,
+    /// Thinking mode state: Some(true)=ON (blue), Some(false)=OFF, None=unsupported
+    pub thinking_enabled: Option<bool>,
 }
 
 impl<'a> StatefulWidget for InputWidget<'a> {
@@ -156,15 +158,25 @@ impl<'a> StatefulWidget for InputWidget<'a> {
 
         // Build block - only add title when showing command hints
         // Use top and bottom borders to span full width like Claude Code
+        // Border color: cyan/sage blue when thinking is ON, gray otherwise
+        let border_color = if self.showing_command_hints {
+            self.theme.colors.warning.to_color()
+        } else if self.thinking_enabled == Some(true) {
+            // Mermaid sage blue - same as the path color in status bar
+            self.theme.colors.info.to_color() // cyan
+        } else {
+            self.theme.colors.border.to_color() // gray
+        };
+
         let block = if self.showing_command_hints {
             Block::default()
                 .borders(Borders::TOP | Borders::BOTTOM)
-                .border_style(Style::new().fg(self.theme.colors.warning.to_color()))
+                .border_style(Style::new().fg(border_color))
                 .title(" Enter Command ")
         } else {
             Block::default()
                 .borders(Borders::TOP | Borders::BOTTOM)
-                .border_style(Style::new().fg(self.theme.colors.border.to_color()))
+                .border_style(Style::new().fg(border_color))
         };
 
         let input = Paragraph::new(input_text)

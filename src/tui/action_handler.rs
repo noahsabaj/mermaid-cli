@@ -1,14 +1,12 @@
 use anyhow::Result;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::agents::{
-    self, ActionDisplay, ActionResult as AgentActionResult, AgentAction, ModeAwareExecutor,
+    self, execute_action, ActionDisplay, ActionResult as AgentActionResult, AgentAction,
 };
 use crate::models::{ChatMessage, MessageRole, ModelConfig, StreamCallback, ToolCall};
-use crate::tui::{App, ConfirmationState, FileInfo};
-use crate::utils::count_file_tokens;
+use crate::tui::App;
 
 /// Result of executing a tool call
 /// Used for building proper Tool messages in the agent loop
@@ -26,140 +24,36 @@ pub struct ToolExecutionResult {
 
 /// Execute a list of agent actions
 ///
-/// Actions are executed sequentially. If an action requires confirmation,
-/// execution pauses and waits for user input (Alt+Y/N).
+/// Actions are executed sequentially without confirmation (Full YOLO mode).
 pub async fn execute_actions(
     app: &mut App,
     actions: Vec<AgentAction>,
     tx: &mpsc::Sender<String>,
 ) -> Result<()> {
-    // Create mode-aware executor
-    let mut executor = ModeAwareExecutor::new(app.operation_state.operation_mode.clone());
-
     for action in actions {
-        // Check if action needs confirmation
-        if executor.needs_confirmation(&action) {
-            // Create confirmation state for inline display
-            let action_desc = executor.describe_action(&action);
+        let action_clone = action.clone();
 
-            // Extract preview and file info for WriteFile actions
-            let (preview_lines, file_info) = match &action {
-                AgentAction::WriteFile { path, content } => {
-                    let lines: Vec<String> =
-                        content.lines().take(5).map(|s| s.to_string()).collect();
-                    let info = FileInfo {
-                        path: path.clone(),
-                        size: content.len(),
-                        exists: Path::new(path).exists(),
-                        language: detect_language(path),
-                    };
-                    (lines, Some(info))
-                },
-                _ => (vec![], None),
-            };
-
-            // Set confirmation state
-            app.operation_state.confirmation_state = Some(ConfirmationState {
-                action: action.clone(),
-                action_description: action_desc,
-                preview_lines,
-                file_info,
-                allow_always: matches!(action, AgentAction::WriteFile { .. }),
-            });
-
-            // Store executor and action in AppState
-            app.set_pending_action(action, executor);
-            break; // Wait for user confirmation
-        } else {
-            // Clone action to check type after execution
-            let action_clone = action.clone();
-
-            // Execute action directly
-            match executor.execute(action).await {
-                Ok(agents::ActionResult::Success { output }) => {
-                    // Handle action-specific success logic
-                    handle_action_success(app, &action_clone, output, tx).await?;
-                },
-                Ok(agents::ActionResult::Error { error }) => {
-                    // Add action display to show the failed action in chat
-                    let action_display = build_action_display(&action_clone, &error);
-                    if let Some(last_msg) = app
-                        .session_state
-                        .messages
-                        .iter_mut()
-                        .rev()
-                        .find(|m| matches!(m.role, MessageRole::Assistant))
-                    {
-                        last_msg.actions.push(action_display);
-                    }
-
-                    // Use unified error display (status bar + chat)
-                    app.display_error_simple(&error);
-                },
-                Err(e) => {
-                    // System error - use unified error display
-                    app.display_error_simple(e.to_string());
-                },
+        // Execute action directly
+        match execute_action(&action).await {
+            agents::ActionResult::Success { output } => {
+                handle_action_success(app, &action_clone, output, tx).await?;
             }
-        }
-    }
-
-    Ok(())
-}
-
-/// Confirm or reject a pending action
-///
-/// This is called when the user presses Alt+Y (approve) or Alt+N (reject).
-pub async fn confirm_action(
-    app: &mut App,
-    approved: bool,
-    tx: &mpsc::Sender<String>,
-) -> Result<()> {
-    if approved {
-        // Approve and execute the action
-        if let Some(confirmation) = app.operation_state.confirmation_state.take() {
-            app.set_status(format!("Executing: {}...", confirmation.action_description));
-
-            // Get the executor from app_state
-            if let Some(mut executor) = app.app_state.pending_executor().cloned() {
-                let action_clone = confirmation.action.clone();
-
-                // Clear the pending action state
-                app.clear_pending_action();
-
-                // Execute the action
-                match executor.execute(confirmation.action).await {
-                    Ok(agents::ActionResult::Success { output }) => {
-                        handle_action_success(app, &action_clone, output, tx).await?;
-                    },
-                    Ok(agents::ActionResult::Error { error }) => {
-                        // Add action display to show the failed action in chat
-                        let action_display = build_action_display(&action_clone, &error);
-                        if let Some(last_msg) = app
-                            .session_state
-                            .messages
-                            .iter_mut()
-                            .rev()
-                            .find(|m| matches!(m.role, MessageRole::Assistant))
-                        {
-                            last_msg.actions.push(action_display);
-                        }
-
-                        // Use unified error display (status bar + chat)
-                        app.display_error_simple(&error);
-                    },
-                    Err(e) => {
-                        // System error - use unified error display
-                        app.display_error_simple(e.to_string());
-                    },
+            agents::ActionResult::Error { error } => {
+                // Add action display to show the failed action in chat
+                let action_display = build_action_display(&action_clone, &error);
+                if let Some(last_msg) = app
+                    .session_state
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| matches!(m.role, MessageRole::Assistant))
+                {
+                    last_msg.actions.push(action_display);
                 }
+
+                // Use unified error display (status bar + chat)
+                app.display_error_simple(&error);
             }
-        }
-    } else {
-        // Reject the action
-        if app.operation_state.confirmation_state.take().is_some() {
-            app.set_status("Action skipped");
-            app.clear_pending_action();
         }
     }
 
@@ -215,34 +109,25 @@ async fn handle_action_success(
             } else {
                 trigger_feedback_loop(app, action, output, tx).await;
             }
-        },
+        }
         AgentAction::WebSearch { .. } => {
             trigger_feedback_loop(app, action, output, tx).await;
-        },
+        }
         AgentAction::ExecuteCommand { .. } => {
             trigger_feedback_loop(app, action, output, tx).await;
-        },
+        }
         AgentAction::GitDiff { .. } => {
             trigger_feedback_loop(app, action, output, tx).await;
-        },
+        }
         AgentAction::GitStatus => {
             trigger_feedback_loop(app, action, output, tx).await;
-        },
+        }
 
-        // Actions that just update context, no follow-through needed
-        AgentAction::WriteFile { path, content } => {
-            app.context.add_file(path.clone(), content.clone());
-            let tokens = count_file_tokens(content, &app.model_state.model_name);
-            app.context.token_count += tokens;
-        },
-        AgentAction::DeleteFile { path } => {
-            if let Some(content) = app.context.files.remove(path) {
-                let tokens = count_file_tokens(&content, &app.model_state.model_name);
-                app.context.token_count = app.context.token_count.saturating_sub(tokens);
-            }
-        },
-        AgentAction::CreateDirectory { .. } => {},
-        AgentAction::GitCommit { .. } => {},
+        // These actions are handled by the tool execution, nothing extra needed
+        AgentAction::WriteFile { .. } => {}
+        AgentAction::DeleteFile { .. } => {}
+        AgentAction::CreateDirectory { .. } => {}
+        AgentAction::GitCommit { .. } => {}
     }
 
     Ok(())
@@ -275,7 +160,7 @@ fn build_action_display_with_timing(
                 item_count: None,
                 failed_items: None,
             }
-        },
+        }
         AgentAction::ReadFile { paths } => {
             let line_count = output.lines().count();
             if paths.len() == 1 {
@@ -309,7 +194,7 @@ fn build_action_display_with_timing(
                     failed_items: None,
                 }
             }
-        },
+        }
         AgentAction::ExecuteCommand { command, .. } => ActionDisplay {
             action_type: "Bash".to_string(),
             target: command.clone(),
@@ -379,12 +264,17 @@ fn build_action_display_with_timing(
                     line_count: Some(output.lines().count()),
                     file_content: None,
                     duration_seconds,
-                    targets: Some(paths.iter().map(|p| p.clone().unwrap_or_else(|| "*".to_string())).collect()),
+                    targets: Some(
+                        paths
+                            .iter()
+                            .map(|p| p.clone().unwrap_or_else(|| "*".to_string()))
+                            .collect(),
+                    ),
                     item_count: Some(paths.len()),
                     failed_items: None,
                 }
             }
-        },
+        }
         AgentAction::GitStatus => ActionDisplay {
             action_type: "GitStatus".to_string(),
             target: ".".to_string(),
@@ -446,7 +336,7 @@ fn build_action_display_with_timing(
                     failed_items: None,
                 }
             }
-        },
+        }
     }
 }
 
@@ -463,129 +353,6 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
             lines.len() - max_lines
         )
     }
-}
-
-/// Detect programming language from file extension
-///
-/// Used to provide context for file previews in confirmation dialogs.
-fn detect_language(path: &str) -> Option<String> {
-    let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
-
-    match ext {
-        "rs" => Some("Rust".to_string()),
-        "py" => Some("Python".to_string()),
-        "js" | "jsx" => Some("JavaScript".to_string()),
-        "ts" | "tsx" => Some("TypeScript".to_string()),
-        "go" => Some("Go".to_string()),
-        "java" => Some("Java".to_string()),
-        "c" => Some("C".to_string()),
-        "cpp" | "cc" | "cxx" => Some("C++".to_string()),
-        "h" | "hpp" => Some("C/C++ Header".to_string()),
-        "rb" => Some("Ruby".to_string()),
-        "php" => Some("PHP".to_string()),
-        "swift" => Some("Swift".to_string()),
-        "kt" => Some("Kotlin".to_string()),
-        "scala" => Some("Scala".to_string()),
-        "sh" | "bash" => Some("Shell".to_string()),
-        "yaml" | "yml" => Some("YAML".to_string()),
-        "toml" => Some("TOML".to_string()),
-        "json" => Some("JSON".to_string()),
-        "xml" => Some("XML".to_string()),
-        "html" => Some("HTML".to_string()),
-        "css" | "scss" | "sass" => Some("CSS".to_string()),
-        "md" => Some("Markdown".to_string()),
-        _ => None,
-    }
-}
-
-/// Approve a plan and start executing it
-pub async fn approve_plan(app: &mut App, tx: &mpsc::Sender<String>) -> Result<()> {
-    if app.app_state.active_plan().is_none() {
-        return Ok(());
-    }
-
-    app.start_plan_execution();
-
-    // Execute the first action in the plan
-    execute_plan_step(app, tx).await
-}
-
-/// Cancel a pending plan
-pub fn cancel_plan(app: &mut App) {
-    app.cancel_plan();
-}
-
-/// Execute the next step in a plan
-/// This is called repeatedly as each action completes
-pub async fn execute_plan_step(app: &mut App, tx: &mpsc::Sender<String>) -> Result<()> {
-    // Check if plan still exists and get the next action
-    let next_action = if let Some(plan) = app.app_state.active_plan() {
-        plan.next_pending_action().map(|(_, action)| action.clone())
-    } else {
-        None
-    };
-
-    if let Some(planned_action) = next_action {
-        let action = planned_action.action.clone();
-        let action_clone = action.clone();
-        let mut executor = ModeAwareExecutor::new(app.operation_state.operation_mode.clone());
-
-        // Execute action directly in plan mode
-        match executor.execute(action).await {
-            Ok(agents::ActionResult::Success { output }) => {
-                app.mark_plan_action_completed(Some(agents::ActionResult::Success {
-                    output: output.clone(),
-                }));
-
-                // Handle action-specific post-processing
-                handle_action_success(app, &action_clone, output, tx).await?;
-
-                // Update plan display and get stats for status message
-                if let Some(plan) = app.app_state.active_plan() {
-                    let stats = plan.stats();
-                    if stats.is_complete() {
-                        app.set_status(format!(
-                            "Plan complete: {}/{} actions succeeded",
-                            stats.completed, stats.total
-                        ));
-                    } else {
-                        app.set_status(format!(
-                            "Plan executing: {}/{}",
-                            stats.completed + stats.failed + stats.skipped,
-                            stats.total
-                        ));
-                    }
-                }
-            },
-            Ok(agents::ActionResult::Error { error }) => {
-                app.mark_plan_action_failed(error.clone());
-                // Use unified error display (status bar + chat)
-                app.display_error("Plan action failed", &error);
-            },
-            Err(e) => {
-                let error_msg = e.to_string();
-                app.mark_plan_action_failed(error_msg.clone());
-                // Use unified error display (status bar + chat)
-                app.display_error("Plan action error", error_msg);
-            },
-        }
-    } else {
-        // Plan is complete
-        if let Some(plan) = app.app_state.active_plan() {
-            let stats = plan.stats();
-            let message = if stats.has_failures() {
-                format!(
-                    "Plan completed with {} failures ({}/{} successful)",
-                    stats.failed, stats.completed, stats.total
-                )
-            } else {
-                format!("Plan completed successfully ({} actions)", stats.total)
-            };
-            app.set_status(message);
-        }
-    }
-
-    Ok(())
 }
 
 /// Build feedback prompt for action results based on action type
@@ -652,23 +419,17 @@ fn build_feedback_prompt(action: &AgentAction, output: &str) -> String {
 }
 
 /// Trigger the unified multi-step feedback loop for action follow-through
-///
-/// This handles synthesizing/analyzing action results by sending them back
-/// to the model along with context, triggering re-generation with analysis.
 async fn trigger_feedback_loop(
     app: &mut App,
     action: &AgentAction,
     output: String,
     tx: &mpsc::Sender<String>,
 ) {
-    // Build the feedback prompt
     let feedback_prompt = build_feedback_prompt(action, &output);
     if feedback_prompt.is_empty() {
-        // Action doesn't need follow-through
         return;
     }
 
-    // Set feedback tracking flags
     app.operation_state.pending_file_read = true;
     if app.operation_state.reading_file_status.is_none() {
         app.operation_state.reading_file_status = Some("Analyzing action results...".to_string());
@@ -676,14 +437,10 @@ async fn trigger_feedback_loop(
     }
 
     app.current_response.clear();
-
-    // Add feedback as system message
     app.add_message(MessageRole::System, feedback_prompt.clone());
     let messages = app.build_message_history();
 
-    // Send feedback to model for re-generation with analysis
     let model = app.model_state.model.clone();
-    let context = app.context.clone();
     let tx_clone = tx.clone();
     let tx_done = tx.clone();
 
@@ -695,35 +452,29 @@ async fn trigger_feedback_loop(
 
         let model = model.write().await;
         match model
-            .chat(&messages, &context, &config, Some(callback))
+            .chat(&messages, &config, Some(callback))
             .await
         {
             Ok(_) => {
                 let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
             }
             Err(e) => {
-                // Send structured error for rich UX display
                 let error_json = e.to_channel_message();
                 let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
             }
         }
     });
 
-    // Start generation state with abort handle from the spawned task
     app.start_generation(handle.abort_handle());
 }
 
 /// Trigger multimodal feedback loop for binary files (PDFs, images)
-///
-/// This attaches the base64-encoded file to the message's images array
-/// so vision-capable models can analyze it natively.
 async fn trigger_multimodal_feedback_loop(
     app: &mut App,
     action: &AgentAction,
     base64_data: String,
     tx: &mpsc::Sender<String>,
 ) {
-    // Build the feedback prompt for binary files
     let feedback_prompt = match action {
         AgentAction::ReadFile { paths } => {
             if paths.len() == 1 {
@@ -738,10 +489,9 @@ async fn trigger_multimodal_feedback_loop(
                 )
             }
         }
-        _ => return, // Only handle ReadFile for now
+        _ => return,
     };
 
-    // Set feedback tracking flags
     app.operation_state.pending_file_read = true;
     if app.operation_state.reading_file_status.is_none() {
         app.operation_state.reading_file_status = Some("Analyzing document...".to_string());
@@ -750,10 +500,7 @@ async fn trigger_multimodal_feedback_loop(
 
     app.current_response.clear();
 
-    // Add feedback as system message with images attached
     let mut messages = app.build_message_history();
-
-    // Create a new message with the base64 image attached
     let feedback_message = ChatMessage {
         role: MessageRole::System,
         content: feedback_prompt,
@@ -765,12 +512,9 @@ async fn trigger_multimodal_feedback_loop(
         tool_call_id: None,
         tool_name: None,
     };
-
     messages.push(feedback_message);
 
-    // Send feedback to model for re-generation with analysis
     let model = app.model_state.model.clone();
-    let context = app.context.clone();
     let tx_clone = tx.clone();
     let tx_done = tx.clone();
 
@@ -782,21 +526,19 @@ async fn trigger_multimodal_feedback_loop(
 
         let model = model.write().await;
         match model
-            .chat(&messages, &context, &config, Some(callback))
+            .chat(&messages, &config, Some(callback))
             .await
         {
             Ok(_) => {
                 let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
             }
             Err(e) => {
-                // Send structured error for rich UX display
                 let error_json = e.to_channel_message();
                 let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
             }
         }
     });
 
-    // Start generation state with abort handle from the spawned task
     app.start_generation(handle.abort_handle());
 }
 
@@ -805,20 +547,16 @@ async fn trigger_multimodal_feedback_loop(
 /// This is the main function for the agentic flow. It:
 /// 1. Takes tool_calls from the model response
 /// 2. Converts each to an AgentAction
-/// 3. Executes the action
-/// 4. Returns ToolExecutionResult for each, which will be added as Tool messages
-///
-/// The loop_coordinator then adds these as Tool messages and calls the model again.
+/// 3. Executes the action directly (no confirmation)
+/// 4. Returns ToolExecutionResult for each
 pub async fn execute_tool_calls_for_agent_loop(
     app: &mut App,
     tool_calls: &[ToolCall],
 ) -> Vec<ToolExecutionResult> {
     let mut results = Vec::new();
-    let mut executor = ModeAwareExecutor::new(app.operation_state.operation_mode.clone());
 
     for tool_call in tool_calls {
         let tool_call_id = tool_call.id.clone().unwrap_or_else(|| {
-            // Generate a unique ID if not provided (timestamp + random component)
             use std::time::{SystemTime, UNIX_EPOCH};
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -832,7 +570,6 @@ pub async fn execute_tool_calls_for_agent_loop(
         let action = match tool_call.to_agent_action() {
             Ok(action) => action,
             Err(e) => {
-                // Return error result for invalid tool call
                 results.push(ToolExecutionResult {
                     tool_call_id,
                     tool_name,
@@ -843,24 +580,10 @@ pub async fn execute_tool_calls_for_agent_loop(
             }
         };
 
-        // Check if action needs confirmation
-        if executor.needs_confirmation(&action) {
-            // For now, return a message indicating confirmation is needed
-            // In a full implementation, this would pause and wait for user input
-            let action_desc = executor.describe_action(&action);
-            results.push(ToolExecutionResult {
-                tool_call_id,
-                tool_name,
-                content: format!("Action requires user confirmation: {}", action_desc),
-                success: false,
-            });
-            continue;
-        }
-
-        // Execute the action
+        // Execute the action directly
         let action_clone = action.clone();
-        match executor.execute(action).await {
-            Ok(agents::ActionResult::Success { output }) => {
+        match execute_action(&action).await {
+            agents::ActionResult::Success { output } => {
                 // Build ActionDisplay for UI rendering
                 let action_display = build_action_display(&action_clone, &output);
 
@@ -875,22 +598,6 @@ pub async fn execute_tool_calls_for_agent_loop(
                     last_msg.actions.push(action_display);
                 }
 
-                // Update context for write/delete operations
-                match &action_clone {
-                    AgentAction::WriteFile { path, content } => {
-                        app.context.add_file(path.clone(), content.clone());
-                        let tokens = count_file_tokens(content, &app.model_state.model_name);
-                        app.context.token_count += tokens;
-                    }
-                    AgentAction::DeleteFile { path } => {
-                        if let Some(content) = app.context.files.remove(path) {
-                            let tokens = count_file_tokens(&content, &app.model_state.model_name);
-                            app.context.token_count = app.context.token_count.saturating_sub(tokens);
-                        }
-                    }
-                    _ => {}
-                }
-
                 results.push(ToolExecutionResult {
                     tool_call_id,
                     tool_name,
@@ -898,8 +605,7 @@ pub async fn execute_tool_calls_for_agent_loop(
                     success: true,
                 });
             }
-            Ok(agents::ActionResult::Error { error }) => {
-                // Add action display to show the failed action in chat
+            agents::ActionResult::Error { error } => {
                 let action_display = build_action_display(&action_clone, &error);
                 if let Some(last_msg) = app
                     .session_state
@@ -915,14 +621,6 @@ pub async fn execute_tool_calls_for_agent_loop(
                     tool_call_id,
                     tool_name,
                     content: format!("Error: {}", error),
-                    success: false,
-                });
-            }
-            Err(e) => {
-                results.push(ToolExecutionResult {
-                    tool_call_id,
-                    tool_name,
-                    content: format!("System error: {}", e),
                     success: false,
                 });
             }

@@ -12,7 +12,7 @@ use crate::utils::MutexExt;
 /// Cache for layout calculations to improve performance
 #[derive(Clone)]
 struct LayoutCache {
-    main_layout: Option<(u16, u16, Vec<Rect>)>, // (width, height, rects)
+    main_layout: Option<(u16, u16, u16, Vec<Rect>)>, // (width, input_height, status_height, rects)
 }
 
 impl LayoutCache {
@@ -22,10 +22,10 @@ impl LayoutCache {
         }
     }
 
-    fn get_main_layout(&mut self, area: Rect, input_height: u16) -> Vec<Rect> {
+    fn get_main_layout(&mut self, area: Rect, input_height: u16, status_line_height: u16) -> Vec<Rect> {
         // Check if cached layout is still valid (cheap clone of Copy types)
-        if let Some((w, h, ref rects)) = self.main_layout {
-            if w == area.width && h == input_height {
+        if let Some((w, ih, sh, ref rects)) = self.main_layout {
+            if w == area.width && ih == input_height && sh == status_line_height {
                 return rects.clone(); // Cheap: Vec of Copy types (5 Rects = ~40 bytes)
             }
         }
@@ -39,14 +39,14 @@ impl LayoutCache {
             .flex(Flex::Start)  // Align to top
             .constraints([
                 Constraint::Min(10),    // Main content / Chat area (grows to fill)
-                Constraint::Length(1),  // Status line (single line, only when generating)
+                Constraint::Length(status_line_height),  // Status line (1-2 lines depending on queued message)
                 Constraint::Length(input_height),  // Dynamic input height (3-8 lines)
                 Constraint::Length(2),  // Status bar (compact, 2 lines)
             ])
             .split(area);
 
         let layout_vec = layout.to_vec();
-        self.main_layout = Some((area.width, input_height, layout_vec.clone()));
+        self.main_layout = Some((area.width, input_height, status_line_height, layout_vec.clone()));
         layout_vec
     }
 }
@@ -84,10 +84,14 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
     };
     let input_height = (input_lines + 2) as u16; // +2 for borders
 
+    // Calculate status line height: 1 + number of queued messages
+    let queued_count = app.operation_state.queued_message_count();
+    let status_line_height = (1 + queued_count).min(6) as u16; // Cap at 6 lines
+
     // Use cached layout for better performance
     let chunks = {
         let mut cache = LAYOUT_CACHE.lock_mut_safe();
-        cache.get_main_layout(frame.area(), input_height)
+        cache.get_main_layout(frame.area(), input_height, status_line_height)
     };
 
     // Render chat area with horizontal padding using new ChatWidget
@@ -98,7 +102,6 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
     let chat_widget = ChatWidget {
         messages: &app.session_state.messages,
         is_generating: app.app_state.is_generating(),
-        confirmation_state: app.operation_state.confirmation_state.as_ref(),
         pending_file_read: app.operation_state.pending_file_read,
         reading_file_status: app.operation_state.reading_file_status.as_deref(),
         theme: &app.ui_state.theme,
@@ -119,6 +122,7 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
             elapsed_secs,
             tokens_received: app.app_state.tokens_received().unwrap_or(0),
             theme: &app.ui_state.theme,
+            queued_messages: app.operation_state.get_queued_messages(),
         };
         frame.render_widget(status_line_widget, chunks[1]);
     }
@@ -128,6 +132,7 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         input: app.input.get(),
         showing_command_hints: app.input.get().starts_with(':'),
         theme: &app.ui_state.theme,
+        thinking_enabled: app.model_state.thinking_enabled,
     };
     frame.render_stateful_widget(input_widget, chunks[2], &mut app.ui_state.input_state);
 
@@ -149,12 +154,11 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
 
     // Render status bar using new StatusWidget (now at chunks[3])
     let status_widget = StatusWidget {
-        operation_mode: app.operation_state.operation_mode,
-        confirmation_pending: app.operation_state.confirmation_state.is_some(),
         theme: &app.ui_state.theme,
         working_dir: &app.working_dir,
         cumulative_tokens: app.session_state.cumulative_tokens,
         model_name: &app.model_state.model_name,
+        thinking_enabled: app.model_state.thinking_enabled,
     };
     frame.render_widget(status_widget, chunks[3]);
 }

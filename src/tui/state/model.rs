@@ -12,6 +12,11 @@ pub struct ModelState {
     pub model: Arc<RwLock<Box<dyn Model>>>,
     pub model_id: String,
     pub model_name: String,
+    /// Thinking mode state:
+    /// - Some(true) = model supports thinking, currently enabled
+    /// - Some(false) = model supports thinking, currently disabled
+    /// - None = model does not support thinking (or unknown)
+    pub thinking_enabled: Option<bool>,
 }
 
 impl ModelState {
@@ -21,11 +26,36 @@ impl ModelState {
             model: Arc::new(RwLock::new(model)),
             model_id,
             model_name,
+            // Default: thinking enabled (will be disabled if model doesn't support it)
+            thinking_enabled: Some(true),
         }
     }
 
     /// Get a reference to the model for reading
     pub fn model_ref(&self) -> &Arc<RwLock<Box<dyn Model>>> {
         &self.model
+    }
+
+    /// Toggle thinking mode (only if model supports it)
+    /// Returns the new state, or None if model doesn't support thinking
+    pub fn toggle_thinking(&mut self) -> Option<bool> {
+        match self.thinking_enabled {
+            Some(enabled) => {
+                self.thinking_enabled = Some(!enabled);
+                self.thinking_enabled
+            }
+            None => None, // Model doesn't support thinking, can't toggle
+        }
+    }
+
+    /// Mark model as not supporting thinking
+    /// Called when we get "does not support thinking" error from Ollama
+    pub fn disable_thinking_support(&mut self) {
+        self.thinking_enabled = None;
+    }
+
+    /// Check if thinking is currently active
+    pub fn is_thinking_active(&self) -> bool {
+        self.thinking_enabled == Some(true)
     }
 }

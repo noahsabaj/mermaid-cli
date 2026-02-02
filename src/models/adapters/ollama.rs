@@ -14,7 +14,7 @@ use std::time::Duration;
 use crate::models::config::{BackendConfig, ModelConfig};
 use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::traits::{Model, ModelCapabilities};
-use crate::models::types::{ChatMessage, MessageRole, ModelResponse, ProjectContext, StreamCallback, TokenUsage};
+use crate::models::types::{ChatMessage, MessageRole, ModelResponse, StreamCallback, TokenUsage};
 use crate::utils::{retry_async, RetryConfig};
 
 /// Ollama model adapter
@@ -244,7 +244,6 @@ impl Model for OllamaAdapter {
     async fn chat(
         &self,
         messages: &[ChatMessage],
-        context: &ProjectContext,
         config: &ModelConfig,
         stream_callback: Option<StreamCallback>,
     ) -> Result<ModelResponse> {
@@ -264,16 +263,7 @@ impl Model for OllamaAdapter {
             }));
         }
 
-        // Add project context
-        let context_str = context.to_prompt_context();
-        if !context_str.is_empty() {
-            json_messages.push(json!({
-                "role": "system",
-                "content": format!("Project Context:\n{}", context_str)
-            }));
-        }
-
-        // Add conversation messages
+        // Add conversation messages (LLM explores codebase via tools, no context injection)
         for msg in messages {
             let role = match msg.role {
                 MessageRole::User => "user",
@@ -318,15 +308,18 @@ impl Model for OllamaAdapter {
         let tools = tool_registry.to_ollama_format();
 
         // Build request body
-        // Enable think=true for models that support extended thinking (like kimi, qwen3)
-        // This is required for proper tool calling behavior per Ollama docs
         let mut request_body = json!({
             "model": self.model_name,
             "messages": json_messages,
             "stream": stream_callback.is_some(),
             "tools": tools,
-            "think": true,
         });
+
+        // Only enable thinking for models that support it (e.g., kimi, qwen3)
+        // Models that don't support thinking will return HTTP 400 error
+        if config.thinking_enabled {
+            request_body["think"] = json!(true);
+        }
 
         tracing::debug!("Sending {} tools to Ollama", tools.len());
         tracing::debug!("Request body tools: {}", serde_json::to_string_pretty(&tools).unwrap_or_default());

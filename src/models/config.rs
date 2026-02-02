@@ -34,6 +34,11 @@ pub struct ModelConfig {
     /// System prompt override (None = use default)
     pub system_prompt: Option<String>,
 
+    /// Enable thinking mode for models that support it (e.g., kimi, qwen3)
+    /// Default: true (enabled)
+    #[serde(default = "default_thinking_enabled")]
+    pub thinking_enabled: bool,
+
     /// Backend-specific options (provider name -> key/value pairs)
     /// Example: {"ollama": {"num_gpu": "10", "num_ctx": "8192"}}
     #[serde(default)]
@@ -50,6 +55,7 @@ impl Default for ModelConfig {
             frequency_penalty: None,
             presence_penalty: None,
             system_prompt: Some(prompts::get_system_prompt()),
+            thinking_enabled: default_thinking_enabled(),
             backend_options: HashMap::new(),
         }
     }
@@ -172,4 +178,8 @@ fn default_max_idle() -> usize {
 
 fn default_health_check_interval() -> u64 {
     30
+}
+
+fn default_thinking_enabled() -> bool {
+    true
 }

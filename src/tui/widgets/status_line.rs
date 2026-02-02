@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
+use std::collections::VecDeque;
 
 use super::super::state::GenerationStatus;
 use crate::tui::theme::Theme;
@@ -16,6 +17,8 @@ pub struct StatusLineWidget<'a> {
     pub elapsed_secs: u64,
     pub tokens_received: usize,
     pub theme: &'a Theme,
+    /// Queued messages waiting to be processed
+    pub queued_messages: &'a VecDeque<String>,
 }
 
 impl<'a> Widget for StatusLineWidget<'a> {
@@ -72,8 +75,29 @@ impl<'a> Widget for StatusLineWidget<'a> {
             ),
         ];
 
-        let line = Line::from(spans);
-        let paragraph = Paragraph::new(line);
+        let mut lines = vec![Line::from(spans)];
+
+        // Show all queued messages below the status line with highlight
+        let max_len = area.width.saturating_sub(4) as usize;
+        for queued in self.queued_messages.iter() {
+            // Truncate long messages to fit in the area
+            let display_msg = if queued.len() > max_len {
+                format!("> {}...", &queued[..max_len.saturating_sub(3)])
+            } else {
+                format!("> {}", queued)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    display_msg,
+                    Style::new()
+                        .fg(self.theme.colors.text_primary.to_color())
+                        .bg(ratatui::style::Color::Rgb(60, 60, 80)), // Subtle purple highlight
+                ),
+            ]));
+        }
+
+        let paragraph = Paragraph::new(lines);
 
         paragraph.render(area, buf);
     }

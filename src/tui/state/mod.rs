@@ -25,6 +25,6 @@ pub use error::{ErrorEntry, ErrorSeverity};
 pub use generation::{AppState, GenerationStatus};
 pub use input::InputBuffer;
 pub use model::ModelState;
-pub use operation::{ConfirmationState, FileInfo, OperationState};
+pub use operation::OperationState;
 pub use status::StatusState;
 pub use ui::UIState;

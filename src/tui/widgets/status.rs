@@ -6,17 +6,16 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-use crate::tui::mode::OperationMode;
 use crate::tui::theme::Theme;
 
 /// Props for StatusWidget (stateless widget)
 pub struct StatusWidget<'a> {
-    pub operation_mode: OperationMode,
-    pub confirmation_pending: bool,
     pub theme: &'a Theme,
     pub working_dir: &'a str,
     pub cumulative_tokens: usize,
     pub model_name: &'a str,
+    /// Thinking mode state: Some(true)=ON, Some(false)=OFF, None=unsupported
+    pub thinking_enabled: Option<bool>,
 }
 
 impl<'a> Widget for StatusWidget<'a> {
@@ -61,36 +60,30 @@ impl<'a> Widget for StatusWidget<'a> {
             ),
         ];
 
-        // Line 2: operation mode (left) | model name (right)
-        let mode_text = match self.operation_mode {
-            OperationMode::Normal => {
-                if self.confirmation_pending {
-                    "action pending (alt+y/n/p)"
-                } else {
-                    ""  // No text in normal mode when not pending
-                }
-            },
-            OperationMode::AcceptEdits => "accept edits on (shift+tab to cycle)",
-            OperationMode::PlanMode => "plan mode on (shift+tab to cycle)",
-            OperationMode::BypassAll => "bypass permissions on (shift+tab to cycle)",
+        // Line 2: "thinking on" (left, only when enabled) | model name (right)
+        let thinking_text = if self.thinking_enabled == Some(true) {
+            "thinking on"
+        } else {
+            ""
         };
-
-        // Calculate padding to align model name with token count above
-        let mode_length = mode_text.len();
         let model_display = self.model_name;
-        let padding_width_line2 = if available_width > mode_length + model_display.len() + 1 {
-            available_width - mode_length - model_display.len()
+
+        // Calculate padding between thinking text and model name
+        let left_content_len = thinking_text.len();
+        let right_content_len = model_display.len();
+        let padding_width_line2 = if available_width > left_content_len + right_content_len {
+            available_width - left_content_len - right_content_len
         } else {
             1
         };
 
         let line2_spans = vec![
-            // Operation mode text (left)
+            // "thinking on" text (left, gray, only when enabled)
             Span::styled(
-                mode_text,
-                Style::new().fg(self.operation_mode.color()),
+                thinking_text,
+                Style::new().fg(self.theme.colors.text_disabled.to_color()),
             ),
-            // Padding
+            // Padding to right-align model name
             Span::raw(" ".repeat(padding_width_line2)),
             // Model name (right, aligned with tokens above)
             Span::styled(

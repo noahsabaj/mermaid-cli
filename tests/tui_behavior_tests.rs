@@ -5,8 +5,8 @@
 // NOTE: Due to module visibility, we'll test the public interfaces rather than internal state
 // This is actually better practice - testing public behavior rather than implementation details
 
-use mermaid_cli::agents::{AgentAction, ModeAwareExecutor, Plan};
-use mermaid_cli::tui::{AppState, GenerationStatus, OperationMode};
+use mermaid_cli::agents::AgentAction;
+use mermaid_cli::tui::{AppState, GenerationStatus};
 
 // ===== APP STATE ENUM TESTS =====
 
@@ -67,22 +67,6 @@ fn test_app_state_variants_are_distinct() {
 }
 
 #[test]
-fn test_app_state_awaiting_action_confirmation() {
-    let action = AgentAction::ReadFile {
-        paths: vec!["test.rs".to_string()],
-    };
-
-    let state = AppState::AwaitingActionConfirmation {
-        action: action.clone(),
-        executor: ModeAwareExecutor::new(OperationMode::Normal),
-    };
-
-    assert!(matches!(state, AppState::AwaitingActionConfirmation { .. }));
-    assert!(!state.is_generating());
-    assert!(!state.is_idle());
-}
-
-#[test]
 fn test_app_state_executing_action() {
     let action = AgentAction::ReadFile {
         paths: vec!["test.rs".to_string()],
@@ -94,40 +78,6 @@ fn test_app_state_executing_action() {
     };
 
     assert!(matches!(state, AppState::ExecutingAction { .. }));
-}
-
-#[test]
-fn test_app_state_awaiting_plan_approval() {
-    let plan = Plan::new(vec![]);
-
-    let state = AppState::AwaitingPlanApproval {
-        plan: plan.clone(),
-        explanation: Some("Test plan explanation".to_string()),
-    };
-
-    assert!(matches!(state, AppState::AwaitingPlanApproval { .. }));
-
-    if let AppState::AwaitingPlanApproval { plan: _p, explanation } = &state {
-        // Plan is empty so display_text will be "No actions in plan"
-        assert_eq!(explanation.as_deref(), Some("Test plan explanation"));
-    }
-}
-
-#[test]
-fn test_app_state_executing_plan() {
-    let plan = Plan::new(vec![]);
-
-    let state = AppState::ExecutingPlan {
-        plan,
-        current_step: 2,
-        start_time: std::time::Instant::now(),
-    };
-
-    assert!(matches!(state, AppState::ExecutingPlan { .. }));
-
-    if let AppState::ExecutingPlan { current_step, .. } = state {
-        assert_eq!(current_step, 2);
-    }
 }
 
 #[test]
@@ -226,22 +176,6 @@ fn test_tokens_received_can_be_incremented() {
     if let AppState::Generating { tokens_received, .. } = state {
         assert_eq!(tokens_received, 10);
     }
-}
-
-// ===== OPERATION MODE TESTS =====
-
-#[test]
-fn test_operation_mode_variants() {
-    let normal = OperationMode::Normal;
-    let accept_edits = OperationMode::AcceptEdits;
-    let plan_mode = OperationMode::PlanMode;
-    let bypass_all = OperationMode::BypassAll;
-
-    // Verify all variants exist
-    assert!(matches!(normal, OperationMode::Normal));
-    assert!(matches!(accept_edits, OperationMode::AcceptEdits));
-    assert!(matches!(plan_mode, OperationMode::PlanMode));
-    assert!(matches!(bypass_all, OperationMode::BypassAll));
 }
 
 // ===== MESSAGE ROLE TESTS =====

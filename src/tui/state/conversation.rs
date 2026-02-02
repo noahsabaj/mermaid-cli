@@ -2,6 +2,8 @@
 ///
 /// Handles chat messages, history, and persistence.
 
+use std::collections::VecDeque;
+
 use crate::context::Context;
 use crate::models::ChatMessage;
 use crate::session::{ConversationHistory, ConversationManager};
@@ -15,7 +17,7 @@ pub struct ConversationState {
     /// Current conversation being tracked
     pub current_conversation: Option<ConversationHistory>,
     /// Input history for arrow key navigation (loaded from session)
-    pub input_history: Vec<String>,
+    pub input_history: VecDeque<String>,
     /// Current position in history (None = editing current input, Some(i) = viewing history[i])
     pub history_index: Option<usize>,
     /// Saved input when navigating away from current draft
@@ -35,7 +37,7 @@ impl ConversationState {
             messages: Vec::new(),
             conversation_manager: None,
             current_conversation: None,
-            input_history: Vec::new(),
+            input_history: VecDeque::new(),
             history_index: None,
             history_buffer: String::new(),
             context: None,
@@ -48,7 +50,7 @@ impl ConversationState {
     pub fn with_conversation(
         conversation_manager: Option<ConversationManager>,
         current_conversation: Option<ConversationHistory>,
-        input_history: Vec<String>,
+        input_history: VecDeque<String>,
     ) -> Self {
         Self {
             messages: Vec::new(),

@@ -3,20 +3,18 @@
 /// Thin coordinator that composes state modules. All state is delegated to
 /// focused modules in src/tui/state/.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::warn;
 
-use super::mode::OperationMode;
 use super::state::{
     AppState, ConversationState, ErrorEntry, ErrorSeverity, GenerationStatus,
     InputBuffer, ModelState, OperationState, StatusState, UIState,
 };
 use super::theme::Theme;
 use super::widgets::{ChatState, InputState};
-use crate::agents::{ActionResult, ActionStatus, AgentAction, ModeAwareExecutor, Plan, PlannedAction, PlanStats};
 use crate::constants::UI_ERROR_LOG_MAX_SIZE;
-use crate::context::Context;
-use crate::models::{ChatMessage, MessageRole, Model, ModelConfig, ProjectContext, StreamCallback};
+use crate::models::{ChatMessage, MessageRole, Model, ModelConfig, StreamCallback};
 use crate::session::{ConversationHistory, ConversationManager};
 
 /// Application state coordinator
@@ -25,14 +23,12 @@ pub struct App {
     pub input: InputBuffer,
     /// Is the app running?
     pub running: bool,
-    /// Project context
-    pub context: ProjectContext,
     /// Current model response (for streaming)
     pub current_response: String,
     /// Current working directory
     pub working_dir: String,
     /// Error log - keeps last N errors for visibility
-    pub error_log: Vec<ErrorEntry>,
+    pub error_log: VecDeque<ErrorEntry>,
     /// State machine for application lifecycle
     pub app_state: AppState,
 
@@ -42,7 +38,7 @@ pub struct App {
     pub ui_state: UIState,
     /// Session state - conversation history and persistence
     pub session_state: ConversationState,
-    /// Operation state - mode, confirmations, and plan execution
+    /// Operation state - file reading and tool calls
     pub operation_state: OperationState,
     /// Status state - UI status messages
     pub status_state: StatusState,
@@ -50,7 +46,7 @@ pub struct App {
 
 impl App {
     /// Create a new app instance
-    pub fn new(model: Box<dyn Model>, context: ProjectContext, model_id: String) -> Self {
+    pub fn new(model: Box<dyn Model>, model_id: String) -> Self {
         let working_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string());
@@ -65,7 +61,7 @@ impl App {
             .map(|_| ConversationHistory::new(working_dir.clone(), model_state.model_name.clone()));
 
         // Load input history from conversation if available
-        let input_history = conversation_manager
+        let input_history: std::collections::VecDeque<String> = conversation_manager
             .as_ref()
             .and_then(|_| current_conversation.as_ref())
             .map(|conv| conv.input_history.clone())
@@ -89,10 +85,9 @@ impl App {
         Self {
             input: InputBuffer::new(),
             running: true,
-            context,
-            current_response: String::new(),
+            current_response: String::with_capacity(8192),
             working_dir,
-            error_log: Vec::new(),
+            error_log: VecDeque::new(),
             app_state: AppState::Idle,
             model_state,
             ui_state,
@@ -113,23 +108,6 @@ impl App {
     /// Set cursor position (compatibility shim)
     pub fn set_cursor_position(&mut self, pos: usize) {
         self.input.cursor_position = pos;
-    }
-
-    // ===== Context Management =====
-
-    /// Set the context for dynamic context reloading
-    pub fn set_context(&mut self, ctx: Context) {
-        self.session_state.context = Some(ctx);
-    }
-
-    /// Update context if file tree has changed since last message
-    pub async fn reload_context_if_needed(&mut self) -> anyhow::Result<()> {
-        if let Some(ref mut ctx) = self.session_state.context {
-            if ctx.reload_if_needed().await? {
-                self.context = ctx.build_context();
-            }
-        }
-        Ok(())
     }
 
     // ===== Message Management =====
@@ -256,9 +234,9 @@ impl App {
     /// Log an error to the error log
     pub fn log_error(&mut self, entry: ErrorEntry) {
         self.status_state.set(entry.display());
-        self.error_log.push(entry);
+        self.error_log.push_back(entry);
         if self.error_log.len() > UI_ERROR_LOG_MAX_SIZE {
-            self.error_log.remove(0);
+            self.error_log.pop_front(); // O(1) instead of O(n)
         }
     }
 
@@ -344,7 +322,7 @@ impl App {
         let mut config = ModelConfig::default();
         config.model = self.model_state.model_id.clone();
 
-        if model.chat(&messages, &self.context, &config, Some(callback)).await.is_ok() {
+        if model.chat(&messages, &config, Some(callback)).await.is_ok() {
             let final_title = title_string.lock().await;
             let title = final_title.lines().next().unwrap_or(&final_title)
                 .trim()
@@ -373,35 +351,6 @@ impl App {
 
     pub fn quit(&mut self) {
         self.running = false;
-    }
-
-    // ===== Operation Mode =====
-
-    pub fn cycle_mode(&mut self) {
-        self.operation_state.operation_mode = self.operation_state.operation_mode.cycle();
-        self.operation_state.bypass_confirmed = false;
-        self.set_status(format!("Mode: {}", self.operation_state.operation_mode.display_name()));
-    }
-
-    pub fn cycle_mode_reverse(&mut self) {
-        self.operation_state.operation_mode = self.operation_state.operation_mode.cycle_reverse();
-        self.operation_state.bypass_confirmed = false;
-        self.set_status(format!("Mode: {}", self.operation_state.operation_mode.display_name()));
-    }
-
-    pub fn set_mode(&mut self, mode: OperationMode) {
-        if self.operation_state.operation_mode != mode {
-            if self.operation_state.operation_mode == OperationMode::PlanMode
-                && self.app_state.is_awaiting_plan_approval()
-            {
-                self.cancel_plan();
-                self.set_status(format!("Plan cancelled - switched to {}", mode.display_name()));
-            }
-
-            self.operation_state.operation_mode = mode;
-            self.operation_state.bypass_confirmed = false;
-            self.set_status(format!("Mode: {}", mode.display_name()));
-        }
     }
 
     // ===== Message History =====
@@ -593,88 +542,4 @@ impl App {
         }
     }
 
-    // ===== Action Confirmation =====
-
-    pub fn set_pending_action(&mut self, action: AgentAction, executor: ModeAwareExecutor) {
-        self.app_state = AppState::AwaitingActionConfirmation { action, executor };
-    }
-
-    pub fn clear_pending_action(&mut self) {
-        self.app_state = AppState::Idle;
-    }
-
-    // ===== Plan State =====
-
-    pub fn set_plan(&mut self, plan: Plan) {
-        self.app_state = AppState::AwaitingPlanApproval {
-            plan: plan.clone(),
-            explanation: plan.explanation.clone(),
-        };
-        self.operation_state.plan_execution_index = None;
-        self.set_status("Plan ready - Y to approve, N to cancel");
-    }
-
-    pub fn cancel_plan(&mut self) {
-        self.app_state = AppState::Idle;
-        self.operation_state.plan_execution_index = None;
-        self.operation_state.plan_mode_active_for_generation = false;
-        self.set_status("Plan cancelled");
-    }
-
-    pub fn start_plan_execution(&mut self) {
-        if let AppState::AwaitingPlanApproval { plan, .. } = &self.app_state {
-            let plan_clone = plan.clone();
-            self.app_state = AppState::ExecutingPlan {
-                plan: plan_clone,
-                current_step: 0,
-                start_time: std::time::Instant::now(),
-            };
-            self.operation_state.plan_execution_index = Some(0);
-            self.set_status("Executing plan...");
-        }
-    }
-
-    pub fn plan_next_action(&self) -> Option<&PlannedAction> {
-        self.app_state
-            .active_plan()
-            .and_then(|plan| plan.next_pending_action().map(|(_, action)| action))
-    }
-
-    pub fn mark_plan_action_completed(&mut self, result: Option<ActionResult>) {
-        if let AppState::ExecutingPlan { plan, current_step, start_time } = &mut self.app_state {
-            let mut plan_clone = plan.clone();
-            if let Some(index) = self.operation_state.plan_execution_index {
-                plan_clone.update_action_status(index, ActionStatus::Completed, result, None);
-                self.operation_state.plan_execution_index = Some(index + 1);
-                self.app_state = AppState::ExecutingPlan {
-                    plan: plan_clone,
-                    current_step: *current_step + 1,
-                    start_time: *start_time,
-                };
-            }
-        }
-    }
-
-    pub fn mark_plan_action_failed(&mut self, error: String) {
-        if let AppState::ExecutingPlan { plan, current_step, start_time } = &mut self.app_state {
-            let mut plan_clone = plan.clone();
-            if let Some(index) = self.operation_state.plan_execution_index {
-                plan_clone.update_action_status(index, ActionStatus::Failed, None, Some(error));
-                self.operation_state.plan_execution_index = Some(index + 1);
-                self.app_state = AppState::ExecutingPlan {
-                    plan: plan_clone,
-                    current_step: *current_step + 1,
-                    start_time: *start_time,
-                };
-            }
-        }
-    }
-
-    pub fn is_plan_complete(&self) -> bool {
-        self.app_state.active_plan().map(|plan| plan.stats().is_complete()).unwrap_or(false)
-    }
-
-    pub fn get_plan_stats(&self) -> Option<PlanStats> {
-        self.app_state.active_plan().map(|plan| plan.stats())
-    }
 }

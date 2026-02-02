@@ -8,6 +8,61 @@ use super::types::{ActionResult, AgentAction};
 use super::web_search::WebSearchClient;
 use crate::utils::check_git_repo;
 
+/// Get a human-readable description of an action (for UI display)
+pub fn describe_action(action: &AgentAction) -> String {
+    match action {
+        AgentAction::ReadFile { paths } => {
+            if paths.len() == 1 {
+                format!("Read file: {}", paths[0])
+            } else {
+                format!("Read {} files", paths.len())
+            }
+        }
+        AgentAction::WriteFile { path, content } => {
+            format!("Write file: {} ({} bytes)", path, content.len())
+        }
+        AgentAction::DeleteFile { path } => {
+            format!("Delete file: {}", path)
+        }
+        AgentAction::CreateDirectory { path } => {
+            format!("Create directory: {}", path)
+        }
+        AgentAction::ExecuteCommand { command, working_dir } => {
+            if let Some(dir) = working_dir {
+                format!("Execute command in {}: {}", dir, command)
+            } else {
+                format!("Execute command: {}", command)
+            }
+        }
+        AgentAction::GitDiff { paths } => {
+            if paths.len() == 1 {
+                if let Some(p) = &paths[0] {
+                    format!("Git diff for: {}", p)
+                } else {
+                    "Git diff (all files)".to_string()
+                }
+            } else {
+                format!("Git diff for {} paths", paths.len())
+            }
+        }
+        AgentAction::GitStatus => "Git status".to_string(),
+        AgentAction::GitCommit { message, files } => {
+            if !files.is_empty() {
+                format!("Git commit ({} files): {}", files.len(), message)
+            } else {
+                format!("Git commit (all): {}", message)
+            }
+        }
+        AgentAction::WebSearch { queries } => {
+            if queries.len() == 1 {
+                format!("Web search: '{}' ({} results)", queries[0].0, queries[0].1)
+            } else {
+                format!("Web search with {} queries", queries.len())
+            }
+        }
+    }
+}
+
 /// Execute an agent action
 ///
 /// Returns ActionResult directly - Success or Error variant.

@@ -10,7 +10,6 @@ use crate::agents::{
     ActionDisplay, ActionResult,
 };
 use crate::models::{ChatMessage, MessageRole};
-use super::super::state::ConfirmationState;
 use crate::tui::markdown::parse_markdown;
 use crate::tui::theme::Theme;
 use crate::utils::format_relative_timestamp;
@@ -82,7 +81,6 @@ impl Default for ChatState {
 pub struct ChatWidget<'a> {
     pub messages: &'a [ChatMessage],
     pub is_generating: bool,
-    pub confirmation_state: Option<&'a ConfirmationState>,
     pub pending_file_read: bool,
     pub reading_file_status: Option<&'a str>,
     pub theme: &'a Theme,
@@ -96,12 +94,18 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
         let message_count = self.messages.len();
         for (idx, msg) in self.messages.iter().enumerate() {
+            // Skip Tool messages - they're internal to the agent loop and their
+            // content is already displayed inline in the assistant's action blocks
+            if matches!(msg.role, MessageRole::Tool) {
+                continue;
+            }
+
             let _is_last_message = idx == message_count - 1;
             let (role_prefix, role_color) = match msg.role {
                 MessageRole::User => (">", ratatui::style::Color::White),
                 MessageRole::Assistant => ("●", ratatui::style::Color::White),
                 MessageRole::System => ("●", self.theme.colors.system_message.to_color()),
-                MessageRole::Tool => ("*", ratatui::style::Color::Cyan), // Tool results in cyan
+                MessageRole::Tool => continue, // Already handled above, but needed for exhaustive match
             };
 
             if matches!(msg.role, MessageRole::Assistant) {
@@ -222,130 +226,6 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 }
             }
 
-            lines.push(Line::from(""));
-        }
-
-        // Show inline confirmation box if action pending
-        if let Some(confirmation) = self.confirmation_state {
-            let width = area.width.saturating_sub(4) as usize;
-
-            lines.push(Line::from("╔".to_string() + &"═".repeat(width - 2) + "╗"));
-
-            let title = format!("Action: {}", confirmation.action_description);
-            let title_len = title.len();
-            lines.push(Line::from(vec![
-                Span::raw("║ "),
-                Span::styled(
-                    title,
-                    Style::new().fg(self.theme.colors.warning.to_color()).bold(),
-                ),
-                Span::raw(format!(
-                    "{}║",
-                    " ".repeat(width.saturating_sub(title_len + 3))
-                )),
-            ]));
-
-            if let Some(ref info) = confirmation.file_info {
-                lines.push(Line::from("╠".to_string() + &"─".repeat(width - 2) + "╣"));
-
-                let path_line = format!("   File: {}", info.path);
-                let path_line_len = path_line.len();
-                lines.push(Line::from(vec![
-                    Span::raw("║"),
-                    Span::raw(path_line),
-                    Span::raw(format!(
-                        "{}║",
-                        " ".repeat(width.saturating_sub(path_line_len + 1))
-                    )),
-                ]));
-
-                let status = if info.exists {
-                    "Will overwrite"
-                } else {
-                    "New file"
-                };
-                let size_line = format!("   Size: {} bytes | {}", info.size, status);
-                let size_line_len = size_line.len();
-                lines.push(Line::from(vec![
-                    Span::raw("║"),
-                    Span::raw(size_line),
-                    Span::raw(format!(
-                        "{}║",
-                        " ".repeat(width.saturating_sub(size_line_len + 1))
-                    )),
-                ]));
-
-                if let Some(ref lang) = info.language {
-                    let lang_line = format!("   Type: {}", lang);
-                    let lang_line_len = lang_line.len();
-                    lines.push(Line::from(vec![
-                        Span::raw("║"),
-                        Span::raw(lang_line),
-                        Span::raw(format!(
-                            "{}║",
-                            " ".repeat(width.saturating_sub(lang_line_len + 1))
-                        )),
-                    ]));
-                }
-
-                if !confirmation.preview_lines.is_empty() {
-                    lines.push(Line::from("╠".to_string() + &"─".repeat(width - 2) + "╣"));
-                    lines.push(Line::from(vec![
-                        Span::raw("║ Preview:"),
-                        Span::raw(format!("{}║", " ".repeat(width.saturating_sub(10)))),
-                    ]));
-                    for line in confirmation.preview_lines.iter().take(3) {
-                        let preview_line = format!("   {}", line);
-                        let truncated = if preview_line.len() > width - 2 {
-                            format!("{}...", &preview_line[..width - 5])
-                        } else {
-                            preview_line
-                        };
-                        let truncated_len = truncated.len();
-                        lines.push(Line::from(vec![
-                            Span::raw("║"),
-                            Span::styled(
-                                truncated,
-                                Style::new().fg(self.theme.colors.text_secondary.to_color()),
-                            ),
-                            Span::raw(format!(
-                                "{}║",
-                                " ".repeat(width.saturating_sub(truncated_len + 1))
-                            )),
-                        ]));
-                    }
-                    if confirmation.preview_lines.len() > 3 {
-                        lines.push(Line::from(vec![
-                            Span::raw("║   ..."),
-                            Span::raw(format!("{}║", " ".repeat(width.saturating_sub(7)))),
-                        ]));
-                    }
-                }
-            }
-
-            lines.push(Line::from("╠".to_string() + &"═".repeat(width - 2) + "╣"));
-
-            let shortcuts = if confirmation.allow_always {
-                " [Alt+Y] Approve   [Alt+N] Skip   [Alt+A] Always   [Alt+P] Preview "
-            } else {
-                " [Alt+Y] Approve   [Alt+N] Skip   [Alt+P] Preview "
-            };
-
-            let padding = (width.saturating_sub(shortcuts.len())) / 2;
-            lines.push(Line::from(vec![
-                Span::raw("║"),
-                Span::raw(" ".repeat(padding)),
-                Span::styled(
-                    shortcuts,
-                    Style::new().fg(self.theme.colors.info.to_color()).bold(),
-                ),
-                Span::raw(format!(
-                    "{}║",
-                    " ".repeat(width.saturating_sub(shortcuts.len() + padding + 1))
-                )),
-            ]));
-
-            lines.push(Line::from("╚".to_string() + &"═".repeat(width - 2) + "╝"));
             lines.push(Line::from(""));
         }
 

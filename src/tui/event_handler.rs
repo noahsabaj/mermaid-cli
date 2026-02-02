@@ -14,16 +14,6 @@ pub enum EventAction {
     SubmitMessage(String),
     /// Execute a slash command
     ExecuteCommand(String),
-    /// Confirm or reject a pending action (true = approve, false = reject)
-    ConfirmAction(bool),
-    /// Always approve similar actions (persistent preference)
-    AlwaysApprove,
-    /// Toggle action preview
-    TogglePreview,
-    /// Approve and start executing a pending plan
-    ApprovePlan,
-    /// Cancel/reject a pending plan
-    CancelPlan,
 }
 
 /// Handle a single event and return the appropriate action
@@ -35,16 +25,6 @@ pub fn handle_event(app: &mut App, event: Event, viewport_height: u16) -> Result
         Event::Mouse(mouse) => handle_mouse_event(app, mouse, viewport_height),
         Event::Key(key) => handle_key_event(app, key, viewport_height),
         _ => Ok(EventAction::Continue), // Ignore FocusGained, FocusLost, Paste, Resize
-    }
-}
-
-/// Handle keyboard events for plan approval/cancellation during plan mode
-/// Uses plain Y/N keys when in plan approval state
-fn handle_plan_approval_keys(key_code: KeyCode) -> Result<EventAction> {
-    match key_code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => Ok(EventAction::ApprovePlan),
-        KeyCode::Char('n') | KeyCode::Char('N') => Ok(EventAction::CancelPlan),
-        _ => Ok(EventAction::Continue),
     }
 }
 
@@ -80,22 +60,6 @@ fn handle_key_event(
         return Ok(EventAction::Continue);
     }
 
-    // Handle Y/N for plan approval/cancellation during plan mode
-    // Plain keys (no modifiers) when in plan approval state
-    if app.app_state.is_awaiting_plan_approval() && key.modifiers.is_empty() {
-        if let result @ Ok(EventAction::ApprovePlan | EventAction::CancelPlan) =
-            handle_plan_approval_keys(key.code)
-        {
-            return result;
-        }
-    }
-
-    // Handle Alt+Y/N/A/P for action confirmation
-    // Alt distinguishes this from plan approval (Ctrl)
-    if key.modifiers == KeyModifiers::ALT && app.operation_state.confirmation_state.is_some() {
-        return handle_confirmation_keys(key.code);
-    }
-
     // Handle normal keyboard shortcuts
     let action = match key.code {
         KeyCode::Esc => handle_escape_key(app),
@@ -119,24 +83,9 @@ fn handle_key_event(
     Ok(action)
 }
 
-/// Handle Alt+key combinations during confirmation
-fn handle_confirmation_keys(key_code: KeyCode) -> Result<EventAction> {
-    match key_code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => Ok(EventAction::ConfirmAction(true)),
-        KeyCode::Char('n') | KeyCode::Char('N') => Ok(EventAction::ConfirmAction(false)),
-        KeyCode::Char('a') | KeyCode::Char('A') => Ok(EventAction::AlwaysApprove),
-        KeyCode::Char('p') | KeyCode::Char('P') => Ok(EventAction::TogglePreview),
-        _ => Ok(EventAction::Continue),
-    }
-}
-
-/// Handle Escape key (stop generation, cancel plan, or clear input)
+/// Handle Escape key (stop generation or clear input)
 fn handle_escape_key(app: &mut App) -> EventAction {
-    if app.app_state.is_awaiting_plan_approval() {
-        // Cancel pending plan
-        app.cancel_plan();
-        return EventAction::Continue;
-    } else if app.app_state.is_generating() {
+    if app.app_state.is_generating() {
         // If generating, abort the generation but keep what was generated
         if let Some(abort) = app.abort_generation() {
             abort.abort();
@@ -158,28 +107,36 @@ fn handle_escape_key(app: &mut App) -> EventAction {
     EventAction::Continue
 }
 
-/// Handle Enter key (submit message or command)
+/// Handle Enter key (submit message, queue message, or command)
 fn handle_enter_key(app: &mut App) -> Result<EventAction> {
-    // If waiting for plan approval, block new messages
-    if app.app_state.is_awaiting_plan_approval() {
-        app.set_status("Complete or cancel the plan first (Y to approve, N to cancel)");
+    if app.input.is_empty() {
         return Ok(EventAction::Continue);
     }
 
-    if !app.input.is_empty() && !app.app_state.is_generating() {
-        // Check if this is a command (starts with ':')
-        if app.input.get().starts_with(':') {
+    // Check if this is a command (starts with ':')
+    if app.input.get().starts_with(':') {
+        // Commands only work when not generating
+        if !app.app_state.is_generating() {
             let command = app.input.get().trim_start_matches(':').to_string();
             app.clear_input();
-            Ok(EventAction::ExecuteCommand(command))
-        } else {
-            let input = app.input.get().to_string();
-            app.clear_input();
-            Ok(EventAction::SubmitMessage(input))
+            return Ok(EventAction::ExecuteCommand(command));
         }
-    } else {
-        Ok(EventAction::Continue)
+        return Ok(EventAction::Continue);
     }
+
+    // If generating, queue the message instead of submitting
+    if app.app_state.is_generating() {
+        let input = app.input.get().to_string();
+        app.operation_state.queue_message(input);
+        app.clear_input();
+        app.set_status("Message queued - will be sent before next action");
+        return Ok(EventAction::Continue);
+    }
+
+    // Normal submission when not generating
+    let input = app.input.get().to_string();
+    app.clear_input();
+    Ok(EventAction::SubmitMessage(input))
 }
 
 /// Handle character input (with modifier check for shortcuts)
@@ -189,6 +146,16 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
         app.auto_save_conversation();
         app.quit();
         return EventAction::Quit;
+    }
+
+    // Alt+T to toggle thinking mode
+    if c == 't' && modifiers == KeyModifiers::ALT {
+        match app.model_state.toggle_thinking() {
+            Some(true) => app.set_status("Thinking mode enabled"),
+            Some(false) => app.set_status("Thinking mode disabled"),
+            None => app.set_status("Model does not support thinking"),
+        }
+        return EventAction::Continue;
     }
 
     // Normal character input (no modifiers or only SHIFT for uppercase)
@@ -320,21 +287,12 @@ fn handle_page_down(app: &mut App) -> EventAction {
     EventAction::Continue
 }
 
-/// Handle Tab key (with modifier check for mode cycling)
-fn handle_tab(app: &mut App, modifiers: KeyModifiers) -> EventAction {
-    if modifiers == KeyModifiers::SHIFT {
-        // Shift+Tab cycles operation modes
-        app.cycle_mode();
-    } else if modifiers == KeyModifiers::CONTROL {
-        // Ctrl+Tab cycles reverse
-        app.cycle_mode_reverse();
-    }
-    // Plain Tab does nothing now
+/// Handle Tab key - no-op (modes removed)
+fn handle_tab(_app: &mut App, _modifiers: KeyModifiers) -> EventAction {
     EventAction::Continue
 }
 
-/// Handle BackTab (Shift+Tab on some terminals)
-fn handle_backtab(app: &mut App) -> EventAction {
-    app.cycle_mode();
+/// Handle BackTab - no-op (modes removed)
+fn handle_backtab(_app: &mut App) -> EventAction {
     EventAction::Continue
 }

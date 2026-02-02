@@ -1,8 +1,6 @@
 use anyhow::Result;
-use std::path::Path;
 
 use crate::app::{load_config, persist_last_model};
-use crate::context::Context;
 use crate::models::{MessageRole, ModelFactory};
 use crate::ollama;
 use crate::tui::App;
@@ -122,22 +120,9 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
     }
 }
 
-/// Refresh file context from disk
+/// Refresh command - no longer needed as LLM explores via tools
 async fn handle_refresh(app: &mut App) {
-    match Context::load(Path::new(".")).await {
-        Ok(new_context) => {
-            app.context.files = new_context.files;
-            app.context.token_count = new_context.token_count;
-            app.set_status(format!(
-                "Refreshed: {} files, ~{} tokens",
-                app.context.files.len(),
-                app.context.token_count
-            ));
-        },
-        Err(e) => {
-            app.set_status(format!("Failed to refresh: {}", e));
-        },
-    }
+    app.set_status("Context refresh not needed - LLM explores codebase via tools");
 }
 
 /// Save current conversation

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use super::config::ModelConfig;
 use super::error::Result;
-use super::types::{ChatMessage, ModelResponse, ProjectContext, StreamCallback};
+use super::types::{ChatMessage, ModelResponse, StreamCallback};
 
 /// Core trait that all model adapters implement
 ///
@@ -17,7 +17,6 @@ pub trait Model: Send + Sync {
     async fn chat(
         &self,
         messages: &[ChatMessage],
-        context: &ProjectContext,
         config: &ModelConfig,
         stream_callback: Option<StreamCallback>,
     ) -> Result<ModelResponse>;

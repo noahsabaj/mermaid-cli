@@ -2,6 +2,7 @@ use crate::models::{ChatMessage, MessageRole};
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +19,7 @@ pub struct ConversationHistory {
     pub total_tokens: Option<usize>,
     /// History of user input prompts for navigation (up/down arrows)
     #[serde(default)]
-    pub input_history: Vec<String>,
+    pub input_history: VecDeque<String>,
 }
 
 impl ConversationHistory {
@@ -35,7 +36,7 @@ impl ConversationHistory {
             created_at: now,
             updated_at: now,
             total_tokens: None,
-            input_history: Vec::new(),
+            input_history: VecDeque::new(),
         }
     }
 
@@ -54,7 +55,7 @@ impl ConversationHistory {
         }
 
         // Don't add if it's identical to the last entry
-        if let Some(last) = self.input_history.last() {
+        if let Some(last) = self.input_history.back() {
             if last == &input {
                 return;
             }
@@ -62,10 +63,10 @@ impl ConversationHistory {
 
         // Cap history at 100 entries to prevent unbounded growth
         if self.input_history.len() >= 100 {
-            self.input_history.remove(0);
+            self.input_history.pop_front(); // O(1) instead of O(n)
         }
 
-        self.input_history.push(input);
+        self.input_history.push_back(input);
     }
 
     /// Update the title based on the first user message

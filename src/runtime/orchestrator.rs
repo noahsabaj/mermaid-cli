@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use crate::{
     app::{load_config, persist_last_model, Config},
     cli::{handle_command, Cli},
-    context::Context,
     models::ModelFactory,
     ollama::{ensure_model as ensure_ollama_model, require_any_model},
     session::{select_conversation, ConversationManager},
@@ -139,19 +138,13 @@ impl Orchestrator {
             },
         };
 
-        // Set up project context
+        // Set up project path for session management
         let project_path = self.cli.path.clone().unwrap_or_else(|| PathBuf::from("."));
 
-        // Load project structure asynchronously (file paths only, no contents)
+        // Start UI - LLM explores codebase via tools, no context injection
         current_step += 1;
-        log_progress(current_step, total_steps, "Loading project structure");
-        let ctx = self.load_project_structure(&project_path).await?;
-
-        // Build context with file tree (for immediate injection into model)
         log_progress(current_step, total_steps, "Starting UI");
-        let context = ctx.build_context();
-        let mut app = App::new(model, context, model_id.clone());
-        app.set_context(ctx);
+        let mut app = App::new(model, model_id.clone());
 
         // Handle session loading
         // Default: start fresh (no history)
@@ -190,30 +183,6 @@ impl Orchestrator {
 
         // Run the TUI
         run_ui(app).await
-    }
-
-    /// Load project structure asynchronously (file paths only)
-    async fn load_project_structure(
-        &self,
-        project_path: &PathBuf,
-    ) -> Result<Context> {
-        log_info(
-            "FILES",
-            format!("Loading project structure from: {}", project_path.display()),
-        );
-
-        let mut ctx = Context::new(project_path)?;
-        ctx.reload().await?;
-
-        log_info(
-            "STATS",
-            format!(
-                "Found {} files in project",
-                ctx.total_files()
-            ),
-        );
-
-        Ok(ctx)
     }
 }
 

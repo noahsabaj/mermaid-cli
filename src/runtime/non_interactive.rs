@@ -10,8 +10,7 @@ use crate::{
     agents::{execute_action, ActionResult as AgentActionResult, AgentAction},
     app::Config,
     cli::OutputFormat,
-    context::Context,
-    models::{ChatMessage, MessageRole, Model, ModelConfig, ModelFactory, ProjectContext, parse_tool_calls, group_parallel_reads},
+    models::{ChatMessage, MessageRole, Model, ModelConfig, ModelFactory, parse_tool_calls, group_parallel_reads},
 };
 
 /// Result of a non-interactive run
@@ -56,7 +55,6 @@ pub struct ExecutionMetadata {
 /// Non-interactive runner for executing single prompts
 pub struct NonInteractiveRunner {
     model: Arc<RwLock<Box<dyn Model>>>,
-    context: ProjectContext,
     no_execute: bool,
     max_tokens: Option<usize>,
 }
@@ -65,7 +63,7 @@ impl NonInteractiveRunner {
     /// Create a new non-interactive runner
     pub async fn new(
         model_id: String,
-        project_path: PathBuf,
+        _project_path: PathBuf,  // Unused - LLM explores via tools
         config: Config,
         no_execute: bool,
         max_tokens: Option<usize>,
@@ -74,12 +72,8 @@ impl NonInteractiveRunner {
         // Create model instance with optional backend preference
         let model = ModelFactory::create_with_backend(&model_id, Some(&config), backend).await?;
 
-        // Load project context
-        let context = Context::load(&project_path).await?;
-
         Ok(Self {
             model: Arc::new(RwLock::new(model)),
-            context,
             no_execute,
             max_tokens,
         })
@@ -91,33 +85,9 @@ impl NonInteractiveRunner {
         let mut errors = Vec::new();
         let mut actions = Vec::new();
 
-        // Build messages - only include project context if the prompt seems code-related
-        let prompt_lower = prompt.to_lowercase();
-        let is_code_related = prompt_lower.contains("code")
-            || prompt_lower.contains("file")
-            || prompt_lower.contains("function")
-            || prompt_lower.contains("class")
-            || prompt_lower.contains("implement")
-            || prompt_lower.contains("create")
-            || prompt_lower.contains("write")
-            || prompt_lower.contains("debug")
-            || prompt_lower.contains("fix")
-            || prompt_lower.contains("test")
-            || prompt_lower.contains("build")
-            || prompt_lower.contains("project")
-            || prompt_lower.contains("analyze")
-            || prompt_lower.contains("refactor");
-
-        let system_content = if is_code_related {
-            format!(
-                "You are an AI coding assistant. Here is the project structure:\n\n{}\n\n{}",
-                self.context.to_prompt_context(),
-                "You can use [FILE_WRITE: path] ... [/FILE_WRITE] blocks to write files, and [COMMAND: cmd] ... [/COMMAND] blocks to run commands."
-            )
-        } else {
-            "You are a helpful AI assistant. Answer the user's question directly and concisely."
-                .to_string()
-        };
+        // Build messages - LLM explores codebase via tools, no context injection
+        let system_content = "You are an AI coding assistant. Use tools to explore and modify the codebase as needed."
+            .to_string();
 
         let system_message = ChatMessage {
             role: MessageRole::System,
@@ -159,6 +129,7 @@ impl NonInteractiveRunner {
             frequency_penalty: None,
             presence_penalty: None,
             system_prompt: None,
+            thinking_enabled: false, // Non-interactive mode doesn't need thinking
             backend_options: std::collections::HashMap::new(),
         };
 
@@ -180,7 +151,7 @@ impl NonInteractiveRunner {
             let model = self.model.write().await;
             model_name = model.name().to_string();
             model
-                .chat(&messages, &self.context, &model_config, Some(callback))
+                .chat(&messages, &model_config, Some(callback))
                 .await
         };
 

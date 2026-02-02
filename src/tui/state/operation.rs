@@ -1,43 +1,55 @@
 /// Operation state management
 ///
-/// Handles operation modes, confirmations, and plan execution.
+/// Minimal state for tracking active operations.
 
-use crate::agents::AgentAction;
-use crate::tui::mode::OperationMode;
+use std::collections::VecDeque;
 
-/// Operation state - mode, confirmations, and plan execution
+/// Operation state - tracks file reading, tool calls, and queued messages
 pub struct OperationState {
-    /// Current operation mode (Normal, AcceptEdits, PlanMode, BypassAll)
-    pub operation_mode: OperationMode,
-    /// Flag for confirming destructive operations in BypassAll mode
-    pub bypass_confirmed: bool,
     /// Track if FILE_READ feedback is pending
     pub pending_file_read: bool,
-    /// Current step index during plan execution (0-based)
-    pub plan_execution_index: Option<usize>,
-    /// Track if plan mode was active when generation started
-    pub plan_mode_active_for_generation: bool,
     /// Status text to show during file reading
     pub reading_file_status: Option<String>,
-    /// Current confirmation state
-    pub confirmation_state: Option<ConfirmationState>,
     /// Accumulated tool calls during streaming (persists across process_stream_chunks calls)
     pub accumulated_tool_calls: Vec<crate::models::ToolCall>,
+    /// Queued messages - typed while model is generating, will be sent in order
+    pub queued_messages: VecDeque<String>,
 }
 
 impl OperationState {
     /// Create a new OperationState with default values
     pub fn new() -> Self {
         Self {
-            operation_mode: OperationMode::default(),
-            bypass_confirmed: false,
             pending_file_read: false,
-            plan_execution_index: None,
-            plan_mode_active_for_generation: false,
             reading_file_status: None,
-            confirmation_state: None,
             accumulated_tool_calls: Vec::new(),
+            queued_messages: VecDeque::new(),
         }
+    }
+
+    /// Queue a message to be sent after current generation
+    pub fn queue_message(&mut self, message: String) {
+        self.queued_messages.push_back(message);
+    }
+
+    /// Take the next queued message (removes from front of queue)
+    pub fn take_queued_message(&mut self) -> Option<String> {
+        self.queued_messages.pop_front()
+    }
+
+    /// Check if there are any queued messages
+    pub fn has_queued_message(&self) -> bool {
+        !self.queued_messages.is_empty()
+    }
+
+    /// Get all queued messages for display (doesn't remove them)
+    pub fn get_queued_messages(&self) -> &VecDeque<String> {
+        &self.queued_messages
+    }
+
+    /// Get the count of queued messages
+    pub fn queued_message_count(&self) -> usize {
+        self.queued_messages.len()
     }
 }
 
@@ -45,22 +57,4 @@ impl Default for OperationState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// State for action confirmation
-#[derive(Debug, Clone)]
-pub struct ConfirmationState {
-    pub action: AgentAction,
-    pub action_description: String,
-    pub preview_lines: Vec<String>,  // First few lines for preview
-    pub file_info: Option<FileInfo>, // Size, path, overwrite status
-    pub allow_always: bool,          // Can user select "always approve"?
-}
-
-#[derive(Debug, Clone)]
-pub struct FileInfo {
-    pub path: String,
-    pub size: usize,
-    pub exists: bool,
-    pub language: Option<String>,
 }

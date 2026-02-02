@@ -1,6 +1,7 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -20,11 +21,22 @@ impl FileCache {
         Ok(Self { cache_dir })
     }
 
-    /// Compute SHA256 hash of a file
+    /// Compute SHA256 hash of a file using buffered streaming
+    /// Uses 64KB chunks to avoid loading entire file into memory
     pub fn hash_file(path: &Path) -> Result<String> {
-        let content = fs::read(path)?;
+        let file = File::open(path)?;
+        let mut reader = BufReader::with_capacity(65536, file); // 64KB buffer
         let mut hasher = Sha256::new();
-        hasher.update(&content);
+        let mut buffer = [0u8; 65536];
+
+        loop {
+            let bytes_read = reader.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+
         let result = hasher.finalize();
         Ok(format!("{:x}", result))
     }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::agents::{AgentAction, Plan};
+use crate::agents::AgentAction;
 use crate::models::{parse_tool_calls, group_parallel_reads, ErrorCategory, MessageRole, UserFacingError};
 use super::state::GenerationStatus;
 use crate::tui::App;
@@ -20,8 +20,6 @@ pub enum StreamStatus {
         /// Original tool calls from the model (for building proper Tool messages)
         tool_calls: Vec<crate::models::ToolCall>,
     },
-    /// Plan ready for approval (PlanMode only)
-    PlanReady { plan: Plan },
     /// Feedback loop complete (ReadFile response)
     FeedbackComplete,
     /// Error occurred during streaming with structured error info
@@ -108,30 +106,7 @@ pub async fn process_stream_chunks(
             // Add the accumulated response from streaming (if any)
             let response_text = app.current_response.clone();
             if !response_text.is_empty() {
-                // Check if we're in PlanMode
-                if app.operation_state.operation_mode.is_planning_only() {
-                    // With tool calling, the response text IS the explanation (no action blocks to strip)
-                    let explanation = if response_text.trim().is_empty() {
-                        None
-                    } else {
-                        Some(response_text.clone())
-                    };
-
-                    // Clear the accumulated response
-                    app.current_response.clear();
-
-                    // Add the full response as a message (will show explanation + plan together)
-                    if !actions.is_empty() || explanation.is_some() {
-                        let plan = Plan::with_explanation(explanation, actions);
-                        app.operation_state.plan_mode_active_for_generation = true;
-                        // Add plan display as assistant message (combines explanation + action summary)
-                        app.add_message(MessageRole::Assistant, plan.display_text.clone());
-                        return Ok(StreamStatus::PlanReady { plan });
-                    }
-                    return Ok(StreamStatus::Complete { actions: vec![], tool_calls: vec![] });
-                }
-
-                // In normal mode, add message with full response
+                // Add message with full response
                 // Note: We do NOT add tool_calls here yet - that's done in loop_coordinator
                 // after we know whether we're continuing the agent loop
                 app.add_message(MessageRole::Assistant, response_text.clone());
@@ -154,6 +129,20 @@ pub async fn process_stream_chunks(
             app.stop_generation();
             app.status_state.custom_status = None;
             app.current_response.clear();
+
+            // Check if this is a "does not support thinking" error
+            // If so, disable thinking support for this model and inform user
+            if user_error.message.contains("does not support thinking") {
+                app.model_state.disable_thinking_support();
+                app.set_status("Model does not support thinking - disabled");
+                // Don't show the error in chat, just retry automatically would be ideal
+                // but for now, just inform the user
+                app.add_message(
+                    MessageRole::System,
+                    "This model does not support thinking mode. Thinking has been disabled. Please try your request again.".to_string()
+                );
+                return Ok(StreamStatus::Error(user_error));
+            }
 
             // Display summary in status bar with category-appropriate prefix
             let status_prefix = match user_error.category {
@@ -260,11 +249,6 @@ mod tests {
 
         let complete = StreamStatus::Complete { actions: vec![], tool_calls: vec![] };
         assert!(matches!(complete, StreamStatus::Complete { .. }));
-
-        let plan_ready = StreamStatus::PlanReady {
-            plan: Plan::with_explanation(None, vec![]),
-        };
-        assert!(matches!(plan_ready, StreamStatus::PlanReady { .. }));
 
         let feedback_complete = StreamStatus::FeedbackComplete;
         assert!(matches!(feedback_complete, StreamStatus::FeedbackComplete));

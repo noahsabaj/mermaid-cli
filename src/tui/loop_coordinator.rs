@@ -5,9 +5,9 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::context::Context;
 use crate::models::{MessageRole, ModelConfig, StreamCallback};
 use crate::searxng::ensure_searxng_running;
 use super::state::GenerationStatus;
@@ -86,26 +86,6 @@ pub async fn run_app_loop(
                     // Execute slash command
                     command_handler::handle_command(app, &command).await?;
                 },
-                EventAction::ConfirmAction(approved) => {
-                    // Confirm or reject pending action
-                    action_handler::confirm_action(app, approved, &tx).await?;
-                },
-                EventAction::AlwaysApprove => {
-                    // Always approve similar actions (not yet fully implemented)
-                    action_handler::confirm_action(app, true, &tx).await?;
-                },
-                EventAction::TogglePreview => {
-                    // Toggle action preview (not yet fully implemented)
-                    app.set_status("Preview toggled");
-                },
-                EventAction::ApprovePlan => {
-                    // Approve and start executing plan
-                    action_handler::approve_plan(app, &tx).await?;
-                },
-                EventAction::CancelPlan => {
-                    // Cancel pending plan
-                    action_handler::cancel_plan(app);
-                },
             }
         }
 
@@ -127,6 +107,47 @@ pub async fn run_app_loop(
                     action_handler::execute_actions(app, actions, &tx).await?;
                 }
 
+                // Process any queued messages after generation completes
+                // This handles the case where user typed messages while model was generating
+                // and there were no tool calls to trigger the agent loop
+                while app.operation_state.has_queued_message() {
+                    if let Some(queued_msg) = app.operation_state.take_queued_message() {
+                        // Submit the queued message as if user pressed Enter
+                        handle_message_submit(app, queued_msg, &tx, viewport_height).await;
+
+                        // Wait for this message's response to complete before sending next
+                        loop {
+                            // Draw UI while waiting
+                            terminal.draw(|f| render_ui(f, app))?;
+
+                            match process_stream_chunks(app, rx).await? {
+                                StreamStatus::Streaming => {
+                                    // Continue processing
+                                },
+                                StreamStatus::Complete { actions: new_actions, tool_calls: new_tool_calls } => {
+                                    // If this response has tool calls, run agent loop
+                                    if !new_tool_calls.is_empty() {
+                                        run_agent_loop(app, new_tool_calls, &tx, rx).await?;
+                                    } else if !new_actions.is_empty() {
+                                        action_handler::execute_actions(app, new_actions, &tx).await?;
+                                    }
+                                    break; // Done with this queued message
+                                },
+                                StreamStatus::FeedbackComplete => {
+                                    break;
+                                },
+                                StreamStatus::Error(error) => {
+                                    app.display_error(&error.summary, &error.message);
+                                    break;
+                                },
+                            }
+
+                            // Brief sleep to avoid busy-wait
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    }
+                }
+
                 // Generate conversation title after first exchange (if not already generated)
                 if app.session_state.conversation_title.is_none() && app.session_state.messages.len() >= 2 {
                     tokio::spawn(async move {
@@ -137,11 +158,6 @@ pub async fn run_app_loop(
                     app.generate_conversation_title().await;
                 }
             },
-            StreamStatus::PlanReady { plan } => {
-                // Plan mode: store plan and wait for user approval
-                // Note: Message already added in stream_handler with full explanation + plan
-                app.set_plan(plan.clone());
-            },
             StreamStatus::FeedbackComplete => {
                 // Feedback loop complete, nothing to do
             },
@@ -151,18 +167,10 @@ pub async fn run_app_loop(
         }
 
         // Check for external file system changes (throttled to once per second)
+        // Note: We don't maintain context anymore, but we keep the watcher for potential future use
         if last_refresh.elapsed() >= std::time::Duration::from_secs(1) {
-            let events = watcher.check_events();
-            if !events.is_empty() {
-                // Reload the context to pick up external changes
-                if let Ok(new_context) = Context::load(Path::new(".")).await {
-                    // Update the context while preserving conversation history
-                    app.context.files = new_context.files;
-                    app.context.token_count = new_context.token_count;
-                    app.set_status("[OK] Files refreshed from disk");
-                }
-                last_refresh = std::time::Instant::now();
-            }
+            let _events = watcher.check_events();
+            last_refresh = std::time::Instant::now();
         }
 
         // Clear stale file reading status after 5 seconds
@@ -212,7 +220,7 @@ async fn handle_message_submit(
     app.current_response.clear();
 
     // Save input to history and reset navigation
-    app.session_state.input_history.push(input.clone());
+    app.session_state.input_history.push_back(input.clone());
     app.session_state.history_index = None;
     app.session_state.history_buffer.clear();
 
@@ -226,15 +234,16 @@ async fn handle_message_submit(
 
     // Process message asynchronously
     let model = app.model_state.model.clone();
-    let context = app.context.clone();
     let tx_clone = tx.clone();
     let tx_done = tx.clone();
 
     let model_id = app.model_state.model_id.clone();
+    let thinking_enabled = app.model_state.is_thinking_active();
 
     let handle = tokio::spawn(async move {
         let mut config = ModelConfig::default();
         config.model = model_id.clone();
+        config.thinking_enabled = thinking_enabled;
 
         let callback: StreamCallback = Arc::new(move |chunk| {
             let _ = tx_clone.try_send(chunk.to_string());
@@ -242,7 +251,7 @@ async fn handle_message_submit(
 
         let model = model.write().await;
         match model
-            .chat(&messages, &context, &config, Some(callback))
+            .chat(&messages, &config, Some(callback))
             .await
         {
             Ok(response) => {
@@ -285,6 +294,85 @@ async fn run_agent_loop(
         iteration += 1;
         app.set_status(format!("Agent loop iteration {}", iteration));
 
+        // Check for queued message BEFORE executing tool calls
+        // This allows the user to intercept and redirect the agent
+        if let Some(queued_msg) = app.operation_state.take_queued_message() {
+            app.set_status("Processing queued message...");
+
+            // Add the queued message as a user message (with timestamp)
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
+            let timestamped_input = format!("[Sent at: {}]\n{}", timestamp, queued_msg);
+            app.add_message(MessageRole::User, timestamped_input);
+
+            // Save to input history
+            app.session_state.input_history.push_back(queued_msg);
+
+            // Clear current tool calls - the model will decide what to do next
+            // based on the new user message
+            current_tool_calls.clear();
+
+            // Build message history and call model with the new context
+            let messages = app.build_message_history();
+            app.current_response.clear();
+
+            let model = app.model_state.model.clone();
+            let tx_clone = tx.clone();
+            let tx_done = tx.clone();
+            let model_id = app.model_state.model_id.clone();
+            let thinking_enabled = app.model_state.is_thinking_active();
+
+            let handle = tokio::spawn(async move {
+                let mut config = ModelConfig::default();
+                config.model = model_id;
+                config.thinking_enabled = thinking_enabled;
+
+                let callback: StreamCallback = Arc::new(move |chunk| {
+                    let _ = tx_clone.try_send(chunk.to_string());
+                });
+
+                let model = model.write().await;
+                match model
+                    .chat(&messages, &config, Some(callback))
+                    .await
+                {
+                    Ok(response) => {
+                        let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
+                        let _ = tx_done.send(format!("[DONE]:tokens={}", tokens)).await;
+                    },
+                    Err(e) => {
+                        let error_json = e.to_channel_message();
+                        let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
+                    },
+                }
+            });
+
+            app.start_generation(handle.abort_handle());
+
+            // Wait for the model response
+            loop {
+                match process_stream_chunks(app, rx).await? {
+                    StreamStatus::Streaming => {},
+                    StreamStatus::Complete { actions: _, tool_calls: new_tool_calls } => {
+                        if !new_tool_calls.is_empty() {
+                            current_tool_calls = new_tool_calls;
+                        }
+                        break;
+                    },
+                    StreamStatus::FeedbackComplete => {
+                        return Ok(());
+                    },
+                    StreamStatus::Error(error) => {
+                        app.display_error(&error.summary, &error.message);
+                        return Ok(());
+                    },
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            // Continue the loop with potentially new tool calls
+            continue;
+        }
+
         // Execute tool calls and get results
         let results = action_handler::execute_tool_calls_for_agent_loop(app, &current_tool_calls).await;
 
@@ -321,14 +409,15 @@ async fn run_agent_loop(
         app.current_response.clear();
 
         let model = app.model_state.model.clone();
-        let context = app.context.clone();
         let tx_clone = tx.clone();
         let tx_done = tx.clone();
         let model_id = app.model_state.model_id.clone();
+        let thinking_enabled = app.model_state.is_thinking_active();
 
         let handle = tokio::spawn(async move {
             let mut config = ModelConfig::default();
             config.model = model_id;
+            config.thinking_enabled = thinking_enabled;
 
             let callback: StreamCallback = Arc::new(move |chunk| {
                 let _ = tx_clone.try_send(chunk.to_string());
@@ -336,7 +425,7 @@ async fn run_agent_loop(
 
             let model = model.write().await;
             match model
-                .chat(&messages, &context, &config, Some(callback))
+                .chat(&messages, &config, Some(callback))
                 .await
             {
                 Ok(response) => {
@@ -371,11 +460,6 @@ async fn run_agent_loop(
                         break; // Break inner loop to continue outer agent loop
                     }
                 },
-                StreamStatus::PlanReady { plan } => {
-                    // Plan mode response - store and exit
-                    app.set_plan(plan);
-                    return Ok(());
-                },
                 StreamStatus::FeedbackComplete => {
                     // Feedback complete - exit loop
                     return Ok(());
@@ -387,8 +471,8 @@ async fn run_agent_loop(
                 },
             }
 
-            // Yield to allow UI updates
-            tokio::task::yield_now().await;
+            // Sleep briefly to avoid busy-wait spin loop
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
