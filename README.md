@@ -1,10 +1,11 @@
 # Mermaid
 
-An open-source AI coding assistant for the terminal. Local-first with Ollama, native tool calling, and a clean TUI.
+An open-source AI coding assistant for the terminal. Local/cloud models with Ollama, native tool calling, and a clean TUI.
 
 ## Features
 
 - **Local Models**: Run 100% locally with Ollama - your code never leaves your machine
+- **Cloud Models**: Run models via Ollama Cloud - use the most powerful models available today with no hardware cost
 - **Native Tool Calling**: Ollama's tool calling API for structured, reliable actions
 - **True Agency**: Read, write, execute commands, and manage git
 - **Real-time Streaming**: See responses as they're generated
@@ -109,12 +110,7 @@ The model can use these tools autonomously:
 
 ## Model Compatibility
 
-Any Ollama model with tool calling support works. Recommended:
-
-- `qwen3:30b` - Excellent coding, good tool use
-- `qwen2.5-coder:32b` - Optimized for code
-- `llama3.1:70b` - Best quality, slower
-- `mistral-nemo:12b` - Fast, balanced
+Any Ollama model with tool calling support works. Models without tool calling can run inference in mermaid, but cannot use tools (Bash, Read, Write, Web Search, etc.)
 
 ### Ollama Cloud
 
@@ -151,4 +147,4 @@ MIT OR Apache-2.0
 
 ## Acknowledgments
 
-Built with [Ratatui](https://github.com/ratatui-org/ratatui) and [Ollama](https://ollama.ai). Inspired by [Aider](https://github.com/paul-gauthier/aider) and Claude Code.
+Built with [Ratatui](https://github.com/ratatui-org/ratatui) and [Ollama](https://ollama.ai). Inspired by [Aider](https://github.com/paul-gauthier/aider) and [Claude Code](https://github.com/anthropics/claude-code).
