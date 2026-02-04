@@ -16,6 +16,8 @@ pub struct StatusLineWidget<'a> {
     pub custom_status: Option<&'a String>,
     pub elapsed_secs: u64,
     pub tokens_received: usize,
+    /// Whether tokens_received is an estimate (show ~ prefix)
+    pub tokens_estimated: bool,
     pub theme: &'a Theme,
     /// Queued messages waiting to be processed
     pub queued_messages: &'a VecDeque<String>,
@@ -64,10 +66,12 @@ impl<'a> Widget for StatusLineWidget<'a> {
                 Style::new().fg(info_color),
             ),
             // Metadata in parentheses (dimmed)
+            // Show ~ prefix when tokens are estimated (during streaming)
             Span::styled(
-                format!("(esc to interrupt • {}s • {} {} tokens)",
+                format!("(esc to interrupt • {}s • {} {}{} tokens)",
                     self.elapsed_secs,
                     if flow_direction == "downstream" { "↓" } else { "↑" },
+                    if self.tokens_estimated { "~" } else { "" },
                     self.tokens_received),
                 Style::new()
                     .fg(self.theme.colors.text_secondary.to_color())

@@ -95,16 +95,12 @@ pub async fn run_app_loop(
                 // During streaming: content is buffered and NOT rendered (block streaming mode)
                 // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
             },
-            StreamStatus::Complete { actions, tool_calls } => {
+            StreamStatus::Complete { tool_calls } => {
                 // Stream complete: response is now rendered
-                // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
 
-                // AGENT LOOP: Execute tool calls and continue until no more tool_calls
+                // AGENT LOOP: Execute tool calls and continue until model stops
                 if !tool_calls.is_empty() {
                     run_agent_loop(app, tool_calls, &tx, rx).await?;
-                } else if !actions.is_empty() {
-                    // Legacy path: actions without tool_calls (backwards compatibility)
-                    action_handler::execute_actions(app, actions, &tx).await?;
                 }
 
                 // Process any queued messages after generation completes
@@ -170,12 +166,10 @@ pub async fn run_app_loop(
                                 StreamStatus::Streaming => {
                                     // Continue processing
                                 },
-                                StreamStatus::Complete { actions: new_actions, tool_calls: new_tool_calls } => {
+                                StreamStatus::Complete { tool_calls: new_tool_calls } => {
                                     // If this response has tool calls, run agent loop
                                     if !new_tool_calls.is_empty() {
                                         run_agent_loop(app, new_tool_calls, &tx, rx).await?;
-                                    } else if !new_actions.is_empty() {
-                                        action_handler::execute_actions(app, new_actions, &tx).await?;
                                     }
                                     break; // Done with this queued message
                                 },
@@ -395,7 +389,7 @@ async fn run_agent_loop(
             loop {
                 match process_stream_chunks(app, rx).await? {
                     StreamStatus::Streaming => {},
-                    StreamStatus::Complete { actions: _, tool_calls: new_tool_calls } => {
+                    StreamStatus::Complete { tool_calls: new_tool_calls } => {
                         if !new_tool_calls.is_empty() {
                             current_tool_calls = new_tool_calls;
                         }
@@ -491,7 +485,7 @@ async fn run_agent_loop(
                 StreamStatus::Streaming => {
                     // Continue processing
                 },
-                StreamStatus::Complete { actions: _, tool_calls: new_tool_calls } => {
+                StreamStatus::Complete { tool_calls: new_tool_calls } => {
                     // Got a new response - check if there are more tool calls
                     if new_tool_calls.is_empty() {
                         // No more tool calls - agent loop complete

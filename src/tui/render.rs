@@ -116,11 +116,22 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
             .map(|start| start.elapsed().as_secs())
             .unwrap_or(0);
 
+        // Estimate tokens during streaming: ~4 chars per token
+        // Use actual count if available (set at end), otherwise estimate from response length
+        let actual_tokens = app.app_state.tokens_received().unwrap_or(0);
+        let (tokens_display, tokens_estimated) = if actual_tokens == 0 && !app.current_response.is_empty() {
+            // Estimate: ~4 characters per token (rough approximation)
+            (app.current_response.len() / 4, true)
+        } else {
+            (actual_tokens, false)
+        };
+
         let status_line_widget = StatusLineWidget {
             status: app.app_state.generation_status().unwrap_or(GenerationStatus::Idle),
             custom_status: app.status_state.custom_status.as_ref(),
             elapsed_secs,
-            tokens_received: app.app_state.tokens_received().unwrap_or(0),
+            tokens_received: tokens_display,
+            tokens_estimated,
             theme: &app.ui_state.theme,
             queued_messages: app.operation_state.get_queued_messages(),
         };

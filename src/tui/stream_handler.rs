@@ -1,8 +1,7 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::agents::AgentAction;
-use crate::models::{parse_tool_calls, group_parallel_reads, ErrorCategory, MessageRole, UserFacingError};
+use crate::models::{ErrorCategory, MessageRole, UserFacingError};
 use super::state::GenerationStatus;
 use crate::tui::App;
 
@@ -14,13 +13,11 @@ const MAX_RESPONSE_CHARS: usize = 400_000;
 pub enum StreamStatus {
     /// Still streaming, no action needed
     Streaming,
-    /// Generation complete with parsed actions and tool calls
+    /// Generation complete with tool calls from Ollama native function calling
     Complete {
-        actions: Vec<AgentAction>,
-        /// Original tool calls from the model (for building proper Tool messages)
         tool_calls: Vec<crate::models::ToolCall>,
     },
-    /// Feedback loop complete (ReadFile response)
+    /// Feedback loop complete (legacy - kept for compatibility during transition)
     FeedbackComplete,
     /// Error occurred during streaming with structured error info
     Error(UserFacingError),
@@ -92,35 +89,17 @@ pub async fn process_stream_chunks(
             }
 
             // Take accumulated tool calls from app state (clears them for next generation)
-            // Do this BEFORE checking current_response so we don't lose tool_calls
-            let accumulated_tool_calls = std::mem::take(&mut app.operation_state.accumulated_tool_calls);
-
-            // Parse actions from accumulated tool calls (Ollama native function calling)
-            let actions = if !accumulated_tool_calls.is_empty() {
-                let parsed = parse_tool_calls(&accumulated_tool_calls);
-                group_parallel_reads(parsed)
-            } else {
-                vec![]
-            };
+            let tool_calls = std::mem::take(&mut app.operation_state.accumulated_tool_calls);
 
             // Add the accumulated response from streaming (if any)
             let response_text = app.current_response.clone();
             if !response_text.is_empty() {
-                // Add message with full response
-                // Note: We do NOT add tool_calls here yet - that's done in loop_coordinator
-                // after we know whether we're continuing the agent loop
                 app.add_message(MessageRole::Assistant, response_text.clone());
-
-                // Clear the accumulated response
                 app.current_response.clear();
             }
 
-            // Return actions and tool_calls for execution in the agent loop
-            // (even if response was empty, we might have tool_calls)
-            return Ok(StreamStatus::Complete {
-                actions,
-                tool_calls: accumulated_tool_calls,
-            });
+            // Return tool_calls for execution in the agent loop
+            return Ok(StreamStatus::Complete { tool_calls });
         } else if chunk.starts_with("[ERROR_JSON]:") {
             // Structured error with rich UX information
             let error_json = chunk.trim_start_matches("[ERROR_JSON]:").trim();
@@ -247,7 +226,7 @@ mod tests {
         let streaming = StreamStatus::Streaming;
         assert!(matches!(streaming, StreamStatus::Streaming));
 
-        let complete = StreamStatus::Complete { actions: vec![], tool_calls: vec![] };
+        let complete = StreamStatus::Complete { tool_calls: vec![] };
         assert!(matches!(complete, StreamStatus::Complete { .. }));
 
         let feedback_complete = StreamStatus::FeedbackComplete;

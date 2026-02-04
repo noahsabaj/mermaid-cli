@@ -10,7 +10,7 @@ use crate::{
     agents::{execute_action, ActionResult as AgentActionResult, AgentAction},
     app::Config,
     cli::OutputFormat,
-    models::{ChatMessage, MessageRole, Model, ModelConfig, ModelFactory, parse_tool_calls, group_parallel_reads},
+    models::{ChatMessage, MessageRole, Model, ModelConfig, ModelFactory},
 };
 
 /// Result of a non-interactive run
@@ -156,7 +156,7 @@ impl NonInteractiveRunner {
         };
 
         // Parse actions from tool calls (Ollama native function calling)
-        let parsed_actions = match result {
+        let parsed_actions: Vec<AgentAction> = match result {
             Ok(response) => {
                 // Try to get content from the callback first
                 let callback_content = response_text.lock_mut_safe().clone();
@@ -167,10 +167,12 @@ impl NonInteractiveRunner {
                 }
                 tokens_used = response.usage.map(|u| u.total_tokens).unwrap_or(0);
 
-                // Parse actions from tool_calls
+                // Convert tool_calls to AgentActions
                 if let Some(tool_calls) = response.tool_calls {
-                    let parsed = parse_tool_calls(&tool_calls);
-                    group_parallel_reads(parsed)
+                    tool_calls
+                        .iter()
+                        .filter_map(|tc| tc.to_agent_action().ok())
+                        .collect()
                 } else {
                     vec![]
                 }

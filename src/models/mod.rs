@@ -21,7 +21,7 @@ pub use error::{BackendError, ConfigError, ErrorCategory, ModelError, Result, Us
 pub use factory::ModelFactory;
 pub use lazy_context::{get_priority_files, LazyProjectContext};
 pub use traits::{Model, ModelCapabilities};
-pub use tool_call::{parse_tool_calls, group_parallel_reads, ToolCall, FunctionCall};
+pub use tool_call::{ToolCall, FunctionCall};
 pub use tools::{Tool, ToolFunction, ToolRegistry};
 pub use types::{
     ChatMessage, MessageRole, ModelResponse, ProjectContext,

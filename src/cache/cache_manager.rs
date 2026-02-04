@@ -355,7 +355,11 @@ mod tests {
 
     #[test]
     fn test_cache_directory_structure() {
-        // Test cache directory path construction
+        // Test cache directory path construction with platform-specific paths
+        #[cfg(windows)]
+        let cache_dir = PathBuf::from("C:\\Users\\user\\AppData\\Local\\mermaid");
+
+        #[cfg(not(windows))]
         let cache_dir = PathBuf::from("/home/user/.cache/mermaid");
 
         // Verify cache directory is a valid PathBuf

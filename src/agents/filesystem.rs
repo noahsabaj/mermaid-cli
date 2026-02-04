@@ -199,27 +199,54 @@ fn validate_path(path: &Path) -> Result<()> {
     let current_dir = std::env::current_dir()?;
 
     // Resolve the path to handle .. and .
+    // For non-existent paths, walk up to find the first existing ancestor
     let canonical = if path.exists() {
         path.canonicalize()?
     } else {
-        // For non-existent paths, canonicalize the parent
-        if let Some(parent) = path.parent() {
-            if parent.exists() {
-                let parent_canonical = parent.canonicalize()?;
-                parent_canonical.join(path.file_name().unwrap_or_default())
-            } else {
-                path.to_path_buf()
+        // Walk up the path to find the first existing ancestor
+        let mut ancestors_to_join = Vec::new();
+        let mut current = path;
+
+        while let Some(parent) = current.parent() {
+            if let Some(name) = current.file_name() {
+                ancestors_to_join.push(name.to_os_string());
             }
-        } else {
-            path.to_path_buf()
+            if parent.as_os_str().is_empty() {
+                // Reached the root of a relative path
+                break;
+            }
+            if parent.exists() {
+                // Found existing ancestor - canonicalize it and join the rest
+                let mut result = parent.canonicalize()?;
+                for component in ancestors_to_join.iter().rev() {
+                    result = result.join(component);
+                }
+                return validate_canonical_path(&result, &current_dir);
+            }
+            current = parent;
         }
+
+        // No existing ancestor found - use current_dir as base
+        let mut result = current_dir.canonicalize().unwrap_or_else(|_| current_dir.clone());
+        for component in ancestors_to_join.iter().rev() {
+            result = result.join(component);
+        }
+        result
     };
 
+    validate_canonical_path(&canonical, &current_dir)
+}
+
+/// Helper to validate a canonical path against the current directory
+fn validate_canonical_path(canonical: &Path, current_dir: &Path) -> Result<()> {
+    // Canonicalize current_dir for consistent comparison (Windows adds \\?\ prefix)
+    let current_dir_canonical = current_dir.canonicalize().unwrap_or_else(|_| current_dir.to_path_buf());
+
     // Ensure the path is within the current directory
-    if !canonical.starts_with(&current_dir) {
+    if !canonical.starts_with(&current_dir_canonical) {
         anyhow::bail!(
             "Security error: attempted to access path outside of project directory: {}",
-            path.display()
+            canonical.display()
         );
     }
 
@@ -235,12 +262,12 @@ fn validate_path(path: &Path) -> Result<()> {
         ".pypirc",
     ];
 
-    let path_str = path.to_string_lossy();
+    let path_str = canonical.to_string_lossy();
     for pattern in &sensitive_patterns {
         if path_str.contains(pattern) {
             anyhow::bail!(
                 "Security error: attempted to access potentially sensitive file: {}",
-                path.display()
+                canonical.display()
             );
         }
     }

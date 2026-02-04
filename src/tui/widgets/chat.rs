@@ -271,7 +271,11 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
 /// Render actions in Claude Code style
 fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Theme) {
-    for action in actions {
+    for (action_idx, action) in actions.iter().enumerate() {
+        // Add blank line between consecutive actions (not before first one)
+        if action_idx > 0 {
+            lines.push(Line::from(""));
+        }
         let action_color = match action.action_type.as_str() {
             "Write" => theme.colors.success.to_color(),
             "Bash" | "Command" => theme.colors.info.to_color(),
@@ -283,7 +287,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
         };
 
         lines.push(Line::from(vec![
-            Span::styled("  ● ", Style::new().fg(action_color).bold()),
+            Span::styled("● ", Style::new().fg(action_color).bold()),
             Span::styled(
                 format!("{}(", action.action_type),
                 Style::new().fg(action_color).bold(),
@@ -344,7 +348,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
 
                 let result_lines: Vec<&str> = result_msg.lines().collect();
                 for (idx, line) in result_lines.iter().enumerate() {
-                    let prefix = if idx == 0 { "    ⎿ " } else { "      " };
+                    let prefix = if idx == 0 { "  ⎿ " } else { "    " };
                     lines.push(Line::from(vec![
                         Span::styled(prefix, Style::new().fg(action_color)),
                         Span::styled(
@@ -362,7 +366,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                         "WebSearch" | "Bash" | "Command" | "GitDiff" | "GitStatus" | "Read"
                     ) {
                         lines.push(Line::from(vec![
-                            Span::styled("      ", Style::new().fg(action_color)),
+                            Span::styled("    ", Style::new().fg(action_color)),
                             Span::styled(
                                 format!("Completed in {:.1} seconds", duration),
                                 Style::new()
@@ -380,7 +384,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
 
                         if !preview_lines.is_empty() {
                             lines.push(Line::from(vec![Span::styled(
-                                "      ",
+                                "    ",
                                 Style::new().fg(action_color),
                             )]));
 
@@ -390,7 +394,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
 
                             for parsed_line in parsed.iter_mut() {
                                 let mut new_spans =
-                                    vec![Span::styled("      ", Style::new().fg(action_color))];
+                                    vec![Span::styled("    ", Style::new().fg(action_color))];
                                 new_spans.extend(parsed_line.spans.drain(..));
                                 parsed_line.spans = new_spans;
                             }
@@ -399,7 +403,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
 
                             if total_lines > 10 {
                                 lines.push(Line::from(vec![
-                                    Span::styled("      ", Style::new().fg(action_color)),
+                                    Span::styled("    ", Style::new().fg(action_color)),
                                     Span::styled(
                                         format!("... ({} more lines)", total_lines - 10),
                                         Style::new()
@@ -414,7 +418,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
             },
             ActionResult::Error { error } => {
                 lines.push(Line::from(vec![
-                    Span::styled("    ⎿ ", Style::new().fg(theme.colors.error.to_color())),
+                    Span::styled("  ⎿ ", Style::new().fg(theme.colors.error.to_color())),
                     Span::styled(
                         format!("Error: {}", error),
                         Style::new().fg(theme.colors.error.to_color()),

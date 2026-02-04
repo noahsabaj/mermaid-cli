@@ -1,11 +1,12 @@
-use anyhow::Result;
-use std::sync::Arc;
-use tokio::sync::mpsc;
+/// Tool call execution for the agent loop
+///
+/// This module handles executing Ollama native tool calls and building
+/// UI displays for the results.
 
 use crate::agents::{
     self, execute_action, ActionDisplay, ActionResult as AgentActionResult, AgentAction,
 };
-use crate::models::{ChatMessage, MessageRole, ModelConfig, StreamCallback, ToolCall};
+use crate::models::{MessageRole, ToolCall};
 use crate::tui::App;
 
 /// Result of executing a tool call
@@ -22,24 +23,70 @@ pub struct ToolExecutionResult {
     pub success: bool,
 }
 
-/// Execute a list of agent actions
+/// Execute tool calls and return results for the agent loop
 ///
-/// Actions are executed sequentially without confirmation (Full YOLO mode).
-pub async fn execute_actions(
+/// This is the main function for the agentic flow. It:
+/// 1. Takes tool_calls from the model response
+/// 2. Converts each to an AgentAction
+/// 3. Executes the action directly (no confirmation)
+/// 4. Returns ToolExecutionResult for each
+pub async fn execute_tool_calls_for_agent_loop(
     app: &mut App,
-    actions: Vec<AgentAction>,
-    tx: &mpsc::Sender<String>,
-) -> Result<()> {
-    for action in actions {
-        let action_clone = action.clone();
+    tool_calls: &[ToolCall],
+) -> Vec<ToolExecutionResult> {
+    let mut results = Vec::new();
 
-        // Execute action directly
+    for tool_call in tool_calls {
+        let tool_call_id = tool_call.id.clone().unwrap_or_else(|| {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("call_{:x}", timestamp)
+        });
+        let tool_name = tool_call.function.name.clone();
+
+        // Convert tool call to AgentAction
+        let action = match tool_call.to_agent_action() {
+            Ok(action) => action,
+            Err(e) => {
+                results.push(ToolExecutionResult {
+                    tool_call_id,
+                    tool_name,
+                    content: format!("Error: {}", e),
+                    success: false,
+                });
+                continue;
+            }
+        };
+
+        // Execute the action directly
+        let action_clone = action.clone();
         match execute_action(&action).await {
             agents::ActionResult::Success { output } => {
-                handle_action_success(app, &action_clone, output, tx).await?;
+                // Build ActionDisplay for UI rendering
+                let action_display = build_action_display(&action_clone, &output);
+
+                // Attach ActionDisplay to the most recent assistant message
+                if let Some(last_msg) = app
+                    .session_state
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| matches!(m.role, MessageRole::Assistant))
+                {
+                    last_msg.actions.push(action_display);
+                }
+
+                results.push(ToolExecutionResult {
+                    tool_call_id,
+                    tool_name,
+                    content: output,
+                    success: true,
+                });
             }
             agents::ActionResult::Error { error } => {
-                // Add action display to show the failed action in chat
                 let action_display = build_action_display(&action_clone, &error);
                 if let Some(last_msg) = app
                     .session_state
@@ -51,86 +98,17 @@ pub async fn execute_actions(
                     last_msg.actions.push(action_display);
                 }
 
-                // Use unified error display (status bar + chat)
-                app.display_error_simple(&error);
+                results.push(ToolExecutionResult {
+                    tool_call_id,
+                    tool_name,
+                    content: format!("Error: {}", error),
+                    success: false,
+                });
             }
         }
     }
 
-    Ok(())
-}
-
-/// Handle successful action execution
-///
-/// Different actions require different post-execution handling:
-/// - ReadFile: Triggers feedback loop to send contents back to model
-/// - WriteFile: Updates context with new file contents
-/// - DeleteFile: Updates context to remove file
-/// - Other actions: Just show success status
-///
-/// Also builds ActionDisplay and attaches to current message for UI rendering
-async fn handle_action_success(
-    app: &mut App,
-    action: &AgentAction,
-    output: String,
-    tx: &mpsc::Sender<String>,
-) -> Result<()> {
-    // Build ActionDisplay for UI rendering
-    let action_display = build_action_display(action, &output);
-
-    // Attach ActionDisplay to the most recent assistant message
-    if let Some(last_msg) = app
-        .session_state
-        .messages
-        .iter_mut()
-        .rev()
-        .find(|m| matches!(m.role, MessageRole::Assistant))
-    {
-        last_msg.actions.push(action_display);
-    }
-
-    // Perform action-specific post-processing
-    match action {
-        // Actions that need multi-step follow-through: Trigger unified feedback loop
-        AgentAction::ReadFile { paths } => {
-            // For single file reads, check if binary
-            if paths.len() == 1 && crate::agents::is_binary_file(&paths[0]) {
-                match crate::agents::read_binary_file(&paths[0]) {
-                    Ok(base64_data) => {
-                        trigger_multimodal_feedback_loop(app, action, base64_data, tx).await;
-                    }
-                    Err(e) => {
-                        app.add_message(
-                            MessageRole::Assistant,
-                            format!("Failed to read binary file: {}", e),
-                        );
-                    }
-                }
-            } else {
-                trigger_feedback_loop(app, action, output, tx).await;
-            }
-        }
-        AgentAction::WebSearch { .. } => {
-            trigger_feedback_loop(app, action, output, tx).await;
-        }
-        AgentAction::ExecuteCommand { .. } => {
-            trigger_feedback_loop(app, action, output, tx).await;
-        }
-        AgentAction::GitDiff { .. } => {
-            trigger_feedback_loop(app, action, output, tx).await;
-        }
-        AgentAction::GitStatus => {
-            trigger_feedback_loop(app, action, output, tx).await;
-        }
-
-        // These actions are handled by the tool execution, nothing extra needed
-        AgentAction::WriteFile { .. } => {}
-        AgentAction::DeleteFile { .. } => {}
-        AgentAction::CreateDirectory { .. } => {}
-        AgentAction::GitCommit { .. } => {}
-    }
-
-    Ok(())
+    results
 }
 
 /// Build an ActionDisplay from an action and its output
@@ -353,279 +331,4 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
             lines.len() - max_lines
         )
     }
-}
-
-/// Build feedback prompt for action results based on action type
-fn build_feedback_prompt(action: &AgentAction, output: &str) -> String {
-    match action {
-        AgentAction::ReadFile { paths } => {
-            if paths.len() == 1 {
-                format!(
-                    "I've successfully read the file '{}'. Here are its contents:\n\n{}\n\nPlease explain what this file contains and how it's relevant to the user's request.",
-                    paths[0], output
-                )
-            } else {
-                format!(
-                    "I've successfully read {} files:\n\n{}\n\nPlease analyze these files together as a cohesive system:\n1. What patterns do you see across files?\n2. What's the overall flow or architecture?\n3. Are there inconsistencies or improvements needed?\n4. What could be optimized?",
-                    paths.len(), output
-                )
-            }
-        }
-        AgentAction::WebSearch { queries } => {
-            if queries.len() == 1 {
-                format!(
-                    "Here are the web search results for '{}':\n\n{}\n\nPlease analyze these results and respond to the user's original question. Summarize the key findings with [source: URL] citations, dates, and author information where available.",
-                    queries[0].0, output
-                )
-            } else {
-                format!(
-                    "I've completed {} web searches:\n\n{}\n\nPlease analyze these results together and respond to the user's original question. Synthesize the findings with [source: URL] citations, dates, and author information where available.",
-                    queries.len(), output
-                )
-            }
-        }
-        AgentAction::ExecuteCommand { command, .. } => {
-            format!(
-                "I executed the command '{}'. Here's the output:\n\n{}\n\nPlease interpret these results and explain what they mean in the context of the user's request.",
-                command, output
-            )
-        }
-        AgentAction::GitDiff { paths } => {
-            if paths.len() == 1 {
-                let context = if let Some(p) = &paths[0] {
-                    format!("for {}", p)
-                } else {
-                    "for the repository".to_string()
-                };
-                format!(
-                    "Here's the git diff {}:\n\n{}\n\nPlease analyze these changes and explain their implications.",
-                    context, output
-                )
-            } else {
-                format!(
-                    "Here are {} git diffs:\n\n{}\n\nPlease analyze these changes together and explain their collective implications and how they work together.",
-                    paths.len(), output
-                )
-            }
-        }
-        AgentAction::GitStatus => {
-            format!(
-                "Here's the current repository status:\n\n{}\n\nPlease explain the repository state clearly to the user.",
-                output
-            )
-        }
-        _ => String::new(),
-    }
-}
-
-/// Trigger the unified multi-step feedback loop for action follow-through
-async fn trigger_feedback_loop(
-    app: &mut App,
-    action: &AgentAction,
-    output: String,
-    tx: &mpsc::Sender<String>,
-) {
-    let feedback_prompt = build_feedback_prompt(action, &output);
-    if feedback_prompt.is_empty() {
-        return;
-    }
-
-    app.operation_state.pending_file_read = true;
-    if app.operation_state.reading_file_status.is_none() {
-        app.operation_state.reading_file_status = Some("Analyzing action results...".to_string());
-        app.status_state.status_timestamp = Some(std::time::Instant::now());
-    }
-
-    app.current_response.clear();
-    app.add_message(MessageRole::System, feedback_prompt.clone());
-    let messages = app.build_message_history();
-
-    let model = app.model_state.model.clone();
-    let tx_clone = tx.clone();
-    let tx_done = tx.clone();
-
-    let handle = tokio::spawn(async move {
-        let config = ModelConfig::default();
-        let callback: StreamCallback = Arc::new(move |chunk| {
-            let _ = tx_clone.try_send(chunk.to_string());
-        });
-
-        let model = model.write().await;
-        match model
-            .chat(&messages, &config, Some(callback))
-            .await
-        {
-            Ok(_) => {
-                let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
-            }
-            Err(e) => {
-                let error_json = e.to_channel_message();
-                let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
-            }
-        }
-    });
-
-    app.start_generation(handle.abort_handle());
-}
-
-/// Trigger multimodal feedback loop for binary files (PDFs, images)
-async fn trigger_multimodal_feedback_loop(
-    app: &mut App,
-    action: &AgentAction,
-    base64_data: String,
-    tx: &mpsc::Sender<String>,
-) {
-    let feedback_prompt = match action {
-        AgentAction::ReadFile { paths } => {
-            if paths.len() == 1 {
-                format!(
-                    "I've successfully read the file '{}'. Please analyze this document and tell the user what it contains.",
-                    paths[0]
-                )
-            } else {
-                format!(
-                    "I've successfully read {} files. Please analyze these documents and tell the user what they contain.",
-                    paths.len()
-                )
-            }
-        }
-        _ => return,
-    };
-
-    app.operation_state.pending_file_read = true;
-    if app.operation_state.reading_file_status.is_none() {
-        app.operation_state.reading_file_status = Some("Analyzing document...".to_string());
-        app.status_state.status_timestamp = Some(std::time::Instant::now());
-    }
-
-    app.current_response.clear();
-
-    let mut messages = app.build_message_history();
-    let feedback_message = ChatMessage {
-        role: MessageRole::System,
-        content: feedback_prompt,
-        timestamp: chrono::Local::now(),
-        actions: Vec::new(),
-        thinking: None,
-        images: Some(vec![base64_data]),
-        tool_calls: None,
-        tool_call_id: None,
-        tool_name: None,
-    };
-    messages.push(feedback_message);
-
-    let model = app.model_state.model.clone();
-    let tx_clone = tx.clone();
-    let tx_done = tx.clone();
-
-    let handle = tokio::spawn(async move {
-        let config = ModelConfig::default();
-        let callback: StreamCallback = Arc::new(move |chunk| {
-            let _ = tx_clone.try_send(chunk.to_string());
-        });
-
-        let model = model.write().await;
-        match model
-            .chat(&messages, &config, Some(callback))
-            .await
-        {
-            Ok(_) => {
-                let _ = tx_done.send("[DONE]:[FEEDBACK_COMPLETE]".to_string()).await;
-            }
-            Err(e) => {
-                let error_json = e.to_channel_message();
-                let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
-            }
-        }
-    });
-
-    app.start_generation(handle.abort_handle());
-}
-
-/// Execute tool calls and return results for the agent loop
-///
-/// This is the main function for the agentic flow. It:
-/// 1. Takes tool_calls from the model response
-/// 2. Converts each to an AgentAction
-/// 3. Executes the action directly (no confirmation)
-/// 4. Returns ToolExecutionResult for each
-pub async fn execute_tool_calls_for_agent_loop(
-    app: &mut App,
-    tool_calls: &[ToolCall],
-) -> Vec<ToolExecutionResult> {
-    let mut results = Vec::new();
-
-    for tool_call in tool_calls {
-        let tool_call_id = tool_call.id.clone().unwrap_or_else(|| {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            format!("call_{:x}", timestamp)
-        });
-        let tool_name = tool_call.function.name.clone();
-
-        // Convert tool call to AgentAction
-        let action = match tool_call.to_agent_action() {
-            Ok(action) => action,
-            Err(e) => {
-                results.push(ToolExecutionResult {
-                    tool_call_id,
-                    tool_name,
-                    content: format!("Error: {}", e),
-                    success: false,
-                });
-                continue;
-            }
-        };
-
-        // Execute the action directly
-        let action_clone = action.clone();
-        match execute_action(&action).await {
-            agents::ActionResult::Success { output } => {
-                // Build ActionDisplay for UI rendering
-                let action_display = build_action_display(&action_clone, &output);
-
-                // Attach ActionDisplay to the most recent assistant message
-                if let Some(last_msg) = app
-                    .session_state
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .find(|m| matches!(m.role, MessageRole::Assistant))
-                {
-                    last_msg.actions.push(action_display);
-                }
-
-                results.push(ToolExecutionResult {
-                    tool_call_id,
-                    tool_name,
-                    content: output,
-                    success: true,
-                });
-            }
-            agents::ActionResult::Error { error } => {
-                let action_display = build_action_display(&action_clone, &error);
-                if let Some(last_msg) = app
-                    .session_state
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .find(|m| matches!(m.role, MessageRole::Assistant))
-                {
-                    last_msg.actions.push(action_display);
-                }
-
-                results.push(ToolExecutionResult {
-                    tool_call_id,
-                    tool_name,
-                    content: format!("Error: {}", error),
-                    success: false,
-                });
-            }
-        }
-    }
-
-    results
 }

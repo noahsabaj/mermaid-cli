@@ -201,7 +201,7 @@ impl Context {
                     .strip_prefix(&self.root_path)
                     .unwrap_or(file_path)
                     .to_string_lossy()
-                    .to_string();
+                    .replace('\\', "/");  // Normalize to forward slashes for cross-platform consistency
 
                 Some((relative_path, content, tokens))
             })

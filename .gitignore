@@ -54,3 +54,6 @@ cobertura.xml
 *.tmp
 temp/
 file.txt
+
+# Mermaid-specific
+.mermaid
