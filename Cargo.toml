@@ -1,6 +1,6 @@
 [package]
 name = "mermaid-cli"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
 description = "Open-source AI pair programmer with agentic capabilities. Local-first with Ollama, native tool calling, and beautiful TUI."
@@ -24,7 +24,7 @@ futures = "0.3"
 
 # TUI
 ratatui = { version = "0.30", features = ["scrolling-regions", "palette", "macros"] }
-crossterm = "0.28"
+crossterm = "0.29"
 tui-textarea = "0.7"
 
 # Model clients - using our own unified interface with HTTP clients
@@ -35,7 +35,7 @@ ignore = "0.4"  # For smart file tree scanning
 # Config & Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "0.9"
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -46,7 +46,7 @@ bincode = "1.3"
 lz4 = "1.28"
 
 # Markdown rendering
-pulldown-cmark = "0.12"
+pulldown-cmark = "0.13"
 
 # Utils
 anyhow = "1.0"
@@ -55,14 +55,14 @@ async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
-directories = "5.0"
-which = "7.0"  # Find executables
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+directories = "6.0"
+which = "8.0"  # Find executables
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 bytes = "1.8"
 dotenvy = "0.15"  # Load .env files
 
 # Git
-git2 = { version = "0.19", features = ["vendored-openssl"] }
+git2 = { version = "0.20", features = ["vendored-openssl"] }
 
 # Additional utilities
 regex = "1.11"
