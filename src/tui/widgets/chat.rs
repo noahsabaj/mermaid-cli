@@ -190,16 +190,22 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             } else {
                 // For User messages: format timestamp and display on right edge
                 let formatted_timestamp = format_relative_timestamp(msg.timestamp);
-                let timestamp_width = formatted_timestamp.len() + 2; // +2 for spacing
+                let timestamp_len = formatted_timestamp.len();
+                let min_gap = 3; // minimum spaces between text and timestamp
 
                 // Strip the [Sent at: ...] line from message content
                 let cleaned_content = strip_timestamp_line(&msg.content);
+
+                // Reserve space on the first line for role prefix + gap + timestamp
+                // so text wraps early enough to not overlap the timestamp
+                let role_prefix_width = role_prefix.len() + 1; // "You " = prefix + space
+                let first_line_reserved = role_prefix_width + min_gap + timestamp_len;
 
                 // Manually wrap the user message with hanging indent (2 spaces)
                 let wrapped = wrap_text_with_indent(
                     &cleaned_content,
                     area.width as usize,
-                    2, // first line indent (for role prefix "  ")
+                    first_line_reserved, // reserve space for prefix + gap + timestamp on first line
                     2, // continuation indent
                 );
 
@@ -217,12 +223,11 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                             Span::raw(text_content.to_string()),
                         ];
 
-                        // Add padding and timestamp on right
-                        let content_width = role_prefix.len() + 1 + text_len;
-                        let padding_needed = (area.width as usize).saturating_sub(content_width + timestamp_width);
-                        if padding_needed > 0 {
-                            spans.push(Span::raw(" ".repeat(padding_needed)));
-                        }
+                        // Always add at least min_gap spaces, plus any extra from word-boundary slack
+                        let content_width = role_prefix_width + text_len;
+                        let total_used = content_width + min_gap + timestamp_len;
+                        let extra_padding = (area.width as usize).saturating_sub(total_used);
+                        spans.push(Span::raw(" ".repeat(min_gap + extra_padding)));
                         spans.push(Span::styled(
                             formatted_timestamp.clone(),
                             Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)),
