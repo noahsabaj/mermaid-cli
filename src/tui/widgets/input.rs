@@ -22,31 +22,74 @@ impl InputState {
     }
 
     /// Calculate cursor position for wrapped text
+    ///
+    /// Must mirror the wrapping logic of `wrap_input_with_prompt` exactly:
+    /// - First line fits `content_width - 2` chars (after "> " prefix)
+    /// - Continuation lines fit `content_width - 2` chars (after "  " prefix)
+    /// - Word-boundary wrapping where possible
     pub fn calculate_cursor_position(
         input: &str,
         cursor_pos: usize,
-        inner_width: usize,
+        content_width: usize,
     ) -> (u16, u16) {
         let cursor_pos = cursor_pos.min(input.len());
-        let mut current_line = 0;
-        let mut current_col = 0;
-        let mut char_count = 0;
 
-        for ch in input.chars() {
-            if char_count == cursor_pos {
-                break;
-            }
-
-            if ch == '\n' || current_col >= inner_width {
-                current_line += 1;
-                current_col = if ch == '\n' { 0 } else { 1 };
-            } else {
-                current_col += 1;
-            }
-            char_count += 1;
+        if content_width < 3 || input.is_empty() {
+            return (0, cursor_pos.min(content_width.saturating_sub(1)) as u16);
         }
 
-        (current_line as u16, current_col as u16)
+        // Available chars per line after the 2-char prefix ("> " or "  ")
+        let line_width = content_width.saturating_sub(2);
+        if line_width == 0 {
+            return (0, 0);
+        }
+
+        // Simulate the same wrapping as wrap_input_with_prompt
+        let mut current_line: usize = 0;
+        let mut consumed: usize = 0; // bytes consumed from input so far
+
+        let mut chars_remaining = input;
+        loop {
+            // Find where this line breaks (same logic as wrap_input_with_prompt)
+            let break_point = if chars_remaining.len() <= line_width {
+                chars_remaining.len()
+            } else {
+                chars_remaining[..line_width]
+                    .rfind(char::is_whitespace)
+                    .map(|pos| pos + 1)
+                    .unwrap_or(line_width)
+            };
+
+            let line_text_len = chars_remaining[..break_point].trim_end().len();
+
+            // Check if cursor falls within this line's content
+            if cursor_pos <= consumed + line_text_len {
+                let col = cursor_pos - consumed;
+                return (current_line as u16, col as u16);
+            }
+
+            // Move past this line
+            consumed += break_point;
+            // Skip leading whitespace on next line (matching trim_start in wrap)
+            let next = &chars_remaining[break_point..];
+            let trimmed = next.trim_start();
+            let skipped_ws = next.len() - trimmed.len();
+            consumed += skipped_ws;
+            chars_remaining = trimmed;
+
+            if chars_remaining.is_empty() {
+                // Cursor is at the very end, past the last line
+                let col = cursor_pos.saturating_sub(consumed - skipped_ws - break_point + line_text_len);
+                return (current_line as u16, col.min(line_width) as u16);
+            }
+
+            current_line += 1;
+
+            // If cursor is in the whitespace that was trimmed, place at end of previous line
+            if cursor_pos < consumed {
+                return (current_line as u16, 0);
+            }
+        }
     }
 }
 

@@ -149,16 +149,18 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
     frame.render_stateful_widget(input_widget, chunks[2], &mut app.ui_state.input_state);
 
     // Set cursor position in input box (visible text cursor)
+    // content_width must match what wrap_input_with_prompt receives:
+    // input_area.width minus 2 for top/bottom borders (no side borders)
     let input_area = chunks[2];
-    let inner_width = input_area.width as usize; // Full width now (no side borders)
+    let content_width = input_area.width.saturating_sub(2) as usize;
     let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
         app.input.get(),
         app.input.cursor_position,
-        inner_width,
+        content_width,
     );
 
-    // Position cursor accounting for "> " prefix and top border
-    // No left border anymore (spans full width), +1 for top border, +2 for "> " prefix
+    // cursor_col is relative to content start (after "> " or "  " prefix)
+    // +2 for the prefix, +1 for top border (no left border)
     frame.set_cursor_position((
         input_area.x + cursor_col + 2,
         input_area.y + 1 + cursor_row,
