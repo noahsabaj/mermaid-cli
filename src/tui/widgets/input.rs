@@ -46,7 +46,7 @@ impl InputState {
 
         // Simulate the same wrapping as wrap_input_with_prompt
         let mut current_line: usize = 0;
-        let mut consumed: usize = 0; // bytes consumed from input so far
+        let mut consumed: usize = 0;
 
         let mut chars_remaining = input;
         loop {
@@ -60,35 +60,24 @@ impl InputState {
                     .unwrap_or(line_width)
             };
 
-            let line_text_len = chars_remaining[..break_point].trim_end().len();
+            // Calculate whitespace gap between this line and the next
+            let after = &chars_remaining[break_point..];
+            let next_content = after.trim_start();
+            let ws_gap = after.len() - next_content.len();
+            let is_last_line = next_content.is_empty();
 
-            // Check if cursor falls within this line's content
-            if cursor_pos <= consumed + line_text_len {
-                let col = cursor_pos - consumed;
-                return (current_line as u16, col as u16);
+            // Cursor belongs to this line if it falls within the line chars,
+            // or within the whitespace gap (trimmed between lines), or if
+            // this is the last line (cursor must be here).
+            if cursor_pos < consumed + break_point + ws_gap || is_last_line {
+                let col = cursor_pos.saturating_sub(consumed);
+                // Cap at break_point so trailing/gap whitespace doesn't overflow
+                return (current_line as u16, col.min(break_point) as u16);
             }
 
-            // Move past this line
-            consumed += break_point;
-            // Skip leading whitespace on next line (matching trim_start in wrap)
-            let next = &chars_remaining[break_point..];
-            let trimmed = next.trim_start();
-            let skipped_ws = next.len() - trimmed.len();
-            consumed += skipped_ws;
-            chars_remaining = trimmed;
-
-            if chars_remaining.is_empty() {
-                // Cursor is at the very end, past the last line
-                let col = cursor_pos.saturating_sub(consumed - skipped_ws - break_point + line_text_len);
-                return (current_line as u16, col.min(line_width) as u16);
-            }
-
+            consumed += break_point + ws_gap;
+            chars_remaining = next_content;
             current_line += 1;
-
-            // If cursor is in the whitespace that was trimmed, place at end of previous line
-            if cursor_pos < consumed {
-                return (current_line as u16, 0);
-            }
         }
     }
 }
