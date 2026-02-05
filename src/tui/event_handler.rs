@@ -24,7 +24,8 @@ pub fn handle_event(app: &mut App, event: Event, viewport_height: u16) -> Result
     match event {
         Event::Mouse(mouse) => handle_mouse_event(app, mouse, viewport_height),
         Event::Key(key) => handle_key_event(app, key, viewport_height),
-        _ => Ok(EventAction::Continue), // Ignore FocusGained, FocusLost, Paste, Resize
+        Event::Paste(text) => handle_paste(app, &text),
+        _ => Ok(EventAction::Continue), // Ignore FocusGained, FocusLost, Resize
     }
 }
 
@@ -137,6 +138,25 @@ fn handle_enter_key(app: &mut App) -> Result<EventAction> {
     let input = app.input.get().to_string();
     app.clear_input();
     Ok(EventAction::SubmitMessage(input))
+}
+
+/// Handle pasted text (bracketed paste mode)
+/// Newlines in pasted text are replaced with spaces so multi-line pastes
+/// become a single input rather than triggering multiple submissions.
+fn handle_paste(app: &mut App, text: &str) -> Result<EventAction> {
+    // Replace newlines with spaces so pasted text stays as one input
+    let cleaned = text.replace('\n', " ").replace('\r', "");
+    // Collapse multiple spaces from blank lines
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !collapsed.is_empty() {
+        // Reset history navigation when pasting
+        if app.session_state.history_index.is_some() {
+            app.session_state.history_index = None;
+            app.session_state.history_buffer.clear();
+        }
+        app.input.insert_str(&collapsed);
+    }
+    Ok(EventAction::Continue)
 }
 
 /// Handle character input (with modifier check for shortcuts)
