@@ -160,23 +160,31 @@ impl FileCache {
         self.cache_dir.join(hash_prefix).join(cache_name)
     }
 
-    /// Get cache statistics
+    /// Get cache statistics with actual sizes from cache entry metadata
     pub fn get_stats(&self) -> Result<CacheStats> {
         let mut total_entries = 0;
         let mut total_size = 0;
         let mut total_compressed_size = 0;
 
-        // Walk cache directory
+        // Walk cache directory and read actual metadata from each entry
         for entry in fs::read_dir(&self.cache_dir)? {
             let entry = entry?;
             if entry.path().is_dir() {
                 for cache_file in fs::read_dir(entry.path())? {
                     let cache_file = cache_file?;
-                    let metadata = cache_file.metadata()?;
+                    let file_metadata = cache_file.metadata()?;
                     total_entries += 1;
-                    total_compressed_size += metadata.len() as usize;
-                    // Estimate original size (we'd need to read entries for exact)
-                    total_size += (metadata.len() as f32 * 3.0) as usize;
+                    total_compressed_size += file_metadata.len() as usize;
+
+                    // Read the cache entry to get actual original size from its metadata
+                    if let Ok(entry_data) = fs::read(cache_file.path()) {
+                        if let Ok(entry) = bincode::deserialize::<CacheEntry<Vec<u8>>>(&entry_data) {
+                            total_size += entry.metadata.file_size as usize;
+                            continue;
+                        }
+                    }
+                    // Fallback: use compressed size if entry can't be read
+                    total_size += file_metadata.len() as usize;
                 }
             }
         }

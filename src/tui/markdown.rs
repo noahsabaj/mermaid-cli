@@ -17,6 +17,13 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
     let mut code_block_content = String::new();
     let mut list_depth: usize = 0;
 
+    // Table state
+    let mut in_table = false;
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut current_row: Vec<String> = Vec::new();
+    let mut current_cell = String::new();
+    let mut table_header_len: usize = 0;
+
     for event in parser {
         match event {
             Event::Start(tag) => {
@@ -89,6 +96,28 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                             .push(Span::styled("• ", Style::default().fg(Color::Yellow)));
                         style_stack.last().copied().unwrap_or_default()
                     },
+                    Tag::Table(_alignments) => {
+                        in_table = true;
+                        table_rows.clear();
+                        table_header_len = 0;
+                        // Flush any pending spans
+                        if !current_line_spans.is_empty() {
+                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+                        }
+                        style_stack.last().copied().unwrap_or_default()
+                    },
+                    Tag::TableHead => {
+                        current_row.clear();
+                        style_stack.last().copied().unwrap_or_default()
+                    },
+                    Tag::TableRow => {
+                        current_row.clear();
+                        style_stack.last().copied().unwrap_or_default()
+                    },
+                    Tag::TableCell => {
+                        current_cell.clear();
+                        style_stack.last().copied().unwrap_or_default()
+                    },
                     Tag::Link { .. } => {
                         current_line_spans
                             .push(Span::styled("[", Style::default().fg(Color::Blue)));
@@ -150,6 +179,71 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                             lines.push(Line::from(""));
                         }
                     },
+                    TagEnd::TableCell => {
+                        current_row.push(std::mem::take(&mut current_cell));
+                    },
+                    TagEnd::TableHead => {
+                        table_header_len = current_row.len();
+                        table_rows.push(std::mem::take(&mut current_row));
+                    },
+                    TagEnd::TableRow => {
+                        table_rows.push(std::mem::take(&mut current_row));
+                    },
+                    TagEnd::Table => {
+                        in_table = false;
+                        // Compute column widths
+                        let num_cols = table_rows.iter().map(|r| r.len()).max().unwrap_or(0);
+                        let mut col_widths = vec![0usize; num_cols];
+                        for row in &table_rows {
+                            for (i, cell) in row.iter().enumerate() {
+                                if i < num_cols {
+                                    col_widths[i] = col_widths[i].max(cell.len());
+                                }
+                            }
+                        }
+                        // Minimum column width of 3
+                        for w in &mut col_widths {
+                            *w = (*w).max(3);
+                        }
+
+                        let border_style = Style::default().fg(Color::DarkGray);
+                        let header_style = Style::default().fg(Color::Cyan).bold();
+                        let cell_style = Style::default().fg(Color::White);
+
+                        for (row_idx, row) in table_rows.iter().enumerate() {
+                            let mut spans = Vec::new();
+                            spans.push(Span::styled("| ", border_style));
+                            for (col_idx, cell) in row.iter().enumerate() {
+                                let width = col_widths.get(col_idx).copied().unwrap_or(3);
+                                let padded = format!("{:<width$}", cell, width = width);
+                                let style = if row_idx == 0 && table_header_len > 0 {
+                                    header_style
+                                } else {
+                                    cell_style
+                                };
+                                spans.push(Span::styled(padded, style));
+                                spans.push(Span::styled(" | ", border_style));
+                            }
+                            lines.push(Line::from(spans));
+
+                            // Add separator after header row
+                            if row_idx == 0 && table_header_len > 0 {
+                                let mut sep_spans = Vec::new();
+                                sep_spans.push(Span::styled("|-", border_style));
+                                for (col_idx, _) in row.iter().enumerate() {
+                                    let width = col_widths.get(col_idx).copied().unwrap_or(3);
+                                    let dashes = "-".repeat(width);
+                                    sep_spans.push(Span::styled(dashes, border_style));
+                                    sep_spans.push(Span::styled("-|-", border_style));
+                                }
+                                lines.push(Line::from(sep_spans));
+                            }
+                        }
+
+                        // Blank line after table
+                        lines.push(Line::from(""));
+                        table_rows.clear();
+                    },
                     TagEnd::Link => {
                         current_line_spans
                             .push(Span::styled("]", Style::default().fg(Color::Blue)));
@@ -166,16 +260,22 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
             Event::Text(text) => {
                 if in_code_block {
                     code_block_content.push_str(&text);
+                } else if in_table {
+                    current_cell.push_str(&text);
                 } else {
                     let style = style_stack.last().copied().unwrap_or_default();
                     current_line_spans.push(Span::styled(text.to_string(), style));
                 }
             },
             Event::Code(code) => {
-                let style = Style::default()
-                    .fg(Color::Yellow)
-                    .bg(Color::Rgb(40, 40, 40));
-                current_line_spans.push(Span::styled(format!(" {} ", code), style));
+                if in_table {
+                    current_cell.push_str(&code);
+                } else {
+                    let style = Style::default()
+                        .fg(Color::Yellow)
+                        .bg(Color::Rgb(40, 40, 40));
+                    current_line_spans.push(Span::styled(format!(" {} ", code), style));
+                }
             },
             Event::SoftBreak | Event::HardBreak => {
                 if !current_line_spans.is_empty() {

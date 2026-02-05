@@ -303,9 +303,8 @@ impl Model for OllamaAdapter {
             json_messages.push(json_msg);
         }
 
-        // Add Ollama native tools for function calling
-        let tool_registry = crate::models::ToolRegistry::mermaid_tools();
-        let tools = tool_registry.to_ollama_format();
+        // Add Ollama native tools for function calling (statically cached)
+        let tools = crate::models::ToolRegistry::ollama_tools_cached();
 
         // Build request body
         let mut request_body = json!({
@@ -315,11 +314,9 @@ impl Model for OllamaAdapter {
             "tools": tools,
         });
 
-        // Only enable thinking for models that support it (e.g., kimi, qwen3)
-        // Models that don't support thinking will return HTTP 400 error
-        if config.thinking_enabled {
-            request_body["think"] = json!(true);
-        }
+        // Explicitly set think parameter so models that default to thinking
+        // (e.g., kimi-k2.5, qwen3) respect the user's toggle (Alt+T)
+        request_body["think"] = json!(config.thinking_enabled);
 
         tracing::debug!("Sending {} tools to Ollama", tools.len());
         tracing::debug!("Request body tools: {}", serde_json::to_string_pretty(&tools).unwrap_or_default());

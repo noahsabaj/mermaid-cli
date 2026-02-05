@@ -4,6 +4,9 @@
 
 use std::collections::VecDeque;
 
+use ratatui::text::Line;
+use rustc_hash::FxHashMap;
+
 use crate::context::Context;
 use crate::models::ChatMessage;
 use crate::session::{ConversationHistory, ConversationManager};
@@ -28,6 +31,9 @@ pub struct ConversationState {
     pub cumulative_tokens: usize,
     /// Auto-generated conversation title (like Claude Code)
     pub conversation_title: Option<String>,
+    /// Cached parsed markdown per message: (message_index, content_len) -> parsed lines
+    /// Invalidated when content length changes (cheap proxy for content change)
+    pub markdown_cache: FxHashMap<(usize, usize), Vec<Line<'static>>>,
 }
 
 impl ConversationState {
@@ -43,6 +49,7 @@ impl ConversationState {
             context: None,
             cumulative_tokens: 0,
             conversation_title: None,
+            markdown_cache: FxHashMap::default(),
         }
     }
 
@@ -62,6 +69,7 @@ impl ConversationState {
             context: None,
             cumulative_tokens: 0,
             conversation_title: None,
+            markdown_cache: FxHashMap::default(),
         }
     }
 

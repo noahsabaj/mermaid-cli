@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::LazyLock;
 
 /// A tool available to the model (Ollama format)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +28,13 @@ pub struct ToolRegistry {
     tools: Vec<Tool>,
 }
 
+/// Cached Ollama JSON format for the static tool definitions.
+/// Built once on first access, reused for every chat() call.
+static OLLAMA_TOOLS_CACHE: LazyLock<Vec<serde_json::Value>> = LazyLock::new(|| {
+    let registry = ToolRegistry::mermaid_tools();
+    registry.tools.iter().map(|t| json!(t)).collect()
+});
+
 impl ToolRegistry {
     /// Create a new registry with all Mermaid tools
     pub fn mermaid_tools() -> Self {
@@ -45,9 +53,14 @@ impl ToolRegistry {
         }
     }
 
-    /// Get all tools in Ollama JSON format
+    /// Get all tools in Ollama JSON format (cached statically)
     pub fn to_ollama_format(&self) -> Vec<serde_json::Value> {
-        self.tools.iter().map(|t| json!(t)).collect()
+        OLLAMA_TOOLS_CACHE.clone()
+    }
+
+    /// Get a reference to the cached Ollama tool definitions without constructing a registry
+    pub fn ollama_tools_cached() -> &'static [serde_json::Value] {
+        &OLLAMA_TOOLS_CACHE
     }
 
     /// Get all tools

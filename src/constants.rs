@@ -47,32 +47,3 @@ pub const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
     "*.egg-info/*",
 ];
 
-// Dangerous Commands (for safety checks)
-pub const DANGEROUS_COMMANDS: &[&str] = &[
-    "rm -rf /",
-    "rm -rf /*",
-    "rm -rf ~",
-    "rm -rf ~/",
-    "format c:",
-    "del /f /s /q c:",
-    ":(){ :|:& };:", // Fork bomb
-    "mkfs",
-    "dd if=/dev/zero",
-    "chmod -R 777 /",
-    "chmod -R 000 /",
-    "chown -R",
-    "> /dev/sda",
-    "wget -O - | sh",
-    "curl -s | bash",
-];
-
-// SSH Key Patterns (for security)
-pub const SSH_KEY_FILES: &[&str] = &[
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-    ".pem",
-    ".key",
-    ".pfx",
-];

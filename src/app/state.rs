@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -13,7 +14,7 @@ pub struct AppState {
     /// Project context
     pub context: Arc<RwLock<ProjectContext>>,
     /// Conversation history (for context)
-    pub history: Arc<RwLock<Vec<(String, String)>>>,
+    pub history: Arc<RwLock<VecDeque<(String, String)>>>,
 }
 
 impl AppState {
@@ -23,7 +24,7 @@ impl AppState {
             config: Arc::new(RwLock::new(config)),
             model: Arc::new(RwLock::new(model)),
             context: Arc::new(RwLock::new(context)),
-            history: Arc::new(RwLock::new(Vec::new())),
+            history: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 
@@ -42,11 +43,11 @@ impl AppState {
     /// Add to conversation history
     pub async fn add_to_history(&self, user_msg: String, assistant_msg: String) {
         let mut history = self.history.write().await;
-        history.push((user_msg, assistant_msg));
+        history.push_back((user_msg, assistant_msg));
 
-        // Keep history manageable (last 10 exchanges)
+        // Keep history manageable (last 10 exchanges) - O(1) with VecDeque
         if history.len() > 10 {
-            history.drain(0..1);
+            history.pop_front();
         }
     }
 

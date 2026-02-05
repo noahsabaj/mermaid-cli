@@ -66,34 +66,6 @@ fn test_app_state_variants_are_distinct() {
     assert!(!matches!(generating, AppState::Idle));
 }
 
-#[test]
-fn test_app_state_executing_action() {
-    let action = AgentAction::ReadFile {
-        paths: vec!["test.rs".to_string()],
-    };
-
-    let state = AppState::ExecutingAction {
-        action,
-        start_time: std::time::Instant::now(),
-    };
-
-    assert!(matches!(state, AppState::ExecutingAction { .. }));
-}
-
-#[test]
-fn test_app_state_reading_file_feedback() {
-    let state = AppState::ReadingFileFeedback {
-        intent: Some("Understand authentication".to_string()),
-        started_at: std::time::Instant::now(),
-    };
-
-    assert!(matches!(state, AppState::ReadingFileFeedback { .. }));
-
-    if let AppState::ReadingFileFeedback { intent, .. } = &state {
-        assert_eq!(intent.as_deref(), Some("Understand authentication"));
-    }
-}
-
 // ===== STATE TRANSITION CHARACTERIZATION =====
 // These tests document the expected state transitions
 

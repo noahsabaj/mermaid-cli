@@ -4,8 +4,6 @@
 
 use std::time::Instant;
 
-use crate::agents::AgentAction;
-
 /// Generation status for the status line
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerationStatus {
@@ -46,18 +44,6 @@ pub enum AppState {
         start_time: Instant,
         tokens_received: usize,
         abort_handle: Option<tokio::task::AbortHandle>,
-    },
-
-    /// Executing an action
-    ExecutingAction {
-        action: AgentAction,
-        start_time: Instant,
-    },
-
-    /// Waiting for file read feedback from user
-    ReadingFileFeedback {
-        intent: Option<String>,
-        started_at: Instant,
     },
 }
 
@@ -100,19 +86,6 @@ impl AppState {
     pub fn abort_handle(&self) -> Option<&tokio::task::AbortHandle> {
         match self {
             AppState::Generating { abort_handle, .. } => abort_handle.as_ref(),
-            _ => None,
-        }
-    }
-
-    /// Check if currently reading file feedback
-    pub fn is_reading_file_feedback(&self) -> bool {
-        matches!(self, AppState::ReadingFileFeedback { .. })
-    }
-
-    /// Get action start time if executing
-    pub fn action_start_time(&self) -> Option<Instant> {
-        match self {
-            AppState::ExecutingAction { start_time, .. } => Some(*start_time),
             _ => None,
         }
     }

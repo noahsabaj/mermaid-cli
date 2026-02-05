@@ -4,6 +4,7 @@
 /// the appropriate adapter implementing the Model trait.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::config::BackendConfig;
 use super::error::{ModelError, Result};
@@ -39,14 +40,20 @@ impl ModelFactory {
         }
     }
 
-    /// List available providers
+    /// List available providers with a fast single-shot health check
     pub async fn available_providers(&self) -> Vec<String> {
         let mut providers = Vec::new();
 
-        // Check Ollama
-        if let Ok(model) = self.create_model("ollama/test").await {
-            if model.health_check().await.is_ok() {
-                providers.push("ollama".to_string());
+        // Quick Ollama check: single GET with 2s timeout, no retries
+        let url = format!("{}/api/tags", self.config.ollama_url.trim().trim_end_matches('/'));
+        if let Ok(client) = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            if let Ok(resp) = client.get(&url).send().await {
+                if resp.status().is_success() {
+                    providers.push("ollama".to_string());
+                }
             }
         }
 

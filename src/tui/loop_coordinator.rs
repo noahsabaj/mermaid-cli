@@ -187,11 +187,6 @@ pub async fn run_app_loop(
 
                 // Generate conversation title after first exchange (if not already generated)
                 if app.session_state.conversation_title.is_none() && app.session_state.messages.len() >= 2 {
-                    tokio::spawn(async move {
-                        // This runs in background to avoid blocking the UI
-                        // Title will be picked up in next render cycle
-                    });
-                    // Actually generate title inline for simplicity
                     app.generate_conversation_title().await;
                 }
             },

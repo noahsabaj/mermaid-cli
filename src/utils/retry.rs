@@ -62,46 +62,6 @@ where
     }
 }
 
-/// Retry a synchronous operation with exponential backoff
-pub fn retry_sync<F, T>(operation: F, config: &RetryConfig) -> Result<T>
-where
-    F: Fn() -> Result<T>,
-{
-    let mut attempt = 0;
-    let mut delay_ms = config.initial_delay_ms;
-
-    loop {
-        attempt += 1;
-
-        match operation() {
-            Ok(result) => return Ok(result),
-            Err(e) if attempt >= config.max_attempts => {
-                return Err(anyhow::anyhow!(
-                    "Operation failed after {} attempts: {}",
-                    config.max_attempts,
-                    e
-                ));
-            },
-            Err(e) => {
-                debug!(
-                    attempt = attempt,
-                    max_attempts = config.max_attempts,
-                    delay_ms = delay_ms,
-                    "Retry attempt failed: {}",
-                    e
-                );
-
-                // Sleep with exponential backoff
-                std::thread::sleep(Duration::from_millis(delay_ms));
-
-                // Calculate next delay
-                delay_ms = ((delay_ms as f64) * config.backoff_multiplier) as u64;
-                delay_ms = delay_ms.min(config.max_delay_ms);
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,4 +17,3 @@ pub use app::{load_config, persist_last_model, Config};
 pub use context::{Context, ContextConfig};
 pub use models::{Model, ModelFactory, ProjectContext};
 pub use tui::run_ui;
-pub use utils::MermaidError;

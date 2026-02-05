@@ -68,19 +68,16 @@ impl CacheManager {
         }
 
         // Check file cache
+        // Note: is_valid() is not needed here because generate_key() already hashed the
+        // current file. The cache path is derived from that hash, so a hit means the entry
+        // was stored for this exact file content. Re-hashing would always match.
         if let Some(cached) = self.file_cache.load::<CachedTokens>(&key)? {
             if cached.model_name == model_name {
-                // Validate cache
-                if self.file_cache.is_valid(&key)? {
-                    // Store in memory cache
-                    let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
-                    mem_cache.tokens.insert(key.clone(), cached.clone());
-                    mem_cache.hits += 1;
-                    return Ok(cached.count);
-                } else {
-                    // Invalid cache, remove it
-                    self.file_cache.remove(&key)?;
-                }
+                // Store in memory cache
+                let mut mem_cache = lock_arc_mutex_safe(&self.memory_cache);
+                mem_cache.tokens.insert(key.clone(), cached.clone());
+                mem_cache.hits += 1;
+                return Ok(cached.count);
             }
         }
 

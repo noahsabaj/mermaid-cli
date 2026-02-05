@@ -105,6 +105,7 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         pending_file_read: app.operation_state.pending_file_read,
         reading_file_status: app.operation_state.reading_file_status.as_deref(),
         theme: &app.ui_state.theme,
+        markdown_cache: &mut app.session_state.markdown_cache,
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut app.ui_state.chat_state);
 

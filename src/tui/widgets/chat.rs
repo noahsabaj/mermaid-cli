@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph, StatefulWidget, Widget},
 };
+use rustc_hash::FxHashMap;
 
 use crate::agents::{
     ActionDisplay, ActionResult,
@@ -84,6 +85,8 @@ pub struct ChatWidget<'a> {
     pub pending_file_read: bool,
     pub reading_file_status: Option<&'a str>,
     pub theme: &'a Theme,
+    /// Shared markdown parse cache: (message_index, content_len) -> parsed lines
+    pub markdown_cache: &'a mut FxHashMap<(usize, usize), Vec<Line<'static>>>,
 }
 
 impl<'a> StatefulWidget for ChatWidget<'a> {
@@ -148,8 +151,15 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 }
 
                 // With tool calling, message content is just text (no embedded action blocks)
-                // Parse and render the markdown content
-                let parsed_lines = parse_markdown(&msg.content);
+                // Use cached parsed markdown when available (avoids re-parsing every frame)
+                let cache_key = (idx, msg.content.len());
+                let parsed_lines = if let Some(cached) = self.markdown_cache.get(&cache_key) {
+                    cached.clone()
+                } else {
+                    let parsed = parse_markdown(&msg.content);
+                    self.markdown_cache.insert(cache_key, parsed.clone());
+                    parsed
+                };
 
                 for (line_idx, mut parsed_line) in parsed_lines.into_iter().enumerate() {
                     // Add role indicator to first line or 2-space margin to others
