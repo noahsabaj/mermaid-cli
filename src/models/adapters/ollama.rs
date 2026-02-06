@@ -30,11 +30,13 @@ impl OllamaAdapter {
         let base_url = normalize_url(&config.ollama_url);
 
         // Build HTTP client with connection pooling
+        // No global timeout -- streaming responses from cloud models can take
+        // minutes for large contexts. Per-request timeouts are set where needed.
         let client = Client::builder()
             .pool_max_idle_per_host(config.max_idle_per_host)
             .pool_idle_timeout(Duration::from_secs(90))
-            .timeout(Duration::from_secs(config.request_timeout_secs))
             .tcp_keepalive(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(config.timeout_secs))
             .build()
             .map_err(|e| ModelError::Backend(BackendError::ConnectionFailed {
                 backend: "ollama".to_string(),

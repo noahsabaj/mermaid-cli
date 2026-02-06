@@ -239,7 +239,7 @@ async fn handle_message_submit(
     app.add_message(MessageRole::User, timestamped_input);
 
     // Build message history including the new message
-    let messages = app.build_message_history();
+    let messages = app.build_managed_message_history(75_000, 4_000);
 
     // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
     app.current_response.clear();
@@ -337,7 +337,7 @@ async fn run_agent_loop(
             current_tool_calls.clear();
 
             // Build message history and call model with the new context
-            let messages = app.build_message_history();
+            let messages = app.build_managed_message_history(75_000, 4_000);
             app.current_response.clear();
 
             let model = app.model_state.model.clone();
@@ -430,7 +430,7 @@ async fn run_agent_loop(
         }
 
         // Call the model again with the updated message history
-        let messages = app.build_message_history();
+        let messages = app.build_managed_message_history(75_000, 4_000);
         app.current_response.clear();
 
         let model = app.model_state.model.clone();
