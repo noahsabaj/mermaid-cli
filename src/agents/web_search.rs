@@ -3,8 +3,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tracing::warn;
-
 use crate::utils::{retry_async, RetryConfig};
 
 /// Result from a web search
@@ -89,7 +87,11 @@ impl WebSearchClient {
         Ok(results_arc)
     }
 
-    /// Execute search via Ollama Cloud API and fetch full page content
+    /// Execute search via Ollama Cloud API
+    ///
+    /// The web_search API already returns full page content per result,
+    /// so no separate web_fetch calls are needed. Each result's content
+    /// is truncated to prevent context bloat.
     async fn search(&self, query: &str, count: usize) -> Result<Vec<SearchResult>> {
         // Validate count
         if count == 0 || count > 10 {
@@ -145,33 +147,22 @@ impl WebSearchClient {
         )
         .await?;
 
-        // Take top N results and fetch full page content for each
-        let mut search_results = Vec::new();
-        for result in ollama_response.results.iter().take(count) {
-            // Fetch full page content via web_fetch
-            match self.fetch_url(&result.url).await {
-                Ok(fetch_result) => {
-                    // Truncate to prevent context bloat
-                    let content = truncate_content(&fetch_result.content, 5000);
-                    search_results.push(SearchResult {
-                        title: result.title.clone(),
-                        url: result.url.clone(),
-                        snippet: result.content.clone(),
-                        full_content: content,
-                    });
+        // The web_search API returns full page content in each result's content field.
+        // Truncate each to prevent context bloat.
+        let search_results: Vec<SearchResult> = ollama_response
+            .results
+            .iter()
+            .take(count)
+            .map(|result| {
+                let content = truncate_content(&result.content, 5000);
+                SearchResult {
+                    title: result.title.clone(),
+                    url: result.url.clone(),
+                    snippet: result.content.chars().take(200).collect(),
+                    full_content: content,
                 }
-                Err(e) => {
-                    // If full page fetch fails, use snippet from search results
-                    warn!(url = %result.url, "Failed to fetch full page: {}", e);
-                    search_results.push(SearchResult {
-                        title: result.title.clone(),
-                        url: result.url.clone(),
-                        snippet: result.content.clone(),
-                        full_content: result.content.clone(),
-                    });
-                }
-            }
-        }
+            })
+            .collect();
 
         if search_results.is_empty() {
             return Err(anyhow!("No search results found for: {}", query));
@@ -230,17 +221,27 @@ impl WebSearchClient {
     }
 
     /// Format search results for model consumption
+    ///
+    /// Pure data -- no behavioral instructions. Citation rules live in the
+    /// system prompt (src/prompts.rs), which is the SSOT for all model behavior.
     pub fn format_results(&self, results: &[SearchResult]) -> String {
         let mut formatted = String::from("[SEARCH_RESULTS]\n");
 
-        for result in results {
+        for (i, result) in results.iter().enumerate() {
             formatted.push_str(&format!(
-                "Title: {}\nURL: {}\nContent:\n{}\n---\n",
-                result.title, result.url, result.full_content
+                "[{}] Title: {}\nURL: {}\nContent:\n{}\n---\n",
+                i + 1, result.title, result.url, result.full_content
             ));
         }
 
-        formatted.push_str("[/SEARCH_RESULTS]\n");
+        formatted.push_str("[/SEARCH_RESULTS]\n\n");
+
+        // Source list for citation (behavior governed by system prompt)
+        formatted.push_str("Sources:\n");
+        for (i, result) in results.iter().enumerate() {
+            formatted.push_str(&format!("{}. {} - {}\n", i + 1, result.title, result.url));
+        }
+
         formatted
     }
 }
