@@ -147,21 +147,44 @@ fn contains_dangerous_command(command: &str) -> bool {
         }
     }
 
-    // Check for attempts to modify system directories
-    let system_dirs = [
-        "/etc",
-        "/usr",
-        "/boot",
-        "/proc",
-        "/sys",
-        "/dev",
-        "C:\\Windows",
-        "C:\\Program Files",
+    // Check for attempts to delete/modify system directories
+    // Use word-boundary-aware matching to avoid false positives like
+    // ".mermaid" containing "rm" or "2>/dev/null" matching "/dev"
+    let system_dir_patterns = [
+        ("/etc", false),
+        ("/usr", false),
+        ("/boot", false),
+        ("/proc", false),
+        ("/sys", false),
+        ("/dev/", true),  // Trailing slash: /dev/sda, /dev/null won't false-positive on "/dev" alone
+        ("C:\\Windows", false),
+        ("C:\\Program Files", false),
     ];
 
-    for dir in &system_dirs {
-        if command.contains(dir) && (command.contains("rm") || command.contains("del")) {
-            return true;
+    // Only match "rm" or "del" as standalone command words, not substrings
+    let has_rm_command = lower_command.starts_with("rm ")
+        || lower_command.contains(" rm ")
+        || lower_command.contains(";rm ")
+        || lower_command.contains("&rm ")
+        || lower_command.contains("|rm ");
+    let has_del_command = lower_command.starts_with("del ")
+        || lower_command.contains(" del ")
+        || lower_command.contains(";del ")
+        || lower_command.contains("&del ");
+
+    if has_rm_command || has_del_command {
+        for (dir, require_trailing) in &system_dir_patterns {
+            if *require_trailing {
+                // For /dev/, check the dir appears as a target, not in redirects like 2>/dev/null
+                if command.contains(dir)
+                    && !command.contains(&format!("{}null", dir))
+                    && !command.contains(&format!("{}zero", dir))
+                {
+                    return true;
+                }
+            } else if command.contains(dir) {
+                return true;
+            }
         }
     }
 
@@ -203,5 +226,15 @@ mod tests {
         assert!(contains_dangerous_command(":(){ :|:& };:"));
         assert!(!contains_dangerous_command("ls -la"));
         assert!(!contains_dangerous_command("cargo build"));
+
+        // False positives that should NOT be blocked
+        assert!(!contains_dangerous_command(
+            r#"find . -type f ! -path "./.git/*" ! -path "./.mermaid/*" 2>/dev/null"#
+        ));
+        assert!(!contains_dangerous_command("ls /tmp 2>/dev/null"));
+
+        // Actual dangerous system dir commands that SHOULD be blocked
+        assert!(contains_dangerous_command("rm -rf /etc/passwd"));
+        assert!(contains_dangerous_command("rm /usr/bin/something"));
     }
 }
