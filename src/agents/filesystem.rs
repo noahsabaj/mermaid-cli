@@ -109,6 +109,114 @@ fn create_timestamped_backup(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Edit a file by replacing a unique occurrence of old_string with new_string
+/// Returns a unified diff showing the changes
+pub fn edit_file(path: &str, old_string: &str, new_string: &str) -> Result<String> {
+    let path = normalize_path(path)?;
+
+    // Security check
+    validate_path(&path)?;
+
+    // Read current content
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read file for editing: {}", path.display()))?;
+
+    // Check that old_string occurs exactly once
+    let match_count = content.matches(old_string).count();
+    if match_count == 0 {
+        anyhow::bail!(
+            "old_string not found in {}. Make sure the text matches exactly, including whitespace and indentation.",
+            path.display()
+        );
+    }
+    if match_count > 1 {
+        anyhow::bail!(
+            "old_string appears {} times in {}. It must be unique. Include more surrounding context to make it unique.",
+            match_count,
+            path.display()
+        );
+    }
+
+    // Perform the replacement
+    let new_content = content.replacen(old_string, new_string, 1);
+
+    // Create timestamped backup
+    create_timestamped_backup(&path)?;
+
+    // Atomic write: write to temporary file, then rename
+    let temp_path = format!("{}.tmp.{}", path.display(), std::process::id());
+    let temp_path = std::path::PathBuf::from(&temp_path);
+
+    fs::write(&temp_path, &new_content).with_context(|| {
+        format!("Failed to write to temporary file: {}", temp_path.display())
+    })?;
+
+    fs::rename(&temp_path, &path).with_context(|| {
+        format!(
+            "Failed to finalize edit to: {} (temp file: {})",
+            path.display(),
+            temp_path.display()
+        )
+    })?;
+
+    // Generate diff
+    let diff = generate_diff(&content, &new_content, old_string, new_string);
+    Ok(diff)
+}
+
+/// Generate a unified diff showing the changed lines with context
+fn generate_diff(old_content: &str, new_content: &str, old_string: &str, new_string: &str) -> String {
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+
+    let removed_count = old_string.lines().count();
+    let added_count = new_string.lines().count();
+
+    // Find where the change starts in the old content
+    let prefix_len = old_content[..old_content.find(old_string).unwrap_or(0)].len();
+    let change_start_line = old_content[..prefix_len].matches('\n').count();
+
+    let context_lines = 3;
+    let diff_start = change_start_line.saturating_sub(context_lines);
+    let new_diff_end = (change_start_line + added_count + context_lines).min(new_lines.len());
+
+    let mut output = String::new();
+    output.push_str(&format!("Added {} lines, removed {} lines\n", added_count, removed_count));
+
+    // Context before
+    for i in diff_start..change_start_line {
+        if i < old_lines.len() {
+            output.push_str(&format!("{:>4}   {}\n", i + 1, old_lines[i]));
+        }
+    }
+
+    // Removed lines
+    for i in 0..removed_count {
+        let line_num = change_start_line + i;
+        if line_num < old_lines.len() {
+            output.push_str(&format!("{:>4} - {}\n", line_num + 1, old_lines[line_num]));
+        }
+    }
+
+    // Added lines
+    for i in 0..added_count {
+        let line_num = change_start_line + i;
+        if line_num < new_lines.len() {
+            output.push_str(&format!("{:>4} + {}\n", line_num + 1, new_lines[line_num]));
+        }
+    }
+
+    // Context after
+    let context_after_start = change_start_line + added_count;
+    for i in context_after_start..new_diff_end {
+        if i < new_lines.len() {
+            output.push_str(&format!("{:>4}   {}\n", i + 1, new_lines[i]));
+        }
+    }
+
+    output
+}
+
 /// Delete a file with timestamped backup (for recovery)
 pub fn delete_file(path: &str) -> Result<()> {
     let path = normalize_path(path)?;

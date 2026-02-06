@@ -190,6 +190,7 @@ impl NonInteractiveRunner {
             for action in parsed_actions {
                 let (action_type, target) = match &action {
                     AgentAction::WriteFile { path, .. } => ("file_write", path.clone()),
+                    AgentAction::EditFile { path, .. } => ("edit_file", path.clone()),
                     AgentAction::ExecuteCommand { command, .. } => ("command", command.clone()),
                     AgentAction::ReadFile { paths } => {
                         if paths.len() == 1 {
@@ -243,6 +244,7 @@ impl NonInteractiveRunner {
             for action in parsed_actions {
                 let (action_type, target) = match &action {
                     AgentAction::WriteFile { path, .. } => ("file_write", path.clone()),
+                    AgentAction::EditFile { path, .. } => ("edit_file", path.clone()),
                     AgentAction::ExecuteCommand { command, .. } => ("command", command.clone()),
                     AgentAction::ReadFile { paths } => {
                         if paths.len() == 1 {

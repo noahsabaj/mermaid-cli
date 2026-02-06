@@ -19,8 +19,6 @@ pub struct ToolExecutionResult {
     pub tool_name: String,
     /// The result content (success output or error message)
     pub content: String,
-    /// Whether the execution succeeded
-    pub success: bool,
 }
 
 /// Execute tool calls and return results for the agent loop
@@ -55,7 +53,6 @@ pub async fn execute_tool_calls_for_agent_loop(
                     tool_call_id,
                     tool_name,
                     content: format!("Error: {}", e),
-                    success: false,
                 });
                 continue;
             }
@@ -83,11 +80,10 @@ pub async fn execute_tool_calls_for_agent_loop(
                     tool_call_id,
                     tool_name,
                     content: output,
-                    success: true,
                 });
             }
             agents::ActionResult::Error { error } => {
-                let action_display = build_action_display(&action_clone, &error);
+                let action_display = build_error_display(&action_clone, &error);
                 if let Some(last_msg) = app
                     .session_state
                     .messages
@@ -102,7 +98,6 @@ pub async fn execute_tool_calls_for_agent_loop(
                     tool_call_id,
                     tool_name,
                     content: format!("Error: {}", error),
-                    success: false,
                 });
             }
         }
@@ -114,6 +109,41 @@ pub async fn execute_tool_calls_for_agent_loop(
 /// Build an ActionDisplay from an action and its output
 fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
     build_action_display_with_timing(action, output, None)
+}
+
+/// Build an error ActionDisplay - uses the action for target info but wraps as Error
+fn build_error_display(action: &AgentAction, error: &str) -> ActionDisplay {
+    let (action_type, target) = match action {
+        AgentAction::EditFile { path, .. } => ("Edit", path.clone()),
+        AgentAction::WriteFile { path, .. } => ("Write", path.clone()),
+        AgentAction::ReadFile { paths } => {
+            if paths.len() == 1 { ("Read", paths[0].clone()) }
+            else { ("ReadFiles", format!("{} files", paths.len())) }
+        }
+        AgentAction::DeleteFile { path } => ("Delete", path.clone()),
+        AgentAction::CreateDirectory { path } => ("CreateDir", path.clone()),
+        AgentAction::ExecuteCommand { command, .. } => ("Bash", command.clone()),
+        AgentAction::GitDiff { .. } => ("GitDiff", ".".to_string()),
+        AgentAction::GitStatus => ("GitStatus", ".".to_string()),
+        AgentAction::GitCommit { message, .. } => ("GitCommit", message.clone()),
+        AgentAction::WebSearch { queries } => {
+            if queries.len() == 1 { ("WebSearch", queries[0].0.clone()) }
+            else { ("WebSearches", format!("{} queries", queries.len())) }
+        }
+        AgentAction::WebFetch { url } => ("WebFetch", url.clone()),
+    };
+    ActionDisplay {
+        action_type: action_type.to_string(),
+        target,
+        result: AgentActionResult::Error { error: error.to_string() },
+        preview: None,
+        line_count: None,
+        file_content: None,
+        duration_seconds: None,
+        targets: None,
+        item_count: None,
+        failed_items: None,
+    }
 }
 
 fn build_action_display_with_timing(
@@ -133,6 +163,24 @@ fn build_action_display_with_timing(
                 preview: None,
                 line_count: Some(line_count),
                 file_content: Some(content.clone()),
+                duration_seconds: None,
+                targets: None,
+                item_count: None,
+                failed_items: None,
+            }
+        }
+        AgentAction::EditFile { path, old_string, new_string } => {
+            let added = new_string.lines().count();
+            let removed = old_string.lines().count();
+            ActionDisplay {
+                action_type: "Edit".to_string(),
+                target: path.clone(),
+                result: AgentActionResult::Success {
+                    output: output.to_string(),
+                },
+                preview: Some(format!("Added {} lines, removed {} lines", added, removed)),
+                line_count: Some(added + removed),
+                file_content: Some(output.to_string()),
                 duration_seconds: None,
                 targets: None,
                 item_count: None,

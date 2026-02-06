@@ -12,6 +12,12 @@ pub enum AgentAction {
         path: String,
         content: String,
     },
+    /// Make targeted edits to a file by replacing specific text
+    EditFile {
+        path: String,
+        old_string: String,
+        new_string: String,
+    },
     /// Delete a file
     DeleteFile {
         path: String,

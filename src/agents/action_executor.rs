@@ -22,6 +22,7 @@ pub fn describe_action(action: &AgentAction) -> String {
         AgentAction::WriteFile { path, content } => {
             format!("Write file: {} ({} bytes)", path, content.len())
         }
+        AgentAction::EditFile { path, .. } => format!("Edit file: {}", path),
         AgentAction::DeleteFile { path } => {
             format!("Delete file: {}", path)
         }
@@ -77,6 +78,12 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
                 Ok(_) => ActionResult::Success {
                     output: format!("File written: {}", path),
                 },
+                Err(e) => ActionResult::Error { error: e.to_string() },
+            }
+        },
+        AgentAction::EditFile { path, old_string, new_string } => {
+            match filesystem::edit_file(path, old_string, new_string) {
+                Ok(diff) => ActionResult::Success { output: diff },
                 Err(e) => ActionResult::Error { error: e.to_string() },
             }
         },

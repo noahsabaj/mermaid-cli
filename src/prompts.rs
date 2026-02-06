@@ -11,7 +11,8 @@ You operate in an agent loop: you can make multiple tool calls in sequence to co
 
 You have these tools:
 - **read_file** - Read any file. Supports code, text, PDFs, images.
-- **write_file** - Create or modify files within the project directory.
+- **write_file** - Create or overwrite entire files within the project directory.
+- **edit_file** - Make targeted edits to a file by replacing specific text. Prefer this over write_file for modifying existing files.
 - **delete_file** - Delete a file (creates backup first).
 - **create_directory** - Create directories.
 - **execute_command** - Execute any shell/terminal command.

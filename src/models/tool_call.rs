@@ -84,6 +84,13 @@ impl ToolCall {
                 }
             }
 
+            "edit_file" => {
+                let path = Self::get_string_arg(args, "path")?;
+                let old_string = Self::get_string_arg(args, "old_string")?;
+                let new_string = Self::get_string_arg(args, "new_string")?;
+                AgentAction::EditFile { path, old_string, new_string }
+            }
+
             "web_fetch" => {
                 let url = Self::get_string_arg(args, "url")?;
                 AgentAction::WebFetch { url }

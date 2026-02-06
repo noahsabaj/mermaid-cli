@@ -48,6 +48,7 @@ impl ToolRegistry {
                 Self::git_diff_tool(),
                 Self::git_status_tool(),
                 Self::git_commit_tool(),
+                Self::edit_file_tool(),
                 Self::web_search_tool(),
                 Self::web_fetch_tool(),
             ],
@@ -241,6 +242,36 @@ impl ToolRegistry {
         }
     }
 
+    fn edit_file_tool() -> Tool {
+        Tool {
+            type_: "function".to_string(),
+            function: ToolFunction {
+                name: "edit_file".to_string(),
+                description: "Make targeted edits to a file by replacing specific text. \
+                    The old_string must match exactly and uniquely in the file. \
+                    Prefer this over write_file for modifying existing files.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file to edit"
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "The exact text to find and replace (must be unique in the file)"
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "The new text to replace old_string with"
+                        }
+                    },
+                    "required": ["path", "old_string", "new_string"]
+                }),
+            },
+        }
+    }
+
     fn web_search_tool() -> Tool {
         Tool {
             type_: "function".to_string(),
@@ -295,7 +326,7 @@ mod tests {
     #[test]
     fn test_tool_registry_creation() {
         let registry = ToolRegistry::mermaid_tools();
-        assert_eq!(registry.tools().len(), 10, "Should have 10 tools defined");
+        assert_eq!(registry.tools().len(), 11, "Should have 11 tools defined");
     }
 
     #[test]
@@ -303,7 +334,7 @@ mod tests {
         let registry = ToolRegistry::mermaid_tools();
         let ollama_tools = registry.to_ollama_format();
 
-        assert_eq!(ollama_tools.len(), 10);
+        assert_eq!(ollama_tools.len(), 11);
 
         // Verify first tool has correct structure
         let first_tool = &ollama_tools[0];

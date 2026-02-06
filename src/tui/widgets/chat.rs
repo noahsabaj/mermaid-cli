@@ -114,6 +114,11 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             if matches!(msg.role, MessageRole::Assistant) {
                 // Render thinking block if present
                 if let Some(ref thinking) = msg.thinking {
+                    // Skip rendering if thinking content is empty or literal "None"
+                    let thinking_trimmed = thinking.trim();
+                    if thinking_trimmed.is_empty() || thinking_trimmed == "None" || thinking_trimmed == "none" {
+                        // Don't render empty/null thinking blocks
+                    } else {
                     // Add "Thinking..." header in italic and dimmed with grayed white dot
                     lines.push(Line::from(vec![
                         Span::styled(
@@ -148,6 +153,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
                     // Add blank line after thinking block
                     lines.push(Line::from(""));
+                    }
                 }
 
                 // With tool calling, message content is just text (no embedded action blocks)
@@ -185,7 +191,11 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
                 // Render all actions at the end of the message
                 if !msg.actions.is_empty() {
-                    render_actions(&msg.actions, &mut lines, self.theme);
+                    // Add blank line between text content and actions
+                    if !msg.content.trim().is_empty() {
+                        lines.push(Line::from(""));
+                    }
+                    render_actions(&msg.actions, &mut lines, self.theme, area.width as usize);
                 }
             } else {
                 // For User messages: format timestamp and display on right edge
@@ -285,14 +295,14 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 }
 
 /// Render actions in Claude Code style
-fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Theme) {
+fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Theme, viewport_width: usize) {
     for (action_idx, action) in actions.iter().enumerate() {
         // Add blank line between consecutive actions (not before first one)
         if action_idx > 0 {
             lines.push(Line::from(""));
         }
         let action_color = match action.action_type.as_str() {
-            "Write" => theme.colors.success.to_color(),
+            "Write" | "Edit" => theme.colors.success.to_color(),
             "Bash" | "Command" => theme.colors.info.to_color(),
             "Read" => theme.colors.info.to_color(),
             "Delete" => theme.colors.warning.to_color(),
@@ -322,6 +332,13 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                             format!("Wrote {} lines to {}", count, action.target)
                         } else {
                             format!("Wrote {}", action.target)
+                        }
+                    },
+                    "Edit" => {
+                        if let Some(ref preview) = action.preview {
+                            preview.clone()
+                        } else {
+                            format!("Edited {}", action.target)
                         }
                     },
                     "Read" => {
@@ -421,6 +438,78 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                                     Span::styled("    ", Style::new().fg(action_color)),
                                     Span::styled(
                                         format!("... ({} more lines)", total_lines - 10),
+                                        Style::new()
+                                            .fg(theme.colors.text_disabled.to_color())
+                                            .italic(),
+                                    ),
+                                ]));
+                            }
+                        }
+                    }
+                }
+
+                // Edit action: render diff with color-coded lines and background highlight
+                if action.action_type == "Edit" {
+                    if let Some(ref diff_content) = action.file_content {
+                        let diff_lines: Vec<&str> = diff_content.lines().collect();
+                        // Skip the first line (summary) since it's already in preview
+                        let display_lines: Vec<&str> = diff_lines.iter()
+                            .skip(1)
+                            .take(20)
+                            .copied()
+                            .collect();
+
+                        if !display_lines.is_empty() {
+                            // Dark background colors for line highlighting (like Claude Code)
+                            let removed_bg = ratatui::style::Color::Rgb(60, 20, 20);
+                            let added_bg = ratatui::style::Color::Rgb(20, 50, 20);
+
+                            for diff_line in &display_lines {
+                                let is_removed = diff_line.contains(" - ") && diff_line.trim_start().starts_with(|c: char| c.is_ascii_digit());
+                                let is_added = diff_line.contains(" + ") && diff_line.trim_start().starts_with(|c: char| c.is_ascii_digit());
+
+                                if is_removed {
+                                    // Removed line: red text on dark red background, padded to full width
+                                    let text = format!("    {}", diff_line);
+                                    let padded = format!("{:<width$}", text, width = viewport_width);
+                                    lines.push(Line::from(vec![
+                                        Span::styled(
+                                            padded,
+                                            Style::new()
+                                                .fg(theme.colors.error.to_color())
+                                                .bg(removed_bg),
+                                        ),
+                                    ]));
+                                } else if is_added {
+                                    // Added line: green text on dark green background, padded to full width
+                                    let text = format!("    {}", diff_line);
+                                    let padded = format!("{:<width$}", text, width = viewport_width);
+                                    lines.push(Line::from(vec![
+                                        Span::styled(
+                                            padded,
+                                            Style::new()
+                                                .fg(theme.colors.success.to_color())
+                                                .bg(added_bg),
+                                        ),
+                                    ]));
+                                } else {
+                                    // Context line: normal color, no background
+                                    lines.push(Line::from(vec![
+                                        Span::styled("    ", Style::new().fg(action_color)),
+                                        Span::styled(
+                                            diff_line.to_string(),
+                                            Style::new().fg(theme.colors.text_secondary.to_color()),
+                                        ),
+                                    ]));
+                                }
+                            }
+
+                            let remaining = diff_lines.len().saturating_sub(21);
+                            if remaining > 0 {
+                                lines.push(Line::from(vec![
+                                    Span::styled("    ", Style::new().fg(action_color)),
+                                    Span::styled(
+                                        format!("... ({} more lines)", remaining),
                                         Style::new()
                                             .fg(theme.colors.text_disabled.to_color())
                                             .italic(),

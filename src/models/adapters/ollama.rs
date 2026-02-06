@@ -74,65 +74,65 @@ impl OllamaAdapter {
         let mut prompt_tokens = 0;
         let mut completion_tokens = 0;
 
+        // Buffer for incomplete JSON lines split across TCP chunks.
+        // Ollama sends newline-delimited JSON, but bytes_stream() chunks
+        // don't align with line boundaries -- a JSON object can be split
+        // across two or more TCP packets.
+        let mut line_buffer = String::new();
+
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| ModelError::StreamError(e.to_string()))?;
 
             let text = String::from_utf8_lossy(&chunk);
+            line_buffer.push_str(&text);
 
-            // Parse each line as JSON
-            for line in text.lines() {
+            // Process only complete lines (terminated by newline)
+            while let Some(newline_pos) = line_buffer.find('\n') {
+                let line: String = line_buffer[..newline_pos].to_string();
+                line_buffer = line_buffer[newline_pos + 1..].to_string();
+
                 if line.trim().is_empty() {
                     continue;
                 }
 
-                let json_chunk: OllamaStreamChunk = serde_json::from_str(line)
+                let json_chunk: OllamaStreamChunk = serde_json::from_str(&line)
                     .map_err(|e| ModelError::ParseError {
                         message: format!("Failed to parse Ollama response: {}", e),
-                        raw: Some(line.to_string()),
+                        raw: Some(line.clone()),
                     })?;
 
-                // Handle thinking content (if present)
-                if let Some(ref thinking_chunk) = json_chunk.message.thinking {
-                    if !in_thinking_phase {
-                        callback("Thinking...\n\n");
-                        in_thinking_phase = true;
-                    }
-                    if !thinking_chunk.is_empty() {
-                        callback(thinking_chunk);
-                        full_thinking.push_str(thinking_chunk);
-                    }
-                }
-
-                // Handle tool calls (if present)
-                if let Some(ref tool_calls) = json_chunk.message.tool_calls {
-                    accumulated_tool_calls.extend(tool_calls.clone());
-                    // Send tool calls to stream handler as special marker
-                    if let Ok(tool_calls_json) = serde_json::to_string(&tool_calls) {
-                        callback(&format!("[TOOL_CALLS:{}]", tool_calls_json));
-                    }
-                }
-
-                // Handle regular content
-                if !json_chunk.message.content.is_empty() {
-                    // Transition from thinking to answer
-                    if in_thinking_phase {
-                        callback("\n...done thinking.\n\n");
-                        in_thinking_phase = false;
-                    }
-                    callback(&json_chunk.message.content);
-                    full_content.push_str(&json_chunk.message.content);
-                }
-
-                // Capture token usage
-                if json_chunk.done {
-                    if let Some(count) = json_chunk.prompt_eval_count {
-                        prompt_tokens = count;
-                    }
-                    if let Some(count) = json_chunk.eval_count {
-                        completion_tokens = count;
-                    }
-                }
+                self.process_stream_chunk(
+                    &json_chunk,
+                    &callback,
+                    &mut full_content,
+                    &mut full_thinking,
+                    &mut accumulated_tool_calls,
+                    &mut in_thinking_phase,
+                    &mut prompt_tokens,
+                    &mut completion_tokens,
+                );
             }
+        }
+
+        // Process any remaining buffered content after the stream ends
+        // (the final JSON line may not have a trailing newline)
+        if !line_buffer.trim().is_empty() {
+            let json_chunk: OllamaStreamChunk = serde_json::from_str(line_buffer.trim())
+                .map_err(|e| ModelError::ParseError {
+                    message: format!("Failed to parse Ollama response: {}", e),
+                    raw: Some(line_buffer.clone()),
+                })?;
+
+            self.process_stream_chunk(
+                &json_chunk,
+                &callback,
+                &mut full_content,
+                &mut full_thinking,
+                &mut accumulated_tool_calls,
+                &mut in_thinking_phase,
+                &mut prompt_tokens,
+                &mut completion_tokens,
+            );
         }
 
         let thinking = if full_thinking.is_empty() {
@@ -158,6 +158,59 @@ impl OllamaAdapter {
             thinking,
             tool_calls,
         })
+    }
+
+    /// Process a single parsed stream chunk, updating all accumulators
+    fn process_stream_chunk(
+        &self,
+        json_chunk: &OllamaStreamChunk,
+        callback: &StreamCallback,
+        full_content: &mut String,
+        full_thinking: &mut String,
+        accumulated_tool_calls: &mut Vec<crate::models::ToolCall>,
+        in_thinking_phase: &mut bool,
+        prompt_tokens: &mut usize,
+        completion_tokens: &mut usize,
+    ) {
+        // Handle thinking content (if present)
+        if let Some(ref thinking_chunk) = json_chunk.message.thinking {
+            if !*in_thinking_phase {
+                callback("Thinking...\n\n");
+                *in_thinking_phase = true;
+            }
+            if !thinking_chunk.is_empty() {
+                callback(thinking_chunk);
+                full_thinking.push_str(thinking_chunk);
+            }
+        }
+
+        // Handle tool calls (if present)
+        if let Some(ref tool_calls) = json_chunk.message.tool_calls {
+            accumulated_tool_calls.extend(tool_calls.clone());
+            if let Ok(tool_calls_json) = serde_json::to_string(&tool_calls) {
+                callback(&format!("[TOOL_CALLS:{}]", tool_calls_json));
+            }
+        }
+
+        // Handle regular content
+        if !json_chunk.message.content.is_empty() {
+            if *in_thinking_phase {
+                callback("\n...done thinking.\n\n");
+                *in_thinking_phase = false;
+            }
+            callback(&json_chunk.message.content);
+            full_content.push_str(&json_chunk.message.content);
+        }
+
+        // Capture token usage
+        if json_chunk.done {
+            if let Some(count) = json_chunk.prompt_eval_count {
+                *prompt_tokens = count;
+            }
+            if let Some(count) = json_chunk.eval_count {
+                *completion_tokens = count;
+            }
+        }
     }
 }
 

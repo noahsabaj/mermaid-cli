@@ -97,6 +97,7 @@ impl PlannedAction {
                 }
             }
             AgentAction::WriteFile { path, .. } => format!("Write {}", path),
+            AgentAction::EditFile { path, .. } => format!("Edit {}", path),
             AgentAction::DeleteFile { path } => format!("Delete {}", path),
             AgentAction::CreateDirectory { path } => format!("Create dir {}", path),
             AgentAction::ExecuteCommand { command, .. } => format!("Run: {}", command),
@@ -127,6 +128,7 @@ impl PlannedAction {
                 if paths.len() == 1 { "Read" } else { "ReadFiles" }
             }
             AgentAction::WriteFile { .. } => "Write",
+            AgentAction::EditFile { .. } => "Edit",
             AgentAction::DeleteFile { .. } => "Delete",
             AgentAction::CreateDirectory { .. } => "Create",
             AgentAction::ExecuteCommand { .. } => "Bash",
@@ -147,6 +149,7 @@ impl PlannedAction {
         match &self.action {
             AgentAction::ReadFile { .. }
             | AgentAction::WriteFile { .. }
+            | AgentAction::EditFile { .. }
             | AgentAction::DeleteFile { .. }
             | AgentAction::CreateDirectory { .. } => ActionCategory::File,
             AgentAction::ExecuteCommand { .. } => ActionCategory::Command,

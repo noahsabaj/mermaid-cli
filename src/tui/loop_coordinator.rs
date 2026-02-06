@@ -93,7 +93,7 @@ pub async fn run_app_loop(
 
                 // AGENT LOOP: Execute tool calls and continue until model stops
                 if !tool_calls.is_empty() {
-                    run_agent_loop(app, tool_calls, &tx, rx).await?;
+                    run_agent_loop(app, tool_calls, &tx, rx, terminal).await?;
                 }
 
                 // Process any queued messages after generation completes
@@ -162,7 +162,7 @@ pub async fn run_app_loop(
                                 StreamStatus::Complete { tool_calls: new_tool_calls } => {
                                     // If this response has tool calls, run agent loop
                                     if !new_tool_calls.is_empty() {
-                                        run_agent_loop(app, new_tool_calls, &tx, rx).await?;
+                                        run_agent_loop(app, new_tool_calls, &tx, rx, terminal).await?;
                                     }
                                     break; // Done with this queued message
                                 },
@@ -296,6 +296,51 @@ async fn handle_message_submit(
     app.start_generation(handle.abort_handle());
 }
 
+/// Render the UI and check for Esc/Ctrl+C interruption (non-blocking).
+/// Returns Ok(true) if the user wants to interrupt the agent loop.
+fn render_and_check_interrupt(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<bool> {
+    terminal.draw(|f| render_ui(f, app))?;
+
+    if event::poll(Duration::from_millis(0))? {
+        if let event::Event::Key(key) = event::read()? {
+            if key.kind == crossterm::event::KeyEventKind::Press {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => {
+                        if let Some(abort) = app.abort_generation() {
+                            abort.abort();
+                        }
+                        if !app.current_response.is_empty() {
+                            app.add_message(MessageRole::Assistant, app.current_response.clone());
+                            app.current_response.clear();
+                        }
+                        app.set_status("Agent loop interrupted");
+                        return Ok(true);
+                    }
+                    crossterm::event::KeyCode::Char('c')
+                        if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        if let Some(abort) = app.abort_generation() {
+                            abort.abort();
+                        }
+                        if !app.current_response.is_empty() {
+                            app.add_message(MessageRole::Assistant, app.current_response.clone());
+                            app.current_response.clear();
+                        }
+                        app.set_status("Agent loop interrupted");
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 /// Run the agent loop for tool calling
 ///
 /// This implements the proper agent loop pattern:
@@ -304,6 +349,9 @@ async fn handle_message_submit(
 /// 3. Call the model again
 /// 4. Loop until no more tool_calls
 ///
+/// Each completed step renders immediately to the TUI so the user
+/// sees tool actions and model responses as they happen (block streaming).
+///
 /// This follows the Ollama API pattern documented at:
 /// https://ollama.com/blog/tool-support
 async fn run_agent_loop(
@@ -311,6 +359,7 @@ async fn run_agent_loop(
     initial_tool_calls: Vec<crate::models::ToolCall>,
     tx: &mpsc::Sender<String>,
     rx: &mut mpsc::Receiver<String>,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
     let mut current_tool_calls = initial_tool_calls;
     let mut iteration = 0;
@@ -318,6 +367,11 @@ async fn run_agent_loop(
     while !current_tool_calls.is_empty() {
         iteration += 1;
         app.set_status(format!("Agent loop iteration {}", iteration));
+
+        // Render so user sees iteration status; check for Esc interrupt
+        if render_and_check_interrupt(terminal, app)? {
+            return Ok(());
+        }
 
         // Check for queued message BEFORE executing tool calls
         // This allows the user to intercept and redirect the agent
@@ -373,8 +427,12 @@ async fn run_agent_loop(
 
             app.start_generation(handle.abort_handle());
 
-            // Wait for the model response
+            // Wait for the model response (render each tick for live status)
             loop {
+                if render_and_check_interrupt(terminal, app)? {
+                    return Ok(());
+                }
+
                 match process_stream_chunks(app, rx).await? {
                     StreamStatus::Streaming => {},
                     StreamStatus::Complete { tool_calls: new_tool_calls } => {
@@ -422,12 +480,18 @@ async fn run_agent_loop(
             );
         }
 
-        // Check if any results failed in a way that should stop the loop
-        let all_failed = results.iter().all(|r| !r.success);
-        if all_failed && !results.is_empty() {
-            app.set_status("Agent loop stopped: all tool calls failed");
-            break;
+        // Render to show completed tool actions immediately
+        app.set_status(format!(
+            "Iteration {} - {} tool(s) executed, calling model...",
+            iteration,
+            results.len()
+        ));
+        if render_and_check_interrupt(terminal, app)? {
+            return Ok(());
         }
+
+        // Note: Even if all tool calls failed, we continue the loop so the model
+        // can see the error messages and retry with a different approach.
 
         // Call the model again with the updated message history
         let messages = app.build_managed_message_history(75_000, 4_000);
@@ -468,7 +532,13 @@ async fn run_agent_loop(
         app.start_generation(handle.abort_handle());
 
         // Wait for the model response by processing stream chunks until Complete
+        // Render on each tick so status bar updates and Esc works
         loop {
+            // Render to show streaming progress (timer, tokens, status)
+            if render_and_check_interrupt(terminal, app)? {
+                return Ok(());
+            }
+
             match process_stream_chunks(app, rx).await? {
                 StreamStatus::Streaming => {
                     // Continue processing
