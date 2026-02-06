@@ -81,6 +81,25 @@ pub fn setup_cloud_interactive() -> Result<bool> {
     Ok(true)
 }
 
+/// Get the Ollama Cloud API key from environment or config
+///
+/// Priority: OLLAMA_API_KEY env var > config file cloud_api_key
+pub fn get_cloud_api_key() -> Option<String> {
+    // Check environment variable first
+    if let Ok(key) = std::env::var("OLLAMA_API_KEY") {
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+
+    // Check config file
+    if let Ok(config) = load_config() {
+        return config.ollama.cloud_api_key;
+    }
+
+    None
+}
+
 /// Check if a model name requires cloud access
 pub fn is_cloud_model(model_name: &str) -> bool {
     model_name.ends_with(":cloud")

@@ -8,7 +8,6 @@ pub mod models;
 pub mod ollama;
 pub mod prompts;
 pub mod runtime;
-pub mod searxng;
 pub mod session;
 pub mod tui;
 pub mod utils;

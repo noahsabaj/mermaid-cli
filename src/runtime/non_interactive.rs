@@ -216,6 +216,7 @@ impl NonInteractiveRunner {
                             ("web_search", format!("{} queries", queries.len()))
                         }
                     }
+                    AgentAction::WebFetch { url } => ("web_fetch", url.clone()),
                 };
 
                 let result = execute_action(&action).await;
@@ -268,6 +269,7 @@ impl NonInteractiveRunner {
                             ("web_search", format!("{} queries", queries.len()))
                         }
                     }
+                    AgentAction::WebFetch { url } => ("web_fetch", url.clone()),
                 };
 
                 actions.push(ActionResult {

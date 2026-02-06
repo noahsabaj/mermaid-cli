@@ -15,4 +15,4 @@ pub use action_executor::{describe_action, execute_action};
 pub use filesystem::{is_binary_file, read_binary_file, read_file};
 pub use plan::{ActionStatus, Plan, PlanStats, PlannedAction};
 pub use types::{ActionDisplay, ActionResult, AgentAction};
-pub use web_search::{SearchResult, WebSearchClient};
+pub use web_search::{SearchResult, WebFetchResult, WebSearchClient};

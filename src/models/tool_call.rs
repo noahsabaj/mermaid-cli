@@ -75,12 +75,18 @@ impl ToolCall {
 
             "web_search" => {
                 let query = Self::get_string_arg(args, "query")?;
-                let result_count = Self::get_int_arg(args, "result_count")
+                let max_results = Self::get_int_arg(args, "max_results")
+                    .or_else(|_| Self::get_int_arg(args, "result_count"))
                     .unwrap_or(5)
                     .clamp(1, 10);
                 AgentAction::WebSearch {
-                    queries: vec![(query, result_count)],
+                    queries: vec![(query, max_results)],
                 }
+            }
+
+            "web_fetch" => {
+                let url = Self::get_string_arg(args, "url")?;
+                AgentAction::WebFetch { url }
             }
 
             name => {

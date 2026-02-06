@@ -1,7 +1,6 @@
 /// Constants module to avoid magic numbers in the codebase
 // Network Configuration
 pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
-pub const DEFAULT_SEARXNG_PORT: u16 = 8888;
 
 // Timeouts
 pub const COMMAND_TIMEOUT_SECS: u64 = 30;

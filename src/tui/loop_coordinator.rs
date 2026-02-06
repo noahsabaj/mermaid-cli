@@ -9,7 +9,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::models::{MessageRole, ModelConfig, StreamCallback};
-use crate::searxng::ensure_searxng_running;
 use super::state::GenerationStatus;
 use crate::tui::render::render_ui;
 use crate::tui::App;
@@ -42,12 +41,6 @@ pub async fn run_app_loop(
     // Initialize file watcher for the current directory
     let watcher = FileSystemWatcher::new(Path::new("."))?;
     let mut last_refresh = std::time::Instant::now();
-
-    // Start Searxng in the background for web search capability
-    // This runs silently without blocking the UI
-    tokio::spawn(async {
-        ensure_searxng_running().await;
-    });
 
     // Main event loop
     loop {

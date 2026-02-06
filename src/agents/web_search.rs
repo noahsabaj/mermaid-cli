@@ -16,34 +16,48 @@ pub struct SearchResult {
     pub full_content: String,
 }
 
-/// Searxng search response structure
+/// Result from a web fetch
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebFetchResult {
+    pub title: String,
+    pub content: String,
+}
+
+/// Ollama web search API response
 #[derive(Debug, Deserialize)]
-struct SearxngResponse {
-    results: Vec<SearxngResult>,
+struct OllamaSearchResponse {
+    results: Vec<OllamaSearchResult>,
 }
 
 #[derive(Debug, Deserialize)]
-struct SearxngResult {
+struct OllamaSearchResult {
     title: String,
     url: String,
     content: String,
 }
 
-use std::sync::Arc;
+/// Ollama web fetch API response
+#[derive(Debug, Deserialize)]
+struct OllamaFetchResponse {
+    title: Option<String>,
+    content: Option<String>,
+}
 
-/// Web search client that queries local Searxng instance
+const OLLAMA_API_BASE: &str = "https://ollama.com/api";
+
+/// Web search client that uses Ollama's cloud API
 pub struct WebSearchClient {
     client: Client,
-    searxng_url: String,
-    cache: HashMap<String, (Arc<Vec<SearchResult>>, Instant)>,
+    api_key: String,
+    cache: HashMap<String, (std::sync::Arc<Vec<SearchResult>>, Instant)>,
     cache_ttl: Duration,
 }
 
 impl WebSearchClient {
-    pub fn new(searxng_url: String) -> Self {
+    pub fn new(api_key: String) -> Self {
         Self {
             client: Client::new(),
-            searxng_url,
+            api_key,
             cache: HashMap::new(),
             cache_ttl: Duration::from_secs(3600), // 1 hour
         }
@@ -54,13 +68,13 @@ impl WebSearchClient {
         &mut self,
         query: &str,
         count: usize,
-    ) -> Result<Arc<Vec<SearchResult>>> {
+    ) -> Result<std::sync::Arc<Vec<SearchResult>>> {
         let cache_key = format!("{}:{}", query, count);
 
         // Check cache first
         if let Some((results, timestamp)) = self.cache.get(&cache_key) {
             if timestamp.elapsed() < self.cache_ttl {
-                return Ok(Arc::clone(results));
+                return Ok(std::sync::Arc::clone(results));
             } else {
                 // Cache expired, remove it
                 self.cache.remove(&cache_key);
@@ -69,26 +83,20 @@ impl WebSearchClient {
 
         // Cache miss or expired - fetch fresh
         let results = self.search(query, count).await?;
-        let results_arc = Arc::new(results);
-        self.cache.insert(cache_key, (Arc::clone(&results_arc), Instant::now()));
+        let results_arc = std::sync::Arc::new(results);
+        self.cache
+            .insert(cache_key, (std::sync::Arc::clone(&results_arc), Instant::now()));
         Ok(results_arc)
     }
 
-    /// Execute search and fetch full page content
+    /// Execute search via Ollama Cloud API and fetch full page content
     async fn search(&self, query: &str, count: usize) -> Result<Vec<SearchResult>> {
         // Validate count
         if count == 0 || count > 10 {
             return Err(anyhow!("Result count must be between 1 and 10, got {}", count));
         }
 
-        // Query Searxng with retry logic
-        let encoded_query = urlencoding::encode(query);
-        let url = format!(
-            "{}/search?q={}&format=json&pageno=1",
-            self.searxng_url, encoded_query
-        );
-
-        // Retry config for Searxng queries (3 attempts, quick backoff)
+        // Query Ollama web search API with retry logic
         let retry_config = RetryConfig {
             max_attempts: 3,
             initial_delay_ms: 500,
@@ -97,51 +105,63 @@ impl WebSearchClient {
         };
 
         let client = self.client.clone();
-        let url_clone = url.clone();
-        let searxng_response: SearxngResponse = retry_async(
+        let api_key = self.api_key.clone();
+        let query_owned = query.to_string();
+        let ollama_response: OllamaSearchResponse = retry_async(
             || {
                 let client = client.clone();
-                let url = url_clone.clone();
+                let api_key = api_key.clone();
+                let query = query_owned.clone();
                 async move {
                     let response = client
-                        .get(&url)
+                        .post(format!("{}/web_search", OLLAMA_API_BASE))
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .json(&serde_json::json!({
+                            "query": query,
+                            "max_results": count,
+                        }))
                         .timeout(Duration::from_secs(30))
                         .send()
                         .await
-                        .map_err(|e| anyhow!("Failed to reach Searxng (is it running?): {}", e))?;
+                        .map_err(|e| anyhow!("Failed to reach Ollama web search API: {}", e))?;
 
                     if !response.status().is_success() {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
                         return Err(anyhow!(
-                            "Searxng returned error status: {}",
-                            response.status()
+                            "Ollama web search API returned error {}: {}",
+                            status,
+                            body
                         ));
                     }
 
                     response
-                        .json::<SearxngResponse>()
+                        .json::<OllamaSearchResponse>()
                         .await
-                        .map_err(|e| anyhow!("Failed to parse Searxng response: {}", e))
+                        .map_err(|e| anyhow!("Failed to parse Ollama search response: {}", e))
                 }
             },
             &retry_config,
         )
         .await?;
 
-        // Take top N results
+        // Take top N results and fetch full page content for each
         let mut search_results = Vec::new();
-        for result in searxng_response.results.iter().take(count) {
-            // Fetch full page content
-            match self.fetch_full_page(&result.url).await {
-                Ok(full_content) => {
+        for result in ollama_response.results.iter().take(count) {
+            // Fetch full page content via web_fetch
+            match self.fetch_url(&result.url).await {
+                Ok(fetch_result) => {
+                    // Truncate to prevent context bloat
+                    let content = truncate_content(&fetch_result.content, 5000);
                     search_results.push(SearchResult {
                         title: result.title.clone(),
                         url: result.url.clone(),
                         snippet: result.content.clone(),
-                        full_content,
+                        full_content: content,
                     });
                 }
                 Err(e) => {
-                    // If full page fetch fails, use snippet only
+                    // If full page fetch fails, use snippet from search results
                     warn!(url = %result.url, "Failed to fetch full page: {}", e);
                     search_results.push(SearchResult {
                         title: result.title.clone(),
@@ -160,13 +180,8 @@ impl WebSearchClient {
         Ok(search_results)
     }
 
-    /// Fetch full page content and convert to markdown
-    async fn fetch_full_page(&self, url: &str) -> Result<String> {
-        // Sanitize URL to prevent SSRF
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(anyhow!("Invalid URL: {}", url));
-        }
-
+    /// Fetch a URL's content via Ollama's web_fetch API
+    pub async fn fetch_url(&self, url: &str) -> Result<WebFetchResult> {
         // Retry config for page fetches (2 attempts, shorter timeout)
         let retry_config = RetryConfig {
             max_attempts: 2,
@@ -176,44 +191,42 @@ impl WebSearchClient {
         };
 
         let client = self.client.clone();
+        let api_key = self.api_key.clone();
         let url_owned = url.to_string();
-        let html = retry_async(
+        let response: OllamaFetchResponse = retry_async(
             || {
                 let client = client.clone();
+                let api_key = api_key.clone();
                 let url = url_owned.clone();
                 async move {
                     let response = client
-                        .get(&url)
+                        .post(format!("{}/web_fetch", OLLAMA_API_BASE))
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .json(&serde_json::json!({ "url": url }))
                         .timeout(Duration::from_secs(15))
                         .send()
                         .await
                         .map_err(|e| anyhow!("Failed to fetch {}: {}", url, e))?;
 
                     if !response.status().is_success() {
-                        return Err(anyhow!("Failed to fetch {}: {}", url, response.status()));
+                        let status = response.status();
+                        return Err(anyhow!("Failed to fetch {}: HTTP {}", url, status));
                     }
 
                     response
-                        .text()
+                        .json::<OllamaFetchResponse>()
                         .await
-                        .map_err(|e| anyhow!("Failed to read response body: {}", e))
+                        .map_err(|e| anyhow!("Failed to parse fetch response: {}", e))
                 }
             },
             &retry_config,
         )
         .await?;
 
-        // Convert HTML to markdown
-        let markdown = html2md::parse_html(&html);
-
-        // Truncate to reasonable size (5000 chars per page to prevent context bloat)
-        let truncated = if markdown.len() > 5000 {
-            format!("{}...[truncated]", &markdown[..5000])
-        } else {
-            markdown
-        };
-
-        Ok(truncated)
+        Ok(WebFetchResult {
+            title: response.title.unwrap_or_default(),
+            content: response.content.unwrap_or_default(),
+        })
     }
 
     /// Format search results for model consumption
@@ -232,28 +245,29 @@ impl WebSearchClient {
     }
 }
 
+/// Truncate content to a maximum character count
+fn truncate_content(content: &str, max_chars: usize) -> String {
+    if content.len() > max_chars {
+        format!("{}...[truncated]", &content[..max_chars])
+    } else {
+        content.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_web_search_client_creation() {
-        let client = WebSearchClient::new("http://localhost:8888".to_string());
-        assert_eq!(client.searxng_url, "http://localhost:8888");
+        let client = WebSearchClient::new("test-key".to_string());
+        assert_eq!(client.api_key, "test-key");
         assert_eq!(client.cache.len(), 0);
     }
 
     #[test]
-    fn test_result_count_validation() {
-        // Would need async test framework for actual async testing
-        // This is a placeholder for structure validation
-        let results: Vec<SearchResult> = vec![];
-        assert!(results.is_empty());
-    }
-
-    #[test]
     fn test_format_results() {
-        let client = WebSearchClient::new("http://localhost:8888".to_string());
+        let client = WebSearchClient::new("test-key".to_string());
         let results = vec![SearchResult {
             title: "Test Article".to_string(),
             url: "https://example.com".to_string(),
@@ -266,5 +280,16 @@ mod tests {
         assert!(formatted.contains("Test Article"));
         assert!(formatted.contains("https://example.com"));
         assert!(formatted.contains("[/SEARCH_RESULTS]"));
+    }
+
+    #[test]
+    fn test_truncate_content() {
+        let short = "hello";
+        assert_eq!(truncate_content(short, 100), "hello");
+
+        let long = "a".repeat(200);
+        let truncated = truncate_content(&long, 50);
+        assert!(truncated.ends_with("...[truncated]"));
+        assert!(truncated.len() < 200);
     }
 }

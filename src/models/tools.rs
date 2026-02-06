@@ -49,6 +49,7 @@ impl ToolRegistry {
                 Self::git_status_tool(),
                 Self::git_commit_tool(),
                 Self::web_search_tool(),
+                Self::web_fetch_tool(),
             ],
         }
     }
@@ -245,7 +246,7 @@ impl ToolRegistry {
             type_: "function".to_string(),
             function: ToolFunction {
                 name: "web_search".to_string(),
-                description: "Search the web using local Searxng instance. Returns full page content in markdown format for deep analysis. Use for current information, library documentation, version-specific questions, or any time-sensitive data.".to_string(),
+                description: "Search the web for information. Returns full page content in markdown format for deep analysis. Use for current information, library documentation, version-specific questions, or any time-sensitive data.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -253,14 +254,34 @@ impl ToolRegistry {
                             "type": "string",
                             "description": "Search query. Be specific and include version numbers when relevant (e.g., 'Rust async tokio 1.40 new features')"
                         },
-                        "result_count": {
+                        "max_results": {
                             "type": "integer",
                             "description": "Number of results to fetch (1-10). Use 3 for simple facts, 5-7 for research, 10 for comprehensive analysis.",
                             "minimum": 1,
                             "maximum": 10
                         }
                     },
-                    "required": ["query", "result_count"]
+                    "required": ["query", "max_results"]
+                }),
+            },
+        }
+    }
+
+    fn web_fetch_tool() -> Tool {
+        Tool {
+            type_: "function".to_string(),
+            function: ToolFunction {
+                name: "web_fetch".to_string(),
+                description: "Fetch content from a URL and return it as clean markdown. Use for reading documentation pages, articles, GitHub READMEs, or any web page the user references.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "The URL to fetch content from (e.g., 'https://docs.rs/tokio/latest')"
+                        }
+                    },
+                    "required": ["url"]
                 }),
             },
         }
@@ -274,7 +295,7 @@ mod tests {
     #[test]
     fn test_tool_registry_creation() {
         let registry = ToolRegistry::mermaid_tools();
-        assert_eq!(registry.tools().len(), 9, "Should have 9 tools defined");
+        assert_eq!(registry.tools().len(), 10, "Should have 10 tools defined");
     }
 
     #[test]
@@ -282,7 +303,7 @@ mod tests {
         let registry = ToolRegistry::mermaid_tools();
         let ollama_tools = registry.to_ollama_format();
 
-        assert_eq!(ollama_tools.len(), 9);
+        assert_eq!(ollama_tools.len(), 10);
 
         // Verify first tool has correct structure
         let first_tool = &ollama_tools[0];

@@ -282,7 +282,14 @@ fn build_action_display_with_timing(
             failed_items: None,
         },
         AgentAction::WebSearch { queries } => {
+            // Detect if this is an error (no [SEARCH_RESULTS] marker means error or empty)
+            let is_error = !output.contains("[SEARCH_RESULTS]");
             let result_count = output.matches("Title:").count();
+            let preview = if is_error {
+                Some(truncate_output(output, 2))
+            } else {
+                Some(format!("Fetched {} search results", result_count))
+            };
             if queries.len() == 1 {
                 ActionDisplay {
                     action_type: "WebSearch".to_string(),
@@ -290,7 +297,7 @@ fn build_action_display_with_timing(
                     result: AgentActionResult::Success {
                         output: output.to_string(),
                     },
-                    preview: Some(format!("Fetched {} search results", result_count)),
+                    preview,
                     line_count: Some(result_count),
                     file_content: None,
                     duration_seconds,
@@ -305,7 +312,7 @@ fn build_action_display_with_timing(
                     result: AgentActionResult::Success {
                         output: output.to_string(),
                     },
-                    preview: Some(format!("Fetched {} search results", result_count)),
+                    preview,
                     line_count: Some(result_count),
                     file_content: None,
                     duration_seconds,
@@ -313,6 +320,23 @@ fn build_action_display_with_timing(
                     item_count: Some(queries.len()),
                     failed_items: None,
                 }
+            }
+        }
+        AgentAction::WebFetch { url } => {
+            let content_len = output.lines().count();
+            ActionDisplay {
+                action_type: "WebFetch".to_string(),
+                target: url.clone(),
+                result: AgentActionResult::Success {
+                    output: output.to_string(),
+                },
+                preview: Some(truncate_output(output, 3)),
+                line_count: Some(content_len),
+                file_content: None,
+                duration_seconds,
+                targets: None,
+                item_count: None,
+                failed_items: None,
             }
         }
     }

@@ -34,9 +34,13 @@ pub enum AgentAction {
         files: Vec<String>,
     },
     GitStatus,
-    /// Web search via local Searxng (executor decides parallelization)
+    /// Web search via Ollama Cloud API (executor decides parallelization)
     WebSearch {
         queries: Vec<(String, usize)>,
+    },
+    /// Fetch a URL's content via Ollama Cloud API
+    WebFetch {
+        url: String,
     },
 }
 

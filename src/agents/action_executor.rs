@@ -6,6 +6,7 @@ use super::filesystem;
 use super::git;
 use super::types::{ActionResult, AgentAction};
 use super::web_search::WebSearchClient;
+use crate::ollama::get_cloud_api_key;
 use crate::utils::check_git_repo;
 
 /// Get a human-readable description of an action (for UI display)
@@ -60,6 +61,7 @@ pub fn describe_action(action: &AgentAction) -> String {
                 format!("Web search with {} queries", queries.len())
             }
         }
+        AgentAction::WebFetch { url } => format!("Web fetch: {}", url),
     }
 }
 
@@ -131,6 +133,7 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
             }
         },
         AgentAction::WebSearch { queries } => execute_web_searches(queries).await,
+        AgentAction::WebFetch { url } => execute_web_fetch(url).await,
     }
 }
 
@@ -211,6 +214,21 @@ async fn execute_read_files(paths: &[String]) -> ActionResult {
     ActionResult::Success { output }
 }
 
+/// Resolve the Ollama Cloud API key, returning an error ActionResult if not configured
+fn resolve_api_key() -> Result<String, ActionResult> {
+    get_cloud_api_key().ok_or_else(|| ActionResult::Error {
+        error: "Web search unavailable: Ollama Cloud API key not configured\n\n\
+            Web search requires an Ollama Cloud API key. To set one up:\n\
+            1. Run :cloud-setup in Mermaid\n\
+            2. Or set the environment variable: export OLLAMA_API_KEY=your_key\n\
+            3. Or add to ~/.config/mermaid/config.toml:\n\
+               [ollama]\n\
+               cloud_api_key = \"your_key\"\n\n\
+            Get a free API key at: https://ollama.com/cloud"
+            .to_string(),
+    })
+}
+
 /// Execute web search(es) - parallelizes if multiple queries
 async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
     if queries.is_empty() {
@@ -219,13 +237,15 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
         };
     }
 
-    let searxng_url = std::env::var("MERMAID_SEARXNG_URL")
-        .unwrap_or_else(|_| "http://localhost:8888".to_string());
+    let api_key = match resolve_api_key() {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
 
     // Single query: simple execution with detailed error handling
     if queries.len() == 1 {
         let (query, result_count) = &queries[0];
-        let mut client = WebSearchClient::new(searxng_url.clone());
+        let mut client = WebSearchClient::new(api_key);
 
         return match client.search_cached(query, *result_count).await {
             Ok(results) => {
@@ -234,22 +254,7 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
             }
             Err(e) => {
                 let error_str = e.to_string();
-                let error_msg = if error_str.contains("Searxng") || error_str.contains("localhost:8888") {
-                    format!(
-                        "Web search unavailable: Searxng service not responding\n\n\
-                        Mermaid attempted to auto-start Searxng on application launch, but \
-                        it's still not responding at {}\n\n\
-                        Possible causes:\n\
-                        1. Podman/Docker not installed or not running\n\
-                        2. Internet connectivity issue (Searxng requires internet)\n\
-                        3. Searxng container failed to start due to resource constraints\n\n\
-                        Manual troubleshooting:\n\
-                        podman-compose up -d searxng        # Start manually\n\
-                        podman-compose logs searxng         # View container logs\n\
-                        curl http://localhost:8888/status   # Check if it's responding",
-                        searxng_url
-                    )
-                } else if error_str.contains("Result count") {
+                let error_msg = if error_str.contains("Result count") {
                     "Invalid search parameters: result count must be between 1 and 10".to_string()
                 } else {
                     format!(
@@ -271,7 +276,7 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
     let futures: Vec<_> = queries
         .iter()
         .map(|(query, count)| {
-            let mut client = WebSearchClient::new(searxng_url.clone());
+            let mut client = WebSearchClient::new(api_key.clone());
             let query_clone = query.clone();
             let count_clone = *count;
             async move { (client.search_cached(&query_clone, count_clone).await, query_clone) }
@@ -283,7 +288,7 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
     for (search_result, query) in search_results {
         match search_result {
             Ok(search_results) => {
-                let client = WebSearchClient::new(searxng_url.clone());
+                let client = WebSearchClient::new(api_key.clone());
                 let formatted = client.format_results(&search_results);
                 results.push((query, formatted));
             }
@@ -318,6 +323,33 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
 
     output.push_str(&format!("(Completed in {:.1}s)", duration));
     ActionResult::Success { output }
+}
+
+/// Execute a web fetch - fetch a URL's content as markdown
+async fn execute_web_fetch(url: &str) -> ActionResult {
+    let api_key = match resolve_api_key() {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
+
+    let client = WebSearchClient::new(api_key);
+    match client.fetch_url(url).await {
+        Ok(result) => {
+            let content = if result.content.len() > 8000 {
+                format!("{}...[truncated]", &result.content[..8000])
+            } else {
+                result.content
+            };
+            let output = format!(
+                "Title: {}\nURL: {}\nContent:\n{}",
+                result.title, url, content
+            );
+            ActionResult::Success { output }
+        }
+        Err(e) => ActionResult::Error {
+            error: format!("Failed to fetch {}: {}", url, e),
+        },
+    }
 }
 
 /// Execute git diff(s) - parallelizes if multiple paths

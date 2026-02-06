@@ -116,6 +116,7 @@ impl PlannedAction {
                     format!("Search {} queries", queries.len())
                 }
             }
+            AgentAction::WebFetch { url } => format!("Fetch: {}", url),
         }
     }
 
@@ -137,6 +138,7 @@ impl PlannedAction {
             AgentAction::WebSearch { queries } => {
                 if queries.len() == 1 { "WebSearch" } else { "WebSearches" }
             }
+            AgentAction::WebFetch { .. } => "WebFetch",
         }
     }
 
@@ -151,7 +153,7 @@ impl PlannedAction {
             AgentAction::GitDiff { .. }
             | AgentAction::GitCommit { .. }
             | AgentAction::GitStatus => ActionCategory::Git,
-            AgentAction::WebSearch { .. } => ActionCategory::WebSearch,
+            AgentAction::WebSearch { .. } | AgentAction::WebFetch { .. } => ActionCategory::WebSearch,
         }
     }
 }
