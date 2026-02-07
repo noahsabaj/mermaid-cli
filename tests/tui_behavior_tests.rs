@@ -182,6 +182,7 @@ fn test_agent_actions_can_be_created() {
     let execute_command = AgentAction::ExecuteCommand {
         command: "ls -la".to_string(),
         working_dir: None,
+        timeout: None,
     };
 
     // Verify actions can be pattern matched

@@ -62,20 +62,14 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         // Start new line for code block
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-
                         }
-                        // Add code block header
+                        // Show language label if present, otherwise just a blank separator
                         let lang = match kind {
                             CodeBlockKind::Fenced(lang) => lang.to_string(),
                             CodeBlockKind::Indented => "".to_string(),
                         };
                         if !lang.is_empty() {
-                            lines.push(line![
-                                span!(Color::DarkGray; "```"),
-                                span!(Color::Magenta; &lang),
-                            ]);
-                        } else {
-                            lines.push(line![span!(Color::DarkGray; "```"),]);
+                            lines.push(line![span!(Color::DarkGray; &lang)]);
                         }
                         Style::default().fg(Color::Gray)
                     },
@@ -159,17 +153,13 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     },
                     TagEnd::CodeBlock => {
                         in_code_block = false;
-                        // Render code block content
+                        // Render code block content (no fence markers)
                         for line in code_block_content.lines() {
                             lines.push(Line::from(vec![Span::styled(
                                 line.to_string(),
                                 Style::default().fg(Color::Gray),
                             )]));
                         }
-                        lines.push(Line::from(vec![Span::styled(
-                            "```",
-                            Style::default().fg(Color::DarkGray),
-                        )]));
                         code_block_content.clear();
                     },
                     TagEnd::List(_) => {

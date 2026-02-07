@@ -54,9 +54,11 @@ impl ToolCall {
             "execute_command" => {
                 let command = Self::get_string_arg(args, "command")?;
                 let working_dir = Self::get_optional_string_arg(args, "working_dir");
+                let timeout = args.get("timeout").and_then(|v| v.as_u64());
                 AgentAction::ExecuteCommand {
                     command,
                     working_dir,
+                    timeout,
                 }
             }
 
@@ -258,9 +260,11 @@ mod tests {
             AgentAction::ExecuteCommand {
                 command,
                 working_dir,
+                timeout,
             } => {
                 assert_eq!(command, "cargo test");
                 assert_eq!(working_dir, Some("/path/to/project".to_string()));
+                assert_eq!(timeout, None);
             }
             _ => panic!("Expected ExecuteCommand action"),
         }

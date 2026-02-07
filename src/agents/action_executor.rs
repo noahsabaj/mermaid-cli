@@ -29,7 +29,7 @@ pub fn describe_action(action: &AgentAction) -> String {
         AgentAction::CreateDirectory { path } => {
             format!("Create directory: {}", path)
         }
-        AgentAction::ExecuteCommand { command, working_dir } => {
+        AgentAction::ExecuteCommand { command, working_dir, .. } => {
             if let Some(dir) = working_dir {
                 format!("Execute command in {}: {}", dir, command)
             } else {
@@ -106,7 +106,8 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
         AgentAction::ExecuteCommand {
             command,
             working_dir,
-        } => executor::execute_command(command, working_dir.as_deref()).await,
+            timeout,
+        } => executor::execute_command(command, working_dir.as_deref(), *timeout).await,
         AgentAction::GitDiff { paths } => {
             // Preemptive check: Are we in a git repo?
             let git_check = check_git_repo(None);
@@ -520,6 +521,7 @@ mod tests {
         let action = AgentAction::ExecuteCommand {
             command: "echo test".to_string(),
             working_dir: None,
+            timeout: None,
         };
         let result = execute_action(&action).await;
         assert!(matches!(result, ActionResult::Success { .. }));
@@ -530,6 +532,7 @@ mod tests {
         let action = AgentAction::ExecuteCommand {
             command: "pwd".to_string(),
             working_dir: Some("/tmp".to_string()),
+            timeout: None,
         };
         let result = execute_action(&action).await;
         assert!(matches!(result, ActionResult::Success { .. }));

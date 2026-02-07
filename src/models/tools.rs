@@ -161,7 +161,7 @@ impl ToolRegistry {
             type_: "function".to_string(),
             function: ToolFunction {
                 name: "execute_command".to_string(),
-                description: "Execute a shell command. Use for running tests, builds, git operations, or any terminal command.".to_string(),
+                description: "Execute a shell command. Use for running tests, builds, git operations, or any terminal command. For long-running processes like servers, set a short timeout (e.g., 5) — the process will keep running after timeout.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -172,6 +172,10 @@ impl ToolRegistry {
                         "working_dir": {
                             "type": "string",
                             "description": "Optional working directory to run the command in. Defaults to project root."
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Timeout in seconds (default: 30, max: 300). For servers/daemons, use a short timeout like 5 since the process continues running after timeout."
                         }
                     },
                     "required": ["command"]

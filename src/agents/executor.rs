@@ -10,7 +10,8 @@ use crate::agents::ActionResult;
 /// Execute a shell command and capture output
 ///
 /// Returns ActionResult directly - errors are captured in ActionResult::Error.
-pub async fn execute_command(command: &str, working_dir: Option<&str>) -> ActionResult {
+/// `timeout_secs` overrides the default 30-second timeout (capped at 300s).
+pub async fn execute_command(command: &str, working_dir: Option<&str>, timeout_secs: Option<u64>) -> ActionResult {
     // Security checks
     if contains_dangerous_command(command) {
         return ActionResult::Error {
@@ -44,8 +45,9 @@ pub async fn execute_command(command: &str, working_dir: Option<&str>) -> Action
         cmd.current_dir(dir);
     }
 
-    // Execute with timeout
-    let timeout_duration = Duration::from_secs(30);
+    // Execute with timeout (default 30s, max 300s)
+    let secs = timeout_secs.unwrap_or(30).min(300);
+    let timeout_duration = Duration::from_secs(secs);
 
     match timeout(timeout_duration, run_command(cmd)).await {
         Ok(Ok(output)) => ActionResult::Success { output },
@@ -54,7 +56,7 @@ pub async fn execute_command(command: &str, working_dir: Option<&str>) -> Action
         },
         Err(_) => ActionResult::Error {
             error: format!(
-                "Command timed out after {} seconds",
+                "Command timed out after {} seconds. If this is a server or long-running process, it is likely still running in the background.",
                 timeout_duration.as_secs()
             ),
         },
@@ -197,7 +199,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_safe_command() {
-        let result = execute_command("echo 'Hello, Mermaid!'", None).await;
+        let result = execute_command("echo 'Hello, Mermaid!'", None, None).await;
 
         match result {
             ActionResult::Success { output } => {
@@ -209,7 +211,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dangerous_command_blocked() {
-        let result = execute_command("rm -rf /", None).await;
+        let result = execute_command("rm -rf /", None, None).await;
 
         match result {
             ActionResult::Error { error } => {

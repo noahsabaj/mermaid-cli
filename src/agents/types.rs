@@ -30,6 +30,7 @@ pub enum AgentAction {
     ExecuteCommand {
         command: String,
         working_dir: Option<String>,
+        timeout: Option<u64>,
     },
     /// Git diff for one or more paths (executor decides parallelization)
     GitDiff {
