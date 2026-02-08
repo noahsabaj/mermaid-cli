@@ -1,6 +1,8 @@
 use anyhow::Result;
+use base64::Engine as _;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
+use crate::clipboard;
 use crate::tui::App;
 
 /// Actions that can result from handling an event
@@ -29,7 +31,7 @@ pub fn handle_event(app: &mut App, event: Event, viewport_height: u16) -> Result
     }
 }
 
-/// Handle mouse events (primarily scrolling)
+/// Handle mouse events (scrolling and Ctrl+Click on images)
 fn handle_mouse_event(
     app: &mut App,
     mouse: crossterm::event::MouseEvent,
@@ -42,6 +44,55 @@ fn handle_mouse_event(
         },
         MouseEventKind::ScrollDown => {
             app.scroll_down(3); // Wheel down shows newer messages (viewport moves down)
+            Ok(EventAction::Continue)
+        },
+        MouseEventKind::Down(crossterm::event::MouseButton::Left)
+            if mouse.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            // Ctrl+Click: check pending attachments first (above input bar)
+            if let Some(area_y) = app.ui_state.attachment_area_y {
+                if mouse.row == area_y && !app.attachment_state.is_empty() {
+                    // Click is in the pending attachment area - open the first attachment
+                    // (all images on one line; open whichever is there)
+                    if let Some(path) = app.attachment_state.last_temp_path() {
+                        let _ = std::process::Command::new("xdg-open")
+                            .arg(path)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn();
+                        app.set_status("Opening image preview...");
+                    }
+                    return Ok(EventAction::Continue);
+                }
+            }
+
+            // Ctrl+Click: check if an image indicator was clicked in chat history
+            if let Some(target) = app.ui_state.chat_state.find_image_at_screen_pos(mouse.row) {
+                let msg_idx = target.message_index;
+                let img_idx = target.image_index;
+                if let Some(msg) = app.session_state.messages.get(msg_idx) {
+                    if let Some(ref images) = msg.images {
+                        if let Some(base64_data) = images.get(img_idx) {
+                            // Decode base64 and write to temp file, then open
+                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(base64_data) {
+                                // Detect format from PNG magic bytes
+                                let ext = if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) { "png" } else { "jpeg" };
+                                let path = format!("/tmp/mermaid-view-{}-{}.{}", msg_idx, img_idx, ext);
+                                if std::fs::write(&path, &bytes).is_ok() {
+                                    let _ = std::process::Command::new("xdg-open")
+                                        .arg(&path)
+                                        .stdin(std::process::Stdio::null())
+                                        .stdout(std::process::Stdio::null())
+                                        .stderr(std::process::Stdio::null())
+                                        .spawn();
+                                    app.set_status(format!("Opening Image #{}", img_idx + 1));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Ok(EventAction::Continue)
         },
         _ => Ok(EventAction::Continue),
@@ -59,6 +110,61 @@ fn handle_key_event(
     // which would cause duplicate character input without this filter.
     if key.kind != KeyEventKind::Press {
         return Ok(EventAction::Continue);
+    }
+
+    // Handle attachment focus mode (cursor is in the image attachment area above input)
+    if app.ui_state.attachment_focused {
+        let action = match key.code {
+            KeyCode::Down | KeyCode::Enter => {
+                // Exit attachment focus, return to input
+                app.ui_state.attachment_focused = false;
+                EventAction::Continue
+            }
+            KeyCode::Left => {
+                if app.ui_state.selected_attachment > 0 {
+                    app.ui_state.selected_attachment -= 1;
+                }
+                EventAction::Continue
+            }
+            KeyCode::Right => {
+                if app.ui_state.selected_attachment + 1 < app.attachment_state.len() {
+                    app.ui_state.selected_attachment += 1;
+                }
+                EventAction::Continue
+            }
+            KeyCode::Backspace | KeyCode::Delete => {
+                let idx = app.ui_state.selected_attachment;
+                if idx < app.attachment_state.len() {
+                    app.attachment_state.remove_at(idx);
+                    let remaining = app.attachment_state.len();
+                    if remaining == 0 {
+                        // No more attachments, exit focus mode
+                        app.ui_state.attachment_focused = false;
+                        app.ui_state.selected_attachment = 0;
+                        app.set_status("All images removed");
+                    } else {
+                        // Clamp selection to valid range
+                        if app.ui_state.selected_attachment >= remaining {
+                            app.ui_state.selected_attachment = remaining - 1;
+                        }
+                        app.set_status(format!("Image removed ({} remaining)", remaining));
+                    }
+                }
+                EventAction::Continue
+            }
+            KeyCode::Esc => {
+                // Exit attachment focus
+                app.ui_state.attachment_focused = false;
+                EventAction::Continue
+            }
+            KeyCode::Char(c) => {
+                // Any typing exits focus mode and inserts the character
+                app.ui_state.attachment_focused = false;
+                handle_char_input(app, c, key.modifiers)
+            }
+            _ => EventAction::Continue,
+        };
+        return Ok(action);
     }
 
     // Handle normal keyboard shortcuts
@@ -168,6 +274,50 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
         return EventAction::Quit;
     }
 
+    // Ctrl+V to paste image or text from clipboard
+    if c == 'v' && modifiers == KeyModifiers::CONTROL {
+        // Check if clipboard has image data (and model hasn't been marked as non-vision)
+        if app.model_state.vision_supported != Some(false) && clipboard::has_image() {
+            match clipboard::read_image_bytes() {
+                Ok((bytes, format)) => {
+                    let num = app.attachment_state.add(&bytes, format);
+                    app.set_status(format!("Image #{} attached (Ctrl+O to preview, Backspace to remove)", num));
+                }
+                Err(e) => {
+                    app.set_status(format!("Failed to read clipboard image: {}", e));
+                }
+            }
+        } else {
+            // Fall back to text paste
+            if let Ok(text) = clipboard::read_text() {
+                let cleaned = text.replace('\n', " ").replace('\r', "");
+                let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !collapsed.is_empty() {
+                    if app.session_state.history_index.is_some() {
+                        app.session_state.history_index = None;
+                        app.session_state.history_buffer.clear();
+                    }
+                    app.input.insert_str(&collapsed);
+                }
+            }
+        }
+        return EventAction::Continue;
+    }
+
+    // Ctrl+O to preview last attached image
+    if c == 'o' && modifiers == KeyModifiers::CONTROL {
+        if let Some(path) = app.attachment_state.last_temp_path() {
+            let _ = std::process::Command::new("xdg-open")
+                .arg(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            app.set_status("Opening image preview...");
+        }
+        return EventAction::Continue;
+    }
+
     // Alt+T to toggle thinking mode
     if c == 't' && modifiers == KeyModifiers::ALT {
         match app.model_state.toggle_thinking() {
@@ -193,7 +343,17 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
 
 /// Handle Backspace key
 fn handle_backspace(app: &mut App) -> EventAction {
-    app.input.backspace();
+    if app.input.is_empty() && !app.attachment_state.is_empty() {
+        app.attachment_state.remove_last();
+        let remaining = app.attachment_state.len();
+        if remaining > 0 {
+            app.set_status(format!("Image removed ({} remaining)", remaining));
+        } else {
+            app.set_status("Image removed");
+        }
+    } else {
+        app.input.backspace();
+    }
     EventAction::Continue
 }
 
@@ -271,8 +431,18 @@ fn navigate_history_forward(app: &mut App) {
     }
 }
 
-/// Handle Up arrow (navigate history or scroll chat)
+/// Handle Up arrow (navigate history, enter attachment focus, or scroll chat)
 fn handle_up_arrow(app: &mut App) -> EventAction {
+    // If cursor is at position 0 (or input empty) and attachments exist, enter attachment focus
+    if !app.ui_state.chat_state.is_manually_scrolling()
+        && !app.attachment_state.is_empty()
+        && app.input.cursor_position == 0
+    {
+        app.ui_state.attachment_focused = true;
+        app.ui_state.selected_attachment = app.attachment_state.len().saturating_sub(1);
+        return EventAction::Continue;
+    }
+
     // If not scrolling chat (input is focused), navigate history
     if !app.ui_state.chat_state.is_manually_scrolling() && !app.session_state.input_history.is_empty() {
         navigate_history_backward(app);

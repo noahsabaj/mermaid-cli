@@ -114,11 +114,26 @@ pub async fn process_stream_chunks(
             if user_error.message.contains("does not support thinking") {
                 app.model_state.disable_thinking_support();
                 app.set_status("Model does not support thinking - disabled");
-                // Don't show the error in chat, just retry automatically would be ideal
-                // but for now, just inform the user
                 app.add_message(
                     MessageRole::System,
                     "This model does not support thinking mode. Thinking has been disabled. Please try your request again.".to_string()
+                );
+                return Ok(StreamStatus::Error(user_error));
+            }
+
+            // Check if this is a vision/image-related error
+            // If so, mark vision as unsupported for this model
+            let error_lower = user_error.message.to_lowercase();
+            if error_lower.contains("does not support images")
+                || error_lower.contains("images not supported")
+                || error_lower.contains("does not support vision")
+                || error_lower.contains("is not a multimodal model")
+            {
+                app.model_state.vision_supported = Some(false);
+                app.set_status("Model does not support images - disabled");
+                app.add_message(
+                    MessageRole::System,
+                    "This model does not support images. Image paste has been disabled for this session.".to_string()
                 );
                 return Ok(StreamStatus::Error(user_error));
             }

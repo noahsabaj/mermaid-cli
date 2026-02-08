@@ -6,13 +6,13 @@ use std::sync::{LazyLock, Mutex};
 
 use super::app::App;
 use super::state::GenerationStatus;
-use crate::tui::widgets::{ChatWidget, InputState, InputWidget, StatusLineWidget, StatusWidget};
+use crate::tui::widgets::{AttachmentWidget, ChatWidget, InputState, InputWidget, StatusLineWidget, StatusWidget};
 use crate::utils::MutexExt;
 
 /// Cache for layout calculations to improve performance
 #[derive(Clone)]
 struct LayoutCache {
-    main_layout: Option<(u16, u16, u16, Vec<Rect>)>, // (width, input_height, status_height, rects)
+    main_layout: Option<(u16, u16, u16, u16, Vec<Rect>)>, // (width, input_height, status_height, attachment_height, rects)
 }
 
 impl LayoutCache {
@@ -22,31 +22,32 @@ impl LayoutCache {
         }
     }
 
-    fn get_main_layout(&mut self, area: Rect, input_height: u16, status_line_height: u16) -> Vec<Rect> {
+    fn get_main_layout(&mut self, area: Rect, input_height: u16, status_line_height: u16, attachment_height: u16) -> Vec<Rect> {
         // Check if cached layout is still valid (cheap clone of Copy types)
-        if let Some((w, ih, sh, ref rects)) = self.main_layout {
-            if w == area.width && ih == input_height && sh == status_line_height {
-                return rects.clone(); // Cheap: Vec of Copy types (5 Rects = ~40 bytes)
+        if let Some((w, ih, sh, ah, ref rects)) = self.main_layout {
+            if w == area.width && ih == input_height && sh == status_line_height && ah == attachment_height {
+                return rects.clone();
             }
         }
 
         // Clean layout with proper spacing (no overlap)
-        // Layout: Chat Area | Status Line | Input Box | Status Bar
+        // Layout: Chat Area | Status Line | Attachments | Input Box | Status Bar
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
-            .spacing(0)  // No negative spacing - prevents overlap
-            .flex(Flex::Start)  // Align to top
+            .spacing(0)
+            .flex(Flex::Start)
             .constraints([
-                Constraint::Min(10),    // Main content / Chat area (grows to fill)
-                Constraint::Length(status_line_height),  // Status line (1-2 lines depending on queued message)
-                Constraint::Length(input_height),  // Dynamic input height (3-8 lines)
-                Constraint::Length(2),  // Status bar (compact, 2 lines)
+                Constraint::Min(10),                      // Chat area (grows to fill)
+                Constraint::Length(status_line_height),    // Status line
+                Constraint::Length(attachment_height),     // Attachment indicators (0 when empty)
+                Constraint::Length(input_height),          // Input box
+                Constraint::Length(2),                     // Status bar
             ])
             .split(area);
 
         let layout_vec = layout.to_vec();
-        self.main_layout = Some((area.width, input_height, status_line_height, layout_vec.clone()));
+        self.main_layout = Some((area.width, input_height, status_line_height, attachment_height, layout_vec.clone()));
         layout_vec
     }
 }
@@ -88,10 +89,13 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
     let queued_count = app.operation_state.queued_message_count();
     let status_line_height = (1 + queued_count).min(6) as u16; // Cap at 6 lines
 
+    // Attachment area: 1 line when attachments present (all images on one line), 0 when empty
+    let attachment_height = if app.attachment_state.is_empty() { 0 } else { 1 };
+
     // Use cached layout for better performance
     let chunks = {
         let mut cache = LAYOUT_CACHE.lock_mut_safe();
-        cache.get_main_layout(frame.area(), input_height, status_line_height)
+        cache.get_main_layout(frame.area(), input_height, status_line_height, attachment_height)
     };
 
     // Render chat area with horizontal padding using new ChatWidget
@@ -139,34 +143,51 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         frame.render_widget(status_line_widget, chunks[1]);
     }
 
-    // Render input area using new InputWidget (now at chunks[2])
+    // Render attachment indicators above input (chunks[2])
+    if !app.attachment_state.is_empty() {
+        app.ui_state.attachment_area_y = Some(chunks[2].y);
+        let attachment_widget = AttachmentWidget {
+            attachments: &app.attachment_state.attachments,
+            theme: &app.ui_state.theme,
+            focused: app.ui_state.attachment_focused,
+            selected: app.ui_state.selected_attachment,
+        };
+        frame.render_widget(attachment_widget, chunks[2]);
+    } else {
+        app.ui_state.attachment_area_y = None;
+    }
+
+    // Render input area (chunks[3])
     let input_widget = InputWidget {
         input: app.input.get(),
         showing_command_hints: app.input.get().starts_with(':'),
         theme: &app.ui_state.theme,
         thinking_enabled: app.model_state.thinking_enabled,
     };
-    frame.render_stateful_widget(input_widget, chunks[2], &mut app.ui_state.input_state);
+    frame.render_stateful_widget(input_widget, chunks[3], &mut app.ui_state.input_state);
 
-    // Set cursor position in input box (visible text cursor)
-    // content_width must match what wrap_input_with_prompt receives:
-    // input_area.width minus 2 for top/bottom borders (no side borders)
-    let input_area = chunks[2];
-    let content_width = input_area.width.saturating_sub(2) as usize;
-    let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
-        app.input.get(),
-        app.input.cursor_position,
-        content_width,
-    );
+    if app.ui_state.attachment_focused {
+        // When attachment area is focused, hide cursor (selection highlight shows focus)
+        // Place cursor offscreen by not setting it
+    } else {
+        // Set cursor position in input box (visible text cursor)
+        let input_area = chunks[3];
+        let content_width = input_area.width.saturating_sub(2) as usize;
+        let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
+            app.input.get(),
+            app.input.cursor_position,
+            content_width,
+        );
 
-    // cursor_col is relative to content start (after "> " or "  " prefix)
-    // +2 for the prefix, +1 for top border (no left border)
-    frame.set_cursor_position((
-        input_area.x + cursor_col + 2,
-        input_area.y + 1 + cursor_row,
-    ));
+        // cursor_col is relative to content start (after "> " or "  " prefix)
+        // +2 for the prefix, +1 for top border (no left border)
+        frame.set_cursor_position((
+            input_area.x + cursor_col + 2,
+            input_area.y + 1 + cursor_row,
+        ));
+    }
 
-    // Render status bar using new StatusWidget (now at chunks[3])
+    // Render status bar (chunks[4])
     let status_widget = StatusWidget {
         theme: &app.ui_state.theme,
         working_dir: &app.working_dir,
@@ -174,5 +195,5 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         model_name: &app.model_state.model_name,
         thinking_enabled: app.model_state.thinking_enabled,
     };
-    frame.render_widget(status_widget, chunks[3]);
+    frame.render_widget(status_widget, chunks[4]);
 }

@@ -15,6 +15,12 @@ pub struct UIState {
     pub theme: Theme,
     /// Selected message index (for navigation)
     pub selected_message: Option<usize>,
+    /// Whether focus is in the attachment area (above input)
+    pub attachment_focused: bool,
+    /// Which attachment is selected when attachment_focused is true
+    pub selected_attachment: usize,
+    /// Attachment area rect from last render (for Ctrl+Click detection)
+    pub attachment_area_y: Option<u16>,
 }
 
 impl UIState {
@@ -25,6 +31,9 @@ impl UIState {
             input_state: InputState::default(),
             theme: Theme::dark(),
             selected_message: None,
+            attachment_focused: false,
+            selected_attachment: 0,
+            attachment_area_y: None,
         }
     }
 }

@@ -235,8 +235,11 @@ async fn handle_message_submit(
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
     let timestamped_input = format!("[Sent at: {}]\n{}", timestamp, input);
 
-    // Add user message to history with timestamp
-    app.add_message(MessageRole::User, timestamped_input);
+    // Take any attached images before adding message
+    let images = app.attachment_state.take_base64_data();
+
+    // Add user message to history with timestamp (and images if any)
+    app.add_message_with_images(MessageRole::User, timestamped_input, images);
 
     // Build message history including the new message
     let messages = app.build_managed_message_history(75_000, 4_000);

@@ -17,6 +17,11 @@ pub struct ModelState {
     /// - Some(false) = model supports thinking, currently disabled
     /// - None = model does not support thinking (or unknown)
     pub thinking_enabled: Option<bool>,
+    /// Vision support state:
+    /// - Some(true) = model supports vision
+    /// - Some(false) = model does not support vision (detected from error)
+    /// - None = unknown (optimistic default)
+    pub vision_supported: Option<bool>,
 }
 
 impl ModelState {
@@ -28,6 +33,8 @@ impl ModelState {
             model_name,
             // Default: thinking enabled (will be disabled if model doesn't support it)
             thinking_enabled: Some(true),
+            // Default: vision unknown (optimistic — try until error)
+            vision_supported: None,
         }
     }
 

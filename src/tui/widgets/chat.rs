@@ -15,6 +15,15 @@ use crate::tui::markdown::parse_markdown;
 use crate::tui::theme::Theme;
 use crate::utils::format_relative_timestamp;
 
+/// Entry in the click map: maps a content line to an image in chat history
+#[derive(Debug, Clone)]
+pub struct ImageClickTarget {
+    /// Index into session_state.messages
+    pub message_index: usize,
+    /// Index into that message's images vec
+    pub image_index: usize,
+}
+
 /// State for the chat widget
 #[derive(Debug, Clone)]
 pub struct ChatState {
@@ -22,6 +31,12 @@ pub struct ChatState {
     scroll_offset: u16,
     /// Whether user is manually scrolling (not following bottom)
     is_user_scrolling: bool,
+    /// Click map: content line number → image target (rebuilt every render)
+    pub image_click_map: Vec<(u16, ImageClickTarget)>,
+    /// Scroll position used in last render (for coordinate mapping)
+    pub last_scroll_position: u16,
+    /// Chat area rect from last render
+    pub last_chat_area: Option<(u16, u16, u16, u16)>, // (x, y, width, height)
 }
 
 impl ChatState {
@@ -30,6 +45,9 @@ impl ChatState {
         Self {
             scroll_offset: 0,
             is_user_scrolling: false,
+            image_click_map: Vec::new(),
+            last_scroll_position: 0,
+            last_chat_area: None,
         }
     }
 
@@ -70,6 +88,26 @@ impl ChatState {
     pub fn is_manually_scrolling(&self) -> bool {
         self.is_user_scrolling
     }
+
+    /// Find an image click target at the given screen coordinates.
+    /// Returns Some((message_index, image_index)) if an image indicator was clicked.
+    pub fn find_image_at_screen_pos(&self, screen_row: u16) -> Option<&ImageClickTarget> {
+        let (_, area_y, _, area_height) = self.last_chat_area?;
+
+        // Check if click is within chat area
+        if screen_row < area_y || screen_row >= area_y + area_height {
+            return None;
+        }
+
+        // Convert screen row to content line
+        let viewport_row = screen_row - area_y;
+        let content_line = viewport_row + self.last_scroll_position;
+
+        // Look up in click map
+        self.image_click_map.iter()
+            .find(|(line, _)| *line == content_line)
+            .map(|(_, target)| target)
+    }
 }
 
 impl Default for ChatState {
@@ -94,6 +132,10 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         let mut lines = Vec::new();
+
+        // Clear click map for this render pass
+        state.image_click_map.clear();
+        state.last_chat_area = Some((area.x, area.y, area.width, area.height));
 
         let message_count = self.messages.len();
         for (idx, msg) in self.messages.iter().enumerate() {
@@ -251,6 +293,34 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 }
             }
 
+            // Show image attachment indicators under user messages (like tool action sub-items)
+            if matches!(msg.role, MessageRole::User) {
+                if let Some(ref images) = msg.images {
+                    if !images.is_empty() {
+                        for (i, _) in images.iter().enumerate() {
+                            // Record this line in the click map before pushing
+                            let content_line = lines.len() as u16;
+                            state.image_click_map.push((content_line, ImageClickTarget {
+                                message_index: idx,
+                                image_index: i,
+                            }));
+                            lines.push(Line::from(vec![
+                                Span::styled(
+                                    "  ⎿ ",
+                                    Style::new().fg(self.theme.colors.info.to_color()),
+                                ),
+                                Span::styled(
+                                    format!("[Image #{}]", i + 1),
+                                    Style::new()
+                                        .fg(self.theme.colors.info.to_color())
+                                        .italic(),
+                                ),
+                            ]));
+                        }
+                    }
+                }
+            }
+
             lines.push(Line::from(""));
         }
 
@@ -286,9 +356,12 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         let content_height = lines.len() as u16;
         let viewport_height = area.height;
 
+        let scroll_pos = state.get_scroll_position(content_height, viewport_height);
+        state.last_scroll_position = scroll_pos;
+
         let paragraph = Paragraph::new(lines)
             .block(Block::default())
-            .scroll((state.get_scroll_position(content_height, viewport_height), 0));
+            .scroll((scroll_pos, 0));
 
         paragraph.render(area, buf);
     }

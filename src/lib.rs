@@ -2,6 +2,7 @@ pub mod agents;
 pub mod app;
 pub mod cache;
 pub mod cli;
+pub mod clipboard;
 pub mod constants;
 pub mod context;
 pub mod models;

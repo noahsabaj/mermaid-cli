@@ -159,8 +159,10 @@ fn contains_dangerous_command(command: &str) -> bool {
         ("/proc", false),
         ("/sys", false),
         ("/dev/", true),  // Trailing slash: /dev/sda, /dev/null won't false-positive on "/dev" alone
+        ("/home", false),
         ("C:\\Windows", false),
         ("C:\\Program Files", false),
+        ("C:\\Users", false),
     ];
 
     // Only match "rm" or "del" as standalone command words, not substrings
@@ -187,6 +189,16 @@ fn contains_dangerous_command(command: &str) -> bool {
             } else if command.contains(dir) {
                 return true;
             }
+        }
+
+        // Check for home directory via shell expansion (~, $HOME)
+        // Match ~ only as standalone word (preceded by space), not as suffix like "file~"
+        if command.contains(" ~/")
+            || command.ends_with(" ~")
+            || command.contains(" ~ ")
+            || command.contains("$HOME")
+        {
+            return true;
         }
     }
 
@@ -238,5 +250,19 @@ mod tests {
         // Actual dangerous system dir commands that SHOULD be blocked
         assert!(contains_dangerous_command("rm -rf /etc/passwd"));
         assert!(contains_dangerous_command("rm /usr/bin/something"));
+
+        // Home directory protection
+        assert!(contains_dangerous_command("rm -rf ~"));
+        assert!(contains_dangerous_command("rm -rf ~/"));
+        assert!(contains_dangerous_command("rm -rf ~/Documents"));
+        assert!(contains_dangerous_command("rm -rf $HOME"));
+        assert!(contains_dangerous_command("rm -rf $HOME/Documents"));
+        assert!(contains_dangerous_command("rm -rf /home/user"));
+        assert!(contains_dangerous_command("rm /home/user/file.txt"));
+
+        // Home dir false positives that should NOT be blocked
+        assert!(!contains_dangerous_command("rm file~"));       // backup file suffix
+        assert!(!contains_dangerous_command("rm backup~"));     // backup file suffix
+        assert!(!contains_dangerous_command("ls ~/Documents")); // ls is not rm
     }
 }

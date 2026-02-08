@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use super::state::{
-    AppState, ConversationState, ErrorEntry, ErrorSeverity, GenerationStatus,
+    AppState, AttachmentState, ConversationState, ErrorEntry, ErrorSeverity, GenerationStatus,
     InputBuffer, ModelState, OperationState, StatusState, UIState,
 };
 use super::theme::Theme;
@@ -42,6 +42,8 @@ pub struct App {
     pub operation_state: OperationState,
     /// Status state - UI status messages
     pub status_state: StatusState,
+    /// Attachment state - pending image attachments
+    pub attachment_state: AttachmentState,
 }
 
 impl App {
@@ -73,6 +75,9 @@ impl App {
             input_state: InputState::new(),
             theme: Theme::dark(),
             selected_message: None,
+            attachment_focused: false,
+            selected_attachment: 0,
+            attachment_area_y: None,
         };
 
         // Initialize ConversationState with conversation management
@@ -94,6 +99,7 @@ impl App {
             session_state,
             operation_state: OperationState::new(),
             status_state: StatusState::new(),
+            attachment_state: AttachmentState::new(),
         }
     }
 
@@ -123,6 +129,28 @@ impl App {
             actions: Vec::new(),
             thinking,
             images: None,
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+        };
+        self.session_state.messages.push(message.clone());
+
+        if let Some(ref mut conv) = self.session_state.current_conversation {
+            conv.add_messages(&[message]);
+        }
+    }
+
+    /// Add a message with image attachments
+    pub fn add_message_with_images(&mut self, role: MessageRole, content: String, images: Option<Vec<String>>) {
+        let (thinking, answer_content) = ChatMessage::extract_thinking(&content);
+
+        let message = ChatMessage {
+            role,
+            content: answer_content,
+            timestamp: chrono::Local::now(),
+            actions: Vec::new(),
+            thinking,
+            images,
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,

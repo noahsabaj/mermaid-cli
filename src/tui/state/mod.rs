@@ -10,6 +10,7 @@
 /// - status: Status messages
 /// - input: User input buffer
 
+pub mod attachment;
 mod conversation;
 mod error;
 mod generation;
@@ -20,6 +21,7 @@ mod status;
 mod ui;
 
 // Re-export all types for easy access
+pub use attachment::AttachmentState;
 pub use conversation::ConversationState;
 pub use error::{ErrorEntry, ErrorSeverity};
 pub use generation::{AppState, GenerationStatus};
