@@ -86,7 +86,8 @@ impl<'a> Widget for StatusLineWidget<'a> {
         for queued in self.queued_messages.iter() {
             // Truncate long messages to fit in the area
             let display_msg = if queued.len() > max_len {
-                format!("> {}...", &queued[..max_len.saturating_sub(3)])
+                let end = queued.floor_char_boundary(max_len.saturating_sub(3));
+                format!("> {}...", &queued[..end])
             } else {
                 format!("> {}", queued)
             };

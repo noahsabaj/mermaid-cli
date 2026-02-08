@@ -188,7 +188,8 @@ pub async fn process_stream_chunks(
 
             // Check response size to prevent memory exhaustion
             if app.current_response.len() > MAX_RESPONSE_CHARS {
-                app.current_response.truncate(MAX_RESPONSE_CHARS);
+                let end = app.current_response.floor_char_boundary(MAX_RESPONSE_CHARS);
+                app.current_response.truncate(end);
                 app.current_response
                     .push_str("\n\n[TRUNCATED: Response exceeded size limit]\n");
                 app.set_status("[WARNING] Response truncated (size limit reached)".to_string());

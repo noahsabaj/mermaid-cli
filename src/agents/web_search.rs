@@ -246,10 +246,12 @@ impl WebSearchClient {
     }
 }
 
-/// Truncate content to a maximum character count
+/// Truncate content to a maximum character count (char-boundary safe)
 fn truncate_content(content: &str, max_chars: usize) -> String {
     if content.len() > max_chars {
-        format!("{}...[truncated]", &content[..max_chars])
+        // Find a valid char boundary at or before max_chars
+        let truncate_at = content.floor_char_boundary(max_chars);
+        format!("{}...[truncated]", &content[..truncate_at])
     } else {
         content.to_string()
     }

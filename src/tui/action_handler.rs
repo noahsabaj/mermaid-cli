@@ -118,19 +118,25 @@ fn build_error_display(action: &AgentAction, error: &str) -> ActionDisplay {
         AgentAction::WriteFile { path, .. } => ("Write", path.clone()),
         AgentAction::ReadFile { paths } => {
             if paths.len() == 1 { ("Read", paths[0].clone()) }
-            else { ("ReadFiles", format!("{} files", paths.len())) }
+            else { ("Read", format!("{} files", paths.len())) }
         }
         AgentAction::DeleteFile { path } => ("Delete", path.clone()),
-        AgentAction::CreateDirectory { path } => ("CreateDir", path.clone()),
+        AgentAction::CreateDirectory { path } => ("Bash", format!("mkdir -p {}", path)),
         AgentAction::ExecuteCommand { command, .. } => ("Bash", command.clone()),
-        AgentAction::GitDiff { .. } => ("GitDiff", ".".to_string()),
-        AgentAction::GitStatus => ("GitStatus", ".".to_string()),
-        AgentAction::GitCommit { message, .. } => ("GitCommit", message.clone()),
-        AgentAction::WebSearch { queries } => {
-            if queries.len() == 1 { ("WebSearch", queries[0].0.clone()) }
-            else { ("WebSearches", format!("{} queries", queries.len())) }
+        AgentAction::GitDiff { paths } => {
+            let path_str = paths.first()
+                .and_then(|p| p.as_ref())
+                .cloned()
+                .unwrap_or_else(|| ".".to_string());
+            ("Bash", format!("git diff {}", path_str))
         }
-        AgentAction::WebFetch { url } => ("WebFetch", url.clone()),
+        AgentAction::GitStatus => ("Bash", "git status".to_string()),
+        AgentAction::GitCommit { message, .. } => ("Bash", format!("git commit -m '{}'", message)),
+        AgentAction::WebSearch { queries } => {
+            if queries.len() == 1 { ("Web Search", queries[0].0.clone()) }
+            else { ("Web Search", format!("{} queries", queries.len())) }
+        }
+        AgentAction::WebFetch { url } => ("Web Fetch", url.clone()),
     };
     ActionDisplay {
         action_type: action_type.to_string(),
@@ -206,7 +212,7 @@ fn build_action_display_with_timing(
                 }
             } else {
                 ActionDisplay {
-                    action_type: "ReadFiles".to_string(),
+                    action_type: "Read".to_string(),
                     target: format!("{} files", paths.len()),
                     result: AgentActionResult::Success {
                         output: output.to_string(),
@@ -250,8 +256,8 @@ fn build_action_display_with_timing(
             failed_items: None,
         },
         AgentAction::CreateDirectory { path } => ActionDisplay {
-            action_type: "CreateDir".to_string(),
-            target: path.clone(),
+            action_type: "Bash".to_string(),
+            target: format!("mkdir -p {}", path),
             result: AgentActionResult::Success {
                 output: output.to_string(),
             },
@@ -264,46 +270,36 @@ fn build_action_display_with_timing(
             failed_items: None,
         },
         AgentAction::GitDiff { paths } => {
-            if paths.len() == 1 {
-                ActionDisplay {
-                    action_type: "GitDiff".to_string(),
-                    target: paths[0].clone().unwrap_or_else(|| ".".to_string()),
-                    result: AgentActionResult::Success {
-                        output: output.to_string(),
-                    },
-                    preview: Some(truncate_output(output, 10)),
-                    line_count: Some(output.lines().count()),
-                    file_content: None,
-                    duration_seconds,
-                    targets: None,
-                    item_count: None,
-                    failed_items: None,
-                }
+            let path_str = if paths.len() == 1 {
+                paths[0].clone().unwrap_or_else(|| ".".to_string())
             } else {
-                ActionDisplay {
-                    action_type: "GitDiffs".to_string(),
-                    target: format!("{} paths", paths.len()),
-                    result: AgentActionResult::Success {
-                        output: output.to_string(),
-                    },
-                    preview: Some(truncate_output(output, 10)),
-                    line_count: Some(output.lines().count()),
-                    file_content: None,
-                    duration_seconds,
-                    targets: Some(
-                        paths
-                            .iter()
-                            .map(|p| p.clone().unwrap_or_else(|| "*".to_string()))
-                            .collect(),
-                    ),
-                    item_count: Some(paths.len()),
-                    failed_items: None,
-                }
+                paths.iter()
+                    .map(|p| p.clone().unwrap_or_else(|| ".".to_string()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            ActionDisplay {
+                action_type: "Bash".to_string(),
+                target: format!("git diff {}", path_str),
+                result: AgentActionResult::Success {
+                    output: output.to_string(),
+                },
+                preview: Some(truncate_output(output, 10)),
+                line_count: Some(output.lines().count()),
+                file_content: None,
+                duration_seconds,
+                targets: if paths.len() > 1 {
+                    Some(paths.iter().map(|p| p.clone().unwrap_or_else(|| "*".to_string())).collect())
+                } else {
+                    None
+                },
+                item_count: if paths.len() > 1 { Some(paths.len()) } else { None },
+                failed_items: None,
             }
         }
         AgentAction::GitStatus => ActionDisplay {
-            action_type: "GitStatus".to_string(),
-            target: ".".to_string(),
+            action_type: "Bash".to_string(),
+            target: "git status".to_string(),
             result: AgentActionResult::Success {
                 output: output.to_string(),
             },
@@ -316,8 +312,8 @@ fn build_action_display_with_timing(
             failed_items: None,
         },
         AgentAction::GitCommit { message, .. } => ActionDisplay {
-            action_type: "GitCommit".to_string(),
-            target: message.clone(),
+            action_type: "Bash".to_string(),
+            target: format!("git commit -m '{}'", message),
             result: AgentActionResult::Success {
                 output: output.to_string(),
             },
@@ -340,7 +336,7 @@ fn build_action_display_with_timing(
             };
             if queries.len() == 1 {
                 ActionDisplay {
-                    action_type: "WebSearch".to_string(),
+                    action_type: "Web Search".to_string(),
                     target: queries[0].0.clone(),
                     result: AgentActionResult::Success {
                         output: output.to_string(),
@@ -355,7 +351,7 @@ fn build_action_display_with_timing(
                 }
             } else {
                 ActionDisplay {
-                    action_type: "WebSearches".to_string(),
+                    action_type: "Web Search".to_string(),
                     target: format!("{} queries", queries.len()),
                     result: AgentActionResult::Success {
                         output: output.to_string(),
@@ -373,7 +369,7 @@ fn build_action_display_with_timing(
         AgentAction::WebFetch { url } => {
             let content_len = output.lines().count();
             ActionDisplay {
-                action_type: "WebFetch".to_string(),
+                action_type: "Web Fetch".to_string(),
                 target: url.clone(),
                 result: AgentActionResult::Success {
                     output: output.to_string(),

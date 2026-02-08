@@ -54,10 +54,12 @@ impl InputState {
             let break_point = if chars_remaining.len() <= line_width {
                 chars_remaining.len()
             } else {
-                chars_remaining[..line_width]
+                // Clamp to a valid char boundary to avoid panic on multi-byte UTF-8
+                let safe_width = chars_remaining.floor_char_boundary(line_width);
+                chars_remaining[..safe_width]
                     .rfind(char::is_whitespace)
                     .map(|pos| pos + 1)
-                    .unwrap_or(line_width)
+                    .unwrap_or(safe_width)
             };
 
             // Calculate whitespace gap between this line and the next
@@ -257,10 +259,12 @@ fn wrap_input_with_prompt(input: &str, width: usize) -> String {
             chars_remaining.len()
         } else {
             // Find last space before width limit for nice wrapping
-            chars_remaining[..line_width]
+            // Clamp to a valid char boundary to avoid panic on multi-byte UTF-8
+            let safe_width = chars_remaining.floor_char_boundary(line_width);
+            chars_remaining[..safe_width]
                 .rfind(char::is_whitespace)
                 .map(|pos| pos + 1) // Include the space
-                .unwrap_or(line_width) // No space found, hard break
+                .unwrap_or(safe_width) // No space found, hard break
         };
 
         // Extract this line's text

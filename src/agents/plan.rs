@@ -124,23 +124,17 @@ impl PlannedAction {
     /// Get action type for display
     pub fn action_type(&self) -> &str {
         match &self.action {
-            AgentAction::ReadFile { paths } => {
-                if paths.len() == 1 { "Read" } else { "ReadFiles" }
-            }
+            AgentAction::ReadFile { .. } => "Read",
             AgentAction::WriteFile { .. } => "Write",
             AgentAction::EditFile { .. } => "Edit",
             AgentAction::DeleteFile { .. } => "Delete",
-            AgentAction::CreateDirectory { .. } => "Create",
+            AgentAction::CreateDirectory { .. } => "Bash",
             AgentAction::ExecuteCommand { .. } => "Bash",
-            AgentAction::GitDiff { paths } => {
-                if paths.len() == 1 { "GitDiff" } else { "GitDiffs" }
-            }
-            AgentAction::GitCommit { .. } => "GitCommit",
-            AgentAction::GitStatus => "GitStatus",
-            AgentAction::WebSearch { queries } => {
-                if queries.len() == 1 { "WebSearch" } else { "WebSearches" }
-            }
-            AgentAction::WebFetch { .. } => "WebFetch",
+            AgentAction::GitDiff { .. } => "Bash",
+            AgentAction::GitCommit { .. } => "Bash",
+            AgentAction::GitStatus => "Bash",
+            AgentAction::WebSearch { .. } => "Web Search",
+            AgentAction::WebFetch { .. } => "Web Fetch",
         }
     }
 

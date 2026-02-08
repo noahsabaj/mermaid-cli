@@ -344,7 +344,8 @@ async fn execute_web_fetch(url: &str) -> ActionResult {
     match client.fetch_url(url).await {
         Ok(result) => {
             let content = if result.content.len() > 8000 {
-                format!("{}...[truncated]", &result.content[..8000])
+                let end = result.content.floor_char_boundary(8000);
+                format!("{}...[truncated]", &result.content[..end])
             } else {
                 result.content
             };

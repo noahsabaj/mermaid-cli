@@ -74,7 +74,8 @@ impl ConversationHistory {
         if let Some(first_user_msg) = self.messages.iter().find(|m| m.role == MessageRole::User) {
             // Take first 60 chars of first user message as title
             let preview = if first_user_msg.content.len() > 60 {
-                format!("{}...", &first_user_msg.content[..60])
+                let end = first_user_msg.content.floor_char_boundary(60);
+                format!("{}...", &first_user_msg.content[..end])
             } else {
                 first_user_msg.content.clone()
             };

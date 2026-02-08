@@ -379,8 +379,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
             "Bash" | "Command" => theme.colors.info.to_color(),
             "Read" => theme.colors.info.to_color(),
             "Delete" => theme.colors.warning.to_color(),
-            "GitDiff" | "GitStatus" | "GitCommit" => theme.colors.text_highlight.to_color(),
-            "WebSearch" => theme.colors.info.to_color(),
+            "Web Search" | "Web Fetch" => theme.colors.info.to_color(),
             _ => theme.colors.text_secondary.to_color(),
         };
 
@@ -431,15 +430,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                         }
                     },
                     "Delete" => format!("Deleted {}", action.target),
-                    "CreateDir" => format!("Created directory {}", action.target),
-                    "GitDiff" | "GitStatus" | "GitCommit" => {
-                        if let Some(ref preview) = action.preview {
-                            preview.clone()
-                        } else {
-                            "Operation completed".to_string()
-                        }
-                    },
-                    "WebSearch" => {
+                    "Web Search" => {
                         if let Some(ref preview) = action.preview {
                             preview.clone()
                         } else if let Some(count) = action.line_count {
@@ -468,7 +459,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                     // Only show timing for operations that typically take a few seconds
                     if matches!(
                         action.action_type.as_str(),
-                        "WebSearch" | "Bash" | "Command" | "GitDiff" | "GitStatus" | "Read"
+                        "Web Search" | "Bash" | "Command" | "Read"
                     ) {
                         lines.push(Line::from(vec![
                             Span::styled("    ", Style::new().fg(action_color)),

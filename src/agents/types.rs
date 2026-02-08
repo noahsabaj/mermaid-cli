@@ -62,7 +62,7 @@ pub enum ActionResult {
 /// Used to show action results in Claude Code style
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionDisplay {
-    /// Type of action (e.g., "Write", "Bash", "Read", "GitDiff", "ReadFiles")
+    /// Type of action (e.g., "Write", "Bash", "Read", "Edit", "Delete", "Web Search", "Web Fetch")
     pub action_type: String,
     /// Target of the action (file path, command, etc.)
     pub target: String,
