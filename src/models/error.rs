@@ -136,7 +136,7 @@ impl ModelError {
             ModelError::Backend(BackendError::HttpError { status, message }) => {
                 let (summary, suggestion) = match status {
                     401 | 403 => ("Authentication failed", "Check your API key in ~/.config/mermaid/config.toml"),
-                    404 => ("Resource not found", "The requested model or endpoint does not exist"),
+                    404 => ("Model not found", "Use :model <name> to switch models (auto-pulls if needed), or pull manually with 'ollama pull <name>'"),
                     429 => ("Rate limited", "Wait a moment before retrying, or switch to a local model"),
                     500..=599 => ("Server error", "The backend service is experiencing issues - try again later"),
                     _ => ("Request failed", "Check your network connection and backend configuration"),

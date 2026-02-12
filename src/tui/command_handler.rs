@@ -77,8 +77,6 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
             return;
         }
 
-        app.set_status(format!("Switching to model: {}...", model_id));
-
         // Try to create the new model
         let config = match load_config() {
             Ok(cfg) => cfg,
@@ -87,6 +85,49 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
                 return;
             },
         };
+
+        // Check if model needs to be pulled (only for ollama models)
+        let bare_model = model_id.strip_prefix("ollama/").unwrap_or(&model_id);
+        if model_id.starts_with("ollama/") || !model_id.contains('/') {
+            if let Ok(models) = ollama::list_models_async().await {
+                let model_exists = models.iter().any(|m| {
+                    m == bare_model
+                        || (!bare_model.contains(':')
+                            && *m == format!("{}:latest", bare_model))
+                });
+
+                if !model_exists {
+                    app.set_status(format!("Pulling model: {}...", bare_model));
+                    app.add_message(
+                        MessageRole::System,
+                        format!(
+                            "Model '{}' not found locally. Pulling from registry...",
+                            bare_model
+                        ),
+                    );
+
+                    match pull_model_http(bare_model, &config.ollama.host, config.ollama.port).await
+                    {
+                        Ok(()) => {
+                            app.add_message(
+                                MessageRole::System,
+                                format!("Model '{}' pulled successfully.", bare_model),
+                            );
+                        }
+                        Err(e) => {
+                            app.set_status(format!("Failed to pull model: {}", e));
+                            app.add_message(
+                                MessageRole::System,
+                                format!("Failed to pull model '{}': {}", bare_model, e),
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        app.set_status(format!("Switching to model: {}...", model_id));
 
         // Create new model asynchronously
         let model_id_clone = model_id.clone();
@@ -227,6 +268,35 @@ fn handle_cloud_setup(app: &mut App) {
         - :model deepseek-v3.1:671b-cloud"
             .to_string(),
     );
+}
+
+/// Pull a model from Ollama registry using the HTTP API.
+///
+/// Uses POST /api/pull with stream: false. Blocks until pull completes.
+/// No global timeout — pulls can take a long time for large models.
+async fn pull_model_http(model_name: &str, host: &str, port: u16) -> anyhow::Result<()> {
+    let url = format!("http://{}:{}/api/pull", host, port);
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "model": model_name,
+            "stream": false
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("HTTP {}: {}", status, body);
+    }
+
+    Ok(())
 }
 
 /// Show help message
