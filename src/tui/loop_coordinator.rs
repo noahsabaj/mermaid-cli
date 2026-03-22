@@ -3,22 +3,57 @@ use chrono::Local;
 use crossterm::event;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::models::{MessageRole, ModelConfig, StreamCallback};
+use crate::constants::UI_POLL_INTERVAL_MS;
+use crate::models::{ChatMessage, MessageRole, StreamCallback};
 use super::state::GenerationStatus;
 use crate::tui::render::render_ui;
 use crate::tui::App;
-use crate::utils::FileSystemWatcher;
 
 /// Import our specialized handlers
 use super::action_handler;
 use super::command_handler;
 use super::event_handler::{handle_event, EventAction};
 use super::stream_handler::{process_stream_chunks, StreamStatus};
+
+/// Spawn an async task to stream the model's response and return the abort handle.
+///
+/// This is the single place that builds the callback, calls the model, and
+/// sends [DONE]/[ERROR_JSON] on the channel. All three call-model sites in
+/// the event loop delegate here.
+fn spawn_model_call(
+    app: &mut App,
+    messages: Vec<ChatMessage>,
+    tx: &mpsc::Sender<String>,
+) {
+    let model = app.model_state.model.clone();
+    let tx_stream = tx.clone();
+    let tx_done = tx.clone();
+    let config = app.model_state.build_config();
+
+    let handle = tokio::spawn(async move {
+        let callback: StreamCallback = Arc::new(move |chunk| {
+            let _ = tx_stream.try_send(chunk.to_string());
+        });
+
+        let model = model.write().await;
+        match model.chat(&messages, &config, Some(callback)).await {
+            Ok(response) => {
+                let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
+                let _ = tx_done.send(format!("[DONE]:tokens={}", tokens)).await;
+            }
+            Err(e) => {
+                let error_json = e.to_channel_message();
+                let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
+            }
+        }
+    });
+
+    app.start_generation(handle.abort_handle());
+}
 
 /// Run the main application event loop
 ///
@@ -38,10 +73,6 @@ pub async fn run_app_loop(
     tx: mpsc::Sender<String>,
     rx: &mut mpsc::Receiver<String>,
 ) -> Result<()> {
-    // Initialize file watcher for the current directory
-    let watcher = FileSystemWatcher::new(Path::new("."))?;
-    let mut last_refresh = std::time::Instant::now();
-
     // Main event loop
     loop {
         // Get viewport height for proper scrolling
@@ -60,7 +91,7 @@ pub async fn run_app_loop(
         }
 
         // Handle input events
-        if event::poll(std::time::Duration::from_millis(50))? {
+        if event::poll(std::time::Duration::from_millis(UI_POLL_INTERVAL_MS))? {
             let event = event::read()?;
 
             // Use event_handler to process the event
@@ -106,53 +137,15 @@ pub async fn run_app_loop(
 
                         // Wait for this message's response to complete before sending next
                         loop {
-                            // Draw UI while waiting
-                            terminal.draw(|f| render_ui(f, app))?;
-
-                            // Check for Esc or Ctrl+C to interrupt queued message processing
-                            if event::poll(Duration::from_millis(10))? {
-                                if let event::Event::Key(key) = event::read()? {
-                                    if key.kind == crossterm::event::KeyEventKind::Press {
-                                        match key.code {
-                                            crossterm::event::KeyCode::Esc => {
-                                                // Abort current generation
-                                                if let Some(abort) = app.abort_generation() {
-                                                    abort.abort();
-                                                }
-                                                // Save partial response
-                                                if !app.current_response.is_empty() {
-                                                    app.add_message(MessageRole::Assistant, app.current_response.clone());
-                                                    app.current_response.clear();
-                                                }
-                                                // Clear remaining queued messages
-                                                let cleared = app.operation_state.queued_message_count();
-                                                while app.operation_state.take_queued_message().is_some() {}
-                                                if cleared > 0 {
-                                                    app.set_status(format!("Interrupted - cleared {} queued message(s)", cleared));
-                                                } else {
-                                                    app.set_status("Generation stopped");
-                                                }
-                                                break 'queue_loop;
-                                            },
-                                            crossterm::event::KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
-                                                // Ctrl+C: same as Esc
-                                                if let Some(abort) = app.abort_generation() {
-                                                    abort.abort();
-                                                }
-                                                if !app.current_response.is_empty() {
-                                                    app.add_message(MessageRole::Assistant, app.current_response.clone());
-                                                    app.current_response.clear();
-                                                }
-                                                while app.operation_state.take_queued_message().is_some() {}
-                                                app.set_status("Interrupted");
-                                                break 'queue_loop;
-                                            },
-                                            _ => {
-                                                // Ignore other keys during queue processing
-                                            }
-                                        }
-                                    }
+                            // Check for interruption and handle scroll events
+                            if render_and_check_interrupt(terminal, app)? {
+                                // Clear remaining queued messages
+                                let cleared = app.operation_state.queued_message_count();
+                                while app.operation_state.take_queued_message().is_some() {}
+                                if cleared > 0 {
+                                    app.set_status(format!("Interrupted - cleared {} queued message(s)", cleared));
                                 }
+                                break 'queue_loop;
                             }
 
                             match process_stream_chunks(app, rx).await? {
@@ -189,13 +182,6 @@ pub async fn run_app_loop(
             StreamStatus::Error(_error) => {
                 // Error already handled by stream_handler (status message set)
             },
-        }
-
-        // Check for external file system changes (throttled to once per second)
-        // Note: We don't maintain context anymore, but we keep the watcher for potential future use
-        if last_refresh.elapsed() >= std::time::Duration::from_secs(1) {
-            let _events = watcher.check_events();
-            last_refresh = std::time::Instant::now();
         }
 
         // Clear stale file reading status after 5 seconds
@@ -261,45 +247,11 @@ async fn handle_message_submit(
     }
 
     // Process message asynchronously
-    let model = app.model_state.model.clone();
-    let tx_clone = tx.clone();
-    let tx_done = tx.clone();
-
-    let model_id = app.model_state.model_id.clone();
-    let thinking_enabled = app.model_state.is_thinking_active();
-
-    let handle = tokio::spawn(async move {
-        let mut config = ModelConfig::default();
-        config.model = model_id.clone();
-        config.thinking_enabled = thinking_enabled;
-
-        let callback: StreamCallback = Arc::new(move |chunk| {
-            let _ = tx_clone.try_send(chunk.to_string());
-        });
-
-        let model = model.write().await;
-        match model
-            .chat(&messages, &config, Some(callback))
-            .await
-        {
-            Ok(response) => {
-                // Send real token count from Ollama with [DONE] message
-                let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
-                let _ = tx_done.send(format!("[DONE]:tokens={}", tokens)).await;
-            },
-            Err(e) => {
-                // Send structured error for rich UX display
-                let error_json = e.to_channel_message();
-                let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
-            },
-        }
-    });
-
-    // Start generation state with abort handle
-    app.start_generation(handle.abort_handle());
+    spawn_model_call(app, messages, tx);
 }
 
 /// Render the UI and check for Esc/Ctrl+C interruption (non-blocking).
+/// Also handles scroll events so the user can scroll during the agent loop.
 /// Returns Ok(true) if the user wants to interrupt the agent loop.
 fn render_and_check_interrupt(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -307,9 +259,9 @@ fn render_and_check_interrupt(
 ) -> Result<bool> {
     terminal.draw(|f| render_ui(f, app))?;
 
-    if event::poll(Duration::from_millis(0))? {
-        if let event::Event::Key(key) = event::read()? {
-            if key.kind == crossterm::event::KeyEventKind::Press {
+    while event::poll(Duration::from_millis(0))? {
+        match event::read()? {
+            event::Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
                 match key.code {
                     crossterm::event::KeyCode::Esc => {
                         if let Some(abort) = app.abort_generation() {
@@ -335,9 +287,23 @@ fn render_and_check_interrupt(
                         app.set_status("Agent loop interrupted");
                         return Ok(true);
                     }
+                    crossterm::event::KeyCode::PageUp => { app.scroll_up(10); }
+                    crossterm::event::KeyCode::PageDown => { app.scroll_down(10); }
                     _ => {}
                 }
             }
+            event::Event::Mouse(mouse) => {
+                match mouse.kind {
+                    crossterm::event::MouseEventKind::ScrollUp => {
+                        app.scroll_up(crate::constants::UI_MOUSE_SCROLL_LINES);
+                    }
+                    crossterm::event::MouseEventKind::ScrollDown => {
+                        app.scroll_down(crate::constants::UI_MOUSE_SCROLL_LINES);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
         }
     }
 
@@ -397,38 +363,7 @@ async fn run_agent_loop(
             let messages = app.build_managed_message_history(75_000, 4_000);
             app.current_response.clear();
 
-            let model = app.model_state.model.clone();
-            let tx_clone = tx.clone();
-            let tx_done = tx.clone();
-            let model_id = app.model_state.model_id.clone();
-            let thinking_enabled = app.model_state.is_thinking_active();
-
-            let handle = tokio::spawn(async move {
-                let mut config = ModelConfig::default();
-                config.model = model_id;
-                config.thinking_enabled = thinking_enabled;
-
-                let callback: StreamCallback = Arc::new(move |chunk| {
-                    let _ = tx_clone.try_send(chunk.to_string());
-                });
-
-                let model = model.write().await;
-                match model
-                    .chat(&messages, &config, Some(callback))
-                    .await
-                {
-                    Ok(response) => {
-                        let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
-                        let _ = tx_done.send(format!("[DONE]:tokens={}", tokens)).await;
-                    },
-                    Err(e) => {
-                        let error_json = e.to_channel_message();
-                        let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
-                    },
-                }
-            });
-
-            app.start_generation(handle.abort_handle());
+            spawn_model_call(app, messages, tx);
 
             // Wait for the model response (render each tick for live status)
             loop {
@@ -500,39 +435,7 @@ async fn run_agent_loop(
         let messages = app.build_managed_message_history(75_000, 4_000);
         app.current_response.clear();
 
-        let model = app.model_state.model.clone();
-        let tx_clone = tx.clone();
-        let tx_done = tx.clone();
-        let model_id = app.model_state.model_id.clone();
-        let thinking_enabled = app.model_state.is_thinking_active();
-
-        let handle = tokio::spawn(async move {
-            let mut config = ModelConfig::default();
-            config.model = model_id;
-            config.thinking_enabled = thinking_enabled;
-
-            let callback: StreamCallback = Arc::new(move |chunk| {
-                let _ = tx_clone.try_send(chunk.to_string());
-            });
-
-            let model = model.write().await;
-            match model
-                .chat(&messages, &config, Some(callback))
-                .await
-            {
-                Ok(response) => {
-                    // Send real token count from Ollama with [DONE] message
-                    let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
-                    let _ = tx_done.send(format!("[DONE]:tokens={}", tokens)).await;
-                },
-                Err(e) => {
-                    let error_json = e.to_channel_message();
-                    let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
-                },
-            }
-        });
-
-        app.start_generation(handle.abort_handle());
+        spawn_model_call(app, messages, tx);
 
         // Wait for the model response by processing stream chunks until Complete
         // Render on each tick so status bar updates and Esc works

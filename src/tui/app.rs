@@ -14,7 +14,7 @@ use super::state::{
 use super::theme::Theme;
 use super::widgets::{ChatState, InputState};
 use crate::constants::UI_ERROR_LOG_MAX_SIZE;
-use crate::models::{ChatMessage, MessageRole, Model, ModelConfig, StreamCallback};
+use crate::models::{ChatMessage, MessageRole, Model, StreamCallback};
 use crate::session::{ConversationHistory, ConversationManager};
 
 /// Application state coordinator
@@ -118,103 +118,65 @@ impl App {
 
     // ===== Message Management =====
 
-    /// Add a message to the chat
+    /// Add a message to the chat (extracts thinking blocks automatically)
     pub fn add_message(&mut self, role: MessageRole, content: String) {
-        let (thinking, answer_content) = ChatMessage::extract_thinking(&content);
-
-        let message = ChatMessage {
-            role,
-            content: answer_content,
-            timestamp: chrono::Local::now(),
-            actions: Vec::new(),
-            thinking,
-            images: None,
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
+        let mut message = match role {
+            MessageRole::User => ChatMessage::user(content),
+            MessageRole::Assistant => ChatMessage::assistant(content),
+            MessageRole::System => ChatMessage::system(content),
+            MessageRole::Tool => ChatMessage::tool("", "", content),
         };
-        self.session_state.messages.push(message.clone());
-
-        if let Some(ref mut conv) = self.session_state.current_conversation {
-            conv.add_messages(&[message]);
-        }
+        // Extract thinking from content
+        let (thinking, answer) = ChatMessage::extract_thinking(&message.content);
+        message.content = answer;
+        message.thinking = thinking;
+        self.commit_message(message);
     }
 
     /// Add a message with image attachments
     pub fn add_message_with_images(&mut self, role: MessageRole, content: String, images: Option<Vec<String>>) {
-        let (thinking, answer_content) = ChatMessage::extract_thinking(&content);
-
-        let message = ChatMessage {
-            role,
-            content: answer_content,
-            timestamp: chrono::Local::now(),
-            actions: Vec::new(),
-            thinking,
-            images,
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
+        let mut message = match role {
+            MessageRole::User => ChatMessage::user(content),
+            MessageRole::Assistant => ChatMessage::assistant(content),
+            MessageRole::System => ChatMessage::system(content),
+            MessageRole::Tool => ChatMessage::tool("", "", content),
         };
-        self.session_state.messages.push(message.clone());
-
-        if let Some(ref mut conv) = self.session_state.current_conversation {
-            conv.add_messages(&[message]);
+        let (thinking, answer) = ChatMessage::extract_thinking(&message.content);
+        message.content = answer;
+        message.thinking = thinking;
+        if let Some(imgs) = images {
+            message = message.with_images(imgs);
         }
+        self.commit_message(message);
     }
 
     /// Add an assistant message with tool_calls attached
-    /// This is used when the model returns tool_calls that need to be recorded
-    /// for proper agent loop conversation history
     pub fn add_assistant_message_with_tool_calls(
         &mut self,
         content: String,
         tool_calls: Vec<crate::models::ToolCall>,
     ) {
-        let (thinking, answer_content) = ChatMessage::extract_thinking(&content);
-
-        let message = ChatMessage {
-            role: MessageRole::Assistant,
-            content: answer_content,
-            timestamp: chrono::Local::now(),
-            actions: Vec::new(),
-            thinking,
-            images: None,
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
-            tool_call_id: None,
-            tool_name: None,
-        };
-        self.session_state.messages.push(message.clone());
-
-        if let Some(ref mut conv) = self.session_state.current_conversation {
-            conv.add_messages(&[message]);
-        }
+        let mut message = ChatMessage::assistant(content).with_tool_calls(tool_calls);
+        let (thinking, answer) = ChatMessage::extract_thinking(&message.content);
+        message.content = answer;
+        message.thinking = thinking;
+        self.commit_message(message);
     }
 
     /// Add a tool result message
-    /// This follows the Ollama/OpenAI API format for tool results:
-    /// - role: "tool"
-    /// - content: the result of executing the tool
-    /// - tool_call_id: links back to the original tool_call
-    /// - tool_name: the function name that was called (required by Ollama)
     pub fn add_tool_result(
         &mut self,
         tool_call_id: String,
         tool_name: String,
         content: String,
     ) {
-        let message = ChatMessage {
-            role: MessageRole::Tool,
-            content,
-            timestamp: chrono::Local::now(),
-            actions: Vec::new(),
-            thinking: None,
-            images: None,
-            tool_calls: None,
-            tool_call_id: Some(tool_call_id),
-            tool_name: Some(tool_name),
-        };
-        self.session_state.messages.push(message.clone());
+        let message = ChatMessage::tool(tool_call_id, tool_name, content);
+        self.commit_message(message);
+    }
 
+    /// Commit a message to session state and conversation history
+    fn commit_message(&mut self, message: ChatMessage) {
+        self.session_state.messages.push(message.clone());
         if let Some(ref mut conv) = self.session_state.current_conversation {
             conv.add_messages(&[message]);
         }
@@ -325,17 +287,7 @@ impl App {
             conversation_summary
         );
 
-        let messages = vec![ChatMessage {
-            role: MessageRole::User,
-            content: title_prompt,
-            timestamp: chrono::Local::now(),
-            actions: Vec::new(),
-            thinking: None,
-            images: None,
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-        }];
+        let messages = vec![ChatMessage::user(title_prompt)];
 
         let title_string = Arc::new(tokio::sync::Mutex::new(String::new()));
         let title_clone = Arc::clone(&title_string);
@@ -347,8 +299,7 @@ impl App {
         });
 
         let model = self.model_state.model.write().await;
-        let mut config = ModelConfig::default();
-        config.model = self.model_state.model_id.clone();
+        let config = self.model_state.build_config();
 
         if model.chat(&messages, &config, Some(callback)).await.is_ok() {
             let final_title = title_string.lock().await;

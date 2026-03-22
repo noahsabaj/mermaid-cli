@@ -29,24 +29,16 @@ pub fn format_relative_timestamp(timestamp: DateTime<Local>) -> String {
     format!("{} at {}", date_str, time_str)
 }
 
-/// Format time as "6:41pm" or "18:41" (12-hour with AM/PM)
+/// Format time as "6:41pm" (12-hour with AM/PM)
 fn format_time(timestamp: DateTime<Local>) -> String {
     let hour = timestamp.hour();
     let minute = timestamp.minute();
 
-    // Convert to 12-hour format
-    let (hour_12, period) = if hour < 12 {
-        if hour == 0 {
-            (12, "am")
-        } else {
-            (hour, "am")
-        }
-    } else {
-        if hour == 12 {
-            (12, "pm")
-        } else {
-            (hour - 12, "pm")
-        }
+    let (hour_12, period) = match hour {
+        0 => (12, "am"),
+        1..=11 => (hour, "am"),
+        12 => (12, "pm"),
+        _ => (hour - 12, "pm"),
     };
 
     format!("{:}:{:02}{}", hour_12, minute, period)

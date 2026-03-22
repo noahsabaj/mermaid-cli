@@ -3,6 +3,7 @@ use base64::Engine as _;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use crate::clipboard;
+use crate::constants::UI_MOUSE_SCROLL_LINES;
 use crate::tui::App;
 
 /// Actions that can result from handling an event
@@ -39,11 +40,11 @@ fn handle_mouse_event(
 ) -> Result<EventAction> {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            app.scroll_up(3); // Wheel up shows older messages (viewport moves up)
+            app.scroll_up(UI_MOUSE_SCROLL_LINES); // Wheel up shows older messages (viewport moves up)
             Ok(EventAction::Continue)
         },
         MouseEventKind::ScrollDown => {
-            app.scroll_down(3); // Wheel down shows newer messages (viewport moves down)
+            app.scroll_down(UI_MOUSE_SCROLL_LINES); // Wheel down shows newer messages (viewport moves down)
             Ok(EventAction::Continue)
         },
         MouseEventKind::Down(crossterm::event::MouseButton::Left)

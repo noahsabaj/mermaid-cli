@@ -3,6 +3,7 @@
 /// Replaces the fragmented app::Config + models::ModelConfig split
 /// with a single, coherent, backend-agnostic configuration structure.
 
+use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE};
 use crate::prompts;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -149,11 +150,11 @@ impl Default for BackendConfig {
 
 // Default value functions
 fn default_temperature() -> f32 {
-    0.7
+    DEFAULT_TEMPERATURE
 }
 
 fn default_max_tokens() -> usize {
-    4096
+    DEFAULT_MAX_TOKENS
 }
 
 fn default_top_p() -> f32 {

@@ -3,7 +3,7 @@ use super::guide;
 use anyhow::Result;
 
 /// Validate that a model exists, auto-pull if not found
-pub async fn ensure_model(model_name: &str, _no_auto_install: bool) -> Result<()> {
+pub async fn ensure_model(model_name: &str) -> Result<()> {
     // Check if Ollama is installed
     if !detector::is_installed() {
         guide::detect_and_guide();

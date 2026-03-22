@@ -26,6 +26,6 @@ pub fn detect_and_guide() {
 
     println!("After installing Ollama:");
     println!("1. Start Ollama: ollama serve");
-    println!("2. Run mermaid again!");
-    println!("\nAlternatively, use cloud models with --model openai/gpt-4o");
+    println!("2. Pull a model: ollama pull qwen3:8b");
+    println!("3. Run mermaid again!");
 }

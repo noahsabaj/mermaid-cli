@@ -10,7 +10,9 @@ use crate::{
     agents::{execute_action, ActionResult as AgentActionResult, AgentAction},
     app::Config,
     cli::OutputFormat,
-    models::{ChatMessage, MessageRole, Model, ModelConfig, ModelFactory},
+    constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE},
+    models::{ChatMessage, Model, ModelConfig, ModelFactory},
+    prompts,
 };
 
 /// Result of a non-interactive run
@@ -85,33 +87,9 @@ impl NonInteractiveRunner {
         let mut errors = Vec::new();
         let mut actions = Vec::new();
 
-        // Build messages - LLM explores codebase via tools, no context injection
-        let system_content = "You are an AI coding assistant. Use tools to explore and modify the codebase as needed."
-            .to_string();
-
-        let system_message = ChatMessage {
-            role: MessageRole::System,
-            content: system_content,
-            timestamp: chrono::Local::now(),
-            actions: Vec::new(),
-            thinking: None,
-            images: None,
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-        };
-
-        let user_message = ChatMessage {
-            role: MessageRole::User,
-            content: prompt.clone(),
-            timestamp: chrono::Local::now(),
-            actions: Vec::new(),
-            thinking: None,
-            images: None,
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-        };
+        // Build messages using the same system prompt as interactive mode
+        let system_message = ChatMessage::system(prompts::get_system_prompt());
+        let user_message = ChatMessage::user(prompt.clone());
 
         let messages = vec![system_message, user_message];
 
@@ -123,8 +101,8 @@ impl NonInteractiveRunner {
         // Create model config
         let model_config = ModelConfig {
             model: model_name,
-            temperature: 0.7,
-            max_tokens: self.max_tokens.unwrap_or(4096),
+            temperature: DEFAULT_TEMPERATURE,
+            max_tokens: self.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             top_p: Some(1.0),
             frequency_penalty: None,
             presence_penalty: None,
@@ -185,101 +163,34 @@ impl NonInteractiveRunner {
             },
         };
 
-        // Execute actions if not in no-execute mode
-        if !self.no_execute && !parsed_actions.is_empty() {
-            for action in parsed_actions {
-                let (action_type, target) = match &action {
-                    AgentAction::WriteFile { path, .. } => ("file_write", path.clone()),
-                    AgentAction::EditFile { path, .. } => ("edit_file", path.clone()),
-                    AgentAction::ExecuteCommand { command, .. } => ("command", command.clone()),
-                    AgentAction::ReadFile { paths } => {
-                        if paths.len() == 1 {
-                            ("file_read", paths[0].clone())
-                        } else {
-                            ("file_read", format!("{} files", paths.len()))
-                        }
-                    }
-                    AgentAction::CreateDirectory { path } => ("create_dir", path.clone()),
-                    AgentAction::DeleteFile { path } => ("delete_file", path.clone()),
-                    AgentAction::GitDiff { paths } => {
-                        if paths.len() == 1 {
-                            ("git_diff", paths[0].as_deref().unwrap_or("*").to_string())
-                        } else {
-                            ("git_diff", format!("{} paths", paths.len()))
-                        }
-                    }
-                    AgentAction::GitStatus => ("git_status", "git status".to_string()),
-                    AgentAction::GitCommit { message, .. } => ("git_commit", message.clone()),
-                    AgentAction::WebSearch { queries } => {
-                        if queries.len() == 1 {
-                            ("web_search", queries[0].0.clone())
-                        } else {
-                            ("web_search", format!("{} queries", queries.len()))
-                        }
-                    }
-                    AgentAction::WebFetch { url } => ("web_fetch", url.clone()),
-                };
+        // Process parsed actions
+        for action in parsed_actions {
+            let (action_type, target) = extract_action_info(&action);
 
+            if self.no_execute {
+                actions.push(ActionResult {
+                    action_type,
+                    target,
+                    success: false,
+                    output: Some("Not executed (--no-execute mode)".to_string()),
+                });
+            } else {
                 let result = execute_action(&action).await;
-
                 let action_result = match result {
                     AgentActionResult::Success { output } => ActionResult {
-                        action_type: action_type.to_string(),
+                        action_type,
                         target,
                         success: true,
                         output: Some(output),
                     },
                     AgentActionResult::Error { error } => ActionResult {
-                        action_type: action_type.to_string(),
+                        action_type,
                         target,
                         success: false,
                         output: Some(error),
                     },
                 };
-
                 actions.push(action_result);
-            }
-        } else if !parsed_actions.is_empty() {
-            // Actions were found but not executed (no-execute mode)
-            for action in parsed_actions {
-                let (action_type, target) = match &action {
-                    AgentAction::WriteFile { path, .. } => ("file_write", path.clone()),
-                    AgentAction::EditFile { path, .. } => ("edit_file", path.clone()),
-                    AgentAction::ExecuteCommand { command, .. } => ("command", command.clone()),
-                    AgentAction::ReadFile { paths } => {
-                        if paths.len() == 1 {
-                            ("file_read", paths[0].clone())
-                        } else {
-                            ("file_read", format!("{} files", paths.len()))
-                        }
-                    }
-                    AgentAction::CreateDirectory { path } => ("create_dir", path.clone()),
-                    AgentAction::DeleteFile { path } => ("delete_file", path.clone()),
-                    AgentAction::GitDiff { paths } => {
-                        if paths.len() == 1 {
-                            ("git_diff", paths[0].as_deref().unwrap_or("*").to_string())
-                        } else {
-                            ("git_diff", format!("{} paths", paths.len()))
-                        }
-                    }
-                    AgentAction::GitStatus => ("git_status", "git status".to_string()),
-                    AgentAction::GitCommit { message, .. } => ("git_commit", message.clone()),
-                    AgentAction::WebSearch { queries } => {
-                        if queries.len() == 1 {
-                            ("web_search", queries[0].0.clone())
-                        } else {
-                            ("web_search", format!("{} queries", queries.len()))
-                        }
-                    }
-                    AgentAction::WebFetch { url } => ("web_fetch", url.clone()),
-                };
-
-                actions.push(ActionResult {
-                    action_type: action_type.to_string(),
-                    target,
-                    success: false,
-                    output: Some("Not executed (--no-execute mode)".to_string()),
-                });
             }
         }
 
@@ -375,5 +286,40 @@ impl NonInteractiveRunner {
                 output
             },
         }
+    }
+}
+
+/// Extract action type and target description from an AgentAction
+fn extract_action_info(action: &AgentAction) -> (String, String) {
+    match action {
+        AgentAction::WriteFile { path, .. } => ("file_write".to_string(), path.clone()),
+        AgentAction::EditFile { path, .. } => ("edit_file".to_string(), path.clone()),
+        AgentAction::ExecuteCommand { command, .. } => ("command".to_string(), command.clone()),
+        AgentAction::ReadFile { paths } => {
+            if paths.len() == 1 {
+                ("file_read".to_string(), paths[0].clone())
+            } else {
+                ("file_read".to_string(), format!("{} files", paths.len()))
+            }
+        }
+        AgentAction::CreateDirectory { path } => ("create_dir".to_string(), path.clone()),
+        AgentAction::DeleteFile { path } => ("delete_file".to_string(), path.clone()),
+        AgentAction::GitDiff { paths } => {
+            if paths.len() == 1 {
+                ("git_diff".to_string(), paths[0].as_deref().unwrap_or("*").to_string())
+            } else {
+                ("git_diff".to_string(), format!("{} paths", paths.len()))
+            }
+        }
+        AgentAction::GitStatus => ("git_status".to_string(), "git status".to_string()),
+        AgentAction::GitCommit { message, .. } => ("git_commit".to_string(), message.clone()),
+        AgentAction::WebSearch { queries } => {
+            if queries.len() == 1 {
+                ("web_search".to_string(), queries[0].0.clone())
+            } else {
+                ("web_search".to_string(), format!("{} queries", queries.len()))
+            }
+        }
+        AgentAction::WebFetch { url } => ("web_fetch".to_string(), url.clone()),
     }
 }

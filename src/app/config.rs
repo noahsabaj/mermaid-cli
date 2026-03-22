@@ -1,4 +1,4 @@
-use crate::constants::DEFAULT_OLLAMA_PORT;
+use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERATURE};
 use crate::prompts;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -94,8 +94,8 @@ impl Default for ModelSettings {
         Self {
             provider: String::new(),
             name: String::new(),
-            temperature: 0.7,
-            max_tokens: 4096,
+            temperature: DEFAULT_TEMPERATURE,
+            max_tokens: DEFAULT_MAX_TOKENS,
             system_prompt: Some(Self::default_system_prompt()),
         }
     }
@@ -288,7 +288,7 @@ impl Default for NonInteractiveConfig {
     fn default() -> Self {
         Self {
             output_format: String::from("text"),
-            max_tokens: 4096,
+            max_tokens: DEFAULT_MAX_TOKENS,
             no_execute: false,
         }
     }

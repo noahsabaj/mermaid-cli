@@ -3,10 +3,10 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "mermaid")]
-#[command(version = "0.1.0")]
+#[command(version)]
 #[command(about = "An open-source, model-agnostic AI pair programmer", long_about = None)]
 pub struct Cli {
-    /// Model to use (e.g., ollama/codellama, openai/gpt-4)
+    /// Model to use (e.g., qwen3-coder:30b, ollama/llama3)
     #[arg(short, long)]
     pub model: Option<String>,
 

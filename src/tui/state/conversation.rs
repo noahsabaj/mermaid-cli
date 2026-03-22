@@ -7,7 +7,6 @@ use std::collections::VecDeque;
 use ratatui::text::Line;
 use rustc_hash::FxHashMap;
 
-use crate::context::Context;
 use crate::models::ChatMessage;
 use crate::session::{ConversationHistory, ConversationManager};
 
@@ -25,8 +24,6 @@ pub struct ConversationState {
     pub history_index: Option<usize>,
     /// Saved input when navigating away from current draft
     pub history_buffer: String,
-    /// Context for dynamic file tree reloading
-    pub context: Option<Context>,
     /// Cumulative token count for the entire conversation
     pub cumulative_tokens: usize,
     /// Auto-generated conversation title (like Claude Code)
@@ -46,7 +43,6 @@ impl ConversationState {
             input_history: VecDeque::new(),
             history_index: None,
             history_buffer: String::new(),
-            context: None,
             cumulative_tokens: 0,
             conversation_title: None,
             markdown_cache: FxHashMap::default(),
@@ -66,7 +62,6 @@ impl ConversationState {
             input_history,
             history_index: None,
             history_buffer: String::new(),
-            context: None,
             cumulative_tokens: 0,
             conversation_title: None,
             markdown_cache: FxHashMap::default(),

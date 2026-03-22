@@ -1,8 +1,7 @@
 use anyhow::Result;
-use std::path::PathBuf;
 
 use crate::{
-    app::init_config,
+    app::{get_config_dir, init_config},
     models::ModelFactory,
     ollama::{is_installed as is_ollama_installed, list_models as get_ollama_models},
 };
@@ -89,9 +88,9 @@ async fn show_status() -> Result<()> {
         println!("  [ERROR] Ollama: Not installed");
     }
 
-    // Check configuration
-    if let Ok(home) = std::env::var("HOME") {
-        let config_path = PathBuf::from(home).join(".config/mermaid/config.toml");
+    // Check configuration (uses platform-specific path via ProjectDirs)
+    if let Ok(config_dir) = get_config_dir() {
+        let config_path = config_dir.join("config.toml");
         if config_path.exists() {
             println!("  [OK] Configuration: {}", config_path.display());
         } else {

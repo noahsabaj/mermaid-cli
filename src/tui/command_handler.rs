@@ -16,7 +16,9 @@ pub async fn handle_command(app: &mut App, command: &str) -> Result<()> {
         Some("quit") | Some("q") => handle_quit(app),
         Some("clear") => handle_clear(app),
         Some("model") => handle_model(app, parts.get(1).copied()).await,
-        Some("refresh") | Some("r") => handle_refresh(app).await,
+        Some("refresh") | Some("r") => {
+            app.set_status("Not needed - the model explores the codebase via tools");
+        },
         Some("save") => handle_save(app, parts.get(1).copied()),
         Some("load") => handle_load(app, parts.get(1).copied()),
         Some("list") => handle_list(app),
@@ -161,11 +163,6 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
     }
 }
 
-/// Refresh command - no longer needed as LLM explores via tools
-async fn handle_refresh(app: &mut App) {
-    app.set_status("Context refresh not needed - LLM explores codebase via tools");
-}
-
 /// Save current conversation
 fn handle_save(app: &mut App, name: Option<&str>) {
     if let Err(e) = app.save_conversation() {
@@ -304,43 +301,28 @@ fn handle_help(app: &mut App) {
     app.add_message(
         MessageRole::System,
         "COMMANDS:\n\
-         :quit/:q - Quit the application\n\
+         :model [name] - Switch model (auto-pulls if needed) or show current\n\
          :clear - Clear chat history\n\
-         :model [name] - Switch model or show current\n\
-         :cloud-setup - Configure Ollama Cloud API key\n\
-         :refresh/:r - Refresh file context from disk\n\
          :save [name] - Save current conversation\n\
          :load [name] - Load a conversation\n\
          :list - List saved conversations\n\
+         :cloud-setup - Configure Ollama Cloud API key\n\
+         :quit/:q - Quit the application\n\
          :help/:h - Show this help\n\
          \n\
-         OPERATION MODES (Shift+Tab to cycle):\n\
-         Normal - Confirms all operations (default)\n\
-         Accept Edits - Auto-accepts file edits only\n\
-         Plan Mode - Preview actions without execution\n\
-         Bypass All - Auto-accepts everything (use with caution)\n\
-         \n\
-         INPUT & NAVIGATION:\n\
-         Enter - Submit message or execute command\n\
-         Esc - Cancel generation/plan or clear input\n\
+         KEYBOARD:\n\
+         Enter - Send message\n\
+         Esc - Stop generation / clear input\n\
+         Ctrl+C - Quit\n\
+         Alt+T - Toggle thinking mode\n\
+         Ctrl+V - Paste image or text from clipboard\n\
+         Ctrl+O - Preview attached image\n\
+         Ctrl+Click - Open image from chat history\n\
          Up/Down - Navigate input history or scroll chat\n\
-         Left/Right - Move cursor in input\n\
-         Home/End - Jump to start/end of input\n\
          Page Up/Down - Scroll chat\n\
          Mouse Wheel - Scroll chat\n\
-         \n\
-         ACTION CONFIRMATION (when prompted):\n\
-         Alt+Y - Approve action\n\
-         Alt+N - Reject action\n\
-         Alt+A - Always approve similar actions\n\
-         Alt+P - Toggle action preview\n\
-         \n\
-         PLAN APPROVAL (when plan is ready):\n\
-         Y - Approve and execute plan\n\
-         N - Cancel plan\n\
-         \n\
-         OTHER:\n\
-         Ctrl+C - Quit application"
+         Left/Right - Move cursor in input\n\
+         Home/End - Jump to start/end of input"
             .to_string(),
     );
 }

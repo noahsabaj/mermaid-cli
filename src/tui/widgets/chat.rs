@@ -73,9 +73,13 @@ impl ChatState {
     }
 
     /// Scroll viewport down (shows newer messages closer to bottom)
+    /// Automatically resumes auto-scroll when reaching the bottom
     pub fn scroll_down(&mut self, amount: u16) {
-        self.is_user_scrolling = true;
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        if self.scroll_offset == 0 {
+            // Reached bottom — resume auto-follow mode
+            self.is_user_scrolling = false;
+        }
     }
 
     /// Force resume auto-scroll mode (jump to bottom)

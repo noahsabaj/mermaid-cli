@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::models::Model;
+use crate::models::{Model, ModelConfig};
 
 /// Model state - LLM configuration and identity
 pub struct ModelState {
@@ -64,5 +64,13 @@ impl ModelState {
     /// Check if thinking is currently active
     pub fn is_thinking_active(&self) -> bool {
         self.thinking_enabled == Some(true)
+    }
+
+    /// Build a ModelConfig for API calls using current model state
+    pub fn build_config(&self) -> ModelConfig {
+        let mut config = ModelConfig::default();
+        config.model = self.model_id.clone();
+        config.thinking_enabled = self.is_thinking_active();
+        config
     }
 }

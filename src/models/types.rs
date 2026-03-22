@@ -1,5 +1,4 @@
 use crate::agents::ActionDisplay;
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -32,8 +31,69 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    /// Create a user message
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::User, content.into())
+    }
+
+    /// Create an assistant message
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::Assistant, content.into())
+    }
+
+    /// Create a system message
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::System, content.into())
+    }
+
+    /// Create a tool result message
+    pub fn tool(tool_call_id: impl Into<String>, tool_name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Tool,
+            content: content.into(),
+            timestamp: chrono::Local::now(),
+            actions: Vec::new(),
+            thinking: None,
+            images: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+            tool_name: Some(tool_name.into()),
+        }
+    }
+
+    /// Base constructor with role and content
+    fn new(role: MessageRole, content: String) -> Self {
+        Self {
+            role,
+            content,
+            timestamp: chrono::Local::now(),
+            actions: Vec::new(),
+            thinking: None,
+            images: None,
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+        }
+    }
+
+    /// Builder: attach images
+    pub fn with_images(mut self, images: Vec<String>) -> Self {
+        self.images = Some(images);
+        self
+    }
+
+    /// Builder: attach tool calls
+    pub fn with_tool_calls(mut self, tool_calls: Vec<crate::models::tool_call::ToolCall>) -> Self {
+        self.tool_calls = if tool_calls.is_empty() { None } else { Some(tool_calls) };
+        self
+    }
+
     /// Extract thinking blocks from message content
     /// Returns (thinking_content, answer_content)
+    ///
+    /// Safety: `str::find()` returns byte offsets. The markers "Thinking..." and
+    /// "...done thinking." are pure ASCII, so adding their `.len()` to the byte
+    /// offset always lands on a valid UTF-8 char boundary.
     pub fn extract_thinking(text: &str) -> (Option<String>, String) {
         // Check if the text contains thinking blocks
         if !text.contains("Thinking...") {
@@ -75,80 +135,6 @@ pub enum MessageRole {
     Tool,
 }
 
-/// Represents the context of the current project
-#[derive(Debug, Clone)]
-pub struct ProjectContext {
-    /// Root directory of the project
-    pub root_path: String,
-    /// Map of file paths to their contents (using FxHashMap for performance)
-    pub files: FxHashMap<String, String>,
-    /// Total token count of the context
-    pub token_count: usize,
-    /// Files to explicitly include in context
-    pub included_files: Vec<String>,
-}
-
-impl ProjectContext {
-    pub fn new(root_path: String) -> Self {
-        Self {
-            root_path,
-            files: FxHashMap::default(),
-            token_count: 0,
-            included_files: Vec::new(),
-        }
-    }
-
-    /// Add a file to the context
-    pub fn add_file(&mut self, path: String, content: String) {
-        self.files.insert(path, content);
-    }
-
-    /// Get a formatted string of the project context for the model
-    pub fn to_prompt_context(&self) -> String {
-        // Pre-calculate capacity to reduce allocations
-        let header_size = 100; // Approximate size of headers
-        let file_list_size = self.files.keys().map(|k| k.len() + 5).sum::<usize>(); // "  - path\n"
-        let content_size: usize = self.included_files.iter()
-            .filter_map(|path| self.files.get(path).map(|content| (path, content)))
-            .map(|(path, content)| content.len() + path.len() + 20) // path + decorators
-            .sum();
-
-        let capacity = header_size + file_list_size + content_size;
-        let mut context = String::with_capacity(capacity);
-
-        context.push_str("Project root: ");
-        context.push_str(&self.root_path);
-        context.push_str("\nFiles in context: ");
-        context.push_str(&self.files.len().to_string());
-        context.push_str("\n\n");
-
-        // Add file tree structure
-        context.push_str("Project structure:\n");
-        for path in self.files.keys() {
-            context.push_str("  - ");
-            context.push_str(path);
-            context.push('\n');
-        }
-        context.push('\n');
-
-        // Add explicitly included files
-        if !self.included_files.is_empty() {
-            context.push_str("Relevant file contents:\n");
-            for file_path in &self.included_files {
-                if let Some(content) = self.files.get(file_path) {
-                    context.push_str("\n=== ");
-                    context.push_str(file_path);
-                    context.push_str(" ===\n");
-                    context.push_str(content);
-                    context.push_str("\n=== end ===\n");
-                }
-            }
-        }
-
-        context
-    }
-}
-
 /// Response from a model
 #[derive(Debug, Clone)]
 pub struct ModelResponse {
@@ -179,8 +165,6 @@ pub type StreamCallback = Arc<dyn Fn(&str) + Send + Sync>;
 mod tests {
     use super::*;
 
-    // Phase 3 Test Suite: Model Types - 8 comprehensive tests
-
     #[test]
     fn test_message_role_equality() {
         let user1 = MessageRole::User;
@@ -192,91 +176,29 @@ mod tests {
     }
 
     #[test]
-    fn test_chat_message_creation() {
-        let message = ChatMessage {
-            role: MessageRole::User,
-            content: "Hello, assistant!".to_string(),
-            timestamp: chrono::Local::now(),
-            actions: vec![],
-            thinking: None,
-            images: None,
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-        };
+    fn test_chat_message_constructors() {
+        let user = ChatMessage::user("Hello!");
+        assert_eq!(user.role, MessageRole::User);
+        assert_eq!(user.content, "Hello!");
+        assert!(user.tool_calls.is_none());
 
-        assert_eq!(message.role, MessageRole::User);
-        assert_eq!(message.content, "Hello, assistant!");
-        assert!(message.actions.is_empty());
-        assert!(message.thinking.is_none());
-        assert!(message.images.is_none());
-        assert!(message.tool_calls.is_none());
-        assert!(message.tool_call_id.is_none());
-        assert!(message.tool_name.is_none());
+        let assistant = ChatMessage::assistant("Hi there");
+        assert_eq!(assistant.role, MessageRole::Assistant);
+
+        let system = ChatMessage::system("You are helpful");
+        assert_eq!(system.role, MessageRole::System);
+
+        let tool = ChatMessage::tool("call_1", "read_file", "file contents");
+        assert_eq!(tool.role, MessageRole::Tool);
+        assert_eq!(tool.tool_call_id, Some("call_1".to_string()));
+        assert_eq!(tool.tool_name, Some("read_file".to_string()));
     }
 
     #[test]
-    fn test_project_context_new() {
-        let context = ProjectContext::new("/home/user/project".to_string());
-
-        assert_eq!(context.root_path, "/home/user/project");
-        assert!(context.files.is_empty());
-        assert_eq!(context.token_count, 0);
-        assert!(context.included_files.is_empty());
-    }
-
-    #[test]
-    fn test_project_context_add_file() {
-        let mut context = ProjectContext::new("/project".to_string());
-
-        context.add_file("src/main.rs".to_string(), "fn main() {}".to_string());
-        context.add_file("Cargo.toml".to_string(), "[package]".to_string());
-
-        assert_eq!(context.files.len(), 2);
-        assert_eq!(
-            context.files.get("src/main.rs"),
-            Some(&"fn main() {}".to_string())
-        );
-        assert_eq!(
-            context.files.get("Cargo.toml"),
-            Some(&"[package]".to_string())
-        );
-    }
-
-    #[test]
-    fn test_project_context_prompt_formatting() {
-        let mut context = ProjectContext::new("/project".to_string());
-        context.add_file("src/main.rs".to_string(), "fn main() {}".to_string());
-        context.add_file("Cargo.toml".to_string(), "[package]".to_string());
-        context.included_files = vec!["src/main.rs".to_string()];
-
-        let prompt = context.to_prompt_context();
-
-        assert!(
-            prompt.contains("Project root: /project"),
-            "Should include project root"
-        );
-        assert!(
-            prompt.contains("Files in context: 2"),
-            "Should include file count"
-        );
-        assert!(
-            prompt.contains("src/main.rs"),
-            "Should include file structure"
-        );
-        assert!(
-            prompt.contains("Cargo.toml"),
-            "Should include file structure"
-        );
-        assert!(
-            prompt.contains("fn main() {}"),
-            "Should include file content"
-        );
-        // Check that included files section exists
-        assert!(
-            prompt.contains("Relevant file contents") || prompt.contains("==="),
-            "Should include section for relevant files"
-        );
+    fn test_chat_message_builders() {
+        let msg = ChatMessage::user("test")
+            .with_images(vec!["base64data".to_string()]);
+        assert_eq!(msg.images, Some(vec!["base64data".to_string()]));
     }
 
     #[test]

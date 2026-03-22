@@ -6,6 +6,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::agents::ActionResult;
+use crate::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 
 /// Execute a shell command and capture output
 ///
@@ -45,8 +46,8 @@ pub async fn execute_command(command: &str, working_dir: Option<&str>, timeout_s
         cmd.current_dir(dir);
     }
 
-    // Execute with timeout (default 30s, max 300s)
-    let secs = timeout_secs.unwrap_or(30).min(300);
+    // Execute with timeout (default COMMAND_TIMEOUT_SECS, max COMMAND_MAX_TIMEOUT_SECS)
+    let secs = timeout_secs.unwrap_or(COMMAND_TIMEOUT_SECS).min(COMMAND_MAX_TIMEOUT_SECS);
     let timeout_duration = Duration::from_secs(secs);
 
     match timeout(timeout_duration, run_command(cmd)).await {
@@ -63,7 +64,10 @@ pub async fn execute_command(command: &str, working_dir: Option<&str>, timeout_s
     }
 }
 
-/// Run the command and stream output
+/// Run the command and capture output
+///
+/// Reads stdout and stderr concurrently to prevent deadlock when the child
+/// process fills one pipe's buffer while we're blocked reading the other.
 async fn run_command(mut cmd: Command) -> Result<String> {
     let mut child = cmd
         .spawn()
@@ -78,29 +82,29 @@ async fn run_command(mut cmd: Command) -> Result<String> {
         .take()
         .context("Command process stderr stream not available. This is likely a bug.")?;
 
-    let mut stdout_reader = BufReader::new(stdout).lines();
-    let mut stderr_reader = BufReader::new(stderr).lines();
+    // Read stdout and stderr concurrently to avoid deadlock
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout).lines();
+        let mut output = String::new();
+        while let Ok(Some(line)) = reader.next_line().await {
+            output.push_str(&line);
+            output.push('\n');
+        }
+        output
+    });
 
-    let mut output = String::new();
-    let mut errors = String::new();
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr).lines();
+        let mut errors = String::new();
+        while let Ok(Some(line)) = reader.next_line().await {
+            errors.push_str(&line);
+            errors.push('\n');
+        }
+        errors
+    });
 
-    // Read stdout
-    while let Some(line) = stdout_reader
-        .next_line()
-        .await
-        .context("Error reading command output. The process may have terminated unexpectedly.")?
-    {
-        output.push_str(&line);
-        output.push('\n');
-    }
-
-    // Read stderr
-    while let Some(line) = stderr_reader.next_line().await.context(
-        "Error reading command error output. The process may have terminated unexpectedly.",
-    )? {
-        errors.push_str(&line);
-        errors.push('\n');
-    }
+    let output = stdout_task.await.unwrap_or_default();
+    let errors = stderr_task.await.unwrap_or_default();
 
     let status = child
         .wait()

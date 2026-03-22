@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use crate::utils::{retry_async, RetryConfig};
 
 /// Result from a web search
@@ -47,8 +46,6 @@ const OLLAMA_API_BASE: &str = "https://ollama.com/api";
 pub struct WebSearchClient {
     client: Client,
     api_key: String,
-    cache: HashMap<String, (std::sync::Arc<Vec<SearchResult>>, Instant)>,
-    cache_ttl: Duration,
 }
 
 impl WebSearchClient {
@@ -56,35 +53,16 @@ impl WebSearchClient {
         Self {
             client: Client::new(),
             api_key,
-            cache: HashMap::new(),
-            cache_ttl: Duration::from_secs(3600), // 1 hour
         }
     }
 
-    /// Search and cache results
-    pub async fn search_cached(
-        &mut self,
+    /// Execute a search query
+    pub async fn search_query(
+        &self,
         query: &str,
         count: usize,
-    ) -> Result<std::sync::Arc<Vec<SearchResult>>> {
-        let cache_key = format!("{}:{}", query, count);
-
-        // Check cache first
-        if let Some((results, timestamp)) = self.cache.get(&cache_key) {
-            if timestamp.elapsed() < self.cache_ttl {
-                return Ok(std::sync::Arc::clone(results));
-            } else {
-                // Cache expired, remove it
-                self.cache.remove(&cache_key);
-            }
-        }
-
-        // Cache miss or expired - fetch fresh
-        let results = self.search(query, count).await?;
-        let results_arc = std::sync::Arc::new(results);
-        self.cache
-            .insert(cache_key, (std::sync::Arc::clone(&results_arc), Instant::now()));
-        Ok(results_arc)
+    ) -> Result<Vec<SearchResult>> {
+        self.search(query, count).await
     }
 
     /// Execute search via Ollama Cloud API
@@ -109,6 +87,7 @@ impl WebSearchClient {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let query_owned = query.to_string();
+        // `count` is Copy (usize) — safe to capture by value across retries
         let ollama_response: OllamaSearchResponse = retry_async(
             || {
                 let client = client.clone();
@@ -248,10 +227,15 @@ impl WebSearchClient {
 
 /// Truncate content to a maximum character count (char-boundary safe)
 fn truncate_content(content: &str, max_chars: usize) -> String {
-    if content.len() > max_chars {
-        // Find a valid char boundary at or before max_chars
-        let truncate_at = content.floor_char_boundary(max_chars);
-        format!("{}...[truncated]", &content[..truncate_at])
+    // Use char count for the threshold check, not byte length
+    if content.chars().count() > max_chars {
+        // Collect up to max_chars characters, then find byte position
+        let byte_end: usize = content
+            .char_indices()
+            .nth(max_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(content.len());
+        format!("{}...[truncated]", &content[..byte_end])
     } else {
         content.to_string()
     }
@@ -265,7 +249,6 @@ mod tests {
     fn test_web_search_client_creation() {
         let client = WebSearchClient::new("test-key".to_string());
         assert_eq!(client.api_key, "test-key");
-        assert_eq!(client.cache.len(), 0);
     }
 
     #[test]

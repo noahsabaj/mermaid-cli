@@ -81,11 +81,6 @@ impl Tokenizer {
     }
 }
 
-/// Count tokens in file contents (~4 chars per token)
-pub fn count_file_tokens(content: &str, _model_name: &str) -> usize {
-    (content.len() + 3) / 4
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

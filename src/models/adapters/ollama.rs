@@ -378,9 +378,7 @@ impl Model for OllamaAdapter {
 
         // Add model parameters
         let mut options = json!({});
-        if let Some(temp) = Some(config.temperature) {
-            options["temperature"] = json!(temp);
-        }
+        options["temperature"] = json!(config.temperature);
         if let Some(num_ctx) = ollama_opts.num_ctx {
             options["num_ctx"] = json!(num_ctx);
         }
@@ -394,9 +392,7 @@ impl Model for OllamaAdapter {
             options["numa"] = json!(numa);
         }
 
-        if !options.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-            request_body["options"] = options;
-        }
+        request_body["options"] = options;
 
         // Send request
         let response = self.client
@@ -500,10 +496,13 @@ fn normalize_url(url: &str) -> String {
     }
 
     // Add default port if missing
-    if !normalized.contains(':') || normalized.matches(':').count() == 1 {
-        if normalized.starts_with("http://") && !normalized[7..].contains(':') {
+    // Strip the scheme prefix to check if the host:port portion already contains a port
+    if let Some(after_scheme) = normalized.strip_prefix("http://") {
+        if !after_scheme.contains(':') {
             normalized = format!("{}:11434", normalized);
-        } else if normalized.starts_with("https://") && !normalized[8..].contains(':') {
+        }
+    } else if let Some(after_scheme) = normalized.strip_prefix("https://") {
+        if !after_scheme.contains(':') {
             normalized = format!("{}:11434", normalized);
         }
     }

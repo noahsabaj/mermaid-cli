@@ -64,7 +64,7 @@ async fn run_non_interactive(
     };
 
     // Validate model exists
-    ensure_ollama_model(&model_id, true).await?;
+    ensure_ollama_model(&model_id).await?;
 
     // Persist model if CLI flag was used
     if cli_model_provided {

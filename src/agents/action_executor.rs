@@ -253,9 +253,9 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
     // Single query: simple execution with detailed error handling
     if queries.len() == 1 {
         let (query, result_count) = &queries[0];
-        let mut client = WebSearchClient::new(api_key);
+        let client = WebSearchClient::new(api_key);
 
-        return match client.search_cached(query, *result_count).await {
+        return match client.search_query(query, *result_count).await {
             Ok(results) => {
                 let formatted = client.format_results(&results);
                 ActionResult::Success { output: formatted }
@@ -284,10 +284,10 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
     let futures: Vec<_> = queries
         .iter()
         .map(|(query, count)| {
-            let mut client = WebSearchClient::new(api_key.clone());
+            let client = WebSearchClient::new(api_key.clone());
             let query_clone = query.clone();
             let count_clone = *count;
-            async move { (client.search_cached(&query_clone, count_clone).await, query_clone) }
+            async move { (client.search_query(&query_clone, count_clone).await, query_clone) }
         })
         .collect();
 

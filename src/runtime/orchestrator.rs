@@ -82,27 +82,23 @@ impl Orchestrator {
             format!("Starting Mermaid with model: {}", model_id),
         );
 
-        // Check Ollama availability for local models
+        // Check Ollama availability (all models route through Ollama)
         current_step += 1;
-        if is_local_model(&model_id) {
-            log_progress(current_step, total_steps, "Checking Ollama availability");
-            let ollama_check = check_ollama_available(
-                &self.config.ollama.host,
-                self.config.ollama.port,
-            ).await;
+        log_progress(current_step, total_steps, "Checking Ollama availability");
+        let ollama_check = check_ollama_available(
+            &self.config.ollama.host,
+            self.config.ollama.port,
+        ).await;
 
-            if !ollama_check.available {
-                log_error("OLLAMA", &ollama_check.message);
-                std::process::exit(1);
-            }
-        } else {
-            log_progress(current_step, total_steps, "Using API provider");
+        if !ollama_check.available {
+            log_error("OLLAMA", &ollama_check.message);
+            std::process::exit(1);
         }
 
         // Validate model exists
         current_step += 1;
         log_progress(current_step, total_steps, "Checking model availability");
-        ensure_ollama_model(&model_id, true).await?;
+        ensure_ollama_model(&model_id).await?;
 
         // Persist model if CLI flag was used
         if cli_model_provided {
@@ -186,13 +182,3 @@ impl Orchestrator {
     }
 }
 
-/// Check if a model uses local Ollama inference
-///
-/// All models go through Ollama:
-/// - `ollama/` prefix - explicit Ollama models
-/// - `:cloud` suffix - Ollama cloud routing (e.g., kimi-k2:cloud)
-/// - Models without prefix - auto-discovered on Ollama
-fn is_local_model(_model_id: &str) -> bool {
-    // All models use Ollama (local or cloud routing)
-    true
-}
