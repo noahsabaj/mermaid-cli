@@ -101,8 +101,8 @@ impl ChatMessage {
         }
 
         // Find thinking block boundaries
-        if let Some(thinking_start) = text.find("Thinking...") {
-            if let Some(thinking_end) = text.find("...done thinking.") {
+        if let Some(thinking_start) = text.find("Thinking...")
+            && let Some(thinking_end) = text.find("...done thinking.") {
                 // Extract thinking content (everything between markers)
                 let thinking_content_start = thinking_start + "Thinking...".len();
                 let thinking_text = text[thinking_content_start..thinking_end].trim().to_string();
@@ -113,7 +113,6 @@ impl ChatMessage {
 
                 return (Some(thinking_text), answer_text);
             }
-        }
 
         // If we found "Thinking..." but not the end marker, treat it all as thinking in progress
         if let Some(thinking_start) = text.find("Thinking...") {

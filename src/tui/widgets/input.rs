@@ -282,7 +282,7 @@ fn wrap_input_with_prompt(input: &str, width: usize) -> String {
         }
 
         // Move to next line
-        chars_remaining = &chars_remaining[break_point..].trim_start();
+        chars_remaining = chars_remaining[break_point..].trim_start();
         is_first_line = false;
     }
 

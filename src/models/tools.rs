@@ -1,7 +1,7 @@
-/// Ollama Tools API support for native function calling
-///
-/// This module defines Mermaid's available tools in Ollama's JSON Schema format,
-/// replacing the legacy text-based action block system.
+//! Ollama Tools API support for native function calling
+//!
+//! This module defines Mermaid's available tools in Ollama's JSON Schema format,
+//! replacing the legacy text-based action block system.
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -53,11 +53,6 @@ impl ToolRegistry {
                 Self::web_fetch_tool(),
             ],
         }
-    }
-
-    /// Get all tools in Ollama JSON format (cached statically)
-    pub fn to_ollama_format(&self) -> Vec<serde_json::Value> {
-        OLLAMA_TOOLS_CACHE.clone()
     }
 
     /// Get a reference to the cached Ollama tool definitions without constructing a registry
@@ -335,8 +330,7 @@ mod tests {
 
     #[test]
     fn test_tool_serialization() {
-        let registry = ToolRegistry::mermaid_tools();
-        let ollama_tools = registry.to_ollama_format();
+        let ollama_tools = ToolRegistry::ollama_tools_cached();
 
         assert_eq!(ollama_tools.len(), 11);
 

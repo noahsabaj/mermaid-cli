@@ -73,7 +73,7 @@ if command_exists mermaid; then
 fi
 
 # Install from crates.io (official releases)
-echo -e "${BLUE}Installing from crates.io (v0.2.0)...${RESET}"
+echo -e "${BLUE}Installing from crates.io...${RESET}"
 cargo install mermaid-cli --force
 
 echo -e "${GREEN}Mermaid CLI installed successfully!${RESET}\n"

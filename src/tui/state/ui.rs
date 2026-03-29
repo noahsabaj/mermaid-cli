@@ -1,6 +1,6 @@
-/// UI state management
-///
-/// Visual presentation and widget states.
+//! UI state management
+//!
+//! Visual presentation and widget states.
 
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{ChatState, InputState};

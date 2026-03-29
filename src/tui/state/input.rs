@@ -1,12 +1,16 @@
-/// Input state management
-///
-/// User input buffer and cursor handling.
+//! Input state management
+//!
+//! User input buffer and cursor handling.
 
 /// Input state - user input buffer and cursor
+///
+/// All cursor positions are byte offsets that are guaranteed to sit on
+/// UTF-8 char boundaries. Methods navigate by whole characters, not
+/// raw bytes, so multi-byte input (emoji, CJK, accented chars) is safe.
 pub struct InputBuffer {
     /// User input buffer
     pub content: String,
-    /// Cursor position in the input string
+    /// Cursor position as a **byte offset** (always on a char boundary)
     pub cursor_position: usize,
 }
 
@@ -44,7 +48,7 @@ impl InputBuffer {
     /// Insert a character at cursor position
     pub fn insert(&mut self, c: char) {
         self.content.insert(self.cursor_position, c);
-        self.cursor_position += 1;
+        self.cursor_position += c.len_utf8();
     }
 
     /// Insert a string at cursor position
@@ -56,8 +60,14 @@ impl InputBuffer {
     /// Delete character before cursor (backspace)
     pub fn backspace(&mut self) -> bool {
         if self.cursor_position > 0 {
-            self.cursor_position -= 1;
-            self.content.remove(self.cursor_position);
+            // Find the start of the previous character
+            let prev_boundary = self.content[..self.cursor_position]
+                .char_indices()
+                .next_back()
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            self.content.remove(prev_boundary);
+            self.cursor_position = prev_boundary;
             true
         } else {
             false
@@ -74,17 +84,27 @@ impl InputBuffer {
         }
     }
 
-    /// Move cursor left
+    /// Move cursor left by one character
     pub fn move_left(&mut self) {
         if self.cursor_position > 0 {
-            self.cursor_position -= 1;
+            // Find the previous char boundary
+            self.cursor_position = self.content[..self.cursor_position]
+                .char_indices()
+                .next_back()
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
         }
     }
 
-    /// Move cursor right
+    /// Move cursor right by one character
     pub fn move_right(&mut self) {
         if self.cursor_position < self.content.len() {
-            self.cursor_position += 1;
+            // Find the next char boundary
+            self.cursor_position = self.content[self.cursor_position..]
+                .char_indices()
+                .nth(1)
+                .map(|(idx, _)| self.cursor_position + idx)
+                .unwrap_or(self.content.len());
         }
     }
 

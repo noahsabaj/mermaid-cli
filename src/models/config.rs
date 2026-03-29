@@ -1,7 +1,7 @@
-/// Unified configuration system for models and backends
-///
-/// Replaces the fragmented app::Config + models::ModelConfig split
-/// with a single, coherent, backend-agnostic configuration structure.
+//! Unified configuration system for models and backends
+//!
+//! Replaces the fragmented app::Config + models::ModelConfig split
+//! with a single, coherent, backend-agnostic configuration structure.
 
 use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE};
 use crate::prompts;
@@ -86,7 +86,7 @@ impl ModelConfig {
     pub fn set_backend_option(&mut self, backend: String, key: String, value: String) {
         self.backend_options
             .entry(backend)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(key, value);
     }
 

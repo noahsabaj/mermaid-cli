@@ -1,6 +1,6 @@
-/// Attachment state for image paste support
-///
-/// Manages pending image attachments before they are sent with a message.
+//! Attachment state for image paste support
+//!
+//! Manages pending image attachments before they are sent with a message.
 
 use base64::{engine::general_purpose, Engine as _};
 use std::path::PathBuf;
@@ -23,12 +23,18 @@ pub struct AttachmentState {
     next_id: usize,
 }
 
-impl AttachmentState {
-    pub fn new() -> Self {
+impl Default for AttachmentState {
+    fn default() -> Self {
         Self {
             attachments: Vec::new(),
             next_id: 1,
         }
+    }
+}
+
+impl AttachmentState {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Add an image from raw bytes. Returns the attachment number.

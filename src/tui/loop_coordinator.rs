@@ -82,13 +82,11 @@ pub async fn run_app_loop(
         terminal.draw(|f| render_ui(f, app))?;
 
         // Check if we should transition from Sending to Thinking (after 1 second with no chunks)
-        if app.app_state.generation_status() == Some(GenerationStatus::Sending) {
-            if let Some(start_time) = app.app_state.generation_start_time() {
-                if start_time.elapsed().as_secs() >= 1 {
+        if app.app_state.generation_status() == Some(GenerationStatus::Sending)
+            && let Some(start_time) = app.app_state.generation_start_time()
+                && start_time.elapsed().as_secs() >= 1 {
                     app.transition_to_thinking();
                 }
-            }
-        }
 
         // Handle input events
         if event::poll(std::time::Duration::from_millis(UI_POLL_INTERVAL_MS))? {
@@ -185,15 +183,13 @@ pub async fn run_app_loop(
         }
 
         // Clear stale file reading status after 5 seconds
-        if app.operation_state.reading_file_status.is_some() && !app.app_state.is_generating() {
-            if let Some(timestamp) = app.status_state.status_timestamp {
-                if timestamp.elapsed() >= std::time::Duration::from_secs(5) {
+        if app.operation_state.reading_file_status.is_some() && !app.app_state.is_generating()
+            && let Some(timestamp) = app.status_state.status_timestamp
+                && timestamp.elapsed() >= std::time::Duration::from_secs(5) {
                     app.operation_state.reading_file_status = None;
                     app.operation_state.pending_file_read = false;
                     app.status_state.status_timestamp = None;
                 }
-            }
-        }
 
         // Check if app should quit
         if !app.running {
@@ -228,7 +224,7 @@ async fn handle_message_submit(
     app.add_message_with_images(MessageRole::User, timestamped_input, images);
 
     // Build message history including the new message
-    let messages = app.build_managed_message_history(75_000, 4_000);
+    let messages = app.build_managed_message_history(crate::constants::MAX_CONTEXT_TOKENS, crate::constants::CONTEXT_RESERVE_TOKENS);
 
     // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
     app.current_response.clear();
@@ -360,7 +356,7 @@ async fn run_agent_loop(
             current_tool_calls.clear();
 
             // Build message history and call model with the new context
-            let messages = app.build_managed_message_history(75_000, 4_000);
+            let messages = app.build_managed_message_history(crate::constants::MAX_CONTEXT_TOKENS, crate::constants::CONTEXT_RESERVE_TOKENS);
             app.current_response.clear();
 
             spawn_model_call(app, messages, tx);
@@ -432,7 +428,7 @@ async fn run_agent_loop(
         // can see the error messages and retry with a different approach.
 
         // Call the model again with the updated message history
-        let messages = app.build_managed_message_history(75_000, 4_000);
+        let messages = app.build_managed_message_history(crate::constants::MAX_CONTEXT_TOKENS, crate::constants::CONTEXT_RESERVE_TOKENS);
         app.current_response.clear();
 
         spawn_model_call(app, messages, tx);

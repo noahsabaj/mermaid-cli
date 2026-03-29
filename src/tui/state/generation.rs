@@ -1,6 +1,6 @@
-/// Generation state machine
-///
-/// Tracks the application lifecycle during model interactions.
+//! Generation state machine
+//!
+//! Tracks the application lifecycle during model interactions.
 
 use std::time::Instant;
 

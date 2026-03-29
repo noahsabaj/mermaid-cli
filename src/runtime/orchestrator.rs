@@ -44,12 +44,11 @@ impl Orchestrator {
         // Handle subcommands
         current_step += 1;
         log_progress(current_step, total_steps, "Processing commands");
-        if let Some(command) = &self.cli.command {
-            if handle_command(command).await? {
+        if let Some(command) = &self.cli.command
+            && handle_command(command).await? {
                 return Ok(()); // Command handled, exit
             }
             // Continue to chat for Commands::Chat
-        }
 
         // Determine model to use (CLI arg > last_used > default_model)
         current_step += 1;
@@ -101,11 +100,10 @@ impl Orchestrator {
         ensure_ollama_model(&model_id).await?;
 
         // Persist model if CLI flag was used
-        if cli_model_provided {
-            if let Err(e) = persist_last_model(&model_id) {
+        if cli_model_provided
+            && let Err(e) = persist_last_model(&model_id) {
                 log_warn("CONFIG", format!("Failed to persist model choice: {}", e));
             }
-        }
 
         // Create model instance with config for authentication and optional backend override
         current_step += 1;
@@ -141,6 +139,10 @@ impl Orchestrator {
         current_step += 1;
         log_progress(current_step, total_steps, "Starting UI");
         let mut app = App::new(model, model_id.clone());
+
+        // Wire app config temperature/max_tokens into model state
+        app.model_state.temperature = self.config.default_model.temperature;
+        app.model_state.max_tokens = self.config.default_model.max_tokens;
 
         // Handle session loading
         // Default: start fresh (no history)

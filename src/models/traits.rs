@@ -1,6 +1,6 @@
-/// Core Model trait - the single interface for model interactions
-///
-/// Adapters implement this trait directly. No intermediate layers.
+//! Core Model trait - the single interface for model interactions
+//!
+//! Adapters implement this trait directly. No intermediate layers.
 
 use async_trait::async_trait;
 
@@ -34,13 +34,20 @@ pub trait Model: Send + Sync {
     async fn list_models(&self) -> Result<Vec<String>>;
 
     /// Check if a specific model is available
+    ///
+    /// Matches exact names and implicit `:latest` tags:
+    /// - "llama3" matches "llama3:latest" (bare name matches with :latest tag)
+    /// - "llama3:latest" matches "llama3:latest" (exact)
+    /// - "llama3:7b" does NOT match "llama3:latest" (different tags)
     async fn has_model(&self, model_name: &str) -> Result<bool> {
         let models = self.list_models().await?;
-        // Check for exact match or prefix match (model:tag format)
         Ok(models.iter().any(|m| {
+            // Exact match
             m == model_name
-                || m.starts_with(&format!("{}:", model_name))
-                || model_name.starts_with(&format!("{}:", m))
+                // Bare name matches model with :latest tag
+                || (!model_name.contains(':') && *m == format!("{}:latest", model_name))
+                // Model with :latest tag matches bare name
+                || (!m.contains(':') && model_name == format!("{}:latest", m))
         }))
     }
 

@@ -129,6 +129,13 @@ async fn run_command(mut cmd: Command) -> Result<String> {
 }
 
 /// Check if a command contains dangerous operations
+///
+/// This is a **defense-in-depth** blocklist, NOT a security boundary.
+/// The AI model is the trusted actor making tool calls. This blocklist
+/// catches obvious destructive patterns that are almost never intentional,
+/// but it cannot prevent all dangerous commands (encoded, obfuscated, or
+/// via scripting languages). The real security boundary is the user's
+/// decision to run Mermaid with filesystem/shell access.
 fn contains_dangerous_command(command: &str) -> bool {
     let dangerous_patterns = [
         "rm -rf /",
@@ -141,6 +148,8 @@ fn contains_dangerous_command(command: &str) -> bool {
         "chmod -R 000 /",
         ":(){ :|:& };:", // Fork bomb
         "curl | bash",
+        "curl | sh",
+        "wget | bash",
         "wget | sh",
         "nc -l", // Netcat listener
     ];

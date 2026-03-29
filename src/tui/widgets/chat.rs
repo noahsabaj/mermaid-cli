@@ -154,7 +154,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 MessageRole::User => (">", ratatui::style::Color::White),
                 MessageRole::Assistant => ("●", ratatui::style::Color::White),
                 MessageRole::System => ("●", self.theme.colors.system_message.to_color()),
-                MessageRole::Tool => continue, // Already handled above, but needed for exhaustive match
+                MessageRole::Tool => unreachable!("Tool messages filtered above"),
             };
 
             if matches!(msg.role, MessageRole::Assistant) {
@@ -298,9 +298,9 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             }
 
             // Show image attachment indicators under user messages (like tool action sub-items)
-            if matches!(msg.role, MessageRole::User) {
-                if let Some(ref images) = msg.images {
-                    if !images.is_empty() {
+            if matches!(msg.role, MessageRole::User)
+                && let Some(ref images) = msg.images
+                    && !images.is_empty() {
                         for (i, _) in images.iter().enumerate() {
                             // Record this line in the click map before pushing
                             let content_line = lines.len() as u16;
@@ -322,15 +322,13 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                             ]));
                         }
                     }
-                }
-            }
 
             lines.push(Line::from(""));
         }
 
         // Show file reading status if active
-        if self.pending_file_read && self.reading_file_status.is_some() && !self.is_generating {
-            if let Some(status) = self.reading_file_status {
+        if self.pending_file_read && self.reading_file_status.is_some() && !self.is_generating
+            && let Some(status) = self.reading_file_status {
                 lines.push(Line::from(vec![
                     Span::styled(
                         "  [READ] ",
@@ -346,7 +344,6 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 ]));
                 lines.push(Line::from(""));
             }
-        }
 
         // NOTE: current_response is NOT rendered during streaming (buffering mode).
         // The response is buffered invisibly and only shown when generation is complete.
@@ -477,8 +474,8 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                     }
                 }
 
-                if action.action_type == "Write" {
-                    if let Some(ref content) = action.file_content {
+                if action.action_type == "Write"
+                    && let Some(ref content) = action.file_content {
                         let preview_lines: Vec<&str> = content.lines().take(10).collect();
                         let total_lines = content.lines().count();
 
@@ -495,7 +492,7 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                             for parsed_line in parsed.iter_mut() {
                                 let mut new_spans =
                                     vec![Span::styled("    ", Style::new().fg(action_color))];
-                                new_spans.extend(parsed_line.spans.drain(..));
+                                new_spans.append(&mut parsed_line.spans);
                                 parsed_line.spans = new_spans;
                             }
 
@@ -514,11 +511,10 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                             }
                         }
                     }
-                }
 
                 // Edit action: render diff with color-coded lines and background highlight
-                if action.action_type == "Edit" {
-                    if let Some(ref diff_content) = action.file_content {
+                if action.action_type == "Edit"
+                    && let Some(ref diff_content) = action.file_content {
                         let diff_lines: Vec<&str> = diff_content.lines().collect();
                         // Skip the first line (summary) since it's already in preview
                         let display_lines: Vec<&str> = diff_lines.iter()
@@ -586,7 +582,6 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                             }
                         }
                     }
-                }
             },
             ActionResult::Error { error } => {
                 lines.push(Line::from(vec![

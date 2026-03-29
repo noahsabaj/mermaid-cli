@@ -1,7 +1,7 @@
-/// Tool call execution for the agent loop
-///
-/// This module handles executing Ollama native tool calls and building
-/// UI displays for the results.
+//! Tool call execution for the agent loop
+//!
+//! This module handles executing Ollama native tool calls and building
+//! UI displays for the results.
 
 use crate::agents::{
     self, execute_action, ActionDisplay, ActionResult as AgentActionResult, AgentAction,

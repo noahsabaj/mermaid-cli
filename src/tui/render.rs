@@ -24,11 +24,10 @@ impl LayoutCache {
 
     fn get_main_layout(&mut self, area: Rect, input_height: u16, status_line_height: u16, attachment_height: u16) -> Vec<Rect> {
         // Check if cached layout is still valid (cheap clone of Copy types)
-        if let Some((w, ih, sh, ah, ref rects)) = self.main_layout {
-            if w == area.width && ih == input_height && sh == status_line_height && ah == attachment_height {
+        if let Some((w, ih, sh, ah, ref rects)) = self.main_layout
+            && w == area.width && ih == input_height && sh == status_line_height && ah == attachment_height {
                 return rects.clone();
             }
-        }
 
         // Clean layout with proper spacing (no overlap)
         // Layout: Chat Area | Status Line | Attachments | Input Box | Status Bar

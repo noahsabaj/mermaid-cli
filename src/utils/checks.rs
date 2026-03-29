@@ -1,7 +1,7 @@
-/// Preemptive checks for service availability
-///
-/// These checks run BEFORE operations to provide clear, early error messages
-/// rather than cryptic failures during execution.
+//! Preemptive checks for service availability
+//!
+//! These checks run BEFORE operations to provide clear, early error messages
+//! rather than cryptic failures during execution.
 
 use std::path::Path;
 use std::time::Duration;

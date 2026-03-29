@@ -68,27 +68,6 @@ services:
       retries: 5
       start_period: 10s
 
-  searxng:
-    image: docker.io/searxng/searxng:latest
-    container_name: mermaid-searxng
-    networks:
-      - litellm-network
-    ports:
-      - "127.0.0.1:8888:8080"  # Bind to localhost only for security
-    volumes:
-      - ./searxng:/etc/searxng:z  # :z for SELinux/Podman compatibility
-    environment:
-      SEARXNG_BASE_URL: "http://localhost:8888/"
-      SEARXNG_SECRET: "${SEARXNG_SECRET:-change-me-please}"
-    restart: unless-stopped
-    security_opt:
-      - label=disable  # For rootless podman compatibility
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-
 volumes:
   litellm_data:
     name: mermaid_litellm_data

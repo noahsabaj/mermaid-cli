@@ -227,16 +227,18 @@ impl WebSearchClient {
 
 /// Truncate content to a maximum character count (char-boundary safe)
 fn truncate_content(content: &str, max_chars: usize) -> String {
-    // Use char count for the threshold check, not byte length
-    if content.chars().count() > max_chars {
-        // Collect up to max_chars characters, then find byte position
-        let byte_end: usize = content
-            .char_indices()
-            .nth(max_chars)
-            .map(|(i, _)| i)
-            .unwrap_or(content.len());
+    // Fast path: if byte length fits, char count definitely fits too
+    // (every char is at least 1 byte, so len <= max_chars implies char_count <= max_chars)
+    if content.len() <= max_chars {
+        return content.to_string();
+    }
+
+    // Slow path: multi-byte content might have fewer chars than bytes
+    // Find the byte position of the max_chars-th character
+    if let Some((byte_end, _)) = content.char_indices().nth(max_chars) {
         format!("{}...[truncated]", &content[..byte_end])
     } else {
+        // Fewer than max_chars characters total — no truncation needed
         content.to_string()
     }
 }

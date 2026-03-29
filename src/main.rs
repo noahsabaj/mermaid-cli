@@ -71,12 +71,6 @@ async fn run_non_interactive(
         let _ = persist_last_model(&model_id);
     }
 
-    // Determine project path
-    let project_path = cli
-        .path
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-
     // Use CLI args if provided, otherwise fall back to config
     let effective_max_tokens = max_tokens.or(Some(config.non_interactive.max_tokens));
     let effective_no_execute = no_execute || config.non_interactive.no_execute;
@@ -92,7 +86,6 @@ async fn run_non_interactive(
     // Create and run the non-interactive runner
     let runner = NonInteractiveRunner::new(
         model_id,
-        project_path,
         config,
         effective_no_execute,
         effective_max_tokens,

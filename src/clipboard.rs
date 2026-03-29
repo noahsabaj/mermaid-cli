@@ -1,7 +1,7 @@
-/// Clipboard access for image and text paste
-///
-/// Auto-detects X11 or Wayland display server and uses the appropriate
-/// system tool (xclip or wl-paste) to read clipboard contents.
+//! Clipboard access for image and text paste
+//!
+//! Auto-detects X11 or Wayland display server and uses the appropriate
+//! system tool (xclip or wl-paste) to read clipboard contents.
 
 use anyhow::{Context, Result};
 use std::process::Command;
@@ -16,27 +16,25 @@ enum DisplayServer {
 /// Detect the active display server
 fn detect_display_server() -> Option<DisplayServer> {
     // Check Wayland first
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        if Command::new("which")
+    if std::env::var("WAYLAND_DISPLAY").is_ok()
+        && Command::new("which")
             .arg("wl-paste")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
-        {
-            return Some(DisplayServer::Wayland);
-        }
+    {
+        return Some(DisplayServer::Wayland);
     }
 
     // Fall back to X11
-    if std::env::var("DISPLAY").is_ok() {
-        if Command::new("which")
+    if std::env::var("DISPLAY").is_ok()
+        && Command::new("which")
             .arg("xclip")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
-        {
-            return Some(DisplayServer::X11);
-        }
+    {
+        return Some(DisplayServer::X11);
     }
 
     None
@@ -80,11 +78,10 @@ pub fn read_image_bytes() -> Result<(Vec<u8>, String)> {
                 .output(),
         };
 
-        if let Ok(output) = output {
-            if output.status.success() && !output.stdout.is_empty() {
+        if let Ok(output) = output
+            && output.status.success() && !output.stdout.is_empty() {
                 return Ok((output.stdout, format.to_string()));
             }
-        }
     }
 
     anyhow::bail!("No image data found in clipboard")

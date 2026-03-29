@@ -41,13 +41,12 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         }
 
                         // Apply style based on level (without visible prefix)
-                        let style = match level {
+                        match level {
                             HeadingLevel::H1 => Style::new().fg(Color::Cyan).bold(),
                             HeadingLevel::H2 => Style::new().fg(Color::Blue).bold(),
                             HeadingLevel::H3 => Style::new().fg(Color::Green).bold(),
                             _ => Style::new().fg(Color::Yellow).bold(),
-                        };
-                        style
+                        }
                     },
                     Tag::Emphasis => style_stack.last().copied().unwrap_or_default().italic(),
                     Tag::Strong => style_stack.last().copied().unwrap_or_default().bold(),

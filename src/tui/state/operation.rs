@@ -1,6 +1,6 @@
-/// Operation state management
-///
-/// Minimal state for tracking active operations.
+//! Operation state management
+//!
+//! Minimal state for tracking active operations.
 
 use std::collections::VecDeque;
 

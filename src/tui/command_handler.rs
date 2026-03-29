@@ -90,8 +90,8 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
 
         // Check if model needs to be pulled (only for ollama models)
         let bare_model = model_id.strip_prefix("ollama/").unwrap_or(&model_id);
-        if model_id.starts_with("ollama/") || !model_id.contains('/') {
-            if let Ok(models) = ollama::list_models_async().await {
+        if (model_id.starts_with("ollama/") || !model_id.contains('/'))
+            && let Ok(models) = ollama::list_models_async().await {
                 let model_exists = models.iter().any(|m| {
                     m == bare_model
                         || (!bare_model.contains(':')
@@ -127,7 +127,6 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
                     }
                 }
             }
-        }
 
         app.set_status(format!("Switching to model: {}...", model_id));
 

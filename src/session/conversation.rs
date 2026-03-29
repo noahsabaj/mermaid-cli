@@ -26,7 +26,8 @@ impl ConversationHistory {
     /// Create a new conversation history
     pub fn new(project_path: String, model_name: String) -> Self {
         let now = Local::now();
-        let id = format!("{}", now.format("%Y%m%d_%H%M%S"));
+        // Include subsecond precision to avoid ID collisions within the same second
+        let id = format!("{}", now.format("%Y%m%d_%H%M%S_%3f"));
         Self {
             id: id.clone(),
             title: format!("Session {}", now.format("%Y-%m-%d %H:%M")),
@@ -55,11 +56,10 @@ impl ConversationHistory {
         }
 
         // Don't add if it's identical to the last entry
-        if let Some(last) = self.input_history.back() {
-            if last == &input {
+        if let Some(last) = self.input_history.back()
+            && last == &input {
                 return;
             }
-        }
 
         // Cap history at 100 entries to prevent unbounded growth
         if self.input_history.len() >= 100 {
@@ -158,15 +158,12 @@ impl ConversationManager {
         // Read all JSON files in the conversations directory
         if let Ok(entries) = fs::read_dir(&self.conversations_dir) {
             for entry in entries.flatten() {
-                if let Some(ext) = entry.path().extension() {
-                    if ext == "json" {
-                        if let Ok(json) = fs::read_to_string(entry.path()) {
-                            if let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json) {
+                if let Some(ext) = entry.path().extension()
+                    && ext == "json"
+                        && let Ok(json) = fs::read_to_string(entry.path())
+                            && let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json) {
                                 conversations.push(conv);
                             }
-                        }
-                    }
-                }
             }
         }
 

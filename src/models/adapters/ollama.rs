@@ -1,7 +1,7 @@
-/// Ollama model adapter
-///
-/// Provides unified interface to Ollama (both local and cloud) with connection pooling,
-/// health monitoring, and zero-unwrap error handling.
+//! Ollama model adapter
+//!
+//! Provides unified interface to Ollama (both local and cloud) with connection pooling,
+//! health monitoring, and zero-unwrap error handling.
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -16,6 +16,16 @@ use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::traits::{Model, ModelCapabilities};
 use crate::models::types::{ChatMessage, MessageRole, ModelResponse, StreamCallback, TokenUsage};
 use crate::utils::{retry_async, RetryConfig};
+
+/// Mutable accumulators for stream processing, grouped to reduce parameter count.
+struct StreamAccumulator {
+    content: String,
+    thinking: String,
+    tool_calls: Vec<crate::models::ToolCall>,
+    in_thinking_phase: bool,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+}
 
 /// Ollama model adapter
 pub struct OllamaAdapter {
@@ -67,12 +77,14 @@ impl OllamaAdapter {
         }
 
         let mut stream = response.bytes_stream();
-        let mut full_content = String::new();
-        let mut full_thinking = String::new();
-        let mut accumulated_tool_calls: Vec<crate::models::ToolCall> = Vec::new();
-        let mut in_thinking_phase = false;
-        let mut prompt_tokens = 0;
-        let mut completion_tokens = 0;
+        let mut acc = StreamAccumulator {
+            content: String::new(),
+            thinking: String::new(),
+            tool_calls: Vec::new(),
+            in_thinking_phase: false,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+        };
 
         // Buffer for incomplete JSON lines split across TCP chunks.
         // Ollama sends newline-delimited JSON, but bytes_stream() chunks
@@ -101,16 +113,7 @@ impl OllamaAdapter {
                         raw: Some(line.clone()),
                     })?;
 
-                self.process_stream_chunk(
-                    &json_chunk,
-                    &callback,
-                    &mut full_content,
-                    &mut full_thinking,
-                    &mut accumulated_tool_calls,
-                    &mut in_thinking_phase,
-                    &mut prompt_tokens,
-                    &mut completion_tokens,
-                );
+                Self::process_stream_chunk(&json_chunk, &callback, &mut acc);
             }
         }
 
@@ -123,36 +126,18 @@ impl OllamaAdapter {
                     raw: Some(line_buffer.clone()),
                 })?;
 
-            self.process_stream_chunk(
-                &json_chunk,
-                &callback,
-                &mut full_content,
-                &mut full_thinking,
-                &mut accumulated_tool_calls,
-                &mut in_thinking_phase,
-                &mut prompt_tokens,
-                &mut completion_tokens,
-            );
+            Self::process_stream_chunk(&json_chunk, &callback, &mut acc);
         }
 
-        let thinking = if full_thinking.is_empty() {
-            None
-        } else {
-            Some(full_thinking)
-        };
-
-        let tool_calls = if accumulated_tool_calls.is_empty() {
-            None
-        } else {
-            Some(accumulated_tool_calls)
-        };
+        let thinking = if acc.thinking.is_empty() { None } else { Some(acc.thinking) };
+        let tool_calls = if acc.tool_calls.is_empty() { None } else { Some(acc.tool_calls) };
 
         Ok(ModelResponse {
-            content: full_content,
+            content: acc.content,
             usage: Some(TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
+                prompt_tokens: acc.prompt_tokens,
+                completion_tokens: acc.completion_tokens,
+                total_tokens: acc.prompt_tokens + acc.completion_tokens,
             }),
             model_name: self.model_name.clone(),
             thinking,
@@ -162,31 +147,25 @@ impl OllamaAdapter {
 
     /// Process a single parsed stream chunk, updating all accumulators
     fn process_stream_chunk(
-        &self,
         json_chunk: &OllamaStreamChunk,
         callback: &StreamCallback,
-        full_content: &mut String,
-        full_thinking: &mut String,
-        accumulated_tool_calls: &mut Vec<crate::models::ToolCall>,
-        in_thinking_phase: &mut bool,
-        prompt_tokens: &mut usize,
-        completion_tokens: &mut usize,
+        acc: &mut StreamAccumulator,
     ) {
         // Handle thinking content (if present)
         if let Some(ref thinking_chunk) = json_chunk.message.thinking {
-            if !*in_thinking_phase {
+            if !acc.in_thinking_phase {
                 callback("Thinking...\n\n");
-                *in_thinking_phase = true;
+                acc.in_thinking_phase = true;
             }
             if !thinking_chunk.is_empty() {
                 callback(thinking_chunk);
-                full_thinking.push_str(thinking_chunk);
+                acc.thinking.push_str(thinking_chunk);
             }
         }
 
         // Handle tool calls (if present)
         if let Some(ref tool_calls) = json_chunk.message.tool_calls {
-            accumulated_tool_calls.extend(tool_calls.clone());
+            acc.tool_calls.extend(tool_calls.clone());
             if let Ok(tool_calls_json) = serde_json::to_string(&tool_calls) {
                 callback(&format!("[TOOL_CALLS:{}]", tool_calls_json));
             }
@@ -194,21 +173,21 @@ impl OllamaAdapter {
 
         // Handle regular content
         if !json_chunk.message.content.is_empty() {
-            if *in_thinking_phase {
+            if acc.in_thinking_phase {
                 callback("\n...done thinking.\n\n");
-                *in_thinking_phase = false;
+                acc.in_thinking_phase = false;
             }
             callback(&json_chunk.message.content);
-            full_content.push_str(&json_chunk.message.content);
+            acc.content.push_str(&json_chunk.message.content);
         }
 
         // Capture token usage
         if json_chunk.done {
             if let Some(count) = json_chunk.prompt_eval_count {
-                *prompt_tokens = count;
+                acc.prompt_tokens = count;
             }
             if let Some(count) = json_chunk.eval_count {
-                *completion_tokens = count;
+                acc.completion_tokens = count;
             }
         }
     }
@@ -334,26 +313,23 @@ impl Model for OllamaAdapter {
 
             // Add tool_calls for assistant messages (required for agent loop)
             // The assistant message must include the tool_calls it made
-            if msg.role == MessageRole::Assistant {
-                if let Some(ref tool_calls) = msg.tool_calls {
+            if msg.role == MessageRole::Assistant
+                && let Some(ref tool_calls) = msg.tool_calls {
                     json_msg["tool_calls"] = json!(tool_calls);
                 }
-            }
 
             // Add tool_name for tool result messages (required by Ollama API)
             // Per Ollama docs: messages.append({'role': 'tool', 'tool_name': tc.function.name, 'content': str(result)})
-            if msg.role == MessageRole::Tool {
-                if let Some(ref tool_name) = msg.tool_name {
+            if msg.role == MessageRole::Tool
+                && let Some(ref tool_name) = msg.tool_name {
                     json_msg["tool_name"] = json!(tool_name);
                 }
-            }
 
             // Add images if present (for multimodal models)
-            if let Some(ref images) = msg.images {
-                if !images.is_empty() {
+            if let Some(ref images) = msg.images
+                && !images.is_empty() {
                     json_msg["images"] = json!(images);
                 }
-            }
 
             json_messages.push(json_msg);
         }
@@ -495,17 +471,12 @@ fn normalize_url(url: &str) -> String {
         normalized = format!("http://{}", normalized);
     }
 
-    // Add default port if missing
-    // Strip the scheme prefix to check if the host:port portion already contains a port
-    if let Some(after_scheme) = normalized.strip_prefix("http://") {
-        if !after_scheme.contains(':') {
+    // Add default Ollama port if missing (only for http; https keeps its default 443)
+    if let Some(after_scheme) = normalized.strip_prefix("http://")
+        && !after_scheme.contains(':') {
             normalized = format!("{}:11434", normalized);
         }
-    } else if let Some(after_scheme) = normalized.strip_prefix("https://") {
-        if !after_scheme.contains(':') {
-            normalized = format!("{}:11434", normalized);
-        }
-    }
+    // For https:// without a port, don't add :11434 — the default port (443) is correct
 
     normalized
 }

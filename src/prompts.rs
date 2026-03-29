@@ -1,7 +1,7 @@
-/// System prompt for Mermaid AI assistant
-///
-/// Teaches the model how to use Mermaid's tools and interface.
-/// Focuses on tool usage, not coding practices - trust the model.
+//! System prompt for Mermaid AI assistant
+//!
+//! Teaches the model how to use Mermaid's tools and interface.
+//! Focuses on tool usage, not coding practices - trust the model.
 
 pub const SYSTEM_PROMPT_TEMPLATE: &str = r#"You are Mermaid, an AI coding assistant. Terse, expert, action-oriented.
 

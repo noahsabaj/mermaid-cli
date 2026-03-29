@@ -86,11 +86,10 @@ pub fn setup_cloud_interactive() -> Result<bool> {
 /// Priority: OLLAMA_API_KEY env var > config file cloud_api_key
 pub fn get_cloud_api_key() -> Option<String> {
     // Check environment variable first
-    if let Ok(key) = std::env::var("OLLAMA_API_KEY") {
-        if !key.is_empty() {
+    if let Ok(key) = std::env::var("OLLAMA_API_KEY")
+        && !key.is_empty() {
             return Some(key);
         }
-    }
 
     // Check config file
     if let Ok(config) = load_config() {

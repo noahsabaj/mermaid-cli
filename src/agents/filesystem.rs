@@ -275,30 +275,84 @@ fn normalize_path(path: &str) -> Result<PathBuf> {
     }
 }
 
-/// Validate that a path is safe to read from (blocks sensitive files only)
-fn validate_path_for_read(path: &Path) -> Result<()> {
-    // Check for sensitive files (but allow reading from anywhere)
-    let sensitive_patterns = [
-        ".ssh",
-        ".aws",
-        ".env",
-        "id_rsa",
-        "id_ed25519",
-        ".git/config",
+/// Check if a path component or filename matches a sensitive pattern.
+///
+/// Uses path-component matching (not substring) to avoid false positives
+/// like ".environment.ts" matching ".env". Checks both directory components
+/// and file extensions.
+fn is_sensitive_path(path: &Path) -> bool {
+    // Directory components that are always sensitive
+    let sensitive_dirs = [".ssh", ".aws", ".gnupg"];
+
+    // Filenames/extensions that are sensitive
+    let sensitive_filenames = [
         ".npmrc",
         ".pypirc",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "id_dsa",
+        "credentials.json",
+        "secrets.yaml",
+        "secrets.yml",
+        "token.json",
     ];
 
+    // File extensions that are sensitive
+    let sensitive_extensions = ["pem", "key"];
+
     let path_str = path.to_string_lossy();
-    for pattern in &sensitive_patterns {
-        if path_str.contains(pattern) {
-            anyhow::bail!(
-                "Security error: attempted to access potentially sensitive file: {}",
-                path.display()
-            );
+
+    // Check for .git/config specifically (substring is fine here, it's unique)
+    if path_str.contains(".git/config") || path_str.contains(".git\\config") {
+        return true;
+    }
+
+    for component in path.components() {
+        let name = component.as_os_str().to_string_lossy();
+
+        // Check sensitive directories
+        for dir in &sensitive_dirs {
+            if name == *dir {
+                return true;
+            }
+        }
+
+        // Check .env files: match ".env" exactly or ".env.*" (like .env.local, .env.production)
+        // but NOT files that merely contain "env" (like .environment.ts)
+        if name == ".env" || name.starts_with(".env.") {
+            return true;
+        }
+
+        // Check sensitive filenames
+        for filename in &sensitive_filenames {
+            if name == *filename {
+                return true;
+            }
         }
     }
 
+    // Check sensitive extensions
+    if let Some(ext) = path.extension() {
+        let ext_str = ext.to_string_lossy().to_lowercase();
+        for sensitive_ext in &sensitive_extensions {
+            if ext_str == *sensitive_ext {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Validate that a path is safe to read from (blocks sensitive files only)
+fn validate_path_for_read(path: &Path) -> Result<()> {
+    if is_sensitive_path(path) {
+        anyhow::bail!(
+            "Security error: attempted to access potentially sensitive file: {}",
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -358,26 +412,12 @@ fn validate_canonical_path(canonical: &Path, current_dir: &Path) -> Result<()> {
         );
     }
 
-    // Check for sensitive files
-    let sensitive_patterns = [
-        ".ssh",
-        ".aws",
-        ".env",
-        "id_rsa",
-        "id_ed25519",
-        ".git/config",
-        ".npmrc",
-        ".pypirc",
-    ];
-
-    let path_str = canonical.to_string_lossy();
-    for pattern in &sensitive_patterns {
-        if path_str.contains(pattern) {
-            anyhow::bail!(
-                "Security error: attempted to access potentially sensitive file: {}",
-                canonical.display()
-            );
-        }
+    // Check for sensitive files using shared path-component matcher
+    if is_sensitive_path(canonical) {
+        anyhow::bail!(
+            "Security error: attempted to access potentially sensitive file: {}",
+            canonical.display()
+        );
     }
 
     Ok(())
@@ -417,76 +457,21 @@ mod tests {
     }
 
     #[test]
-    fn test_write_file_returns_result() {
-        // Test that write_file returns a proper Result type
-        // Just verify the function signature returns Result<()>
-        let _result: Result<(), _> = Err("placeholder");
+    fn test_write_and_read_roundtrip() {
+        // Test actual write + read roundtrip in target/ (always within project)
+        let test_path = "target/test_write_roundtrip.txt";
+        let content = "Hello, Mermaid!";
+        let result = write_file(test_path, content);
+        assert!(result.is_ok(), "Write should succeed in target/");
 
-        // Verify Result enum works as expected
-        let ok_result: Result<&str> = Ok("success");
-        assert!(ok_result.is_ok());
-    }
+        let read_back = read_file(test_path);
+        assert!(read_back.is_ok(), "Should read back written file");
+        assert_eq!(read_back.unwrap(), content);
 
-    #[test]
-    fn test_write_file_can_create_files() {
-        // Verify the write_file function is callable and handles various inputs properly
-        // Rather than testing actual file creation which may fail due to validation
-        let result1 = write_file("src/test.rs", "fn main() {}");
-        let result2 = write_file("tests/file.txt", "content");
-
-        // Both should either succeed or return specific errors
-        assert!(
-            result1.is_ok() || result1.is_err(),
-            "Should handle write attempts properly"
-        );
-        assert!(
-            result2.is_ok() || result2.is_err(),
-            "Should handle write attempts properly"
-        );
-    }
-
-    #[test]
-    fn test_write_file_creates_parent_dirs_logic() {
-        // Test the logic of parent directory creation without relying on actual filesystem
-        // Just verify that paths with multiple components are handled
-        let nested_paths = vec![
-            "src/agents/test.rs",
-            "tests/data/file.txt",
-            "docs/api/guide.md",
-        ];
-
-        for path in nested_paths {
-            // Just verify these are valid paths that write_file would accept
-            assert!(path.contains('/'), "Paths should have directory components");
-        }
-    }
-
-    #[test]
-    fn test_write_file_backup_logic() {
-        // Test the logic of backup creation without modifying actual files
-        let backup_format = |path: &str| -> String { format!("{}.backup", path) };
-
-        let original_path = "src/main.rs";
-        let backup_path = backup_format(original_path);
-
-        assert_eq!(
-            backup_path, "src/main.rs.backup",
-            "Backup path should have .backup suffix"
-        );
-    }
-
-    #[test]
-    fn test_delete_file_creates_backup_logic() {
-        // Test the backup naming logic without modifying files
-        let deleted_backup = |path: &str| -> String { format!("{}.deleted", path) };
-
-        let test_file = "src/test.rs";
-        let backup_path = deleted_backup(test_file);
-
-        assert_eq!(
-            backup_path, "src/test.rs.deleted",
-            "Deleted backup should have .deleted suffix"
-        );
+        // Cleanup
+        let _ = fs::remove_file(test_path);
+        // Also clean up backup file
+        let _ = fs::remove_file(format!("{}.backup", test_path));
     }
 
     #[test]
@@ -531,40 +516,46 @@ mod tests {
 
     #[test]
     fn test_path_validation_blocks_dotenv() {
-        // Test that sensitive files are blocked
         let result = read_file(".env");
         assert!(result.is_err(), "Should reject .env file access");
         let error = result.unwrap_err().to_string();
-        assert!(
-            error.contains("sensitive") || error.contains("Security"),
-            "Error should mention sensitivity: {}",
-            error
-        );
+        assert!(error.contains("Security"), "Error should mention Security: {}", error);
+    }
+
+    #[test]
+    fn test_path_validation_blocks_dotenv_variants() {
+        // .env.local, .env.production should be blocked
+        assert!(is_sensitive_path(Path::new("/project/.env.local")));
+        assert!(is_sensitive_path(Path::new("/project/.env.production")));
+        // But .environment.ts should NOT be blocked (path-component matching)
+        assert!(!is_sensitive_path(Path::new("/project/src/.environment.ts")));
+        assert!(!is_sensitive_path(Path::new("/project/src/environment.rs")));
     }
 
     #[test]
     fn test_path_validation_blocks_ssh_keys() {
-        // Test that SSH key patterns are blocked
         let result = read_file(".ssh/id_rsa");
         assert!(result.is_err(), "Should reject .ssh/id_rsa access");
         let error = result.unwrap_err().to_string();
-        assert!(
-            error.contains("sensitive") || error.contains("Security"),
-            "Error should mention sensitivity: {}",
-            error
-        );
+        assert!(error.contains("Security"), "Error should mention Security: {}", error);
     }
 
     #[test]
     fn test_path_validation_blocks_aws_credentials() {
-        // Test that AWS credential patterns are blocked
         let result = read_file(".aws/credentials");
         assert!(result.is_err(), "Should reject .aws/credentials access");
         let error = result.unwrap_err().to_string();
-        assert!(
-            error.contains("sensitive") || error.contains("Security"),
-            "Error should mention sensitivity: {}",
-            error
-        );
+        assert!(error.contains("Security"), "Error should mention Security: {}", error);
+    }
+
+    #[test]
+    fn test_path_validation_blocks_new_sensitive_patterns() {
+        // Verify the expanded blocklist
+        assert!(is_sensitive_path(Path::new("/home/user/credentials.json")));
+        assert!(is_sensitive_path(Path::new("/project/secrets.yaml")));
+        assert!(is_sensitive_path(Path::new("/project/server.pem")));
+        assert!(is_sensitive_path(Path::new("/project/private.key")));
+        assert!(is_sensitive_path(Path::new("/project/token.json")));
+        assert!(is_sensitive_path(Path::new("/home/user/.gnupg/pubring.kbx")));
     }
 }

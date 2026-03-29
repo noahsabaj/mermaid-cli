@@ -1,7 +1,7 @@
-/// Factory for creating model instances
-///
-/// This factory provides the public API for creating models. It handles
-/// configuration conversion and delegates to the internal ModelFactory.
+//! Factory for creating model instances
+//!
+//! This factory provides the public API for creating models. It handles
+//! configuration conversion and delegates to the internal ModelFactory.
 
 use super::backend::ModelFactory as InternalFactory;
 use super::config::BackendConfig;
@@ -98,13 +98,12 @@ impl ModelFactory {
         for provider in providers {
             // Create a dummy model to list models from this provider
             let dummy_model_id = format!("{}/dummy", provider);
-            if let Ok(model) = factory.create_model(&dummy_model_id).await {
-                if let Ok(models) = model.list_models().await {
+            if let Ok(model) = factory.create_model(&dummy_model_id).await
+                && let Ok(models) = model.list_models().await {
                     for model_name in models {
                         all_models.push(format!("{}/{}", provider, model_name));
                     }
                 }
-            }
         }
 
         all_models.sort();

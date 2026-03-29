@@ -1,6 +1,6 @@
-/// Error types for the UI layer
-///
-/// Structured error logging with severity levels.
+//! Error types for the UI layer
+//!
+//! Structured error logging with severity levels.
 
 use std::time::Instant;
 
@@ -24,15 +24,6 @@ impl ErrorSeverity {
             ErrorSeverity::Warning => "WARN",
             ErrorSeverity::Error => "ERROR",
             ErrorSeverity::Security => "SECURITY",
-        }
-    }
-
-    pub fn color(&self) -> &str {
-        match self {
-            ErrorSeverity::Info => "cyan",
-            ErrorSeverity::Warning => "yellow",
-            ErrorSeverity::Error => "red",
-            ErrorSeverity::Security => "magenta",
         }
     }
 }

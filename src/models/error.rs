@@ -1,7 +1,7 @@
-/// Comprehensive error types for the model system
-///
-/// Replaces scattered anyhow::Error usage with structured, actionable errors
-/// that enable proper recovery, retry logic, and user-friendly messages.
+//! Comprehensive error types for the model system
+//!
+//! Replaces scattered anyhow::Error usage with structured, actionable errors
+//! that enable proper recovery, retry logic, and user-friendly messages.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

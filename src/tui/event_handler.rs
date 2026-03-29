@@ -51,8 +51,8 @@ fn handle_mouse_event(
             if mouse.modifiers.contains(KeyModifiers::CONTROL) =>
         {
             // Ctrl+Click: check pending attachments first (above input bar)
-            if let Some(area_y) = app.ui_state.attachment_area_y {
-                if mouse.row == area_y && !app.attachment_state.is_empty() {
+            if let Some(area_y) = app.ui_state.attachment_area_y
+                && mouse.row == area_y && !app.attachment_state.is_empty() {
                     // Click is in the pending attachment area - open the first attachment
                     // (all images on one line; open whichever is there)
                     if let Some(path) = app.attachment_state.last_temp_path() {
@@ -66,15 +66,14 @@ fn handle_mouse_event(
                     }
                     return Ok(EventAction::Continue);
                 }
-            }
 
             // Ctrl+Click: check if an image indicator was clicked in chat history
             if let Some(target) = app.ui_state.chat_state.find_image_at_screen_pos(mouse.row) {
                 let msg_idx = target.message_index;
                 let img_idx = target.image_index;
-                if let Some(msg) = app.session_state.messages.get(msg_idx) {
-                    if let Some(ref images) = msg.images {
-                        if let Some(base64_data) = images.get(img_idx) {
+                if let Some(msg) = app.session_state.messages.get(msg_idx)
+                    && let Some(ref images) = msg.images
+                        && let Some(base64_data) = images.get(img_idx) {
                             // Decode base64 and write to temp file, then open
                             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(base64_data) {
                                 // Detect format from PNG magic bytes
@@ -91,8 +90,6 @@ fn handle_mouse_event(
                                 }
                             }
                         }
-                    }
-                }
             }
             Ok(EventAction::Continue)
         },
@@ -183,8 +180,6 @@ fn handle_key_event(
         KeyCode::Down => handle_down_arrow(app),
         KeyCode::PageUp => handle_page_up(app),
         KeyCode::PageDown => handle_page_down(app),
-        KeyCode::Tab => handle_tab(app, key.modifiers),
-        KeyCode::BackTab => handle_backtab(app),
         _ => EventAction::Continue,
     };
 
@@ -478,12 +473,3 @@ fn handle_page_down(app: &mut App) -> EventAction {
     EventAction::Continue
 }
 
-/// Handle Tab key - no-op (modes removed)
-fn handle_tab(_app: &mut App, _modifiers: KeyModifiers) -> EventAction {
-    EventAction::Continue
-}
-
-/// Handle BackTab - no-op (modes removed)
-fn handle_backtab(_app: &mut App) -> EventAction {
-    EventAction::Continue
-}

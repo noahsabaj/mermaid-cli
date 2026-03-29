@@ -1,6 +1,6 @@
-/// Conversation state management
-///
-/// Handles chat messages, history, and persistence.
+//! Conversation state management
+//!
+//! Handles chat messages, history, and persistence.
 
 use std::collections::VecDeque;
 

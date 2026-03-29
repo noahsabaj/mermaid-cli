@@ -1,7 +1,7 @@
-/// Application coordinator
-///
-/// Thin coordinator that composes state modules. All state is delegated to
-/// focused modules in src/tui/state/.
+//! Application coordinator
+//!
+//! Thin coordinator that composes state modules. All state is delegated to
+//! focused modules in src/tui/state/.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -63,9 +63,8 @@ impl App {
             .map(|_| ConversationHistory::new(working_dir.clone(), model_state.model_name.clone()));
 
         // Load input history from conversation if available
-        let input_history: std::collections::VecDeque<String> = conversation_manager
+        let input_history: std::collections::VecDeque<String> = current_conversation
             .as_ref()
-            .and_then(|_| current_conversation.as_ref())
             .map(|conv| conv.input_history.clone())
             .unwrap_or_default();
 
@@ -439,13 +438,12 @@ impl App {
     }
 
     pub fn save_conversation(&mut self) -> anyhow::Result<()> {
-        if let Some(ref manager) = self.session_state.conversation_manager {
-            if let Some(ref mut conv) = self.session_state.current_conversation {
+        if let Some(ref manager) = self.session_state.conversation_manager
+            && let Some(ref mut conv) = self.session_state.current_conversation {
                 conv.messages = self.session_state.messages.clone();
                 manager.save_conversation(conv)?;
                 self.set_status("Conversation saved");
             }
-        }
         Ok(())
     }
 

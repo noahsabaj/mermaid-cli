@@ -1,14 +1,14 @@
-/// State management modules for the TUI
-///
-/// Splits the App god object into focused, composable state modules:
-/// - generation: State machine for model interactions
-/// - error: Structured error logging
-/// - conversation: Chat messages and history
-/// - model: LLM configuration
-/// - ui: Visual presentation
-/// - operation: Modes and confirmations
-/// - status: Status messages
-/// - input: User input buffer
+//! State management modules for the TUI
+//!
+//! Splits the App god object into focused, composable state modules:
+//! - generation: State machine for model interactions
+//! - error: Structured error logging
+//! - conversation: Chat messages and history
+//! - model: LLM configuration
+//! - ui: Visual presentation
+//! - operation: Modes and confirmations
+//! - status: Status messages
+//! - input: User input buffer
 
 pub mod attachment;
 mod conversation;

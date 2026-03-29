@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Main configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Last used model (persisted between sessions)
     #[serde(default)]
@@ -32,10 +32,6 @@ pub struct Config {
     #[serde(default)]
     pub ui: UIConfig,
 
-    /// Context loader configuration
-    #[serde(default)]
-    pub context: ContextConfig,
-
     /// Operation mode configuration
     #[serde(default)]
     pub mode: ModeConfig,
@@ -47,23 +43,6 @@ pub struct Config {
     /// Non-interactive mode configuration
     #[serde(default)]
     pub non_interactive: NonInteractiveConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            last_used_model: None,
-            default_model: ModelSettings::default(),
-            ollama: OllamaConfig::default(),
-            openai: OpenAIConfig::default(),
-            anthropic: AnthropicConfig::default(),
-            ui: UIConfig::default(),
-            context: ContextConfig::default(),
-            mode: ModeConfig::default(),
-            behavior: BehaviorConfig::default(),
-            non_interactive: NonInteractiveConfig::default(),
-        }
-    }
 }
 
 /// Default model settings
@@ -181,49 +160,12 @@ impl Default for AnthropicConfig {
 pub struct UIConfig {
     /// Color theme
     pub theme: String,
-    /// Syntax highlighting theme
-    pub syntax_theme: String,
-    /// Show line numbers in code blocks
-    pub show_line_numbers: bool,
-    /// Show file sidebar by default
-    pub show_sidebar: bool,
 }
 
 impl Default for UIConfig {
     fn default() -> Self {
         Self {
             theme: String::from("dark"),
-            syntax_theme: String::from("monokai"),
-            show_line_numbers: true,
-            show_sidebar: true,
-        }
-    }
-}
-
-/// Context loader configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ContextConfig {
-    /// Maximum file size to load (in bytes)
-    pub max_file_size: usize,
-    /// Maximum number of files to include
-    pub max_files: usize,
-    /// Maximum total context size in tokens
-    pub max_context_tokens: usize,
-    /// Auto-include these file patterns
-    pub include_patterns: Vec<String>,
-    /// Always exclude these patterns
-    pub exclude_patterns: Vec<String>,
-}
-
-impl Default for ContextConfig {
-    fn default() -> Self {
-        Self {
-            max_file_size: 1024 * 1024, // 1MB
-            max_files: 100,
-            max_context_tokens: 50000,
-            include_patterns: vec![],
-            exclude_patterns: vec![String::from("*.log"), String::from("*.tmp")],
         }
     }
 }

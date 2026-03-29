@@ -396,7 +396,7 @@ async fn execute_git_diffs(paths: &[Option<String>]) -> ActionResult {
     let diff_results = join_all(futures).await;
 
     for (result, path) in diff_results {
-        let path_str = path.as_ref().map(|p| p.as_str()).unwrap_or("*");
+        let path_str = path.as_deref().unwrap_or("*");
         match result {
             Ok(diff_output) => results.push((path_str.to_string(), diff_output)),
             Err(_) => failed_items.push(path_str.to_string()),

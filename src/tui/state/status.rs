@@ -1,6 +1,6 @@
-/// Status state management
-///
-/// UI status messages and timing.
+//! Status state management
+//!
+//! UI status messages and timing.
 
 use std::time::Instant;
 

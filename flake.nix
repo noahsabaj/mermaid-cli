@@ -41,38 +41,18 @@
       cargo = pkgs.cargo;
 
       workspaceShell = pkgs.mkShell {
-        packages = [ 
-          pkgs.statix 
-          pkgs.openssl_1_1.dev 
-          pkgs.zlib.dev 
-          pkgs.sccache 
-          pkgs.llvm_19
-          pkgs.libclang
-          pkgs.clang_19
+        packages = [
+          pkgs.statix
+          pkgs.openssl_1_1.dev
+          pkgs.zlib.dev
+          pkgs.sccache
           pkgs.pkg-config
         ];
         shellHook = ''
           export PKG_CONFIG_PATH=${pkgs.openssl_1_1.dev}/lib/pkgconfig:${pkgs.zlib.dev}/lib/pkgconfig:$PKG_CONFIG_PATH
           export PATH=${myRustc}/bin:${cargo}/bin:${pkgs.sccache}/bin:$PATH
-          
-          # Configure libclang for bindgen (RocksDB needs this)
-          export LIBCLANG_PATH=${pkgs.libclang.lib}/lib
-          export CLANG_PATH=${pkgs.clang_19}/bin/clang
-          
-          # Set up bindgen environment for RocksDB
-          export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.llvm_19.dev}/include -I${pkgs.glibc.dev}/include -I${pkgs.gcc.cc}/lib/gcc/x86_64-unknown-linux-gnu/*/include"
-          
-          # Ensure C++ compiler is available for RocksDB
-          export CC=${pkgs.clang_19}/bin/clang
-          export CXX=${pkgs.clang_19}/bin/clang++
-          
-          # RocksDB specific environment
-          export ROCKSDB_STATIC=1
-          
-          echo "🦀 Rust + RocksDB development environment ready!"
-          echo "LIBCLANG_PATH: $LIBCLANG_PATH"
-          echo "CC: $CC"
-          echo "CXX: $CXX"
+
+          echo "🦀 Rust development environment ready!"
         '';
       };
     in

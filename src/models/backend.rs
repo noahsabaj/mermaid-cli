@@ -1,7 +1,7 @@
-/// Model factory - creates model instances from identifiers
-///
-/// Parses model identifiers like "ollama/llama3" and creates
-/// the appropriate adapter implementing the Model trait.
+//! Model factory - creates model instances from identifiers
+//!
+//! Parses model identifiers like "ollama/llama3" and creates
+//! the appropriate adapter implementing the Model trait.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,13 +49,10 @@ impl ModelFactory {
         if let Ok(client) = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()
-        {
-            if let Ok(resp) = client.get(&url).send().await {
-                if resp.status().is_success() {
+            && let Ok(resp) = client.get(&url).send().await
+                && resp.status().is_success() {
                     providers.push("ollama".to_string());
                 }
-            }
-        }
 
         providers
     }
@@ -88,7 +85,6 @@ mod tests {
         assert_eq!(provider, "ollama");
         assert_eq!(model, "llama3");
     }
-
 
     #[test]
     fn test_parse_model_id_bare_name() {

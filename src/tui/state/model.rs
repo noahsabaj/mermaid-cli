@@ -1,6 +1,6 @@
-/// Model state management
-///
-/// Handles LLM configuration and identity.
+//! Model state management
+//!
+//! Handles LLM configuration and identity.
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -22,6 +22,10 @@ pub struct ModelState {
     /// - Some(false) = model does not support vision (detected from error)
     /// - None = unknown (optimistic default)
     pub vision_supported: Option<bool>,
+    /// Temperature from app config (wired through so build_config uses it)
+    pub temperature: f32,
+    /// Max tokens from app config
+    pub max_tokens: usize,
 }
 
 impl ModelState {
@@ -31,10 +35,10 @@ impl ModelState {
             model: Arc::new(RwLock::new(model)),
             model_id,
             model_name,
-            // Default: thinking enabled (will be disabled if model doesn't support it)
             thinking_enabled: Some(true),
-            // Default: vision unknown (optimistic — try until error)
             vision_supported: None,
+            temperature: crate::constants::DEFAULT_TEMPERATURE,
+            max_tokens: crate::constants::DEFAULT_MAX_TOKENS,
         }
     }
 
@@ -68,9 +72,12 @@ impl ModelState {
 
     /// Build a ModelConfig for API calls using current model state
     pub fn build_config(&self) -> ModelConfig {
-        let mut config = ModelConfig::default();
-        config.model = self.model_id.clone();
-        config.thinking_enabled = self.is_thinking_active();
-        config
+        ModelConfig {
+            model: self.model_id.clone(),
+            thinking_enabled: self.is_thinking_active(),
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            ..ModelConfig::default()
+        }
     }
 }

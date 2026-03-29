@@ -68,11 +68,7 @@ pub fn get_status() -> Result<String> {
             format!("  deleted:  {}", path)
         } else if status.is_wt_renamed() {
             format!("  renamed:  {}", path)
-        } else if status.is_index_new() {
-            format!("  staged:   {}", path)
-        } else if status.is_index_modified() {
-            format!("  staged:   {}", path)
-        } else if status.is_index_deleted() {
+        } else if status.is_index_new() || status.is_index_modified() || status.is_index_deleted() {
             format!("  staged:   {}", path)
         } else if status.is_conflicted() {
             format!("  conflict: {}", path)
@@ -90,11 +86,10 @@ pub fn get_status() -> Result<String> {
     }
 
     // Add branch info
-    if let Ok(head) = repo.head() {
-        if let Some(name) = head.shorthand() {
+    if let Ok(head) = repo.head()
+        && let Some(name) = head.shorthand() {
             output.push_str(&format!("\nOn branch: {}\n", name));
         }
-    }
 
     Ok(output)
 }

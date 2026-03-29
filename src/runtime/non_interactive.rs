@@ -1,6 +1,5 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -65,7 +64,6 @@ impl NonInteractiveRunner {
     /// Create a new non-interactive runner
     pub async fn new(
         model_id: String,
-        _project_path: PathBuf,  // Unused - LLM explores via tools
         config: Config,
         no_execute: bool,
         max_tokens: Option<usize>,
@@ -264,7 +262,7 @@ impl NonInteractiveRunner {
                             output.push_str(&format!("  ```\n  {}\n  ```\n", out));
                         }
                     }
-                    output.push_str("\n");
+                    output.push('\n');
                 }
 
                 if !result.errors.is_empty() {
@@ -272,7 +270,7 @@ impl NonInteractiveRunner {
                     for error in &result.errors {
                         output.push_str(&format!("- {}\n", error));
                     }
-                    output.push_str("\n");
+                    output.push('\n');
                 }
 
                 output.push_str("---\n");

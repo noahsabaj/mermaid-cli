@@ -16,7 +16,7 @@ impl Tokenizer {
 
     /// Count tokens in a single text string (~4 chars per token)
     pub fn count_tokens(&self, text: &str) -> Result<usize> {
-        Ok((text.len() + 3) / 4)
+        Ok(text.len().div_ceil(4))
     }
 
     /// Count tokens in a chat message format
@@ -25,16 +25,17 @@ impl Tokenizer {
             .iter()
             .map(|(role, content)| role.len() + content.len() + 4) // +4 for message overhead
             .sum();
-        Ok((total_chars + 3) / 4)
+        Ok(total_chars.div_ceil(4))
     }
 
     /// Get the maximum tokens for a model
     pub fn get_max_tokens(&self) -> usize {
         let model_name = self.get_base_model_name();
 
-        if model_name.contains("gpt-4o") {
-            128000
-        } else if model_name.contains("gpt-4-turbo") || model_name.contains("gpt-4-1106") {
+        if model_name.contains("gpt-4o")
+            || model_name.contains("gpt-4-turbo")
+            || model_name.contains("gpt-4-1106")
+        {
             128000
         } else if model_name.contains("gpt-4-32k") {
             32768
@@ -56,9 +57,10 @@ impl Tokenizer {
             16384
         } else if model_name.contains("deepseek-coder") {
             65536
-        } else if model_name.contains("qwen") {
-            32768
-        } else if model_name.contains("mistral") || model_name.contains("mixtral") {
+        } else if model_name.contains("qwen")
+            || model_name.contains("mistral")
+            || model_name.contains("mixtral")
+        {
             32768
         } else {
             8192 // Conservative default

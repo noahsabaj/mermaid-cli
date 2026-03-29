@@ -1,7 +1,7 @@
-/// Attachment indicator widget
-///
-/// Renders [Image #N] indicators above the input box when images are attached.
-/// Shows help text for navigation: "(↑ to select)" normally, or navigation hints when focused.
+//! Attachment indicator widget
+//!
+//! Renders [Image #N] indicators above the input box when images are attached.
+//! Shows help text for navigation: "(up to select)" normally, or navigation hints when focused.
 
 use ratatui::{
     buffer::Buffer,

@@ -1,7 +1,7 @@
-/// Tool call parsing and conversion to AgentAction
-///
-/// Handles deserialization of Ollama tool_calls responses and converts
-/// them to Mermaid's internal AgentAction enum.
+//! Tool call parsing and conversion to AgentAction
+//!
+//! Handles deserialization of Ollama tool_calls responses and converts
+//! them to Mermaid's internal AgentAction enum.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
