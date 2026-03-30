@@ -11,8 +11,6 @@ pub enum GenerationStatus {
     Idle,
     /// Message sent upstream, waiting for model to start responding
     Sending,
-    /// Model is loading/initializing (before first token)
-    Initializing,
     /// Waiting for first token from model (thinking/reasoning)
     Thinking,
     /// Actively receiving and displaying tokens
@@ -24,7 +22,6 @@ impl GenerationStatus {
         match self {
             GenerationStatus::Idle => "Idle",
             GenerationStatus::Sending => "Sending",
-            GenerationStatus::Initializing => "Initializing",
             GenerationStatus::Thinking => "Thinking",
             GenerationStatus::Streaming => "Streaming",
         }
@@ -44,6 +41,8 @@ pub enum AppState {
         start_time: Instant,
         tokens_received: usize,
         abort_handle: Option<tokio::task::AbortHandle>,
+        /// Accumulated streaming response text for this model call
+        response_buffer: String,
     },
 }
 
@@ -77,7 +76,9 @@ impl AppState {
     /// Get tokens received if we're generating
     pub fn tokens_received(&self) -> Option<usize> {
         match self {
-            AppState::Generating { tokens_received, .. } => Some(*tokens_received),
+            AppState::Generating {
+                tokens_received, ..
+            } => Some(*tokens_received),
             _ => None,
         }
     }

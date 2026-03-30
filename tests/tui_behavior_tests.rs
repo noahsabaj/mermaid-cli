@@ -21,6 +21,7 @@ fn test_app_state_is_generating_method() {
         start_time: std::time::Instant::now(),
         tokens_received: 0,
         abort_handle: None,
+        response_buffer: String::new(),
     };
     assert!(generating_state.is_generating());
     assert!(!generating_state.is_idle());
@@ -36,15 +37,18 @@ fn test_app_state_generation_status_method() {
         start_time: std::time::Instant::now(),
         tokens_received: 42,
         abort_handle: None,
+        response_buffer: String::new(),
     };
-    assert_eq!(generating_state.generation_status(), Some(GenerationStatus::Streaming));
+    assert_eq!(
+        generating_state.generation_status(),
+        Some(GenerationStatus::Streaming)
+    );
 }
 
 #[test]
 fn test_generation_status_display_text() {
     assert_eq!(GenerationStatus::Idle.display_text(), "Idle");
     assert_eq!(GenerationStatus::Sending.display_text(), "Sending");
-    assert_eq!(GenerationStatus::Initializing.display_text(), "Initializing");
     assert_eq!(GenerationStatus::Thinking.display_text(), "Thinking");
     assert_eq!(GenerationStatus::Streaming.display_text(), "Streaming");
 }
@@ -57,6 +61,7 @@ fn test_app_state_variants_are_distinct() {
         start_time: std::time::Instant::now(),
         tokens_received: 0,
         abort_handle: None,
+        response_buffer: String::new(),
     };
 
     // These should be different variants
@@ -81,6 +86,7 @@ fn test_state_transition_idle_to_generating() {
         start_time: std::time::Instant::now(),
         tokens_received: 0,
         abort_handle: None,
+        response_buffer: String::new(),
     };
 
     // Verify transition
@@ -97,6 +103,7 @@ fn test_state_transition_generating_to_idle() {
         start_time: std::time::Instant::now(),
         tokens_received: 100,
         abort_handle: None,
+        response_buffer: String::new(),
     };
     assert!(state.is_generating());
 
@@ -116,6 +123,7 @@ fn test_generation_status_can_be_updated() {
         start_time: std::time::Instant::now(),
         tokens_received: 0,
         abort_handle: None,
+        response_buffer: String::new(),
     };
 
     // Verify initial status
@@ -137,15 +145,22 @@ fn test_tokens_received_can_be_incremented() {
         start_time: std::time::Instant::now(),
         tokens_received: 0,
         abort_handle: None,
+        response_buffer: String::new(),
     };
 
     // Increment tokens (simulating streaming)
-    if let AppState::Generating { tokens_received, .. } = &mut state {
+    if let AppState::Generating {
+        tokens_received, ..
+    } = &mut state
+    {
         *tokens_received += 10;
     }
 
     // Verify increment
-    if let AppState::Generating { tokens_received, .. } = state {
+    if let AppState::Generating {
+        tokens_received, ..
+    } = state
+    {
         assert_eq!(tokens_received, 10);
     }
 }
@@ -188,7 +203,10 @@ fn test_agent_actions_can_be_created() {
     // Verify actions can be pattern matched
     assert!(matches!(read_file, AgentAction::ReadFile { .. }));
     assert!(matches!(write_file, AgentAction::WriteFile { .. }));
-    assert!(matches!(execute_command, AgentAction::ExecuteCommand { .. }));
+    assert!(matches!(
+        execute_command,
+        AgentAction::ExecuteCommand { .. }
+    ));
 }
 
 #[test]
@@ -200,7 +218,9 @@ fn test_agent_actions_can_be_cloned() {
     let cloned = action.clone();
 
     // Verify clone works
-    if let (AgentAction::ReadFile { paths: p1 }, AgentAction::ReadFile { paths: p2 }) = (&action, &cloned) {
+    if let (AgentAction::ReadFile { paths: p1 }, AgentAction::ReadFile { paths: p2 }) =
+        (&action, &cloned)
+    {
         assert_eq!(p1, p2);
     }
 }
@@ -232,6 +252,7 @@ fn test_characterization_app_state_must_match_flags() {
         start_time: std::time::Instant::now(),
         tokens_received: 0,
         abort_handle: None,
+        response_buffer: String::new(),
     };
 
     // Verify the convenience methods that replace the flags

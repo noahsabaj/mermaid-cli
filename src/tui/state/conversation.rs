@@ -1,11 +1,6 @@
 //! Conversation state management
 //!
-//! Handles chat messages, history, and persistence.
-
-use std::collections::VecDeque;
-
-use ratatui::text::Line;
-use rustc_hash::FxHashMap;
+//! Handles chat messages, persistence, and conversation metadata.
 
 use crate::models::ChatMessage;
 use crate::session::{ConversationHistory, ConversationManager};
@@ -18,19 +13,10 @@ pub struct ConversationState {
     pub conversation_manager: Option<ConversationManager>,
     /// Current conversation being tracked
     pub current_conversation: Option<ConversationHistory>,
-    /// Input history for arrow key navigation (loaded from session)
-    pub input_history: VecDeque<String>,
-    /// Current position in history (None = editing current input, Some(i) = viewing history[i])
-    pub history_index: Option<usize>,
-    /// Saved input when navigating away from current draft
-    pub history_buffer: String,
     /// Cumulative token count for the entire conversation
     pub cumulative_tokens: usize,
     /// Auto-generated conversation title (like Claude Code)
     pub conversation_title: Option<String>,
-    /// Cached parsed markdown per message: (message_index, content_len) -> parsed lines
-    /// Invalidated when content length changes (cheap proxy for content change)
-    pub markdown_cache: FxHashMap<(usize, usize), Vec<Line<'static>>>,
 }
 
 impl ConversationState {
@@ -40,12 +26,8 @@ impl ConversationState {
             messages: Vec::new(),
             conversation_manager: None,
             current_conversation: None,
-            input_history: VecDeque::new(),
-            history_index: None,
-            history_buffer: String::new(),
             cumulative_tokens: 0,
             conversation_title: None,
-            markdown_cache: FxHashMap::default(),
         }
     }
 
@@ -53,18 +35,13 @@ impl ConversationState {
     pub fn with_conversation(
         conversation_manager: Option<ConversationManager>,
         current_conversation: Option<ConversationHistory>,
-        input_history: VecDeque<String>,
     ) -> Self {
         Self {
             messages: Vec::new(),
             conversation_manager,
             current_conversation,
-            input_history,
-            history_index: None,
-            history_buffer: String::new(),
             cumulative_tokens: 0,
             conversation_title: None,
-            markdown_cache: FxHashMap::default(),
         }
     }
 

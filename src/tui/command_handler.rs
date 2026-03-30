@@ -41,6 +41,7 @@ fn handle_quit(app: &mut App) {
 /// Clear chat history
 fn handle_clear(app: &mut App) {
     app.session_state.messages.clear();
+    app.ui_state.markdown_cache.clear();
     app.set_status("Chat cleared");
 }
 
@@ -91,57 +92,59 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
         // Check if model needs to be pulled (only for ollama models)
         let bare_model = model_id.strip_prefix("ollama/").unwrap_or(&model_id);
         if (model_id.starts_with("ollama/") || !model_id.contains('/'))
-            && let Ok(models) = ollama::list_models_async().await {
-                let model_exists = models.iter().any(|m| {
-                    m == bare_model
-                        || (!bare_model.contains(':')
-                            && *m == format!("{}:latest", bare_model))
-                });
+            && let Ok(models) = ollama::list_models_async().await
+        {
+            let model_exists = models.iter().any(|m| {
+                m == bare_model
+                    || (!bare_model.contains(':') && *m == format!("{}:latest", bare_model))
+            });
 
-                if !model_exists {
-                    app.set_status(format!("Pulling model: {}...", bare_model));
-                    app.add_message(
-                        MessageRole::System,
-                        format!(
-                            "Model '{}' not found locally. Pulling from registry...",
-                            bare_model
-                        ),
-                    );
+            if !model_exists {
+                app.set_status(format!("Pulling model: {}...", bare_model));
+                app.add_message(
+                    MessageRole::System,
+                    format!(
+                        "Model '{}' not found locally. Pulling from registry...",
+                        bare_model
+                    ),
+                );
 
-                    match pull_model_http(bare_model, &config.ollama.host, config.ollama.port).await
-                    {
-                        Ok(()) => {
-                            app.add_message(
-                                MessageRole::System,
-                                format!("Model '{}' pulled successfully.", bare_model),
-                            );
-                        }
-                        Err(e) => {
-                            app.set_status(format!("Failed to pull model: {}", e));
-                            app.add_message(
-                                MessageRole::System,
-                                format!("Failed to pull model '{}': {}", bare_model, e),
-                            );
-                            return;
-                        }
-                    }
+                match pull_model_http(bare_model, &config.ollama.host, config.ollama.port).await {
+                    Ok(()) => {
+                        app.add_message(
+                            MessageRole::System,
+                            format!("Model '{}' pulled successfully.", bare_model),
+                        );
+                    },
+                    Err(e) => {
+                        app.set_status(format!("Failed to pull model: {}", e));
+                        app.add_message(
+                            MessageRole::System,
+                            format!("Failed to pull model '{}': {}", bare_model, e),
+                        );
+                        return;
+                    },
                 }
             }
+        }
 
         app.set_status(format!("Switching to model: {}...", model_id));
 
-        // Create new model asynchronously
-        let model_id_clone = model_id.clone();
-        let new_model = tokio::task::spawn(async move {
-            ModelFactory::create(&model_id_clone, Some(&config)).await
-        });
+        // Create new model
+        let new_model = ModelFactory::create(&model_id, Some(&config)).await;
 
-        match new_model.await {
-            Ok(Ok(model)) => {
+        match new_model {
+            Ok(model) => {
                 // Update the model and model name
                 *app.model_state.model.write().await = model;
                 app.model_state.model_name = model_id.clone();
                 app.model_state.model_id = model_id.clone();
+
+                // Reset capability flags for the new model — they'll be
+                // re-detected from the model's responses. Temperature and
+                // max_tokens are preserved from the current session.
+                app.model_state.thinking_enabled = Some(true);
+                app.model_state.vision_supported = None;
 
                 // Persist the model choice to config
                 if let Err(e) = persist_last_model(&model_id) {
@@ -149,9 +152,6 @@ async fn handle_model(app: &mut App, model_name: Option<&str>) {
                 } else {
                     app.set_status(format!("Switched to model: {}", model_id));
                 }
-            },
-            Ok(Err(e)) => {
-                app.set_status(format!("Failed to switch model: {}", e));
             },
             Err(e) => {
                 app.set_status(format!("Failed to switch model: {}", e));

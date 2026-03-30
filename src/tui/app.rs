@@ -5,14 +5,11 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tracing::warn;
 
 use super::state::{
     AppState, AttachmentState, ConversationState, ErrorEntry, ErrorSeverity, GenerationStatus,
     InputBuffer, ModelState, OperationState, StatusState, UIState,
 };
-use super::theme::Theme;
-use super::widgets::{ChatState, InputState};
 use crate::constants::UI_ERROR_LOG_MAX_SIZE;
 use crate::models::{ChatMessage, MessageRole, Model, StreamCallback};
 use crate::session::{ConversationHistory, ConversationManager};
@@ -23,8 +20,6 @@ pub struct App {
     pub input: InputBuffer,
     /// Is the app running?
     pub running: bool,
-    /// Current model response (for streaming)
-    pub current_response: String,
     /// Current working directory
     pub working_dir: String,
     /// Error log - keeps last N errors for visibility
@@ -68,28 +63,22 @@ impl App {
             .map(|conv| conv.input_history.clone())
             .unwrap_or_default();
 
+        // Initialize input buffer with persisted history
+        let mut input = InputBuffer::new();
+        input.load_history(input_history);
+
         // Initialize UIState
-        let ui_state = UIState {
-            chat_state: ChatState::new(),
-            input_state: InputState::new(),
-            theme: Theme::dark(),
-            selected_message: None,
-            attachment_focused: false,
-            selected_attachment: 0,
-            attachment_area_y: None,
-        };
+        let ui_state = UIState::new();
 
         // Initialize ConversationState with conversation management
         let session_state = ConversationState::with_conversation(
             conversation_manager,
             current_conversation,
-            input_history,
         );
 
         Self {
-            input: InputBuffer::new(),
+            input,
             running: true,
-            current_response: String::with_capacity(8192),
             working_dir,
             error_log: VecDeque::new(),
             app_state: AppState::Idle,
@@ -102,38 +91,20 @@ impl App {
         }
     }
 
-    // ===== Compatibility shims for old field access =====
-    // These will be removed as callers are updated
-
-    /// Get cursor position (compatibility shim)
-    pub fn cursor_position(&self) -> usize {
-        self.input.cursor_position
-    }
-
-    /// Set cursor position (compatibility shim)
-    pub fn set_cursor_position(&mut self, pos: usize) {
-        self.input.cursor_position = pos;
-    }
-
     // ===== Message Management =====
 
     /// Add a message to the chat (extracts thinking blocks automatically)
     pub fn add_message(&mut self, role: MessageRole, content: String) {
-        let mut message = match role {
-            MessageRole::User => ChatMessage::user(content),
-            MessageRole::Assistant => ChatMessage::assistant(content),
-            MessageRole::System => ChatMessage::system(content),
-            MessageRole::Tool => ChatMessage::tool("", "", content),
-        };
-        // Extract thinking from content
-        let (thinking, answer) = ChatMessage::extract_thinking(&message.content);
-        message.content = answer;
-        message.thinking = thinking;
-        self.commit_message(message);
+        self.add_message_with_images(role, content, None);
     }
 
-    /// Add a message with image attachments
-    pub fn add_message_with_images(&mut self, role: MessageRole, content: String, images: Option<Vec<String>>) {
+    /// Add a message with optional image attachments
+    pub fn add_message_with_images(
+        &mut self,
+        role: MessageRole,
+        content: String,
+        images: Option<Vec<String>>,
+    ) {
         let mut message = match role {
             MessageRole::User => ChatMessage::user(content),
             MessageRole::Assistant => ChatMessage::assistant(content),
@@ -163,12 +134,7 @@ impl App {
     }
 
     /// Add a tool result message
-    pub fn add_tool_result(
-        &mut self,
-        tool_call_id: String,
-        tool_name: String,
-        content: String,
-    ) {
+    pub fn add_tool_result(&mut self, tool_call_id: String, tool_name: String, content: String) {
         let message = ChatMessage::tool(tool_call_id, tool_name, content);
         self.commit_message(message);
     }
@@ -241,7 +207,11 @@ impl App {
         msg: impl Into<String>,
         context: impl Into<String>,
     ) {
-        self.log_error(ErrorEntry::with_context(severity, msg.into(), context.into()));
+        self.log_error(ErrorEntry::with_context(
+            severity,
+            msg.into(),
+            context.into(),
+        ));
     }
 
     /// Get recent errors
@@ -260,59 +230,73 @@ impl App {
 
     // ===== Title Generation =====
 
-    /// Generate conversation title from current messages
-    pub async fn generate_conversation_title(&mut self) {
-        if self.session_state.conversation_title.is_some() || self.session_state.messages.len() < 2 {
-            return;
+    /// Spawn title generation as a background task (non-blocking).
+    /// Returns a JoinHandle the caller can poll with `is_finished()`.
+    pub fn spawn_title_generation(&self) -> Option<tokio::task::JoinHandle<Option<String>>> {
+        if self.session_state.conversation_title.is_some() || self.session_state.messages.len() < 2
+        {
+            return None;
         }
 
-        let mut conversation_summary = String::new();
-        for (i, msg) in self.session_state.messages.iter().take(4).enumerate() {
-            let role = match msg.role {
-                MessageRole::User => "User",
-                MessageRole::Assistant => "Assistant",
-                MessageRole::System | MessageRole::Tool => continue,
+        let mut summary = String::new();
+        for msg in self
+            .session_state
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::User | MessageRole::Assistant))
+            .take(4)
+        {
+            let role = if msg.role == MessageRole::User {
+                "User"
+            } else {
+                "Assistant"
             };
-            conversation_summary.push_str(&format!(
+            summary.push_str(&format!(
                 "{}: {}\n\n",
                 role,
                 msg.content.chars().take(200).collect::<String>()
             ));
-            if i >= 3 { break; }
         }
 
-        let title_prompt = format!(
-            "Based on this conversation, generate a short, descriptive title (2-4 words maximum, no quotes):\n\n{}\n\nTitle:",
-            conversation_summary
-        );
+        let model = self.model_state.model.clone();
+        let mut config = self.model_state.build_config();
+        config.thinking_enabled = Some(false);
 
-        let messages = vec![ChatMessage::user(title_prompt)];
+        Some(tokio::spawn(async move {
+            let prompt = format!(
+                "Based on this conversation, generate a short, descriptive title (2-4 words maximum, no quotes):\n\n{}\n\nTitle:",
+                summary
+            );
+            let buf = Arc::new(tokio::sync::Mutex::new(String::new()));
+            let buf_clone = Arc::clone(&buf);
+            let callback: StreamCallback = Arc::new(move |chunk: &str| {
+                if let Ok(mut t) = buf_clone.try_lock() {
+                    t.push_str(chunk);
+                }
+            });
 
-        let title_string = Arc::new(tokio::sync::Mutex::new(String::new()));
-        let title_clone = Arc::clone(&title_string);
-
-        let callback: StreamCallback = Arc::new(move |chunk: &str| {
-            if let Ok(mut title) = title_clone.try_lock() {
-                title.push_str(chunk);
+            let model = model.read().await;
+            if model
+                .chat(&[ChatMessage::user(prompt)], &config, Some(callback))
+                .await
+                .is_ok()
+            {
+                let raw = buf.lock().await;
+                let title: String = raw
+                    .lines()
+                    .next()
+                    .unwrap_or(&raw)
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'' || c == '.' || c == ',')
+                    .chars()
+                    .take(50)
+                    .collect();
+                if !title.is_empty() {
+                    return Some(title);
+                }
             }
-        });
-
-        let model = self.model_state.model.write().await;
-        let config = self.model_state.build_config();
-
-        if model.chat(&messages, &config, Some(callback)).await.is_ok() {
-            let final_title = title_string.lock().await;
-            let title = final_title.lines().next().unwrap_or(&final_title)
-                .trim()
-                .trim_matches(|c| c == '"' || c == '\'' || c == '.' || c == ',')
-                .chars()
-                .take(50)
-                .collect::<String>();
-
-            if !title.is_empty() {
-                self.session_state.conversation_title = Some(title);
-            }
-        }
+            None
+        }))
     }
 
     // ===== Scrolling =====
@@ -333,18 +317,34 @@ impl App {
 
     // ===== Message History =====
 
-    /// Build message history for model API calls
-    /// Includes User, Assistant, and Tool messages (for proper agent loop)
-    pub fn build_message_history(&self) -> Vec<ChatMessage> {
-        self.session_state.messages
+    /// Filter and prepare messages for model API calls.
+    /// Includes User, Assistant, and Tool messages for proper agent loop.
+    /// Injects timestamp context into User messages for the model's temporal awareness.
+    fn prepare_api_messages(&self) -> Vec<ChatMessage> {
+        self.session_state
+            .messages
             .iter()
             .filter(|msg| {
                 msg.role == MessageRole::User
                     || msg.role == MessageRole::Assistant
                     || msg.role == MessageRole::Tool
             })
-            .cloned()
+            .map(|msg| {
+                if msg.role == MessageRole::User {
+                    let ts = msg.timestamp.format("%Y-%m-%d %H:%M:%S %Z").to_string();
+                    let mut m = msg.clone();
+                    m.content = format!("[Sent at: {}]\n{}", ts, m.content);
+                    m
+                } else {
+                    msg.clone()
+                }
+            })
             .collect()
+    }
+
+    /// Build message history for model API calls (all messages, no truncation)
+    pub fn build_message_history(&self) -> Vec<ChatMessage> {
+        self.prepare_api_messages()
     }
 
     pub fn build_managed_message_history(
@@ -357,18 +357,7 @@ impl App {
         let tokenizer = Tokenizer::new(&self.model_state.model_name);
         let available_tokens = max_context_tokens.saturating_sub(reserve_tokens);
 
-        // Include User, Assistant, and Tool messages for proper agent loop
-        let all_messages: Vec<ChatMessage> = self
-            .session_state
-            .messages
-            .iter()
-            .filter(|msg| {
-                msg.role == MessageRole::User
-                    || msg.role == MessageRole::Assistant
-                    || msg.role == MessageRole::Tool
-            })
-            .cloned()
-            .collect();
+        let all_messages = self.prepare_api_messages();
 
         if all_messages.is_empty() {
             return Vec::new();
@@ -439,11 +428,12 @@ impl App {
 
     pub fn save_conversation(&mut self) -> anyhow::Result<()> {
         if let Some(ref manager) = self.session_state.conversation_manager
-            && let Some(ref mut conv) = self.session_state.current_conversation {
-                conv.messages = self.session_state.messages.clone();
-                manager.save_conversation(conv)?;
-                self.set_status("Conversation saved");
-            }
+            && let Some(ref mut conv) = self.session_state.current_conversation
+        {
+            conv.messages = self.session_state.messages.clone();
+            manager.save_conversation(conv)?;
+            self.set_status("Conversation saved");
+        }
         Ok(())
     }
 
@@ -451,72 +441,146 @@ impl App {
         if self.session_state.messages.is_empty() {
             return;
         }
-        if let Err(e) = self.save_conversation() {
-            warn!("Failed to auto-save conversation: {}", e);
+        if let Some(ref manager) = self.session_state.conversation_manager
+            && let Some(ref mut conv) = self.session_state.current_conversation
+        {
+            conv.messages = self.session_state.messages.clone();
+            let conv_clone = conv.clone();
+            let manager_clone = manager.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = manager_clone.save_conversation(&conv_clone) {
+                    tracing::warn!("Failed to auto-save conversation: {}", e);
+                }
+            });
         }
     }
 
     // ===== Generation State Transitions =====
 
     pub fn start_generation(&mut self, abort_handle: tokio::task::AbortHandle) {
-        // Clear accumulated tool calls from any previous generation
-        self.operation_state.accumulated_tool_calls.clear();
-
         self.app_state = AppState::Generating {
             status: GenerationStatus::Sending,
             start_time: std::time::Instant::now(),
             tokens_received: 0,
             abort_handle: Some(abort_handle),
+            response_buffer: String::with_capacity(8192),
         };
     }
 
+    /// Update the abort handle for a new model call within the same turn.
+    /// Keeps the existing start_time and token count (cumulative for the turn).
+    pub fn update_abort_handle(&mut self, abort_handle: tokio::task::AbortHandle) {
+        if let AppState::Generating {
+            abort_handle: ref mut existing,
+            ..
+        } = self.app_state
+        {
+            *existing = Some(abort_handle);
+        }
+    }
+
+    /// Reset status to Sending for a new model call within the same turn.
+    pub fn transition_to_sending(&mut self) {
+        if let AppState::Generating { status, .. } = &mut self.app_state {
+            *status = GenerationStatus::Sending;
+        }
+    }
+
     pub fn transition_to_thinking(&mut self) {
-        if let AppState::Generating { start_time, tokens_received, ref abort_handle, .. } = self.app_state {
-            self.app_state = AppState::Generating {
-                status: GenerationStatus::Thinking,
-                start_time,
-                tokens_received,
-                abort_handle: abort_handle.clone(),
-            };
+        if let AppState::Generating { status, .. } = &mut self.app_state {
+            *status = GenerationStatus::Thinking;
         }
     }
 
     pub fn transition_to_streaming(&mut self) {
-        if let AppState::Generating { start_time, tokens_received, ref abort_handle, .. } = self.app_state {
-            self.app_state = AppState::Generating {
-                status: GenerationStatus::Streaming,
-                start_time,
-                tokens_received,
-                abort_handle: abort_handle.clone(),
-            };
+        if let AppState::Generating { status, .. } = &mut self.app_state {
+            *status = GenerationStatus::Streaming;
         }
     }
 
-    /// Set the final token count from Ollama's actual response
+    /// Add tokens from a completed model call (accumulates across the turn)
     pub fn set_final_tokens(&mut self, count: usize) {
-        if let AppState::Generating { status, start_time, ref abort_handle, .. } = self.app_state {
-            self.app_state = AppState::Generating {
-                status,
-                start_time,
-                tokens_received: count,
-                abort_handle: abort_handle.clone(),
-            };
-            self.session_state.add_tokens(count);
+        if let AppState::Generating {
+            tokens_received, ..
+        } = &mut self.app_state
+        {
+            *tokens_received += count;
         }
+        self.session_state.add_tokens(count);
     }
 
     pub fn stop_generation(&mut self) {
         self.app_state = AppState::Idle;
     }
 
-    pub fn abort_generation(&mut self) -> Option<tokio::task::AbortHandle> {
-        if let AppState::Generating { abort_handle, .. } = &mut self.app_state {
+    pub fn abort_generation(&mut self) -> (Option<tokio::task::AbortHandle>, String) {
+        if let AppState::Generating {
+            abort_handle,
+            response_buffer,
+            ..
+        } = &mut self.app_state
+        {
             let handle = abort_handle.take();
+            let buffer = std::mem::take(response_buffer);
             self.app_state = AppState::Idle;
-            handle
+            (handle, buffer)
         } else {
-            None
+            (None, String::new())
         }
     }
 
+    // ===== Response Buffer Accessors =====
+
+    /// Append text to the response buffer. No-op if not generating.
+    /// Enforces MAX_RESPONSE_CHARS size limit.
+    pub fn push_response(&mut self, text: &str) {
+        if let AppState::Generating {
+            response_buffer, ..
+        } = &mut self.app_state
+        {
+            response_buffer.push_str(text);
+            if response_buffer.len() > crate::constants::WEB_CONTENT_MAX_CHARS * 80 {
+                // 400k chars limit (MAX_RESPONSE_CHARS from stream_handler)
+                let end = response_buffer.floor_char_boundary(400_000);
+                response_buffer.truncate(end);
+                response_buffer
+                    .push_str("\n\n[TRUNCATED: Response exceeded size limit]\n");
+                self.set_status("[WARNING] Response truncated (size limit reached)");
+            }
+        }
+    }
+
+    /// Get response buffer length (0 if not generating)
+    pub fn response_len(&self) -> usize {
+        if let AppState::Generating {
+            response_buffer, ..
+        } = &self.app_state
+        {
+            response_buffer.len()
+        } else {
+            0
+        }
+    }
+
+    /// Take the response buffer, leaving it empty. Returns empty string if not generating.
+    pub fn take_response(&mut self) -> String {
+        if let AppState::Generating {
+            response_buffer, ..
+        } = &mut self.app_state
+        {
+            std::mem::take(response_buffer)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Clear the response buffer (for per-model-call reset within a turn)
+    pub fn clear_response(&mut self) {
+        if let AppState::Generating {
+            response_buffer, ..
+        } = &mut self.app_state
+        {
+            response_buffer.clear();
+        }
+    }
 }

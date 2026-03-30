@@ -1,8 +1,10 @@
 //! Input state management
 //!
-//! User input buffer and cursor handling.
+//! User input buffer, cursor handling, and input history navigation.
 
-/// Input state - user input buffer and cursor
+use std::collections::VecDeque;
+
+/// Input state - user input buffer, cursor, and history
 ///
 /// All cursor positions are byte offsets that are guaranteed to sit on
 /// UTF-8 char boundaries. Methods navigate by whole characters, not
@@ -12,6 +14,12 @@ pub struct InputBuffer {
     pub content: String,
     /// Cursor position as a **byte offset** (always on a char boundary)
     pub cursor_position: usize,
+    /// Input history for arrow key navigation (persisted across sessions)
+    pub history: VecDeque<String>,
+    /// Current position in history (None = editing current input, Some(i) = viewing history[i])
+    pub history_index: Option<usize>,
+    /// Saved input when navigating away from current draft
+    pub history_buffer: String,
 }
 
 impl InputBuffer {
@@ -20,7 +28,15 @@ impl InputBuffer {
         Self {
             content: String::new(),
             cursor_position: 0,
+            history: VecDeque::new(),
+            history_index: None,
+            history_buffer: String::new(),
         }
+    }
+
+    /// Load persisted input history (from a resumed conversation)
+    pub fn load_history(&mut self, history: VecDeque<String>) {
+        self.history = history;
     }
 
     /// Clear the input buffer
