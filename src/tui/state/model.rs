@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::models::{Model, ModelConfig};
+use crate::models::{Model, ModelConfig, OllamaOptions};
 
 /// Model state - LLM configuration and identity
 pub struct ModelState {
@@ -26,6 +26,8 @@ pub struct ModelState {
     pub temperature: f32,
     /// Max tokens from app config
     pub max_tokens: usize,
+    /// Ollama-specific hardware options from app config
+    pub ollama_options: OllamaOptions,
 }
 
 impl ModelState {
@@ -39,6 +41,7 @@ impl ModelState {
             vision_supported: None,
             temperature: crate::constants::DEFAULT_TEMPERATURE,
             max_tokens: crate::constants::DEFAULT_MAX_TOKENS,
+            ollama_options: OllamaOptions::default(),
         }
     }
 
@@ -54,7 +57,7 @@ impl ModelState {
             Some(enabled) => {
                 self.thinking_enabled = Some(!enabled);
                 self.thinking_enabled
-            }
+            },
             None => None, // Model doesn't support thinking, can't toggle
         }
     }
@@ -72,12 +75,26 @@ impl ModelState {
 
     /// Build a ModelConfig for API calls using current model state
     pub fn build_config(&self) -> ModelConfig {
-        ModelConfig {
+        let mut config = ModelConfig {
             model: self.model_id.clone(),
-            thinking_enabled: self.is_thinking_active(),
+            thinking_enabled: self.thinking_enabled,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             ..ModelConfig::default()
+        };
+        // Wire Ollama-specific options from app config
+        if let Some(v) = self.ollama_options.num_gpu {
+            config.set_backend_option("ollama".into(), "num_gpu".into(), v.to_string());
         }
+        if let Some(v) = self.ollama_options.num_ctx {
+            config.set_backend_option("ollama".into(), "num_ctx".into(), v.to_string());
+        }
+        if let Some(v) = self.ollama_options.num_thread {
+            config.set_backend_option("ollama".into(), "num_thread".into(), v.to_string());
+        }
+        if let Some(v) = self.ollama_options.numa {
+            config.set_backend_option("ollama".into(), "numa".into(), v.to_string());
+        }
+        config
     }
 }

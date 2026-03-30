@@ -1,7 +1,7 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use ratatui::macros::{line, span};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::macros::{line, span};
 
 /// Parse markdown and convert to styled ratatui Lines
 pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
@@ -32,7 +32,6 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         // Start new line for headers
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-
                         }
 
                         // Add blank line before heading (except for first heading)
@@ -76,7 +75,6 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         list_depth += 1;
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-
                         }
                         style_stack.last().copied().unwrap_or_default()
                     },
@@ -121,7 +119,6 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     Tag::BlockQuote(_) => {
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-
                         }
                         current_line_spans
                             .push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
@@ -139,7 +136,6 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     TagEnd::Heading(_) => {
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-
                         }
                         // Don't add blank line here - let lists flow directly from headings
                         // Blank line before next heading is added by Tag::Heading
@@ -147,7 +143,6 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     TagEnd::Paragraph | TagEnd::Item => {
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-
                         }
                     },
                     TagEnd::CodeBlock => {
@@ -240,7 +235,6 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     TagEnd::BlockQuote(_) => {
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-
                         }
                     },
                     _ => {},
@@ -269,7 +263,6 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
             Event::SoftBreak | Event::HardBreak => {
                 if !current_line_spans.is_empty() {
                     lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-
                 }
             },
             _ => {},
@@ -282,4 +275,144 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: flatten all spans in all lines into a single string
+    fn lines_to_text(lines: &[Line]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_plain_text() {
+        let lines = parse_markdown("Hello, world!");
+        assert!(!lines.is_empty());
+        assert!(lines_to_text(&lines).contains("Hello, world!"));
+    }
+
+    #[test]
+    fn test_heading_levels() {
+        let lines = parse_markdown("# H1\n## H2\n### H3");
+        let text = lines_to_text(&lines);
+        assert!(text.contains("H1"));
+        assert!(text.contains("H2"));
+        assert!(text.contains("H3"));
+
+        // Headings should have different colors (just check they parse without panic)
+        assert!(lines.len() >= 3);
+    }
+
+    #[test]
+    fn test_code_block() {
+        let input = "```rust\nfn main() {}\n```";
+        let lines = parse_markdown(input);
+        let text = lines_to_text(&lines);
+        assert!(text.contains("fn main() {}"));
+        // Language label should appear
+        assert!(text.contains("rust"));
+    }
+
+    #[test]
+    fn test_code_block_no_lang() {
+        let input = "```\nsome code\n```";
+        let lines = parse_markdown(input);
+        let text = lines_to_text(&lines);
+        assert!(text.contains("some code"));
+    }
+
+    #[test]
+    fn test_inline_code() {
+        let lines = parse_markdown("Use `cargo build` to compile");
+        let text = lines_to_text(&lines);
+        assert!(text.contains("cargo build"));
+    }
+
+    #[test]
+    fn test_unordered_list() {
+        let input = "- Item 1\n- Item 2\n- Item 3";
+        let lines = parse_markdown(input);
+        let text = lines_to_text(&lines);
+        assert!(text.contains("Item 1"));
+        assert!(text.contains("Item 2"));
+        assert!(text.contains("Item 3"));
+        // Should have bullet characters
+        assert!(text.contains("•"));
+    }
+
+    #[test]
+    fn test_nested_list() {
+        let input = "- Outer\n  - Inner";
+        let lines = parse_markdown(input);
+        let text = lines_to_text(&lines);
+        assert!(text.contains("Outer"));
+        assert!(text.contains("Inner"));
+    }
+
+    #[test]
+    fn test_bold_and_italic() {
+        let lines = parse_markdown("**bold** and *italic*");
+        let text = lines_to_text(&lines);
+        assert!(text.contains("bold"));
+        assert!(text.contains("italic"));
+    }
+
+    #[test]
+    fn test_link() {
+        let lines = parse_markdown("[click here](https://example.com)");
+        let text = lines_to_text(&lines);
+        assert!(text.contains("click here"));
+        assert!(text.contains("["));
+        assert!(text.contains("]"));
+    }
+
+    #[test]
+    fn test_blockquote() {
+        let lines = parse_markdown("> Quoted text");
+        let text = lines_to_text(&lines);
+        assert!(text.contains("Quoted text"));
+        assert!(text.contains("│"));
+    }
+
+    #[test]
+    fn test_table() {
+        let input = "| Header1 | Header2 |\n|---------|--------|\n| Cell1   | Cell2  |";
+        let lines = parse_markdown(input);
+        let text = lines_to_text(&lines);
+        assert!(text.contains("Header1"));
+        assert!(text.contains("Cell1"));
+        assert!(text.contains("|"));
+    }
+
+    #[test]
+    fn test_strikethrough() {
+        let lines = parse_markdown("~~deleted~~");
+        let text = lines_to_text(&lines);
+        assert!(text.contains("deleted"));
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let lines = parse_markdown("");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_paragraphs() {
+        let lines = parse_markdown("Paragraph 1\n\nParagraph 2");
+        let text = lines_to_text(&lines);
+        assert!(text.contains("Paragraph 1"));
+        assert!(text.contains("Paragraph 2"));
+    }
 }

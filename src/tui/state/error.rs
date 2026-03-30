@@ -58,12 +58,7 @@ impl ErrorEntry {
 
     pub fn display(&self) -> String {
         match &self.context {
-            Some(ctx) => format!(
-                "[{}] {} - {}",
-                self.severity.display(),
-                self.message,
-                ctx
-            ),
+            Some(ctx) => format!("[{}] {} - {}", self.severity.display(), self.message, ctx),
             None => format!("[{}] {}", self.severity.display(), self.message),
         }
     }

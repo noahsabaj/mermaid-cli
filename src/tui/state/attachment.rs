@@ -2,7 +2,7 @@
 //!
 //! Manages pending image attachments before they are sent with a message.
 
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use std::path::PathBuf;
 
 /// A single image attachment ready to send
@@ -46,7 +46,7 @@ impl AttachmentState {
         let base64_data = general_purpose::STANDARD.encode(image_bytes);
 
         // Write temp file for preview
-        let temp_path = PathBuf::from(format!("/tmp/mermaid-img-{}.{}", id, format));
+        let temp_path = std::env::temp_dir().join(format!("mermaid-img-{}.{}", id, format));
         let _ = std::fs::write(&temp_path, image_bytes);
 
         self.attachments.push(ImageAttachment {
@@ -101,7 +101,11 @@ impl AttachmentState {
         if self.attachments.is_empty() {
             return None;
         }
-        let data: Vec<String> = self.attachments.iter().map(|a| a.base64_data.clone()).collect();
+        let data: Vec<String> = self
+            .attachments
+            .iter()
+            .map(|a| a.base64_data.clone())
+            .collect();
         self.clear();
         Some(data)
     }

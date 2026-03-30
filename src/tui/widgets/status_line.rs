@@ -13,7 +13,6 @@ use crate::tui::theme::Theme;
 /// Props for StatusLineWidget (stateless widget showing generation progress)
 pub struct StatusLineWidget<'a> {
     pub status: GenerationStatus,
-    pub custom_status: Option<&'a String>,
     pub elapsed_secs: u64,
     pub tokens_received: usize,
     /// Whether tokens_received is an estimate (show ~ prefix)
@@ -35,44 +34,36 @@ impl<'a> Widget for StatusLineWidget<'a> {
             return;
         }
 
-        // Build the status line
-        // Use custom status if provided, otherwise use the default status text
-        let status_text = if let Some(custom) = self.custom_status {
-            custom.as_str()
-        } else {
-            self.status.display_text()
-        };
+        let status_text = self.status.display_text();
 
         let info_color = self.theme.colors.info.to_color();
 
         // Determine arrow direction based on state
         let (arrow, flow_direction) = match self.status {
-            GenerationStatus::Sending |
-            GenerationStatus::Initializing |
-            GenerationStatus::Thinking => ("↑ ", "upstream"),
+            GenerationStatus::Sending | GenerationStatus::Thinking => ("↑ ", "upstream"),
             GenerationStatus::Streaming => ("↓ ", "downstream"),
             GenerationStatus::Idle => ("", ""),
         };
 
         let spans = vec![
             // Arrow indicator showing message direction (cyan)
-            Span::styled(
-                arrow,
-                Style::new().fg(info_color),
-            ),
+            Span::styled(arrow, Style::new().fg(info_color)),
             // Status text with ellipsis (cyan)
-            Span::styled(
-                format!("{}... ", status_text),
-                Style::new().fg(info_color),
-            ),
+            Span::styled(format!("{}... ", status_text), Style::new().fg(info_color)),
             // Metadata in parentheses (dimmed)
             // Show ~ prefix when tokens are estimated (during streaming)
             Span::styled(
-                format!("(esc to interrupt • {}s • {} {}{} tokens)",
+                format!(
+                    "(esc to interrupt • {}s • {} {}{} tokens)",
                     self.elapsed_secs,
-                    if flow_direction == "downstream" { "↓" } else { "↑" },
+                    if flow_direction == "downstream" {
+                        "↓"
+                    } else {
+                        "↑"
+                    },
                     if self.tokens_estimated { "~" } else { "" },
-                    self.tokens_received),
+                    self.tokens_received
+                ),
                 Style::new()
                     .fg(self.theme.colors.text_secondary.to_color())
                     .dim(),
@@ -92,14 +83,12 @@ impl<'a> Widget for StatusLineWidget<'a> {
                 format!("> {}", queued)
             };
 
-            lines.push(Line::from(vec![
-                Span::styled(
-                    display_msg,
-                    Style::new()
-                        .fg(self.theme.colors.text_primary.to_color())
-                        .bg(ratatui::style::Color::Rgb(60, 60, 80)), // Subtle purple highlight
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                display_msg,
+                Style::new()
+                    .fg(self.theme.colors.text_primary.to_color())
+                    .bg(ratatui::style::Color::Rgb(60, 60, 80)), // Subtle purple highlight
+            )]));
         }
 
         let paragraph = Paragraph::new(lines);

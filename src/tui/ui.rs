@@ -2,9 +2,9 @@ use anyhow::Result;
 use crossterm::{
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 use tokio::sync::mpsc;
 
@@ -25,7 +25,12 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -33,14 +38,19 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     terminal.clear()?;
 
     // Create channel for streaming responses
-    let (tx, mut rx) = mpsc::channel::<String>(1000);
+    let (tx, mut rx) = mpsc::channel::<super::stream_event::StreamEvent>(1000);
 
     // Run the UI loop using the loop coordinator
     let res = super::loop_coordinator::run_app_loop(&mut terminal, &mut app, tx, &mut rx).await;
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     res

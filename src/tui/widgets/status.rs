@@ -46,7 +46,10 @@ impl<'a> Widget for StatusWidget<'a> {
                 format!("{}@{}", username, hostname),
                 Style::new().fg(ratatui::style::Color::Green).bold(),
             ),
-            Span::styled(":", Style::new().fg(self.theme.colors.text_primary.to_color())),
+            Span::styled(
+                ":",
+                Style::new().fg(self.theme.colors.text_primary.to_color()),
+            ),
             Span::styled(
                 self.working_dir,
                 Style::new().fg(ratatui::style::Color::Cyan),

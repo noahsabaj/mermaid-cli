@@ -9,7 +9,6 @@ use std::time::Instant;
 pub struct StatusState {
     pub status_message: Option<String>,
     pub status_timestamp: Option<Instant>,
-    pub custom_status: Option<String>,
 }
 
 impl StatusState {
@@ -17,7 +16,6 @@ impl StatusState {
         Self {
             status_message: None,
             status_timestamp: None,
-            custom_status: None,
         }
     }
 

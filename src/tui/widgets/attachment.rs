@@ -50,12 +50,13 @@ impl<'a> Widget for AttachmentWidget<'a> {
                     .add_modifier(Modifier::BOLD)
             };
 
+            spans.push(Span::styled(format!("[Image #{}]", i + 1), label_style));
             spans.push(Span::styled(
-                format!("[Image #{}]", i + 1),
-                label_style,
-            ));
-            spans.push(Span::styled(
-                format!(" ({}, {})  ", attachment.format.to_uppercase(), size_display),
+                format!(
+                    " ({}, {})  ",
+                    attachment.format.to_uppercase(),
+                    size_display
+                ),
                 hint_style,
             ));
         }

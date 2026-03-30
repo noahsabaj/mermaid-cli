@@ -213,9 +213,7 @@ impl<'a> StatefulWidget for InputWidget<'a> {
                 .border_style(Style::new().fg(border_color))
         };
 
-        let input = Paragraph::new(input_text)
-            .style(input_style)
-            .block(block);
+        let input = Paragraph::new(input_text).style(input_style).block(block);
 
         input.render(input_area, buf);
 
