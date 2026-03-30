@@ -24,59 +24,6 @@ pub trait Model: Send + Sync {
     /// Get the model identifier (e.g., "ollama/tinyllama")
     fn name(&self) -> &str;
 
-    /// Check if this is a local model (no external API calls)
-    fn is_local(&self) -> bool;
-
-    /// Check if the model backend is available and healthy
-    async fn health_check(&self) -> Result<()>;
-
     /// List available models from this backend
     async fn list_models(&self) -> Result<Vec<String>>;
-
-    /// Check if a specific model is available
-    ///
-    /// Matches exact names and implicit `:latest` tags:
-    /// - "llama3" matches "llama3:latest" (bare name matches with :latest tag)
-    /// - "llama3:latest" matches "llama3:latest" (exact)
-    /// - "llama3:7b" does NOT match "llama3:latest" (different tags)
-    async fn has_model(&self, model_name: &str) -> Result<bool> {
-        let models = self.list_models().await?;
-        Ok(models.iter().any(|m| {
-            // Exact match
-            m == model_name
-                // Bare name matches model with :latest tag
-                || (!model_name.contains(':') && *m == format!("{}:latest", model_name))
-                // Model with :latest tag matches bare name
-                || (!m.contains(':') && model_name == format!("{}:latest", m))
-        }))
-    }
-
-    /// Get model capabilities
-    fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities::default()
-    }
-}
-
-/// Model capabilities (what the model/backend supports)
-#[derive(Debug, Clone)]
-pub struct ModelCapabilities {
-    /// Maximum context length supported
-    pub max_context_length: usize,
-    /// Supports streaming responses
-    pub supports_streaming: bool,
-    /// Supports function/tool calling
-    pub supports_functions: bool,
-    /// Supports vision/images
-    pub supports_vision: bool,
-}
-
-impl Default for ModelCapabilities {
-    fn default() -> Self {
-        Self {
-            max_context_length: 4096,
-            supports_streaming: true,
-            supports_functions: false,
-            supports_vision: false,
-        }
-    }
 }

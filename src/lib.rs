@@ -11,6 +11,6 @@ pub mod session;
 pub mod tui;
 pub mod utils;
 
-pub use app::{load_config, persist_last_model, Config};
+pub use app::{Config, load_config, persist_last_model};
 pub use models::{Model, ModelFactory};
 pub use tui::run_ui;

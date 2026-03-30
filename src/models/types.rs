@@ -47,7 +47,11 @@ impl ChatMessage {
     }
 
     /// Create a tool result message
-    pub fn tool(tool_call_id: impl Into<String>, tool_name: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn tool(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             role: MessageRole::Tool,
             content: content.into(),
@@ -84,7 +88,11 @@ impl ChatMessage {
 
     /// Builder: attach tool calls
     pub fn with_tool_calls(mut self, tool_calls: Vec<crate::models::tool_call::ToolCall>) -> Self {
-        self.tool_calls = if tool_calls.is_empty() { None } else { Some(tool_calls) };
+        self.tool_calls = if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        };
         self
     }
 
@@ -102,17 +110,20 @@ impl ChatMessage {
 
         // Find thinking block boundaries
         if let Some(thinking_start) = text.find("Thinking...")
-            && let Some(thinking_end) = text.find("...done thinking.") {
-                // Extract thinking content (everything between markers)
-                let thinking_content_start = thinking_start + "Thinking...".len();
-                let thinking_text = text[thinking_content_start..thinking_end].trim().to_string();
+            && let Some(thinking_end) = text.find("...done thinking.")
+        {
+            // Extract thinking content (everything between markers)
+            let thinking_content_start = thinking_start + "Thinking...".len();
+            let thinking_text = text[thinking_content_start..thinking_end]
+                .trim()
+                .to_string();
 
-                // Extract answer (everything after thinking block)
-                let answer_start = thinking_end + "...done thinking.".len();
-                let answer_text = text[answer_start..].trim().to_string();
+            // Extract answer (everything after thinking block)
+            let answer_start = thinking_end + "...done thinking.".len();
+            let answer_text = text[answer_start..].trim().to_string();
 
-                return (Some(thinking_text), answer_text);
-            }
+            return (Some(thinking_text), answer_text);
+        }
 
         // If we found "Thinking..." but not the end marker, treat it all as thinking in progress
         if let Some(thinking_start) = text.find("Thinking...") {
@@ -195,8 +206,7 @@ mod tests {
 
     #[test]
     fn test_chat_message_builders() {
-        let msg = ChatMessage::user("test")
-            .with_images(vec!["base64data".to_string()]);
+        let msg = ChatMessage::user("test").with_images(vec!["base64data".to_string()]);
         assert_eq!(msg.images, Some(vec!["base64data".to_string()]));
     }
 
