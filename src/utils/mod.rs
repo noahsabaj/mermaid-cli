@@ -5,14 +5,18 @@
 mod checks;
 mod logger;
 mod mutex_ext;
+mod open;
 mod retry;
+mod text;
 mod timestamp;
 mod tokenizer;
 
 // Public re-exports - the ONLY way to access utils functionality
-pub use checks::{check_git_repo, check_ollama_available, check_ollama_model, CheckResult};
+pub use checks::{CheckResult, check_ollama_available, check_ollama_model};
 pub use logger::{init_logger, log_debug, log_error, log_info, log_progress, log_warn};
-pub use mutex_ext::{lock_arc_mutex_safe, MutexExt};
-pub use retry::{retry_async, RetryConfig};
+pub use mutex_ext::{MutexExt, lock_arc_mutex_safe};
+pub use open::open_file;
+pub use retry::{RetryConfig, retry_async};
+pub use text::{format_tokens, truncate_content, truncate_web_content};
 pub use timestamp::format_relative_timestamp;
 pub use tokenizer::Tokenizer;

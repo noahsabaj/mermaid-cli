@@ -3,13 +3,13 @@
 //! These checks run BEFORE operations to provide clear, early error messages
 //! rather than cryptic failures during execution.
 
-use std::path::Path;
 use std::time::Duration;
 
-use super::retry::{retry_async, RetryConfig};
+use super::retry::{RetryConfig, retry_async};
 
 /// Check result with actionable error message
 #[derive(Debug)]
+#[must_use]
 pub struct CheckResult {
     pub available: bool,
     pub message: String,
@@ -49,7 +49,7 @@ pub async fn check_ollama_available(host: &str, port: u16) -> CheckResult {
         Ok(c) => c,
         Err(e) => {
             return CheckResult::fail(format!("Failed to create HTTP client: {}", e));
-        }
+        },
     };
 
     // Retry config: 3 attempts with quick backoff (Ollama might be starting)
@@ -114,52 +114,8 @@ pub async fn check_ollama_available(host: &str, port: u16) -> CheckResult {
                 )
             };
             CheckResult::fail(message)
-        }
+        },
     }
-}
-
-/// Check if the given path is inside a git repository
-///
-/// Returns early with a clear message if not in a git repo,
-/// rather than letting git operations fail with confusing errors.
-pub fn check_git_repo(path: Option<&Path>) -> CheckResult {
-    let check_path = path.unwrap_or_else(|| Path::new("."));
-
-    // Walk up the directory tree looking for .git
-    let mut current = if check_path.is_absolute() {
-        check_path.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(check_path),
-            Err(e) => {
-                return CheckResult::fail(format!("Cannot determine current directory: {}", e));
-            }
-        }
-    };
-
-    loop {
-        let git_dir = current.join(".git");
-        if git_dir.exists() {
-            return CheckResult::ok();
-        }
-
-        match current.parent() {
-            Some(parent) => current = parent.to_path_buf(),
-            None => break,
-        }
-    }
-
-    let path_display = path
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "current directory".to_string());
-
-    CheckResult::fail(format!(
-        "Not a git repository: {}\n\n\
-        Git operations require a git repository. Initialize one with:\n\
-          git init\n\n\
-        Or navigate to an existing repository.",
-        path_display
-    ))
 }
 
 /// Check if a specific model is available in Ollama
@@ -174,7 +130,7 @@ pub async fn check_ollama_model(host: &str, port: u16, model_name: &str) -> Chec
         Ok(c) => c,
         Err(e) => {
             return CheckResult::fail(format!("Failed to create HTTP client: {}", e));
-        }
+        },
     };
 
     // Retry config: 2 attempts (model listing should be quick)
@@ -247,7 +203,7 @@ pub async fn check_ollama_model(host: &str, port: u16, model_name: &str) -> Chec
             } else {
                 CheckResult::fail("Invalid response from Ollama: missing models list")
             }
-        }
+        },
         Err(e) => CheckResult::fail(e.to_string()),
     }
 }
@@ -255,32 +211,6 @@ pub async fn check_ollama_model(host: &str, port: u16, model_name: &str) -> Chec
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_check_git_repo_completes_without_panic() {
-        // Test that check_git_repo completes without panicking
-        // The result depends on where tests are run, so we just verify it works
-        let result = check_git_repo(None);
-        // Either available (in a git repo) or has an error message (not in a git repo)
-        assert!(result.available || !result.message.is_empty());
-    }
-
-    #[test]
-    fn test_check_git_repo_with_explicit_path() {
-        // Test with an explicit path
-        let result = check_git_repo(Some(Path::new("/tmp")));
-        // /tmp is unlikely to be a git repo, but check completes either way
-        assert!(result.available || !result.message.is_empty());
-    }
-
-    #[test]
-    fn test_check_git_repo_error_message_is_helpful() {
-        // When not in a git repo, error message should be helpful
-        let result = check_git_repo(Some(Path::new("/tmp")));
-        if !result.available {
-            assert!(result.message.contains("git init") || result.message.contains("Not a git repository"));
-        }
-    }
 
     #[test]
     fn test_check_result_ok() {

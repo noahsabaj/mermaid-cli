@@ -1,6 +1,6 @@
 [package]
 name = "mermaid-cli"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
 description = "Open-source AI pair programmer with agentic capabilities. Local-first with Ollama, native tool calling, and beautiful TUI."
@@ -51,16 +51,12 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "str
 bytes = "1.8"
 dotenvy = "0.15"  # Load .env files
 
-# Git
-git2 = { version = "0.20", features = ["vendored-openssl"] }
-
 # Additional utilities
 regex = "1.11"
 rustc-hash = "2.0"  # Faster non-cryptographic hash for HashMap
 base64 = "0.22"  # Base64 encoding for binary files (PDFs, images)
 
 [dev-dependencies]
-tempfile = "3.14"
 
 [profile.release]
 lto = true
