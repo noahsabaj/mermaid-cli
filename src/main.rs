@@ -2,9 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 
 use mermaid_cli::{
-    app::{load_config, persist_last_model},
+    app::{load_config, persist_last_model, resolve_model_id},
     cli::{Cli, Commands, OutputFormat},
-    ollama::{ensure_model as ensure_ollama_model, require_any_model},
+    ollama::ensure_model as ensure_ollama_model,
     runtime::{NonInteractiveRunner, Orchestrator},
     utils::init_logger,
 };
@@ -46,22 +46,7 @@ async fn run_non_interactive(
 
     // Determine model to use (CLI arg > last_used > default_model)
     let cli_model_provided = cli.model.is_some();
-    let model_id = if let Some(model) = &cli.model {
-        model.clone()
-    } else if let Some(last_model) = &config.last_used_model {
-        last_model.clone()
-    } else if !config.default_model.provider.is_empty()
-        && !config.default_model.name.is_empty()
-    {
-        format!(
-            "{}/{}",
-            config.default_model.provider, config.default_model.name
-        )
-    } else {
-        // No model configured - check if any models are available
-        let available = require_any_model().await?;
-        format!("ollama/{}", available[0])
-    };
+    let model_id = resolve_model_id(cli.model.as_deref(), &config).await?;
 
     // Validate model exists
     ensure_ollama_model(&model_id).await?;
@@ -75,23 +60,10 @@ async fn run_non_interactive(
     let effective_max_tokens = max_tokens.or(Some(config.non_interactive.max_tokens));
     let effective_no_execute = no_execute || config.non_interactive.no_execute;
 
-    // Get backend from config (clone to avoid borrow issues)
-    let backend_str = config.behavior.backend.clone();
-    let backend = if backend_str == "auto" {
-        None
-    } else {
-        Some(backend_str.as_str())
-    };
-
     // Create and run the non-interactive runner
-    let runner = NonInteractiveRunner::new(
-        model_id,
-        config,
-        effective_no_execute,
-        effective_max_tokens,
-        backend,
-    )
-    .await?;
+    let runner =
+        NonInteractiveRunner::new(model_id, config, effective_no_execute, effective_max_tokens)
+            .await?;
 
     // Execute the prompt
     let result = runner.execute(prompt).await?;

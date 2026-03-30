@@ -33,9 +33,11 @@
 
       myRustc = pkgs.rust-bin.nightly."2025-09-16".default;
 
-      rustPkgs = pkgs.rustBuilder.makePackageSet {
-        rustToolchain = myRustc;
-      };
+      # Requires cargo2nix overlay (currently commented out above).
+      # Uncomment the cargo2nix input and overlay to use this:
+      # rustPkgs = pkgs.rustBuilder.makePackageSet {
+      #   rustToolchain = myRustc;
+      # };
 
       # Use pre-built cargo from nixpkgs for Phase 1
       cargo = pkgs.cargo;

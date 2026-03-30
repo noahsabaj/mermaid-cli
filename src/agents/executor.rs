@@ -12,7 +12,11 @@ use crate::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 ///
 /// Returns ActionResult directly - errors are captured in ActionResult::Error.
 /// `timeout_secs` overrides the default 30-second timeout (capped at 300s).
-pub async fn execute_command(command: &str, working_dir: Option<&str>, timeout_secs: Option<u64>) -> ActionResult {
+pub async fn execute_command(
+    command: &str,
+    working_dir: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> ActionResult {
     // Security checks
     if contains_dangerous_command(command) {
         return ActionResult::Error {
@@ -47,7 +51,9 @@ pub async fn execute_command(command: &str, working_dir: Option<&str>, timeout_s
     }
 
     // Execute with timeout (default COMMAND_TIMEOUT_SECS, max COMMAND_MAX_TIMEOUT_SECS)
-    let secs = timeout_secs.unwrap_or(COMMAND_TIMEOUT_SECS).min(COMMAND_MAX_TIMEOUT_SECS);
+    let secs = timeout_secs
+        .unwrap_or(COMMAND_TIMEOUT_SECS)
+        .min(COMMAND_MAX_TIMEOUT_SECS);
     let timeout_duration = Duration::from_secs(secs);
 
     match timeout(timeout_duration, run_command(cmd)).await {
@@ -141,17 +147,22 @@ fn contains_dangerous_command(command: &str) -> bool {
         "rm -rf /",
         "rm -rf /*",
         "dd if=/dev/zero of=/",
+        "dd if=/dev/random of=/",
+        "dd if=/dev/urandom of=/",
         "mkfs.",
         "format c:",
         "> /dev/sda",
         "chmod -R 777 /",
         "chmod -R 000 /",
-        ":(){ :|:& };:", // Fork bomb
+        ":(){ :|:& };:", // Fork bomb (with spaces)
+        ":(){ :|:&};:",  // Fork bomb (no space before colon)
         "curl | bash",
         "curl | sh",
         "wget | bash",
         "wget | sh",
-        "nc -l", // Netcat listener
+        "nc -l",             // Netcat listener
+        "ncat -l",           // Nmap netcat listener
+        "socat tcp-listen:", // Socat listener
     ];
 
     let lower_command = command.to_lowercase();
@@ -171,7 +182,7 @@ fn contains_dangerous_command(command: &str) -> bool {
         ("/boot", false),
         ("/proc", false),
         ("/sys", false),
-        ("/dev/", true),  // Trailing slash: /dev/sda, /dev/null won't false-positive on "/dev" alone
+        ("/dev/", true), // Trailing slash: /dev/sda, /dev/null won't false-positive on "/dev" alone
         ("/home", false),
         ("C:\\Windows", false),
         ("C:\\Program Files", false),
@@ -251,8 +262,17 @@ mod tests {
         assert!(contains_dangerous_command("rm -rf /"));
         assert!(contains_dangerous_command("format c:"));
         assert!(contains_dangerous_command(":(){ :|:& };:"));
+        assert!(contains_dangerous_command(":(){ :|:&};:")); // No space variant
         assert!(!contains_dangerous_command("ls -la"));
         assert!(!contains_dangerous_command("cargo build"));
+
+        // Netcat/socat listeners
+        assert!(contains_dangerous_command("ncat -l 8080"));
+        assert!(contains_dangerous_command("socat tcp-listen:8080 -"));
+
+        // dd to devices
+        assert!(contains_dangerous_command("dd if=/dev/random of=/dev/sda"));
+        assert!(contains_dangerous_command("dd if=/dev/urandom of=/dev/sdb"));
 
         // False positives that should NOT be blocked
         assert!(!contains_dangerous_command(
@@ -274,8 +294,8 @@ mod tests {
         assert!(contains_dangerous_command("rm /home/user/file.txt"));
 
         // Home dir false positives that should NOT be blocked
-        assert!(!contains_dangerous_command("rm file~"));       // backup file suffix
-        assert!(!contains_dangerous_command("rm backup~"));     // backup file suffix
+        assert!(!contains_dangerous_command("rm file~")); // backup file suffix
+        assert!(!contains_dangerous_command("rm backup~")); // backup file suffix
         assert!(!contains_dangerous_command("ls ~/Documents")); // ls is not rm
     }
 }

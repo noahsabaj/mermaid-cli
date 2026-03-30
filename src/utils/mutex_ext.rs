@@ -48,14 +48,3 @@ pub fn lock_arc_mutex_safe<T>(mutex: &Arc<Mutex<T>>) -> std::sync::MutexGuard<'_
         },
     }
 }
-
-/// Helper to lock a mutex with expect-style error message
-#[macro_export]
-macro_rules! lock_or_panic {
-    ($mutex:expr, $msg:expr) => {
-        $mutex.lock().unwrap_or_else(|e| {
-            panic!("{}: mutex poisoned: {}", $msg, e);
-        })
-    };
-}
-

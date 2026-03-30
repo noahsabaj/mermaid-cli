@@ -3,14 +3,21 @@ use anyhow::Result;
 /// Token counting utility using character-based estimation
 /// Uses ~4 characters per token as a reasonable approximation
 pub struct Tokenizer {
-    model_name: String,
+    /// Base model name (provider prefix stripped at construction time)
+    base_model_name: String,
 }
 
 impl Tokenizer {
     /// Create a new tokenizer for the given model
     pub fn new(model_name: &str) -> Self {
+        let base = if let Some(idx) = model_name.find('/') {
+            // Safe: '/' is ASCII, so byte offset == char offset
+            &model_name[idx + 1..]
+        } else {
+            model_name
+        };
         Self {
-            model_name: model_name.to_string(),
+            base_model_name: base.to_lowercase(),
         }
     }
 
@@ -28,42 +35,54 @@ impl Tokenizer {
         Ok(total_chars.div_ceil(4))
     }
 
-    /// Get the maximum tokens for a model
+    /// Get the maximum context window for a model (in tokens).
+    ///
+    /// Focused on Ollama model families — the actual models Mermaid supports.
+    /// These are conservative defaults; Ollama may use different context sizes
+    /// depending on the specific model variant and user's num_ctx setting.
     pub fn get_max_tokens(&self) -> usize {
-        let model_name = self.get_base_model_name();
+        let model_name = &self.base_model_name;
 
-        if model_name.contains("gpt-4o")
-            || model_name.contains("gpt-4-turbo")
-            || model_name.contains("gpt-4-1106")
+        // Large-context models (128k+)
+        if model_name.contains("qwen3-coder")
+            || model_name.contains("qwen2.5-coder")
+            || model_name.contains("deepseek-v3")
+            || model_name.contains("deepseek-r1")
+            || model_name.contains("kimi")
         {
-            128000
-        } else if model_name.contains("gpt-4-32k") {
-            32768
-        } else if model_name.contains("gpt-4") {
-            8192
-        } else if model_name.contains("gpt-3.5-turbo-16k") {
-            16384
-        } else if model_name.contains("gpt-3.5-turbo") {
-            4096
-        } else if model_name.contains("claude-3") {
-            200000
-        } else if model_name.contains("claude") {
-            100000
-        } else if model_name.contains("llama-3") {
-            8192
-        } else if model_name.contains("llama-2") {
-            4096
-        } else if model_name.contains("codellama") {
-            16384
-        } else if model_name.contains("deepseek-coder") {
+            131072
+        }
+        // 64k context models
+        else if model_name.contains("deepseek-coder") || model_name.contains("command-r") {
             65536
-        } else if model_name.contains("qwen")
+        }
+        // 32k context models
+        else if model_name.contains("qwen")
             || model_name.contains("mistral")
             || model_name.contains("mixtral")
+            || model_name.contains("gemma2")
         {
             32768
+        }
+        // 16k context models
+        else if model_name.contains("codellama") || model_name.contains("phi") {
+            16384
+        }
+        // 8k context models (llama3 default)
+        else if model_name.contains("llama3")
+            || model_name.contains("llama-3")
+            || model_name.contains("gemma")
+        {
+            8192
+        }
+        // 4k context models (older)
+        else if model_name.contains("llama2")
+            || model_name.contains("llama-2")
+            || model_name.contains("tinyllama")
+        {
+            4096
         } else {
-            8192 // Conservative default
+            8192 // Conservative default for unknown models
         }
     }
 
@@ -71,15 +90,6 @@ impl Tokenizer {
     pub fn remaining_tokens(&self, used_tokens: usize) -> usize {
         let max_tokens = self.get_max_tokens();
         max_tokens.saturating_sub(used_tokens)
-    }
-
-    /// Get the base model name (strip provider prefix)
-    fn get_base_model_name(&self) -> String {
-        if let Some(idx) = self.model_name.find('/') {
-            self.model_name[idx + 1..].to_string()
-        } else {
-            self.model_name.clone()
-        }
     }
 }
 
@@ -99,21 +109,27 @@ mod tests {
     #[test]
     fn test_model_name_extraction() {
         let tokenizer = Tokenizer::new("ollama/gpt-4");
-        assert_eq!(tokenizer.get_base_model_name(), "gpt-4");
+        assert_eq!(tokenizer.base_model_name, "gpt-4");
 
         let tokenizer = Tokenizer::new("unknown-model");
-        assert_eq!(tokenizer.get_base_model_name(), "unknown-model");
+        assert_eq!(tokenizer.base_model_name, "unknown-model");
     }
 
     #[test]
     fn test_max_tokens() {
-        let tokenizer = Tokenizer::new("gpt-4");
+        let tokenizer = Tokenizer::new("ollama/qwen3-coder:30b");
+        assert_eq!(tokenizer.get_max_tokens(), 131072);
+
+        let tokenizer = Tokenizer::new("ollama/llama3:8b");
         assert_eq!(tokenizer.get_max_tokens(), 8192);
 
-        let tokenizer = Tokenizer::new("gpt-4o");
-        assert_eq!(tokenizer.get_max_tokens(), 128000);
-
-        let tokenizer = Tokenizer::new("gpt-3.5-turbo");
+        let tokenizer = Tokenizer::new("tinyllama");
         assert_eq!(tokenizer.get_max_tokens(), 4096);
+
+        let tokenizer = Tokenizer::new("ollama/mistral");
+        assert_eq!(tokenizer.get_max_tokens(), 32768);
+
+        let tokenizer = Tokenizer::new("unknown-model");
+        assert_eq!(tokenizer.get_max_tokens(), 8192);
     }
 }

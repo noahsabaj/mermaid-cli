@@ -1,7 +1,7 @@
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Get the log file path (~/.mermaid/mermaid.log)
 fn get_log_file_path() -> Option<PathBuf> {
@@ -29,11 +29,7 @@ pub fn init_logger(verbose: bool) {
         }
 
         // Open log file for appending
-        if let Ok(file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
+        if let Ok(file) = OpenOptions::new().create(true).append(true).open(&log_path) {
             let fmt_layer = tracing_subscriber::fmt::layer()
                 .with_writer(file)
                 .with_target(false)
@@ -51,9 +47,7 @@ pub fn init_logger(verbose: bool) {
     }
 
     // Fallback: no logging if file creation fails (don't corrupt TUI)
-    tracing_subscriber::registry()
-        .with(filter)
-        .init();
+    tracing_subscriber::registry().with(filter).init();
 }
 
 /// Log an info message with category prefix (backward compatible)

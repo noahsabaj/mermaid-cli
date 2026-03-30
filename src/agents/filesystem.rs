@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,11 +15,9 @@ pub fn read_file(path: &str) -> Result<String> {
 
 /// Read a file from the filesystem asynchronously (for parallel operations)
 pub async fn read_file_async(path: String) -> Result<String> {
-    tokio::task::spawn_blocking(move || {
-        read_file(&path)
-    })
-    .await
-    .context("Failed to spawn blocking task for file read")?
+    tokio::task::spawn_blocking(move || read_file(&path))
+        .await
+        .context("Failed to spawn blocking task for file read")?
 }
 
 /// Check if a file is a binary format that should be base64-encoded
@@ -76,9 +74,8 @@ pub fn write_file(path: &str, content: &str) -> Result<()> {
     let temp_path = std::path::PathBuf::from(&temp_path);
 
     // Write to temporary file
-    fs::write(&temp_path, content).with_context(|| {
-        format!("Failed to write to temporary file: {}", temp_path.display())
-    })?;
+    fs::write(&temp_path, content)
+        .with_context(|| format!("Failed to write to temporary file: {}", temp_path.display()))?;
 
     // Atomically rename temp file to target
     fs::rename(&temp_path, &path).with_context(|| {
@@ -147,9 +144,8 @@ pub fn edit_file(path: &str, old_string: &str, new_string: &str) -> Result<Strin
     let temp_path = format!("{}.tmp.{}", path.display(), std::process::id());
     let temp_path = std::path::PathBuf::from(&temp_path);
 
-    fs::write(&temp_path, &new_content).with_context(|| {
-        format!("Failed to write to temporary file: {}", temp_path.display())
-    })?;
+    fs::write(&temp_path, &new_content)
+        .with_context(|| format!("Failed to write to temporary file: {}", temp_path.display()))?;
 
     fs::rename(&temp_path, &path).with_context(|| {
         format!(
@@ -165,7 +161,12 @@ pub fn edit_file(path: &str, old_string: &str, new_string: &str) -> Result<Strin
 }
 
 /// Generate a unified diff showing the changed lines with context
-fn generate_diff(old_content: &str, new_content: &str, old_string: &str, new_string: &str) -> String {
+fn generate_diff(
+    old_content: &str,
+    new_content: &str,
+    old_string: &str,
+    new_string: &str,
+) -> String {
     let old_lines: Vec<&str> = old_content.lines().collect();
     let new_lines: Vec<&str> = new_content.lines().collect();
 
@@ -181,7 +182,10 @@ fn generate_diff(old_content: &str, new_content: &str, old_string: &str, new_str
     let new_diff_end = (change_start_line + added_count + context_lines).min(new_lines.len());
 
     let mut output = String::new();
-    output.push_str(&format!("Added {} lines, removed {} lines\n", added_count, removed_count));
+    output.push_str(&format!(
+        "Added {} lines, removed {} lines\n",
+        added_count, removed_count
+    ));
 
     // Context before
     for i in diff_start..change_start_line {
@@ -261,6 +265,15 @@ fn normalize_path_for_read(path: &str) -> Result<PathBuf> {
 fn normalize_path(path: &str) -> Result<PathBuf> {
     let path = Path::new(path);
 
+    // Reject paths containing ".." to prevent directory traversal.
+    // Symlinks in existing ancestors are resolved by canonicalize() in validate_path,
+    // but ".." in non-existent portions would be silently dropped by file_name().
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            anyhow::bail!("Access denied: path contains '..' component");
+        }
+    }
+
     if path.is_absolute() {
         // For absolute paths, ensure they're within the current directory
         let current_dir = std::env::current_dir()?;
@@ -282,12 +295,13 @@ fn normalize_path(path: &str) -> Result<PathBuf> {
 /// and file extensions.
 fn is_sensitive_path(path: &Path) -> bool {
     // Directory components that are always sensitive
-    let sensitive_dirs = [".ssh", ".aws", ".gnupg"];
+    let sensitive_dirs = [".ssh", ".aws", ".gnupg", ".docker"];
 
     // Filenames/extensions that are sensitive
     let sensitive_filenames = [
         ".npmrc",
         ".pypirc",
+        ".netrc",
         "id_rsa",
         "id_ed25519",
         "id_ecdsa",
@@ -296,6 +310,7 @@ fn is_sensitive_path(path: &Path) -> bool {
         "secrets.yaml",
         "secrets.yml",
         "token.json",
+        "config.json", // Docker registry auth, various credential stores
     ];
 
     // File extensions that are sensitive
@@ -305,6 +320,13 @@ fn is_sensitive_path(path: &Path) -> bool {
 
     // Check for .git/config specifically (substring is fine here, it's unique)
     if path_str.contains(".git/config") || path_str.contains(".git\\config") {
+        return true;
+    }
+
+    // Check for mermaid config (contains cloud_api_key)
+    if (path_str.contains("mermaid/config.toml") || path_str.contains("mermaid\\config.toml"))
+        && (path_str.contains(".config/") || path_str.contains(".config\\"))
+    {
         return true;
     }
 
@@ -389,7 +411,9 @@ fn validate_path(path: &Path) -> Result<()> {
         }
 
         // No existing ancestor found - use current_dir as base
-        let mut result = current_dir.canonicalize().unwrap_or_else(|_| current_dir.clone());
+        let mut result = current_dir
+            .canonicalize()
+            .unwrap_or_else(|_| current_dir.clone());
         for component in ancestors_to_join.iter().rev() {
             result = result.join(component);
         }
@@ -402,7 +426,9 @@ fn validate_path(path: &Path) -> Result<()> {
 /// Helper to validate a canonical path against the current directory
 fn validate_canonical_path(canonical: &Path, current_dir: &Path) -> Result<()> {
     // Canonicalize current_dir for consistent comparison (Windows adds \\?\ prefix)
-    let current_dir_canonical = current_dir.canonicalize().unwrap_or_else(|_| current_dir.to_path_buf());
+    let current_dir_canonical = current_dir
+        .canonicalize()
+        .unwrap_or_else(|_| current_dir.to_path_buf());
 
     // Ensure the path is within the current directory
     if !canonical.starts_with(&current_dir_canonical) {
@@ -519,7 +545,11 @@ mod tests {
         let result = read_file(".env");
         assert!(result.is_err(), "Should reject .env file access");
         let error = result.unwrap_err().to_string();
-        assert!(error.contains("Security"), "Error should mention Security: {}", error);
+        assert!(
+            error.contains("Security"),
+            "Error should mention Security: {}",
+            error
+        );
     }
 
     #[test]
@@ -528,7 +558,9 @@ mod tests {
         assert!(is_sensitive_path(Path::new("/project/.env.local")));
         assert!(is_sensitive_path(Path::new("/project/.env.production")));
         // But .environment.ts should NOT be blocked (path-component matching)
-        assert!(!is_sensitive_path(Path::new("/project/src/.environment.ts")));
+        assert!(!is_sensitive_path(Path::new(
+            "/project/src/.environment.ts"
+        )));
         assert!(!is_sensitive_path(Path::new("/project/src/environment.rs")));
     }
 
@@ -537,7 +569,11 @@ mod tests {
         let result = read_file(".ssh/id_rsa");
         assert!(result.is_err(), "Should reject .ssh/id_rsa access");
         let error = result.unwrap_err().to_string();
-        assert!(error.contains("Security"), "Error should mention Security: {}", error);
+        assert!(
+            error.contains("Security"),
+            "Error should mention Security: {}",
+            error
+        );
     }
 
     #[test]
@@ -545,7 +581,11 @@ mod tests {
         let result = read_file(".aws/credentials");
         assert!(result.is_err(), "Should reject .aws/credentials access");
         let error = result.unwrap_err().to_string();
-        assert!(error.contains("Security"), "Error should mention Security: {}", error);
+        assert!(
+            error.contains("Security"),
+            "Error should mention Security: {}",
+            error
+        );
     }
 
     #[test]
@@ -556,6 +596,19 @@ mod tests {
         assert!(is_sensitive_path(Path::new("/project/server.pem")));
         assert!(is_sensitive_path(Path::new("/project/private.key")));
         assert!(is_sensitive_path(Path::new("/project/token.json")));
-        assert!(is_sensitive_path(Path::new("/home/user/.gnupg/pubring.kbx")));
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.gnupg/pubring.kbx"
+        )));
+        // Docker and netrc
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.docker/config.json"
+        )));
+        assert!(is_sensitive_path(Path::new("/home/user/.netrc")));
+        // Mermaid config (contains cloud_api_key)
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.config/mermaid/config.toml"
+        )));
+        // But NOT arbitrary config.toml files in project directories
+        assert!(!is_sensitive_path(Path::new("/project/config.toml")));
     }
 }

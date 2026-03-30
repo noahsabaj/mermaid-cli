@@ -2,12 +2,12 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::{
-    app::{load_config, persist_last_model, Config},
-    cli::{handle_command, Cli},
-    models::ModelFactory,
-    ollama::{ensure_model as ensure_ollama_model, require_any_model},
-    session::{select_conversation, ConversationManager},
-    tui::{run_ui, App},
+    app::{Config, load_config, persist_last_model},
+    cli::{Cli, handle_command},
+    models::{ModelFactory, OllamaOptions},
+    ollama::ensure_model as ensure_ollama_model,
+    session::{ConversationManager, select_conversation},
+    tui::{App, run_ui},
     utils::{check_ollama_available, log_error, log_info, log_progress, log_warn},
 };
 
@@ -24,15 +24,15 @@ impl Orchestrator {
         let config = match load_config() {
             Ok(cfg) => cfg,
             Err(e) => {
-                log_warn("CONFIG", format!("Config load failed: {:#}. Using defaults.", e));
+                log_warn(
+                    "CONFIG",
+                    format!("Config load failed: {:#}. Using defaults.", e),
+                );
                 Config::default()
             },
         };
 
-        Ok(Self {
-            cli,
-            config,
-        })
+        Ok(Self { cli, config })
     }
 
     /// Run the orchestrator
@@ -45,36 +45,19 @@ impl Orchestrator {
         current_step += 1;
         log_progress(current_step, total_steps, "Processing commands");
         if let Some(command) = &self.cli.command
-            && handle_command(command).await? {
-                return Ok(()); // Command handled, exit
-            }
-            // Continue to chat for Commands::Chat
+            && handle_command(command).await?
+        {
+            return Ok(()); // Command handled, exit
+        }
+        // Continue to chat for Commands::Chat
 
         // Determine model to use (CLI arg > last_used > default_model)
         current_step += 1;
         log_progress(current_step, total_steps, "Configuring model");
 
         let cli_model_provided = self.cli.model.is_some();
-        let model_id = if let Some(model) = &self.cli.model {
-            // CLI flag takes precedence
-            model.clone()
-        } else if let Some(last_model) = &self.config.last_used_model {
-            // Use last used model from config
-            last_model.clone()
-        } else if !self.config.default_model.provider.is_empty()
-            && !self.config.default_model.name.is_empty()
-        {
-            // Fall back to default_model if set
-            format!(
-                "{}/{}",
-                self.config.default_model.provider, self.config.default_model.name
-            )
-        } else {
-            // No model configured - check if any models are available
-            let available = require_any_model().await?;
-            // Use first available model
-            format!("ollama/{}", available[0])
-        };
+        let model_id =
+            crate::app::resolve_model_id(self.cli.model.as_deref(), &self.config).await?;
 
         log_info(
             "MERMAID",
@@ -84,14 +67,12 @@ impl Orchestrator {
         // Check Ollama availability (all models route through Ollama)
         current_step += 1;
         log_progress(current_step, total_steps, "Checking Ollama availability");
-        let ollama_check = check_ollama_available(
-            &self.config.ollama.host,
-            self.config.ollama.port,
-        ).await;
+        let ollama_check =
+            check_ollama_available(&self.config.ollama.host, self.config.ollama.port).await;
 
         if !ollama_check.available {
             log_error("OLLAMA", &ollama_check.message);
-            std::process::exit(1);
+            anyhow::bail!("{}", ollama_check.message);
         }
 
         // Validate model exists
@@ -100,37 +81,25 @@ impl Orchestrator {
         ensure_ollama_model(&model_id).await?;
 
         // Persist model if CLI flag was used
-        if cli_model_provided
-            && let Err(e) = persist_last_model(&model_id) {
-                log_warn("CONFIG", format!("Failed to persist model choice: {}", e));
-            }
+        if cli_model_provided && let Err(e) = persist_last_model(&model_id) {
+            log_warn("CONFIG", format!("Failed to persist model choice: {}", e));
+        }
 
-        // Create model instance with config for authentication and optional backend override
+        // Create model instance with config for authentication
         current_step += 1;
         log_progress(current_step, total_steps, "Initializing model");
-        // Use config.behavior.backend ("auto" means None)
-        let backend = if self.config.behavior.backend == "auto" {
-            None
-        } else {
-            Some(self.config.behavior.backend.as_str())
-        };
-        let model = match ModelFactory::create_with_backend(
+        let model = ModelFactory::create(
             &model_id,
             Some(&self.config),
-            backend,
         )
         .await
-        {
-            Ok(m) => m,
-            Err(e) => {
-                log_error("ERROR", format!("Failed to initialize model: {}", e));
-                log_error(
-                    "",
-                    "Make sure the model is available and properly configured.",
-                );
-                std::process::exit(1);
-            },
-        };
+        .map_err(|e| {
+            log_error("ERROR", format!("Failed to initialize model: {}", e));
+            anyhow::anyhow!(
+                "Failed to initialize model: {}. Make sure the model is available and properly configured.",
+                e
+            )
+        })?;
 
         // Set up project path for session management
         let project_path = self.cli.path.clone().unwrap_or_else(|| PathBuf::from("."));
@@ -143,6 +112,14 @@ impl Orchestrator {
         // Wire app config temperature/max_tokens into model state
         app.model_state.temperature = self.config.default_model.temperature;
         app.model_state.max_tokens = self.config.default_model.max_tokens;
+
+        // Wire Ollama hardware options from config
+        app.model_state.ollama_options = OllamaOptions {
+            num_gpu: self.config.ollama.num_gpu,
+            num_thread: self.config.ollama.num_thread,
+            num_ctx: self.config.ollama.num_ctx,
+            numa: self.config.ollama.numa,
+        };
 
         // Handle session loading
         // Default: start fresh (no history)
@@ -168,10 +145,7 @@ impl Orchestrator {
             } else {
                 // --continue: resume last conversation
                 if let Some(last_conv) = conversation_manager.load_last_conversation()? {
-                    log_info(
-                        "RESUME",
-                        format!("Resuming: {}", last_conv.title),
-                    );
+                    log_info("RESUME", format!("Resuming: {}", last_conv.title));
                     app.load_conversation(last_conv);
                 } else {
                     log_info("INFO", "No previous conversation to continue");
@@ -183,4 +157,3 @@ impl Orchestrator {
         run_ui(app).await
     }
 }
-

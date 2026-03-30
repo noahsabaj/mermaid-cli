@@ -70,11 +70,7 @@ mod tests {
     #[test]
     fn test_format_time() {
         // Create a timestamp for 6:41 PM
-        let ts = Local::now()
-            .with_hour(18)
-            .unwrap()
-            .with_minute(41)
-            .unwrap();
+        let ts = Local::now().with_hour(18).unwrap().with_minute(41).unwrap();
 
         let time = format_time(ts);
         assert_eq!(time, "6:41pm");
@@ -82,11 +78,7 @@ mod tests {
 
     #[test]
     fn test_format_time_am() {
-        let ts = Local::now()
-            .with_hour(9)
-            .unwrap()
-            .with_minute(26)
-            .unwrap();
+        let ts = Local::now().with_hour(9).unwrap().with_minute(26).unwrap();
 
         let time = format_time(ts);
         assert_eq!(time, "9:26am");

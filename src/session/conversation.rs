@@ -57,9 +57,10 @@ impl ConversationHistory {
 
         // Don't add if it's identical to the last entry
         if let Some(last) = self.input_history.back()
-            && last == &input {
-                return;
-            }
+            && last == &input
+        {
+            return;
+        }
 
         // Cap history at 100 entries to prevent unbounded growth
         if self.input_history.len() >= 100 {
@@ -69,10 +70,14 @@ impl ConversationHistory {
         self.input_history.push_back(input);
     }
 
-    /// Update the title based on the first user message
+    /// Update the title based on the first user message.
+    /// Short-circuits if the title was already derived from a user message.
     fn update_title(&mut self) {
+        // Only set title once — it comes from the first user message
+        if !self.title.starts_with("Session ") {
+            return;
+        }
         if let Some(first_user_msg) = self.messages.iter().find(|m| m.role == MessageRole::User) {
-            // Take first 60 chars of first user message as title
             let preview = if first_user_msg.content.len() > 60 {
                 let end = first_user_msg.content.floor_char_boundary(60);
                 format!("{}...", &first_user_msg.content[..end])
@@ -102,6 +107,7 @@ impl ConversationHistory {
 }
 
 /// Manages conversation persistence for a project
+#[derive(Clone)]
 pub struct ConversationManager {
     conversations_dir: PathBuf,
 }
@@ -160,10 +166,11 @@ impl ConversationManager {
             for entry in entries.flatten() {
                 if let Some(ext) = entry.path().extension()
                     && ext == "json"
-                        && let Ok(json) = fs::read_to_string(entry.path())
-                            && let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json) {
-                                conversations.push(conv);
-                            }
+                    && let Ok(json) = fs::read_to_string(entry.path())
+                    && let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json)
+                {
+                    conversations.push(conv);
+                }
             }
         }
 

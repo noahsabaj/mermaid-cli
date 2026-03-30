@@ -31,14 +31,14 @@ pub async fn handle_command(command: &Commands) -> Result<bool> {
             show_status().await?;
             Ok(true)
         },
-        Commands::Chat => Ok(false), // Continue to chat interface
+        Commands::Chat => Ok(false),       // Continue to chat interface
         Commands::Run { .. } => Ok(false), // Handled by main.rs
     }
 }
 
 /// List available models across all backends
 pub async fn list_models() -> Result<()> {
-    let models = ModelFactory::list_all_backend_models().await?;
+    let models = ModelFactory::list_all_models().await?;
 
     if models.is_empty() {
         println!("No models found across any backends");
@@ -63,7 +63,7 @@ async fn show_status() -> Result<()> {
     println!();
 
     // Check available backends
-    let backends = ModelFactory::get_available_backends().await;
+    let backends = ModelFactory::available_providers().await;
     if backends.is_empty() {
         println!("  [WARNING] Backends: None available");
     } else {

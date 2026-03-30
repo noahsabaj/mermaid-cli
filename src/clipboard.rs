@@ -1,21 +1,43 @@
 //! Clipboard access for image and text paste
 //!
-//! Auto-detects X11 or Wayland display server and uses the appropriate
-//! system tool (xclip or wl-paste) to read clipboard contents.
+//! Auto-detects the platform and display server, then uses the appropriate
+//! system tool to read clipboard contents:
+//! - Linux/Wayland: wl-paste
+//! - Linux/X11: xclip
+//! - macOS: pbpaste / osascript (for images)
+//! - Windows: PowerShell Get-Clipboard
 
 use anyhow::{Context, Result};
 use std::process::Command;
 
-/// Display server type
+/// Display server / platform type
 #[derive(Debug, Clone, Copy)]
-enum DisplayServer {
+enum ClipboardBackend {
     Wayland,
     X11,
+    MacOS,
+    Windows,
 }
 
-/// Detect the active display server
-fn detect_display_server() -> Option<DisplayServer> {
-    // Check Wayland first
+/// Detect the active clipboard backend
+fn detect_backend() -> Option<ClipboardBackend> {
+    // macOS
+    if cfg!(target_os = "macos")
+        && Command::new("which")
+            .arg("pbpaste")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    {
+        return Some(ClipboardBackend::MacOS);
+    }
+
+    // Windows
+    if cfg!(target_os = "windows") {
+        return Some(ClipboardBackend::Windows);
+    }
+
+    // Linux: check Wayland first
     if std::env::var("WAYLAND_DISPLAY").is_ok()
         && Command::new("which")
             .arg("wl-paste")
@@ -23,10 +45,10 @@ fn detect_display_server() -> Option<DisplayServer> {
             .map(|o| o.status.success())
             .unwrap_or(false)
     {
-        return Some(DisplayServer::Wayland);
+        return Some(ClipboardBackend::Wayland);
     }
 
-    // Fall back to X11
+    // Linux: fall back to X11
     if std::env::var("DISPLAY").is_ok()
         && Command::new("which")
             .arg("xclip")
@@ -34,7 +56,7 @@ fn detect_display_server() -> Option<DisplayServer> {
             .map(|o| o.status.success())
             .unwrap_or(false)
     {
-        return Some(DisplayServer::X11);
+        return Some(ClipboardBackend::X11);
     }
 
     None
@@ -42,8 +64,8 @@ fn detect_display_server() -> Option<DisplayServer> {
 
 /// Check if the clipboard contains image data
 pub fn has_image() -> bool {
-    match detect_display_server() {
-        Some(DisplayServer::Wayland) => Command::new("wl-paste")
+    match detect_backend() {
+        Some(ClipboardBackend::Wayland) => Command::new("wl-paste")
             .arg("--list-types")
             .output()
             .map(|o| {
@@ -51,7 +73,7 @@ pub fn has_image() -> bool {
                 types.contains("image/png") || types.contains("image/jpeg")
             })
             .unwrap_or(false),
-        Some(DisplayServer::X11) => Command::new("xclip")
+        Some(ClipboardBackend::X11) => Command::new("xclip")
             .args(["-selection", "clipboard", "-t", "TARGETS", "-o"])
             .output()
             .map(|o| {
@@ -59,6 +81,32 @@ pub fn has_image() -> bool {
                 types.contains("image/png") || types.contains("image/jpeg")
             })
             .unwrap_or(false),
+        Some(ClipboardBackend::MacOS) => {
+            // Check clipboard type via AppleScript
+            Command::new("osascript")
+                .args(["-e", "clipboard info"])
+                .output()
+                .map(|o| {
+                    let info = String::from_utf8_lossy(&o.stdout);
+                    info.contains("PNGf") || info.contains("JPEG") || info.contains("TIFF")
+                })
+                .unwrap_or(false)
+        },
+        Some(ClipboardBackend::Windows) => {
+            // PowerShell: check if clipboard contains an image
+            Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "[System.Windows.Forms.Clipboard]::ContainsImage()",
+                ])
+                .output()
+                .map(|o| {
+                    let out = String::from_utf8_lossy(&o.stdout);
+                    out.trim() == "True"
+                })
+                .unwrap_or(false)
+        },
         None => false,
     }
 }
@@ -66,38 +114,114 @@ pub fn has_image() -> bool {
 /// Read image bytes from the clipboard.
 /// Returns (bytes, format) where format is "png" or "jpeg".
 pub fn read_image_bytes() -> Result<(Vec<u8>, String)> {
-    let server =
-        detect_display_server().context("No display server detected (need X11 with xclip or Wayland with wl-paste)")?;
+    let backend = detect_backend()
+        .context("No clipboard backend detected (need xclip, wl-paste, pbpaste, or PowerShell)")?;
 
-    // Try PNG first, then JPEG
-    for (mime, format) in [("image/png", "png"), ("image/jpeg", "jpeg")] {
-        let output = match server {
-            DisplayServer::Wayland => Command::new("wl-paste").args(["--type", mime]).output(),
-            DisplayServer::X11 => Command::new("xclip")
-                .args(["-selection", "clipboard", "-t", mime, "-o"])
-                .output(),
-        };
+    match backend {
+        ClipboardBackend::Wayland | ClipboardBackend::X11 => {
+            // Try PNG first, then JPEG
+            for (mime, format) in [("image/png", "png"), ("image/jpeg", "jpeg")] {
+                let output = match backend {
+                    ClipboardBackend::Wayland => {
+                        Command::new("wl-paste").args(["--type", mime]).output()
+                    },
+                    ClipboardBackend::X11 => Command::new("xclip")
+                        .args(["-selection", "clipboard", "-t", mime, "-o"])
+                        .output(),
+                    _ => unreachable!(),
+                };
 
-        if let Ok(output) = output
-            && output.status.success() && !output.stdout.is_empty() {
-                return Ok((output.stdout, format.to_string()));
+                if let Ok(output) = output
+                    && output.status.success()
+                    && !output.stdout.is_empty()
+                {
+                    return Ok((output.stdout, format.to_string()));
+                }
             }
-    }
+            anyhow::bail!("No image data found in clipboard")
+        },
+        ClipboardBackend::MacOS => {
+            // Use osascript to save clipboard image to a temp file, then read it
+            let temp_path = std::env::temp_dir().join("mermaid-clipboard-paste.png");
+            let temp_str = temp_path.to_string_lossy();
+            let script = format!(
+                "set theFile to POSIX file \"{}\"\n\
+                 tell application \"System Events\" to set theData to the clipboard as «class PNGf»\n\
+                 set fp to open for access theFile with write permission\n\
+                 write theData to fp\n\
+                 close access fp",
+                temp_str
+            );
+            // Try the simpler pngpaste approach first (if available), fall back to osascript
+            let pngpaste_output = Command::new("pngpaste").arg(&temp_path).output();
+            let success = if let Ok(output) = pngpaste_output
+                && output.status.success()
+            {
+                true
+            } else {
+                // Fall back to osascript
+                Command::new("osascript")
+                    .args(["-e", &script])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            };
 
-    anyhow::bail!("No image data found in clipboard")
+            if success {
+                let bytes = std::fs::read(&temp_path)
+                    .context("Failed to read clipboard image from temp file")?;
+                let _ = std::fs::remove_file(&temp_path);
+                if !bytes.is_empty() {
+                    return Ok((bytes, "png".to_string()));
+                }
+            }
+            anyhow::bail!("No image data found in clipboard (macOS)")
+        },
+        ClipboardBackend::Windows => {
+            // Use PowerShell to save clipboard image to temp file
+            let temp_path = std::env::temp_dir().join("mermaid-clipboard-paste.png");
+            let temp_str = temp_path.to_string_lossy();
+            let script = format!(
+                "Add-Type -AssemblyName System.Windows.Forms; \
+                 $img = [System.Windows.Forms.Clipboard]::GetImage(); \
+                 if ($img) {{ $img.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png) }}",
+                temp_str
+            );
+            let output = Command::new("powershell")
+                .args(["-NoProfile", "-Command", &script])
+                .output();
+
+            if let Ok(output) = output
+                && output.status.success()
+                && temp_path.exists()
+            {
+                let bytes = std::fs::read(&temp_path)
+                    .context("Failed to read clipboard image from temp file")?;
+                let _ = std::fs::remove_file(&temp_path);
+                if !bytes.is_empty() {
+                    return Ok((bytes, "png".to_string()));
+                }
+            }
+            anyhow::bail!("No image data found in clipboard (Windows)")
+        },
+    }
 }
 
 /// Read text from the clipboard (fallback when no image is found).
 pub fn read_text() -> Result<String> {
-    let server =
-        detect_display_server().context("No display server detected (need X11 with xclip or Wayland with wl-paste)")?;
+    let backend = detect_backend()
+        .context("No clipboard backend detected (need xclip, wl-paste, pbpaste, or PowerShell)")?;
 
-    let output = match server {
-        DisplayServer::Wayland => Command::new("wl-paste")
+    let output = match backend {
+        ClipboardBackend::Wayland => Command::new("wl-paste")
             .args(["--type", "text/plain"])
             .output(),
-        DisplayServer::X11 => Command::new("xclip")
+        ClipboardBackend::X11 => Command::new("xclip")
             .args(["-selection", "clipboard", "-o"])
+            .output(),
+        ClipboardBackend::MacOS => Command::new("pbpaste").output(),
+        ClipboardBackend::Windows => Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Get-Clipboard"])
             .output(),
     };
 
@@ -114,9 +238,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_display_server() {
+    fn test_detect_backend() {
         // Just verify it doesn't panic — actual result depends on environment
-        let _ = detect_display_server();
+        let _ = detect_backend();
     }
 
     #[test]

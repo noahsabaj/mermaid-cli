@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Result};
+use crate::utils::{RetryConfig, retry_async};
+use anyhow::{Result, anyhow};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use crate::utils::{retry_async, RetryConfig};
 
 /// Result from a web search
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +43,7 @@ struct OllamaFetchResponse {
 const OLLAMA_API_BASE: &str = "https://ollama.com/api";
 
 /// Web search client that uses Ollama's cloud API
+#[derive(Clone)]
 pub struct WebSearchClient {
     client: Client,
     api_key: String,
@@ -57,11 +58,7 @@ impl WebSearchClient {
     }
 
     /// Execute a search query
-    pub async fn search_query(
-        &self,
-        query: &str,
-        count: usize,
-    ) -> Result<Vec<SearchResult>> {
+    pub async fn search_query(&self, query: &str, count: usize) -> Result<Vec<SearchResult>> {
         self.search(query, count).await
     }
 
@@ -73,7 +70,10 @@ impl WebSearchClient {
     async fn search(&self, query: &str, count: usize) -> Result<Vec<SearchResult>> {
         // Validate count
         if count == 0 || count > 10 {
-            return Err(anyhow!("Result count must be between 1 and 10, got {}", count));
+            return Err(anyhow!(
+                "Result count must be between 1 and 10, got {}",
+                count
+            ));
         }
 
         // Query Ollama web search API with retry logic
@@ -133,7 +133,10 @@ impl WebSearchClient {
             .iter()
             .take(count)
             .map(|result| {
-                let content = truncate_content(&result.content, 5000);
+                let content = crate::utils::truncate_content(
+                    &result.content,
+                    crate::constants::WEB_CONTENT_MAX_CHARS,
+                );
                 SearchResult {
                     title: result.title.clone(),
                     url: result.url.clone(),
@@ -209,7 +212,10 @@ impl WebSearchClient {
         for (i, result) in results.iter().enumerate() {
             formatted.push_str(&format!(
                 "[{}] Title: {}\nURL: {}\nContent:\n{}\n---\n",
-                i + 1, result.title, result.url, result.full_content
+                i + 1,
+                result.title,
+                result.url,
+                result.full_content
             ));
         }
 
@@ -222,24 +228,6 @@ impl WebSearchClient {
         }
 
         formatted
-    }
-}
-
-/// Truncate content to a maximum character count (char-boundary safe)
-fn truncate_content(content: &str, max_chars: usize) -> String {
-    // Fast path: if byte length fits, char count definitely fits too
-    // (every char is at least 1 byte, so len <= max_chars implies char_count <= max_chars)
-    if content.len() <= max_chars {
-        return content.to_string();
-    }
-
-    // Slow path: multi-byte content might have fewer chars than bytes
-    // Find the byte position of the max_chars-th character
-    if let Some((byte_end, _)) = content.char_indices().nth(max_chars) {
-        format!("{}...[truncated]", &content[..byte_end])
-    } else {
-        // Fewer than max_chars characters total — no truncation needed
-        content.to_string()
     }
 }
 
@@ -268,16 +256,5 @@ mod tests {
         assert!(formatted.contains("Test Article"));
         assert!(formatted.contains("https://example.com"));
         assert!(formatted.contains("[/SEARCH_RESULTS]"));
-    }
-
-    #[test]
-    fn test_truncate_content() {
-        let short = "hello";
-        assert_eq!(truncate_content(short, 100), "hello");
-
-        let long = "a".repeat(200);
-        let truncated = truncate_content(&long, 50);
-        assert!(truncated.ends_with("...[truncated]"));
-        assert!(truncated.len() < 200);
     }
 }

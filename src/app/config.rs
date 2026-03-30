@@ -1,5 +1,4 @@
 use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERATURE};
-use crate::prompts;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -20,26 +19,6 @@ pub struct Config {
     #[serde(default)]
     pub ollama: OllamaConfig,
 
-    /// OpenAI configuration (for direct OpenAI API access)
-    #[serde(default)]
-    pub openai: OpenAIConfig,
-
-    /// Anthropic configuration (for direct Anthropic API access)
-    #[serde(default)]
-    pub anthropic: AnthropicConfig,
-
-    /// UI configuration
-    #[serde(default)]
-    pub ui: UIConfig,
-
-    /// Operation mode configuration
-    #[serde(default)]
-    pub mode: ModeConfig,
-
-    /// Behavior configuration (auto-install, etc.)
-    #[serde(default)]
-    pub behavior: BehaviorConfig,
-
     /// Non-interactive mode configuration
     #[serde(default)]
     pub non_interactive: NonInteractiveConfig,
@@ -57,15 +36,6 @@ pub struct ModelSettings {
     pub temperature: f32,
     /// Maximum tokens to generate
     pub max_tokens: usize,
-    /// System prompt
-    pub system_prompt: Option<String>,
-}
-
-impl ModelSettings {
-    /// Default system prompt that teaches models how to use Mermaid's action blocks
-    pub fn default_system_prompt() -> String {
-        prompts::get_system_prompt()
-    }
 }
 
 impl Default for ModelSettings {
@@ -75,7 +45,6 @@ impl Default for ModelSettings {
             name: String::new(),
             temperature: DEFAULT_TEMPERATURE,
             max_tokens: DEFAULT_MAX_TOKENS,
-            system_prompt: Some(Self::default_system_prompt()),
         }
     }
 }
@@ -119,101 +88,6 @@ impl Default for OllamaConfig {
     }
 }
 
-/// OpenAI configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct OpenAIConfig {
-    /// Environment variable containing API key
-    pub api_key_env: String,
-    /// Organization ID (optional)
-    pub organization: Option<String>,
-}
-
-impl Default for OpenAIConfig {
-    fn default() -> Self {
-        Self {
-            api_key_env: String::from("OPENAI_API_KEY"),
-            organization: None,
-        }
-    }
-}
-
-/// Anthropic configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AnthropicConfig {
-    /// Environment variable containing API key
-    pub api_key_env: String,
-}
-
-impl Default for AnthropicConfig {
-    fn default() -> Self {
-        Self {
-            api_key_env: String::from("ANTHROPIC_API_KEY"),
-        }
-    }
-}
-
-/// UI configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct UIConfig {
-    /// Color theme
-    pub theme: String,
-}
-
-impl Default for UIConfig {
-    fn default() -> Self {
-        Self {
-            theme: String::from("dark"),
-        }
-    }
-}
-
-/// Operation mode configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ModeConfig {
-    /// Default operation mode (normal, accept_edits, plan_mode, bypass_all)
-    pub default_mode: String,
-    /// Remember mode between sessions
-    pub remember_mode: bool,
-    /// Auto-commit in AcceptEdits mode
-    pub auto_commit_on_accept: bool,
-    /// Require double confirmation for destructive operations in BypassAll mode
-    pub require_destructive_confirmation: bool,
-}
-
-impl Default for ModeConfig {
-    fn default() -> Self {
-        Self {
-            default_mode: String::from("normal"),
-            remember_mode: false,
-            auto_commit_on_accept: false,
-            require_destructive_confirmation: true,
-        }
-    }
-}
-
-/// Behavior configuration (formerly CLI flags)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BehaviorConfig {
-    /// Automatically install missing Ollama models
-    pub auto_install_models: bool,
-    /// Preferred backend (ollama only)
-    pub backend: String,
-}
-
-impl Default for BehaviorConfig {
-    fn default() -> Self {
-        Self {
-            auto_install_models: true,
-            backend: String::from("auto"),
-        }
-    }
-}
-
 /// Non-interactive mode configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -244,8 +118,12 @@ pub fn load_config() -> Result<Config> {
     if config_path.exists() {
         let toml_str = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read {}", config_path.display()))?;
-        let config: Config = toml::from_str(&toml_str)
-            .with_context(|| format!("Failed to parse {}. Run 'mermaid init' to regenerate.", config_path.display()))?;
+        let config: Config = toml::from_str(&toml_str).with_context(|| {
+            format!(
+                "Failed to parse {}. Run 'mermaid init' to regenerate.",
+                config_path.display()
+            )
+        })?;
         Ok(config)
     } else {
         Ok(Config::default())
@@ -309,4 +187,22 @@ pub fn persist_last_model(model: &str) -> Result<()> {
     let mut config = load_config().unwrap_or_default();
     config.last_used_model = Some(model.to_string());
     save_config(&config, None)
+}
+
+/// Resolve which model to use: CLI arg > last_used > default_model > any available
+pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyhow::Result<String> {
+    if let Some(model) = cli_model {
+        return Ok(model.to_string());
+    }
+    if let Some(last_model) = &config.last_used_model {
+        return Ok(last_model.clone());
+    }
+    if !config.default_model.provider.is_empty() && !config.default_model.name.is_empty() {
+        return Ok(format!(
+            "{}/{}",
+            config.default_model.provider, config.default_model.name
+        ));
+    }
+    let available = crate::ollama::require_any_model().await?;
+    Ok(format!("ollama/{}", available[0]))
 }

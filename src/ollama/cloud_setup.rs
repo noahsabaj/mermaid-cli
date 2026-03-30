@@ -72,7 +72,10 @@ pub fn setup_cloud_interactive() -> Result<bool> {
     let config_path = get_config_dir()?.join("config.toml");
     save_config(&config, Some(config_path.clone()))?;
 
-    println!("\n✓ Ollama Cloud API key saved to: {}", config_path.display());
+    println!(
+        "\n✓ Ollama Cloud API key saved to: {}",
+        config_path.display()
+    );
     println!("\nYou can now use cloud models with the :cloud suffix:");
     println!("  :model kimi-k2-thinking:cloud");
     println!("  :model qwen3-coder:480b-cloud");
@@ -87,9 +90,10 @@ pub fn setup_cloud_interactive() -> Result<bool> {
 pub fn get_cloud_api_key() -> Option<String> {
     // Check environment variable first
     if let Ok(key) = std::env::var("OLLAMA_API_KEY")
-        && !key.is_empty() {
-            return Some(key);
-        }
+        && !key.is_empty()
+    {
+        return Some(key);
+    }
 
     // Check config file
     if let Ok(config) = load_config() {
