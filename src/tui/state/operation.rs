@@ -3,27 +3,28 @@
 //! Minimal state for tracking active operations.
 
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
-/// Operation state - tracks file reading, tool calls, and queued messages
+use crate::agents::SubagentProgress;
+use crate::utils::MutexExt;
+
+/// Operation state - tracks tool calls and queued messages
 pub struct OperationState {
-    /// Track if FILE_READ feedback is pending
-    pub pending_file_read: bool,
-    /// Status text to show during file reading
-    pub reading_file_status: Option<String>,
     /// Accumulated tool calls during streaming (persists across process_stream_chunks calls)
     pub accumulated_tool_calls: Vec<crate::models::ToolCall>,
     /// Queued messages - typed while model is generating, will be sent in order
     pub queued_messages: VecDeque<String>,
+    /// Shared progress state for active subagents (None when no agents running)
+    pub active_subagents: Option<Arc<Mutex<Vec<SubagentProgress>>>>,
 }
 
 impl OperationState {
     /// Create a new OperationState with default values
     pub fn new() -> Self {
         Self {
-            pending_file_read: false,
-            reading_file_status: None,
             accumulated_tool_calls: Vec::new(),
             queued_messages: VecDeque::new(),
+            active_subagents: None,
         }
     }
 
@@ -50,6 +51,19 @@ impl OperationState {
     /// Get the count of queued messages
     pub fn queued_message_count(&self) -> usize {
         self.queued_messages.len()
+    }
+
+    /// Snapshot the active subagent progress for rendering.
+    /// Locks the mutex briefly and clones the vec (max 10 small entries).
+    pub fn snapshot_subagent_progress(&self) -> Option<Vec<SubagentProgress>> {
+        self.active_subagents
+            .as_ref()
+            .map(|p| p.lock_mut_safe().clone())
+    }
+
+    /// Clear the active subagents state
+    pub fn clear_subagents(&mut self) {
+        self.active_subagents = None;
     }
 }
 

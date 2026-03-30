@@ -4,22 +4,12 @@
 //! UI displays for the results.
 
 use crate::agents::{
-    self, execute_action, ActionDisplay, ActionResult as AgentActionResult, AgentAction,
+    self, ActionDetails, ActionDisplay, ActionResult as AgentActionResult, AgentAction,
+    SubagentResult, execute_action,
 };
 use crate::models::{MessageRole, ToolCall};
+use crate::runtime::agent_loop::ToolExecutionResult;
 use crate::tui::App;
-
-/// Result of executing a tool call
-/// Used for building proper Tool messages in the agent loop
-#[derive(Debug, Clone)]
-pub struct ToolExecutionResult {
-    /// The original tool call ID (for linking result back to call)
-    pub tool_call_id: String,
-    /// The function name that was called
-    pub tool_name: String,
-    /// The result content (success output or error message)
-    pub content: String,
-}
 
 /// Execute tool calls and return results for the agent loop
 ///
@@ -52,10 +42,14 @@ pub async fn execute_tool_calls_for_agent_loop(
                 results.push(ToolExecutionResult {
                     tool_call_id,
                     tool_name,
-                    content: format!("Error: {}", e),
+                    action: AgentAction::ParseError {
+                        message: format!("Error: {}", e),
+                    },
+                    success: false,
+                    output: format!("Error: {}", e),
                 });
                 continue;
-            }
+            },
         };
 
         // Execute the action directly
@@ -79,9 +73,11 @@ pub async fn execute_tool_calls_for_agent_loop(
                 results.push(ToolExecutionResult {
                     tool_call_id,
                     tool_name,
-                    content: output,
+                    action: action_clone,
+                    success: true,
+                    output,
                 });
-            }
+            },
             agents::ActionResult::Error { error } => {
                 let action_display = build_error_display(&action_clone, &error);
                 if let Some(last_msg) = app
@@ -97,9 +93,11 @@ pub async fn execute_tool_calls_for_agent_loop(
                 results.push(ToolExecutionResult {
                     tool_call_id,
                     tool_name,
-                    content: format!("Error: {}", error),
+                    action: action_clone,
+                    success: false,
+                    output: format!("Error: {}", error),
                 });
-            }
+            },
         }
     }
 
@@ -113,42 +111,15 @@ fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
 
 /// Build an error ActionDisplay - uses the action for target info but wraps as Error
 fn build_error_display(action: &AgentAction, error: &str) -> ActionDisplay {
-    let (action_type, target) = match action {
-        AgentAction::EditFile { path, .. } => ("Edit", path.clone()),
-        AgentAction::WriteFile { path, .. } => ("Write", path.clone()),
-        AgentAction::ReadFile { paths } => {
-            if paths.len() == 1 { ("Read", paths[0].clone()) }
-            else { ("Read", format!("{} files", paths.len())) }
-        }
-        AgentAction::DeleteFile { path } => ("Delete", path.clone()),
-        AgentAction::CreateDirectory { path } => ("Bash", format!("mkdir -p {}", path)),
-        AgentAction::ExecuteCommand { command, .. } => ("Bash", command.clone()),
-        AgentAction::GitDiff { paths } => {
-            let path_str = paths.first()
-                .and_then(|p| p.as_ref())
-                .cloned()
-                .unwrap_or_else(|| ".".to_string());
-            ("Bash", format!("git diff {}", path_str))
-        }
-        AgentAction::GitStatus => ("Bash", "git status".to_string()),
-        AgentAction::GitCommit { message, .. } => ("Bash", format!("git commit -m '{}'", message)),
-        AgentAction::WebSearch { queries } => {
-            if queries.len() == 1 { ("Web Search", queries[0].0.clone()) }
-            else { ("Web Search", format!("{} queries", queries.len())) }
-        }
-        AgentAction::WebFetch { url } => ("Web Fetch", url.clone()),
-    };
+    let (action_type, target) = action.display_info();
     ActionDisplay {
         action_type: action_type.to_string(),
         target,
-        result: AgentActionResult::Error { error: error.to_string() },
-        preview: None,
-        line_count: None,
-        file_content: None,
+        result: AgentActionResult::Error {
+            error: error.to_string(),
+        },
+        details: ActionDetails::Simple,
         duration_seconds: None,
-        targets: None,
-        item_count: None,
-        failed_items: None,
     }
 }
 
@@ -157,232 +128,72 @@ fn build_action_display_with_timing(
     output: &str,
     duration_seconds: Option<f64>,
 ) -> ActionDisplay {
-    match action {
-        AgentAction::WriteFile { path, content } => {
-            let line_count = content.lines().count();
-            ActionDisplay {
-                action_type: "Write".to_string(),
-                target: path.clone(),
-                result: AgentActionResult::Success {
-                    output: output.to_string(),
-                },
-                preview: None,
-                line_count: Some(line_count),
-                file_content: Some(content.clone()),
-                duration_seconds: None,
-                targets: None,
-                item_count: None,
-                failed_items: None,
-            }
-        }
-        AgentAction::EditFile { path, old_string, new_string } => {
+    let (action_type, target) = action.display_info();
+    let result = AgentActionResult::Success {
+        output: output.to_string(),
+    };
+
+    let details = match action {
+        AgentAction::WriteFile { content, .. } => ActionDetails::FileContent {
+            line_count: content.lines().count(),
+            content: content.clone(),
+        },
+        AgentAction::EditFile {
+            old_string,
+            new_string,
+            ..
+        } => {
             let added = new_string.lines().count();
             let removed = old_string.lines().count();
-            ActionDisplay {
-                action_type: "Edit".to_string(),
-                target: path.clone(),
-                result: AgentActionResult::Success {
-                    output: output.to_string(),
-                },
-                preview: Some(format!("Added {} lines, removed {} lines", added, removed)),
-                line_count: Some(added + removed),
-                file_content: Some(output.to_string()),
-                duration_seconds: None,
-                targets: None,
-                item_count: None,
-                failed_items: None,
+            ActionDetails::Diff {
+                summary: format!("Added {} lines, removed {} lines", added, removed),
+                diff: output.to_string(),
             }
-        }
+        },
         AgentAction::ReadFile { paths } => {
-            let line_count = output.lines().count();
-            if paths.len() == 1 {
-                ActionDisplay {
-                    action_type: "Read".to_string(),
-                    target: paths[0].clone(),
-                    result: AgentActionResult::Success {
-                        output: output.to_string(),
-                    },
-                    preview: Some(truncate_output(output, 3)),
-                    line_count: Some(line_count),
-                    file_content: None,
-                    duration_seconds,
-                    targets: None,
-                    item_count: None,
-                    failed_items: None,
-                }
-            } else {
-                ActionDisplay {
-                    action_type: "Read".to_string(),
-                    target: format!("{} files", paths.len()),
-                    result: AgentActionResult::Success {
-                        output: output.to_string(),
-                    },
-                    preview: Some(truncate_output(output, 5)),
-                    line_count: Some(line_count),
-                    file_content: None,
-                    duration_seconds,
-                    targets: Some(paths.clone()),
-                    item_count: Some(paths.len()),
-                    failed_items: None,
-                }
-            }
-        }
-        AgentAction::ExecuteCommand { command, .. } => ActionDisplay {
-            action_type: "Bash".to_string(),
-            target: command.clone(),
-            result: AgentActionResult::Success {
-                output: output.to_string(),
-            },
-            preview: Some(truncate_output(output, 5)),
-            line_count: Some(output.lines().count()),
-            file_content: None,
-            duration_seconds,
-            targets: None,
-            item_count: None,
-            failed_items: None,
-        },
-        AgentAction::DeleteFile { path } => ActionDisplay {
-            action_type: "Delete".to_string(),
-            target: path.clone(),
-            result: AgentActionResult::Success {
-                output: output.to_string(),
-            },
-            preview: None,
-            line_count: None,
-            file_content: None,
-            duration_seconds: None,
-            targets: None,
-            item_count: None,
-            failed_items: None,
-        },
-        AgentAction::CreateDirectory { path } => ActionDisplay {
-            action_type: "Bash".to_string(),
-            target: format!("mkdir -p {}", path),
-            result: AgentActionResult::Success {
-                output: output.to_string(),
-            },
-            preview: None,
-            line_count: None,
-            file_content: None,
-            duration_seconds: None,
-            targets: None,
-            item_count: None,
-            failed_items: None,
-        },
-        AgentAction::GitDiff { paths } => {
-            let path_str = if paths.len() == 1 {
-                paths[0].clone().unwrap_or_else(|| ".".to_string())
-            } else {
-                paths.iter()
-                    .map(|p| p.clone().unwrap_or_else(|| ".".to_string()))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            };
-            ActionDisplay {
-                action_type: "Bash".to_string(),
-                target: format!("git diff {}", path_str),
-                result: AgentActionResult::Success {
-                    output: output.to_string(),
-                },
-                preview: Some(truncate_output(output, 10)),
+            let preview_lines = if paths.len() == 1 { 3 } else { 5 };
+            ActionDetails::Preview {
+                text: truncate_output(output, preview_lines),
                 line_count: Some(output.lines().count()),
-                file_content: None,
-                duration_seconds,
-                targets: if paths.len() > 1 {
-                    Some(paths.iter().map(|p| p.clone().unwrap_or_else(|| "*".to_string())).collect())
-                } else {
-                    None
-                },
-                item_count: if paths.len() > 1 { Some(paths.len()) } else { None },
-                failed_items: None,
             }
-        }
-        AgentAction::GitStatus => ActionDisplay {
-            action_type: "Bash".to_string(),
-            target: "git status".to_string(),
-            result: AgentActionResult::Success {
-                output: output.to_string(),
-            },
-            preview: Some(truncate_output(output, 10)),
+        },
+        AgentAction::ExecuteCommand { .. } => ActionDetails::Preview {
+            text: truncate_output(output, 5),
             line_count: Some(output.lines().count()),
-            file_content: None,
-            duration_seconds,
-            targets: None,
-            item_count: None,
-            failed_items: None,
         },
-        AgentAction::GitCommit { message, .. } => ActionDisplay {
-            action_type: "Bash".to_string(),
-            target: format!("git commit -m '{}'", message),
-            result: AgentActionResult::Success {
-                output: output.to_string(),
-            },
-            preview: Some(truncate_output(output, 3)),
-            line_count: None,
-            file_content: None,
-            duration_seconds: None,
-            targets: None,
-            item_count: None,
-            failed_items: None,
+        AgentAction::DeleteFile { .. } | AgentAction::CreateDirectory { .. } => {
+            ActionDetails::Simple
         },
-        AgentAction::WebSearch { queries } => {
-            // Detect if this is an error (no [SEARCH_RESULTS] marker means error or empty)
+        AgentAction::WebSearch { .. } => {
             let is_error = !output.contains("[SEARCH_RESULTS]");
             let result_count = output.matches("Title:").count();
-            let preview = if is_error {
-                Some(truncate_output(output, 2))
+            let text = if is_error {
+                truncate_output(output, 2)
             } else {
-                Some(format!("Fetched {} search results", result_count))
+                format!("Fetched {} search results", result_count)
             };
-            if queries.len() == 1 {
-                ActionDisplay {
-                    action_type: "Web Search".to_string(),
-                    target: queries[0].0.clone(),
-                    result: AgentActionResult::Success {
-                        output: output.to_string(),
-                    },
-                    preview,
-                    line_count: Some(result_count),
-                    file_content: None,
-                    duration_seconds,
-                    targets: None,
-                    item_count: None,
-                    failed_items: None,
-                }
-            } else {
-                ActionDisplay {
-                    action_type: "Web Search".to_string(),
-                    target: format!("{} queries", queries.len()),
-                    result: AgentActionResult::Success {
-                        output: output.to_string(),
-                    },
-                    preview,
-                    line_count: Some(result_count),
-                    file_content: None,
-                    duration_seconds,
-                    targets: Some(queries.iter().map(|(q, _)| q.clone()).collect()),
-                    item_count: Some(queries.len()),
-                    failed_items: None,
-                }
+            ActionDetails::Preview {
+                text,
+                line_count: Some(result_count),
             }
-        }
-        AgentAction::WebFetch { url } => {
-            let content_len = output.lines().count();
-            ActionDisplay {
-                action_type: "Web Fetch".to_string(),
-                target: url.clone(),
-                result: AgentActionResult::Success {
-                    output: output.to_string(),
-                },
-                preview: Some(truncate_output(output, 3)),
-                line_count: Some(content_len),
-                file_content: None,
-                duration_seconds,
-                targets: None,
-                item_count: None,
-                failed_items: None,
-            }
-        }
+        },
+        AgentAction::WebFetch { .. } => ActionDetails::Preview {
+            text: truncate_output(output, 3),
+            line_count: Some(output.lines().count()),
+        },
+        AgentAction::SpawnAgent { .. } => ActionDetails::Preview {
+            text: truncate_output(output, 3),
+            line_count: None,
+        },
+        AgentAction::ParseError { .. } => ActionDetails::Simple,
+    };
+
+    ActionDisplay {
+        action_type: action_type.to_string(),
+        target,
+        result,
+        details,
+        duration_seconds,
     }
 }
 
@@ -398,5 +209,52 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
             truncated,
             lines.len() - max_lines
         )
+    }
+}
+
+/// Format duration in seconds as human-readable string.
+fn format_duration_secs(total_secs: f64) -> String {
+    let secs = total_secs as u64;
+    if secs < 60 {
+        return format!("{:.1}s", total_secs);
+    }
+    let mins = secs / 60;
+    let remainder = secs % 60;
+    if mins < 60 {
+        format!("{}m {}s", mins, remainder)
+    } else {
+        let hours = mins / 60;
+        let mins = mins % 60;
+        format!("{}h {}m {}s", hours, mins, remainder)
+    }
+}
+
+/// Build an ActionDisplay for a completed subagent result.
+pub fn build_agent_action_display(result: &SubagentResult) -> ActionDisplay {
+    let token_display = crate::utils::format_tokens(result.tokens);
+    let summary = format!(
+        "Completed \u{00b7} {} tool uses \u{00b7} {} \u{00b7} {}",
+        result.tool_uses,
+        token_display,
+        format_duration_secs(result.duration_secs),
+    );
+
+    ActionDisplay {
+        action_type: "Agent".to_string(),
+        target: result.description.clone(),
+        result: if result.success {
+            AgentActionResult::Success {
+                output: result.response.clone(),
+            }
+        } else {
+            AgentActionResult::Error {
+                error: result.response.clone(),
+            }
+        },
+        details: ActionDetails::Agent {
+            summary,
+            tool_uses: result.tool_uses,
+        },
+        duration_seconds: Some(result.duration_secs),
     }
 }

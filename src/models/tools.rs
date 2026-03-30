@@ -45,12 +45,10 @@ impl ToolRegistry {
                 Self::delete_file_tool(),
                 Self::create_directory_tool(),
                 Self::execute_command_tool(),
-                Self::git_diff_tool(),
-                Self::git_status_tool(),
-                Self::git_commit_tool(),
                 Self::edit_file_tool(),
                 Self::web_search_tool(),
                 Self::web_fetch_tool(),
+                Self::agent_tool(),
             ],
         }
     }
@@ -136,7 +134,9 @@ impl ToolRegistry {
             type_: "function".to_string(),
             function: ToolFunction {
                 name: "create_directory".to_string(),
-                description: "Create a new directory in the project. Creates parent directories if needed.".to_string(),
+                description:
+                    "Create a new directory in the project. Creates parent directories if needed."
+                        .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -179,68 +179,6 @@ impl ToolRegistry {
         }
     }
 
-    fn git_diff_tool() -> Tool {
-        Tool {
-            type_: "function".to_string(),
-            function: ToolFunction {
-                name: "git_diff".to_string(),
-                description: "Show git diff for staged and unstaged changes. Can show diff for specific files or entire repository.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Optional specific file path to show diff for. If omitted, shows diff for entire repository."
-                        }
-                    },
-                    "required": []
-                }),
-            },
-        }
-    }
-
-    fn git_status_tool() -> Tool {
-        Tool {
-            type_: "function".to_string(),
-            function: ToolFunction {
-                name: "git_status".to_string(),
-                description: "Show the current git repository status including staged, unstaged, and untracked files.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }),
-            },
-        }
-    }
-
-    fn git_commit_tool() -> Tool {
-        Tool {
-            type_: "function".to_string(),
-            function: ToolFunction {
-                name: "git_commit".to_string(),
-                description: "Create a git commit with specified message and files.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "message": {
-                            "type": "string",
-                            "description": "Commit message"
-                        },
-                        "files": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            },
-                            "description": "List of file paths to include in the commit"
-                        }
-                    },
-                    "required": ["message", "files"]
-                }),
-            },
-        }
-    }
-
     fn edit_file_tool() -> Tool {
         Tool {
             type_: "function".to_string(),
@@ -248,7 +186,8 @@ impl ToolRegistry {
                 name: "edit_file".to_string(),
                 description: "Make targeted edits to a file by replacing specific text. \
                     The old_string must match exactly and uniquely in the file. \
-                    Prefer this over write_file for modifying existing files.".to_string(),
+                    Prefer this over write_file for modifying existing files."
+                    .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -316,6 +255,33 @@ impl ToolRegistry {
             },
         }
     }
+
+    fn agent_tool() -> Tool {
+        Tool {
+            type_: "function".to_string(),
+            function: ToolFunction {
+                name: "agent".to_string(),
+                description: "Spawn an autonomous sub-agent to handle a task independently. \
+                    The agent gets its own conversation context and full tool access. \
+                    Give it a self-contained task via the prompt parameter. \
+                    Multiple agent calls in one response run in parallel.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "The task for the agent to complete"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Short label for the UI (e.g., 'Read src/models/ files')"
+                        }
+                    },
+                    "required": ["prompt", "description"]
+                }),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -325,14 +291,14 @@ mod tests {
     #[test]
     fn test_tool_registry_creation() {
         let registry = ToolRegistry::mermaid_tools();
-        assert_eq!(registry.tools().len(), 11, "Should have 11 tools defined");
+        assert_eq!(registry.tools().len(), 9, "Should have 9 tools defined");
     }
 
     #[test]
     fn test_tool_serialization() {
         let ollama_tools = ToolRegistry::ollama_tools_cached();
 
-        assert_eq!(ollama_tools.len(), 11);
+        assert_eq!(ollama_tools.len(), 9);
 
         // Verify first tool has correct structure
         let first_tool = &ollama_tools[0];

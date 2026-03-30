@@ -21,3 +21,15 @@ pub const DEFAULT_MAX_TOKENS: usize = 4096;
 pub const MAX_CONTEXT_TOKENS: usize = 75_000;
 /// Tokens reserved for the model's response within the context window
 pub const CONTEXT_RESERVE_TOKENS: usize = 4_000;
+
+// Web Content
+/// Maximum characters to keep when truncating fetched web content
+pub const WEB_CONTENT_MAX_CHARS: usize = 5_000;
+
+// UI Cache
+/// Maximum entries in the markdown parse cache before eviction
+pub const MARKDOWN_CACHE_MAX_ENTRIES: usize = 200;
+
+// Subagent Configuration
+/// Maximum number of concurrent subagents that can be spawned by a single parent call
+pub const MAX_CONCURRENT_AGENTS: usize = 10;

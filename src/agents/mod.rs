@@ -5,12 +5,16 @@
 mod action_executor;
 mod executor;
 mod filesystem;
-mod git;
+mod subagent;
 mod types;
 mod web_search;
 
 // Public re-exports - the ONLY way to access agent functionality
 pub use action_executor::{describe_action, execute_action};
 pub use filesystem::{is_binary_file, read_binary_file, read_file};
-pub use types::{ActionDisplay, ActionResult, AgentAction};
+pub use subagent::{
+    SubagentProgress, SubagentResult, SubagentStatus, collect_subagent_results,
+    format_subagent_tool_result, spawn_subagents,
+};
+pub use types::{ActionDetails, ActionDisplay, ActionResult, AgentAction};
 pub use web_search::{SearchResult, WebFetchResult, WebSearchClient};

@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -7,9 +9,7 @@ use ratatui::{
 };
 use rustc_hash::FxHashMap;
 
-use crate::agents::{
-    ActionDisplay, ActionResult,
-};
+use crate::agents::{ActionDetails, ActionDisplay, ActionResult, SubagentProgress, SubagentStatus};
 use crate::models::{ChatMessage, MessageRole};
 use crate::tui::markdown::parse_markdown;
 use crate::tui::theme::Theme;
@@ -108,7 +108,8 @@ impl ChatState {
         let content_line = viewport_row + self.last_scroll_position;
 
         // Look up in click map
-        self.image_click_map.iter()
+        self.image_click_map
+            .iter()
             .find(|(line, _)| *line == content_line)
             .map(|(_, target)| target)
     }
@@ -123,12 +124,11 @@ impl Default for ChatState {
 /// Props for ChatWidget
 pub struct ChatWidget<'a> {
     pub messages: &'a [ChatMessage],
-    pub is_generating: bool,
-    pub pending_file_read: bool,
-    pub reading_file_status: Option<&'a str>,
     pub theme: &'a Theme,
     /// Shared markdown parse cache: (message_index, content_len) -> parsed lines
-    pub markdown_cache: &'a mut FxHashMap<(usize, usize), Vec<Line<'static>>>,
+    pub markdown_cache: &'a mut FxHashMap<u64, Vec<Line<'static>>>,
+    /// Live progress of active subagents (None when no agents running)
+    pub active_subagents: Option<Vec<SubagentProgress>>,
 }
 
 impl<'a> StatefulWidget for ChatWidget<'a> {
@@ -141,7 +141,6 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         state.image_click_map.clear();
         state.last_chat_area = Some((area.x, area.y, area.width, area.height));
 
-        let message_count = self.messages.len();
         for (idx, msg) in self.messages.iter().enumerate() {
             // Skip Tool messages - they're internal to the agent loop and their
             // content is already displayed inline in the assistant's action blocks
@@ -149,7 +148,6 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 continue;
             }
 
-            let _is_last_message = idx == message_count - 1;
             let (role_prefix, role_color) = match msg.role {
                 MessageRole::User => (">", ratatui::style::Color::White),
                 MessageRole::Assistant => ("●", ratatui::style::Color::White),
@@ -162,54 +160,60 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 if let Some(ref thinking) = msg.thinking {
                     // Skip rendering if thinking content is empty or literal "None"
                     let thinking_trimmed = thinking.trim();
-                    if thinking_trimmed.is_empty() || thinking_trimmed == "None" || thinking_trimmed == "none" {
+                    if thinking_trimmed.is_empty()
+                        || thinking_trimmed == "None"
+                        || thinking_trimmed == "none"
+                    {
                         // Don't render empty/null thinking blocks
                     } else {
-                    // Add "Thinking..." header in italic and dimmed with grayed white dot
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "● ",
-                            Style::new().fg(ratatui::style::Color::DarkGray),
-                        ),
-                        Span::styled(
-                            "Thinking...",
-                            Style::new()
-                                .fg(self.theme.colors.text_secondary.to_color())
-                                .italic()
-                                .dim(),
-                        ),
-                    ]));
+                        // Add "Thinking..." header in italic and dimmed with grayed white dot
+                        lines.push(Line::from(vec![
+                            Span::styled("● ", Style::new().fg(ratatui::style::Color::DarkGray)),
+                            Span::styled(
+                                "Thinking...",
+                                Style::new()
+                                    .fg(self.theme.colors.text_secondary.to_color())
+                                    .italic()
+                                    .dim(),
+                            ),
+                        ]));
 
-                    // Render thinking content with proper wrapping (2-space hanging indent)
-                    let wrapped = wrap_text_with_indent(
-                        thinking,
-                        area.width as usize,
-                        2, // first line indent (2 spaces)
-                        2, // continuation indent (2 spaces)
-                    );
-                    for wrapped_line in wrapped {
-                        lines.push(Line::from(Span::styled(
-                            wrapped_line,
-                            Style::new()
-                                .fg(self.theme.colors.text_secondary.to_color())
-                                .italic()
-                                .dim(),
-                        )));
-                    }
+                        // Render thinking content with proper wrapping (2-space hanging indent)
+                        let wrapped = wrap_text_with_indent(
+                            thinking,
+                            area.width as usize,
+                            2, // first line indent (2 spaces)
+                            2, // continuation indent (2 spaces)
+                        );
+                        for wrapped_line in wrapped {
+                            lines.push(Line::from(Span::styled(
+                                wrapped_line,
+                                Style::new()
+                                    .fg(self.theme.colors.text_secondary.to_color())
+                                    .italic()
+                                    .dim(),
+                            )));
+                        }
 
-                    // Add blank line after thinking block
-                    lines.push(Line::from(""));
+                        // Add blank line after thinking block
+                        lines.push(Line::from(""));
                     }
                 }
 
                 // With tool calling, message content is just text (no embedded action blocks)
                 // Use cached parsed markdown when available (avoids re-parsing every frame)
-                let cache_key = (idx, msg.content.len());
+                let mut hasher = rustc_hash::FxHasher::default();
+                msg.content.hash(&mut hasher);
+                let cache_key = hasher.finish();
                 let parsed_lines = if let Some(cached) = self.markdown_cache.get(&cache_key) {
                     cached.clone()
                 } else {
                     let parsed = parse_markdown(&msg.content);
                     self.markdown_cache.insert(cache_key, parsed.clone());
+                    if self.markdown_cache.len() > crate::constants::MARKDOWN_CACHE_MAX_ENTRIES {
+                        self.markdown_cache.clear();
+                        self.markdown_cache.insert(cache_key, parsed.clone());
+                    }
                     parsed
                 };
 
@@ -249,8 +253,8 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 let timestamp_len = formatted_timestamp.len();
                 let min_gap = 3; // minimum spaces between text and timestamp
 
-                // Strip the [Sent at: ...] line from message content
-                let cleaned_content = strip_timestamp_line(&msg.content);
+                // Content is clean — timestamps are injected at API call time only
+                let cleaned_content = &msg.content;
 
                 // Reserve space on the first line for role prefix + gap + timestamp
                 // so text wraps early enough to not overlap the timestamp
@@ -259,10 +263,10 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
                 // Manually wrap the user message with hanging indent (2 spaces)
                 let wrapped = wrap_text_with_indent(
-                    &cleaned_content,
+                    cleaned_content,
                     area.width as usize,
                     first_line_reserved, // reserve space for prefix + gap + timestamp on first line
-                    2, // continuation indent
+                    2,                   // continuation indent
                 );
 
                 for (line_idx, wrapped_line) in wrapped.iter().enumerate() {
@@ -300,52 +304,103 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             // Show image attachment indicators under user messages (like tool action sub-items)
             if matches!(msg.role, MessageRole::User)
                 && let Some(ref images) = msg.images
-                    && !images.is_empty() {
-                        for (i, _) in images.iter().enumerate() {
-                            // Record this line in the click map before pushing
-                            let content_line = lines.len() as u16;
-                            state.image_click_map.push((content_line, ImageClickTarget {
-                                message_index: idx,
-                                image_index: i,
-                            }));
-                            lines.push(Line::from(vec![
-                                Span::styled(
-                                    "  ⎿ ",
-                                    Style::new().fg(self.theme.colors.info.to_color()),
-                                ),
-                                Span::styled(
-                                    format!("[Image #{}]", i + 1),
-                                    Style::new()
-                                        .fg(self.theme.colors.info.to_color())
-                                        .italic(),
-                                ),
-                            ]));
-                        }
-                    }
+                && !images.is_empty()
+            {
+                for (i, _) in images.iter().enumerate() {
+                    // Record this line in the click map before pushing
+                    let content_line = lines.len() as u16;
+                    state.image_click_map.push((
+                        content_line,
+                        ImageClickTarget {
+                            message_index: idx,
+                            image_index: i,
+                        },
+                    ));
+                    lines.push(Line::from(vec![
+                        Span::styled("  ⎿ ", Style::new().fg(self.theme.colors.info.to_color())),
+                        Span::styled(
+                            format!("[Image #{}]", i + 1),
+                            Style::new().fg(self.theme.colors.info.to_color()).italic(),
+                        ),
+                    ]));
+                }
+            }
 
             lines.push(Line::from(""));
         }
 
-        // Show file reading status if active
-        if self.pending_file_read && self.reading_file_status.is_some() && !self.is_generating
-            && let Some(status) = self.reading_file_status {
+        // Render active subagent progress (live, during execution)
+        if let Some(ref agents) = self.active_subagents
+            && !agents.is_empty()
+        {
+            lines.push(Line::from(""));
+
+            for agent in agents {
+                let agent_color = self.theme.colors.info.to_color();
+
+                // Header: "  Agent(description)"
                 lines.push(Line::from(vec![
+                    Span::styled("  ", Style::new()),
+                    Span::styled("Agent(", Style::new().fg(agent_color).bold()),
                     Span::styled(
-                        "  [READ] ",
-                        Style::new().fg(self.theme.colors.info.to_color()).bold(),
+                        agent.description.clone(),
+                        Style::new().fg(self.theme.colors.text_secondary.to_color()),
+                    ),
+                    Span::styled(")", Style::new().fg(agent_color).bold()),
+                ]));
+
+                // Progress line: "  ⎿ In progress... · N tool uses · X.Xk tokens"
+                let status_text = match &agent.status {
+                    SubagentStatus::Running => "In progress...".to_string(),
+                    SubagentStatus::Completed => "Completed".to_string(),
+                    SubagentStatus::Failed(msg) => format!("Failed: {}", msg),
+                };
+                let token_display = crate::utils::format_tokens(agent.tokens);
+                let elapsed = format_duration(agent.started_at.elapsed().as_secs());
+
+                lines.push(Line::from(vec![
+                    Span::styled("  \u{23bf} ", Style::new().fg(agent_color)),
+                    Span::styled(
+                        status_text,
+                        Style::new().fg(self.theme.colors.text_secondary.to_color()),
                     ),
                     Span::styled(
-                        status,
+                        " \u{00b7} ",
+                        Style::new().fg(self.theme.colors.text_disabled.to_color()),
+                    ),
+                    Span::styled(
+                        format!("{}", agent.tool_uses),
                         Style::new()
-                            .fg(self.theme.colors.info.to_color())
-                            .italic()
-                            .slow_blink(),
+                            .fg(self.theme.colors.text_primary.to_color())
+                            .bold(),
+                    ),
+                    Span::styled(
+                        " tool uses",
+                        Style::new().fg(self.theme.colors.text_secondary.to_color()),
+                    ),
+                    Span::styled(
+                        " \u{00b7} ",
+                        Style::new().fg(self.theme.colors.text_disabled.to_color()),
+                    ),
+                    Span::styled(
+                        token_display,
+                        Style::new().fg(self.theme.colors.text_secondary.to_color()),
+                    ),
+                    Span::styled(
+                        " \u{00b7} ",
+                        Style::new().fg(self.theme.colors.text_disabled.to_color()),
+                    ),
+                    Span::styled(
+                        elapsed,
+                        Style::new().fg(self.theme.colors.text_secondary.to_color()),
                     ),
                 ]));
+
                 lines.push(Line::from(""));
             }
+        }
 
-        // NOTE: current_response is NOT rendered during streaming (buffering mode).
+        // NOTE: The response buffer is NOT rendered during streaming (buffering mode).
         // The response is buffered invisibly and only shown when generation is complete.
         // This provides a Claude Code-like experience where the complete response
         // appears instantly instead of streaming character-by-character.
@@ -369,21 +424,23 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 }
 
 /// Render actions in Claude Code style
-fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Theme, viewport_width: usize) {
+fn render_actions(
+    actions: &[ActionDisplay],
+    lines: &mut Vec<Line>,
+    theme: &Theme,
+    viewport_width: usize,
+) {
     for (action_idx, action) in actions.iter().enumerate() {
-        // Add blank line between consecutive actions (not before first one)
         if action_idx > 0 {
             lines.push(Line::from(""));
         }
         let action_color = match action.action_type.as_str() {
             "Write" | "Edit" => theme.colors.success.to_color(),
-            "Bash" | "Command" => theme.colors.info.to_color(),
-            "Read" => theme.colors.info.to_color(),
             "Delete" => theme.colors.warning.to_color(),
-            "Web Search" | "Web Fetch" => theme.colors.info.to_color(),
-            _ => theme.colors.text_secondary.to_color(),
+            _ => theme.colors.info.to_color(),
         };
 
+        // Header: ● Type(target)
         lines.push(Line::from(vec![
             Span::styled("● ", Style::new().fg(action_color).bold()),
             Span::styled(
@@ -399,52 +456,21 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
 
         match &action.result {
             ActionResult::Success { .. } => {
-                let result_msg = match action.action_type.as_str() {
-                    "Write" => {
-                        if let Some(count) = action.line_count {
-                            format!("Wrote {} lines to {}", count, action.target)
-                        } else {
-                            format!("Wrote {}", action.target)
-                        }
+                // Result summary from details enum
+                let result_msg = match &action.details {
+                    ActionDetails::FileContent { line_count, .. } => {
+                        format!("Wrote {} lines to {}", line_count, action.target)
                     },
-                    "Edit" => {
-                        if let Some(ref preview) = action.preview {
-                            preview.clone()
-                        } else {
-                            format!("Edited {}", action.target)
-                        }
+                    ActionDetails::Diff { summary, .. } => summary.clone(),
+                    ActionDetails::Preview { text, .. } => text.clone(),
+                    ActionDetails::Agent { summary, .. } => summary.clone(),
+                    ActionDetails::Simple => match action.action_type.as_str() {
+                        "Delete" => format!("Deleted {}", action.target),
+                        _ => "Success".to_string(),
                     },
-                    "Read" => {
-                        if let Some(count) = action.line_count {
-                            format!("Read {} lines from {}", count, action.target)
-                        } else {
-                            format!("Read {}", action.target)
-                        }
-                    },
-                    "Bash" | "Command" => {
-                        if let Some(ref preview) = action.preview {
-                            preview.clone()
-                        } else if let Some(count) = action.line_count {
-                            format!("Command output: {} lines", count)
-                        } else {
-                            "Command executed successfully".to_string()
-                        }
-                    },
-                    "Delete" => format!("Deleted {}", action.target),
-                    "Web Search" => {
-                        if let Some(ref preview) = action.preview {
-                            preview.clone()
-                        } else if let Some(count) = action.line_count {
-                            format!("Web Search: {} results for '{}'", count, action.target)
-                        } else {
-                            format!("Web Search: {}", action.target)
-                        }
-                    },
-                    _ => "Success".to_string(),
                 };
 
-                let result_lines: Vec<&str> = result_msg.lines().collect();
-                for (idx, line) in result_lines.iter().enumerate() {
+                for (idx, line) in result_msg.lines().enumerate() {
                     let prefix = if idx == 0 { "  ⎿ " } else { "    " };
                     lines.push(Line::from(vec![
                         Span::styled(prefix, Style::new().fg(action_color)),
@@ -455,133 +481,125 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
                     ]));
                 }
 
-                // Show timing for long-running actions
-                if let Some(duration) = action.duration_seconds {
-                    // Only show timing for operations that typically take a few seconds
-                    if matches!(
-                        action.action_type.as_str(),
-                        "Web Search" | "Bash" | "Command" | "Read"
-                    ) {
-                        lines.push(Line::from(vec![
-                            Span::styled("    ", Style::new().fg(action_color)),
-                            Span::styled(
-                                format!("Completed in {:.1} seconds", duration),
-                                Style::new()
-                                    .fg(theme.colors.text_disabled.to_color())
-                                    .italic(),
-                            ),
-                        ]));
+                // Duration for long-running actions (not Agent -- it's in the summary)
+                if let Some(duration) = action.duration_seconds
+                    && !matches!(action.details, ActionDetails::Agent { .. })
+                    && matches!(
+                        action.details,
+                        ActionDetails::Preview { .. }
+                    )
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled("    ", Style::new().fg(action_color)),
+                        Span::styled(
+                            format!("Completed in {:.1} seconds", duration),
+                            Style::new()
+                                .fg(theme.colors.text_disabled.to_color())
+                                .italic(),
+                        ),
+                    ]));
+                }
+
+                // Write: syntax-highlighted file preview
+                if let ActionDetails::FileContent {
+                    content,
+                    line_count,
+                } = &action.details
+                {
+                    let preview_lines: Vec<&str> = content.lines().take(10).collect();
+                    if !preview_lines.is_empty() {
+                        lines.push(Line::from(vec![Span::styled(
+                            "    ",
+                            Style::new().fg(action_color),
+                        )]));
+
+                        let preview_content = preview_lines.join("\n");
+                        let mut parsed = parse_markdown(&format!("```\n{}\n```", preview_content));
+                        for parsed_line in parsed.iter_mut() {
+                            let mut new_spans =
+                                vec![Span::styled("    ", Style::new().fg(action_color))];
+                            new_spans.append(&mut parsed_line.spans);
+                            parsed_line.spans = new_spans;
+                        }
+                        lines.extend(parsed);
+
+                        if *line_count > 10 {
+                            lines.push(Line::from(vec![
+                                Span::styled("    ", Style::new().fg(action_color)),
+                                Span::styled(
+                                    format!("... ({} more lines)", line_count - 10),
+                                    Style::new()
+                                        .fg(theme.colors.text_disabled.to_color())
+                                        .italic(),
+                                ),
+                            ]));
+                        }
                     }
                 }
 
-                if action.action_type == "Write"
-                    && let Some(ref content) = action.file_content {
-                        let preview_lines: Vec<&str> = content.lines().take(10).collect();
-                        let total_lines = content.lines().count();
+                // Edit: color-coded diff
+                if let ActionDetails::Diff { diff, .. } = &action.details {
+                    let diff_lines: Vec<&str> = diff.lines().collect();
+                    let display_lines: Vec<&str> =
+                        diff_lines.iter().skip(1).take(20).copied().collect();
 
-                        if !preview_lines.is_empty() {
-                            lines.push(Line::from(vec![Span::styled(
-                                "    ",
-                                Style::new().fg(action_color),
-                            )]));
+                    if !display_lines.is_empty() {
+                        let removed_bg = ratatui::style::Color::Rgb(60, 20, 20);
+                        let added_bg = ratatui::style::Color::Rgb(20, 50, 20);
 
-                            let preview_content = preview_lines.join("\n");
-                            let mut parsed =
-                                parse_markdown(&format!("```\n{}\n```", preview_content));
+                        for diff_line in &display_lines {
+                            let is_removed = diff_line.contains(" - ")
+                                && diff_line
+                                    .trim_start()
+                                    .starts_with(|c: char| c.is_ascii_digit());
+                            let is_added = diff_line.contains(" + ")
+                                && diff_line
+                                    .trim_start()
+                                    .starts_with(|c: char| c.is_ascii_digit());
 
-                            for parsed_line in parsed.iter_mut() {
-                                let mut new_spans =
-                                    vec![Span::styled("    ", Style::new().fg(action_color))];
-                                new_spans.append(&mut parsed_line.spans);
-                                parsed_line.spans = new_spans;
-                            }
-
-                            lines.extend(parsed);
-
-                            if total_lines > 10 {
+                            if is_removed {
+                                let text = format!("    {}", diff_line);
+                                let padded = format!("{:<width$}", text, width = viewport_width);
+                                lines.push(Line::from(vec![Span::styled(
+                                    padded,
+                                    Style::new()
+                                        .fg(theme.colors.error.to_color())
+                                        .bg(removed_bg),
+                                )]));
+                            } else if is_added {
+                                let text = format!("    {}", diff_line);
+                                let padded = format!("{:<width$}", text, width = viewport_width);
+                                lines.push(Line::from(vec![Span::styled(
+                                    padded,
+                                    Style::new()
+                                        .fg(theme.colors.success.to_color())
+                                        .bg(added_bg),
+                                )]));
+                            } else {
                                 lines.push(Line::from(vec![
                                     Span::styled("    ", Style::new().fg(action_color)),
                                     Span::styled(
-                                        format!("... ({} more lines)", total_lines - 10),
-                                        Style::new()
-                                            .fg(theme.colors.text_disabled.to_color())
-                                            .italic(),
+                                        diff_line.to_string(),
+                                        Style::new().fg(theme.colors.text_secondary.to_color()),
                                     ),
                                 ]));
                             }
                         }
-                    }
 
-                // Edit action: render diff with color-coded lines and background highlight
-                if action.action_type == "Edit"
-                    && let Some(ref diff_content) = action.file_content {
-                        let diff_lines: Vec<&str> = diff_content.lines().collect();
-                        // Skip the first line (summary) since it's already in preview
-                        let display_lines: Vec<&str> = diff_lines.iter()
-                            .skip(1)
-                            .take(20)
-                            .copied()
-                            .collect();
-
-                        if !display_lines.is_empty() {
-                            // Dark background colors for line highlighting (like Claude Code)
-                            let removed_bg = ratatui::style::Color::Rgb(60, 20, 20);
-                            let added_bg = ratatui::style::Color::Rgb(20, 50, 20);
-
-                            for diff_line in &display_lines {
-                                let is_removed = diff_line.contains(" - ") && diff_line.trim_start().starts_with(|c: char| c.is_ascii_digit());
-                                let is_added = diff_line.contains(" + ") && diff_line.trim_start().starts_with(|c: char| c.is_ascii_digit());
-
-                                if is_removed {
-                                    // Removed line: red text on dark red background, padded to full width
-                                    let text = format!("    {}", diff_line);
-                                    let padded = format!("{:<width$}", text, width = viewport_width);
-                                    lines.push(Line::from(vec![
-                                        Span::styled(
-                                            padded,
-                                            Style::new()
-                                                .fg(theme.colors.error.to_color())
-                                                .bg(removed_bg),
-                                        ),
-                                    ]));
-                                } else if is_added {
-                                    // Added line: green text on dark green background, padded to full width
-                                    let text = format!("    {}", diff_line);
-                                    let padded = format!("{:<width$}", text, width = viewport_width);
-                                    lines.push(Line::from(vec![
-                                        Span::styled(
-                                            padded,
-                                            Style::new()
-                                                .fg(theme.colors.success.to_color())
-                                                .bg(added_bg),
-                                        ),
-                                    ]));
-                                } else {
-                                    // Context line: normal color, no background
-                                    lines.push(Line::from(vec![
-                                        Span::styled("    ", Style::new().fg(action_color)),
-                                        Span::styled(
-                                            diff_line.to_string(),
-                                            Style::new().fg(theme.colors.text_secondary.to_color()),
-                                        ),
-                                    ]));
-                                }
-                            }
-
-                            let remaining = diff_lines.len().saturating_sub(21);
-                            if remaining > 0 {
-                                lines.push(Line::from(vec![
-                                    Span::styled("    ", Style::new().fg(action_color)),
-                                    Span::styled(
-                                        format!("... ({} more lines)", remaining),
-                                        Style::new()
-                                            .fg(theme.colors.text_disabled.to_color())
-                                            .italic(),
-                                    ),
-                                ]));
-                            }
+                        let remaining = diff_lines.len().saturating_sub(21);
+                        if remaining > 0 {
+                            lines.push(Line::from(vec![
+                                Span::styled("    ", Style::new().fg(action_color)),
+                                Span::styled(
+                                    format!("... ({} more lines)", remaining),
+                                    Style::new()
+                                        .fg(theme.colors.text_disabled.to_color())
+                                        .italic(),
+                                ),
+                            ]));
                         }
                     }
+                }
             },
             ActionResult::Error { error } => {
                 lines.push(Line::from(vec![
@@ -596,28 +614,14 @@ fn render_actions(actions: &[ActionDisplay], lines: &mut Vec<Line>, theme: &Them
     }
 }
 
-/// Strip the [Sent at: ...] timestamp line from message content
-/// This line was added for the model but should be hidden from the user display
-fn strip_timestamp_line(content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-
-    if lines.is_empty() {
-        return String::new();
-    }
-
-    // Check if first line is a timestamp marker
-    if lines[0].starts_with("[Sent at:") && lines[0].ends_with("]") {
-        // Skip the first line and rejoin remaining lines
-        lines[1..].join("\n")
-    } else {
-        // No timestamp line to strip, return as-is
-        content.to_string()
-    }
-}
-
 /// Wrap text with hanging indent support
 /// Returns a vector of strings, each representing a wrapped line
-fn wrap_text_with_indent(text: &str, width: usize, first_line_indent: usize, continuation_indent: usize) -> Vec<String> {
+fn wrap_text_with_indent(
+    text: &str,
+    width: usize,
+    first_line_indent: usize,
+    continuation_indent: usize,
+) -> Vec<String> {
     let mut wrapped_lines = Vec::new();
 
     for (line_idx, line) in text.lines().enumerate() {
@@ -626,7 +630,11 @@ fn wrap_text_with_indent(text: &str, width: usize, first_line_indent: usize, con
             continue;
         }
 
-        let current_indent = if line_idx == 0 { first_line_indent } else { continuation_indent };
+        let current_indent = if line_idx == 0 {
+            first_line_indent
+        } else {
+            continuation_indent
+        };
         let available_width = width.saturating_sub(current_indent);
 
         if available_width == 0 {
@@ -677,7 +685,11 @@ fn wrap_text_with_indent(text: &str, width: usize, first_line_indent: usize, con
 
 /// Wrap a styled Line with hanging indent, preserving all span styles
 /// Returns multiple Line objects with proper indentation
-fn wrap_styled_line(line: Line<'static>, width: usize, continuation_indent: usize) -> Vec<Line<'static>> {
+fn wrap_styled_line(
+    line: Line<'static>,
+    width: usize,
+    continuation_indent: usize,
+) -> Vec<Line<'static>> {
     // Calculate the total length of the line by summing all span lengths
     let total_length: usize = line.spans.iter().map(|s| s.content.len()).sum();
 
@@ -735,5 +747,24 @@ fn wrap_styled_line(line: Line<'static>, width: usize, continuation_indent: usiz
         vec![line]
     } else {
         result_lines
+    }
+}
+
+/// Format elapsed seconds as human-readable duration.
+/// Examples: "5s", "1m 47s", "1h 46m 19s", "3d 5h 9m 0s"
+fn format_duration(total_secs: u64) -> String {
+    if total_secs < 60 {
+        return format!("{}s", total_secs);
+    }
+    let days = total_secs / 86400;
+    let hours = (total_secs % 86400) / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if days > 0 {
+        format!("{}d {}h {}m {}s", days, hours, mins, secs)
+    } else if hours > 0 {
+        format!("{}h {}m {}s", hours, mins, secs)
+    } else {
+        format!("{}m {}s", mins, secs)
     }
 }

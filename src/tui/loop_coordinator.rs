@@ -1,34 +1,39 @@
 use anyhow::Result;
-use chrono::Local;
 use crossterm::event;
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use super::state::GenerationStatus;
+use super::stream_event::StreamEvent;
+use crate::agents::{
+    AgentAction, SubagentProgress, SubagentResult, collect_subagent_results,
+    format_subagent_tool_result, spawn_subagents,
+};
 use crate::constants::UI_POLL_INTERVAL_MS;
 use crate::models::{ChatMessage, MessageRole, StreamCallback};
-use super::state::GenerationStatus;
-use crate::tui::render::render_ui;
+use crate::runtime::agent_loop::{MAX_AGENT_ITERATIONS, ToolExecutionResult};
 use crate::tui::App;
+use crate::tui::render::render_ui;
 
 /// Import our specialized handlers
 use super::action_handler;
 use super::command_handler;
-use super::event_handler::{handle_event, EventAction};
-use super::stream_handler::{process_stream_chunks, StreamStatus};
+use super::event_handler::{EventAction, handle_event};
+use super::stream_handler::{StreamStatus, process_stream_chunks};
 
 /// Spawn an async task to stream the model's response and return the abort handle.
 ///
 /// This is the single place that builds the callback, calls the model, and
 /// sends [DONE]/[ERROR_JSON] on the channel. All three call-model sites in
 /// the event loop delegate here.
-fn spawn_model_call(
-    app: &mut App,
-    messages: Vec<ChatMessage>,
-    tx: &mpsc::Sender<String>,
-) {
+fn spawn_model_call(app: &mut App, messages: Vec<ChatMessage>, tx: &mpsc::Sender<StreamEvent>) {
+    // Per-model-call resets (these are per-call, not per-turn)
+    app.operation_state.accumulated_tool_calls.clear();
+    app.clear_response();
+
     let model = app.model_state.model.clone();
     let tx_stream = tx.clone();
     let tx_done = tx.clone();
@@ -36,23 +41,40 @@ fn spawn_model_call(
 
     let handle = tokio::spawn(async move {
         let callback: StreamCallback = Arc::new(move |chunk| {
-            let _ = tx_stream.try_send(chunk.to_string());
+            let _ = tx_stream.try_send(StreamEvent::Chunk(chunk.to_string()));
         });
 
-        let model = model.write().await;
+        let model = model.read().await;
         match model.chat(&messages, &config, Some(callback)).await {
             Ok(response) => {
+                if let Some(ref tool_calls) = response.tool_calls
+                    && !tool_calls.is_empty()
+                {
+                    let _ = tx_done
+                        .send(StreamEvent::ToolCalls(tool_calls.clone()))
+                        .await;
+                }
                 let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
-                let _ = tx_done.send(format!("[DONE]:tokens={}", tokens)).await;
-            }
+                let _ = tx_done
+                    .send(StreamEvent::Done {
+                        completion_tokens: tokens,
+                    })
+                    .await;
+            },
             Err(e) => {
-                let error_json = e.to_channel_message();
-                let _ = tx_done.send(format!("[ERROR_JSON]:{}", error_json)).await;
-            }
+                let _ = tx_done.send(StreamEvent::Error(e.to_user_facing())).await;
+            },
         }
     });
 
-    app.start_generation(handle.abort_handle());
+    if app.app_state.is_generating() {
+        // Already in mermaid's turn (agent loop continuation) — update handle, reset to Sending
+        app.update_abort_handle(handle.abort_handle());
+        app.transition_to_sending();
+    } else {
+        // New turn — enter generating state
+        app.start_generation(handle.abort_handle());
+    }
 }
 
 /// Run the main application event loop
@@ -70,11 +92,22 @@ fn spawn_model_call(
 pub async fn run_app_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    tx: mpsc::Sender<String>,
-    rx: &mut mpsc::Receiver<String>,
+    tx: mpsc::Sender<StreamEvent>,
+    rx: &mut mpsc::Receiver<StreamEvent>,
 ) -> Result<()> {
+    // Background title generation (non-blocking)
+    let mut title_task: Option<tokio::task::JoinHandle<Option<String>>> = None;
+
     // Main event loop
     loop {
+        // Poll for completed title generation (non-blocking)
+        if let Some(ref task) = title_task
+            && task.is_finished()
+            && let Some(task) = title_task.take()
+            && let Ok(Some(title)) = task.await
+        {
+            app.session_state.conversation_title = Some(title);
+        }
         // Get viewport height for proper scrolling
         let viewport_height = terminal.size()?.height.saturating_sub(8); // 3 header + 3 input + 1 status + 1 margin
 
@@ -84,9 +117,10 @@ pub async fn run_app_loop(
         // Check if we should transition from Sending to Thinking (after 1 second with no chunks)
         if app.app_state.generation_status() == Some(GenerationStatus::Sending)
             && let Some(start_time) = app.app_state.generation_start_time()
-                && start_time.elapsed().as_secs() >= 1 {
-                    app.transition_to_thinking();
-                }
+            && start_time.elapsed().as_secs() >= 1
+        {
+            app.transition_to_thinking();
+        }
 
         // Handle input events
         if event::poll(std::time::Duration::from_millis(UI_POLL_INTERVAL_MS))? {
@@ -141,7 +175,10 @@ pub async fn run_app_loop(
                                 let cleared = app.operation_state.queued_message_count();
                                 while app.operation_state.take_queued_message().is_some() {}
                                 if cleared > 0 {
-                                    app.set_status(format!("Interrupted - cleared {} queued message(s)", cleared));
+                                    app.set_status(format!(
+                                        "Interrupted - cleared {} queued message(s)",
+                                        cleared
+                                    ));
                                 }
                                 break 'queue_loop;
                             }
@@ -150,46 +187,39 @@ pub async fn run_app_loop(
                                 StreamStatus::Streaming => {
                                     // Continue processing
                                 },
-                                StreamStatus::Complete { tool_calls: new_tool_calls } => {
+                                StreamStatus::Complete {
+                                    tool_calls: new_tool_calls,
+                                } => {
                                     // If this response has tool calls, run agent loop
                                     if !new_tool_calls.is_empty() {
-                                        run_agent_loop(app, new_tool_calls, &tx, rx, terminal).await?;
+                                        run_agent_loop(app, new_tool_calls, &tx, rx, terminal)
+                                            .await?;
                                     }
                                     break; // Done with this queued message
                                 },
-                                StreamStatus::FeedbackComplete => {
-                                    break;
-                                },
                                 StreamStatus::Error(error) => {
                                     app.display_error(&error.summary, &error.message);
-                                    break;
+                                    app.stop_generation();
+                                    break 'queue_loop;
                                 },
                             }
                         }
                     }
                 }
 
-                // Generate conversation title after first exchange (if not already generated)
-                if app.session_state.conversation_title.is_none() && app.session_state.messages.len() >= 2 {
-                    app.generate_conversation_title().await;
+                // Mermaid's turn is over — return to user's turn
+                app.stop_generation();
+
+                // Spawn title generation in background (non-blocking)
+                if title_task.is_none() {
+                    title_task = app.spawn_title_generation();
                 }
-            },
-            StreamStatus::FeedbackComplete => {
-                // Feedback loop complete, nothing to do
             },
             StreamStatus::Error(_error) => {
                 // Error already handled by stream_handler (status message set)
+                app.stop_generation();
             },
         }
-
-        // Clear stale file reading status after 5 seconds
-        if app.operation_state.reading_file_status.is_some() && !app.app_state.is_generating()
-            && let Some(timestamp) = app.status_state.status_timestamp
-                && timestamp.elapsed() >= std::time::Duration::from_secs(5) {
-                    app.operation_state.reading_file_status = None;
-                    app.operation_state.pending_file_read = false;
-                    app.status_state.status_timestamp = None;
-                }
 
         // Check if app should quit
         if !app.running {
@@ -206,39 +236,38 @@ pub async fn run_app_loop(
 async fn handle_message_submit(
     app: &mut App,
     input: String,
-    tx: &mpsc::Sender<String>,
+    tx: &mpsc::Sender<StreamEvent>,
     _viewport_height: u16,
 ) {
-    // Clear any stuck status messages when sending new message
-    app.operation_state.pending_file_read = false;
-    app.operation_state.reading_file_status = None;
-
-    // Add timestamp to message for temporal awareness
-    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
-    let timestamped_input = format!("[Sent at: {}]\n{}", timestamp, input);
-
     // Take any attached images before adding message
     let images = app.attachment_state.take_base64_data();
 
-    // Add user message to history with timestamp (and images if any)
-    app.add_message_with_images(MessageRole::User, timestamped_input, images);
+    // Store clean content — timestamp is in ChatMessage.timestamp field.
+    // Temporal context is injected at API call time by build_managed_message_history.
+    app.add_message_with_images(MessageRole::User, input.clone(), images);
 
     // Build message history including the new message
-    let messages = app.build_managed_message_history(crate::constants::MAX_CONTEXT_TOKENS, crate::constants::CONTEXT_RESERVE_TOKENS);
+    let messages = app.build_managed_message_history(
+        crate::constants::MAX_CONTEXT_TOKENS,
+        crate::constants::CONTEXT_RESERVE_TOKENS,
+    );
 
     // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
-    app.current_response.clear();
 
     // Save input to history and reset navigation
-    app.session_state.input_history.push_back(input.clone());
-    app.session_state.history_index = None;
-    app.session_state.history_buffer.clear();
+    app.input.history.push_back(input.clone());
+    app.input.history_index = None;
+    app.input.history_buffer.clear();
 
     // Persist to conversation if available
     if let Some(ref mut conv) = app.session_state.current_conversation {
         conv.add_to_input_history(input.clone());
         if let Some(ref manager) = app.session_state.conversation_manager {
-            let _ = manager.save_conversation(conv);
+            let conv_clone = conv.clone();
+            let manager_clone = manager.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = manager_clone.save_conversation(&conv_clone);
+            });
         }
     }
 
@@ -246,9 +275,10 @@ async fn handle_message_submit(
     spawn_model_call(app, messages, tx);
 }
 
-/// Render the UI and check for Esc/Ctrl+C interruption (non-blocking).
-/// Also handles scroll events so the user can scroll during the agent loop.
-/// Returns Ok(true) if the user wants to interrupt the agent loop.
+/// Render the UI and check for interruption (non-blocking).
+/// Handles all input events so the user can type, scroll, and queue messages
+/// while the agent loop or model call is in progress.
+/// Returns Ok(true) if the user wants to interrupt.
 fn render_and_check_interrupt(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -260,46 +290,94 @@ fn render_and_check_interrupt(
             event::Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
                 match key.code {
                     crossterm::event::KeyCode::Esc => {
-                        if let Some(abort) = app.abort_generation() {
-                            abort.abort();
+                        let (abort, partial) = app.abort_generation();
+                        if let Some(h) = abort {
+                            h.abort();
                         }
-                        if !app.current_response.is_empty() {
-                            app.add_message(MessageRole::Assistant, app.current_response.clone());
-                            app.current_response.clear();
+                        if !partial.is_empty() {
+                            app.add_message(MessageRole::Assistant, partial);
                         }
                         app.set_status("Agent loop interrupted");
                         return Ok(true);
-                    }
+                    },
                     crossterm::event::KeyCode::Char('c')
-                        if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
                     {
-                        if let Some(abort) = app.abort_generation() {
-                            abort.abort();
+                        let (abort, partial) = app.abort_generation();
+                        if let Some(h) = abort {
+                            h.abort();
                         }
-                        if !app.current_response.is_empty() {
-                            app.add_message(MessageRole::Assistant, app.current_response.clone());
-                            app.current_response.clear();
+                        if !partial.is_empty() {
+                            app.add_message(MessageRole::Assistant, partial);
                         }
                         app.set_status("Agent loop interrupted");
                         return Ok(true);
-                    }
-                    crossterm::event::KeyCode::PageUp => { app.scroll_up(10); }
-                    crossterm::event::KeyCode::PageDown => { app.scroll_down(10); }
-                    _ => {}
+                    },
+                    // Typing: insert characters into input buffer
+                    crossterm::event::KeyCode::Char(c) => {
+                        if key.modifiers.is_empty()
+                            || key.modifiers == crossterm::event::KeyModifiers::SHIFT
+                        {
+                            app.input.insert(c);
+                        }
+                    },
+                    // Enter: queue the typed message for processing after current step
+                    crossterm::event::KeyCode::Enter => {
+                        if !app.input.is_empty() && !app.input.get().starts_with(':') {
+                            let input = app.input.get().to_string();
+                            app.operation_state.queue_message(input);
+                            app.clear_input();
+                            app.set_status("Message queued");
+                        }
+                    },
+                    // Cursor movement and editing
+                    crossterm::event::KeyCode::Backspace => {
+                        app.input.backspace();
+                    },
+                    crossterm::event::KeyCode::Delete => {
+                        app.input.delete();
+                    },
+                    crossterm::event::KeyCode::Left => {
+                        app.input.move_left();
+                    },
+                    crossterm::event::KeyCode::Right => {
+                        app.input.move_right();
+                    },
+                    crossterm::event::KeyCode::Home => {
+                        app.input.move_home();
+                    },
+                    crossterm::event::KeyCode::End => {
+                        app.input.move_end();
+                    },
+                    // Scrolling
+                    crossterm::event::KeyCode::PageUp => {
+                        app.scroll_up(10);
+                    },
+                    crossterm::event::KeyCode::PageDown => {
+                        app.scroll_down(10);
+                    },
+                    _ => {},
                 }
-            }
-            event::Event::Mouse(mouse) => {
-                match mouse.kind {
-                    crossterm::event::MouseEventKind::ScrollUp => {
-                        app.scroll_up(crate::constants::UI_MOUSE_SCROLL_LINES);
-                    }
-                    crossterm::event::MouseEventKind::ScrollDown => {
-                        app.scroll_down(crate::constants::UI_MOUSE_SCROLL_LINES);
-                    }
-                    _ => {}
+            },
+            event::Event::Mouse(mouse) => match mouse.kind {
+                crossterm::event::MouseEventKind::ScrollUp => {
+                    app.scroll_up(crate::constants::UI_MOUSE_SCROLL_LINES);
+                },
+                crossterm::event::MouseEventKind::ScrollDown => {
+                    app.scroll_down(crate::constants::UI_MOUSE_SCROLL_LINES);
+                },
+                _ => {},
+            },
+            // Handle paste events during agent loop
+            event::Event::Paste(text) => {
+                let cleaned = text.replace('\r', "");
+                if !cleaned.is_empty() {
+                    app.input.insert_str(&cleaned);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -322,8 +400,8 @@ fn render_and_check_interrupt(
 async fn run_agent_loop(
     app: &mut App,
     initial_tool_calls: Vec<crate::models::ToolCall>,
-    tx: &mpsc::Sender<String>,
-    rx: &mut mpsc::Receiver<String>,
+    tx: &mpsc::Sender<StreamEvent>,
+    rx: &mut mpsc::Receiver<StreamEvent>,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
     let mut current_tool_calls = initial_tool_calls;
@@ -331,6 +409,13 @@ async fn run_agent_loop(
 
     while !current_tool_calls.is_empty() {
         iteration += 1;
+        if iteration > MAX_AGENT_ITERATIONS {
+            app.set_status(format!(
+                "Agent loop exceeded {} iterations",
+                MAX_AGENT_ITERATIONS
+            ));
+            return Ok(());
+        }
         app.set_status(format!("Agent loop iteration {}", iteration));
 
         // Render so user sees iteration status; check for Esc interrupt
@@ -343,21 +428,22 @@ async fn run_agent_loop(
         if let Some(queued_msg) = app.operation_state.take_queued_message() {
             app.set_status("Processing queued message...");
 
-            // Add the queued message as a user message (with timestamp)
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
-            let timestamped_input = format!("[Sent at: {}]\n{}", timestamp, queued_msg);
-            app.add_message(MessageRole::User, timestamped_input);
+            // Add the queued message as a user message (timestamp is in ChatMessage.timestamp)
+            app.add_message(MessageRole::User, queued_msg.clone());
 
             // Save to input history
-            app.session_state.input_history.push_back(queued_msg);
+            app.input.history.push_back(queued_msg);
 
             // Clear current tool calls - the model will decide what to do next
             // based on the new user message
             current_tool_calls.clear();
 
             // Build message history and call model with the new context
-            let messages = app.build_managed_message_history(crate::constants::MAX_CONTEXT_TOKENS, crate::constants::CONTEXT_RESERVE_TOKENS);
-            app.current_response.clear();
+            let messages = app.build_managed_message_history(
+                crate::constants::MAX_CONTEXT_TOKENS,
+                crate::constants::CONTEXT_RESERVE_TOKENS,
+            );
+            app.clear_response();
 
             spawn_model_call(app, messages, tx);
 
@@ -369,14 +455,13 @@ async fn run_agent_loop(
 
                 match process_stream_chunks(app, rx).await? {
                     StreamStatus::Streaming => {},
-                    StreamStatus::Complete { tool_calls: new_tool_calls } => {
+                    StreamStatus::Complete {
+                        tool_calls: new_tool_calls,
+                    } => {
                         if !new_tool_calls.is_empty() {
                             current_tool_calls = new_tool_calls;
                         }
                         break;
-                    },
-                    StreamStatus::FeedbackComplete => {
-                        return Ok(());
                     },
                     StreamStatus::Error(error) => {
                         app.display_error(&error.summary, &error.message);
@@ -390,8 +475,87 @@ async fn run_agent_loop(
             continue;
         }
 
-        // Execute tool calls and get results
-        let results = action_handler::execute_tool_calls_for_agent_loop(app, &current_tool_calls).await;
+        // Partition tool calls: regular vs agent
+        let (regular_calls, agent_calls): (Vec<&_>, Vec<&_>) = current_tool_calls
+            .iter()
+            .partition(|tc| tc.function.name != "agent");
+
+        // Execute regular tool calls first (may write files that agents need to read)
+        let regular_owned: Vec<_> = regular_calls.into_iter().cloned().collect();
+        let mut results = if !regular_owned.is_empty() {
+            action_handler::execute_tool_calls_for_agent_loop(app, &regular_owned).await
+        } else {
+            Vec::new()
+        };
+
+        // Execute agent tool calls in parallel
+        if !agent_calls.is_empty() {
+            let agent_specs: Vec<(String, String)> = agent_calls
+                .iter()
+                .filter_map(|tc| match tc.to_agent_action() {
+                    Ok(AgentAction::SpawnAgent {
+                        prompt,
+                        description,
+                    }) => Some((prompt, description)),
+                    _ => None,
+                })
+                .collect();
+
+            if !agent_specs.is_empty() {
+                let progress = Arc::new(Mutex::new(Vec::<SubagentProgress>::new()));
+                let config = app.model_state.build_config();
+
+                // Store progress for UI rendering
+                app.operation_state.active_subagents = Some(Arc::clone(&progress));
+
+                let (handles, overflow) = spawn_subagents(
+                    agent_specs,
+                    Arc::clone(&app.model_state.model),
+                    &config,
+                    Arc::clone(&progress),
+                );
+
+                // Poll handles with render loop (TUI stays responsive)
+                let subagent_results =
+                    poll_subagent_handles(handles, overflow, terminal, app).await?;
+
+                // Build ToolExecutionResult + ActionDisplay for each completed agent
+                for (i, agent_result) in subagent_results.iter().enumerate() {
+                    let action_display =
+                        action_handler::build_agent_action_display(agent_result);
+
+                    if let Some(last_msg) = app
+                        .session_state
+                        .messages
+                        .iter_mut()
+                        .rev()
+                        .find(|m| matches!(m.role, MessageRole::Assistant))
+                    {
+                        last_msg.actions.push(action_display);
+                    }
+
+                    let tool_call_id = agent_calls
+                        .get(i)
+                        .and_then(|tc| tc.id.clone())
+                        .unwrap_or_else(|| format!("call_agent_{}", i));
+
+                    let output = format_subagent_tool_result(agent_result);
+
+                    results.push(ToolExecutionResult {
+                        tool_call_id,
+                        tool_name: "agent".to_string(),
+                        action: AgentAction::SpawnAgent {
+                            prompt: String::new(),
+                            description: agent_result.description.clone(),
+                        },
+                        success: agent_result.success,
+                        output,
+                    });
+
+                    app.session_state.cumulative_tokens += agent_result.tokens;
+                }
+            }
+        }
 
         // Update the last assistant message to include tool_calls
         // (This is needed for the API to understand the conversation flow)
@@ -410,7 +574,7 @@ async fn run_agent_loop(
             app.add_tool_result(
                 result.tool_call_id.clone(),
                 result.tool_name.clone(),
-                result.content.clone(),
+                result.output.clone(),
             );
         }
 
@@ -428,8 +592,11 @@ async fn run_agent_loop(
         // can see the error messages and retry with a different approach.
 
         // Call the model again with the updated message history
-        let messages = app.build_managed_message_history(crate::constants::MAX_CONTEXT_TOKENS, crate::constants::CONTEXT_RESERVE_TOKENS);
-        app.current_response.clear();
+        let messages = app.build_managed_message_history(
+            crate::constants::MAX_CONTEXT_TOKENS,
+            crate::constants::CONTEXT_RESERVE_TOKENS,
+        );
+        app.clear_response();
 
         spawn_model_call(app, messages, tx);
 
@@ -445,21 +612,22 @@ async fn run_agent_loop(
                 StreamStatus::Streaming => {
                     // Continue processing
                 },
-                StreamStatus::Complete { tool_calls: new_tool_calls } => {
+                StreamStatus::Complete {
+                    tool_calls: new_tool_calls,
+                } => {
                     // Got a new response - check if there are more tool calls
                     if new_tool_calls.is_empty() {
                         // No more tool calls - agent loop complete
-                        app.set_status(format!("Agent loop complete after {} iterations", iteration));
+                        app.set_status(format!(
+                            "Agent loop complete after {} iterations",
+                            iteration
+                        ));
                         return Ok(());
                     } else {
                         // More tool calls - continue the loop
                         current_tool_calls = new_tool_calls;
                         break; // Break inner loop to continue outer agent loop
                     }
-                },
-                StreamStatus::FeedbackComplete => {
-                    // Feedback complete - exit loop
-                    return Ok(());
                 },
                 StreamStatus::Error(error) => {
                     // Error occurred - display and exit
@@ -474,4 +642,54 @@ async fn run_agent_loop(
     }
 
     Ok(())
+}
+
+/// Poll subagent JoinHandles with rendering between checks.
+/// Aborts all handles and returns empty vec if user interrupts (Esc).
+async fn poll_subagent_handles(
+    handles: Vec<tokio::task::JoinHandle<SubagentResult>>,
+    overflow: Vec<SubagentResult>,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<Vec<SubagentResult>> {
+    let handle_count = handles.len();
+    app.set_status(format!("Running {} agent(s)...", handle_count));
+
+    loop {
+        // Update token count from subagent progress for the status line
+        if let Some(ref progress) = app.operation_state.active_subagents {
+            let total_tokens: usize = progress
+                .lock()
+                .map(|p| p.iter().map(|a| a.tokens).sum())
+                .unwrap_or(0);
+            if let super::state::AppState::Generating {
+                tokens_received, ..
+            } = &mut app.app_state
+            {
+                *tokens_received = total_tokens;
+            }
+        }
+
+        // Render UI (shows live progress via active_subagents) and check for Esc
+        if render_and_check_interrupt(terminal, app)? {
+            for h in &handles {
+                h.abort();
+            }
+            app.operation_state.clear_subagents();
+            return Ok(Vec::new());
+        }
+
+        if handles.iter().all(|h| h.is_finished()) {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(UI_POLL_INTERVAL_MS)).await;
+    }
+
+    let results = collect_subagent_results(handles, overflow).await;
+
+    app.set_status(format!("{} agent(s) completed", results.len()));
+    app.operation_state.clear_subagents();
+
+    Ok(results)
 }

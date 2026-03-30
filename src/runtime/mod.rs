@@ -1,3 +1,4 @@
+pub mod agent_loop;
 mod non_interactive;
 /// Runtime orchestrator module - Gateway
 mod orchestrator;

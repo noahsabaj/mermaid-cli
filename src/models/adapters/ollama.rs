@@ -13,9 +13,8 @@ use std::time::Duration;
 
 use crate::models::config::{BackendConfig, ModelConfig};
 use crate::models::error::{BackendError, ModelError, Result};
-use crate::models::traits::{Model, ModelCapabilities};
+use crate::models::traits::Model;
 use crate::models::types::{ChatMessage, MessageRole, ModelResponse, StreamCallback, TokenUsage};
-use crate::utils::{retry_async, RetryConfig};
 
 /// Mutable accumulators for stream processing, grouped to reduce parameter count.
 struct StreamAccumulator {
@@ -23,6 +22,7 @@ struct StreamAccumulator {
     thinking: String,
     tool_calls: Vec<crate::models::ToolCall>,
     in_thinking_phase: bool,
+    hide_thinking: bool,
     prompt_tokens: usize,
     completion_tokens: usize,
 }
@@ -48,11 +48,13 @@ impl OllamaAdapter {
             .tcp_keepalive(Duration::from_secs(60))
             .connect_timeout(Duration::from_secs(config.timeout_secs))
             .build()
-            .map_err(|e| ModelError::Backend(BackendError::ConnectionFailed {
-                backend: "ollama".to_string(),
-                url: base_url.clone(),
-                reason: e.to_string(),
-            }))?;
+            .map_err(|e| {
+                ModelError::Backend(BackendError::ConnectionFailed {
+                    backend: "ollama".to_string(),
+                    url: base_url.clone(),
+                    reason: e.to_string(),
+                })
+            })?;
 
         Ok(Self {
             client,
@@ -66,10 +68,14 @@ impl OllamaAdapter {
         &self,
         response: reqwest::Response,
         callback: StreamCallback,
+        hide_thinking: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(ModelError::Backend(BackendError::HttpError {
                 status,
                 message: error_text,
@@ -82,6 +88,7 @@ impl OllamaAdapter {
             thinking: String::new(),
             tool_calls: Vec::new(),
             in_thinking_phase: false,
+            hide_thinking,
             prompt_tokens: 0,
             completion_tokens: 0,
         };
@@ -107,8 +114,8 @@ impl OllamaAdapter {
                     continue;
                 }
 
-                let json_chunk: OllamaStreamChunk = serde_json::from_str(&line)
-                    .map_err(|e| ModelError::ParseError {
+                let json_chunk: OllamaStreamChunk =
+                    serde_json::from_str(&line).map_err(|e| ModelError::ParseError {
                         message: format!("Failed to parse Ollama response: {}", e),
                         raw: Some(line.clone()),
                     })?;
@@ -120,8 +127,8 @@ impl OllamaAdapter {
         // Process any remaining buffered content after the stream ends
         // (the final JSON line may not have a trailing newline)
         if !line_buffer.trim().is_empty() {
-            let json_chunk: OllamaStreamChunk = serde_json::from_str(line_buffer.trim())
-                .map_err(|e| ModelError::ParseError {
+            let json_chunk: OllamaStreamChunk =
+                serde_json::from_str(line_buffer.trim()).map_err(|e| ModelError::ParseError {
                     message: format!("Failed to parse Ollama response: {}", e),
                     raw: Some(line_buffer.clone()),
                 })?;
@@ -129,8 +136,16 @@ impl OllamaAdapter {
             Self::process_stream_chunk(&json_chunk, &callback, &mut acc);
         }
 
-        let thinking = if acc.thinking.is_empty() { None } else { Some(acc.thinking) };
-        let tool_calls = if acc.tool_calls.is_empty() { None } else { Some(acc.tool_calls) };
+        let thinking = if acc.thinking.is_empty() {
+            None
+        } else {
+            Some(acc.thinking)
+        };
+        let tool_calls = if acc.tool_calls.is_empty() {
+            None
+        } else {
+            Some(acc.tool_calls)
+        };
 
         Ok(ModelResponse {
             content: acc.content,
@@ -152,7 +167,11 @@ impl OllamaAdapter {
         acc: &mut StreamAccumulator,
     ) {
         // Handle thinking content (if present)
-        if let Some(ref thinking_chunk) = json_chunk.message.thinking {
+        // When hide_thinking is true, silently discard -- model still thinks
+        // server-side but the trace isn't shown to the user (like --hidethinking)
+        if let Some(ref thinking_chunk) = json_chunk.message.thinking
+            && !acc.hide_thinking
+        {
             if !acc.in_thinking_phase {
                 callback("Thinking...\n\n");
                 acc.in_thinking_phase = true;
@@ -166,9 +185,6 @@ impl OllamaAdapter {
         // Handle tool calls (if present)
         if let Some(ref tool_calls) = json_chunk.message.tool_calls {
             acc.tool_calls.extend(tool_calls.clone());
-            if let Ok(tool_calls_json) = serde_json::to_string(&tool_calls) {
-                callback(&format!("[TOOL_CALLS:{}]", tool_calls_json));
-            }
         }
 
         // Handle regular content
@@ -199,65 +215,16 @@ impl Model for OllamaAdapter {
         &self.model_name
     }
 
-    fn is_local(&self) -> bool {
-        // Ollama daemon is local, even if it routes to cloud
-        true
-    }
-
-    async fn health_check(&self) -> Result<()> {
-        let url = format!("{}/api/tags", self.base_url);
-        let base_url = self.base_url.clone();
-
-        // Retry config for health checks (3 attempts with quick backoff)
-        let retry_config = RetryConfig {
-            max_attempts: 3,
-            initial_delay_ms: 500,
-            max_delay_ms: 3000,
-            backoff_multiplier: 2.0,
-        };
-
-        let client = self.client.clone();
-        let health_result = retry_async(
-            || {
-                let client = client.clone();
-                let url = url.clone();
-                async move {
-                    let response = client
-                        .get(&url)
-                        .send()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Health check failed: {}", e))?;
-
-                    if response.status().is_success() {
-                        Ok(())
-                    } else {
-                        Err(anyhow::anyhow!("HTTP {}", response.status()))
-                    }
-                }
-            },
-            &retry_config,
-        )
-        .await;
-
-        health_result.map_err(|e| ModelError::Backend(BackendError::ConnectionFailed {
-            backend: "ollama".to_string(),
-            url: base_url,
-            reason: e.to_string(),
-        }))
-    }
-
     async fn list_models(&self) -> Result<Vec<String>> {
         let url = format!("{}/api/tags", self.base_url);
 
-        let response = self.client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ModelError::Backend(BackendError::ConnectionFailed {
+        let response = self.client.get(&url).send().await.map_err(|e| {
+            ModelError::Backend(BackendError::ConnectionFailed {
                 backend: "ollama".to_string(),
                 url: self.base_url.clone(),
                 reason: e.to_string(),
-            }))?;
+            })
+        })?;
 
         if !response.status().is_success() {
             return Err(ModelError::Backend(BackendError::HttpError {
@@ -266,8 +233,8 @@ impl Model for OllamaAdapter {
             }));
         }
 
-        let tags: OllamaTagsResponse = response.json().await
-            .map_err(|e| ModelError::ParseError {
+        let tags: OllamaTagsResponse =
+            response.json().await.map_err(|e| ModelError::ParseError {
                 message: format!("Failed to parse tags response: {}", e),
                 raw: None,
             })?;
@@ -314,43 +281,71 @@ impl Model for OllamaAdapter {
             // Add tool_calls for assistant messages (required for agent loop)
             // The assistant message must include the tool_calls it made
             if msg.role == MessageRole::Assistant
-                && let Some(ref tool_calls) = msg.tool_calls {
-                    json_msg["tool_calls"] = json!(tool_calls);
-                }
+                && let Some(ref tool_calls) = msg.tool_calls
+            {
+                json_msg["tool_calls"] = json!(tool_calls);
+            }
 
             // Add tool_name for tool result messages (required by Ollama API)
             // Per Ollama docs: messages.append({'role': 'tool', 'tool_name': tc.function.name, 'content': str(result)})
             if msg.role == MessageRole::Tool
-                && let Some(ref tool_name) = msg.tool_name {
-                    json_msg["tool_name"] = json!(tool_name);
-                }
+                && let Some(ref tool_name) = msg.tool_name
+            {
+                json_msg["tool_name"] = json!(tool_name);
+            }
 
             // Add images if present (for multimodal models)
             if let Some(ref images) = msg.images
-                && !images.is_empty() {
-                    json_msg["images"] = json!(images);
-                }
+                && !images.is_empty()
+            {
+                json_msg["images"] = json!(images);
+            }
 
             json_messages.push(json_msg);
         }
 
         // Add Ollama native tools for function calling (statically cached)
-        let tools = crate::models::ToolRegistry::ollama_tools_cached();
+        let all_tools = crate::models::ToolRegistry::ollama_tools_cached();
+        let no_cloud_key = crate::ollama::get_cloud_api_key().is_none();
+        let tools: Vec<&serde_json::Value> = all_tools
+            .iter()
+            .filter(|t| {
+                let name = t
+                    .pointer("/function/name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                // Exclude web tools when no cloud API key is configured
+                if no_cloud_key && (name == "web_search" || name == "web_fetch") {
+                    return false;
+                }
+                // Exclude agent tool for subagents (prevents recursive nesting)
+                if config.is_subagent && name == "agent" {
+                    return false;
+                }
+                true
+            })
+            .collect();
 
         // Build request body
         let mut request_body = json!({
             "model": self.model_name,
             "messages": json_messages,
             "stream": stream_callback.is_some(),
-            "tools": tools,
+            "tools": &tools,
         });
 
-        // Explicitly set think parameter so models that default to thinking
-        // (e.g., kimi-k2.5, qwen3) respect the user's toggle (Alt+T)
-        request_body["think"] = json!(config.thinking_enabled);
+        // Only send think parameter when explicitly set by the user (Alt+T toggle).
+        // Omitting it lets the model use its default behavior.
+        if let Some(val) = config.thinking_enabled {
+            request_body["think"] = json!(val);
+        }
+        tracing::debug!("think={:?}", config.thinking_enabled);
 
         tracing::debug!("Sending {} tools to Ollama", tools.len());
-        tracing::debug!("Request body tools: {}", serde_json::to_string_pretty(&tools).unwrap_or_default());
+        tracing::debug!(
+            "Request body tools: {}",
+            serde_json::to_string_pretty(&tools).unwrap_or_default()
+        );
 
         // Add model parameters
         let mut options = json!({});
@@ -371,32 +366,39 @@ impl Model for OllamaAdapter {
         request_body["options"] = options;
 
         // Send request
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| ModelError::Backend(BackendError::ConnectionFailed {
-                backend: "ollama".to_string(),
-                url: self.base_url.clone(),
-                reason: e.to_string(),
-            }))?;
+            .map_err(|e| {
+                ModelError::Backend(BackendError::ConnectionFailed {
+                    backend: "ollama".to_string(),
+                    url: self.base_url.clone(),
+                    reason: e.to_string(),
+                })
+            })?;
 
         if let Some(callback) = stream_callback {
-            self.handle_stream(response, callback).await
+            let hide_thinking = config.thinking_enabled == Some(false);
+            self.handle_stream(response, callback, hide_thinking).await
         } else {
             // Non-streaming response
             if !response.status().is_success() {
                 let status = response.status().as_u16();
-                let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
                 return Err(ModelError::Backend(BackendError::HttpError {
                     status,
                     message: error_text,
                 }));
             }
 
-            let json: OllamaStreamChunk = response.json().await
-                .map_err(|e| ModelError::ParseError {
+            let json: OllamaStreamChunk =
+                response.json().await.map_err(|e| ModelError::ParseError {
                     message: format!("Failed to parse response: {}", e),
                     raw: None,
                 })?;
@@ -411,15 +413,6 @@ impl Model for OllamaAdapter {
                 thinking,
                 tool_calls,
             })
-        }
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities {
-            max_context_length: 8192,
-            supports_streaming: true,
-            supports_functions: true,
-            supports_vision: true,
         }
     }
 }
@@ -447,13 +440,13 @@ struct OllamaMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct OllamaTagsResponse {
-    models: Vec<OllamaModel>,
+pub(crate) struct OllamaTagsResponse {
+    pub(crate) models: Vec<OllamaModel>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct OllamaModel {
-    name: String,
+pub(crate) struct OllamaModel {
+    pub(crate) name: String,
 }
 
 // Helper functions
@@ -473,9 +466,10 @@ fn normalize_url(url: &str) -> String {
 
     // Add default Ollama port if missing (only for http; https keeps its default 443)
     if let Some(after_scheme) = normalized.strip_prefix("http://")
-        && !after_scheme.contains(':') {
-            normalized = format!("{}:11434", normalized);
-        }
+        && !after_scheme.contains(':')
+    {
+        normalized = format!("{}:11434", normalized);
+    }
     // For https:// without a port, don't add :11434 — the default port (443) is correct
 
     normalized

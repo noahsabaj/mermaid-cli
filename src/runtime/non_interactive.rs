@@ -6,13 +6,15 @@ use tokio::sync::RwLock;
 use crate::utils::MutexExt;
 
 use crate::{
-    agents::{execute_action, ActionResult as AgentActionResult, AgentAction},
+    agents::{ActionResult as AgentActionResult, AgentAction},
     app::Config,
     cli::OutputFormat,
     constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE},
     models::{ChatMessage, Model, ModelConfig, ModelFactory},
     prompts,
 };
+
+use super::agent_loop::{self, AgentObserver, LoopControl, MAX_AGENT_ITERATIONS};
 
 /// Result of a non-interactive run
 #[derive(Debug, Serialize, Deserialize)]
@@ -67,10 +69,9 @@ impl NonInteractiveRunner {
         config: Config,
         no_execute: bool,
         max_tokens: Option<usize>,
-        backend: Option<&str>,
     ) -> Result<Self> {
-        // Create model instance with optional backend preference
-        let model = ModelFactory::create_with_backend(&model_id, Some(&config), backend).await?;
+        // Create model instance
+        let model = ModelFactory::create(&model_id, Some(&config)).await?;
 
         Ok(Self {
             model: Arc::new(RwLock::new(model)),
@@ -83,37 +84,27 @@ impl NonInteractiveRunner {
     pub async fn execute(&self, prompt: String) -> Result<NonInteractiveResult> {
         let start_time = std::time::Instant::now();
         let mut errors = Vec::new();
-        let mut actions = Vec::new();
+        let mut total_tokens = 0;
 
-        // Build messages using the same system prompt as interactive mode
+        // Build initial messages
         let system_message = ChatMessage::system(prompts::get_system_prompt());
         let user_message = ChatMessage::user(prompt.clone());
+        let mut messages = vec![system_message, user_message];
 
-        let messages = vec![system_message, user_message];
-
-        // Get model name from the model
-        let model_guard = self.model.read().await;
-        let model_name = model_guard.name().to_string();
-        drop(model_guard);
-
-        // Create model config
+        // Build model config
+        let model_name = {
+            let model = self.model.read().await;
+            model.name().to_string()
+        };
         let model_config = ModelConfig {
-            model: model_name,
+            model: model_name.clone(),
             temperature: DEFAULT_TEMPERATURE,
             max_tokens: self.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            top_p: Some(1.0),
-            frequency_penalty: None,
-            presence_penalty: None,
-            system_prompt: None,
-            thinking_enabled: false, // Non-interactive mode doesn't need thinking
-            backend_options: std::collections::HashMap::new(),
+            thinking_enabled: Some(false),
+            ..ModelConfig::default()
         };
 
-        // Send prompt to model
-        let full_response;
-        let tokens_used;
-
-        // Create a callback to capture the response
+        // First model call to get the initial response
         let response_text = Arc::new(std::sync::Mutex::new(String::new()));
         let response_clone = Arc::clone(&response_text);
         let callback = Arc::new(move |chunk: &str| {
@@ -121,88 +112,118 @@ impl NonInteractiveRunner {
             resp.push_str(chunk);
         });
 
-        // Call the model
-        let model_name;
         let result = {
-            let model = self.model.write().await;
-            model_name = model.name().to_string();
-            model
-                .chat(&messages, &model_config, Some(callback))
-                .await
+            let model = self.model.read().await;
+            model.chat(&messages, &model_config, Some(callback)).await
         };
 
-        // Parse actions from tool calls (Ollama native function calling)
-        let parsed_actions: Vec<AgentAction> = match result {
+        let (content, initial_tool_calls) = match result {
             Ok(response) => {
-                // Try to get content from the callback first
                 let callback_content = response_text.lock_mut_safe().clone();
-                if !callback_content.is_empty() {
-                    full_response = callback_content;
+                let content = if !callback_content.is_empty() {
+                    callback_content
                 } else {
-                    full_response = response.content;
-                }
-                tokens_used = response.usage.map(|u| u.total_tokens).unwrap_or(0);
-
-                // Convert tool_calls to AgentActions
-                if let Some(tool_calls) = response.tool_calls {
-                    tool_calls
-                        .iter()
-                        .filter_map(|tc| tc.to_agent_action().ok())
-                        .collect()
-                } else {
-                    vec![]
-                }
+                    response.content
+                };
+                total_tokens += response.usage.map(|u| u.total_tokens).unwrap_or(0);
+                let tool_calls = response.tool_calls.unwrap_or_default();
+                (content, tool_calls)
             },
             Err(e) => {
                 errors.push(format!("Model error: {}", e));
-                full_response = response_text.lock_mut_safe().clone();
-                tokens_used = 0;
-                vec![]
+                let content = response_text.lock_mut_safe().clone();
+                (content, vec![])
             },
         };
 
-        // Process parsed actions
-        for action in parsed_actions {
-            let (action_type, target) = extract_action_info(&action);
+        // If no tool calls, return immediately
+        if initial_tool_calls.is_empty() {
+            let duration_ms = start_time.elapsed().as_millis();
+            return Ok(NonInteractiveResult {
+                prompt,
+                response: content,
+                actions: vec![],
+                errors,
+                metadata: ExecutionMetadata {
+                    model: model_name,
+                    tokens_used: Some(total_tokens),
+                    duration_ms,
+                    actions_executed: false,
+                },
+            });
+        }
 
-            if self.no_execute {
-                actions.push(ActionResult {
+        // Add assistant message with tool calls to history
+        let assistant_msg =
+            ChatMessage::assistant(content.clone()).with_tool_calls(initial_tool_calls.clone());
+        messages.push(assistant_msg);
+
+        // Handle --no-execute mode: record tool calls but don't execute them
+        if self.no_execute {
+            let actions = build_no_execute_actions(&initial_tool_calls, &mut messages);
+            let duration_ms = start_time.elapsed().as_millis();
+            return Ok(NonInteractiveResult {
+                prompt,
+                response: content,
+                actions,
+                errors,
+                metadata: ExecutionMetadata {
+                    model: model_name,
+                    tokens_used: Some(total_tokens),
+                    duration_ms,
+                    actions_executed: false,
+                },
+            });
+        }
+
+        // Delegate to shared agent loop for tool execution + model re-calling
+        let mut observer = SilentObserver;
+        let loop_result = agent_loop::run_agent_loop(
+            Arc::clone(&self.model),
+            &model_config,
+            &mut messages,
+            initial_tool_calls,
+            &mut observer,
+            MAX_AGENT_ITERATIONS,
+        )
+        .await?;
+
+        // Build result from the agent loop
+        total_tokens += loop_result.total_tokens;
+        let final_response = if loop_result.final_response.is_empty() {
+            content
+        } else {
+            loop_result.final_response
+        };
+
+        let actions: Vec<ActionResult> = loop_result
+            .tool_results
+            .iter()
+            .map(|tr| {
+                let (action_type, target) = extract_action_info(&tr.action);
+                ActionResult {
                     action_type,
                     target,
-                    success: false,
-                    output: Some("Not executed (--no-execute mode)".to_string()),
-                });
-            } else {
-                let result = execute_action(&action).await;
-                let action_result = match result {
-                    AgentActionResult::Success { output } => ActionResult {
-                        action_type,
-                        target,
-                        success: true,
-                        output: Some(output),
-                    },
-                    AgentActionResult::Error { error } => ActionResult {
-                        action_type,
-                        target,
-                        success: false,
-                        output: Some(error),
-                    },
-                };
-                actions.push(action_result);
-            }
+                    success: tr.success,
+                    output: Some(tr.output.clone()),
+                }
+            })
+            .collect();
+
+        if loop_result.interrupted {
+            errors.push("Agent loop was interrupted".to_string());
         }
 
         let duration_ms = start_time.elapsed().as_millis();
-        let actions_executed = !self.no_execute && !actions.is_empty();
-
+        let actions_executed = !actions.is_empty();
         Ok(NonInteractiveResult {
             prompt,
-            response: full_response,
+            response: final_response,
             actions,
             errors,
             metadata: ExecutionMetadata {
                 model: model_name,
-                tokens_used: Some(tokens_used),
+                tokens_used: Some(total_tokens),
                 duration_ms,
                 actions_executed,
             },
@@ -289,35 +310,47 @@ impl NonInteractiveRunner {
 
 /// Extract action type and target description from an AgentAction
 fn extract_action_info(action: &AgentAction) -> (String, String) {
-    match action {
-        AgentAction::WriteFile { path, .. } => ("file_write".to_string(), path.clone()),
-        AgentAction::EditFile { path, .. } => ("edit_file".to_string(), path.clone()),
-        AgentAction::ExecuteCommand { command, .. } => ("command".to_string(), command.clone()),
-        AgentAction::ReadFile { paths } => {
-            if paths.len() == 1 {
-                ("file_read".to_string(), paths[0].clone())
-            } else {
-                ("file_read".to_string(), format!("{} files", paths.len()))
-            }
-        }
-        AgentAction::CreateDirectory { path } => ("create_dir".to_string(), path.clone()),
-        AgentAction::DeleteFile { path } => ("delete_file".to_string(), path.clone()),
-        AgentAction::GitDiff { paths } => {
-            if paths.len() == 1 {
-                ("git_diff".to_string(), paths[0].as_deref().unwrap_or("*").to_string())
-            } else {
-                ("git_diff".to_string(), format!("{} paths", paths.len()))
-            }
-        }
-        AgentAction::GitStatus => ("git_status".to_string(), "git status".to_string()),
-        AgentAction::GitCommit { message, .. } => ("git_commit".to_string(), message.clone()),
-        AgentAction::WebSearch { queries } => {
-            if queries.len() == 1 {
-                ("web_search".to_string(), queries[0].0.clone())
-            } else {
-                ("web_search".to_string(), format!("{} queries", queries.len()))
-            }
-        }
-        AgentAction::WebFetch { url } => ("web_fetch".to_string(), url.clone()),
+    let (label, target) = action.display_info();
+    (label.to_lowercase().replace(' ', "_"), target)
+}
+
+/// Build ActionResult entries for --no-execute mode (records tool calls without executing)
+fn build_no_execute_actions(
+    tool_calls: &[crate::models::ToolCall],
+    messages: &mut Vec<ChatMessage>,
+) -> Vec<ActionResult> {
+    let mut actions = Vec::new();
+    for tc in tool_calls {
+        let tool_call_id = tc.id.clone().unwrap_or_else(|| "call_noexec".to_string());
+        let tool_name = tc.function.name.clone();
+
+        let (action_type, target) = match tc.to_agent_action() {
+            Ok(action) => extract_action_info(&action),
+            Err(_) => (tool_name.clone(), String::new()),
+        };
+
+        let msg = "Not executed (--no-execute mode)".to_string();
+        messages.push(ChatMessage::tool(&tool_call_id, &tool_name, &msg));
+        actions.push(ActionResult {
+            action_type,
+            target,
+            success: false,
+            output: Some(msg),
+        });
     }
+    actions
+}
+
+/// Observer that does nothing -- used by non-interactive mode
+struct SilentObserver;
+
+impl AgentObserver for SilentObserver {
+    fn check_interrupt(&mut self) -> LoopControl {
+        LoopControl::Continue
+    }
+    fn on_status(&mut self, _: &str) {}
+    fn on_tool_result(&mut self, _: &str, _: &str, _: &AgentAction, _: &AgentActionResult) {}
+    fn on_error(&mut self, _: &str) {}
+    fn on_generation_start(&mut self) {}
+    fn on_generation_complete(&mut self, _: usize) {}
 }

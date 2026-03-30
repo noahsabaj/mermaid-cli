@@ -32,15 +32,6 @@ pub enum AgentAction {
         working_dir: Option<String>,
         timeout: Option<u64>,
     },
-    /// Git diff for one or more paths (executor decides parallelization)
-    GitDiff {
-        paths: Vec<Option<String>>,
-    },
-    GitCommit {
-        message: String,
-        files: Vec<String>,
-    },
-    GitStatus,
     /// Web search via Ollama Cloud API (executor decides parallelization)
     WebSearch {
         queries: Vec<(String, usize)>,
@@ -49,37 +40,87 @@ pub enum AgentAction {
     WebFetch {
         url: String,
     },
+    /// Spawn an autonomous sub-agent with its own conversation context
+    SpawnAgent {
+        prompt: String,
+        description: String,
+    },
+    /// Placeholder for tool calls that failed to parse (never executed)
+    ParseError {
+        message: String,
+    },
 }
 
 /// Result of an agent action
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
 pub enum ActionResult {
     Success { output: String },
     Error { error: String },
 }
 
+impl AgentAction {
+    /// Extract a (type_label, target) pair for display or logging
+    pub fn display_info(&self) -> (&str, String) {
+        match self {
+            AgentAction::ReadFile { paths } => {
+                if paths.len() == 1 {
+                    ("Read", paths[0].clone())
+                } else {
+                    ("Read", format!("{} files", paths.len()))
+                }
+            },
+            AgentAction::WriteFile { path, .. } => ("Write", path.clone()),
+            AgentAction::EditFile { path, .. } => ("Edit", path.clone()),
+            AgentAction::DeleteFile { path } => ("Delete", path.clone()),
+            AgentAction::CreateDirectory { path } => ("Bash", format!("mkdir -p {}", path)),
+            AgentAction::ExecuteCommand { command, .. } => ("Bash", command.clone()),
+            AgentAction::WebSearch { queries } => {
+                if queries.len() == 1 {
+                    ("Web Search", queries[0].0.clone())
+                } else {
+                    ("Web Search", format!("{} queries", queries.len()))
+                }
+            },
+            AgentAction::WebFetch { url } => ("Web Fetch", url.clone()),
+            AgentAction::SpawnAgent { description, .. } => ("Agent", description.clone()),
+            AgentAction::ParseError { message } => ("Error", message.clone()),
+        }
+    }
+}
+
 /// Display representation of an action for UI rendering
-/// Used to show action results in Claude Code style
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionDisplay {
-    /// Type of action (e.g., "Write", "Bash", "Read", "Edit", "Delete", "Web Search", "Web Fetch")
+    /// Type of action (e.g., "Write", "Bash", "Read", "Edit", "Delete", "Agent")
     pub action_type: String,
     /// Target of the action (file path, command, etc.)
     pub target: String,
     /// Result of the action
     pub result: ActionResult,
-    /// Preview of the output (truncated for display)
-    pub preview: Option<String>,
-    /// Line count for file operations
-    pub line_count: Option<usize>,
-    /// Full file content (for Write actions, to show preview)
-    pub file_content: Option<String>,
-    /// Duration of long-running actions in seconds (for display)
+    /// Type-specific display data
+    #[serde(default)]
+    pub details: ActionDetails,
+    /// Duration of long-running actions in seconds
     pub duration_seconds: Option<f64>,
-    /// Multiple targets for parallel operations (e.g., multiple files, searches)
-    pub targets: Option<Vec<String>>,
-    /// Number of items in parallel operation
-    pub item_count: Option<usize>,
-    /// Items that failed initially but were retried
-    pub failed_items: Option<Vec<String>>,
 }
+
+/// Type-specific display data for action results
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub enum ActionDetails {
+    /// No extra display data (Delete, CreateDirectory, or old conversations)
+    #[default]
+    Simple,
+    /// Text preview with optional line count (Read, Bash, Git, WebSearch, etc.)
+    Preview {
+        text: String,
+        line_count: Option<usize>,
+    },
+    /// File write with content for syntax-highlighted preview
+    FileContent { line_count: usize, content: String },
+    /// File edit with summary and diff for color-coded display
+    Diff { summary: String, diff: String },
+    /// Agent completion with summary and tool use count
+    Agent { summary: String, tool_uses: usize },
+}
+
