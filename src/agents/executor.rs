@@ -57,15 +57,17 @@ pub async fn execute_command(
     let timeout_duration = Duration::from_secs(secs);
 
     match timeout(timeout_duration, run_command(cmd)).await {
-        Ok(Ok(output)) => ActionResult::Success { output },
+        Ok(Ok(output)) => ActionResult::Success { output, images: None },
         Ok(Err(e)) => ActionResult::Error {
             error: format!("Command failed: {}", e),
         },
-        Err(_) => ActionResult::Error {
-            error: format!(
-                "Command timed out after {} seconds. If this is a server or long-running process, it is likely still running in the background.",
+        Err(_) => ActionResult::Success {
+            output: format!(
+                "Command timed out after {} seconds. The process is likely still running in the background. \
+                 This is normal for GUI apps, servers, and long-running processes.",
                 timeout_duration.as_secs()
             ),
+            images: None,
         },
     }
 }
@@ -238,7 +240,7 @@ mod tests {
         let result = execute_command("echo 'Hello, Mermaid!'", None, None).await;
 
         match result {
-            ActionResult::Success { output } => {
+            ActionResult::Success { output, .. } => {
                 assert!(output.contains("Hello, Mermaid!"));
             },
             _ => panic!("Expected success"),
