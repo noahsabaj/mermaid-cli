@@ -45,6 +45,31 @@ pub enum AgentAction {
         prompt: String,
         description: String,
     },
+    /// Capture a screenshot of the screen (or a focused window/monitor/region/window)
+    Screenshot {
+        mode: String,            // "fullscreen", "focused", "monitor", "region", "window"
+        monitor: Option<String>, // monitor name for "monitor" mode (e.g., "DP-0")
+        region: Option<String>,  // "X,Y,WIDTHxHEIGHT" for "region" mode
+        window: Option<String>,  // window title for "window" mode (e.g., "Discord")
+    },
+    /// Click at screen coordinates
+    Click { x: i32, y: i32, button: String },
+    /// Type a text string at the current cursor position
+    TypeText { text: String },
+    /// Press a key or key combination
+    PressKey { key: String },
+    /// Scroll in a direction
+    Scroll { direction: String, amount: i32 },
+    /// Move mouse cursor to coordinates
+    MouseMove { x: i32, y: i32 },
+    /// List all visible window titles (lightweight, no screenshot)
+    ListWindows,
+    /// Dynamic MCP tool call (dispatched to an MCP server at runtime)
+    McpToolCall {
+        server_name: String,
+        tool_name: String,
+        arguments: serde_json::Value,
+    },
     /// Placeholder for tool calls that failed to parse (never executed)
     ParseError {
         message: String,
@@ -55,8 +80,14 @@ pub enum AgentAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub enum ActionResult {
-    Success { output: String },
-    Error { error: String },
+    Success {
+        output: String,
+        #[serde(default)]
+        images: Option<Vec<String>>,
+    },
+    Error {
+        error: String,
+    },
 }
 
 impl AgentAction {
@@ -84,6 +115,35 @@ impl AgentAction {
             },
             AgentAction::WebFetch { url } => ("Web Fetch", url.clone()),
             AgentAction::SpawnAgent { description, .. } => ("Agent", description.clone()),
+            AgentAction::Screenshot { mode, window, .. } => {
+                let target = match mode.as_str() {
+                    "focused" => "focused window".to_string(),
+                    "monitor" => "monitor".to_string(),
+                    "region" => "region".to_string(),
+                    "window" => {
+                        format!("window \"{}\"", window.as_deref().unwrap_or("?"))
+                    },
+                    _ => "screen capture".to_string(),
+                };
+                ("Screenshot", target)
+            },
+            AgentAction::Click { x, y, button } => {
+                ("Click", format!("({}, {}) {}", x, y, button))
+            },
+            AgentAction::TypeText { text } => {
+                ("Type", text.chars().take(30).collect())
+            },
+            AgentAction::PressKey { key } => ("Key", key.clone()),
+            AgentAction::Scroll { direction, amount } => {
+                ("Scroll", format!("{} {}", direction, amount))
+            },
+            AgentAction::MouseMove { x, y } => ("Move", format!("({}, {})", x, y)),
+            AgentAction::ListWindows => ("ListWindows", "visible windows".to_string()),
+            AgentAction::McpToolCall {
+                server_name,
+                tool_name,
+                ..
+            } => ("MCP", format!("{}:{}", server_name, tool_name)),
             AgentAction::ParseError { message } => ("Error", message.clone()),
         }
     }

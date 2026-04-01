@@ -1,11 +1,26 @@
 use futures::future::join_all;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use super::executor;
 use super::filesystem;
 use super::types::{ActionResult, AgentAction};
 use super::web_search::WebSearchClient;
+use crate::mcp::McpServerManager;
 use crate::ollama::get_cloud_api_key;
+
+/// Global MCP server manager, initialized at startup.
+static MCP_MANAGER: OnceLock<Arc<McpServerManager>> = OnceLock::new();
+
+/// Set the global MCP server manager (called once at startup).
+pub fn set_mcp_manager(manager: Arc<McpServerManager>) {
+    let _ = MCP_MANAGER.set(manager);
+}
+
+/// Get the global MCP server manager.
+pub fn get_mcp_manager() -> Option<&'static Arc<McpServerManager>> {
+    MCP_MANAGER.get()
+}
 
 /// Get a human-readable description of an action (for UI display)
 pub fn describe_action(action: &AgentAction) -> String {
@@ -49,6 +64,24 @@ pub fn describe_action(action: &AgentAction) -> String {
         AgentAction::SpawnAgent { description, .. } => {
             format!("Spawn agent: {}", description)
         },
+        AgentAction::Screenshot { mode, window, .. } => {
+            if mode == "window" {
+                format!("Screenshot (window: {})", window.as_deref().unwrap_or("?"))
+            } else {
+                format!("Screenshot ({})", mode)
+            }
+        },
+        AgentAction::ListWindows => "List windows".to_string(),
+        AgentAction::Click { x, y, button } => format!("Click {} at ({}, {})", button, x, y),
+        AgentAction::TypeText { text } => format!("Type: {}", text.chars().take(30).collect::<String>()),
+        AgentAction::PressKey { key } => format!("Press key: {}", key),
+        AgentAction::Scroll { direction, amount } => format!("Scroll {} by {}", direction, amount),
+        AgentAction::MouseMove { x, y } => format!("Move mouse to ({}, {})", x, y),
+        AgentAction::McpToolCall {
+            server_name,
+            tool_name,
+            ..
+        } => format!("MCP tool: {}:{}", server_name, tool_name),
         AgentAction::ParseError { message } => format!("Parse error: {}", message),
     }
 }
@@ -63,6 +96,7 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
         AgentAction::WriteFile { path, content } => match filesystem::write_file(path, content) {
             Ok(_) => ActionResult::Success {
                 output: format!("File written: {}", path),
+                images: None,
             },
             Err(e) => ActionResult::Error {
                 error: e.to_string(),
@@ -73,7 +107,7 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
             old_string,
             new_string,
         } => match filesystem::edit_file(path, old_string, new_string) {
-            Ok(diff) => ActionResult::Success { output: diff },
+            Ok(diff) => ActionResult::Success { output: diff, images: None },
             Err(e) => ActionResult::Error {
                 error: e.to_string(),
             },
@@ -81,6 +115,7 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
         AgentAction::DeleteFile { path } => match filesystem::delete_file(path) {
             Ok(_) => ActionResult::Success {
                 output: format!("File deleted: {}", path),
+                images: None,
             },
             Err(e) => ActionResult::Error {
                 error: e.to_string(),
@@ -89,6 +124,7 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
         AgentAction::CreateDirectory { path } => match filesystem::create_directory(path) {
             Ok(_) => ActionResult::Success {
                 output: format!("Directory created: {}", path),
+                images: None,
             },
             Err(e) => ActionResult::Error {
                 error: e.to_string(),
@@ -105,6 +141,32 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
             error: "SpawnAgent must be handled at the agent loop level, not execute_action"
                 .to_string(),
         },
+        AgentAction::Screenshot { mode, monitor, region, window } => {
+            super::computer_use::execute_screenshot(
+                mode,
+                monitor.as_deref(),
+                region.as_deref(),
+                window.as_deref(),
+            )
+            .await
+        },
+        AgentAction::ListWindows => super::computer_use::execute_list_windows().await,
+        AgentAction::Click { x, y, button } => {
+            super::computer_use::execute_click(*x, *y, button).await
+        },
+        AgentAction::TypeText { text } => super::computer_use::execute_type_text(text).await,
+        AgentAction::PressKey { key } => super::computer_use::execute_press_key(key).await,
+        AgentAction::Scroll { direction, amount } => {
+            super::computer_use::execute_scroll(direction, *amount).await
+        },
+        AgentAction::MouseMove { x, y } => {
+            super::computer_use::execute_mouse_move(*x, *y).await
+        },
+        AgentAction::McpToolCall {
+            server_name,
+            tool_name,
+            arguments,
+        } => execute_mcp_tool(server_name, tool_name, arguments).await,
         AgentAction::ParseError { message } => ActionResult::Error {
             error: message.clone(),
         },
@@ -122,7 +184,7 @@ async fn execute_read_files(paths: &[String]) -> ActionResult {
     // Single file: simple synchronous read
     if paths.len() == 1 {
         return match filesystem::read_file(&paths[0]) {
-            Ok(content) => ActionResult::Success { output: content },
+            Ok(content) => ActionResult::Success { output: content, images: None },
             Err(e) => ActionResult::Error {
                 error: e.to_string(),
             },
@@ -187,7 +249,7 @@ async fn execute_read_files(paths: &[String]) -> ActionResult {
     }
 
     output.push_str(&format!("(Completed in {:.1}s)", duration));
-    ActionResult::Success { output }
+    ActionResult::Success { output, images: None }
 }
 
 /// Resolve the Ollama Cloud API key, returning an error ActionResult if not configured
@@ -226,7 +288,7 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
         return match client.search_query(query, *result_count).await {
             Ok(results) => {
                 let formatted = client.format_results(&results);
-                ActionResult::Success { output: formatted }
+                ActionResult::Success { output: formatted, images: None }
             },
             Err(e) => {
                 let error_str = e.to_string();
@@ -306,7 +368,40 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
     }
 
     output.push_str(&format!("(Completed in {:.1}s)", duration));
-    ActionResult::Success { output }
+    ActionResult::Success { output, images: None }
+}
+
+/// Execute an MCP tool call via the global server manager
+async fn execute_mcp_tool(
+    server_name: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> ActionResult {
+    let manager = match get_mcp_manager() {
+        Some(m) => m,
+        None => {
+            return ActionResult::Error {
+                error: "MCP servers not initialized. Add [mcp_servers] to config.toml.".to_string(),
+            };
+        },
+    };
+
+    match manager.call_tool(server_name, tool_name, arguments).await {
+        Ok(result) => {
+            let (text, images) = McpServerManager::format_tool_result(&result);
+            if result.is_error {
+                ActionResult::Error { error: text }
+            } else {
+                ActionResult::Success {
+                    output: text,
+                    images,
+                }
+            }
+        },
+        Err(e) => ActionResult::Error {
+            error: format!("MCP tool call failed: {}", e),
+        },
+    }
 }
 
 /// Execute a web fetch - fetch a URL's content as markdown
@@ -327,7 +422,7 @@ async fn execute_web_fetch(url: &str) -> ActionResult {
                 "Title: {}\nURL: {}\nContent:\n{}",
                 result.title, url, content
             );
-            ActionResult::Success { output }
+            ActionResult::Success { output, images: None }
         },
         Err(e) => ActionResult::Error {
             error: format!("Failed to fetch {}: {}", url, e),
@@ -347,7 +442,7 @@ mod tests {
         };
         let result = execute_action(&action).await;
         match result {
-            ActionResult::Success { output } => {
+            ActionResult::Success { output, .. } => {
                 assert!(output.contains("[package]") || !output.is_empty());
             },
             ActionResult::Error { .. } => panic!("Should not error on valid file"),
@@ -374,7 +469,7 @@ mod tests {
         };
         let result = execute_action(&action).await;
         match result {
-            ActionResult::Success { output } => {
+            ActionResult::Success { output, .. } => {
                 assert!(output.contains("File written"));
             },
             ActionResult::Error { error } => {
@@ -390,7 +485,7 @@ mod tests {
         };
         let result = execute_action(&action).await;
         match result {
-            ActionResult::Success { output } => {
+            ActionResult::Success { output, .. } => {
                 assert!(output.contains("Directory created"));
             },
             ActionResult::Error { error } => {

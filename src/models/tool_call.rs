@@ -95,6 +95,64 @@ impl ToolCall {
                 AgentAction::SpawnAgent { prompt, description }
             },
 
+            "screenshot" => {
+                let mode = Self::get_optional_string_arg(args, "mode")
+                    .unwrap_or_else(|| "fullscreen".to_string());
+                let monitor = Self::get_optional_string_arg(args, "monitor");
+                let region = Self::get_optional_string_arg(args, "region");
+                let window = Self::get_optional_string_arg(args, "window");
+                AgentAction::Screenshot { mode, monitor, region, window }
+            },
+
+            "list_windows" => AgentAction::ListWindows,
+
+            "click" => {
+                let x = Self::get_int_arg(args, "x")? as i32;
+                let y = Self::get_int_arg(args, "y")? as i32;
+                let button = Self::get_optional_string_arg(args, "button")
+                    .unwrap_or_else(|| "left".to_string());
+                AgentAction::Click { x, y, button }
+            },
+
+            "type_text" => {
+                let text = Self::get_string_arg(args, "text")?;
+                AgentAction::TypeText { text }
+            },
+
+            "press_key" => {
+                let key = Self::get_string_arg(args, "key")?;
+                AgentAction::PressKey { key }
+            },
+
+            "scroll" => {
+                let direction = Self::get_string_arg(args, "direction")?;
+                let amount = Self::get_int_arg(args, "amount").unwrap_or(3) as i32;
+                AgentAction::Scroll { direction, amount }
+            },
+
+            "mouse_move" => {
+                let x = Self::get_int_arg(args, "x")? as i32;
+                let y = Self::get_int_arg(args, "y")? as i32;
+                AgentAction::MouseMove { x, y }
+            },
+
+            // MCP tools: mcp__{server_name}__{tool_name}
+            name if name.starts_with("mcp__") => {
+                let rest = &name[5..]; // skip "mcp__"
+                if let Some((server_name, tool_name)) = rest.split_once("__") {
+                    AgentAction::McpToolCall {
+                        server_name: server_name.to_string(),
+                        tool_name: tool_name.to_string(),
+                        arguments: args.clone(),
+                    }
+                } else {
+                    return Err(anyhow!(
+                        "Invalid MCP tool name format: '{}'. Expected 'mcp__{{server}}__{{tool}}'.",
+                        name
+                    ));
+                }
+            },
+
             name => {
                 return Err(anyhow!(
                     "Unknown tool: '{}'. Model attempted to call a tool that doesn't exist.",
