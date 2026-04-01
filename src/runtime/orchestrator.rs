@@ -1,9 +1,12 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::{
+    agents::set_mcp_manager,
     app::{Config, load_config, persist_last_model},
     cli::{Cli, handle_command},
+    mcp::McpServerManager,
     models::{ModelFactory, OllamaOptions},
     ollama::ensure_model as ensure_ollama_model,
     session::{ConversationManager, select_conversation},
@@ -120,6 +123,26 @@ impl Orchestrator {
             num_ctx: self.config.ollama.num_ctx,
             numa: self.config.ollama.numa,
         };
+
+        // Start MCP servers (if configured)
+        if !self.config.mcp_servers.is_empty() {
+            log_info(
+                "MCP",
+                format!(
+                    "Starting {} MCP server(s)...",
+                    self.config.mcp_servers.len()
+                ),
+            );
+            let manager = McpServerManager::start(&self.config.mcp_servers).await;
+            if manager.has_servers() {
+                // Convert MCP tools to Ollama format and store on app
+                let mcp_tools =
+                    crate::models::tools::mcp_tools_to_ollama(manager.get_all_tools());
+                log_info("MCP", format!("{} MCP tool(s) available", mcp_tools.len()));
+                app.mcp_tools = mcp_tools;
+                set_mcp_manager(Arc::new(manager));
+            }
+        }
 
         // Handle session loading
         // Default: start fresh (no history)

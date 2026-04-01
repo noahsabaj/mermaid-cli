@@ -307,7 +307,7 @@ impl Model for OllamaAdapter {
         // Add Ollama native tools for function calling (statically cached)
         let all_tools = crate::models::ToolRegistry::ollama_tools_cached();
         let no_cloud_key = crate::ollama::get_cloud_api_key().is_none();
-        let tools: Vec<&serde_json::Value> = all_tools
+        let mut tools: Vec<&serde_json::Value> = all_tools
             .iter()
             .filter(|t| {
                 let name = t
@@ -322,9 +322,30 @@ impl Model for OllamaAdapter {
                 if config.is_subagent && name == "agent" {
                     return false;
                 }
+                // Exclude computer use tools for subagents — concurrent mouse/keyboard
+                // control is inherently broken (shared screen, global coordinates)
+                if config.is_subagent
+                    && matches!(
+                        name,
+                        "screenshot"
+                            | "list_windows"
+                            | "click"
+                            | "type_text"
+                            | "press_key"
+                            | "scroll"
+                            | "mouse_move"
+                    )
+                {
+                    return false;
+                }
                 true
             })
             .collect();
+
+        // Append MCP tools (dynamic, discovered at runtime from MCP servers)
+        for mcp_tool in &config.mcp_tools {
+            tools.push(mcp_tool);
+        }
 
         // Build request body
         let mut request_body = json!({

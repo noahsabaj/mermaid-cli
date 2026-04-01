@@ -2,6 +2,7 @@ use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERAT
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Main configuration structure
@@ -22,6 +23,23 @@ pub struct Config {
     /// Non-interactive mode configuration
     #[serde(default)]
     pub non_interactive: NonInteractiveConfig,
+
+    /// MCP server configurations
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
+}
+
+/// MCP server configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// Command to execute (e.g., "npx", "node", "python")
+    pub command: String,
+    /// Command-line arguments
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables for the server process
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 /// Default model settings

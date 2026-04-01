@@ -43,6 +43,11 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     // Run the UI loop using the loop coordinator
     let res = super::loop_coordinator::run_app_loop(&mut terminal, &mut app, tx, &mut rx).await;
 
+    // Shut down MCP servers (if any)
+    if let Some(manager) = crate::agents::get_mcp_manager() {
+        manager.shutdown().await;
+    }
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(

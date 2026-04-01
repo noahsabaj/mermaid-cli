@@ -3,6 +3,7 @@
 
 // Private submodules - not directly accessible from outside
 mod action_executor;
+mod computer_use;
 mod executor;
 mod filesystem;
 mod subagent;
@@ -10,7 +11,7 @@ mod types;
 mod web_search;
 
 // Public re-exports - the ONLY way to access agent functionality
-pub use action_executor::{describe_action, execute_action};
+pub use action_executor::{describe_action, execute_action, get_mcp_manager, set_mcp_manager};
 pub use filesystem::{is_binary_file, read_binary_file, read_file};
 pub use subagent::{
     SubagentProgress, SubagentResult, SubagentStatus, collect_subagent_results,

@@ -40,6 +40,11 @@ pub struct ModelConfig {
     /// Example: {"ollama": {"num_gpu": "10", "num_ctx": "8192"}}
     #[serde(default)]
     pub backend_options: HashMap<String, HashMap<String, String>>,
+
+    /// MCP tool definitions in Ollama JSON format (runtime-only, never persisted).
+    /// Merged with built-in tools when sending requests to the model.
+    #[serde(skip)]
+    pub mcp_tools: Vec<serde_json::Value>,
 }
 
 impl Default for ModelConfig {
@@ -52,6 +57,7 @@ impl Default for ModelConfig {
             thinking_enabled: Some(true),
             is_subagent: false,
             backend_options: HashMap::new(),
+            mcp_tools: Vec::new(),
         }
     }
 }

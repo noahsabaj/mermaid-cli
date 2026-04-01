@@ -91,6 +91,11 @@ impl ModelFactory {
         factory.available_providers_impl().await
     }
 
+    /// List available providers using this factory's config (instance method)
+    pub async fn available_providers_pub(&self) -> Vec<String> {
+        self.available_providers_impl().await
+    }
+
     // --- Instance methods ---
 
     /// List available providers with a fast single-shot health check
