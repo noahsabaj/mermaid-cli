@@ -197,3 +197,144 @@ impl ConversationManager {
         &self.conversations_dir
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_conversation_has_session_title() {
+        let conv = ConversationHistory::new("/tmp/project".into(), "test-model".into());
+        assert!(conv.title.starts_with("Session "));
+        assert_eq!(conv.model_name, "test-model");
+        assert_eq!(conv.project_path, "/tmp/project");
+        assert!(conv.messages.is_empty());
+    }
+
+    #[test]
+    fn test_title_updates_from_first_user_message() {
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
+        conv.add_messages(&[ChatMessage::user("Fix the login bug")]);
+        assert_eq!(conv.title, "Fix the login bug");
+    }
+
+    #[test]
+    fn test_title_truncated_at_60_chars() {
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
+        let long_msg = "a".repeat(100);
+        conv.add_messages(&[ChatMessage::user(long_msg)]);
+        assert!(conv.title.ends_with("..."));
+        assert!(conv.title.len() <= 64); // 60 chars + "..."
+    }
+
+    #[test]
+    fn test_title_set_only_once() {
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
+        conv.add_messages(&[ChatMessage::user("First message")]);
+        conv.add_messages(&[ChatMessage::user("Second message")]);
+        assert_eq!(conv.title, "First message");
+    }
+
+    #[test]
+    fn test_input_history_deduplication() {
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
+        conv.add_to_input_history("hello".into());
+        conv.add_to_input_history("hello".into()); // duplicate
+        conv.add_to_input_history("world".into());
+        assert_eq!(conv.input_history.len(), 2);
+    }
+
+    #[test]
+    fn test_input_history_skips_empty() {
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
+        conv.add_to_input_history("".into());
+        conv.add_to_input_history("   ".into());
+        assert_eq!(conv.input_history.len(), 0);
+    }
+
+    #[test]
+    fn test_input_history_capped_at_100() {
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
+        for i in 0..110 {
+            conv.add_to_input_history(format!("msg{}", i));
+        }
+        assert_eq!(conv.input_history.len(), 100);
+        assert_eq!(conv.input_history.front().unwrap(), "msg10");
+    }
+
+    #[test]
+    fn test_save_load_roundtrip() {
+        let dir = std::env::temp_dir().join("mermaid_test_conv_roundtrip");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+
+        let mut conv = ConversationHistory::new("/tmp".into(), "model".into());
+        conv.add_messages(&[ChatMessage::user("test message")]);
+        conv.add_to_input_history("test message".into());
+
+        manager.save_conversation(&conv).unwrap();
+        let loaded = manager.load_conversation(&conv.id).unwrap();
+
+        assert_eq!(loaded.id, conv.id);
+        assert_eq!(loaded.title, conv.title);
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.input_history.len(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_list_conversations_ordered_by_updated_at() {
+        let dir = std::env::temp_dir().join("mermaid_test_conv_list");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+
+        let conv1 = ConversationHistory::new("/tmp".into(), "m".into());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let conv2 = ConversationHistory::new("/tmp".into(), "m".into());
+
+        manager.save_conversation(&conv1).unwrap();
+        manager.save_conversation(&conv2).unwrap();
+
+        let list = manager.list_conversations().unwrap();
+        assert_eq!(list.len(), 2);
+        // Newest first
+        assert_eq!(list[0].id, conv2.id);
+        assert_eq!(list[1].id, conv1.id);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_last_conversation() {
+        let dir = std::env::temp_dir().join("mermaid_test_conv_last");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+
+        assert!(manager.load_last_conversation().unwrap().is_none());
+
+        let conv = ConversationHistory::new("/tmp".into(), "m".into());
+        manager.save_conversation(&conv).unwrap();
+
+        let last = manager.load_last_conversation().unwrap().unwrap();
+        assert_eq!(last.id, conv.id);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_delete_conversation() {
+        let dir = std::env::temp_dir().join("mermaid_test_conv_delete");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+
+        let conv = ConversationHistory::new("/tmp".into(), "m".into());
+        manager.save_conversation(&conv).unwrap();
+        assert_eq!(manager.list_conversations().unwrap().len(), 1);
+
+        manager.delete_conversation(&conv.id).unwrap();
+        assert_eq!(manager.list_conversations().unwrap().len(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

@@ -6,6 +6,21 @@ use super::stream_event::StreamEvent;
 use crate::models::{ErrorCategory, MessageRole, UserFacingError};
 use crate::tui::App;
 
+/// Check if an error message indicates the model does not support thinking mode.
+fn is_thinking_unsupported_error(message: &str) -> bool {
+    message.contains("does not support thinking")
+}
+
+/// Check if an error message indicates the model does not support vision/images.
+fn is_vision_unsupported_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("does not support images")
+        || lower.contains("images not supported")
+        || lower.contains("does not support vision")
+        || lower.contains("is not a multimodal model")
+        || lower.contains("unsupported content type")
+}
+
 /// Result of processing streaming chunks
 #[derive(Debug, Clone)]
 #[must_use]
@@ -56,8 +71,8 @@ pub async fn process_stream_chunks(
                 // Accumulate in app state so tool calls persist across process_stream_chunks calls
                 app.operation_state.accumulated_tool_calls.extend(calls);
             },
-            StreamEvent::Done { completion_tokens } => {
-                app.set_final_tokens(completion_tokens);
+            StreamEvent::Done { total_tokens } => {
+                app.set_final_tokens(total_tokens);
 
                 // Take accumulated tool calls from app state (clears them for next generation)
                 let tool_calls = std::mem::take(&mut app.operation_state.accumulated_tool_calls);
@@ -76,7 +91,7 @@ pub async fn process_stream_chunks(
 
                 // Check if this is a "does not support thinking" error
                 // If so, disable thinking support for this model and inform user
-                if user_error.message.contains("does not support thinking") {
+                if is_thinking_unsupported_error(&user_error.message) {
                     app.model_state.disable_thinking_support();
                     app.set_status("Model does not support thinking - disabled");
                     app.add_message(
@@ -89,17 +104,7 @@ pub async fn process_stream_chunks(
                 // Check if this is a vision/image-related error
                 // If so, mark vision as unsupported for this model and strip images
                 // from history to prevent the same error on subsequent requests.
-                // Known error strings:
-                // - Local Ollama: "does not support images", "is not a multimodal model"
-                // - Cloud Ollama: "unsupported content type 'image_url'" (cloud converts
-                //   native images field to OpenAI image_url format internally)
-                let error_lower = user_error.message.to_lowercase();
-                if error_lower.contains("does not support images")
-                    || error_lower.contains("images not supported")
-                    || error_lower.contains("does not support vision")
-                    || error_lower.contains("is not a multimodal model")
-                    || error_lower.contains("unsupported content type")
-                {
+                if is_vision_unsupported_error(&user_error.message) {
                     app.model_state.vision_supported = Some(false);
                     // Strip images from all messages in history to prevent re-sending
                     for msg in &mut app.session_state.messages {
@@ -145,8 +150,6 @@ mod tests {
 
     #[test]
     fn test_stream_status_variants() {
-        // Verify all StreamStatus variants are properly defined
-
         let streaming = StreamStatus::Streaming;
         assert!(matches!(streaming, StreamStatus::Streaming));
 
@@ -161,5 +164,39 @@ mod tests {
             recoverable: false,
         });
         assert!(matches!(error, StreamStatus::Error(_)));
+    }
+
+    #[test]
+    fn test_thinking_unsupported_detection() {
+        assert!(is_thinking_unsupported_error(
+            "this model does not support thinking"
+        ));
+        assert!(is_thinking_unsupported_error(
+            "Model X does not support thinking mode"
+        ));
+        assert!(!is_thinking_unsupported_error("connection refused"));
+        assert!(!is_thinking_unsupported_error(""));
+    }
+
+    #[test]
+    fn test_vision_unsupported_detection() {
+        // Local Ollama errors
+        assert!(is_vision_unsupported_error(
+            "this model does not support images"
+        ));
+        assert!(is_vision_unsupported_error(
+            "images not supported by this model"
+        ));
+        assert!(is_vision_unsupported_error(
+            "llama3 is not a multimodal model"
+        ));
+        // Cloud Ollama error (cloud converts images to OpenAI image_url format)
+        assert!(is_vision_unsupported_error(
+            "unsupported content type 'image_url'"
+        ));
+        // Should NOT match
+        assert!(!is_vision_unsupported_error("connection refused"));
+        assert!(!is_vision_unsupported_error("rate limit exceeded"));
+        assert!(!is_vision_unsupported_error(""));
     }
 }

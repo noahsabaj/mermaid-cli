@@ -5,7 +5,7 @@ use mermaid_cli::{
     app::{load_config, persist_last_model, resolve_model_id},
     cli::{Cli, Commands, OutputFormat},
     ollama::ensure_model as ensure_ollama_model,
-    runtime::{NonInteractiveRunner, Orchestrator},
+    runtime::{NonInteractiveRunner, Orchestrator, format_result},
     utils::init_logger,
 };
 
@@ -69,7 +69,7 @@ async fn run_non_interactive(
     let result = runner.execute(prompt).await?;
 
     // Format and output the result
-    let formatted = runner.format_result(&result, format);
+    let formatted = format_result(&result, format);
     println!("{}", formatted);
 
     // Exit with appropriate code

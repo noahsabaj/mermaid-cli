@@ -230,81 +230,82 @@ impl NonInteractiveRunner {
         })
     }
 
-    /// Format the result according to the output format
-    pub fn format_result(&self, result: &NonInteractiveResult, format: OutputFormat) -> String {
-        match format {
-            OutputFormat::Json => serde_json::to_string_pretty(result).unwrap_or_else(|e| {
-                format!("{{\"error\": \"Failed to serialize result: {}\"}}", e)
-            }),
-            OutputFormat::Text => {
-                let mut output = String::new();
-                output.push_str(&result.response);
+}
 
-                if !result.actions.is_empty() {
-                    output.push_str("\n\n--- Actions ---\n");
-                    for action in &result.actions {
-                        output.push_str(&format!(
-                            "[{}] {} - {}\n",
-                            if action.success { "OK" } else { "FAIL" },
-                            action.action_type,
-                            action.target
-                        ));
-                        if let Some(ref out) = action.output {
-                            output.push_str(&format!("  {}\n", out));
-                        }
+/// Format a non-interactive result according to the output format
+pub fn format_result(result: &NonInteractiveResult, format: OutputFormat) -> String {
+    match format {
+        OutputFormat::Json => serde_json::to_string_pretty(result).unwrap_or_else(|e| {
+            format!("{{\"error\": \"Failed to serialize result: {}\"}}", e)
+        }),
+        OutputFormat::Text => {
+            let mut output = String::new();
+            output.push_str(&result.response);
+
+            if !result.actions.is_empty() {
+                output.push_str("\n\n--- Actions ---\n");
+                for action in &result.actions {
+                    output.push_str(&format!(
+                        "[{}] {} - {}\n",
+                        if action.success { "OK" } else { "FAIL" },
+                        action.action_type,
+                        action.target
+                    ));
+                    if let Some(ref out) = action.output {
+                        output.push_str(&format!("  {}\n", out));
                     }
                 }
+            }
 
-                if !result.errors.is_empty() {
-                    output.push_str("\n--- Errors ---\n");
-                    for error in &result.errors {
-                        output.push_str(&format!("• {}\n", error));
+            if !result.errors.is_empty() {
+                output.push_str("\n--- Errors ---\n");
+                for error in &result.errors {
+                    output.push_str(&format!("• {}\n", error));
+                }
+            }
+
+            output
+        },
+        OutputFormat::Markdown => {
+            let mut output = String::new();
+
+            output.push_str("## Response\n\n");
+            output.push_str(&result.response);
+            output.push_str("\n\n");
+
+            if !result.actions.is_empty() {
+                output.push_str("## Actions Executed\n\n");
+                for action in &result.actions {
+                    let status = if action.success { "SUCCESS" } else { "FAILED" };
+                    output.push_str(&format!(
+                        "- {} **{}**: `{}`\n",
+                        status, action.action_type, action.target
+                    ));
+                    if let Some(ref out) = action.output {
+                        output.push_str(&format!("  ```\n  {}\n  ```\n", out));
                     }
                 }
+                output.push('\n');
+            }
 
-                output
-            },
-            OutputFormat::Markdown => {
-                let mut output = String::new();
-
-                output.push_str("## Response\n\n");
-                output.push_str(&result.response);
-                output.push_str("\n\n");
-
-                if !result.actions.is_empty() {
-                    output.push_str("## Actions Executed\n\n");
-                    for action in &result.actions {
-                        let status = if action.success { "SUCCESS" } else { "FAILED" };
-                        output.push_str(&format!(
-                            "- {} **{}**: `{}`\n",
-                            status, action.action_type, action.target
-                        ));
-                        if let Some(ref out) = action.output {
-                            output.push_str(&format!("  ```\n  {}\n  ```\n", out));
-                        }
-                    }
-                    output.push('\n');
+            if !result.errors.is_empty() {
+                output.push_str("## Errors\n\n");
+                for error in &result.errors {
+                    output.push_str(&format!("- {}\n", error));
                 }
+                output.push('\n');
+            }
 
-                if !result.errors.is_empty() {
-                    output.push_str("## Errors\n\n");
-                    for error in &result.errors {
-                        output.push_str(&format!("- {}\n", error));
-                    }
-                    output.push('\n');
-                }
+            output.push_str("---\n");
+            output.push_str(&format!(
+                "*Model: {} | Tokens: {} | Duration: {}ms*\n",
+                result.metadata.model,
+                result.metadata.tokens_used.unwrap_or(0),
+                result.metadata.duration_ms
+            ));
 
-                output.push_str("---\n");
-                output.push_str(&format!(
-                    "*Model: {} | Tokens: {} | Duration: {}ms*\n",
-                    result.metadata.model,
-                    result.metadata.tokens_used.unwrap_or(0),
-                    result.metadata.duration_ms
-                ));
-
-                output
-            },
-        }
+            output
+        },
     }
 }
 
@@ -353,4 +354,150 @@ impl AgentObserver for SilentObserver {
     fn on_error(&mut self, _: &str) {}
     fn on_generation_start(&mut self) {}
     fn on_generation_complete(&mut self, _: usize) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::AgentAction;
+
+    fn sample_result() -> NonInteractiveResult {
+        NonInteractiveResult {
+            prompt: "Fix the bug".to_string(),
+            response: "I fixed the bug.".to_string(),
+            actions: vec![ActionResult {
+                action_type: "write_file".to_string(),
+                target: "src/main.rs".to_string(),
+                success: true,
+                output: Some("File written".to_string()),
+            }],
+            errors: vec![],
+            metadata: ExecutionMetadata {
+                model: "test-model".to_string(),
+                tokens_used: Some(100),
+                duration_ms: 1234,
+                actions_executed: true,
+            },
+        }
+    }
+
+    fn sample_result_with_errors() -> NonInteractiveResult {
+        NonInteractiveResult {
+            prompt: "Do something".to_string(),
+            response: "Tried but failed.".to_string(),
+            actions: vec![ActionResult {
+                action_type: "bash".to_string(),
+                target: "cargo test".to_string(),
+                success: false,
+                output: Some("tests failed".to_string()),
+            }],
+            errors: vec!["Command failed".to_string()],
+            metadata: ExecutionMetadata {
+                model: "test-model".to_string(),
+                tokens_used: Some(50),
+                duration_ms: 500,
+                actions_executed: true,
+            },
+        }
+    }
+
+    #[test]
+    fn test_extract_action_info_read() {
+        let action = AgentAction::ReadFile {
+            paths: vec!["foo.rs".to_string()],
+        };
+        let (action_type, target) = extract_action_info(&action);
+        assert_eq!(action_type, "read");
+        assert_eq!(target, "foo.rs");
+    }
+
+    #[test]
+    fn test_extract_action_info_bash() {
+        let action = AgentAction::ExecuteCommand {
+            command: "cargo test".to_string(),
+            working_dir: None,
+            timeout: None,
+        };
+        let (action_type, target) = extract_action_info(&action);
+        assert_eq!(action_type, "bash");
+        assert_eq!(target, "cargo test");
+    }
+
+    #[test]
+    fn test_extract_action_info_web_search() {
+        let action = AgentAction::WebSearch {
+            queries: vec![("rust async".to_string(), 5)],
+        };
+        let (action_type, target) = extract_action_info(&action);
+        assert_eq!(action_type, "web_search");
+        assert_eq!(target, "rust async");
+    }
+
+    #[test]
+    fn test_extract_action_info_write() {
+        let action = AgentAction::WriteFile {
+            path: "out.txt".to_string(),
+            content: "hello".to_string(),
+        };
+        let (action_type, target) = extract_action_info(&action);
+        assert_eq!(action_type, "write");
+        assert_eq!(target, "out.txt");
+    }
+
+    #[test]
+    fn test_format_result_json() {
+        let result = sample_result();
+        let json = format_result(&result, OutputFormat::Json);
+        assert!(json.contains("\"prompt\": \"Fix the bug\""));
+        assert!(json.contains("\"success\": true"));
+        assert!(json.contains("\"model\": \"test-model\""));
+    }
+
+    #[test]
+    fn test_format_result_text() {
+        let result = sample_result();
+        let text = format_result(&result, OutputFormat::Text);
+        assert!(text.contains("I fixed the bug."));
+        assert!(text.contains("[OK] write_file - src/main.rs"));
+        assert!(text.contains("--- Actions ---"));
+    }
+
+    #[test]
+    fn test_format_result_text_with_errors() {
+        let result = sample_result_with_errors();
+        let text = format_result(&result, OutputFormat::Text);
+        assert!(text.contains("[FAIL] bash - cargo test"));
+        assert!(text.contains("--- Errors ---"));
+        assert!(text.contains("Command failed"));
+    }
+
+    #[test]
+    fn test_format_result_markdown() {
+        let result = sample_result();
+        let md = format_result(&result, OutputFormat::Markdown);
+        assert!(md.contains("## Response"));
+        assert!(md.contains("I fixed the bug."));
+        assert!(md.contains("## Actions Executed"));
+        assert!(md.contains("SUCCESS **write_file**"));
+        assert!(md.contains("*Model: test-model"));
+    }
+
+    #[test]
+    fn test_format_result_text_no_actions() {
+        let result = NonInteractiveResult {
+            prompt: "hi".to_string(),
+            response: "hello".to_string(),
+            actions: vec![],
+            errors: vec![],
+            metadata: ExecutionMetadata {
+                model: "m".to_string(),
+                tokens_used: None,
+                duration_ms: 10,
+                actions_executed: false,
+            },
+        };
+        let text = format_result(&result, OutputFormat::Text);
+        assert_eq!(text, "hello");
+        assert!(!text.contains("Actions"));
+    }
 }
