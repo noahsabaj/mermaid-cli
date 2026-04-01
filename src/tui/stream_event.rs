@@ -11,8 +11,8 @@ pub enum StreamEvent {
     Chunk(String),
     /// Tool calls extracted from the completed model response
     ToolCalls(Vec<ToolCall>),
-    /// Model finished generating
-    Done { completion_tokens: usize },
+    /// Model finished generating (total = prompt + completion tokens)
+    Done { total_tokens: usize },
     /// Model returned an error
     Error(UserFacingError),
 }

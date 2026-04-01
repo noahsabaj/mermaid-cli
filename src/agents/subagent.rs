@@ -135,7 +135,7 @@ async fn run_subagent(
             } else {
                 response.content.clone()
             };
-            let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
+            let tokens = response.usage.map(|u| u.total_tokens).unwrap_or(0);
             let tool_calls = response.tool_calls.unwrap_or_default();
 
             {
@@ -355,13 +355,13 @@ pub async fn collect_subagent_results(
 ) -> Vec<SubagentResult> {
     let mut results = Vec::with_capacity(handles.len() + overflow_results.len());
 
-    for handle in handles {
+    for (i, handle) in handles.into_iter().enumerate() {
         match handle.await {
             Ok(result) => results.push(result),
             Err(e) => {
                 warn!("Subagent task failed: {}", e);
                 results.push(SubagentResult {
-                    id: 0,
+                    id: i,
                     description: "Unknown".to_string(),
                     response: format!("Agent task failed: {}", e),
                     tool_uses: 0,
