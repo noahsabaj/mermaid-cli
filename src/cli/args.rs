@@ -42,6 +42,18 @@ pub enum Commands {
     Version,
     /// Check status of dependencies and backends
     Status,
+    /// Add an MCP server (e.g., mermaid add context7)
+    Add {
+        /// MCP server name (e.g., context7, github, filesystem)
+        name: String,
+    },
+    /// Remove a configured MCP server
+    Remove {
+        /// MCP server name to remove
+        name: String,
+    },
+    /// List configured MCP servers
+    Mcp,
     /// Run a single prompt non-interactively
     Run {
         /// The prompt to execute
