@@ -1,14 +1,16 @@
 # Mermaid
 
-An open-source AI coding assistant for the terminal. Local/cloud models via Ollama, native tool calling, and a clean TUI.
+An open-source AI coding assistant with computer use for the terminal. Local/cloud models via Ollama, native tool calling, subagents, desktop control, and a clean TUI.
 
 ## Features
 
 - **Local & Cloud Models** via Ollama - run locally or use cloud models with no hardware cost
-- **Native Tool Calling** - read, write, edit, execute commands, search the web, manage git
+- **Native Tool Calling** - read, write, edit, execute commands, search the web
+- **Computer Use** - screenshot, click, type, scroll -- full desktop control via vision models
+- **Subagents** - spawn parallel autonomous agents for independent tasks
 - **Agent Loop** - model calls tools autonomously, sees results, and continues until done
 - **Image Paste** - Ctrl+V to attach images for vision models (X11/Wayland)
-- **Thinking Mode** - toggle extended reasoning with Alt+T
+- **Thinking Mode** - toggle extended reasoning with Alt+T (hidden when disabled)
 - **Session Persistence** - conversations auto-save and resume with `--continue`
 - **Message Queuing** - type while the model generates, messages send in order
 - **Non-Interactive Mode** - script with `mermaid run "prompt"` for CI/automation
@@ -26,6 +28,21 @@ cargo install --path .
 ```
 
 Requires [Ollama](https://ollama.com) for model inference. Models auto-pull if not found locally.
+
+### Computer Use Dependencies (optional)
+
+For desktop control via screenshot/click/type tools:
+
+```bash
+# X11
+sudo apt install scrot xdotool
+
+# Wayland
+sudo apt install grim ydotool wtype
+
+# Screenshot downscaling (optional, for high-res displays)
+sudo apt install imagemagick
+```
 
 ## Usage
 
@@ -82,12 +99,16 @@ The model uses these autonomously via native tool calling:
 | `edit_file` | Targeted text replacement with diff |
 | `delete_file` | Delete files (with backup) |
 | `create_directory` | Create directories |
-| `execute_command` | Run shell commands |
-| `git_status` | Check repository status |
-| `git_diff` | View file changes |
-| `git_commit` | Create commits |
+| `execute_command` | Run any command -- terminal, GUI apps, scripts, servers |
 | `web_search` | Search the web |
 | `web_fetch` | Fetch URL content as markdown |
+| `agent` | Spawn autonomous sub-agent for parallel tasks |
+| `screenshot` | Capture the screen for visual analysis |
+| `click` | Click at screen coordinates |
+| `type_text` | Type text at cursor position |
+| `press_key` | Press key combos (ctrl+s, alt+tab, etc.) |
+| `scroll` | Scroll up or down |
+| `mouse_move` | Move mouse cursor |
 
 ## Configuration
 
@@ -102,6 +123,8 @@ last_used_model = "ollama/qwen3-coder:30b"
 host = "localhost"
 port = 11434
 # cloud_api_key = "your-key"
+# num_gpu = 10
+# num_ctx = 8192
 ```
 
 ## Cloud & Web Search
