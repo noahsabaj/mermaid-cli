@@ -69,24 +69,7 @@ pub fn write_file(path: &str, content: &str) -> Result<()> {
         create_timestamped_backup(&path)?;
     }
 
-    // Atomic write: write to temporary file, then rename
-    let temp_path = format!("{}.tmp.{}", path.display(), std::process::id());
-    let temp_path = std::path::PathBuf::from(&temp_path);
-
-    // Write to temporary file
-    fs::write(&temp_path, content)
-        .with_context(|| format!("Failed to write to temporary file: {}", temp_path.display()))?;
-
-    // Atomically rename temp file to target
-    fs::rename(&temp_path, &path).with_context(|| {
-        format!(
-            "Failed to finalize write to: {} (temp file: {})",
-            path.display(),
-            temp_path.display()
-        )
-    })?;
-
-    Ok(())
+    atomic_write(&path, content)
 }
 
 /// Create a timestamped backup of a file
@@ -100,6 +83,26 @@ fn create_timestamped_backup(path: &std::path::Path) -> Result<()> {
             "Failed to create backup of: {} to {}",
             path.display(),
             backup_path
+        )
+    })?;
+
+    Ok(())
+}
+
+/// Atomically write content to a file by writing to a temporary file first,
+/// then renaming. This prevents partial writes if the process is interrupted.
+fn atomic_write(path: &Path, content: &str) -> Result<()> {
+    let temp_path = format!("{}.tmp.{}", path.display(), std::process::id());
+    let temp_path = PathBuf::from(&temp_path);
+
+    fs::write(&temp_path, content)
+        .with_context(|| format!("Failed to write to temporary file: {}", temp_path.display()))?;
+
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "Failed to finalize write to: {} (temp file: {})",
+            path.display(),
+            temp_path.display()
         )
     })?;
 
@@ -140,20 +143,7 @@ pub fn edit_file(path: &str, old_string: &str, new_string: &str) -> Result<Strin
     // Create timestamped backup
     create_timestamped_backup(&path)?;
 
-    // Atomic write: write to temporary file, then rename
-    let temp_path = format!("{}.tmp.{}", path.display(), std::process::id());
-    let temp_path = std::path::PathBuf::from(&temp_path);
-
-    fs::write(&temp_path, &new_content)
-        .with_context(|| format!("Failed to write to temporary file: {}", temp_path.display()))?;
-
-    fs::rename(&temp_path, &path).with_context(|| {
-        format!(
-            "Failed to finalize edit to: {} (temp file: {})",
-            path.display(),
-            temp_path.display()
-        )
-    })?;
+    atomic_write(&path, &new_content)?;
 
     // Generate diff
     let diff = generate_diff(&content, &new_content, old_string, new_string);

@@ -39,6 +39,8 @@ pub struct App {
     pub status_state: StatusState,
     /// Attachment state - pending image attachments
     pub attachment_state: AttachmentState,
+    /// MCP tool definitions in Ollama JSON format (injected at startup)
+    pub mcp_tools: Vec<serde_json::Value>,
 }
 
 impl App {
@@ -88,7 +90,15 @@ impl App {
             operation_state: OperationState::new(),
             status_state: StatusState::new(),
             attachment_state: AttachmentState::new(),
+            mcp_tools: Vec::new(),
         }
+    }
+
+    /// Build a ModelConfig with MCP tools included.
+    pub fn build_model_config(&self) -> crate::models::ModelConfig {
+        let mut config = self.model_state.build_config();
+        config.mcp_tools = self.mcp_tools.clone();
+        config
     }
 
     // ===== Message Management =====
@@ -140,7 +150,7 @@ impl App {
     }
 
     /// Commit a message to session state and conversation history
-    fn commit_message(&mut self, message: ChatMessage) {
+    pub fn commit_message(&mut self, message: ChatMessage) {
         self.session_state.messages.push(message.clone());
         if let Some(ref mut conv) = self.session_state.current_conversation {
             conv.add_messages(&[message]);
@@ -259,7 +269,7 @@ impl App {
         }
 
         let model = self.model_state.model.clone();
-        let mut config = self.model_state.build_config();
+        let mut config = self.build_model_config();
         config.thinking_enabled = Some(false);
 
         Some(tokio::spawn(async move {
@@ -421,6 +431,8 @@ impl App {
     // ===== Conversation Persistence =====
 
     pub fn load_conversation(&mut self, conversation: ConversationHistory) {
+        self.session_state.cumulative_tokens = conversation.total_tokens.unwrap_or(0);
+        self.session_state.conversation_title = Some(conversation.title.clone());
         self.session_state.messages = conversation.messages.clone();
         self.session_state.current_conversation = Some(conversation);
         self.set_status("Conversation loaded");
@@ -431,6 +443,7 @@ impl App {
             && let Some(ref mut conv) = self.session_state.current_conversation
         {
             conv.messages = self.session_state.messages.clone();
+            conv.total_tokens = Some(self.session_state.cumulative_tokens);
             manager.save_conversation(conv)?;
             self.set_status("Conversation saved");
         }
@@ -445,6 +458,7 @@ impl App {
             && let Some(ref mut conv) = self.session_state.current_conversation
         {
             conv.messages = self.session_state.messages.clone();
+            conv.total_tokens = Some(self.session_state.cumulative_tokens);
             let conv_clone = conv.clone();
             let manager_clone = manager.clone();
             tokio::task::spawn_blocking(move || {
@@ -539,9 +553,8 @@ impl App {
         } = &mut self.app_state
         {
             response_buffer.push_str(text);
-            if response_buffer.len() > crate::constants::WEB_CONTENT_MAX_CHARS * 80 {
-                // 400k chars limit (MAX_RESPONSE_CHARS from stream_handler)
-                let end = response_buffer.floor_char_boundary(400_000);
+            if response_buffer.len() > crate::constants::MAX_RESPONSE_CHARS {
+                let end = response_buffer.floor_char_boundary(crate::constants::MAX_RESPONSE_CHARS);
                 response_buffer.truncate(end);
                 response_buffer
                     .push_str("\n\n[TRUNCATED: Response exceeded size limit]\n");

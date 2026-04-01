@@ -1,8 +1,13 @@
 //! Shared agent loop for tool-calling models.
 //!
-//! Both TUI and non-interactive modes delegate to this loop.
-//! The `AgentObserver` trait allows each mode to provide its own
-//! I/O behavior (rendering, interruption, logging).
+//! Used by **non-interactive mode** (`SilentObserver`) and **sub-agents**
+//! (`SubagentObserver`). The TUI has its own agent loop in
+//! `tui::loop_coordinator::run_agent_loop` because it needs direct `Terminal`
+//! access for live rendering and interrupt handling — `Terminal` is not `Send`
+//! so it cannot be passed through the `AgentObserver` trait.
+//!
+//! The `AgentObserver` trait allows each non-TUI consumer to provide its own
+//! I/O behavior (interruption checks, status logging, tool result handling).
 
 use std::sync::{Arc, Mutex};
 
@@ -79,12 +84,14 @@ pub struct ToolExecutionResult {
     pub action: AgentAction,
     pub success: bool,
     pub output: String,
+    pub images: Option<Vec<String>>,
 }
 
 /// Run the agent loop: execute tool calls, feed results back, repeat.
 ///
-/// This is the core loop shared by TUI and non-interactive modes.
-/// The observer trait provides environment-specific behavior.
+/// Used by non-interactive mode and sub-agents. The TUI has its own
+/// implementation in `tui::loop_coordinator::run_agent_loop` — see that
+/// function's documentation for the rationale.
 pub async fn run_agent_loop(
     model: Arc<tokio::sync::RwLock<Box<dyn Model>>>,
     config: &ModelConfig,
@@ -165,26 +172,36 @@ pub async fn run_agent_loop(
                             },
                             success: false,
                             output: error_msg,
+                            images: None,
                         });
                         continue;
                     },
                 };
 
                 let result = execute_action(&agent_action).await;
-                let (success, output) = match &result {
-                    AgentActionResult::Success { output } => (true, output.clone()),
-                    AgentActionResult::Error { error } => (false, format!("Error: {}", error)),
+                let (success, output, images) = match &result {
+                    AgentActionResult::Success { output, images } => {
+                        (true, output.clone(), images.clone())
+                    },
+                    AgentActionResult::Error { error } => {
+                        (false, format!("Error: {}", error), None)
+                    },
                 };
 
                 observer.on_tool_result(&tool_name, &tool_call_id, &agent_action, &result);
 
-                messages.push(ChatMessage::tool(&tool_call_id, &tool_name, &output));
+                let mut tool_msg = ChatMessage::tool(&tool_call_id, &tool_name, &output);
+                if let Some(ref imgs) = images {
+                    tool_msg = tool_msg.with_images(imgs.clone());
+                }
+                messages.push(tool_msg);
                 all_tool_results.push(ToolExecutionResult {
                     tool_call_id,
                     tool_name,
                     action: agent_action,
                     success,
                     output,
+                    images,
                 });
             }
 
@@ -230,6 +247,7 @@ pub async fn run_agent_loop(
                             &if result.success {
                                 AgentActionResult::Success {
                                     output: output.clone(),
+                                    images: None,
                                 }
                             } else {
                                 AgentActionResult::Error {
@@ -248,6 +266,7 @@ pub async fn run_agent_loop(
                             },
                             success: result.success,
                             output,
+                            images: None,
                         });
 
                         total_tokens += result.tokens;
@@ -298,7 +317,7 @@ pub async fn run_agent_loop(
                         response.content.clone()
                     }
                 };
-                let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
+                let tokens = response.usage.map(|u| u.total_tokens).unwrap_or(0);
                 total_tokens += tokens;
                 observer.on_generation_complete(tokens);
 

@@ -17,6 +17,6 @@ pub use logger::{init_logger, log_debug, log_error, log_info, log_progress, log_
 pub use mutex_ext::{MutexExt, lock_arc_mutex_safe};
 pub use open::open_file;
 pub use retry::{RetryConfig, retry_async};
-pub use text::{format_tokens, truncate_content, truncate_web_content};
+pub use text::{format_duration, format_tokens, truncate_content, truncate_web_content};
 pub use timestamp::format_relative_timestamp;
 pub use tokenizer::Tokenizer;

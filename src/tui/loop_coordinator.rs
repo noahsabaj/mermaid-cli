@@ -37,16 +37,28 @@ fn spawn_model_call(app: &mut App, messages: Vec<ChatMessage>, tx: &mpsc::Sender
     let model = app.model_state.model.clone();
     let tx_stream = tx.clone();
     let tx_done = tx.clone();
-    let config = app.model_state.build_config();
+    let config = app.build_model_config();
 
     let handle = tokio::spawn(async move {
+        let sent_chunks = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sent_flag = Arc::clone(&sent_chunks);
         let callback: StreamCallback = Arc::new(move |chunk| {
+            sent_flag.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = tx_stream.try_send(StreamEvent::Chunk(chunk.to_string()));
         });
 
         let model = model.read().await;
         match model.chat(&messages, &config, Some(callback)).await {
             Ok(response) => {
+                // Defensive fallback: if no chunks were streamed but response has
+                // content, forward it now. Matches runtime::agent_loop's fallback.
+                if !sent_chunks.load(std::sync::atomic::Ordering::Relaxed)
+                    && !response.content.is_empty()
+                {
+                    let _ = tx_done
+                        .send(StreamEvent::Chunk(response.content.clone()))
+                        .await;
+                }
                 if let Some(ref tool_calls) = response.tool_calls
                     && !tool_calls.is_empty()
                 {
@@ -54,10 +66,10 @@ fn spawn_model_call(app: &mut App, messages: Vec<ChatMessage>, tx: &mpsc::Sender
                         .send(StreamEvent::ToolCalls(tool_calls.clone()))
                         .await;
                 }
-                let tokens = response.usage.map(|u| u.completion_tokens).unwrap_or(0);
+                let tokens = response.usage.map(|u| u.total_tokens).unwrap_or(0);
                 let _ = tx_done
                     .send(StreamEvent::Done {
-                        completion_tokens: tokens,
+                        total_tokens: tokens,
                     })
                     .await;
             },
@@ -384,7 +396,20 @@ fn render_and_check_interrupt(
     Ok(false)
 }
 
-/// Run the agent loop for tool calling
+/// TUI-specific agent loop for tool calling.
+///
+/// This is intentionally separate from `runtime::agent_loop::run_agent_loop`
+/// because the TUI loop requires:
+/// 1. Direct `&mut Terminal` access for `render_and_check_interrupt` — `Terminal`
+///    is not `Send`, so it cannot be threaded through the `AgentObserver` trait.
+/// 2. Live rendering of subagent progress via `poll_subagent_handles` with UI
+///    updates between poll iterations.
+/// 3. Queued message interception: the user can type and submit messages mid-loop,
+///    which requires clearing tool calls, injecting a user message, and re-calling
+///    the model — logic tightly coupled to TUI input state.
+///
+/// The shared loop in `runtime::agent_loop` is used by non-interactive mode
+/// (via `SilentObserver`) and by sub-agents (via `SubagentObserver`).
 ///
 /// This implements the proper agent loop pattern:
 /// 1. Execute tool calls
@@ -503,7 +528,7 @@ async fn run_agent_loop(
 
             if !agent_specs.is_empty() {
                 let progress = Arc::new(Mutex::new(Vec::<SubagentProgress>::new()));
-                let config = app.model_state.build_config();
+                let config = app.build_model_config();
 
                 // Store progress for UI rendering
                 app.operation_state.active_subagents = Some(Arc::clone(&progress));
@@ -518,6 +543,12 @@ async fn run_agent_loop(
                 // Poll handles with render loop (TUI stays responsive)
                 let subagent_results =
                     poll_subagent_handles(handles, overflow, terminal, app).await?;
+
+                // Empty result means user interrupted (Esc) — exit cleanly
+                // without stamping orphaned tool_calls onto the conversation
+                if subagent_results.is_empty() {
+                    return Ok(());
+                }
 
                 // Build ToolExecutionResult + ActionDisplay for each completed agent
                 for (i, agent_result) in subagent_results.iter().enumerate() {
@@ -550,6 +581,7 @@ async fn run_agent_loop(
                         },
                         success: agent_result.success,
                         output,
+                        images: None,
                     });
 
                     app.session_state.cumulative_tokens += agent_result.tokens;
@@ -569,13 +601,25 @@ async fn run_agent_loop(
             last_assistant.tool_calls = Some(current_tool_calls.clone());
         }
 
-        // Add Tool messages for each result
+        // Add Tool messages for each result (with images for screenshot etc.)
         for result in &results {
-            app.add_tool_result(
-                result.tool_call_id.clone(),
-                result.tool_name.clone(),
-                result.output.clone(),
-            );
+            if let Some(ref imgs) = result.images {
+                // Tool produced images (e.g., screenshot) — attach to tool message
+                // so the model can see them on the next call
+                let mut tool_msg = crate::models::ChatMessage::tool(
+                    &result.tool_call_id,
+                    &result.tool_name,
+                    &result.output,
+                );
+                tool_msg = tool_msg.with_images(imgs.clone());
+                app.commit_message(tool_msg);
+            } else {
+                app.add_tool_result(
+                    result.tool_call_id.clone(),
+                    result.tool_name.clone(),
+                    result.output.clone(),
+                );
+            }
         }
 
         // Render to show completed tool actions immediately

@@ -26,6 +26,10 @@ pub const CONTEXT_RESERVE_TOKENS: usize = 4_000;
 /// Maximum characters to keep when truncating fetched web content
 pub const WEB_CONTENT_MAX_CHARS: usize = 5_000;
 
+/// Maximum characters allowed in the streaming response buffer.
+/// Prevents unbounded memory growth from runaway model responses.
+pub const MAX_RESPONSE_CHARS: usize = 400_000;
+
 // UI Cache
 /// Maximum entries in the markdown parse cache before eviction
 pub const MARKDOWN_CACHE_MAX_ENTRIES: usize = 200;
@@ -33,3 +37,7 @@ pub const MARKDOWN_CACHE_MAX_ENTRIES: usize = 200;
 // Subagent Configuration
 /// Maximum number of concurrent subagents that can be spawned by a single parent call
 pub const MAX_CONCURRENT_AGENTS: usize = 10;
+
+// Computer Use
+/// Maximum width for screenshots sent to models (pixels)
+pub const SCREENSHOT_MAX_WIDTH: u32 = 1280;

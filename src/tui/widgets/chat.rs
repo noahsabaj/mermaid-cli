@@ -356,7 +356,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     SubagentStatus::Failed(msg) => format!("Failed: {}", msg),
                 };
                 let token_display = crate::utils::format_tokens(agent.tokens);
-                let elapsed = format_duration(agent.started_at.elapsed().as_secs());
+                let elapsed = crate::utils::format_duration(agent.started_at.elapsed().as_secs() as f64);
 
                 lines.push(Line::from(vec![
                     Span::styled("  \u{23bf} ", Style::new().fg(agent_color)),
@@ -750,21 +750,3 @@ fn wrap_styled_line(
     }
 }
 
-/// Format elapsed seconds as human-readable duration.
-/// Examples: "5s", "1m 47s", "1h 46m 19s", "3d 5h 9m 0s"
-fn format_duration(total_secs: u64) -> String {
-    if total_secs < 60 {
-        return format!("{}s", total_secs);
-    }
-    let days = total_secs / 86400;
-    let hours = (total_secs % 86400) / 3600;
-    let mins = (total_secs % 3600) / 60;
-    let secs = total_secs % 60;
-    if days > 0 {
-        format!("{}d {}h {}m {}s", days, hours, mins, secs)
-    } else if hours > 0 {
-        format!("{}h {}m {}s", hours, mins, secs)
-    } else {
-        format!("{}m {}s", mins, secs)
-    }
-}

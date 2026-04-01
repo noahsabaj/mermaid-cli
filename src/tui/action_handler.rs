@@ -47,6 +47,7 @@ pub async fn execute_tool_calls_for_agent_loop(
                     },
                     success: false,
                     output: format!("Error: {}", e),
+                    images: None,
                 });
                 continue;
             },
@@ -55,7 +56,7 @@ pub async fn execute_tool_calls_for_agent_loop(
         // Execute the action directly
         let action_clone = action.clone();
         match execute_action(&action).await {
-            agents::ActionResult::Success { output } => {
+            agents::ActionResult::Success { output, images } => {
                 // Build ActionDisplay for UI rendering
                 let action_display = build_action_display(&action_clone, &output);
 
@@ -76,6 +77,7 @@ pub async fn execute_tool_calls_for_agent_loop(
                     action: action_clone,
                     success: true,
                     output,
+                    images,
                 });
             },
             agents::ActionResult::Error { error } => {
@@ -96,6 +98,7 @@ pub async fn execute_tool_calls_for_agent_loop(
                     action: action_clone,
                     success: false,
                     output: format!("Error: {}", error),
+                    images: None,
                 });
             },
         }
@@ -131,6 +134,7 @@ fn build_action_display_with_timing(
     let (action_type, target) = action.display_info();
     let result = AgentActionResult::Success {
         output: output.to_string(),
+        images: None,
     };
 
     let details = match action {
@@ -185,6 +189,26 @@ fn build_action_display_with_timing(
             text: truncate_output(output, 3),
             line_count: None,
         },
+        AgentAction::Screenshot { .. } => ActionDetails::Preview {
+            text: truncate_output(output, 2),
+            line_count: None,
+        },
+        AgentAction::Click { .. }
+        | AgentAction::TypeText { .. }
+        | AgentAction::PressKey { .. } => ActionDetails::Preview {
+            text: truncate_output(output, 2),
+            line_count: None,
+        },
+        AgentAction::Scroll { .. }
+        | AgentAction::MouseMove { .. } => ActionDetails::Simple,
+        AgentAction::ListWindows => ActionDetails::Preview {
+            text: truncate_output(output, 10),
+            line_count: Some(output.lines().count()),
+        },
+        AgentAction::McpToolCall { .. } => ActionDetails::Preview {
+            text: truncate_output(output, 5),
+            line_count: Some(output.lines().count()),
+        },
         AgentAction::ParseError { .. } => ActionDetails::Simple,
     };
 
@@ -212,23 +236,6 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
     }
 }
 
-/// Format duration in seconds as human-readable string.
-fn format_duration_secs(total_secs: f64) -> String {
-    let secs = total_secs as u64;
-    if secs < 60 {
-        return format!("{:.1}s", total_secs);
-    }
-    let mins = secs / 60;
-    let remainder = secs % 60;
-    if mins < 60 {
-        format!("{}m {}s", mins, remainder)
-    } else {
-        let hours = mins / 60;
-        let mins = mins % 60;
-        format!("{}h {}m {}s", hours, mins, remainder)
-    }
-}
-
 /// Build an ActionDisplay for a completed subagent result.
 pub fn build_agent_action_display(result: &SubagentResult) -> ActionDisplay {
     let token_display = crate::utils::format_tokens(result.tokens);
@@ -236,7 +243,7 @@ pub fn build_agent_action_display(result: &SubagentResult) -> ActionDisplay {
         "Completed \u{00b7} {} tool uses \u{00b7} {} \u{00b7} {}",
         result.tool_uses,
         token_display,
-        format_duration_secs(result.duration_secs),
+        crate::utils::format_duration(result.duration_secs),
     );
 
     ActionDisplay {
@@ -245,6 +252,7 @@ pub fn build_agent_action_display(result: &SubagentResult) -> ActionDisplay {
         result: if result.success {
             AgentActionResult::Success {
                 output: result.response.clone(),
+                images: None,
             }
         } else {
             AgentActionResult::Error {
