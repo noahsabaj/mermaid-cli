@@ -9,7 +9,6 @@ use crate::{
     agents::{ActionResult as AgentActionResult, AgentAction},
     app::Config,
     cli::OutputFormat,
-    constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE},
     models::{ChatMessage, Model, ModelConfig, ModelFactory},
     prompts,
 };
@@ -59,7 +58,7 @@ pub struct ExecutionMetadata {
 pub struct NonInteractiveRunner {
     model: Arc<RwLock<Box<dyn Model>>>,
     no_execute: bool,
-    max_tokens: Option<usize>,
+    model_config: ModelConfig,
 }
 
 impl NonInteractiveRunner {
@@ -73,10 +72,17 @@ impl NonInteractiveRunner {
         // Create model instance
         let model = ModelFactory::create(&model_id, Some(&config)).await?;
 
+        // Build base config from app config, then apply CLI overrides
+        let mut model_config = ModelConfig::from_app_config(&config, &model_id);
+        model_config.thinking_enabled = Some(false);
+        if let Some(mt) = max_tokens {
+            model_config.max_tokens = mt;
+        }
+
         Ok(Self {
             model: Arc::new(RwLock::new(model)),
             no_execute,
-            max_tokens,
+            model_config,
         })
     }
 
@@ -91,18 +97,9 @@ impl NonInteractiveRunner {
         let user_message = ChatMessage::user(prompt.clone());
         let mut messages = vec![system_message, user_message];
 
-        // Build model config
-        let model_name = {
-            let model = self.model.read().await;
-            model.name().to_string()
-        };
-        let model_config = ModelConfig {
-            model: model_name.clone(),
-            temperature: DEFAULT_TEMPERATURE,
-            max_tokens: self.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            thinking_enabled: Some(false),
-            ..ModelConfig::default()
-        };
+        // Use pre-built model config
+        let model_config = &self.model_config;
+        let model_name = model_config.model.clone();
 
         // First model call to get the initial response
         let response_text = Arc::new(std::sync::Mutex::new(String::new()));
@@ -114,7 +111,7 @@ impl NonInteractiveRunner {
 
         let result = {
             let model = self.model.read().await;
-            model.chat(&messages, &model_config, Some(callback)).await
+            model.chat(&messages, model_config, Some(callback)).await
         };
 
         let (content, initial_tool_calls) = match result {
@@ -180,7 +177,7 @@ impl NonInteractiveRunner {
         let mut observer = SilentObserver;
         let loop_result = agent_loop::run_agent_loop(
             Arc::clone(&self.model),
-            &model_config,
+            model_config,
             &mut messages,
             initial_tool_calls,
             &mut observer,

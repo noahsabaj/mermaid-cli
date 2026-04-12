@@ -17,7 +17,7 @@ mod ui;
 mod widgets;
 
 // Public re-exports - the ONLY way to access TUI functionality
-pub use app::App;
+pub use app::{App, McpInitResult};
 pub use state::{
     AppState, ConversationState, ErrorEntry, ErrorSeverity, GenerationStatus, InputBuffer,
     ModelState, OperationState, StatusState, UIState,

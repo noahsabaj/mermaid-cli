@@ -15,10 +15,8 @@ use super::transport::StdioTransport;
 /// A resolved MCP server ready for configuration
 pub struct ResolvedServer {
     pub package: String,
-    pub description: String,
     pub env_vars: Vec<(String, String)>, // (name, description)
     pub extra_args: Vec<String>,
-    pub tool_names: Vec<String>,
 }
 
 /// Built-in registry entry
@@ -290,14 +288,12 @@ pub async fn resolve(name: &str) -> Result<ResolvedServer> {
         println!("Found: {} ({})", entry.package, entry.description);
         return Ok(ResolvedServer {
             package: entry.package.to_string(),
-            description: entry.description.to_string(),
             env_vars: entry
                 .env_vars
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             extra_args: entry.extra_args.iter().map(|s| s.to_string()).collect(),
-            tool_names: Vec::new(), // filled during validation
         });
     }
 
@@ -308,10 +304,8 @@ pub async fn resolve(name: &str) -> Result<ResolvedServer> {
         println!("Found: {}", package);
         return Ok(ResolvedServer {
             package,
-            description: String::new(),
             env_vars: Vec::new(),
             extra_args: Vec::new(),
-            tool_names: Vec::new(),
         });
     }
 
@@ -334,10 +328,8 @@ pub async fn resolve(name: &str) -> Result<ResolvedServer> {
 
             Ok(ResolvedServer {
                 package,
-                description,
                 env_vars: Vec::new(),
                 extra_args: Vec::new(),
-                tool_names: Vec::new(),
             })
         },
         Ok(None) => Err(anyhow!(

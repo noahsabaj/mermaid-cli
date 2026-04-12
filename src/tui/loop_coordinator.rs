@@ -120,6 +120,10 @@ pub async fn run_app_loop(
         {
             app.session_state.conversation_title = Some(title);
         }
+
+        // Poll for completed MCP background initialization (non-blocking)
+        app.poll_mcp_init().await;
+
         // Get viewport height for proper scrolling
         let viewport_height = terminal.size()?.height.saturating_sub(8); // 3 header + 3 input + 1 status + 1 margin
 
@@ -442,6 +446,9 @@ async fn run_agent_loop(
             return Ok(());
         }
         app.set_status(format!("Agent loop iteration {}", iteration));
+
+        // Pick up MCP tools if background init completed since last iteration
+        app.poll_mcp_init().await;
 
         // Render so user sees iteration status; check for Esc interrupt
         if render_and_check_interrupt(terminal, app)? {

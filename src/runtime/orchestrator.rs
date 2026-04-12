@@ -3,14 +3,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
-    agents::set_mcp_manager,
+    agents::mark_mcp_init_started,
     app::{Config, load_config, persist_last_model},
     cli::{Cli, handle_command},
     mcp::McpServerManager,
-    models::{ModelFactory, OllamaOptions},
+    models::{ModelConfig, ModelFactory},
     ollama::ensure_model as ensure_ollama_model,
     session::{ConversationManager, select_conversation},
-    tui::{App, run_ui},
+    tui::{App, McpInitResult, run_ui},
     utils::{check_ollama_available, log_error, log_info, log_progress, log_warn},
 };
 
@@ -110,38 +110,33 @@ impl Orchestrator {
         // Start UI - LLM explores codebase via tools, no context injection
         current_step += 1;
         log_progress(current_step, total_steps, "Starting UI");
-        let mut app = App::new(model, model_id.clone());
+        let base_config = ModelConfig::from_app_config(&self.config, &model_id);
+        let mut app = App::new(model, model_id.clone(), base_config);
 
-        // Wire app config temperature/max_tokens into model state
-        app.model_state.temperature = self.config.default_model.temperature;
-        app.model_state.max_tokens = self.config.default_model.max_tokens;
-
-        // Wire Ollama hardware options from config
-        app.model_state.ollama_options = OllamaOptions {
-            num_gpu: self.config.ollama.num_gpu,
-            num_thread: self.config.ollama.num_thread,
-            num_ctx: self.config.ollama.num_ctx,
-            numa: self.config.ollama.numa,
-        };
-
-        // Start MCP servers (if configured)
+        // Start MCP servers in background (non-blocking — TUI renders immediately)
         if !self.config.mcp_servers.is_empty() {
-            log_info(
-                "MCP",
-                format!(
-                    "Starting {} MCP server(s)...",
-                    self.config.mcp_servers.len()
-                ),
-            );
-            let manager = McpServerManager::start(&self.config.mcp_servers).await;
-            if manager.has_servers() {
-                // Convert MCP tools to Ollama format and store on app
-                let mcp_tools =
-                    crate::models::tools::mcp_tools_to_ollama(manager.get_all_tools());
-                log_info("MCP", format!("{} MCP tool(s) available", mcp_tools.len()));
-                app.mcp_tools = mcp_tools;
-                set_mcp_manager(Arc::new(manager));
-            }
+            let server_count = self.config.mcp_servers.len();
+            log_info("MCP", format!("Starting {} MCP server(s) in background...", server_count));
+            mark_mcp_init_started();
+
+            let mcp_configs = self.config.mcp_servers.clone();
+            app.mcp_init_task = Some(tokio::spawn(async move {
+                let manager = McpServerManager::start(&mcp_configs).await;
+                if manager.has_servers() {
+                    let tools =
+                        crate::models::tools::mcp_tools_to_ollama(manager.get_all_tools());
+                    log_info("MCP", format!("{} MCP tool(s) available", tools.len()));
+                    McpInitResult {
+                        tools,
+                        manager: Some(Arc::new(manager)),
+                    }
+                } else {
+                    McpInitResult {
+                        tools: Vec::new(),
+                        manager: None,
+                    }
+                }
+            }));
         }
 
         // Handle session loading

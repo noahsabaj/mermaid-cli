@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::models::{Model, ModelConfig, OllamaOptions};
+use crate::models::{Model, ModelConfig};
 
 /// Model state - LLM configuration and identity
 pub struct ModelState {
@@ -22,16 +22,13 @@ pub struct ModelState {
     /// - Some(false) = model does not support vision (detected from error)
     /// - None = unknown (optimistic default)
     pub vision_supported: Option<bool>,
-    /// Temperature from app config (wired through so build_config uses it)
-    pub temperature: f32,
-    /// Max tokens from app config
-    pub max_tokens: usize,
-    /// Ollama-specific hardware options from app config
-    pub ollama_options: OllamaOptions,
+    /// Base model configuration from app config. Used by build_config() to
+    /// produce API-ready ModelConfig with runtime-only fields set.
+    pub base_config: ModelConfig,
 }
 
 impl ModelState {
-    pub fn new(model: Box<dyn Model>, model_id: String) -> Self {
+    pub fn new(model: Box<dyn Model>, model_id: String, base_config: ModelConfig) -> Self {
         let model_name = model.name().to_string();
         Self {
             model: Arc::new(RwLock::new(model)),
@@ -39,9 +36,7 @@ impl ModelState {
             model_name,
             thinking_enabled: Some(true),
             vision_supported: None,
-            temperature: crate::constants::DEFAULT_TEMPERATURE,
-            max_tokens: crate::constants::DEFAULT_MAX_TOKENS,
-            ollama_options: OllamaOptions::default(),
+            base_config,
         }
     }
 
@@ -73,28 +68,12 @@ impl ModelState {
         self.thinking_enabled == Some(true)
     }
 
-    /// Build a ModelConfig for API calls using current model state
+    /// Build a ModelConfig for API calls using current model state.
+    /// Clones the base config and sets runtime-only fields.
     pub fn build_config(&self) -> ModelConfig {
-        let mut config = ModelConfig {
-            model: self.model_id.clone(),
-            thinking_enabled: self.thinking_enabled,
-            temperature: self.temperature,
-            max_tokens: self.max_tokens,
-            ..ModelConfig::default()
-        };
-        // Wire Ollama-specific options from app config
-        if let Some(v) = self.ollama_options.num_gpu {
-            config.set_backend_option("ollama".into(), "num_gpu".into(), v.to_string());
-        }
-        if let Some(v) = self.ollama_options.num_ctx {
-            config.set_backend_option("ollama".into(), "num_ctx".into(), v.to_string());
-        }
-        if let Some(v) = self.ollama_options.num_thread {
-            config.set_backend_option("ollama".into(), "num_thread".into(), v.to_string());
-        }
-        if let Some(v) = self.ollama_options.numa {
-            config.set_backend_option("ollama".into(), "numa".into(), v.to_string());
-        }
+        let mut config = self.base_config.clone();
+        config.model = self.model_id.clone();
+        config.thinking_enabled = self.thinking_enabled;
         config
     }
 }

@@ -1,4 +1,5 @@
 use futures::future::join_all;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -12,6 +13,14 @@ use crate::ollama::get_cloud_api_key;
 /// Global MCP server manager, initialized at startup.
 static MCP_MANAGER: OnceLock<Arc<McpServerManager>> = OnceLock::new();
 
+/// Whether MCP initialization has completed (true = done or not configured).
+/// Starts true (no servers = ready). Set to false when background init starts,
+/// back to true when it finishes.
+static MCP_INIT_COMPLETE: AtomicBool = AtomicBool::new(true);
+
+/// Notification for MCP init completion (wakes waiters in execute_mcp_tool).
+static MCP_READY_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 /// Set the global MCP server manager (called once at startup).
 pub fn set_mcp_manager(manager: Arc<McpServerManager>) {
     let _ = MCP_MANAGER.set(manager);
@@ -20,6 +29,19 @@ pub fn set_mcp_manager(manager: Arc<McpServerManager>) {
 /// Get the global MCP server manager.
 pub fn get_mcp_manager() -> Option<&'static Arc<McpServerManager>> {
     MCP_MANAGER.get()
+}
+
+/// Signal that MCP background initialization has started.
+/// Called before spawning the background task.
+pub fn mark_mcp_init_started() {
+    MCP_INIT_COMPLETE.store(false, Ordering::Release);
+}
+
+/// Signal that MCP background initialization has finished.
+/// Wakes any tool calls that were waiting for MCP to become ready.
+pub fn mark_mcp_init_complete() {
+    MCP_INIT_COMPLETE.store(true, Ordering::Release);
+    MCP_READY_NOTIFY.notify_waiters();
 }
 
 /// Get a human-readable description of an action (for UI display)
@@ -371,12 +393,31 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
     ActionResult::Success { output, images: None }
 }
 
-/// Execute an MCP tool call via the global server manager
+/// Execute an MCP tool call via the global server manager.
+///
+/// If MCP servers are still initializing (background startup), waits up to 30s
+/// for them to become ready instead of failing immediately. This handles the
+/// edge case where a model generates an MCP tool call before the background
+/// init task has completed.
 async fn execute_mcp_tool(
     server_name: &str,
     tool_name: &str,
     arguments: &serde_json::Value,
 ) -> ActionResult {
+    // If MCP init is still in progress, wait for it
+    if !MCP_INIT_COMPLETE.load(Ordering::Acquire) {
+        let wait_result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            MCP_READY_NOTIFY.notified(),
+        )
+        .await;
+        if wait_result.is_err() {
+            return ActionResult::Error {
+                error: "MCP servers still starting after 30s. Try again.".to_string(),
+            };
+        }
+    }
+
     let manager = match get_mcp_manager() {
         Some(m) => m,
         None => {

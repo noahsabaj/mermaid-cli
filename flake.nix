@@ -26,12 +26,9 @@
       ];
       pkgs = import nixpkgs {
         inherit system overlays;
-        config = {
-          permittedInsecurePackages = [ "openssl-1.1.1w" ];
-        };
       };
 
-      myRustc = pkgs.rust-bin.nightly."2025-09-16".default;
+      myRustc = pkgs.rust-bin.stable."1.87.0".default;
 
       # Requires cargo2nix overlay (currently commented out above).
       # Uncomment the cargo2nix input and overlay to use this:
@@ -45,16 +42,15 @@
       workspaceShell = pkgs.mkShell {
         packages = [
           pkgs.statix
-          pkgs.openssl_1_1.dev
           pkgs.zlib.dev
           pkgs.sccache
           pkgs.pkg-config
         ];
         shellHook = ''
-          export PKG_CONFIG_PATH=${pkgs.openssl_1_1.dev}/lib/pkgconfig:${pkgs.zlib.dev}/lib/pkgconfig:$PKG_CONFIG_PATH
+          export PKG_CONFIG_PATH=${pkgs.zlib.dev}/lib/pkgconfig:$PKG_CONFIG_PATH
           export PATH=${myRustc}/bin:${cargo}/bin:${pkgs.sccache}/bin:$PATH
 
-          echo "🦀 Rust development environment ready!"
+          echo "Rust development environment ready!"
         '';
       };
     in

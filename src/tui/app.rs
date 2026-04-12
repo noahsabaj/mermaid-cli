@@ -5,13 +5,14 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 
 use super::state::{
     AppState, AttachmentState, ConversationState, ErrorEntry, ErrorSeverity, GenerationStatus,
     InputBuffer, ModelState, OperationState, StatusState, UIState,
 };
 use crate::constants::UI_ERROR_LOG_MAX_SIZE;
-use crate::models::{ChatMessage, MessageRole, Model, StreamCallback};
+use crate::models::{ChatMessage, MessageRole, Model, ModelConfig, StreamCallback};
 use crate::session::{ConversationHistory, ConversationManager};
 
 /// Application state coordinator
@@ -39,19 +40,28 @@ pub struct App {
     pub status_state: StatusState,
     /// Attachment state - pending image attachments
     pub attachment_state: AttachmentState,
-    /// MCP tool definitions in Ollama JSON format (injected at startup)
+    /// MCP tool definitions in Ollama JSON format (injected at startup or background init)
     pub mcp_tools: Vec<serde_json::Value>,
+    /// Background MCP server initialization task.
+    /// Polled in the event loop; when done, mcp_tools and global manager are set.
+    pub mcp_init_task: Option<JoinHandle<McpInitResult>>,
+}
+
+/// Result of background MCP server initialization
+pub struct McpInitResult {
+    pub tools: Vec<serde_json::Value>,
+    pub manager: Option<Arc<crate::mcp::McpServerManager>>,
 }
 
 impl App {
     /// Create a new app instance
-    pub fn new(model: Box<dyn Model>, model_id: String) -> Self {
+    pub fn new(model: Box<dyn Model>, model_id: String, base_config: ModelConfig) -> Self {
         let working_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string());
 
         // Initialize model state
-        let model_state = ModelState::new(model, model_id);
+        let model_state = ModelState::new(model, model_id, base_config);
 
         // Initialize conversation manager for the current directory
         let conversation_manager = ConversationManager::new(&working_dir).ok();
@@ -91,6 +101,7 @@ impl App {
             status_state: StatusState::new(),
             attachment_state: AttachmentState::new(),
             mcp_tools: Vec::new(),
+            mcp_init_task: None,
         }
     }
 
@@ -99,6 +110,34 @@ impl App {
         let mut config = self.model_state.build_config();
         config.mcp_tools = self.mcp_tools.clone();
         config
+    }
+
+    /// Poll for completed MCP background initialization (non-blocking).
+    ///
+    /// Returns immediately if init is still in progress or already done.
+    /// When init completes, sets mcp_tools on self and registers the global
+    /// MCP manager so tool calls can be dispatched.
+    ///
+    /// Called from both the main event loop and the agent loop so that MCP
+    /// tools become available to the model as soon as servers are ready,
+    /// even mid-agent-loop.
+    pub async fn poll_mcp_init(&mut self) {
+        let ready = self.mcp_init_task.as_ref().is_some_and(|t| t.is_finished());
+        if !ready {
+            return;
+        }
+        if let Some(task) = self.mcp_init_task.take()
+            && let Ok(result) = task.await
+        {
+            if !result.tools.is_empty() {
+                self.mcp_tools = result.tools;
+            }
+            if let Some(manager) = result.manager {
+                crate::agents::set_mcp_manager(manager);
+            }
+        }
+        // Mark complete whether the task succeeded or panicked, so waiters unblock
+        crate::agents::mark_mcp_init_complete();
     }
 
     // ===== Message Management =====

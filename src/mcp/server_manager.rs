@@ -91,6 +91,15 @@ impl McpServerManager {
     }
 
     /// Call a tool on a specific server.
+    ///
+    /// # Concurrency
+    ///
+    /// Multiple concurrent calls to the same server will serialize at the
+    /// transport layer (`StdioTransport` holds a mutex over stdin writes and
+    /// uses a shared pending-response map for JSON-RPC correlation). This is
+    /// intentional: JSON-RPC over stdio is a byte stream, and interleaved
+    /// writes would corrupt messages. Calls to *different* servers run fully
+    /// in parallel since each has its own transport.
     pub async fn call_tool(
         &self,
         server_name: &str,

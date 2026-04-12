@@ -86,6 +86,32 @@ impl ModelConfig {
             .insert(key, value);
     }
 
+    /// Build a ModelConfig from user-facing app Config for a given model ID.
+    ///
+    /// Centralizes the wiring of temperature, max_tokens, and Ollama hardware
+    /// options that was previously scattered across orchestrator.rs and model.rs.
+    pub fn from_app_config(config: &crate::app::Config, model_id: &str) -> Self {
+        let mut mc = Self {
+            model: model_id.to_string(),
+            temperature: config.default_model.temperature,
+            max_tokens: config.default_model.max_tokens,
+            ..Self::default()
+        };
+        if let Some(v) = config.ollama.num_gpu {
+            mc.set_backend_option("ollama".into(), "num_gpu".into(), v.to_string());
+        }
+        if let Some(v) = config.ollama.num_ctx {
+            mc.set_backend_option("ollama".into(), "num_ctx".into(), v.to_string());
+        }
+        if let Some(v) = config.ollama.num_thread {
+            mc.set_backend_option("ollama".into(), "num_thread".into(), v.to_string());
+        }
+        if let Some(v) = config.ollama.numa {
+            mc.set_backend_option("ollama".into(), "numa".into(), v.to_string());
+        }
+        mc
+    }
+
     /// Extract Ollama-specific options
     pub fn ollama_options(&self) -> OllamaOptions {
         OllamaOptions {

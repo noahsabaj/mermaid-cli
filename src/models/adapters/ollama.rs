@@ -323,7 +323,9 @@ impl Model for OllamaAdapter {
                     return false;
                 }
                 // Exclude computer use tools for subagents — concurrent mouse/keyboard
-                // control is inherently broken (shared screen, global coordinates)
+                // control is inherently broken (shared screen, global coordinates).
+                // Additionally, `computer_use.rs` stores scale factor and capture
+                // offsets in global atomics that assume single-agent access.
                 if config.is_subagent
                     && matches!(
                         name,
@@ -485,13 +487,79 @@ fn normalize_url(url: &str) -> String {
         normalized = format!("http://{}", normalized);
     }
 
-    // Add default Ollama port if missing (only for http; https keeps its default 443)
-    if let Some(after_scheme) = normalized.strip_prefix("http://")
-        && !after_scheme.contains(':')
-    {
-        normalized = format!("{}:11434", normalized);
+    // Add default Ollama port if missing (only for http; https keeps its default 443).
+    // Check the authority portion only (before first '/') to avoid appending the port
+    // after a path component (e.g., "http://host/v1" must NOT become "http://host/v1:11434").
+    if let Some(after_scheme) = normalized.strip_prefix("http://") {
+        let (authority, path) = match after_scheme.find('/') {
+            Some(i) => (&after_scheme[..i], &after_scheme[i..]),
+            None => (after_scheme, ""),
+        };
+        if !authority.contains(':') {
+            normalized = format!("http://{}:11434{}", authority, path);
+        }
     }
     // For https:// without a port, don't add :11434 — the default port (443) is correct
 
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_url;
+
+    #[test]
+    fn test_normalize_url_bare_host() {
+        assert_eq!(normalize_url("localhost"), "http://localhost:11434");
+    }
+
+    #[test]
+    fn test_normalize_url_http_no_port() {
+        assert_eq!(normalize_url("http://localhost"), "http://localhost:11434");
+    }
+
+    #[test]
+    fn test_normalize_url_http_with_port() {
+        assert_eq!(
+            normalize_url("http://localhost:11434"),
+            "http://localhost:11434"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_custom_port() {
+        assert_eq!(normalize_url("http://host:8080"), "http://host:8080");
+    }
+
+    #[test]
+    fn test_normalize_url_with_path_no_port() {
+        assert_eq!(
+            normalize_url("http://ollama.example.com/v1"),
+            "http://ollama.example.com:11434/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_with_path_and_port() {
+        assert_eq!(
+            normalize_url("http://ollama.example.com:8080/v1"),
+            "http://ollama.example.com:8080/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_https_no_port_added() {
+        assert_eq!(
+            normalize_url("https://ollama.example.com"),
+            "https://ollama.example.com"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_replaces_0000() {
+        assert_eq!(
+            normalize_url("http://0.0.0.0:11434"),
+            "http://127.0.0.1:11434"
+        );
+    }
 }

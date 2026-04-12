@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-04-12
+
+### Added
+- MCP (Model Context Protocol) client integration for connecting to external tool servers
+- `mermaid add <name>` / `mermaid remove <name>` / `mermaid mcp` commands for MCP server management
+- Built-in registry of 17 popular MCP servers (context7, github, playwright, memory, postgres, etc.)
+- Enhanced computer use: window-aware screenshots (`mode: "window"`), `list_windows` tool, auto-screenshot after click/type/key actions
+- 42 new tests across agent loop, session persistence, non-interactive mode, and stream handler
+
+### Changed
+- MCP servers now initialize in background (TUI renders immediately instead of blocking startup)
+- MCP tools become available to the model as soon as servers are ready, even mid-agent-loop
+- Centralized model configuration into `ModelConfig::from_app_config()` (internal refactor)
+- Nix flake: switched from nightly Rust to stable 1.87.0, removed OpenSSL 1.1 dependency
+
+### Fixed
+- Ollama URL normalization with paths (`http://host/v1` no longer appends port after the path)
+- Token tracking now counts total tokens (prompt + completion) instead of completion-only
+- `ActionResult` images field properly propagated for screenshot tool results
+- Command timeout treated as success (process continues running in background)
+
+### Removed
+- Sync `list_models()` from Ollama detector (replaced by async-only `list_models_async()`)
+- Unused fields from MCP `ResolvedServer` struct
+
 ## [0.5.0] - 2026-03-15
 
 ### Added
@@ -185,7 +210,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.3.0...v0.4.0

@@ -21,6 +21,16 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 ///
 /// Manages the child process lifecycle and provides request/response
 /// correlation over the JSON-RPC 2.0 protocol.
+///
+/// # Concurrency model
+///
+/// The `stdin` mutex serializes outbound writes so that JSON-RPC messages
+/// are never interleaved. The `pending` mutex maps request IDs to oneshot
+/// channels, allowing multiple in-flight requests (the ID counter is
+/// atomic). In practice, because `send_request` holds the `stdin` lock
+/// for the entire write+flush, concurrent callers queue behind it. This
+/// is correct: stdio is a byte stream with no framing guarantees beyond
+/// newlines, so concurrent writes could produce corrupt JSON.
 pub struct StdioTransport {
     /// Stdin writer for sending messages to the server
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,

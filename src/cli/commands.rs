@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::{
     app::{get_config_dir, init_config, load_config},
     models::ModelFactory,
-    ollama::{is_installed as is_ollama_installed, list_models as get_ollama_models},
+    ollama::{is_installed as is_ollama_installed, list_models_async as get_ollama_models},
 };
 
 use super::Commands;
@@ -119,7 +119,7 @@ async fn show_status() -> Result<()> {
 
     // Check Ollama
     if is_ollama_installed() {
-        let models = get_ollama_models().unwrap_or_default();
+        let models = get_ollama_models().await.unwrap_or_default();
         if models.is_empty() {
             println!("  [WARNING] Ollama: Installed (no models)");
         } else {

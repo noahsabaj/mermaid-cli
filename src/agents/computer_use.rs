@@ -28,14 +28,28 @@ enum DisplayBackend {
 /// Monotonic counter for unique temp file names (avoids collisions)
 static SCREENSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Scale factor from the last screenshot (pixels_original / pixels_sent_to_model)
+// -- Global state: single-agent exclusivity required --
+//
+// The statics below store shared mutable state (scale factor, capture offsets)
+// that is written during screenshots and read during mouse/keyboard actions.
+// They are safe ONLY because computer_use tools are excluded from subagents
+// (see `src/models/adapters/ollama.rs` tool filtering for `is_subagent`).
+//
+// If that subagent exclusion is ever removed, concurrent agents will race
+// on these values, producing silently wrong click coordinates. Any change
+// to the subagent tool-filtering logic MUST account for this global state.
+
+/// Scale factor from the last screenshot (pixels_original / pixels_sent_to_model).
 /// Stored as f64 bits in an AtomicU64 for thread safety.
+/// SAFETY: single-agent-only -- see block comment above.
 static SCALE_FACTOR: AtomicU64 = AtomicU64::new(0x3FF0_0000_0000_0000); // f64 bits for 1.0
 
-/// Capture offset: top-left corner of the last screenshot in screen coordinates.
-/// When capturing a region/window/monitor, model coordinates are relative to the
-/// captured area. These offsets translate back to absolute screen coordinates.
+/// Capture offset X: left edge of the last screenshot in screen coordinates.
+/// SAFETY: single-agent-only -- see block comment above.
 static CAPTURE_OFFSET_X: AtomicU64 = AtomicU64::new(0); // f64 bits for 0.0
+
+/// Capture offset Y: top edge of the last screenshot in screen coordinates.
+/// SAFETY: single-agent-only -- see block comment above.
 static CAPTURE_OFFSET_Y: AtomicU64 = AtomicU64::new(0); // f64 bits for 0.0
 
 fn get_scale_factor() -> f64 {
