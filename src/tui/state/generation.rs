@@ -43,6 +43,10 @@ pub enum AppState {
         abort_handle: Option<tokio::task::AbortHandle>,
         /// Accumulated streaming response text for this model call
         response_buffer: String,
+        /// True once `response_buffer` has been truncated to the size cap.
+        /// Subsequent `push_response` calls become no-ops to avoid quadratic
+        /// re-truncation and duplicated `[TRUNCATED…]` markers.
+        response_truncated: bool,
     },
 }
 

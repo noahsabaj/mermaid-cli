@@ -1,9 +1,11 @@
 use ratatui::{Frame, layout::Margin};
+use unicode_width::UnicodeWidthChar;
 
 use super::app::App;
 use super::state::GenerationStatus;
 use crate::tui::widgets::{
-    AttachmentWidget, ChatWidget, InputState, InputWidget, StatusLineWidget, StatusWidget,
+    AttachmentWidget, ChatWidget, InputState, InputWidget, SlashPaletteWidget, StatusLineWidget,
+    StatusWidget,
 };
 
 /// Render the main UI
@@ -16,20 +18,24 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         app.set_terminal_title(&format!("mermaid - {}", app.working_dir));
     }
 
-    // Calculate input area height based on content
+    // Calculate input area height based on content.
+    //
+    // Per-char width is counted in display cells (via `UnicodeWidthChar`)
+    // so CJK double-width and emoji take the right number of columns.
+    // Control chars (where `width()` is None) contribute 0 cells.
     let terminal_width = frame.area().width.saturating_sub(4) as usize; // Account for borders
     let input_lines = if app.input.is_empty() {
         1
     } else {
-        // Calculate how many lines the input will take
         let mut lines = 1;
-        let mut current_line_length = 0;
+        let mut current_line_width = 0usize;
         for ch in app.input.get().chars() {
-            if ch == '\n' || current_line_length >= terminal_width {
+            let w = ch.width().unwrap_or(0);
+            if ch == '\n' || current_line_width >= terminal_width {
                 lines += 1;
-                current_line_length = if ch == '\n' { 0 } else { 1 };
+                current_line_width = if ch == '\n' { 0 } else { w };
             } else {
-                current_line_length += 1;
+                current_line_width += w;
             }
         }
         lines.min(5) // Cap at 5 lines max
@@ -47,12 +53,41 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         1
     };
 
+    // Bottom region (chunk[4]) hosts EITHER the persistent 2-line
+    // status bar OR the slash-command palette while the user is typing
+    // a `/command`. The palette needs ~10 lines (top + bottom border +
+    // up to 8 command rows); a flat 2-line region would erase content
+    // entirely. Compute the right height here so the layout adjusts
+    // and the chat area shrinks accordingly.
+    let palette_open = app.input.get().starts_with('/');
+    let bottom_height = if palette_open {
+        // 8 visible rows max + 2 borders = 10. Cap so we never push
+        // chat below the Min(10) constraint into negative.
+        let typed = app
+            .input
+            .get()
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        // Clamp to [1, 8]: at least 1 row to render the
+        // "No matching commands" placeholder when filter is empty;
+        // at most 8 rows so the chat area never disappears.
+        let row_count = crate::tui::slash_commands::filter_by_prefix(typed)
+            .len()
+            .clamp(1, 8);
+        (row_count as u16) + 2 // +2 for top + bottom border.
+    } else {
+        2 // Status bar takes 2 lines.
+    };
+
     // Use cached layout for better performance (local to UIState, no global mutex)
     let chunks = app.ui_state.layout_cache.get_main_layout(
         frame.area(),
         input_height,
         status_line_height,
         attachment_height,
+        bottom_height,
     );
 
     // Render chat area with horizontal padding using new ChatWidget
@@ -82,13 +117,12 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         // Estimate tokens during streaming: ~4 chars per token
         // Use actual count if available (set at end), otherwise estimate from response length
         let actual_tokens = app.app_state.tokens_received().unwrap_or(0);
-        let (tokens_display, tokens_estimated) =
-            if actual_tokens == 0 && app.response_len() > 0 {
-                // Estimate: ~4 characters per token (rough approximation)
-                (app.response_len() / 4, true)
-            } else {
-                (actual_tokens, false)
-            };
+        let (tokens_display, tokens_estimated) = if actual_tokens == 0 && app.response_len() > 0 {
+            // Estimate: ~4 characters per token (rough approximation)
+            (app.response_len() / 4, true)
+        } else {
+            (actual_tokens, false)
+        };
 
         let status_line_widget = StatusLineWidget {
             status: app
@@ -121,9 +155,10 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
     // Render input area (chunks[3])
     let input_widget = InputWidget {
         input: app.input.get(),
-        showing_command_hints: app.input.get().starts_with(':'),
+        showing_command_hints: app.input.get().starts_with('/'),
         theme: &app.ui_state.theme,
-        thinking_enabled: app.model_state.thinking_enabled,
+        reasoning_active: app.model_state.base_config.reasoning
+            != crate::models::ReasoningLevel::None,
     };
     frame.render_stateful_widget(input_widget, chunks[3], &mut app.ui_state.input_state);
 
@@ -145,13 +180,53 @@ pub fn render_ui(frame: &mut Frame, app: &mut App) {
         frame.set_cursor_position((input_area.x + cursor_col + 2, input_area.y + 1 + cursor_row));
     }
 
-    // Render status bar (chunks[4])
-    let status_widget = StatusWidget {
-        theme: &app.ui_state.theme,
-        working_dir: &app.working_dir,
-        cumulative_tokens: app.session_state.cumulative_tokens,
-        model_name: &app.model_state.model_name,
-        thinking_enabled: app.model_state.thinking_enabled,
+    // Compute effective reasoning level + snap-divergence (Step 5b).
+    // The user's requested level may exceed what the current model
+    // supports — `nearest_effort` snaps it onto the supported set; we
+    // surface the requested vs effective gap in the status bar so the
+    // user knows when the API is silently using a lower tier.
+    let requested = app.model_state.base_config.reasoning;
+    let effective = match &app.model_state.supported_reasoning {
+        crate::models::ReasoningCapability::Levels(supp) => {
+            crate::models::nearest_effort(requested, supp).unwrap_or(requested)
+        },
+        // Binary / Unsupported / Budget — no levels-based snap to surface.
+        _ => requested,
     };
-    frame.render_widget(status_widget, chunks[4]);
+    let requested_level = if effective == requested {
+        None
+    } else {
+        Some(requested)
+    };
+
+    // Bottom region (chunks[4]): the slash-command palette while the
+    // user is typing a `/command`, otherwise the persistent status bar.
+    // Reusing the same chunk avoids layout cache invalidation on every
+    // keystroke (palette opens and closes constantly during typing).
+    if app.input.get().starts_with('/') {
+        let typed = app
+            .input
+            .get()
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        let commands = crate::tui::slash_commands::filter_by_prefix(typed);
+        let palette_widget = SlashPaletteWidget {
+            theme: &app.ui_state.theme,
+            commands,
+            selected_index: app.ui_state.palette_selected_index,
+        };
+        frame.render_widget(palette_widget, chunks[4]);
+    } else {
+        let status_widget = StatusWidget {
+            theme: &app.ui_state.theme,
+            working_dir: &app.working_dir,
+            cumulative_tokens: app.session_state.cumulative_tokens,
+            model_name: &app.model_state.model_name,
+            reasoning_level: effective,
+            requested_level,
+        };
+        frame.render_widget(status_widget, chunks[4]);
+    }
 }

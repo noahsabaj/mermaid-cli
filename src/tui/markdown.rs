@@ -2,6 +2,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 use ratatui::macros::{line, span};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 /// Parse markdown and convert to styled ratatui Lines
 pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
@@ -175,13 +176,17 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                     },
                     TagEnd::Table => {
                         in_table = false;
-                        // Compute column widths
+                        // Compute column widths in **display cells**, not bytes.
+                        // CJK / emoji cells (3 bytes per codepoint, 2 cells)
+                        // would otherwise inflate widths by ~3× and misalign
+                        // every other row. Padding below also uses cell-based
+                        // computation rather than format!'s char-count default.
                         let num_cols = table_rows.iter().map(|r| r.len()).max().unwrap_or(0);
                         let mut col_widths = vec![0usize; num_cols];
                         for row in &table_rows {
                             for (i, cell) in row.iter().enumerate() {
                                 if i < num_cols {
-                                    col_widths[i] = col_widths[i].max(cell.len());
+                                    col_widths[i] = col_widths[i].max(cell.width());
                                 }
                             }
                         }
@@ -199,7 +204,13 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                             spans.push(Span::styled("| ", border_style));
                             for (col_idx, cell) in row.iter().enumerate() {
                                 let width = col_widths.get(col_idx).copied().unwrap_or(3);
-                                let padded = format!("{:<width$}", cell, width = width);
+                                // Pad to `width` display cells (not chars or
+                                // bytes). `{:<width$}` would pad to chars,
+                                // which is wrong for CJK (each char is 2 cells
+                                // but counted as 1 char by the formatter).
+                                let cell_w = cell.width();
+                                let padding = width.saturating_sub(cell_w);
+                                let padded = format!("{}{}", cell, " ".repeat(padding));
                                 let style = if row_idx == 0 && table_header_len > 0 {
                                     header_style
                                 } else {
@@ -210,7 +221,9 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                             }
                             lines.push(Line::from(spans));
 
-                            // Add separator after header row
+                            // Add separator after header row. `width` is now
+                            // in cells; "-" is 1 byte / 1 cell so repeating
+                            // produces exactly `width` cells of dashes.
                             if row_idx == 0 && table_header_len > 0 {
                                 let mut sep_spans = Vec::new();
                                 sep_spans.push(Span::styled("|-", border_style));
@@ -414,5 +427,34 @@ mod tests {
         let text = lines_to_text(&lines);
         assert!(text.contains("Paragraph 1"));
         assert!(text.contains("Paragraph 2"));
+    }
+
+    /// Tables with CJK cells used to misalign because `cell.len()` reported
+    /// 3 bytes for each 2-cell character. After the fix, column widths are
+    /// computed in display cells and padding emits enough trailing spaces
+    /// to make every row visually line up.
+    #[test]
+    fn table_column_widths_use_display_cells() {
+        let input = "| Name | Score |\n|------|-------|\n| 你好 | 100   |\n| ab   | 50    |";
+        let lines = parse_markdown(input);
+
+        // Find the body row containing "你好" and the row containing "ab"
+        // (skipping header + separator).
+        let mut cjk_row_width = 0usize;
+        let mut ascii_row_width = 0usize;
+        for line in &lines {
+            let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            if rendered.contains("你好") {
+                cjk_row_width = rendered.width();
+            } else if rendered.contains("ab") && rendered.contains("|") {
+                ascii_row_width = rendered.width();
+            }
+        }
+        assert!(cjk_row_width > 0, "did not find the CJK body row");
+        assert!(ascii_row_width > 0, "did not find the ASCII body row");
+        assert_eq!(
+            cjk_row_width, ascii_row_width,
+            "CJK and ASCII rows must have equal display width for the table to align"
+        );
     }
 }

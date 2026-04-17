@@ -1,20 +1,33 @@
+//! TUI event loop + the `TuiObserver` that plugs the TUI into the
+//! shared agent loop.
+//!
+//! The observer pattern in `runtime::agent_loop` lets us thread
+//! channel-based streaming, live rendering, and queued-message
+//! interception through a single shared loop — this module just
+//! implements the hooks. The TUI no longer owns a forked `run_agent_loop`.
+
 use anyhow::Result;
-use crossterm::event;
+use async_trait::async_trait;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{RwLock, mpsc};
 
-use super::state::GenerationStatus;
-use super::stream_event::StreamEvent;
+use super::state::{AppState, GenerationStatus};
+use super::tui_stream_event::TuiStreamEvent;
 use crate::agents::{
-    AgentAction, SubagentProgress, SubagentResult, collect_subagent_results,
-    format_subagent_tool_result, spawn_subagents,
+    ActionResult as AgentActionResult, AgentAction, SubagentProgress, SubagentResult,
+    collect_subagent_results, spawn_subagents,
 };
-use crate::constants::UI_POLL_INTERVAL_MS;
-use crate::models::{ChatMessage, MessageRole, StreamCallback};
-use crate::runtime::agent_loop::{MAX_AGENT_ITERATIONS, ToolExecutionResult};
+use crate::constants::{UI_MOUSE_SCROLL_LINES, UI_POLL_INTERVAL_MS};
+use crate::models::{
+    ChatMessage, ErrorCategory, MessageRole, Model, ModelConfig, StreamCallback, StreamEvent,
+};
+use crate::runtime::agent_loop::{
+    AgentObserver, LoopControl, MAX_AGENT_ITERATIONS, ModelCallOutput, run_agent_loop,
+};
 use crate::tui::App;
 use crate::tui::render::render_ui;
 
@@ -22,97 +35,580 @@ use crate::tui::render::render_ui;
 use super::action_handler;
 use super::command_handler;
 use super::event_handler::{EventAction, handle_event};
-use super::stream_handler::{StreamStatus, process_stream_chunks};
 
-/// Spawn an async task to stream the model's response and return the abort handle.
+/// Observer that bridges the shared agent loop to the TUI's `App` and
+/// `Terminal`. Owns mutable refs to both for the lifetime of a turn.
 ///
-/// This is the single place that builds the callback, calls the model, and
-/// sends [DONE]/[ERROR_JSON] on the channel. All three call-model sites in
-/// the event loop delegate here.
-fn spawn_model_call(app: &mut App, messages: Vec<ChatMessage>, tx: &mpsc::Sender<StreamEvent>) {
-    // Per-model-call resets (these are per-call, not per-turn)
-    app.operation_state.accumulated_tool_calls.clear();
-    app.clear_response();
+/// The observer's hooks:
+/// - `check_interrupt` drains crossterm events, maps Esc/Ctrl+C to
+///   Interrupt and any queued message to InjectMessage.
+/// - `on_status` / `on_tool_result` / `on_generation_*` mutate App
+///   state and re-render.
+/// - `call_model` spawns a model task that streams chunks to a channel,
+///   then drains the channel while rendering between ticks.
+/// - `run_subagents` spawns subagents and polls their handles with
+///   live rendering (mirrors the old `poll_subagent_handles`).
+/// - `on_message_appended` mirrors every new message from
+///   run_agent_loop into `app.session_state.messages` so the UI sees
+///   tool and assistant messages in real time.
+pub struct TuiObserver<'a> {
+    pub app: &'a mut App,
+    pub terminal: &'a mut Terminal<CrosstermBackend<io::Stdout>>,
+    pub tx: mpsc::Sender<TuiStreamEvent>,
+    pub rx: &'a mut mpsc::Receiver<TuiStreamEvent>,
+}
 
-    let model = app.model_state.model.clone();
-    let tx_stream = tx.clone();
-    let tx_done = tx.clone();
-    let config = app.build_model_config();
+impl<'a> TuiObserver<'a> {
+    fn render(&mut self) -> Result<()> {
+        self.terminal.draw(|f| render_ui(f, self.app))?;
+        Ok(())
+    }
 
-    let handle = tokio::spawn(async move {
-        let sent_chunks = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let sent_flag = Arc::clone(&sent_chunks);
-        let callback: StreamCallback = Arc::new(move |chunk| {
-            sent_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            let _ = tx_stream.try_send(StreamEvent::Chunk(chunk.to_string()));
-        });
-
-        let model = model.read().await;
-        match model.chat(&messages, &config, Some(callback)).await {
-            Ok(response) => {
-                // Defensive fallback: if no chunks were streamed but response has
-                // content, forward it now. Matches runtime::agent_loop's fallback.
-                if !sent_chunks.load(std::sync::atomic::Ordering::Relaxed)
-                    && !response.content.is_empty()
-                {
-                    let _ = tx_done
-                        .send(StreamEvent::Chunk(response.content.clone()))
-                        .await;
-                }
-                if let Some(ref tool_calls) = response.tool_calls
-                    && !tool_calls.is_empty()
-                {
-                    let _ = tx_done
-                        .send(StreamEvent::ToolCalls(tool_calls.clone()))
-                        .await;
-                }
-                let tokens = response.usage.map(|u| u.total_tokens).unwrap_or(0);
-                let _ = tx_done
-                    .send(StreamEvent::Done {
-                        total_tokens: tokens,
-                    })
-                    .await;
-            },
-            Err(e) => {
-                let _ = tx_done.send(StreamEvent::Error(e.to_user_facing())).await;
-            },
+    /// Drain any pending crossterm events (keys, mouse, paste), apply
+    /// their effects to the app, and return whether the user wants to
+    /// interrupt. Also handles Enter to queue a message (intercepted
+    /// later by `check_interrupt` via `LoopControl::InjectMessage`).
+    fn drain_events(&mut self) -> Result<bool> {
+        while event::poll(Duration::from_millis(0))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Esc => return Ok(true),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(true);
+                    },
+                    KeyCode::Char(c)
+                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                    {
+                        self.app.input.insert(c);
+                    },
+                    KeyCode::Enter => {
+                        if !self.app.input.is_empty() && !self.app.input.get().starts_with('/') {
+                            let input = self.app.input.get().to_string();
+                            self.app.operation_state.queue_message(input);
+                            self.app.clear_input();
+                            self.app.set_status("Message queued");
+                        }
+                    },
+                    KeyCode::Backspace => {
+                        self.app.input.backspace();
+                    },
+                    KeyCode::Delete => {
+                        self.app.input.delete();
+                    },
+                    KeyCode::Left => self.app.input.move_left(),
+                    KeyCode::Right => self.app.input.move_right(),
+                    KeyCode::Home => self.app.input.move_home(),
+                    KeyCode::End => self.app.input.move_end(),
+                    KeyCode::PageUp => self.app.scroll_up(10),
+                    KeyCode::PageDown => self.app.scroll_down(10),
+                    _ => {},
+                },
+                Event::Mouse(m) => match m.kind {
+                    MouseEventKind::ScrollUp => self.app.scroll_up(UI_MOUSE_SCROLL_LINES),
+                    MouseEventKind::ScrollDown => self.app.scroll_down(UI_MOUSE_SCROLL_LINES),
+                    _ => {},
+                },
+                Event::Paste(text) => {
+                    let cleaned = text.replace('\r', "");
+                    if !cleaned.is_empty() {
+                        self.app.input.insert_str(&cleaned);
+                    }
+                },
+                _ => {},
+            }
         }
-    });
+        Ok(false)
+    }
 
-    if app.app_state.is_generating() {
-        // Already in mermaid's turn (agent loop continuation) — update handle, reset to Sending
-        app.update_abort_handle(handle.abort_handle());
-        app.transition_to_sending();
-    } else {
-        // New turn — enter generating state
-        app.start_generation(handle.abort_handle());
+    /// Save partial streamed content as an assistant message (on abort).
+    fn commit_partial_response(&mut self) {
+        let partial = self.app.take_response();
+        if !partial.is_empty() {
+            self.app.add_message(MessageRole::Assistant, partial);
+        }
+    }
+
+    /// Check the rx channel for a fatal error event AND dispatch
+    /// capability-disable responses (thinking / vision).
+    fn handle_stream_error(&mut self, user_error: &crate::models::UserFacingError) {
+        self.app.clear_response();
+
+        // "Does not support thinking" → snap reasoning to None for this
+        // model and tell the user. Replaces the legacy
+        // `disable_thinking_support` sentinel with a single source of
+        // truth on `base_config.reasoning`.
+        if user_error.message.contains("does not support thinking") {
+            self.app
+                .model_state
+                .set_reasoning(crate::models::ReasoningLevel::None);
+            let _ = crate::app::persist_reasoning_for_model(
+                &self.app.model_state.model_id,
+                crate::models::ReasoningLevel::None,
+            );
+            self.app
+                .set_status("Model does not support thinking — reasoning set to none");
+            self.app.add_message(
+                MessageRole::System,
+                "This model does not support thinking mode. Reasoning has been set to `none`. Please try your request again."
+                    .to_string(),
+            );
+            return;
+        }
+
+        // Vision / image errors → strip images from history and mark vision unsupported.
+        let lower = user_error.message.to_lowercase();
+        if lower.contains("does not support images")
+            || lower.contains("images not supported")
+            || lower.contains("does not support vision")
+            || lower.contains("is not a multimodal model")
+            || lower.contains("unsupported content type")
+        {
+            self.app.model_state.vision_supported = Some(false);
+            for msg in &mut self.app.session_state.messages {
+                msg.images = None;
+            }
+            self.app
+                .set_status("Model does not support images - disabled");
+            self.app.add_message(
+                MessageRole::System,
+                "This model does not support images. Image paste has been disabled for this session.".to_string()
+            );
+            return;
+        }
+
+        let status_prefix = match user_error.category {
+            ErrorCategory::Connection => "Connection",
+            ErrorCategory::Auth => "Auth",
+            ErrorCategory::Config => "Config",
+            ErrorCategory::NotFound => "Not Found",
+            ErrorCategory::Temporary => "Temporary",
+            ErrorCategory::Internal => "Error",
+        };
+        self.app
+            .set_status(format!("[{}] {}", status_prefix, user_error.summary));
+        let error_display = format!(
+            "{}\n\nSuggestion: {}",
+            user_error.message, user_error.suggestion
+        );
+        self.app.add_message(MessageRole::System, error_display);
     }
 }
 
-/// Run the main application event loop
+#[async_trait]
+impl<'a> AgentObserver for TuiObserver<'a> {
+    fn check_interrupt(&mut self) -> LoopControl {
+        // Render first so the user sees the latest state before we decide.
+        let _ = self.render();
+
+        // Auto-transition from Sending to Thinking after 1s without chunks.
+        if self.app.app_state.generation_status() == Some(GenerationStatus::Sending)
+            && let Some(start_time) = self.app.app_state.generation_start_time()
+            && start_time.elapsed().as_secs() >= 1
+        {
+            self.app.transition_to_thinking();
+        }
+
+        match self.drain_events() {
+            Ok(true) => {
+                self.commit_partial_response();
+                self.app.set_status("Agent loop interrupted");
+                LoopControl::Interrupt
+            },
+            Ok(false) => {
+                if let Some(queued) = self.app.operation_state.take_queued_message() {
+                    self.app.set_status("Processing queued message...");
+                    LoopControl::InjectMessage(queued)
+                } else {
+                    LoopControl::Continue
+                }
+            },
+            Err(_) => LoopControl::Continue,
+        }
+    }
+
+    fn on_status(&mut self, message: &str) {
+        self.app.set_status(message);
+        let _ = self.render();
+    }
+
+    fn on_tool_result(
+        &mut self,
+        tool_name: &str,
+        _tool_call_id: &str,
+        action: &AgentAction,
+        result: &AgentActionResult,
+    ) {
+        // Build a rich ActionDisplay and attach it to the last assistant
+        // message in session_state for inline rendering under the chat.
+        if tool_name == "agent" {
+            // Subagent results receive a dedicated display builder that
+            // knows how to show tool-use counts, duration, etc. — we
+            // don't have access to the SubagentResult here, so build
+            // a minimal Success/Error display from the raw result.
+            return;
+        }
+        let action_display = match result {
+            AgentActionResult::Success { output, .. } => {
+                action_handler::build_action_display(action, output)
+            },
+            AgentActionResult::Error { error } => {
+                action_handler::build_error_display(action, error)
+            },
+        };
+        if let Some(last_msg) = self
+            .app
+            .session_state
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m.role, MessageRole::Assistant))
+        {
+            last_msg.actions.push(action_display);
+        }
+        let _ = self.render();
+    }
+
+    fn on_error(&mut self, error: &str) {
+        self.app.display_error_simple(error);
+        let _ = self.render();
+    }
+
+    fn on_generation_start(&mut self) {
+        // Streaming state is already set up by `call_model` when it
+        // spawns the model task; nothing else needed here.
+    }
+
+    fn on_generation_complete(&mut self, tokens: usize) {
+        self.app.set_final_tokens(tokens);
+    }
+
+    fn on_message_appended(&mut self, msg: &ChatMessage) {
+        // Mirror the message into session_state so the UI renders it
+        // live. The agent-loop's own `messages` vec (which is a
+        // per-call snapshot — see `run_agent_loop_for_turn`) is
+        // independent.
+        self.app.commit_message(msg.clone());
+    }
+
+    async fn call_model(
+        &mut self,
+        model: Arc<RwLock<Box<dyn Model>>>,
+        _messages: &[ChatMessage],
+        config: &ModelConfig,
+    ) -> Result<ModelCallOutput> {
+        // Step 5h: auto-reload MERMAID.md if it changed since last turn.
+        // mtime poll is microseconds; we only re-read the file when the
+        // mtime actually moved. Status messages surface visible changes
+        // so users know context shifted under them.
+        {
+            use crate::app::instructions::{ReloadOutcome, refresh};
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let prior = self.app.instructions.take();
+            let (refreshed, outcome) = refresh(prior, &cwd);
+            self.app.instructions = refreshed;
+            match outcome {
+                ReloadOutcome::Reloaded {
+                    old_tokens,
+                    new_tokens,
+                } => {
+                    self.app.set_status(format!(
+                        "MERMAID.md updated — reloaded ({} → {} tokens)",
+                        old_tokens, new_tokens
+                    ));
+                },
+                ReloadOutcome::LoadedFirst { tokens } => {
+                    self.app
+                        .set_status(format!("MERMAID.md created — loaded ({} tokens)", tokens));
+                },
+                ReloadOutcome::Removed => {
+                    self.app
+                        .set_status("MERMAID.md removed — context refreshed");
+                },
+                ReloadOutcome::Unchanged => {},
+            }
+        }
+
+        // Build the trimmed window from session_state (source of truth).
+        // The `_messages` param is the per-call snapshot maintained by
+        // run_agent_loop; for the TUI we always re-trim from the full
+        // session_state because tool results have been mirrored in.
+        let trimmed = self.app.build_managed_message_history(
+            crate::constants::MAX_CONTEXT_TOKENS,
+            crate::constants::CONTEXT_RESERVE_TOKENS,
+        );
+
+        // Per-call resets
+        self.app.operation_state.accumulated_tool_calls.clear();
+        self.app.clear_response();
+
+        let tx_stream = self.tx.clone();
+        let tx_done = self.tx.clone();
+        let model_clone = Arc::clone(&model);
+
+        // When reasoning is set to None we suppress reasoning chunks at
+        // the stream level too, so the adapter doesn't waste work emitting
+        // tokens we'd turn around and drop. Independent of the explicit
+        // `hide_reasoning_trace` toggle (a user can hide the trace while
+        // keeping reasoning depth high).
+        let mut effective_config = config.clone();
+        let reasoning_off = config.reasoning == crate::models::ReasoningLevel::None;
+        effective_config.hide_reasoning_trace = config.hide_reasoning_trace || reasoning_off;
+        effective_config.dynamic_system_suffix =
+            self.app.instructions.as_ref().map(|i| i.content.clone());
+
+        let handle = tokio::spawn(async move {
+            // Track entry/exit of reasoning phase so the TUI's existing
+            // marker-based rendering keeps working unchanged. Wave 4
+            // (renaming TuiStreamEvent) deliberately stayed name-only;
+            // proper reasoning rendering ships in Step 4 of the
+            // multi-provider rollout.
+            let in_thinking = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let sent_text = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let in_thinking_cb = Arc::clone(&in_thinking);
+            let sent_text_cb = Arc::clone(&sent_text);
+            let tx_stream_cb = tx_stream.clone();
+
+            let typed_callback: StreamCallback = Arc::new(move |event| match event {
+                StreamEvent::Text(text) => {
+                    if in_thinking_cb.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        let _ = tx_stream_cb
+                            .try_send(TuiStreamEvent::Chunk("\n...done thinking.\n\n".to_string()));
+                    }
+                    sent_text_cb.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = tx_stream_cb.try_send(TuiStreamEvent::Chunk(text));
+                },
+                StreamEvent::Reasoning(chunk) => {
+                    if !in_thinking_cb.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        let _ = tx_stream_cb
+                            .try_send(TuiStreamEvent::Chunk("Thinking...\n\n".to_string()));
+                    }
+                    if !chunk.text.is_empty() {
+                        sent_text_cb.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let _ = tx_stream_cb.try_send(TuiStreamEvent::Chunk(chunk.text));
+                    }
+                },
+                StreamEvent::ToolCall(tc) => {
+                    let _ = tx_stream_cb.try_send(TuiStreamEvent::ToolCalls(vec![tc]));
+                },
+                // Done is captured below via `response.usage` and re-emitted
+                // AFTER any defensive-fallback chunk so consumer ordering
+                // matches the pre-typed-events behavior.
+                StreamEvent::Done { .. } => {},
+            });
+
+            let model = model_clone.read().await;
+            match model
+                .chat(&trimmed, &effective_config, Some(typed_callback))
+                .await
+            {
+                Ok(response) => {
+                    // Defensive fallback: forward buffered content if the
+                    // adapter didn't stream anything (preserves legacy
+                    // behavior; adapters shouldn't hit this in practice).
+                    if !sent_text.load(std::sync::atomic::Ordering::Relaxed)
+                        && !response.content.is_empty()
+                    {
+                        let _ = tx_done
+                            .send(TuiStreamEvent::Chunk(response.content.clone()))
+                            .await;
+                    }
+                    // Tool calls: emit anything the response carries that
+                    // the typed stream might have missed (Ollama's own
+                    // chat_typed emits them as events, so this is usually
+                    // empty — but the receiver dedupes by accumulating).
+                    if let Some(ref tool_calls) = response.tool_calls
+                        && !tool_calls.is_empty()
+                    {
+                        let _ = tx_done
+                            .send(TuiStreamEvent::ToolCalls(tool_calls.clone()))
+                            .await;
+                    }
+                    let tokens = response.usage.map(|u| u.total_tokens).unwrap_or(0);
+                    let _ = tx_done
+                        .send(TuiStreamEvent::Done {
+                            total_tokens: tokens,
+                        })
+                        .await;
+                },
+                Err(e) => {
+                    let _ = tx_done
+                        .send(TuiStreamEvent::Error(e.to_user_facing()))
+                        .await;
+                },
+            }
+        });
+
+        // Install abort handle into app_state so Esc can cancel.
+        if self.app.app_state.is_generating() {
+            self.app.update_abort_handle(handle.abort_handle());
+            self.app.transition_to_sending();
+        } else {
+            self.app.start_generation(handle.abort_handle());
+        }
+
+        // Drain the channel. Render between events and honor the full
+        // input handler so the user can type, edit, scroll, and queue
+        // messages mid-stream (queued messages are consumed by
+        // `check_interrupt` between agent-loop steps). `drain_events`
+        // inserts chars into `app.input`, handles Enter-to-queue,
+        // backspace/arrow navigation, PageUp/PageDown, mouse scroll,
+        // and returns `true` on Esc / Ctrl+C.
+        loop {
+            let _ = self.render();
+
+            if self.drain_events()? {
+                let (abort, partial) = self.app.abort_generation();
+                if let Some(h) = abort {
+                    h.abort();
+                }
+                if !partial.is_empty() {
+                    self.app.add_message(MessageRole::Assistant, partial);
+                }
+                self.app.set_status("Generation stopped");
+                anyhow::bail!("Generation interrupted by user");
+            }
+
+            // Try to receive next event with a short timeout so we
+            // don't busy-spin.
+            let event = match tokio::time::timeout(
+                Duration::from_millis(UI_POLL_INTERVAL_MS),
+                self.rx.recv(),
+            )
+            .await
+            {
+                Ok(Some(ev)) => ev,
+                Ok(None) => anyhow::bail!("Stream channel closed unexpectedly"),
+                Err(_) => continue, // timeout — loop and render again
+            };
+
+            match event {
+                TuiStreamEvent::Chunk(text) => {
+                    self.app.push_response(&text);
+                    if self.app.app_state.generation_status() != Some(GenerationStatus::Streaming) {
+                        self.app.transition_to_streaming();
+                    }
+                },
+                TuiStreamEvent::ToolCalls(calls) => {
+                    self.app
+                        .operation_state
+                        .accumulated_tool_calls
+                        .extend(calls);
+                },
+                TuiStreamEvent::Done { total_tokens } => {
+                    // Extract buffered content + accumulated tool_calls.
+                    let content = self.app.take_response();
+                    let tool_calls =
+                        std::mem::take(&mut self.app.operation_state.accumulated_tool_calls);
+                    return Ok(ModelCallOutput {
+                        content,
+                        tool_calls,
+                        tokens: total_tokens,
+                    });
+                },
+                TuiStreamEvent::Error(err) => {
+                    self.handle_stream_error(&err);
+                    anyhow::bail!("{}", err.summary);
+                },
+            }
+        }
+    }
+
+    async fn run_subagents(
+        &mut self,
+        specs: Vec<(String, String)>,
+        model: Arc<RwLock<Box<dyn Model>>>,
+        config: &ModelConfig,
+    ) -> Vec<SubagentResult> {
+        let progress = Arc::new(Mutex::new(Vec::<SubagentProgress>::new()));
+        self.app.operation_state.active_subagents = Some(Arc::clone(&progress));
+
+        let (handles, overflow) = spawn_subagents(specs, model, config, Arc::clone(&progress));
+
+        let handle_count = handles.len();
+        self.app
+            .set_status(format!("Running {} agent(s)...", handle_count));
+
+        // Poll handles with rendering between checks.
+        loop {
+            // Sync token count from subagents for the status line.
+            if let Some(ref p) = self.app.operation_state.active_subagents {
+                let total_tokens: usize = p
+                    .lock()
+                    .map(|v| v.iter().map(|a| a.tokens).sum())
+                    .unwrap_or(0);
+                if let AppState::Generating {
+                    tokens_received, ..
+                } = &mut self.app.app_state
+                {
+                    *tokens_received = total_tokens;
+                }
+            }
+
+            let _ = self.render();
+
+            // Esc aborts all subagent handles and returns an empty result.
+            let mut interrupt = false;
+            if let Ok(true) = self.drain_events() {
+                interrupt = true;
+            }
+            if interrupt {
+                for h in &handles {
+                    h.abort();
+                }
+                self.app.operation_state.clear_subagents();
+                return Vec::new();
+            }
+
+            if handles.iter().all(|h| h.is_finished()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(UI_POLL_INTERVAL_MS)).await;
+        }
+
+        let results = collect_subagent_results(handles, overflow).await;
+
+        // Attach a completion display for each subagent to the last
+        // assistant message so they render inline like tool actions.
+        for result in &results {
+            let display = action_handler::build_agent_action_display(result);
+            if let Some(last_msg) = self
+                .app
+                .session_state
+                .messages
+                .iter_mut()
+                .rev()
+                .find(|m| matches!(m.role, MessageRole::Assistant))
+            {
+                last_msg.actions.push(display);
+            }
+            self.app.session_state.cumulative_tokens += result.tokens;
+        }
+
+        self.app
+            .set_status(format!("{} agent(s) completed", results.len()));
+        self.app.operation_state.clear_subagents();
+        results
+    }
+}
+
+/// Run the main application event loop.
 ///
-/// This function coordinates all the specialized handlers and manages
-/// the lifecycle of the TUI application.
-///
-/// The loop performs these steps each iteration:
-/// 1. Render the UI
-/// 2. Poll for events (keyboard, mouse)
-/// 3. Process streaming chunks from LLM
-/// 4. Handle events and delegate to specialized handlers
-/// 5. Check for file system changes
-/// 6. Auto-scroll management
+/// Top-level: handles UI rendering, non-generation keyboard events,
+/// command dispatch, and kicks off model turns. When a model turn
+/// starts it builds a `TuiObserver`, makes the first model call, and
+/// hands control to `run_agent_loop` for tool execution — the TUI
+/// observer's hooks render, stream, and intercept queued messages
+/// inside the shared loop.
 pub async fn run_app_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    tx: mpsc::Sender<StreamEvent>,
-    rx: &mut mpsc::Receiver<StreamEvent>,
+    tx: mpsc::Sender<TuiStreamEvent>,
+    rx: &mut mpsc::Receiver<TuiStreamEvent>,
 ) -> Result<()> {
-    // Background title generation (non-blocking)
     let mut title_task: Option<tokio::task::JoinHandle<Option<String>>> = None;
 
-    // Main event loop
     loop {
-        // Poll for completed title generation (non-blocking)
+        // Poll background title generation.
         if let Some(ref task) = title_task
             && task.is_finished()
             && let Some(task) = title_task.take()
@@ -121,123 +617,38 @@ pub async fn run_app_loop(
             app.session_state.conversation_title = Some(title);
         }
 
-        // Poll for completed MCP background initialization (non-blocking)
+        // Poll background MCP init.
         app.poll_mcp_init().await;
 
-        // Get viewport height for proper scrolling
-        let viewport_height = terminal.size()?.height.saturating_sub(8); // 3 header + 3 input + 1 status + 1 margin
-
-        // Draw UI
+        let viewport_height = terminal.size()?.height.saturating_sub(8);
         terminal.draw(|f| render_ui(f, app))?;
 
-        // Check if we should transition from Sending to Thinking (after 1 second with no chunks)
-        if app.app_state.generation_status() == Some(GenerationStatus::Sending)
-            && let Some(start_time) = app.app_state.generation_start_time()
-            && start_time.elapsed().as_secs() >= 1
-        {
-            app.transition_to_thinking();
-        }
-
-        // Handle input events
-        if event::poll(std::time::Duration::from_millis(UI_POLL_INTERVAL_MS))? {
+        // Idle: poll keyboard/mouse events.
+        if event::poll(Duration::from_millis(UI_POLL_INTERVAL_MS))? {
             let event = event::read()?;
-
-            // Use event_handler to process the event
             match handle_event(app, event, viewport_height)? {
-                EventAction::Continue => {
-                    // Continue normal loop
-                },
-                EventAction::Quit => {
-                    break;
-                },
+                EventAction::Continue => {},
+                EventAction::Quit => break,
                 EventAction::SubmitMessage(input) => {
-                    // Submit message to model
-                    handle_message_submit(app, input, &tx, viewport_height).await;
+                    run_turn(app, input, terminal, &tx, rx).await?;
+
+                    // Process any messages queued while the turn was running.
+                    while let Some(queued) = app.operation_state.take_queued_message() {
+                        run_turn(app, queued, terminal, &tx, rx).await?;
+                    }
+
+                    // Turn complete — spawn title generation if first one.
+                    app.stop_generation();
+                    if title_task.is_none() {
+                        title_task = app.spawn_title_generation();
+                    }
                 },
                 EventAction::ExecuteCommand(command) => {
-                    // Execute slash command
-                    command_handler::handle_command(app, &command).await?;
+                    command_handler::handle_command(app, terminal, &command).await?;
                 },
             }
         }
 
-        // Process streaming responses
-        match process_stream_chunks(app, rx).await? {
-            StreamStatus::Streaming => {
-                // During streaming: content is buffered and NOT rendered (block streaming mode)
-                // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
-            },
-            StreamStatus::Complete { tool_calls } => {
-                // Stream complete: response is now rendered
-
-                // AGENT LOOP: Execute tool calls and continue until model stops
-                if !tool_calls.is_empty() {
-                    run_agent_loop(app, tool_calls, &tx, rx, terminal).await?;
-                }
-
-                // Process any queued messages after generation completes
-                // This handles the case where user typed messages while model was generating
-                // and there were no tool calls to trigger the agent loop
-                'queue_loop: while app.operation_state.has_queued_message() {
-                    if let Some(queued_msg) = app.operation_state.take_queued_message() {
-                        // Submit the queued message as if user pressed Enter
-                        handle_message_submit(app, queued_msg, &tx, viewport_height).await;
-
-                        // Wait for this message's response to complete before sending next
-                        loop {
-                            // Check for interruption and handle scroll events
-                            if render_and_check_interrupt(terminal, app)? {
-                                // Clear remaining queued messages
-                                let cleared = app.operation_state.queued_message_count();
-                                while app.operation_state.take_queued_message().is_some() {}
-                                if cleared > 0 {
-                                    app.set_status(format!(
-                                        "Interrupted - cleared {} queued message(s)",
-                                        cleared
-                                    ));
-                                }
-                                break 'queue_loop;
-                            }
-
-                            match process_stream_chunks(app, rx).await? {
-                                StreamStatus::Streaming => {
-                                    // Continue processing
-                                },
-                                StreamStatus::Complete {
-                                    tool_calls: new_tool_calls,
-                                } => {
-                                    // If this response has tool calls, run agent loop
-                                    if !new_tool_calls.is_empty() {
-                                        run_agent_loop(app, new_tool_calls, &tx, rx, terminal)
-                                            .await?;
-                                    }
-                                    break; // Done with this queued message
-                                },
-                                StreamStatus::Error(error) => {
-                                    app.display_error(&error.summary, &error.message);
-                                    app.stop_generation();
-                                    break 'queue_loop;
-                                },
-                            }
-                        }
-                    }
-                }
-
-                // Mermaid's turn is over — return to user's turn
-                app.stop_generation();
-
-                // Spawn title generation in background (non-blocking)
-                if title_task.is_none() {
-                    title_task = app.spawn_title_generation();
-                }
-            },
-            StreamStatus::Error(_error) => {
-                // Error already handled by stream_handler (status message set)
-                app.stop_generation();
-            },
-        }
-
-        // Check if app should quit
         if !app.running {
             break;
         }
@@ -246,38 +657,27 @@ pub async fn run_app_loop(
     Ok(())
 }
 
-/// Handle message submission to the model
-///
-/// This spawns an async task to stream the model's response.
-async fn handle_message_submit(
+/// Drive a single "turn": commit user input, call the model once,
+/// then delegate to `run_agent_loop` for tool execution if any.
+async fn run_turn(
     app: &mut App,
     input: String,
-    tx: &mpsc::Sender<StreamEvent>,
-    _viewport_height: u16,
-) {
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    tx: &mpsc::Sender<TuiStreamEvent>,
+    rx: &mut mpsc::Receiver<TuiStreamEvent>,
+) -> Result<()> {
     // Take any attached images before adding message
     let images = app.attachment_state.take_base64_data();
-
-    // Store clean content — timestamp is in ChatMessage.timestamp field.
-    // Temporal context is injected at API call time by build_managed_message_history.
     app.add_message_with_images(MessageRole::User, input.clone(), images);
 
-    // Build message history including the new message
-    let messages = app.build_managed_message_history(
-        crate::constants::MAX_CONTEXT_TOKENS,
-        crate::constants::CONTEXT_RESERVE_TOKENS,
-    );
-
-    // Auto-scroll happens naturally via u16::MAX in render (if not user-scrolling)
-
-    // Save input to history and reset navigation
-    app.input.history.push_back(input.clone());
+    // Save to input history (capped + dedup).
+    app.input.add_to_history(input.clone());
     app.input.history_index = None;
     app.input.history_buffer.clear();
 
-    // Persist to conversation if available
+    // Persist the conversation asynchronously.
     if let Some(ref mut conv) = app.session_state.current_conversation {
-        conv.add_to_input_history(input.clone());
+        conv.add_to_input_history(input);
         if let Some(ref manager) = app.session_state.conversation_manager {
             let conv_clone = conv.clone();
             let manager_clone = manager.clone();
@@ -287,460 +687,57 @@ async fn handle_message_submit(
         }
     }
 
-    // Process message asynchronously
-    spawn_model_call(app, messages, tx);
-}
+    // Make the first model call via the observer, then enter the
+    // shared agent loop with whatever tool_calls it produced.
+    let mut observer = TuiObserver {
+        app,
+        terminal,
+        tx: tx.clone(),
+        rx,
+    };
+    let model = Arc::clone(&observer.app.model_state.model);
+    let config = observer.app.build_model_config();
 
-/// Render the UI and check for interruption (non-blocking).
-/// Handles all input events so the user can type, scroll, and queue messages
-/// while the agent loop or model call is in progress.
-/// Returns Ok(true) if the user wants to interrupt.
-fn render_and_check_interrupt(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-) -> Result<bool> {
-    terminal.draw(|f| render_ui(f, app))?;
+    observer.on_generation_start();
+    let first_call = observer.call_model(Arc::clone(&model), &[], &config).await;
+    let (content, initial_tool_calls) = match first_call {
+        Ok(out) => {
+            observer.on_generation_complete(out.tokens);
+            (out.content, out.tool_calls)
+        },
+        Err(_) => {
+            // Error already handled inside call_model (status + system message).
+            observer.app.stop_generation();
+            return Ok(());
+        },
+    };
 
-    while event::poll(Duration::from_millis(0))? {
-        match event::read()? {
-            event::Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
-                match key.code {
-                    crossterm::event::KeyCode::Esc => {
-                        let (abort, partial) = app.abort_generation();
-                        if let Some(h) = abort {
-                            h.abort();
-                        }
-                        if !partial.is_empty() {
-                            app.add_message(MessageRole::Assistant, partial);
-                        }
-                        app.set_status("Agent loop interrupted");
-                        return Ok(true);
-                    },
-                    crossterm::event::KeyCode::Char('c')
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                    {
-                        let (abort, partial) = app.abort_generation();
-                        if let Some(h) = abort {
-                            h.abort();
-                        }
-                        if !partial.is_empty() {
-                            app.add_message(MessageRole::Assistant, partial);
-                        }
-                        app.set_status("Agent loop interrupted");
-                        return Ok(true);
-                    },
-                    // Typing: insert characters into input buffer
-                    crossterm::event::KeyCode::Char(c) => {
-                        if key.modifiers.is_empty()
-                            || key.modifiers == crossterm::event::KeyModifiers::SHIFT
-                        {
-                            app.input.insert(c);
-                        }
-                    },
-                    // Enter: queue the typed message for processing after current step
-                    crossterm::event::KeyCode::Enter => {
-                        if !app.input.is_empty() && !app.input.get().starts_with(':') {
-                            let input = app.input.get().to_string();
-                            app.operation_state.queue_message(input);
-                            app.clear_input();
-                            app.set_status("Message queued");
-                        }
-                    },
-                    // Cursor movement and editing
-                    crossterm::event::KeyCode::Backspace => {
-                        app.input.backspace();
-                    },
-                    crossterm::event::KeyCode::Delete => {
-                        app.input.delete();
-                    },
-                    crossterm::event::KeyCode::Left => {
-                        app.input.move_left();
-                    },
-                    crossterm::event::KeyCode::Right => {
-                        app.input.move_right();
-                    },
-                    crossterm::event::KeyCode::Home => {
-                        app.input.move_home();
-                    },
-                    crossterm::event::KeyCode::End => {
-                        app.input.move_end();
-                    },
-                    // Scrolling
-                    crossterm::event::KeyCode::PageUp => {
-                        app.scroll_up(10);
-                    },
-                    crossterm::event::KeyCode::PageDown => {
-                        app.scroll_down(10);
-                    },
-                    _ => {},
-                }
-            },
-            event::Event::Mouse(mouse) => match mouse.kind {
-                crossterm::event::MouseEventKind::ScrollUp => {
-                    app.scroll_up(crate::constants::UI_MOUSE_SCROLL_LINES);
-                },
-                crossterm::event::MouseEventKind::ScrollDown => {
-                    app.scroll_down(crate::constants::UI_MOUSE_SCROLL_LINES);
-                },
-                _ => {},
-            },
-            // Handle paste events during agent loop
-            event::Event::Paste(text) => {
-                let cleaned = text.replace('\r', "");
-                if !cleaned.is_empty() {
-                    app.input.insert_str(&cleaned);
-                }
-            },
-            _ => {},
-        }
+    // Commit the assistant message (with tool_calls, if any).
+    if !content.is_empty() || !initial_tool_calls.is_empty() {
+        observer
+            .app
+            .add_assistant_message_with_tool_calls(content, initial_tool_calls.clone());
     }
 
-    Ok(false)
-}
-
-/// TUI-specific agent loop for tool calling.
-///
-/// This is intentionally separate from `runtime::agent_loop::run_agent_loop`
-/// because the TUI loop requires:
-/// 1. Direct `&mut Terminal` access for `render_and_check_interrupt` — `Terminal`
-///    is not `Send`, so it cannot be threaded through the `AgentObserver` trait.
-/// 2. Live rendering of subagent progress via `poll_subagent_handles` with UI
-///    updates between poll iterations.
-/// 3. Queued message interception: the user can type and submit messages mid-loop,
-///    which requires clearing tool calls, injecting a user message, and re-calling
-///    the model — logic tightly coupled to TUI input state.
-///
-/// The shared loop in `runtime::agent_loop` is used by non-interactive mode
-/// (via `SilentObserver`) and by sub-agents (via `SubagentObserver`).
-///
-/// This implements the proper agent loop pattern:
-/// 1. Execute tool calls
-/// 2. Add Tool messages for each result
-/// 3. Call the model again
-/// 4. Loop until no more tool_calls
-///
-/// Each completed step renders immediately to the TUI so the user
-/// sees tool actions and model responses as they happen (block streaming).
-///
-/// This follows the Ollama API pattern documented at:
-/// https://ollama.com/blog/tool-support
-async fn run_agent_loop(
-    app: &mut App,
-    initial_tool_calls: Vec<crate::models::ToolCall>,
-    tx: &mpsc::Sender<StreamEvent>,
-    rx: &mut mpsc::Receiver<StreamEvent>,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> Result<()> {
-    let mut current_tool_calls = initial_tool_calls;
-    let mut iteration = 0;
-
-    while !current_tool_calls.is_empty() {
-        iteration += 1;
-        if iteration > MAX_AGENT_ITERATIONS {
-            app.set_status(format!(
-                "Agent loop exceeded {} iterations",
-                MAX_AGENT_ITERATIONS
-            ));
-            return Ok(());
-        }
-        app.set_status(format!("Agent loop iteration {}", iteration));
-
-        // Pick up MCP tools if background init completed since last iteration
-        app.poll_mcp_init().await;
-
-        // Render so user sees iteration status; check for Esc interrupt
-        if render_and_check_interrupt(terminal, app)? {
-            return Ok(());
-        }
-
-        // Check for queued message BEFORE executing tool calls
-        // This allows the user to intercept and redirect the agent
-        if let Some(queued_msg) = app.operation_state.take_queued_message() {
-            app.set_status("Processing queued message...");
-
-            // Add the queued message as a user message (timestamp is in ChatMessage.timestamp)
-            app.add_message(MessageRole::User, queued_msg.clone());
-
-            // Save to input history
-            app.input.history.push_back(queued_msg);
-
-            // Clear current tool calls - the model will decide what to do next
-            // based on the new user message
-            current_tool_calls.clear();
-
-            // Build message history and call model with the new context
-            let messages = app.build_managed_message_history(
-                crate::constants::MAX_CONTEXT_TOKENS,
-                crate::constants::CONTEXT_RESERVE_TOKENS,
-            );
-            app.clear_response();
-
-            spawn_model_call(app, messages, tx);
-
-            // Wait for the model response (render each tick for live status)
-            loop {
-                if render_and_check_interrupt(terminal, app)? {
-                    return Ok(());
-                }
-
-                match process_stream_chunks(app, rx).await? {
-                    StreamStatus::Streaming => {},
-                    StreamStatus::Complete {
-                        tool_calls: new_tool_calls,
-                    } => {
-                        if !new_tool_calls.is_empty() {
-                            current_tool_calls = new_tool_calls;
-                        }
-                        break;
-                    },
-                    StreamStatus::Error(error) => {
-                        app.display_error(&error.summary, &error.message);
-                        return Ok(());
-                    },
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-
-            // Continue the loop with potentially new tool calls
-            continue;
-        }
-
-        // Partition tool calls: regular vs agent
-        let (regular_calls, agent_calls): (Vec<&_>, Vec<&_>) = current_tool_calls
-            .iter()
-            .partition(|tc| tc.function.name != "agent");
-
-        // Execute regular tool calls first (may write files that agents need to read)
-        let regular_owned: Vec<_> = regular_calls.into_iter().cloned().collect();
-        let mut results = if !regular_owned.is_empty() {
-            action_handler::execute_tool_calls_for_agent_loop(app, &regular_owned).await
-        } else {
-            Vec::new()
-        };
-
-        // Execute agent tool calls in parallel
-        if !agent_calls.is_empty() {
-            let agent_specs: Vec<(String, String)> = agent_calls
-                .iter()
-                .filter_map(|tc| match tc.to_agent_action() {
-                    Ok(AgentAction::SpawnAgent {
-                        prompt,
-                        description,
-                    }) => Some((prompt, description)),
-                    _ => None,
-                })
-                .collect();
-
-            if !agent_specs.is_empty() {
-                let progress = Arc::new(Mutex::new(Vec::<SubagentProgress>::new()));
-                let config = app.build_model_config();
-
-                // Store progress for UI rendering
-                app.operation_state.active_subagents = Some(Arc::clone(&progress));
-
-                let (handles, overflow) = spawn_subagents(
-                    agent_specs,
-                    Arc::clone(&app.model_state.model),
-                    &config,
-                    Arc::clone(&progress),
-                );
-
-                // Poll handles with render loop (TUI stays responsive)
-                let subagent_results =
-                    poll_subagent_handles(handles, overflow, terminal, app).await?;
-
-                // Empty result means user interrupted (Esc) — exit cleanly
-                // without stamping orphaned tool_calls onto the conversation
-                if subagent_results.is_empty() {
-                    return Ok(());
-                }
-
-                // Build ToolExecutionResult + ActionDisplay for each completed agent
-                for (i, agent_result) in subagent_results.iter().enumerate() {
-                    let action_display =
-                        action_handler::build_agent_action_display(agent_result);
-
-                    if let Some(last_msg) = app
-                        .session_state
-                        .messages
-                        .iter_mut()
-                        .rev()
-                        .find(|m| matches!(m.role, MessageRole::Assistant))
-                    {
-                        last_msg.actions.push(action_display);
-                    }
-
-                    let tool_call_id = agent_calls
-                        .get(i)
-                        .and_then(|tc| tc.id.clone())
-                        .unwrap_or_else(|| format!("call_agent_{}", i));
-
-                    let output = format_subagent_tool_result(agent_result);
-
-                    results.push(ToolExecutionResult {
-                        tool_call_id,
-                        tool_name: "agent".to_string(),
-                        action: AgentAction::SpawnAgent {
-                            prompt: String::new(),
-                            description: agent_result.description.clone(),
-                        },
-                        success: agent_result.success,
-                        output,
-                        images: None,
-                    });
-
-                    app.session_state.cumulative_tokens += agent_result.tokens;
-                }
-            }
-        }
-
-        // Update the last assistant message to include tool_calls
-        // (This is needed for the API to understand the conversation flow)
-        if let Some(last_assistant) = app
-            .session_state
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| matches!(m.role, MessageRole::Assistant))
-        {
-            last_assistant.tool_calls = Some(current_tool_calls.clone());
-        }
-
-        // Add Tool messages for each result (with images for screenshot etc.)
-        for result in &results {
-            if let Some(ref imgs) = result.images {
-                // Tool produced images (e.g., screenshot) — attach to tool message
-                // so the model can see them on the next call
-                let mut tool_msg = crate::models::ChatMessage::tool(
-                    &result.tool_call_id,
-                    &result.tool_name,
-                    &result.output,
-                );
-                tool_msg = tool_msg.with_images(imgs.clone());
-                app.commit_message(tool_msg);
-            } else {
-                app.add_tool_result(
-                    result.tool_call_id.clone(),
-                    result.tool_name.clone(),
-                    result.output.clone(),
-                );
-            }
-        }
-
-        // Render to show completed tool actions immediately
-        app.set_status(format!(
-            "Iteration {} - {} tool(s) executed, calling model...",
-            iteration,
-            results.len()
-        ));
-        if render_and_check_interrupt(terminal, app)? {
-            return Ok(());
-        }
-
-        // Note: Even if all tool calls failed, we continue the loop so the model
-        // can see the error messages and retry with a different approach.
-
-        // Call the model again with the updated message history
-        let messages = app.build_managed_message_history(
+    // If the model asked for tools, run the agent loop.
+    if !initial_tool_calls.is_empty() {
+        // The shared loop owns a local `messages` vec so it doesn't
+        // alias session_state.messages (which the observer mirrors
+        // into via on_message_appended).
+        let mut messages = observer.app.build_managed_message_history(
             crate::constants::MAX_CONTEXT_TOKENS,
             crate::constants::CONTEXT_RESERVE_TOKENS,
         );
-        app.clear_response();
-
-        spawn_model_call(app, messages, tx);
-
-        // Wait for the model response by processing stream chunks until Complete
-        // Render on each tick so status bar updates and Esc works
-        loop {
-            // Render to show streaming progress (timer, tokens, status)
-            if render_and_check_interrupt(terminal, app)? {
-                return Ok(());
-            }
-
-            match process_stream_chunks(app, rx).await? {
-                StreamStatus::Streaming => {
-                    // Continue processing
-                },
-                StreamStatus::Complete {
-                    tool_calls: new_tool_calls,
-                } => {
-                    // Got a new response - check if there are more tool calls
-                    if new_tool_calls.is_empty() {
-                        // No more tool calls - agent loop complete
-                        app.set_status(format!(
-                            "Agent loop complete after {} iterations",
-                            iteration
-                        ));
-                        return Ok(());
-                    } else {
-                        // More tool calls - continue the loop
-                        current_tool_calls = new_tool_calls;
-                        break; // Break inner loop to continue outer agent loop
-                    }
-                },
-                StreamStatus::Error(error) => {
-                    // Error occurred - display and exit
-                    app.display_error(&error.summary, &error.message);
-                    return Ok(());
-                },
-            }
-
-            // Sleep briefly to avoid busy-wait spin loop
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        let _ = run_agent_loop(
+            model,
+            &config,
+            &mut messages,
+            initial_tool_calls,
+            &mut observer,
+            MAX_AGENT_ITERATIONS,
+        )
+        .await?;
     }
 
     Ok(())
-}
-
-/// Poll subagent JoinHandles with rendering between checks.
-/// Aborts all handles and returns empty vec if user interrupts (Esc).
-async fn poll_subagent_handles(
-    handles: Vec<tokio::task::JoinHandle<SubagentResult>>,
-    overflow: Vec<SubagentResult>,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-) -> Result<Vec<SubagentResult>> {
-    let handle_count = handles.len();
-    app.set_status(format!("Running {} agent(s)...", handle_count));
-
-    loop {
-        // Update token count from subagent progress for the status line
-        if let Some(ref progress) = app.operation_state.active_subagents {
-            let total_tokens: usize = progress
-                .lock()
-                .map(|p| p.iter().map(|a| a.tokens).sum())
-                .unwrap_or(0);
-            if let super::state::AppState::Generating {
-                tokens_received, ..
-            } = &mut app.app_state
-            {
-                *tokens_received = total_tokens;
-            }
-        }
-
-        // Render UI (shows live progress via active_subagents) and check for Esc
-        if render_and_check_interrupt(terminal, app)? {
-            for h in &handles {
-                h.abort();
-            }
-            app.operation_state.clear_subagents();
-            return Ok(Vec::new());
-        }
-
-        if handles.iter().all(|h| h.is_finished()) {
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_millis(UI_POLL_INTERVAL_MS)).await;
-    }
-
-    let results = collect_subagent_results(handles, overflow).await;
-
-    app.set_status(format!("{} agent(s) completed", results.len()));
-    app.operation_state.clear_subagents();
-
-    Ok(results)
 }

@@ -22,6 +22,7 @@ fn test_app_state_is_generating_method() {
         tokens_received: 0,
         abort_handle: None,
         response_buffer: String::new(),
+        response_truncated: false,
     };
     assert!(generating_state.is_generating());
     assert!(!generating_state.is_idle());
@@ -38,6 +39,7 @@ fn test_app_state_generation_status_method() {
         tokens_received: 42,
         abort_handle: None,
         response_buffer: String::new(),
+        response_truncated: false,
     };
     assert_eq!(
         generating_state.generation_status(),
@@ -62,6 +64,7 @@ fn test_app_state_variants_are_distinct() {
         tokens_received: 0,
         abort_handle: None,
         response_buffer: String::new(),
+        response_truncated: false,
     };
 
     // These should be different variants
@@ -87,6 +90,7 @@ fn test_state_transition_idle_to_generating() {
         tokens_received: 0,
         abort_handle: None,
         response_buffer: String::new(),
+        response_truncated: false,
     };
 
     // Verify transition
@@ -104,6 +108,7 @@ fn test_state_transition_generating_to_idle() {
         tokens_received: 100,
         abort_handle: None,
         response_buffer: String::new(),
+        response_truncated: false,
     };
     assert!(state.is_generating());
 
@@ -124,6 +129,7 @@ fn test_generation_status_can_be_updated() {
         tokens_received: 0,
         abort_handle: None,
         response_buffer: String::new(),
+        response_truncated: false,
     };
 
     // Verify initial status
@@ -146,6 +152,7 @@ fn test_tokens_received_can_be_incremented() {
         tokens_received: 0,
         abort_handle: None,
         response_buffer: String::new(),
+        response_truncated: false,
     };
 
     // Increment tokens (simulating streaming)
@@ -253,9 +260,10 @@ fn test_characterization_app_state_must_match_flags() {
         tokens_received: 0,
         abort_handle: None,
         response_buffer: String::new(),
+        response_truncated: false,
     };
 
     // Verify the convenience methods that replace the flags
-    assert_eq!(idle.is_generating(), false);
-    assert_eq!(generating.is_generating(), true);
+    assert!(!idle.is_generating());
+    assert!(generating.is_generating());
 }

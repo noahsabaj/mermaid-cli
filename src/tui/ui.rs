@@ -38,7 +38,7 @@ pub async fn run_ui(mut app: App) -> Result<()> {
     terminal.clear()?;
 
     // Create channel for streaming responses
-    let (tx, mut rx) = mpsc::channel::<super::stream_event::StreamEvent>(1000);
+    let (tx, mut rx) = mpsc::channel::<super::tui_stream_event::TuiStreamEvent>(1000);
 
     // Run the UI loop using the loop coordinator
     let res = super::loop_coordinator::run_app_loop(&mut terminal, &mut app, tx, &mut rx).await;

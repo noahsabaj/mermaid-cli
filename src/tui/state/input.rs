@@ -4,6 +4,11 @@
 
 use std::collections::VecDeque;
 
+/// Maximum entries kept in the input history deque. Matches the cap used
+/// by ConversationHistory::add_to_input_history so persisted and in-memory
+/// history stay in the same shape.
+const INPUT_HISTORY_CAP: usize = 100;
+
 /// Input state - user input buffer, cursor, and history
 ///
 /// All cursor positions are byte offsets that are guaranteed to sit on
@@ -37,6 +42,27 @@ impl InputBuffer {
     /// Load persisted input history (from a resumed conversation)
     pub fn load_history(&mut self, history: VecDeque<String>) {
         self.history = history;
+    }
+
+    /// Append an input to history with dedup + cap, mirroring
+    /// ConversationHistory::add_to_input_history.
+    ///
+    /// - Empty/whitespace inputs are ignored.
+    /// - Consecutive duplicates of the last entry are skipped.
+    /// - Oldest entry is evicted when the cap is reached.
+    pub fn add_to_history(&mut self, input: String) {
+        if input.trim().is_empty() {
+            return;
+        }
+        if let Some(last) = self.history.back()
+            && last == &input
+        {
+            return;
+        }
+        if self.history.len() >= INPUT_HISTORY_CAP {
+            self.history.pop_front();
+        }
+        self.history.push_back(input);
     }
 
     /// Clear the input buffer
@@ -138,5 +164,47 @@ impl InputBuffer {
 impl Default for InputBuffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_to_history_skips_empty_and_whitespace() {
+        let mut buf = InputBuffer::new();
+        buf.add_to_history(String::new());
+        buf.add_to_history("   ".into());
+        buf.add_to_history("\t\n".into());
+        assert!(buf.history.is_empty());
+    }
+
+    #[test]
+    fn add_to_history_dedups_consecutive() {
+        let mut buf = InputBuffer::new();
+        buf.add_to_history("hello".into());
+        buf.add_to_history("hello".into());
+        buf.add_to_history("world".into());
+        buf.add_to_history("hello".into()); // non-consecutive duplicate is kept
+        assert_eq!(
+            buf.history.iter().cloned().collect::<Vec<_>>(),
+            vec!["hello", "world", "hello"]
+        );
+    }
+
+    #[test]
+    fn add_to_history_caps_at_limit() {
+        let mut buf = InputBuffer::new();
+        for i in 0..(INPUT_HISTORY_CAP + 25) {
+            buf.add_to_history(format!("msg{}", i));
+        }
+        assert_eq!(buf.history.len(), INPUT_HISTORY_CAP);
+        // Oldest 25 evicted; first retained entry is msg25.
+        assert_eq!(buf.history.front().unwrap(), "msg25");
+        assert_eq!(
+            buf.history.back().unwrap(),
+            &format!("msg{}", INPUT_HISTORY_CAP + 24)
+        );
     }
 }

@@ -9,10 +9,10 @@ mod event_handler;
 mod loop_coordinator;
 mod markdown;
 mod render;
+pub(crate) mod slash_commands;
 pub mod state;
-mod stream_event;
-mod stream_handler;
 mod theme;
+mod tui_stream_event;
 mod ui;
 mod widgets;
 

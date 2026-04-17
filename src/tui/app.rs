@@ -11,9 +11,35 @@ use super::state::{
     AppState, AttachmentState, ConversationState, ErrorEntry, ErrorSeverity, GenerationStatus,
     InputBuffer, ModelState, OperationState, StatusState, UIState,
 };
-use crate::constants::UI_ERROR_LOG_MAX_SIZE;
-use crate::models::{ChatMessage, MessageRole, Model, ModelConfig, StreamCallback};
+use crate::constants::{MAX_RESPONSE_CHARS, UI_ERROR_LOG_MAX_SIZE};
+use crate::models::{ChatMessage, MessageRole, Model, ModelConfig, StreamCallback, StreamEvent};
 use crate::session::{ConversationHistory, ConversationManager};
+use crate::utils::MutexExt;
+
+/// Truncation marker appended to the response buffer once the size cap is
+/// hit. Public to the module so tests can assert against it.
+const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: Response exceeded size limit]\n";
+
+/// Append `chunk` to `buf`, enforcing `cap` bytes (char-boundary safe). Once
+/// the cap is tripped (`*truncated` set to `true`), subsequent calls become
+/// no-ops — preventing the O(n)-per-chunk re-truncation and duplicated
+/// markers that the original `push_response` exhibited under runaway model
+/// output. Returns `true` if this call performed the truncation.
+fn push_with_cap(buf: &mut String, truncated: &mut bool, chunk: &str, cap: usize) -> bool {
+    if *truncated {
+        return false;
+    }
+    buf.push_str(chunk);
+    if buf.len() > cap {
+        let end = buf.floor_char_boundary(cap);
+        buf.truncate(end);
+        buf.push_str(TRUNCATION_MARKER);
+        *truncated = true;
+        true
+    } else {
+        false
+    }
+}
 
 /// Application state coordinator
 pub struct App {
@@ -45,6 +71,10 @@ pub struct App {
     /// Background MCP server initialization task.
     /// Polled in the event loop; when done, mcp_tools and global manager are set.
     pub mcp_init_task: Option<JoinHandle<McpInitResult>>,
+    /// Project instructions auto-loaded from MERMAID.md (Step 5h).
+    /// `None` when no MERMAID.md exists in the bounded walk from cwd.
+    /// Refreshed before every model call by `loop_coordinator::call_model`.
+    pub instructions: Option<crate::app::instructions::LoadedInstructions>,
 }
 
 /// Result of background MCP server initialization
@@ -83,10 +113,8 @@ impl App {
         let ui_state = UIState::new();
 
         // Initialize ConversationState with conversation management
-        let session_state = ConversationState::with_conversation(
-            conversation_manager,
-            current_conversation,
-        );
+        let session_state =
+            ConversationState::with_conversation(conversation_manager, current_conversation);
 
         Self {
             input,
@@ -102,6 +130,7 @@ impl App {
             attachment_state: AttachmentState::new(),
             mcp_tools: Vec::new(),
             mcp_init_task: None,
+            instructions: None,
         }
     }
 
@@ -309,19 +338,28 @@ impl App {
 
         let model = self.model_state.model.clone();
         let mut config = self.build_model_config();
-        config.thinking_enabled = Some(false);
+        // Title generation is a quick utility call — no reasoning needed.
+        config.reasoning = crate::models::ReasoningLevel::None;
 
         Some(tokio::spawn(async move {
             let prompt = format!(
                 "Based on this conversation, generate a short, descriptive title (2-4 words maximum, no quotes):\n\n{}\n\nTitle:",
                 summary
             );
-            let buf = Arc::new(tokio::sync::Mutex::new(String::new()));
+            // `std::sync::Mutex` (via MutexExt's `lock_mut_safe`) matches
+            // the rest of the codebase and avoids the `try_lock` race the
+            // earlier `tokio::sync::Mutex` had — accumulator never drops
+            // a chunk because the lock was momentarily contended. The
+            // closure stays `Send + Sync` because `std::sync::Mutex<String>`
+            // is both.
+            let buf = Arc::new(std::sync::Mutex::new(String::new()));
             let buf_clone = Arc::clone(&buf);
-            let callback: StreamCallback = Arc::new(move |chunk: &str| {
-                if let Ok(mut t) = buf_clone.try_lock() {
-                    t.push_str(chunk);
+            let callback: StreamCallback = Arc::new(move |event| {
+                if let StreamEvent::Text(chunk) = event {
+                    buf_clone.lock_mut_safe().push_str(&chunk);
                 }
+                // Reasoning / tool calls / done are irrelevant for title
+                // generation — we only want the model's literal text reply.
             });
 
             let model = model.read().await;
@@ -330,7 +368,7 @@ impl App {
                 .await
                 .is_ok()
             {
-                let raw = buf.lock().await;
+                let raw = buf.lock_mut_safe();
                 let title: String = raw
                     .lines()
                     .next()
@@ -369,8 +407,10 @@ impl App {
     /// Filter and prepare messages for model API calls.
     /// Includes User, Assistant, and Tool messages for proper agent loop.
     /// Injects timestamp context into User messages for the model's temporal awareness.
+    /// Step 5f Wave 5: prunes stale screenshots via `prune_stale_screenshots`.
     fn prepare_api_messages(&self) -> Vec<ChatMessage> {
-        self.session_state
+        let prepared: Vec<ChatMessage> = self
+            .session_state
             .messages
             .iter()
             .filter(|msg| {
@@ -388,7 +428,9 @@ impl App {
                     msg.clone()
                 }
             })
-            .collect()
+            .collect();
+
+        prune_stale_screenshots(prepared, crate::constants::MAX_RETAINED_SCREENSHOTS)
     }
 
     /// Build message history for model API calls (all messages, no truncation)
@@ -517,6 +559,7 @@ impl App {
             tokens_received: 0,
             abort_handle: Some(abort_handle),
             response_buffer: String::with_capacity(8192),
+            response_truncated: false,
         };
     }
 
@@ -585,20 +628,26 @@ impl App {
     // ===== Response Buffer Accessors =====
 
     /// Append text to the response buffer. No-op if not generating.
-    /// Enforces MAX_RESPONSE_CHARS size limit.
+    /// Enforces MAX_RESPONSE_CHARS size limit; once tripped, subsequent calls
+    /// are silently dropped so we don't pay O(n) per chunk re-truncating
+    /// (and don't emit duplicate `[TRUNCATED…]` markers).
     pub fn push_response(&mut self, text: &str) {
+        let mut just_truncated = false;
         if let AppState::Generating {
-            response_buffer, ..
+            response_buffer,
+            response_truncated,
+            ..
         } = &mut self.app_state
         {
-            response_buffer.push_str(text);
-            if response_buffer.len() > crate::constants::MAX_RESPONSE_CHARS {
-                let end = response_buffer.floor_char_boundary(crate::constants::MAX_RESPONSE_CHARS);
-                response_buffer.truncate(end);
-                response_buffer
-                    .push_str("\n\n[TRUNCATED: Response exceeded size limit]\n");
-                self.set_status("[WARNING] Response truncated (size limit reached)");
-            }
+            just_truncated = push_with_cap(
+                response_buffer,
+                response_truncated,
+                text,
+                MAX_RESPONSE_CHARS,
+            );
+        }
+        if just_truncated {
+            self.set_status("[WARNING] Response truncated (size limit reached)");
         }
     }
 
@@ -615,11 +664,15 @@ impl App {
     }
 
     /// Take the response buffer, leaving it empty. Returns empty string if not generating.
+    /// Also clears the `response_truncated` flag so the next model call starts fresh.
     pub fn take_response(&mut self) -> String {
         if let AppState::Generating {
-            response_buffer, ..
+            response_buffer,
+            response_truncated,
+            ..
         } = &mut self.app_state
         {
+            *response_truncated = false;
             std::mem::take(response_buffer)
         } else {
             String::new()
@@ -627,12 +680,158 @@ impl App {
     }
 
     /// Clear the response buffer (for per-model-call reset within a turn)
+    /// and the truncated flag so the new call's buffer is fresh.
     pub fn clear_response(&mut self) {
         if let AppState::Generating {
-            response_buffer, ..
+            response_buffer,
+            response_truncated,
+            ..
         } = &mut self.app_state
         {
             response_buffer.clear();
+            *response_truncated = false;
         }
+    }
+}
+
+/// Drop image attachments from all but the most recent `keep` messages
+/// that have images. Older messages keep their text content, with a
+/// placeholder appended noting how many turns ago the image was — so
+/// the model knows what was elided rather than wondering why an action
+/// "happened with no visible result." Each click in computer-use mode
+/// auto-attaches a ~1k-token base64 PNG; without pruning, a 10-click
+/// loop bloats history by ~10k tokens of stale visuals.
+pub(crate) fn prune_stale_screenshots(
+    mut messages: Vec<ChatMessage>,
+    keep: usize,
+) -> Vec<ChatMessage> {
+    let image_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| m.images.as_ref().filter(|imgs| !imgs.is_empty()).map(|_| i))
+        .collect();
+    let keep_threshold = image_indices.len().saturating_sub(keep);
+    for (rank, idx) in image_indices.iter().enumerate() {
+        if rank < keep_threshold {
+            let turns_ago = image_indices.len() - rank;
+            let placeholder = format!(
+                "\n[screenshot from {} turns ago — dropped from context to save tokens, see latest]",
+                turns_ago
+            );
+            messages[*idx].images = None;
+            messages[*idx].content.push_str(&placeholder);
+        }
+    }
+    messages
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TRUNCATION_MARKER, prune_stale_screenshots, push_with_cap};
+    use crate::models::ChatMessage;
+
+    #[test]
+    fn push_with_cap_under_limit_appends_normally() {
+        let mut buf = String::new();
+        let mut truncated = false;
+        assert!(!push_with_cap(&mut buf, &mut truncated, "hello", 100));
+        assert!(!push_with_cap(&mut buf, &mut truncated, " world", 100));
+        assert_eq!(buf, "hello world");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn push_with_cap_truncates_once_and_short_circuits() {
+        let mut buf = String::new();
+        let mut truncated = false;
+        let cap = 10;
+        let big = "a".repeat(50);
+
+        // First push trips the cap.
+        assert!(push_with_cap(&mut buf, &mut truncated, &big, cap));
+        assert!(truncated);
+        assert!(buf.starts_with(&"a".repeat(10)));
+        assert!(buf.ends_with(TRUNCATION_MARKER));
+        let len_after_first = buf.len();
+        let marker_count_first = buf.matches(TRUNCATION_MARKER).count();
+        assert_eq!(marker_count_first, 1);
+
+        // Subsequent pushes must be no-ops — buffer unchanged, no extra marker.
+        assert!(!push_with_cap(&mut buf, &mut truncated, &big, cap));
+        assert!(!push_with_cap(&mut buf, &mut truncated, "more stuff", cap));
+        assert!(!push_with_cap(&mut buf, &mut truncated, &big, cap));
+        assert_eq!(buf.len(), len_after_first);
+        assert_eq!(buf.matches(TRUNCATION_MARKER).count(), 1);
+    }
+
+    #[test]
+    fn push_with_cap_respects_char_boundary_for_cjk() {
+        let mut buf = String::new();
+        let mut truncated = false;
+        // Each 你 is 3 bytes. cap=4 lands inside the second 你; floor must
+        // truncate to 3 bytes (one full character) before appending the marker.
+        let chunk = "你你你你".to_string();
+        assert!(push_with_cap(&mut buf, &mut truncated, &chunk, 4));
+        // Truncated content should be exactly "你" (3 bytes), then the marker.
+        let body = &buf[..buf.find('\n').unwrap()];
+        assert_eq!(body, "你");
+        assert!(buf.ends_with(TRUNCATION_MARKER));
+    }
+
+    /// Step 5f Wave 5: out of N screenshot-bearing messages, keep only
+    /// the last K — older messages have their `images` set to None.
+    #[test]
+    fn prune_stale_screenshots_keeps_only_last_3() {
+        let mk = |i: i32, has_img: bool| {
+            let mut m = ChatMessage::user(format!("msg {}", i));
+            if has_img {
+                m = m.with_images(vec![format!("base64-data-{}", i)]);
+            }
+            m
+        };
+        let msgs = vec![
+            mk(0, true),
+            mk(1, true),
+            mk(2, true),
+            mk(3, true),
+            mk(4, true),
+        ];
+        let pruned = prune_stale_screenshots(msgs, 3);
+        // Last 3 (indices 2, 3, 4) keep images.
+        assert!(pruned[0].images.is_none());
+        assert!(pruned[1].images.is_none());
+        assert!(pruned[2].images.is_some());
+        assert!(pruned[3].images.is_some());
+        assert!(pruned[4].images.is_some());
+    }
+
+    /// Step 5f Wave 5: dropped screenshots get a placeholder explaining
+    /// to the model that the image was elided. Without this the model
+    /// might think the screenshot tool failed.
+    #[test]
+    fn prune_stale_screenshots_appends_placeholder_for_dropped() {
+        let mk = |i: i32| {
+            ChatMessage::user(format!("msg {}", i)).with_images(vec![format!("data-{}", i)])
+        };
+        let msgs = vec![mk(0), mk(1), mk(2), mk(3)];
+        let pruned = prune_stale_screenshots(msgs, 2);
+        // First 2 are pruned; their content should mention "screenshot from N turns ago"
+        assert!(pruned[0].content.contains("screenshot from"));
+        assert!(pruned[0].content.contains("turns ago"));
+        assert!(pruned[1].content.contains("screenshot from"));
+        // Last 2 retain images, content unchanged.
+        assert!(!pruned[2].content.contains("screenshot from"));
+        assert!(!pruned[3].content.contains("screenshot from"));
+    }
+
+    #[test]
+    fn prune_stale_screenshots_no_op_when_under_keep_threshold() {
+        let mk = |i: i32| {
+            ChatMessage::user(format!("msg {}", i)).with_images(vec![format!("data-{}", i)])
+        };
+        let msgs = vec![mk(0), mk(1)]; // only 2 images, keep = 3 → all retained
+        let pruned = prune_stale_screenshots(msgs, 3);
+        assert!(pruned[0].images.is_some());
+        assert!(pruned[1].images.is_some());
     }
 }

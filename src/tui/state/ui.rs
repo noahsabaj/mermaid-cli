@@ -9,9 +9,22 @@ use rustc_hash::FxHashMap;
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{ChatState, InputState};
 
-/// Cache for layout calculations to avoid recomputation each frame
+/// Cache key for the main layout — all dimensions that, if changed,
+/// invalidate the cached `Vec<Rect>`. Step 5e added `bottom_height`
+/// (palette grows the bottom region from 2 lines to ~10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LayoutKey {
+    width: u16,
+    height: u16,
+    input_height: u16,
+    status_line_height: u16,
+    attachment_height: u16,
+    bottom_height: u16,
+}
+
+/// Cache for layout calculations to avoid recomputation each frame.
 pub struct LayoutCache {
-    cached: Option<(u16, u16, u16, u16, u16, Vec<Rect>)>,
+    cached: Option<(LayoutKey, Vec<Rect>)>,
 }
 
 impl LayoutCache {
@@ -25,13 +38,18 @@ impl LayoutCache {
         input_height: u16,
         status_line_height: u16,
         attachment_height: u16,
+        bottom_height: u16,
     ) -> Vec<Rect> {
-        if let Some((w, h, ih, sh, ah, ref rects)) = self.cached
-            && w == area.width
-            && h == area.height
-            && ih == input_height
-            && sh == status_line_height
-            && ah == attachment_height
+        let key = LayoutKey {
+            width: area.width,
+            height: area.height,
+            input_height,
+            status_line_height,
+            attachment_height,
+            bottom_height,
+        };
+        if let Some((cached_key, ref rects)) = self.cached
+            && cached_key == key
         {
             return rects.clone();
         }
@@ -46,19 +64,12 @@ impl LayoutCache {
                 Constraint::Length(status_line_height),
                 Constraint::Length(attachment_height),
                 Constraint::Length(input_height),
-                Constraint::Length(2),
+                Constraint::Length(bottom_height),
             ])
             .split(area);
 
         let layout_vec = layout.to_vec();
-        self.cached = Some((
-            area.width,
-            area.height,
-            input_height,
-            status_line_height,
-            attachment_height,
-            layout_vec.clone(),
-        ));
+        self.cached = Some((key, layout_vec.clone()));
         layout_vec
     }
 }
@@ -79,6 +90,11 @@ pub struct UIState {
     pub selected_attachment: usize,
     /// Attachment area rect from last render (for Ctrl+Click detection)
     pub attachment_area_y: Option<u16>,
+    /// Selected row in the slash-command palette (visible whenever the
+    /// input starts with `/`). Indexes into the FILTERED list, not the
+    /// full registry — reset to 0 whenever the filter changes so a
+    /// shrinking result list can't leave the index out-of-bounds.
+    pub palette_selected_index: usize,
     /// Layout cache (avoids recomputation each frame)
     pub layout_cache: LayoutCache,
     /// Cached parsed markdown per message: (message_index, content_hash) -> parsed lines
@@ -96,6 +112,7 @@ impl UIState {
             attachment_focused: false,
             selected_attachment: 0,
             attachment_area_y: None,
+            palette_selected_index: 0,
             layout_cache: LayoutCache::new(),
             markdown_cache: FxHashMap::default(),
         }

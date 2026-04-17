@@ -80,6 +80,64 @@ impl ColorValue {
 }
 
 impl Theme {
+    /// Create a light theme.
+    ///
+    /// Not wired into any config reader yet — the `Deserialize` impl on
+    /// `Theme` is retained so a future patch can load
+    /// `config.ui.theme = "light" | "dark"` from config.toml and select
+    /// the constructor. Until then, call this explicitly to test.
+    pub fn light() -> Self {
+        Self {
+            name: "Light".to_string(),
+            colors: ThemeColors {
+                background: ColorValue::Rgb {
+                    r: 250,
+                    g: 250,
+                    b: 250,
+                },
+                foreground: ColorValue::Rgb {
+                    r: 30,
+                    g: 30,
+                    b: 30,
+                },
+
+                border: ColorValue::Named("gray".to_string()),
+                border_focused: ColorValue::Named("blue".to_string()),
+                header: ColorValue::Named("blue".to_string()),
+                status_bar: ColorValue::Named("white".to_string()),
+
+                text_primary: ColorValue::Named("black".to_string()),
+                text_secondary: ColorValue::Named("dark_gray".to_string()),
+                text_disabled: ColorValue::Named("gray".to_string()),
+                text_highlight: ColorValue::Named("magenta".to_string()),
+
+                user_message: ColorValue::Named("blue".to_string()),
+                assistant_message: ColorValue::Named("green".to_string()),
+                system_message: ColorValue::Named("yellow".to_string()),
+
+                code_background: ColorValue::Rgb {
+                    r: 240,
+                    g: 240,
+                    b: 240,
+                },
+                code_foreground: ColorValue::Named("dark_gray".to_string()),
+                code_keyword: ColorValue::Named("magenta".to_string()),
+                code_string: ColorValue::Named("green".to_string()),
+                code_comment: ColorValue::Named("gray".to_string()),
+
+                mode_normal: ColorValue::Named("green".to_string()),
+                mode_accept_edits: ColorValue::Named("yellow".to_string()),
+                mode_plan: ColorValue::Named("blue".to_string()),
+                mode_bypass_all: ColorValue::Named("red".to_string()),
+
+                success: ColorValue::Named("green".to_string()),
+                warning: ColorValue::Named("yellow".to_string()),
+                error: ColorValue::Named("red".to_string()),
+                info: ColorValue::Named("blue".to_string()),
+            },
+        }
+    }
+
     /// Create the default dark theme
     pub fn dark() -> Self {
         Self {

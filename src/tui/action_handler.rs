@@ -1,136 +1,18 @@
-//! Tool call execution for the agent loop
+//! Build UI displays for tool call results.
 //!
-//! This module handles executing Ollama native tool calls and building
-//! UI displays for the results.
+//! The `TuiObserver` in `loop_coordinator::run_turn` calls these from
+//! its `on_tool_result` hook to attach rich action displays (diffs,
+//! file previews, etc.) under the most recent assistant message.
 
 use crate::agents::{
-    self, ActionDetails, ActionDisplay, ActionResult as AgentActionResult, AgentAction,
-    SubagentResult, execute_action,
+    ActionDetails, ActionDisplay, ActionResult as AgentActionResult, AgentAction, SubagentResult,
 };
-use crate::models::{MessageRole, ToolCall};
-use crate::runtime::agent_loop::ToolExecutionResult;
-use crate::tui::App;
 
-/// Execute tool calls and return results for the agent loop
-///
-/// This is the main function for the agentic flow. It:
-/// 1. Takes tool_calls from the model response
-/// 2. Converts each to an AgentAction
-/// 3. Executes the action directly (no confirmation)
-/// 4. Returns ToolExecutionResult for each
-pub async fn execute_tool_calls_for_agent_loop(
-    app: &mut App,
-    tool_calls: &[ToolCall],
-) -> Vec<ToolExecutionResult> {
-    let mut results = Vec::new();
-
-    for tool_call in tool_calls {
-        let tool_call_id = tool_call.id.clone().unwrap_or_else(|| {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            format!("call_{:x}", timestamp)
-        });
-        let tool_name = tool_call.function.name.clone();
-
-        // Convert tool call to AgentAction
-        let action = match tool_call.to_agent_action() {
-            Ok(action) => action,
-            Err(e) => {
-                results.push(ToolExecutionResult {
-                    tool_call_id,
-                    tool_name,
-                    action: AgentAction::ParseError {
-                        message: format!("Error: {}", e),
-                    },
-                    success: false,
-                    output: format!("Error: {}", e),
-                    images: None,
-                });
-                continue;
-            },
-        };
-
-        // Execute the action directly
-        let action_clone = action.clone();
-        match execute_action(&action).await {
-            agents::ActionResult::Success { output, images } => {
-                // Build ActionDisplay for UI rendering
-                let action_display = build_action_display(&action_clone, &output);
-
-                // Attach ActionDisplay to the most recent assistant message
-                if let Some(last_msg) = app
-                    .session_state
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .find(|m| matches!(m.role, MessageRole::Assistant))
-                {
-                    last_msg.actions.push(action_display);
-                }
-
-                results.push(ToolExecutionResult {
-                    tool_call_id,
-                    tool_name,
-                    action: action_clone,
-                    success: true,
-                    output,
-                    images,
-                });
-            },
-            agents::ActionResult::Error { error } => {
-                let action_display = build_error_display(&action_clone, &error);
-                if let Some(last_msg) = app
-                    .session_state
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .find(|m| matches!(m.role, MessageRole::Assistant))
-                {
-                    last_msg.actions.push(action_display);
-                }
-
-                results.push(ToolExecutionResult {
-                    tool_call_id,
-                    tool_name,
-                    action: action_clone,
-                    success: false,
-                    output: format!("Error: {}", error),
-                    images: None,
-                });
-            },
-        }
-    }
-
-    results
-}
-
-/// Build an ActionDisplay from an action and its output
-fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
-    build_action_display_with_timing(action, output, None)
-}
-
-/// Build an error ActionDisplay - uses the action for target info but wraps as Error
-fn build_error_display(action: &AgentAction, error: &str) -> ActionDisplay {
-    let (action_type, target) = action.display_info();
-    ActionDisplay {
-        action_type: action_type.to_string(),
-        target,
-        result: AgentActionResult::Error {
-            error: error.to_string(),
-        },
-        details: ActionDetails::Simple,
-        duration_seconds: None,
-    }
-}
-
-fn build_action_display_with_timing(
-    action: &AgentAction,
-    output: &str,
-    duration_seconds: Option<f64>,
-) -> ActionDisplay {
+/// Build an ActionDisplay from an action and its output. `duration_seconds`
+/// stays `None` here — only `build_agent_action_display` records timing
+/// (subagent runs), and the renderer only consults the field for Agent
+/// actions.
+pub fn build_action_display(action: &AgentAction, output: &str) -> ActionDisplay {
     let (action_type, target) = action.display_info();
     let result = AgentActionResult::Success {
         output: output.to_string(),
@@ -193,14 +75,13 @@ fn build_action_display_with_timing(
             text: truncate_output(output, 2),
             line_count: None,
         },
-        AgentAction::Click { .. }
-        | AgentAction::TypeText { .. }
-        | AgentAction::PressKey { .. } => ActionDetails::Preview {
-            text: truncate_output(output, 2),
-            line_count: None,
+        AgentAction::Click { .. } | AgentAction::TypeText { .. } | AgentAction::PressKey { .. } => {
+            ActionDetails::Preview {
+                text: truncate_output(output, 2),
+                line_count: None,
+            }
         },
-        AgentAction::Scroll { .. }
-        | AgentAction::MouseMove { .. } => ActionDetails::Simple,
+        AgentAction::Scroll { .. } | AgentAction::MouseMove { .. } => ActionDetails::Simple,
         AgentAction::ListWindows => ActionDetails::Preview {
             text: truncate_output(output, 10),
             line_count: Some(output.lines().count()),
@@ -217,7 +98,21 @@ fn build_action_display_with_timing(
         target,
         result,
         details,
-        duration_seconds,
+        duration_seconds: None,
+    }
+}
+
+/// Build an error ActionDisplay - uses the action for target info but wraps as Error
+pub fn build_error_display(action: &AgentAction, error: &str) -> ActionDisplay {
+    let (action_type, target) = action.display_info();
+    ActionDisplay {
+        action_type: action_type.to_string(),
+        target,
+        result: AgentActionResult::Error {
+            error: error.to_string(),
+        },
+        details: ActionDetails::Simple,
+        duration_seconds: None,
     }
 }
 

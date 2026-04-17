@@ -166,6 +166,18 @@ fn handle_key_event(
         return Ok(action);
     }
 
+    // Slash-command palette focus mode (input starts with `/`).
+    // Intercepts ↑/↓/Tab/Esc to navigate the palette and complete
+    // commands. All other keys (Enter, char input, Backspace, etc.)
+    // fall through to the normal handlers — palette stays in sync via
+    // the existing `showing_command_hints = input.starts_with('/')`
+    // flag in render.rs.
+    if app.input.get().starts_with('/')
+        && let Some(action) = handle_palette_key(app, &key)
+    {
+        return Ok(action);
+    }
+
     // Handle normal keyboard shortcuts
     let action = match key.code {
         KeyCode::Esc => handle_escape_key(app),
@@ -185,6 +197,92 @@ fn handle_key_event(
     };
 
     Ok(action)
+}
+
+/// Palette navigation: handle ↑/↓/Tab/Esc when input starts with `/`.
+/// Returns `Some(action)` if the key was handled here; `None` to fall
+/// through to the normal keyboard handlers (so Enter, char input, etc.
+/// still work as usual).
+fn handle_palette_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Option<EventAction> {
+    use crate::tui::slash_commands::filter_by_prefix;
+
+    let typed = app
+        .input
+        .get()
+        .trim_start_matches('/')
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    let candidates = filter_by_prefix(typed);
+
+    match key.code {
+        KeyCode::Up => {
+            if app.ui_state.palette_selected_index > 0 {
+                app.ui_state.palette_selected_index -= 1;
+            }
+            Some(EventAction::Continue)
+        },
+        KeyCode::Down => {
+            let max = candidates.len().saturating_sub(1);
+            if app.ui_state.palette_selected_index < max {
+                app.ui_state.palette_selected_index += 1;
+            }
+            Some(EventAction::Continue)
+        },
+        KeyCode::Tab => {
+            // Complete the highlighted command name into the input.
+            // Adds a trailing space so the user can immediately type
+            // arguments (e.g. `/model <Tab>` → `/model | …` with the
+            // cursor positioned to type the model name).
+            if let Some(cmd) = candidates.get(app.ui_state.palette_selected_index) {
+                let new_input = format!("/{} ", cmd.name);
+                app.input.set(new_input);
+                app.ui_state.palette_selected_index = 0;
+            }
+            Some(EventAction::Continue)
+        },
+        KeyCode::Esc => {
+            // Dismiss palette by clearing the input. The normal Esc
+            // semantics (stop generation, clear non-slash input) only
+            // fire when input doesn't start with `/`.
+            app.clear_input();
+            app.ui_state.palette_selected_index = 0;
+            Some(EventAction::Continue)
+        },
+        KeyCode::Enter => {
+            // Complete-then-execute: replace the typed command word
+            // with the highlighted selection (preserving any args the
+            // user already typed), then fall through to the normal
+            // Enter handler so the dispatcher runs. Without this, just
+            // typing `/` and pressing Enter would dispatch an empty
+            // command and silently flash "Unknown command:".
+            //
+            // If no candidate matches the typed prefix, leave input
+            // alone — the dispatcher will surface its own clear
+            // "Unknown command: <typed>" so the user knows why nothing
+            // happened.
+            if let Some(cmd) = candidates.get(app.ui_state.palette_selected_index) {
+                let raw = app.input.get();
+                let after_slash = raw.trim_start_matches('/');
+                // Preserve everything from the first whitespace onward
+                // (the user's args + spacing), only replacing the
+                // command word itself.
+                let rest = match after_slash.find(char::is_whitespace) {
+                    Some(idx) => &after_slash[idx..],
+                    None => "",
+                };
+                let new_input = format!("/{}{}", cmd.name, rest);
+                app.input.set(new_input);
+                app.ui_state.palette_selected_index = 0;
+            }
+            // Return None so the normal Enter handler runs and actually
+            // dispatches the (now-completed) command. This is the
+            // critical line — intercepting Enter here would close the
+            // palette without executing anything.
+            None
+        },
+        _ => None, // Fall through to normal handlers.
+    }
 }
 
 /// Handle Escape key (stop generation or clear input)
@@ -215,11 +313,11 @@ fn handle_enter_key(app: &mut App) -> Result<EventAction> {
         return Ok(EventAction::Continue);
     }
 
-    // Check if this is a command (starts with ':')
-    if app.input.get().starts_with(':') {
+    // Check if this is a slash command (starts with '/')
+    if app.input.get().starts_with('/') {
         // Commands only work when not generating
         if !app.app_state.is_generating() {
-            let command = app.input.get().trim_start_matches(':').to_string();
+            let command = app.input.get().trim_start_matches('/').to_string();
             app.clear_input();
             return Ok(EventAction::ExecuteCommand(command));
         }
@@ -308,13 +406,14 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
         return EventAction::Continue;
     }
 
-    // Alt+T to toggle thinking mode
+    // Alt+T cycles reasoning depth (None → Low → Medium → High → Max → None)
     if c == 't' && modifiers == KeyModifiers::ALT {
-        match app.model_state.toggle_thinking() {
-            Some(true) => app.set_status("Thinking mode enabled"),
-            Some(false) => app.set_status("Thinking mode disabled"),
-            None => app.set_status("Model does not support thinking"),
-        }
+        let new_level = app.model_state.cycle_reasoning();
+        // Persist per-model so cycling on Sonnet doesn't bleed into the
+        // next session with Ollama. Failure is non-fatal — the in-memory
+        // state is still updated and the status message reflects it.
+        let _ = crate::app::persist_reasoning_for_model(&app.model_state.model_id, new_level);
+        app.set_status(format!("Reasoning: {}", new_level.as_str()));
         return EventAction::Continue;
     }
 
@@ -326,6 +425,10 @@ fn handle_char_input(app: &mut App, c: char, modifiers: KeyModifiers) -> EventAc
             app.input.history_buffer.clear();
         }
         app.input.insert(c);
+        // Reset palette selection on every keystroke that mutates the
+        // filter — prevents stale indices from pointing past the end of
+        // a shrinking result list.
+        app.ui_state.palette_selected_index = 0;
     }
 
     EventAction::Continue
@@ -343,6 +446,9 @@ fn handle_backspace(app: &mut App) -> EventAction {
         }
     } else {
         app.input.backspace();
+        // Reset palette selection on filter mutation (same reason as
+        // the char-input path above).
+        app.ui_state.palette_selected_index = 0;
     }
     EventAction::Continue
 }
@@ -439,9 +545,7 @@ fn handle_up_arrow(app: &mut App) -> EventAction {
     }
 
     // If not scrolling chat (input is focused), navigate history
-    if !app.ui_state.chat_state.is_manually_scrolling()
-        && !app.input.history.is_empty()
-    {
+    if !app.ui_state.chat_state.is_manually_scrolling() && !app.input.history.is_empty() {
         navigate_history_backward(app);
         return EventAction::Continue;
     }
@@ -453,9 +557,7 @@ fn handle_up_arrow(app: &mut App) -> EventAction {
 /// Handle Down arrow (navigate history or scroll chat)
 fn handle_down_arrow(app: &mut App) -> EventAction {
     // If not scrolling chat (input is focused), navigate history
-    if !app.ui_state.chat_state.is_manually_scrolling()
-        && !app.input.history.is_empty()
-    {
+    if !app.ui_state.chat_state.is_manually_scrolling() && !app.input.history.is_empty() {
         navigate_history_forward(app);
         return EventAction::Continue;
     }

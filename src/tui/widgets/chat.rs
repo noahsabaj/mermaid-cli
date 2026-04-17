@@ -8,8 +8,12 @@ use ratatui::{
     widgets::{Block, Paragraph, StatefulWidget, Widget},
 };
 use rustc_hash::FxHashMap;
+use unicode_width::UnicodeWidthStr;
 
-use crate::agents::{ActionDetails, ActionDisplay, ActionResult, SubagentProgress, SubagentStatus};
+use crate::agents::{
+    ActionDetails, ActionDisplay, ActionResult, DiffLineKind, SubagentProgress, SubagentStatus,
+    parse_diff_line,
+};
 use crate::models::{ChatMessage, MessageRole};
 use crate::tui::markdown::parse_markdown;
 use crate::tui::theme::Theme;
@@ -356,7 +360,8 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     SubagentStatus::Failed(msg) => format!("Failed: {}", msg),
                 };
                 let token_display = crate::utils::format_tokens(agent.tokens);
-                let elapsed = crate::utils::format_duration(agent.started_at.elapsed().as_secs() as f64);
+                let elapsed =
+                    crate::utils::format_duration(agent.started_at.elapsed().as_secs() as f64);
 
                 lines.push(Line::from(vec![
                     Span::styled("  \u{23bf} ", Style::new().fg(agent_color)),
@@ -481,24 +486,11 @@ fn render_actions(
                     ]));
                 }
 
-                // Duration for long-running actions (not Agent -- it's in the summary)
-                if let Some(duration) = action.duration_seconds
-                    && !matches!(action.details, ActionDetails::Agent { .. })
-                    && matches!(
-                        action.details,
-                        ActionDetails::Preview { .. }
-                    )
-                {
-                    lines.push(Line::from(vec![
-                        Span::styled("    ", Style::new().fg(action_color)),
-                        Span::styled(
-                            format!("Completed in {:.1} seconds", duration),
-                            Style::new()
-                                .fg(theme.colors.text_disabled.to_color())
-                                .italic(),
-                        ),
-                    ]));
-                }
+                // (No "Completed in X seconds" line for Preview details:
+                // `build_action_display` only sets `duration_seconds` for
+                // Agent actions, which use `ActionDetails::Agent` and embed
+                // the duration in the summary directly. The branch that used
+                // to live here was unreachable.)
 
                 // Write: syntax-highlighted file preview
                 if let ActionDetails::FileContent {
@@ -548,41 +540,42 @@ fn render_actions(
                         let added_bg = ratatui::style::Color::Rgb(20, 50, 20);
 
                         for diff_line in &display_lines {
-                            let is_removed = diff_line.contains(" - ")
-                                && diff_line
-                                    .trim_start()
-                                    .starts_with(|c: char| c.is_ascii_digit());
-                            let is_added = diff_line.contains(" + ")
-                                && diff_line
-                                    .trim_start()
-                                    .starts_with(|c: char| c.is_ascii_digit());
-
-                            if is_removed {
-                                let text = format!("    {}", diff_line);
-                                let padded = format!("{:<width$}", text, width = viewport_width);
-                                lines.push(Line::from(vec![Span::styled(
-                                    padded,
-                                    Style::new()
-                                        .fg(theme.colors.error.to_color())
-                                        .bg(removed_bg),
-                                )]));
-                            } else if is_added {
-                                let text = format!("    {}", diff_line);
-                                let padded = format!("{:<width$}", text, width = viewport_width);
-                                lines.push(Line::from(vec![Span::styled(
-                                    padded,
-                                    Style::new()
-                                        .fg(theme.colors.success.to_color())
-                                        .bg(added_bg),
-                                )]));
-                            } else {
-                                lines.push(Line::from(vec![
-                                    Span::styled("    ", Style::new().fg(action_color)),
-                                    Span::styled(
-                                        diff_line.to_string(),
-                                        Style::new().fg(theme.colors.text_secondary.to_color()),
-                                    ),
-                                ]));
+                            // Delegate the producer-format awareness to
+                            // `parse_diff_line`, which lives next to the
+                            // marker constants and stays in lockstep with
+                            // any future format change.
+                            match parse_diff_line(diff_line) {
+                                DiffLineKind::Removed => {
+                                    let text = format!("    {}", diff_line);
+                                    let padded =
+                                        format!("{:<width$}", text, width = viewport_width);
+                                    lines.push(Line::from(vec![Span::styled(
+                                        padded,
+                                        Style::new()
+                                            .fg(theme.colors.error.to_color())
+                                            .bg(removed_bg),
+                                    )]));
+                                },
+                                DiffLineKind::Added => {
+                                    let text = format!("    {}", diff_line);
+                                    let padded =
+                                        format!("{:<width$}", text, width = viewport_width);
+                                    lines.push(Line::from(vec![Span::styled(
+                                        padded,
+                                        Style::new()
+                                            .fg(theme.colors.success.to_color())
+                                            .bg(added_bg),
+                                    )]));
+                                },
+                                DiffLineKind::Context => {
+                                    lines.push(Line::from(vec![
+                                        Span::styled("    ", Style::new().fg(action_color)),
+                                        Span::styled(
+                                            diff_line.to_string(),
+                                            Style::new().fg(theme.colors.text_secondary.to_color()),
+                                        ),
+                                    ]));
+                                },
                             }
                         }
 
@@ -614,8 +607,14 @@ fn render_actions(
     }
 }
 
-/// Wrap text with hanging indent support
-/// Returns a vector of strings, each representing a wrapped line
+/// Wrap text with hanging indent support.
+///
+/// `width`, `first_line_indent`, and `continuation_indent` are all measured
+/// in **display cells**, not bytes. Word lengths are also measured in cells
+/// via `UnicodeWidthStr::width` so CJK / emoji wrap at the visual edge —
+/// previously a CJK paragraph would wrap after ~1/3 of the line because
+/// `word.len()` (bytes) is roughly 3× `word.width()` (cells) for 3-byte
+/// codepoints.
 fn wrap_text_with_indent(
     text: &str,
     width: usize,
@@ -650,27 +649,30 @@ fn wrap_text_with_indent(
 
         let mut current_line = String::with_capacity(width);
         current_line.push_str(&" ".repeat(current_indent));
+        // Display-cell widths: indent is ASCII spaces (1 cell each), so
+        // start fresh and let words contribute their own cell widths.
         let mut current_length = 0;
 
         for (word_idx, word) in words.iter().enumerate() {
-            let word_len = word.len();
+            let word_width = word.width();
 
             if word_idx == 0 {
                 // First word always fits on the line
                 current_line.push_str(word);
-                current_length = word_len;
-            } else if current_length + 1 + word_len <= available_width {
-                // Word fits on current line
+                current_length = word_width;
+            } else if current_length + 1 + word_width <= available_width {
+                // Word fits on current line (the +1 accounts for the
+                // separator space, which is 1 cell)
                 current_line.push(' ');
                 current_line.push_str(word);
-                current_length += 1 + word_len;
+                current_length += 1 + word_width;
             } else {
                 // Word doesn't fit, start a new line
                 wrapped_lines.push(current_line);
                 current_line = String::with_capacity(width);
                 current_line.push_str(&" ".repeat(continuation_indent));
                 current_line.push_str(word);
-                current_length = word_len;
+                current_length = word_width;
             }
         }
 
@@ -690,18 +692,21 @@ fn wrap_styled_line(
     width: usize,
     continuation_indent: usize,
 ) -> Vec<Line<'static>> {
-    // Calculate the total length of the line by summing all span lengths
-    let total_length: usize = line.spans.iter().map(|s| s.content.len()).sum();
+    // Widths are counted in display cells (via `UnicodeWidthStr`), not
+    // bytes. This makes CJK double-width chars and emoji wrap at the
+    // correct visual column, and avoids over-wrapping multi-byte ASCII-
+    // looking glyphs.
+    let total_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
 
     // If the line fits within width, return as-is
-    if total_length <= width {
+    if total_width <= width {
         return vec![line];
     }
 
     // Line needs wrapping - extract all text and styles
     let mut result_lines = Vec::new();
     let mut current_line_spans = Vec::new();
-    let mut current_line_length = 0;
+    let mut current_line_width = 0usize;
     let available_width = width.saturating_sub(continuation_indent);
 
     for span in line.spans.clone() {
@@ -712,28 +717,28 @@ fn wrap_styled_line(
         let words: Vec<&str> = span_text.split_whitespace().collect();
 
         for (word_idx, word) in words.iter().enumerate() {
-            let word_with_space = if word_idx > 0 || current_line_length > 0 {
+            let word_with_space = if word_idx > 0 || current_line_width > 0 {
                 format!(" {}", word)
             } else {
                 word.to_string()
             };
 
-            let word_len = word_with_space.len();
+            let word_width = word_with_space.width();
 
-            if current_line_length == 0 && result_lines.is_empty() {
+            if current_line_width == 0 && result_lines.is_empty() {
                 // First word of first line - no indent
                 current_line_spans.push(Span::styled(word_with_space, span_style));
-                current_line_length += word_len;
-            } else if current_line_length + word_len <= available_width {
+                current_line_width += word_width;
+            } else if current_line_width + word_width <= available_width {
                 // Word fits on current line
                 current_line_spans.push(Span::styled(word_with_space, span_style));
-                current_line_length += word_len;
+                current_line_width += word_width;
             } else {
                 // Word doesn't fit - finish current line and start new one
                 result_lines.push(Line::from(current_line_spans));
                 current_line_spans = vec![Span::raw(" ".repeat(continuation_indent))];
                 current_line_spans.push(Span::styled(word.to_string(), span_style));
-                current_line_length = word.len();
+                current_line_width = word.width();
             }
         }
     }
@@ -750,3 +755,78 @@ fn wrap_styled_line(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CJK characters are 3 bytes but 2 display cells each. The
+    /// byte-length version of `wrap_styled_line` would incorrectly
+    /// over-wrap such input. This test asserts the display-width
+    /// version keeps CJK-only input on a single line when the display
+    /// width fits, even when the byte length exceeds the width.
+    #[test]
+    fn wrap_styled_line_uses_display_width_for_cjk() {
+        // "你好世界" is 4 CJK chars × 3 bytes = 12 bytes, × 2 display cells = 8 cells.
+        // Target width of 10: byte-length would see 12 > 10 and wrap;
+        // display-width sees 8 <= 10 and keeps it on one line.
+        let line = Line::from(Span::raw("你好世界".to_string()));
+        let wrapped = wrap_styled_line(line, 10, 2);
+        assert_eq!(
+            wrapped.len(),
+            1,
+            "CJK input fitting in display-width should NOT be wrapped; got {} lines",
+            wrapped.len()
+        );
+    }
+
+    /// Sanity: ASCII wrapping still works and produces >= 2 lines when
+    /// the input exceeds the width.
+    #[test]
+    fn wrap_styled_line_ascii_wraps_when_too_long() {
+        let line = Line::from(Span::raw(
+            "the quick brown fox jumps over the lazy dog".to_string(),
+        ));
+        let wrapped = wrap_styled_line(line, 15, 2);
+        assert!(
+            wrapped.len() >= 2,
+            "long ASCII input should wrap to multiple lines; got {}",
+            wrapped.len()
+        );
+    }
+
+    /// Counterpart to `wrap_styled_line_uses_display_width_for_cjk` for
+    /// the plain-string wrapper used by user messages and thinking blocks.
+    /// The byte-based version would wrap a 4-CJK paragraph after the second
+    /// char (12 bytes > 10) even though it fits in 8 cells. Display-width
+    /// version keeps it on one line.
+    #[test]
+    fn wrap_text_with_indent_uses_display_width_for_cjk() {
+        // "你好世界" = 4 chars, 12 bytes, 8 display cells. Width 12 cells
+        // with 0 indent: should fit on one line.
+        let wrapped = wrap_text_with_indent("你好世界", 12, 0, 0);
+        assert_eq!(
+            wrapped.len(),
+            1,
+            "CJK paragraph fitting in display width should not wrap; got {} lines: {:?}",
+            wrapped.len(),
+            wrapped
+        );
+        assert_eq!(wrapped[0].trim_start(), "你好世界");
+    }
+
+    /// Mixed content: CJK + ASCII should still wrap correctly when the
+    /// total exceeds available cells.
+    #[test]
+    fn wrap_text_with_indent_wraps_cjk_at_visual_edge() {
+        // "你好 world 世界" = 2 + 1 + 5 + 1 + 2 = 11 cells without spaces,
+        // with separators: 2 + 1 + 5 + 1 + 4 = 13 cells. Width 8 cells should
+        // produce ≥ 2 lines.
+        let wrapped = wrap_text_with_indent("你好 world 世界", 8, 0, 0);
+        assert!(
+            wrapped.len() >= 2,
+            "mixed CJK+ASCII exceeding width should wrap; got {} lines: {:?}",
+            wrapped.len(),
+            wrapped
+        );
+    }
+}
