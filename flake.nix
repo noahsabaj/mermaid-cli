@@ -28,7 +28,10 @@
         inherit system overlays;
       };
 
-      myRustc = pkgs.rust-bin.stable."1.87.0".default;
+      # Aligned with .clippy.toml msrv = "1.91.0" — `str::floor_char_boundary`
+      # (used in several places for UTF-8-safe slicing) stabilized in 1.91.
+      # Verified via clippy::incompatible_msrv during local checks.
+      myRustc = pkgs.rust-bin.stable."1.91.0".default;
 
       # Requires cargo2nix overlay (currently commented out above).
       # Uncomment the cargo2nix input and overlay to use this:

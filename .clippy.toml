@@ -1,6 +1,9 @@
 # Clippy configuration for Mermaid
 
 # Specify MSRV (Minimum Supported Rust Version)
+# `str::floor_char_boundary` (used in several places for UTF-8-safe slicing)
+# was stabilized in Rust 1.91.0 — verified via clippy::incompatible_msrv.
+# Matches `Cargo.toml`'s `rust-version`.
 msrv = "1.91.0"
 
 # Maximum cognitive complexity allowed for a single function

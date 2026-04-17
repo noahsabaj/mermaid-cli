@@ -1,7 +1,10 @@
 [package]
 name = "mermaid-cli"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
+# `str::floor_char_boundary` (used in several places for UTF-8-safe slicing)
+# stabilized in Rust 1.91.0 — confirmed by clippy::incompatible_msrv.
+rust-version = "1.91"
 authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
 description = "Open-source AI pair programmer with agentic capabilities. Local-first with Ollama, native tool calling, and beautiful TUI."
 repository = "https://github.com/noahsabaj/mermaid-cli"
@@ -17,8 +20,8 @@ name = "mermaid"
 path = "src/main.rs"
 
 [dependencies]
-# Async runtime
-tokio = { version = "1.42", features = ["full"] }
+# Async runtime. 1.44 closes RUSTSEC-2025-0023 (broadcast channel unsoundness).
+tokio = { version = "1.44", features = ["full"] }
 tokio-stream = "0.1"
 futures = "0.3"
 
@@ -30,10 +33,10 @@ tui-textarea = "0.7"
 # Config & Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.9"
+toml = "1.1"
 
 # CLI
-clap = { version = "4.5", features = ["derive", "env"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 
 # Markdown rendering
 pulldown-cmark = "0.13"
@@ -48,15 +51,26 @@ chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 which = "8.0"  # Find executables
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
-bytes = "1.8"
-dotenvy = "0.15"  # Load .env files
+bytes = "1.11"
 
 # Additional utilities
-regex = "1.11"
+regex = "1.12"
 rustc-hash = "2.0"  # Faster non-cryptographic hash for HashMap
 base64 = "0.22"  # Base64 encoding for binary files (PDFs, images)
+rpassword = "7.4.0"
+# `tui-textarea 0.7` pulls in `ratatui 0.29` (the project also depends
+# on `ratatui 0.30` directly), and 0.29 exact-pins `unicode-width
+# =0.2.0`. This pin makes the dual-ratatui resolution deterministic and
+# drops once `tui-textarea` upgrades past its 0.29 dep. Upstream PR #118
+# (ratatui 0.30 support) is merged but unreleased; `tui-textarea-2` fork
+# is available if we need to unblock sooner.
+unicode-width = "=0.2.0"
 
 [dev-dependencies]
+# Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`
+# patterns in model + auth tests. Safer under `--test-threads > 1`.
+# `async_closure` feature enables `async_with_vars` for tokio-test paths.
+temp-env = { version = "0.3", features = ["async_closure"] }
 
 [profile.release]
 lto = true

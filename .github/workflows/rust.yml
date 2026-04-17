@@ -23,7 +23,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  # Linting with Clippy
+  # Linting with Clippy — `-D warnings` makes lint regressions fail CI.
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -34,7 +34,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Run clippy
-        run: cargo clippy -- -W clippy::all
+        run: cargo clippy --all-targets -- -D warnings
 
   # Build and test on multiple Rust versions and OS
   test:
