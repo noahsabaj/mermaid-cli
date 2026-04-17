@@ -557,23 +557,28 @@ impl AnthropicAdapter {
     }
 
     /// POST `/v1/messages` and return the raw response.
+    /// Transparently retries on 5xx, 429, or reqwest connect failures
+    /// via `crate::models::retry_transient_http`.
     async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
-        self.client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| {
-                ModelError::Backend(BackendError::ConnectionFailed {
-                    backend: "anthropic".to_string(),
-                    url: url.clone(),
-                    reason: e.to_string(),
+        crate::models::retry_transient_http(|| async {
+            self.client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .json(body)
+                .send()
+                .await
+                .map_err(|e| {
+                    ModelError::Backend(BackendError::ConnectionFailed {
+                        backend: "anthropic".to_string(),
+                        url: url.clone(),
+                        reason: e.to_string(),
+                    })
                 })
-            })
+        })
+        .await
     }
 
     /// Decode a single non-streaming response into `ModelResponse`.

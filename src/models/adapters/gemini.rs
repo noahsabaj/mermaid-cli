@@ -495,6 +495,8 @@ impl GeminiAdapter {
 
     /// POST to `:generateContent` (sync) or `:streamGenerateContent`
     /// (streaming) and return the raw response.
+    /// Transparently retries on 5xx, 429, or reqwest connect failures
+    /// via `crate::models::retry_transient_http`.
     async fn send_chat(&self, body: &Value, stream: bool) -> Result<reqwest::Response> {
         let method = if stream {
             "streamGenerateContent?alt=sse"
@@ -507,20 +509,23 @@ impl GeminiAdapter {
             self.model_name,
             method
         );
-        self.client
-            .post(&url)
-            .header("x-goog-api-key", &self.api_key)
-            .header("content-type", "application/json")
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| {
-                ModelError::Backend(BackendError::ConnectionFailed {
-                    backend: "gemini".to_string(),
-                    url: url.clone(),
-                    reason: e.to_string(),
+        crate::models::retry_transient_http(|| async {
+            self.client
+                .post(&url)
+                .header("x-goog-api-key", &self.api_key)
+                .header("content-type", "application/json")
+                .json(body)
+                .send()
+                .await
+                .map_err(|e| {
+                    ModelError::Backend(BackendError::ConnectionFailed {
+                        backend: "gemini".to_string(),
+                        url: url.clone(),
+                        reason: e.to_string(),
+                    })
                 })
-            })
+        })
+        .await
     }
 
     /// Decode a non-streaming response into `ModelResponse`.

@@ -9,6 +9,7 @@ mod config; // Unified configuration
 mod error; // Structured error types
 mod providers; // OpenAI-compatible provider profiles + registry
 mod reasoning; // ReasoningLevel, ReasoningCapability, nearest_effort
+mod retry; // Transient-failure retry policy for provider HTTP calls
 mod stream; // Typed StreamEvent enum (replaces text-only callback)
 pub mod tool_call; // Tool call parsing (native function calling)
 pub mod tools; // Tool definitions
@@ -25,6 +26,7 @@ pub use providers::{
     ReasoningStrategy, lookup_provider,
 };
 pub use reasoning::{ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort};
+pub use retry::retry_transient_http;
 pub use stream::{StreamCallback, StreamEvent};
 pub use tool_call::{FunctionCall, ToolCall};
 pub use tools::{Tool, ToolFunction, ToolRegistry};

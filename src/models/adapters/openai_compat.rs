@@ -282,19 +282,25 @@ impl OpenAICompatAdapter {
     }
 
     /// POST `/chat/completions` and return the raw response.
+    /// Transparently retries on 5xx, 429, or reqwest connect failures
+    /// via `crate::models::retry_transient_http`. Useful for Groq /
+    /// OpenRouter / etc. when an upstream relay hiccups.
     async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let mut req = self.client.post(&url).bearer_auth(&self.api_key).json(body);
-        for (name, value) in &self.extra_headers {
-            req = req.header(name, value);
-        }
-        req.send().await.map_err(|e| {
-            ModelError::Backend(BackendError::ConnectionFailed {
-                backend: self.profile.name.to_string(),
-                url: url.clone(),
-                reason: e.to_string(),
+        crate::models::retry_transient_http(|| async {
+            let mut req = self.client.post(&url).bearer_auth(&self.api_key).json(body);
+            for (name, value) in &self.extra_headers {
+                req = req.header(name, value);
+            }
+            req.send().await.map_err(|e| {
+                ModelError::Backend(BackendError::ConnectionFailed {
+                    backend: self.profile.name.to_string(),
+                    url: url.clone(),
+                    reason: e.to_string(),
+                })
             })
         })
+        .await
     }
 
     /// Decode a single non-streaming response into `ModelResponse`.
