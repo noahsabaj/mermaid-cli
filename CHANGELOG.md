@@ -7,6 +7,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-16
+
+Major release: multi-provider adapter support. Mermaid is no longer
+Ollama-only — direct integrations for Anthropic Claude, Google Gemini, and
+the full OpenAI-compatible long tail (OpenAI, Groq, OpenRouter, Cerebras,
+DeepInfra, Together). Plus a new slash-command palette, auto-loaded
+MERMAID.md project instructions, MCP spec bump, and a security update.
+
+### Added
+
+- **Anthropic adapter** (`src/models/adapters/anthropic.rs`) — bespoke
+  Messages API support: `2023-06-01` version pin, adaptive + legacy
+  thinking formats dispatched per model, typed SSE streaming, `thinking`
+  signature round-trip for multi-turn extended thinking, `cache_control:
+  ephemeral` on system prompts + last tool for prompt caching, vision
+  (base64 images), tool translation to Anthropic's flat `{type: "custom"}`
+  shape. Supports Claude Opus 4.7 (`xhigh` effort tier), Sonnet 4.6,
+  Opus 4.6, Sonnet 4.5, Opus 4.5, Haiku 4.5.
+- **Gemini adapter** (`src/models/adapters/gemini.rs`) — per-method
+  endpoints (`:generateContent` / `:streamGenerateContent?alt=sse`),
+  `user`/`model` role convention, `functionResponse` merge for tool
+  results, per-model thinking dispatch (Gemini 3 `thinkingLevel` enum,
+  Gemini 2.5 Pro/Flash/Flash-Lite `thinkingBudget` with correct floors,
+  2.0 omits `thinkingConfig`), `thought: true` reasoning parts, inline
+  base64 images for vision. Curated list: `gemini-pro-latest`,
+  `gemini-flash-latest`, `gemini-3.1-pro-preview`, `gemini-3-flash-preview`,
+  `gemini-3.1-flash-lite-preview`, `gemini-2.5-pro/flash/flash-lite`.
+- **OpenAI-compatible adapter** (`src/models/adapters/openai_compat.rs`)
+  — single `/chat/completions` adapter with per-provider quirks encoded
+  in `ProviderProfile`. Built-in registry: OpenAI, Groq, OpenRouter,
+  Cerebras, DeepInfra, Together. Three reasoning strategies (`Effort`,
+  `OpenRouterShape`, `None`) and three extraction strategies
+  (`DeltaContentField`, `InlineThinkTags`, `None`). Streaming tool-call
+  accumulator handles OpenAI's chunked `delta.tool_calls` pattern.
+  OpenRouter `X-OpenRouter-Title` canonical header.
+- **Custom OpenAI-compatible providers** — users can add any
+  `/chat/completions` endpoint via `[providers.<name>]` in `config.toml`
+  with `base_url`, `api_key_env`, and `compat = "openai" |
+  "openai-effort" | "openrouter"`.
+- **`ReasoningLevel` enum** (`src/models/reasoning.rs`) — seven tiers
+  (`None`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, `Max`) with rank
+  ordering; `XHigh` sits between `High` and `Max`. `nearest_effort()`
+  snaps user choice onto the model's advertised `ReasoningCapability`.
+  Per-model persistence via `[reasoning_per_model]` in config.
+- **`--reasoning <level>` CLI flag** overrides config-default for this
+  session.
+- **Typed streaming** (`src/models/stream.rs`) — `StreamEvent` enum
+  (`Text`, `Reasoning`, `ToolCall`, `Done`) replaces the legacy text-only
+  callback. Adapters emit typed events; consumers route them without
+  marker-sniffing.
+- **`ModelCapabilities`** (`src/models/capabilities.rs`) — per-model
+  `supports_tools`/`supports_vision`/`supports_reasoning`/`max_context_tokens`
+  advertised by each adapter.
+- **MERMAID.md project instructions** (`src/app/instructions.rs`) —
+  walks UP from cwd to the git root or `$HOME`, loads the nearest
+  `MERMAID.md`, auto-reloads on mtime change before every model call
+  (one stat per turn). 10k-token cap with truncation marker. Injected
+  via `ModelConfig::dynamic_system_suffix`; Anthropic gets a separate
+  cache block (static base stays warm across project switches).
+- **Slash-command palette** (`src/tui/widgets/slash_palette.rs`,
+  `src/tui/slash_commands.rs`) — type `/` to open a filter-as-you-type
+  list of all commands. Up/Down navigates, Tab completes, Enter
+  dispatches, Esc dismisses. Centralized `COMMAND_REGISTRY` so `/help`
+  auto-updates with new commands.
+- **`/reasoning <level>` slash command** — per-model persisted reasoning
+  depth. Alt+T cycles `None → Low → Medium → High → Max → None`
+  (Minimal + XHigh reachable only via `/reasoning`, treated as
+  specialist tiers).
+- **MCP 2025-11-25 protocol** — bumped from 2025-03-26. New content
+  block types: `audio`, `resource_link`, `resource` (embedded).
+  Audio flows through the image attachment channel; resource links
+  render as text so the model can follow up with another tool call.
+- **`postgres-mcp` (uvx)** replacing deprecated
+  `@modelcontextprotocol/server-postgres` — crystaldba community
+  maintainer. Env var renamed `DATABASE_URL` → `DATABASE_URI`.
+- **`@zencoderai/slack-mcp-server`** replacing deprecated
+  `@modelcontextprotocol/server-slack` — Zencoder is the official
+  handoff maintainer.
+- **`@brave/brave-search-mcp-server`** replacing deprecated
+  `@modelcontextprotocol/server-brave-search` — Brave is now the
+  first-party maintainer.
+- **Graceful MCP shutdown** (`src/mcp/transport.rs`) — close stdin →
+  2s wait → SIGTERM → 1s wait → SIGKILL. Replaces the previous
+  straight-to-SIGKILL path.
+- **UTF-8-safe byte-buffer draining** (`src/utils/ndjson.rs`,
+  `src/utils/sse.rs`) — NDJSON line splitter and SSE event splitter
+  that buffer raw bytes and decode only complete frames. Protects
+  against TCP-chunk-inside-codepoint corruption on both Ollama NDJSON
+  and OpenAI-compat SSE streams.
+- **API-key resolution** (`src/utils/auth.rs`) — uniform env-var lookup
+  with optional `[providers.<name>].api_key_env` override.
+
+### Changed
+
+- **`/` slash-command prefix** replaces the legacy `:` colon prefix.
+  All commands now live under `/`; the palette only opens for `/`.
+- **Tokio bumped to 1.44** (resolves to 1.49 via caret) — closes
+  RUSTSEC-2025-0023 (broadcast channel unsoundness).
+- **toml 0.9 → 1.1** (major version bump), clap 4.5 → 4.6, bytes 1.8 →
+  1.11, regex 1.11 → 1.12.
+- **Removed `dotenvy`** — unused dead dependency.
+- **Added `temp-env`** dev-dep — replaces `unsafe { env::set_var /
+  remove_var }` in `backend.rs` + `auth.rs` tests; safer under
+  `--test-threads > 1`.
+- **MSRV pinned to 1.91** in `Cargo.toml rust-version`, `.clippy.toml`,
+  and `flake.nix`. `str::floor_char_boundary` (used for UTF-8-safe
+  slicing) stabilized in Rust 1.91.
+- **Ollama `gpt-oss` dispatch** — sends `think: "low"|"medium"|"high"`
+  (string enum) instead of the bool other Ollama models expect. Advertised
+  as `Levels([None, Low, Medium, High])` in capabilities so XHigh/Max
+  snap correctly via `nearest_effort`.
+- **OpenRouter header** — `X-Title` → `X-OpenRouter-Title` (the new
+  canonical name; old still accepted for backward compat).
+
+### Fixed
+
+- Anthropic `Max` effort now gated per-model — Sonnet 4.5 / Opus 4.5 /
+  Haiku 4.5 snap to `"high"` since they don't accept `"max"` per the
+  2026-04 effort documentation.
+- Gemini 3 model IDs refreshed — `gemini-3-pro` (shut down 2026-03),
+  `gemini-3-flash`, `gemini-3-flash-lite` replaced with the current
+  `-preview` variants and `-latest` aliases.
+- MCP registry entries for `slack`, `postgres`, and `brave-search` swapped
+  to current maintained alternatives (originals deprecated upstream).
+
+### Removed
+
+- `src/tui/stream_handler.rs` — replaced by the typed `StreamEvent` path
+  and `TuiObserver` in `loop_coordinator.rs`.
+- `.env.example` — `dotenvy` dependency removed, no `.env` loading path.
+
 ## [0.5.1] - 2026-04-12
 
 ### Added
@@ -210,7 +341,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.4.0...v0.4.1
