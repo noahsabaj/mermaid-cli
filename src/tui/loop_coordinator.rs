@@ -56,6 +56,11 @@ pub struct TuiObserver<'a> {
     pub terminal: &'a mut Terminal<CrosstermBackend<io::Stdout>>,
     pub tx: mpsc::Sender<TuiStreamEvent>,
     pub rx: &'a mut mpsc::Receiver<TuiStreamEvent>,
+    /// Set true by `handle_stream_error` once an error has been added to
+    /// the chat as a system message. When `run_agent_loop` subsequently
+    /// calls `on_error`, we skip adding a second (lower-fidelity) message
+    /// since the detailed one is already on screen.
+    pub error_already_displayed: bool,
 }
 
 impl<'a> TuiObserver<'a> {
@@ -191,6 +196,24 @@ impl<'a> TuiObserver<'a> {
             user_error.message, user_error.suggestion
         );
         self.app.add_message(MessageRole::System, error_display);
+
+        // Post-mortem breadcrumb. In-band stream errors previously never
+        // hit `tracing` — only startup / auth errors did — so post-failure
+        // debugging had to rely on whatever the user could quote from the
+        // UI. Log the category, summary, and detail so `~/.mermaid/
+        // mermaid.log` captures the incident.
+        tracing::warn!(
+            category = ?user_error.category,
+            summary = %user_error.summary,
+            recoverable = user_error.recoverable,
+            "stream error: {}",
+            user_error.message
+        );
+
+        // Mark the error as already surfaced so `on_error` (called later
+        // by `run_agent_loop`) doesn't add a second system message with
+        // the same content. See `AgentObserver::on_error` override below.
+        self.error_already_displayed = true;
     }
 }
 
@@ -269,7 +292,23 @@ impl<'a> AgentObserver for TuiObserver<'a> {
     }
 
     fn on_error(&mut self, error: &str) {
-        self.app.display_error_simple(error);
+        // `run_agent_loop` calls this when `call_model` returns Err. For
+        // stream errors that arrived via `TuiStreamEvent::Error`, the
+        // message was already added to the chat by `handle_stream_error`
+        // — so here we only need to refresh the status (and skip adding
+        // a duplicate system message with the bail-summary string).
+        //
+        // For other error paths (channel closed unexpectedly, user Esc
+        // → "Generation interrupted", spurious errors outside the stream
+        // pipeline), the flag is still false and we fall back to the
+        // legacy `display_error_simple` behavior so the user still sees
+        // something meaningful.
+        if self.error_already_displayed {
+            self.app.set_status(format!("[Error] {}", error));
+            self.error_already_displayed = false;
+        } else {
+            self.app.display_error_simple(error);
+        }
         let _ = self.render();
     }
 
@@ -694,6 +733,7 @@ async fn run_turn(
         terminal,
         tx: tx.clone(),
         rx,
+        error_already_displayed: false,
     };
     let model = Arc::clone(&observer.app.model_state.model);
     let config = observer.app.build_model_config();

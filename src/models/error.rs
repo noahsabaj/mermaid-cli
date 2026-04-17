@@ -174,7 +174,7 @@ impl ModelError {
                     ),
                     404 => (
                         "Model not found",
-                        "Use :model <name> to switch models (auto-pulls if needed), or pull manually with 'ollama pull <name>'",
+                        "Use /model <name> to switch models (auto-pulls if needed), or pull manually with 'ollama pull <name>'",
                     ),
                     429 => (
                         "Rate limited",
@@ -189,13 +189,26 @@ impl ModelError {
                         "Check your network connection and backend configuration",
                     ),
                 };
+                // Body may be a raw JSON blob from the provider (e.g., Ollama
+                // Cloud emits `{"error":"Internal Server Error (ref: ...)"}`).
+                // Render the extracted message when we can, fall back to the
+                // raw body so we never lose information.
+                let rendered = match try_extract_error_message(message) {
+                    Some(clean) => format!("HTTP {}: {}", status, clean),
+                    None => format!("HTTP {}: {}", status, message),
+                };
                 UserFacingError {
                     summary: summary.to_string(),
-                    message: format!("HTTP {}: {}", status, message),
+                    message: rendered,
                     suggestion: suggestion.to_string(),
+                    // 5xx errors ARE recoverable (the caller can retry) and
+                    // the suggestion tells the user to try again — that's
+                    // the `Temporary` category semantic. `Internal` was
+                    // wrong and painted the status bar with a sterner tone
+                    // than the situation warrants.
                     category: if *status == 401 || *status == 403 {
                         ErrorCategory::Auth
-                    } else if *status == 429 {
+                    } else if *status == 429 || (500..=599).contains(status) {
                         ErrorCategory::Temporary
                     } else {
                         ErrorCategory::Internal
@@ -501,6 +514,49 @@ impl From<serde_json::Error> for ModelError {
     }
 }
 
+/// Try to extract a human-readable error message from a raw upstream
+/// response body. Handles the two shapes observed in the wild across
+/// Ollama, OpenAI, Groq, OpenRouter, Cerebras, DeepInfra, Together
+/// (Anthropic + Gemini have their own adapter-level parsers):
+///
+/// - `{"error": "some string"}` — Ollama Cloud style
+/// - `{"error": {"message": "...", ...}}` — OpenAI Chat Completions style
+///
+/// Returns `None` when the body isn't parseable JSON or doesn't match
+/// either shape — callers fall back to the raw body so no information
+/// is lost.
+fn try_extract_error_message(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let error = value.get("error")?;
+
+    // Shape 1: `error` is a plain string.
+    if let Some(s) = error.as_str() {
+        return Some(s.trim().to_string());
+    }
+
+    // Shape 2: `error` is an object with a `message` field. Prepend
+    // `type:` if present (matches OpenAI's `"invalid_request_error"` +
+    // message convention).
+    if let Some(obj) = error.as_object() {
+        let message = obj.get("message").and_then(|v| v.as_str())?;
+        let kind = obj
+            .get("type")
+            .and_then(|v| v.as_str())
+            .or_else(|| obj.get("code").and_then(|v| v.as_str()));
+        let out = match kind {
+            Some(k) if !k.is_empty() => format!("{}: {}", k, message),
+            _ => message.to_string(),
+        };
+        return Some(out.trim().to_string());
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,5 +594,79 @@ mod tests {
         let ufe = err.to_user_facing();
         assert_eq!(ufe.message, "'HTTP request' timed out");
         assert!(!ufe.message.contains("0 seconds"));
+    }
+
+    #[test]
+    fn extract_error_handles_ollama_string_shape() {
+        let body = r#"{"error":"Internal Server Error (ref: 6e8ae4c7)"}"#;
+        assert_eq!(
+            try_extract_error_message(body).as_deref(),
+            Some("Internal Server Error (ref: 6e8ae4c7)")
+        );
+    }
+
+    #[test]
+    fn extract_error_handles_openai_object_shape_with_type() {
+        let body = r#"{"error":{"message":"Rate limit","type":"rate_limit_error","code":null}}"#;
+        assert_eq!(
+            try_extract_error_message(body).as_deref(),
+            Some("rate_limit_error: Rate limit")
+        );
+    }
+
+    /// OpenRouter emits `code` as a numeric HTTP status, not a string.
+    /// `as_str()` returns None so we skip the prefix gracefully.
+    #[test]
+    fn extract_error_handles_openrouter_numeric_code() {
+        let body = r#"{"error":{"message":"upstream timeout","code":504,"metadata":{}}}"#;
+        assert_eq!(
+            try_extract_error_message(body).as_deref(),
+            Some("upstream timeout")
+        );
+    }
+
+    #[test]
+    fn extract_error_returns_none_for_non_json() {
+        assert_eq!(try_extract_error_message("<html>bad gateway</html>"), None);
+        assert_eq!(try_extract_error_message(""), None);
+        assert_eq!(try_extract_error_message("plain text error"), None);
+    }
+
+    #[test]
+    fn extract_error_returns_none_for_missing_error_field() {
+        let body = r#"{"status":"ok","message":"nothing here"}"#;
+        assert_eq!(try_extract_error_message(body), None);
+    }
+
+    /// 5xx responses carrying an Ollama-style JSON body should render as
+    /// the clean string in the user-facing message, and be categorised as
+    /// `Temporary` (matches `recoverable: true`) so the status bar treats
+    /// them as "come back and retry" rather than "something is broken".
+    #[test]
+    fn http_500_renders_clean_message_and_temporary_category() {
+        let err = ModelError::Backend(BackendError::HttpError {
+            status: 500,
+            message: r#"{"error":"Internal Server Error (ref: abc-123)"}"#.to_string(),
+        });
+        let ufe = err.to_user_facing();
+        assert_eq!(ufe.summary, "Server error");
+        assert_eq!(
+            ufe.message,
+            "HTTP 500: Internal Server Error (ref: abc-123)"
+        );
+        assert!(ufe.recoverable);
+        assert_eq!(ufe.category, ErrorCategory::Temporary);
+    }
+
+    /// Unparseable bodies fall back to the raw content so we never lose
+    /// information.
+    #[test]
+    fn http_500_falls_back_to_raw_body_for_html() {
+        let err = ModelError::Backend(BackendError::HttpError {
+            status: 502,
+            message: "<html>Bad Gateway</html>".to_string(),
+        });
+        let ufe = err.to_user_facing();
+        assert_eq!(ufe.message, "HTTP 502: <html>Bad Gateway</html>");
     }
 }
