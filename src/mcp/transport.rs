@@ -7,8 +7,8 @@
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
@@ -58,18 +58,20 @@ impl StdioTransport {
         cmd.args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            // If `Child` is dropped without `shutdown` being called (e.g. the
+            // outer task panics or we abort during init), tokio kills and
+            // reaps the process for us. `shutdown` does the same explicitly
+            // for the normal path; this is just a belt-and-braces fallback
+            // so we never leak MCP server processes.
+            .kill_on_drop(true);
 
         for (key, value) in env {
             cmd.env(key, value);
         }
 
         let mut child = cmd.spawn().with_context(|| {
-            format!(
-                "Failed to spawn MCP server: {} {}",
-                command,
-                args.join(" ")
-            )
+            format!("Failed to spawn MCP server: {} {}", command, args.join(" "))
         })?;
 
         let stdin = child
@@ -97,12 +99,19 @@ impl StdioTransport {
                     continue;
                 }
                 let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-                    tracing::warn!("MCP: unparseable stdout line: {}", &line[..line.len().min(200)]);
+                    // Slice on a char boundary — MCP stdout may contain
+                    // non-ASCII text, and a raw byte slice at offset 200
+                    // could fall inside a multi-byte codepoint and panic.
+                    let end = line.floor_char_boundary(200);
+                    tracing::warn!("MCP: unparseable stdout line: {}", &line[..end]);
                     continue;
                 };
 
-                // Check if this is a response (has "id" and either "result" or "error")
-                if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
+                // Check if this is a response (has "id" and either "result" or "error").
+                // JSON-RPC 2.0 allows the id to be a string OR a number; we always
+                // SEND integers (next_id is u64), but spec-conformant servers may
+                // echo back the id in either shape, so accept both.
+                if let Some(id) = msg.get("id").and_then(parse_response_id) {
                     let mut pending = pending_clone.lock().await;
                     if let Some(sender) = pending.remove(&id) {
                         let _ = sender.send(msg);
@@ -161,7 +170,13 @@ impl StdioTransport {
         // Wait for response with timeout
         let response = timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), rx)
             .await
-            .map_err(|_| anyhow!("MCP request timed out after {}s: {}", REQUEST_TIMEOUT_SECS, method))?
+            .map_err(|_| {
+                anyhow!(
+                    "MCP request timed out after {}s: {}",
+                    REQUEST_TIMEOUT_SECS,
+                    method
+                )
+            })?
             .map_err(|_| anyhow!("MCP response channel closed unexpectedly"))?;
 
         // Check for JSON-RPC error
@@ -196,10 +211,101 @@ impl StdioTransport {
         Ok(())
     }
 
-    /// Gracefully shut down the MCP server process.
+    /// Gracefully shut down the MCP server process per MCP spec guidance:
+    /// close stdin (signals EOF) → brief grace period → SIGTERM → SIGKILL.
+    /// Most servers exit cleanly on stdin close; the terminate/kill steps
+    /// are a safety net for misbehaving servers.
+    ///
+    /// `kill_on_drop(true)` set in `spawn` is the panic-path fallback;
+    /// this explicit path is the normal one.
     pub async fn shutdown(&self) {
+        // Step 1: close stdin. Many MCP servers treat stdin EOF as a
+        // shutdown signal and exit on their own.
+        //
+        // Note: we can't drop `self.stdin` because it's behind an Arc —
+        // but `ChildStdin::shutdown()` flushes + closes the write side,
+        // which has the same effect for the child's reader.
+        {
+            let mut stdin = self.stdin.lock().await;
+            let _ = stdin.shutdown().await;
+        }
+
         let mut child = self.child.lock().await;
-        // Try graceful kill first
+
+        // Step 2: short grace period (2s) for the server to exit on its own.
+        if tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+
+        // Step 3: SIGTERM-equivalent via `start_kill` (doesn't await).
+        // Give another brief grace for the signal handler to run.
+        if let Err(e) = child.start_kill() {
+            tracing::debug!("MCP: start_kill failed: {}", e);
+        }
+        if tokio::time::timeout(Duration::from_secs(1), child.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+
+        // Step 4: last resort — force kill and reap. `kill()` on tokio
+        // is equivalent to `start_kill() + wait()`, so this also reaps.
         let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+}
+
+/// Extract a u64 request id from a JSON-RPC `id` field, accepting either an
+/// integer (`{"id": 5}`) or a string-encoded integer (`{"id": "5"}`). The
+/// JSON-RPC 2.0 spec permits both shapes and a strict server may echo back
+/// the id as a different JSON type than we sent.
+fn parse_response_id(v: &Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_response_id;
+    use serde_json::json;
+
+    /// The warn-log truncation used above must not panic when byte 200 lands
+    /// inside a multi-byte UTF-8 codepoint. This reproduces the scenario with
+    /// 199 ASCII bytes followed by a 3-byte CJK character that straddles the
+    /// 200 cutoff.
+    #[test]
+    fn truncation_respects_char_boundary() {
+        let line = format!("{}你好", "a".repeat(199));
+        // Byte 200 falls inside the first codepoint of "你好".
+        let end = line.floor_char_boundary(200);
+        let truncated = &line[..end]; // must not panic
+        assert!(end <= 200);
+        assert!(truncated.is_char_boundary(end));
+    }
+
+    #[test]
+    fn parse_response_id_accepts_integer() {
+        assert_eq!(parse_response_id(&json!(5)), Some(5));
+        assert_eq!(parse_response_id(&json!(0)), Some(0));
+    }
+
+    #[test]
+    fn parse_response_id_accepts_string_integer() {
+        // JSON-RPC 2.0 allows the id to be a string; spec-conformant servers
+        // may echo back `"id": "5"` even though we sent `"id": 5`.
+        assert_eq!(parse_response_id(&json!("5")), Some(5));
+        assert_eq!(parse_response_id(&json!("0")), Some(0));
+    }
+
+    #[test]
+    fn parse_response_id_rejects_non_numeric() {
+        assert_eq!(parse_response_id(&json!("abc")), None);
+        assert_eq!(parse_response_id(&json!(null)), None);
+        assert_eq!(parse_response_id(&json!({})), None);
+        assert_eq!(parse_response_id(&json!(-1)), None);
     }
 }

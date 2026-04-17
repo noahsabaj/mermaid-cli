@@ -28,7 +28,12 @@ impl McpServerManager {
         let mut all_tools = Vec::new();
 
         for (name, config) in configs {
-            info!("Starting MCP server: {} ({} {})", name, config.command, config.args.join(" "));
+            info!(
+                "Starting MCP server: {} ({} {})",
+                name,
+                config.command,
+                config.args.join(" ")
+            );
 
             match Self::start_one(name, config).await {
                 Ok((client, tools)) => {
@@ -65,17 +70,18 @@ impl McpServerManager {
         name: &str,
         config: &McpServerConfig,
     ) -> Result<(McpClient, Vec<McpToolDef>)> {
-        let transport =
-            StdioTransport::spawn(&config.command, &config.args, &config.env).await?;
+        let transport = StdioTransport::spawn(&config.command, &config.args, &config.env).await?;
         let mut client = McpClient::new(transport);
 
-        client.initialize().await.map_err(|e| {
-            anyhow!("MCP server '{}' initialization failed: {}", name, e)
-        })?;
+        client
+            .initialize()
+            .await
+            .map_err(|e| anyhow!("MCP server '{}' initialization failed: {}", name, e))?;
 
-        let tools = client.list_tools().await.map_err(|e| {
-            anyhow!("MCP server '{}' tool discovery failed: {}", name, e)
-        })?;
+        let tools = client
+            .list_tools()
+            .await
+            .map_err(|e| anyhow!("MCP server '{}' tool discovery failed: {}", name, e))?;
 
         Ok((client, tools))
     }
@@ -115,7 +121,10 @@ impl McpServerManager {
     }
 
     /// Convert an MCP tool result into text suitable for a tool result message.
-    /// Images are returned separately for multimodal attachment.
+    /// Images are returned separately for multimodal attachment. Audio is
+    /// attached through the same channel — adapters that don't support audio
+    /// will silently drop it. Resource links + embedded resources render as
+    /// text so the model can follow up with another tool call.
     pub fn format_tool_result(result: &McpToolResult) -> (String, Option<Vec<String>>) {
         let mut text_parts = Vec::new();
         let mut images = Vec::new();
@@ -124,6 +133,44 @@ impl McpServerManager {
             match block {
                 ContentBlock::Text(text) => text_parts.push(text.clone()),
                 ContentBlock::Image { data, .. } => images.push(data.clone()),
+                ContentBlock::Audio { data, mime_type } => {
+                    images.push(data.clone());
+                    text_parts.push(format!("[audio attachment: {}]", mime_type));
+                },
+                ContentBlock::ResourceLink {
+                    uri,
+                    name,
+                    description,
+                    mime_type,
+                } => {
+                    let label = name.as_deref().unwrap_or(uri.as_str());
+                    let desc = description.as_deref().unwrap_or("");
+                    let mime = mime_type.as_deref().unwrap_or("");
+                    text_parts.push(format!(
+                        "[resource link: {} ({}) — {} → {}]",
+                        label, mime, desc, uri
+                    ));
+                },
+                ContentBlock::Resource {
+                    uri,
+                    mime_type,
+                    text,
+                    blob,
+                } => {
+                    let mime = mime_type.as_deref().unwrap_or("");
+                    if let Some(t) = text {
+                        text_parts.push(format!("[resource {}]:\n{}", uri, t));
+                    } else if let Some(b) = blob {
+                        text_parts.push(format!(
+                            "[resource {} ({}): {} bytes of base64]",
+                            uri,
+                            mime,
+                            b.len()
+                        ));
+                    } else {
+                        text_parts.push(format!("[resource {} ({})]", uri, mime));
+                    }
+                },
             }
         }
 

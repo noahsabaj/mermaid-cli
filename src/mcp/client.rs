@@ -40,11 +40,41 @@ pub struct McpToolResult {
     pub is_error: bool,
 }
 
-/// A content block in an MCP tool result
+/// A content block in an MCP tool result. Per the 2025-11-25 spec,
+/// servers may return text, image, audio, resource_link (URI reference),
+/// or embedded resource content. Older servers only emit text/image.
 #[derive(Debug, Clone)]
 pub enum ContentBlock {
     Text(String),
-    Image { data: String, mime_type: String },
+    Image {
+        data: String,
+        mime_type: String,
+    },
+    /// Audio content — base64-encoded data + mime type (e.g., `audio/wav`).
+    /// Routed to the model's image attachment channel for now; adapters
+    /// that don't support audio will silently drop the bytes but keep
+    /// the text hint from the tool output.
+    Audio {
+        data: String,
+        mime_type: String,
+    },
+    /// URI reference to an external resource. Rendered as text for the
+    /// model so it can follow up with another tool call if needed.
+    ResourceLink {
+        uri: String,
+        name: Option<String>,
+        description: Option<String>,
+        mime_type: Option<String>,
+    },
+    /// Embedded resource — same shape as a read_resource response.
+    /// Either `text` or `blob` (base64) is present depending on the
+    /// resource's kind. Rendered as text for the model.
+    Resource {
+        uri: String,
+        mime_type: Option<String>,
+        text: Option<String>,
+        blob: Option<String>,
+    },
 }
 
 impl McpClient {
@@ -66,7 +96,13 @@ impl McpClient {
             .send_request(
                 "initialize",
                 json!({
-                    "protocolVersion": "2025-03-26",
+                    // MCP spec version as of 2026-04. Servers negotiate
+                    // down to older versions if they don't support this;
+                    // spec requires them to respond with their latest
+                    // supported version, which we currently accept
+                    // silently. Bump when MCP ships a newer revision
+                    // with features we depend on.
+                    "protocolVersion": "2025-11-25",
                     "capabilities": {},
                     "clientInfo": {
                         "name": "mermaid",
@@ -100,10 +136,7 @@ impl McpClient {
 
     /// Discover all tools available from this server.
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>> {
-        let result = self
-            .transport
-            .send_request("tools/list", json!({}))
-            .await?;
+        let result = self.transport.send_request("tools/list", json!({})).await?;
 
         let tools_array = result
             .get("tools")
@@ -180,6 +213,65 @@ impl McpClient {
                         .unwrap_or("image/png")
                         .to_string();
                     content.push(ContentBlock::Image { data, mime_type });
+                },
+                "audio" => {
+                    let data = block
+                        .get("data")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let mime_type = block
+                        .get("mimeType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("audio/wav")
+                        .to_string();
+                    content.push(ContentBlock::Audio { data, mime_type });
+                },
+                "resource_link" => {
+                    let uri = block
+                        .get("uri")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if uri.is_empty() {
+                        continue;
+                    }
+                    content.push(ContentBlock::ResourceLink {
+                        uri,
+                        name: block.get("name").and_then(|v| v.as_str()).map(String::from),
+                        description: block
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        mime_type: block
+                            .get("mimeType")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                    });
+                },
+                "resource" => {
+                    // Embedded resource — nested under `resource`.
+                    let res = match block.get("resource") {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let uri = res
+                        .get("uri")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if uri.is_empty() {
+                        continue;
+                    }
+                    content.push(ContentBlock::Resource {
+                        uri,
+                        mime_type: res
+                            .get("mimeType")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        text: res.get("text").and_then(|v| v.as_str()).map(String::from),
+                        blob: res.get("blob").and_then(|v| v.as_str()).map(String::from),
+                    });
                 },
                 _ => {
                     // Unknown content type — treat as text if it has a text field

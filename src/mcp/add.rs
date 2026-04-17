@@ -20,10 +20,7 @@ pub async fn add_server(name: &str) -> Result<()> {
     // Check if already configured
     let mut config = load_config().unwrap_or_default();
     if config.mcp_servers.contains_key(name) {
-        print!(
-            "'{}' is already configured. Overwrite? [y/N]: ",
-            name
-        );
+        print!("'{}' is already configured. Overwrite? [y/N]: ", name);
         io::stdout().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
@@ -85,16 +82,18 @@ pub async fn add_server(name: &str) -> Result<()> {
 
     // Validate by spawning the server
     println!("\nValidating server (this may take a moment on first run)...");
-    let tool_names =
-        registry::validate_server(&resolved.package, &resolved.extra_args, &env).await?;
+    let tool_names = registry::validate_server(
+        &resolved.command,
+        &resolved.package,
+        &resolved.extra_args,
+        &env,
+    )
+    .await?;
 
     if tool_names.is_empty() {
         println!("Warning: Server responded but reported 0 tools.");
     } else {
-        println!(
-            "Server ready: {} tool(s) available",
-            tool_names.len()
-        );
+        println!("Server ready: {} tool(s) available", tool_names.len());
         // Show first few tool names
         let preview: Vec<&str> = tool_names.iter().map(|s| s.as_str()).take(5).collect();
         let suffix = if tool_names.len() > 5 {
@@ -105,12 +104,15 @@ pub async fn add_server(name: &str) -> Result<()> {
         println!("  {}{}", preview.join(", "), suffix);
     }
 
-    // Build config entry
-    let mut args = vec!["-y".to_string(), resolved.package.clone()];
+    // Build config entry — launcher-specific flags (`-y` for npx, none for uvx).
+    let mut args: Vec<String> = match resolved.command.as_str() {
+        "npx" => vec!["-y".to_string(), resolved.package.clone()],
+        _ => vec![resolved.package.clone()],
+    };
     args.extend(resolved.extra_args);
 
     let server_config = McpServerConfig {
-        command: "npx".to_string(),
+        command: resolved.command.clone(),
         args,
         env,
     };
@@ -139,7 +141,15 @@ pub async fn remove_server(name: &str) -> Result<()> {
     } else {
         println!("MCP server '{}' is not configured.", name);
         if !config.mcp_servers.is_empty() {
-            println!("Configured servers: {}", config.mcp_servers.keys().cloned().collect::<Vec<_>>().join(", "));
+            println!(
+                "Configured servers: {}",
+                config
+                    .mcp_servers
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
     }
 
