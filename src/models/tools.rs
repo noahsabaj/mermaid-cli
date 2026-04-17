@@ -271,7 +271,8 @@ impl ToolRegistry {
                 description: "Spawn an autonomous sub-agent to handle a task independently. \
                     The agent gets its own conversation context and full tool access. \
                     Give it a self-contained task via the prompt parameter. \
-                    Multiple agent calls in one response run in parallel.".to_string(),
+                    Multiple agent calls in one response run in parallel."
+                    .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -343,13 +344,14 @@ impl ToolRegistry {
             type_: "function".to_string(),
             function: ToolFunction {
                 name: "click".to_string(),
-                description: "Click at screen coordinates. Take a screenshot first to identify target coordinates.".to_string(),
+                description: "Click at screen coordinates. Take a screenshot first to identify target coordinates. The optional screenshot_id selects which screenshot's coordinate space (x, y) refer to — useful when chaining multiple screenshots; if omitted, the most recent screenshot is used.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "x": { "type": "integer", "description": "X coordinate (pixels from left)" },
                         "y": { "type": "integer", "description": "Y coordinate (pixels from top)" },
-                        "button": { "type": "string", "description": "Mouse button: 'left' (default), 'right', or 'middle'", "enum": ["left", "right", "middle"] }
+                        "button": { "type": "string", "description": "Mouse button: 'left' (default), 'right', or 'middle'", "enum": ["left", "right", "middle"] },
+                        "screenshot_id": { "type": "integer", "description": "Optional id of the screenshot whose coordinates these refer to (from the screenshot tool's success message). Omit to use the most recent." }
                     },
                     "required": ["x", "y"]
                 }),
@@ -414,12 +416,13 @@ impl ToolRegistry {
             type_: "function".to_string(),
             function: ToolFunction {
                 name: "mouse_move".to_string(),
-                description: "Move the mouse cursor to screen coordinates without clicking.".to_string(),
+                description: "Move the mouse cursor to screen coordinates without clicking. The optional screenshot_id selects which screenshot's coordinate space (x, y) refer to; if omitted, the most recent screenshot is used.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "x": { "type": "integer", "description": "X coordinate" },
-                        "y": { "type": "integer", "description": "Y coordinate" }
+                        "y": { "type": "integer", "description": "Y coordinate" },
+                        "screenshot_id": { "type": "integer", "description": "Optional id of the screenshot whose coordinates these refer to. Omit to use the most recent." }
                     },
                     "required": ["x", "y"]
                 }),
@@ -432,9 +435,7 @@ impl ToolRegistry {
 ///
 /// Each tool is namespaced as `mcp__{server_name}__{tool_name}` following
 /// the Claude Code convention for MCP tool naming.
-pub fn mcp_tools_to_ollama(
-    tools: &[(String, crate::mcp::McpToolDef)],
-) -> Vec<serde_json::Value> {
+pub fn mcp_tools_to_ollama(tools: &[(String, crate::mcp::McpToolDef)]) -> Vec<serde_json::Value> {
     tools
         .iter()
         .map(|(server_name, tool)| {

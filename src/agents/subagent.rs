@@ -13,7 +13,9 @@ use tracing::{info, warn};
 
 use crate::agents::{ActionResult as AgentActionResult, AgentAction};
 use crate::constants::MAX_CONCURRENT_AGENTS;
-use crate::models::{ChatMessage, Model, ModelConfig, StreamCallback};
+use crate::models::{
+    ChatMessage, Model, ModelConfig, ReasoningLevel, StreamCallback, StreamEvent, ToolCall,
+};
 use crate::prompts;
 use crate::runtime::agent_loop::{self, AgentObserver, LoopControl, MAX_AGENT_ITERATIONS};
 use crate::utils::MutexExt;
@@ -114,12 +116,22 @@ async fn run_subagent(
         ChatMessage::user(prompt),
     ];
 
-    // First model call
+    // First model call. Subagents don't surface reasoning to the parent
+    // (the parent just sees the final summary), so we drop Reasoning
+    // chunks. Text + tool calls feed the agent loop the same way the
+    // legacy text accumulator did.
     let response_text = Arc::new(std::sync::Mutex::new(String::new()));
-    let response_clone = Arc::clone(&response_text);
-    let callback: StreamCallback = Arc::new(move |chunk: &str| {
-        let mut resp = response_clone.lock_mut_safe();
-        resp.push_str(chunk);
+    let typed_tool_calls = Arc::new(std::sync::Mutex::new(Vec::<ToolCall>::new()));
+    let text_clone = Arc::clone(&response_text);
+    let tool_clone = Arc::clone(&typed_tool_calls);
+    let callback: StreamCallback = Arc::new(move |event| match event {
+        StreamEvent::Text(chunk) => {
+            text_clone.lock_mut_safe().push_str(&chunk);
+        },
+        StreamEvent::ToolCall(tc) => {
+            tool_clone.lock_mut_safe().push(tc);
+        },
+        StreamEvent::Reasoning(_) | StreamEvent::Done { .. } => {},
     });
 
     let initial_result = {
@@ -129,14 +141,19 @@ async fn run_subagent(
 
     let (content, initial_tool_calls, initial_tokens) = match initial_result {
         Ok(response) => {
-            let callback_content = response_text.lock_mut_safe().clone();
-            let content = if !callback_content.is_empty() {
-                callback_content
+            let streamed_text = response_text.lock_mut_safe().clone();
+            let content = if !streamed_text.is_empty() {
+                streamed_text
             } else {
                 response.content.clone()
             };
             let tokens = response.usage.map(|u| u.total_tokens).unwrap_or(0);
-            let tool_calls = response.tool_calls.unwrap_or_default();
+            let streamed_tool_calls = std::mem::take(&mut *typed_tool_calls.lock_mut_safe());
+            let tool_calls = if !streamed_tool_calls.is_empty() {
+                streamed_tool_calls
+            } else {
+                response.tool_calls.unwrap_or_default()
+            };
 
             {
                 let mut prog = progress.lock_mut_safe();
@@ -318,10 +335,12 @@ pub fn spawn_subagents(
             continue;
         }
 
-        // Build subagent-specific config
+        // Build subagent-specific config. Subagents skip reasoning to
+        // keep them fast and focused — the orchestrating turn already
+        // did the planning.
         let mut subagent_config = config.clone();
         subagent_config.is_subagent = true;
-        subagent_config.thinking_enabled = Some(false);
+        subagent_config.reasoning = ReasoningLevel::None;
 
         let model_clone = Arc::clone(&model);
         let progress_clone = Arc::clone(&progress);
@@ -383,13 +402,19 @@ pub fn format_subagent_tool_result(result: &SubagentResult) -> String {
     if result.success {
         format!(
             "Agent '{}' completed successfully ({} tool uses, {} tokens, {:.1}s):\n\n{}",
-            result.description, result.tool_uses, result.tokens, result.duration_secs,
+            result.description,
+            result.tool_uses,
+            result.tokens,
+            result.duration_secs,
             result.response
         )
     } else {
         format!(
             "Agent '{}' failed: {} ({} tool uses, {} tokens, {:.1}s)",
-            result.description, result.response, result.tool_uses, result.tokens,
+            result.description,
+            result.response,
+            result.tool_uses,
+            result.tokens,
             result.duration_secs
         )
     }

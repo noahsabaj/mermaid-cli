@@ -4,6 +4,7 @@
 //! with a single, coherent, backend-agnostic configuration structure.
 
 use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE};
+use crate::models::reasoning::ReasoningLevel;
 use crate::prompts;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -26,10 +27,31 @@ pub struct ModelConfig {
     /// System prompt override (None = use default)
     pub system_prompt: Option<String>,
 
-    /// Enable thinking mode for models that support it (e.g., kimi, qwen3)
-    /// Some(true) = explicitly enabled, Some(false) = explicitly disabled, None = model default
-    #[serde(default = "default_thinking_enabled")]
-    pub thinking_enabled: Option<bool>,
+    /// Project-specific instructions appended to the system prompt
+    /// (Step 5h: MERMAID.md content). Runtime-only — never persisted.
+    /// On Anthropic, this gets its own `cache_control` block so the
+    /// static base stays cached even when the dynamic suffix changes.
+    /// On other adapters, it's concatenated onto the system prompt
+    /// with a `---` separator.
+    #[serde(skip)]
+    pub dynamic_system_suffix: Option<String>,
+
+    /// Requested reasoning depth. Adapters map this to provider-native
+    /// shapes via `nearest_effort()` against `ModelCapabilities
+    /// ::supports_reasoning`. Defaults to `Medium` — the OpenAI / Anthropic
+    /// / Gemini default and the level that produces useful chain-of-thought
+    /// without burning excessive latency for routine prompts.
+    #[serde(default)]
+    pub reasoning: ReasoningLevel,
+
+    /// Hide the reasoning trace from the user-visible stream while still
+    /// allowing the model to reason server-side. Maps to Ollama's
+    /// `--hidethinking` semantics and Anthropic's `thinking.display:
+    /// "omitted"`. Independent of `reasoning` (you can have full reasoning
+    /// depth with the trace hidden, or no reasoning at all — the two
+    /// concerns are orthogonal).
+    #[serde(default)]
+    pub hide_reasoning_trace: bool,
 
     /// Whether this is a subagent context (excludes the agent tool to prevent nesting).
     /// Runtime-only flag -- never persisted to disk.
@@ -50,11 +72,18 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            model: "ollama/tinyllama".to_string(),
+            // Intentionally empty — every real construction goes through
+            // `from_app_config` which sets this immediately. Leaving a
+            // concrete model here (e.g. "ollama/tinyllama") would silently
+            // boot an unintended model if the default ever leaked to a
+            // call site; an empty string produces a clearer server error.
+            model: String::new(),
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
             system_prompt: Some(prompts::get_system_prompt()),
-            thinking_enabled: Some(true),
+            dynamic_system_suffix: None,
+            reasoning: ReasoningLevel::default(),
+            hide_reasoning_trace: false,
             is_subagent: false,
             backend_options: HashMap::new(),
             mcp_tools: Vec::new(),
@@ -86,15 +115,48 @@ impl ModelConfig {
             .insert(key, value);
     }
 
+    /// Build the system-prompt string for adapters that don't support
+    /// per-block cache control (Gemini, OpenAI-compat, Ollama). Joins
+    /// the static base and the dynamic suffix (MERMAID.md content)
+    /// with a `---` separator. Anthropic's adapter doesn't use this
+    /// helper — it emits two separately-cached typed-text blocks.
+    ///
+    /// Returns `None` only when both fields are empty/unset.
+    pub fn combined_system_prompt(&self) -> Option<String> {
+        match (
+            self.system_prompt.as_deref(),
+            self.dynamic_system_suffix.as_deref(),
+        ) {
+            (Some(s), Some(suffix)) if !s.is_empty() && !suffix.is_empty() => {
+                Some(format!("{}\n\n---\n\n{}", s, suffix))
+            },
+            (Some(s), _) if !s.is_empty() => Some(s.to_string()),
+            (_, Some(suffix)) if !suffix.is_empty() => Some(suffix.to_string()),
+            _ => None,
+        }
+    }
+
     /// Build a ModelConfig from user-facing app Config for a given model ID.
     ///
-    /// Centralizes the wiring of temperature, max_tokens, and Ollama hardware
-    /// options that was previously scattered across orchestrator.rs and model.rs.
+    /// Centralizes the wiring of temperature, max_tokens, reasoning level,
+    /// and Ollama hardware options that was previously scattered across
+    /// orchestrator.rs and model.rs.
+    ///
+    /// Reasoning resolution: per-model preference
+    /// (`config.reasoning_per_model[model_id]`) wins, then falls back to
+    /// the global `default_model.reasoning`. Set per-model via Alt+T or
+    /// `/reasoning <level>` while using the model in question.
     pub fn from_app_config(config: &crate::app::Config, model_id: &str) -> Self {
+        let reasoning = config
+            .reasoning_per_model
+            .get(model_id)
+            .copied()
+            .unwrap_or(config.default_model.reasoning);
         let mut mc = Self {
             model: model_id.to_string(),
             temperature: config.default_model.temperature,
             max_tokens: config.default_model.max_tokens,
+            reasoning,
             ..Self::default()
         };
         if let Some(v) = config.ollama.num_gpu {
@@ -168,7 +230,14 @@ fn default_max_tokens() -> usize {
 }
 
 fn default_ollama_url() -> String {
-    std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string())
+    // Real callers always go through `ModelFactory::config_to_backend_config`,
+    // which reads `app::Config.ollama.host/port` (the single documented config
+    // path). This default only fires when constructing `BackendConfig::default`
+    // directly (no app config supplied) — primarily tests. Keep it static so
+    // the precedence is unambiguous; a `MERMAID_OLLAMA_HOST` env override
+    // would belong on `app::Config` loading instead, where it can be
+    // documented and surfaced in `mermaid status`.
+    "http://localhost:11434".to_string()
 }
 
 fn default_timeout() -> u64 {
@@ -179,6 +248,47 @@ fn default_max_idle() -> usize {
     10
 }
 
-fn default_thinking_enabled() -> Option<bool> {
-    Some(true)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Step 4 wires `default_model.reasoning` from app config into the
+    /// per-call ModelConfig. Without this, the user's config-file choice
+    /// would silently revert to `Medium` on every session bootstrap.
+    #[test]
+    fn from_app_config_propagates_reasoning_from_settings() {
+        let mut cfg = crate::app::Config::default();
+        cfg.default_model.reasoning = ReasoningLevel::High;
+
+        let mc = ModelConfig::from_app_config(&cfg, "ollama/qwen3-coder:30b");
+        assert_eq!(mc.reasoning, ReasoningLevel::High);
+        assert_eq!(mc.model, "ollama/qwen3-coder:30b");
+    }
+
+    #[test]
+    fn from_app_config_uses_medium_default_when_unset() {
+        let cfg = crate::app::Config::default();
+        let mc = ModelConfig::from_app_config(&cfg, "ollama/qwen3-coder:30b");
+        assert_eq!(mc.reasoning, ReasoningLevel::Medium);
+    }
+
+    /// Per-model preference wins over the global default. This is the
+    /// Step 5b semantic: setting `/reasoning high` on Sonnet sticks for
+    /// Sonnet without affecting other models.
+    #[test]
+    fn from_app_config_uses_per_model_preference() {
+        let mut cfg = crate::app::Config::default();
+        cfg.default_model.reasoning = ReasoningLevel::Low;
+        cfg.reasoning_per_model.insert(
+            "anthropic/claude-sonnet-4-6".to_string(),
+            ReasoningLevel::High,
+        );
+
+        let mc_per_model = ModelConfig::from_app_config(&cfg, "anthropic/claude-sonnet-4-6");
+        assert_eq!(mc_per_model.reasoning, ReasoningLevel::High);
+
+        // Falls back to default for other models.
+        let mc_default = ModelConfig::from_app_config(&cfg, "ollama/foo");
+        assert_eq!(mc_default.reasoning, ReasoningLevel::Low);
+    }
 }

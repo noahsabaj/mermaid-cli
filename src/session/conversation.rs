@@ -145,16 +145,32 @@ impl ConversationManager {
         Ok(conversation)
     }
 
-    /// Load the most recent conversation
+    /// Load the most recent conversation.
+    ///
+    /// Picks the newest file by filesystem mtime, then deserializes only
+    /// that one file. Much cheaper than `list_conversations()` (which
+    /// reads and parses every file) in directories with many sessions.
     pub fn load_last_conversation(&self) -> Result<Option<ConversationHistory>> {
-        let conversations = self.list_conversations()?;
-
-        if conversations.is_empty() {
+        let Ok(entries) = fs::read_dir(&self.conversations_dir) else {
             return Ok(None);
-        }
+        };
 
-        // Conversations are already sorted by modification time (newest first)
-        Ok(conversations.into_iter().next())
+        let newest = entries
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .filter_map(|e| {
+                let mtime = e.metadata().ok()?.modified().ok()?;
+                Some((mtime, e.path()))
+            })
+            .max_by_key(|(mtime, _)| *mtime);
+
+        let Some((_, path)) = newest else {
+            return Ok(None);
+        };
+
+        let json = fs::read_to_string(&path)?;
+        let conv: ConversationHistory = serde_json::from_str(&json)?;
+        Ok(Some(conv))
     }
 
     /// List all conversations in the project
@@ -318,6 +334,36 @@ mod tests {
 
         let last = manager.load_last_conversation().unwrap().unwrap();
         assert_eq!(last.id, conv.id);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_last_conversation_picks_newest_by_mtime() {
+        // Writes three conversations with staggered mtimes (via sleeps
+        // between saves) and asserts the mtime-based picker returns the
+        // last one written — even though filename-alphabetical ordering
+        // would pick a different file.
+        let dir = std::env::temp_dir().join("mermaid_test_conv_mtime");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+
+        let conv1 = ConversationHistory::new("/tmp".into(), "m".into());
+        manager.save_conversation(&conv1).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let conv2 = ConversationHistory::new("/tmp".into(), "m".into());
+        manager.save_conversation(&conv2).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let conv3 = ConversationHistory::new("/tmp".into(), "m".into());
+        manager.save_conversation(&conv3).unwrap();
+
+        let last = manager.load_last_conversation().unwrap().unwrap();
+        assert_eq!(
+            last.id, conv3.id,
+            "should return the most-recently-written file"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

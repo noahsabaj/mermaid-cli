@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+use crate::models::ReasoningLevel;
+
 #[derive(Parser, Debug)]
 #[command(name = "mermaid")]
 #[command(version)]
@@ -9,6 +11,12 @@ pub struct Cli {
     /// Model to use (e.g., qwen3-coder:30b, ollama/llama3)
     #[arg(short, long)]
     pub model: Option<String>,
+
+    /// Reasoning depth (none, minimal, low, medium, high, max).
+    /// Overrides the persisted default for this session; the slash
+    /// command `/reasoning <level>` and Alt+T can change it at runtime.
+    #[arg(long)]
+    pub reasoning: Option<ReasoningLevel>,
 
     /// Project directory (defaults to current directory)
     #[arg(short, long)]

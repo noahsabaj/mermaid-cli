@@ -1,4 +1,5 @@
 use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERATURE};
+use crate::models::ReasoningLevel;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,68 @@ pub struct Config {
     /// MCP server configurations
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+
+    /// User overrides + custom OpenAI-compatible providers. Keys are
+    /// provider names; matching a built-in registry entry overrides its
+    /// defaults, anything else defines a fully custom provider.
+    /// Example:
+    /// ```toml
+    /// [providers.groq]
+    /// api_key_env = "MY_GROQ_KEY"  # override default GROQ_API_KEY
+    ///
+    /// [providers.my-vllm]
+    /// base_url = "http://192.168.1.42:8000/v1"
+    /// api_key_env = "VLLM_KEY"
+    /// compat = "openai-effort"
+    /// ```
+    #[serde(default)]
+    pub providers: HashMap<String, UserProviderConfig>,
+
+    /// Per-model reasoning preferences keyed by full model ID
+    /// (`provider/name`). Set when the user runs `/reasoning <level>` or
+    /// Alt+T cycles while using a specific model — the new value sticks
+    /// for that model until changed. Falls back to
+    /// `default_model.reasoning` when no entry exists.
+    /// Example:
+    /// ```toml
+    /// [reasoning_per_model]
+    /// "anthropic/claude-sonnet-4-6" = "high"
+    /// "ollama/qwen3-coder:30b" = "low"
+    /// ```
+    #[serde(default)]
+    pub reasoning_per_model: HashMap<String, ReasoningLevel>,
+}
+
+/// User-supplied OpenAI-compatible provider configuration. All fields are
+/// optional — when matching a built-in registry entry, only the supplied
+/// fields override; the rest fall back to the registry defaults. For
+/// fully custom providers, `base_url` and `api_key_env` are required.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserProviderConfig {
+    /// Override base URL for `/chat/completions` (None = use built-in
+    /// registry default; required for fully custom providers).
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Env var name to read the API key from (None = use the built-in
+    /// registry default like `GROQ_API_KEY`; required for fully custom
+    /// providers).
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// Extra HTTP headers sent on every request to this provider.
+    #[serde(default)]
+    pub extra_headers: HashMap<String, String>,
+    /// For fully custom providers (no built-in registry entry), declares
+    /// which OpenAI-compatible shape the endpoint speaks. Ignored when
+    /// the provider name matches a built-in registry entry. Values:
+    /// `"openai"` (no reasoning), `"openai-effort"` (`reasoning_effort`
+    /// field), `"openrouter"` (nested `reasoning: {effort}` object).
+    #[serde(default)]
+    pub compat: Option<String>,
+    /// Optional preferred model — surfaced by `mermaid status` and used
+    /// as the default when the user picks this provider with no model
+    /// suffix.
+    #[serde(default)]
+    pub default_model: Option<String>,
 }
 
 /// MCP server configuration
@@ -54,6 +117,10 @@ pub struct ModelSettings {
     pub temperature: f32,
     /// Maximum tokens to generate
     pub max_tokens: usize,
+    /// Default reasoning depth used for new sessions when no `--reasoning`
+    /// flag is given. Each adapter snaps this onto the closest level the
+    /// model actually supports via `nearest_effort()`.
+    pub reasoning: ReasoningLevel,
 }
 
 impl Default for ModelSettings {
@@ -63,6 +130,7 @@ impl Default for ModelSettings {
             name: String::new(),
             temperature: DEFAULT_TEMPERATURE,
             max_tokens: DEFAULT_MAX_TOKENS,
+            reasoning: ReasoningLevel::default(),
         }
     }
 }
@@ -207,6 +275,28 @@ pub fn persist_last_model(model: &str) -> Result<()> {
     save_config(&config, None)
 }
 
+/// Persist the user's default reasoning level to config file. Mirrors
+/// `persist_last_model` — used by the `/reasoning` slash command and the
+/// Alt+T cycle handler so the choice survives across sessions.
+pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
+    let mut config = load_config().unwrap_or_default();
+    config.default_model.reasoning = level;
+    save_config(&config, None)
+}
+
+/// Persist a reasoning level for a specific model ID
+/// (e.g. `anthropic/claude-sonnet-4-6`). The TUI calls this from Alt+T,
+/// `/reasoning <level>`, and the does-not-support-thinking auto-snap so
+/// the choice sticks per-model rather than bleeding into other models on
+/// next session start.
+pub fn persist_reasoning_for_model(model_id: &str, level: ReasoningLevel) -> Result<()> {
+    let mut config = load_config().unwrap_or_default();
+    config
+        .reasoning_per_model
+        .insert(model_id.to_string(), level);
+    save_config(&config, None)
+}
+
 /// Resolve which model to use: CLI arg > last_used > default_model > any available
 pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyhow::Result<String> {
     if let Some(model) = cli_model {
@@ -221,6 +311,129 @@ pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyho
             config.default_model.provider, config.default_model.name
         ));
     }
-    let available = crate::ollama::require_any_model().await?;
-    Ok(format!("ollama/{}", available[0]))
+    let available = crate::ollama::require_any_model(config).await?;
+    // `require_any_model` already errors on empty, so this `.first()` is
+    // never `None` in practice. Use `.first()` over `[0]` so the precondition
+    // is enforced by the type system instead of by a comment.
+    let first = available
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("require_any_model returned empty list"))?;
+    Ok(format!("ollama/{}", first))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Configs persisted before Step 4 don't have a `reasoning` field on
+    /// `[default_model]`. Loading them must succeed and yield the
+    /// `Medium` default — otherwise existing user configs break on
+    /// upgrade.
+    #[test]
+    fn model_settings_deserializes_without_reasoning_field() {
+        let toml_blob = r#"
+            provider = "ollama"
+            name = "qwen3-coder:30b"
+            temperature = 0.7
+            max_tokens = 4096
+        "#;
+        let settings: ModelSettings = toml::from_str(toml_blob).expect("backward compat");
+        assert_eq!(settings.reasoning, ReasoningLevel::Medium);
+        assert_eq!(settings.provider, "ollama");
+    }
+
+    #[test]
+    fn model_settings_round_trips_reasoning_high() {
+        let original = ModelSettings {
+            provider: "anthropic".to_string(),
+            name: "claude-sonnet-4-6".to_string(),
+            temperature: 0.5,
+            max_tokens: 8192,
+            reasoning: ReasoningLevel::High,
+        };
+        let toml_blob = toml::to_string(&original).expect("serialize");
+        let back: ModelSettings = toml::from_str(&toml_blob).expect("deserialize");
+        assert_eq!(back.reasoning, ReasoningLevel::High);
+        assert_eq!(back.name, "claude-sonnet-4-6");
+    }
+
+    /// `persist_default_reasoning` writes to the real config path, so
+    /// this test goes through `save_config(_, Some(path))` directly to
+    /// avoid clobbering the user's actual `~/.config/mermaid/config.toml`.
+    /// Uses `std::env::temp_dir` (matching the pattern in
+    /// `session::conversation` and `utils::logger`) — no external
+    /// `tempfile` crate dependency.
+    #[test]
+    fn save_and_reload_preserves_reasoning_field() {
+        let dir = std::env::temp_dir().join("mermaid_test_config_reasoning");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.default_model.provider = "ollama".to_string();
+        cfg.default_model.name = "qwen3-coder:30b".to_string();
+        cfg.default_model.reasoning = ReasoningLevel::Low;
+
+        save_config(&cfg, Some(path.clone())).expect("save");
+
+        let blob = std::fs::read_to_string(&path).expect("read");
+        let loaded: Config = toml::from_str(&blob).expect("parse back");
+        assert_eq!(loaded.default_model.reasoning, ReasoningLevel::Low);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Per-model entries serialize as a TOML table with quoted keys (the
+    /// model IDs contain `/`). This test verifies the round-trip works
+    /// through both serialization and deserialization, matching what
+    /// `persist_reasoning_for_model` would produce in real use.
+    #[test]
+    fn save_and_reload_preserves_reasoning_per_model_table() {
+        let dir = std::env::temp_dir().join("mermaid_test_config_per_model_reasoning");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.reasoning_per_model.insert(
+            "anthropic/claude-sonnet-4-6".to_string(),
+            ReasoningLevel::High,
+        );
+        cfg.reasoning_per_model
+            .insert("ollama/qwen3-coder:30b".to_string(), ReasoningLevel::Low);
+
+        save_config(&cfg, Some(path.clone())).expect("save");
+
+        let blob = std::fs::read_to_string(&path).expect("read");
+        let loaded: Config = toml::from_str(&blob).expect("parse back");
+        assert_eq!(
+            loaded
+                .reasoning_per_model
+                .get("anthropic/claude-sonnet-4-6"),
+            Some(&ReasoningLevel::High)
+        );
+        assert_eq!(
+            loaded.reasoning_per_model.get("ollama/qwen3-coder:30b"),
+            Some(&ReasoningLevel::Low)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Configs from before Step 5b don't have a `reasoning_per_model`
+    /// section. Loading them must succeed with an empty map — otherwise
+    /// upgrade breaks every existing user.
+    #[test]
+    fn config_deserializes_without_reasoning_per_model() {
+        let toml_blob = r#"
+            last_used_model = "ollama/qwen3-coder:30b"
+
+            [default_model]
+            provider = "ollama"
+            name = "qwen3-coder:30b"
+            temperature = 0.7
+            max_tokens = 4096
+        "#;
+        let cfg: Config = toml::from_str(toml_blob).expect("backward compat");
+        assert!(cfg.reasoning_per_model.is_empty());
+    }
 }

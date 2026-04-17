@@ -4,4 +4,4 @@ mod non_interactive;
 mod orchestrator;
 
 pub use non_interactive::{NonInteractiveResult, NonInteractiveRunner, format_result};
-pub use orchestrator::Orchestrator;
+pub use orchestrator::{Orchestrator, actionable_init_error};

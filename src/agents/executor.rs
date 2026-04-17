@@ -57,7 +57,10 @@ pub async fn execute_command(
     let timeout_duration = Duration::from_secs(secs);
 
     match timeout(timeout_duration, run_command(cmd)).await {
-        Ok(Ok(output)) => ActionResult::Success { output, images: None },
+        Ok(Ok(output)) => ActionResult::Success {
+            output,
+            images: None,
+        },
         Ok(Err(e)) => ActionResult::Error {
             error: format!("Command failed: {}", e),
         },
@@ -136,14 +139,22 @@ async fn run_command(mut cmd: Command) -> Result<String> {
     Ok(full_output)
 }
 
-/// Check if a command contains dangerous operations
+/// Check if a command contains dangerous operations.
 ///
 /// This is a **defense-in-depth** blocklist, NOT a security boundary.
 /// The AI model is the trusted actor making tool calls. This blocklist
 /// catches obvious destructive patterns that are almost never intentional,
-/// but it cannot prevent all dangerous commands (encoded, obfuscated, or
-/// via scripting languages). The real security boundary is the user's
-/// decision to run Mermaid with filesystem/shell access.
+/// but it cannot prevent all dangerous commands. Known residual gaps:
+///
+///   - Encoded payloads (`echo cm0gLXJmIC8K | base64 -d | sh`).
+///   - `eval` / `exec` chains where the literal `rm` token never appears.
+///   - Scripting languages spawning the actual call (`python -c "..."`,
+///     `node -e "..."`).
+///   - Substitution chains beyond the simple `$(...)` and backtick forms
+///     that this function catches (e.g. nested expansions, `<(...)`).
+///
+/// The real security boundary is the user's decision to run Mermaid with
+/// filesystem/shell access.
 fn contains_dangerous_command(command: &str) -> bool {
     let dangerous_patterns = [
         "rm -rf /",
@@ -191,16 +202,23 @@ fn contains_dangerous_command(command: &str) -> bool {
         ("C:\\Users", false),
     ];
 
-    // Only match "rm" or "del" as standalone command words, not substrings
+    // Only match "rm" or "del" as standalone command words, not substrings.
+    // The subshell forms (`$(rm`, `` `rm ``) are caught explicitly because
+    // the previous separator-based patterns missed them — `$(rm -rf /etc)`
+    // would have slipped through the heuristic without these.
     let has_rm_command = lower_command.starts_with("rm ")
         || lower_command.contains(" rm ")
         || lower_command.contains(";rm ")
         || lower_command.contains("&rm ")
-        || lower_command.contains("|rm ");
+        || lower_command.contains("|rm ")
+        || lower_command.contains("$(rm ")
+        || lower_command.contains("`rm ");
     let has_del_command = lower_command.starts_with("del ")
         || lower_command.contains(" del ")
         || lower_command.contains(";del ")
-        || lower_command.contains("&del ");
+        || lower_command.contains("&del ")
+        || lower_command.contains("$(del ")
+        || lower_command.contains("`del ");
 
     if has_rm_command || has_del_command {
         for (dir, require_trailing) in &system_dir_patterns {
@@ -299,5 +317,14 @@ mod tests {
         assert!(!contains_dangerous_command("rm file~")); // backup file suffix
         assert!(!contains_dangerous_command("rm backup~")); // backup file suffix
         assert!(!contains_dangerous_command("ls ~/Documents")); // ls is not rm
+
+        // Subshell forms — `$(rm ...)` and backtick `rm ...`. These slipped
+        // through the prior separator-based heuristic.
+        assert!(contains_dangerous_command("echo $(rm -rf /etc)"));
+        assert!(contains_dangerous_command("echo `rm /etc/passwd`"));
+        assert!(contains_dangerous_command("foo=$(rm /home/user/secret)"));
+        // Subshell form without a system-dir target stays allowed (we only
+        // block `rm` against specific protected dirs).
+        assert!(!contains_dangerous_command("echo $(rm /tmp/scratch)"));
     }
 }

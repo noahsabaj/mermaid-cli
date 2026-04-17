@@ -9,12 +9,20 @@ use tokio::sync::RwLock;
 
 use mermaid_cli::agents::{ActionResult as AgentActionResult, AgentAction};
 use mermaid_cli::models::{
-    ChatMessage, FunctionCall, Model, ModelConfig, ModelResponse, StreamCallback, ToolCall,
-    TokenUsage,
+    ChatMessage, FunctionCall, Model, ModelCapabilities, ModelConfig, ModelResponse,
+    StreamCallback, TokenUsage, ToolCall,
 };
 use mermaid_cli::runtime::agent_loop::{
     AgentObserver, LoopControl, MAX_AGENT_ITERATIONS, run_agent_loop,
 };
+use std::sync::OnceLock;
+
+/// Shared capabilities instance for the test models. Test adapters all use
+/// the same conservative defaults; sharing avoids per-model boilerplate.
+fn mock_capabilities() -> &'static ModelCapabilities {
+    static CAPS: OnceLock<ModelCapabilities> = OnceLock::new();
+    CAPS.get_or_init(ModelCapabilities::ollama_default)
+}
 
 /// Mock model: the agent loop passes initial_tool_calls separately, then
 /// calls chat() after executing those tools. This mock always returns no
@@ -40,11 +48,16 @@ impl Model for MockModel {
             model_name: "mock".to_string(),
             thinking: None,
             tool_calls: None,
+            thinking_signature: None,
         })
     }
 
     fn name(&self) -> &str {
         "mock"
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        mock_capabilities()
     }
 
     async fn list_models(&self) -> mermaid_cli::models::Result<Vec<String>> {
@@ -163,6 +176,7 @@ async fn test_agent_loop_respects_max_iterations() {
                         arguments: serde_json::json!({"path": "Cargo.toml"}),
                     },
                 }]),
+                thinking_signature: None,
             })
         }
 
@@ -170,13 +184,16 @@ async fn test_agent_loop_respects_max_iterations() {
             "infinite-mock"
         }
 
+        fn capabilities(&self) -> &ModelCapabilities {
+            mock_capabilities()
+        }
+
         async fn list_models(&self) -> mermaid_cli::models::Result<Vec<String>> {
             Ok(vec![])
         }
     }
 
-    let model: Arc<RwLock<Box<dyn Model>>> =
-        Arc::new(RwLock::new(Box::new(InfiniteToolModel)));
+    let model: Arc<RwLock<Box<dyn Model>>> = Arc::new(RwLock::new(Box::new(InfiniteToolModel)));
     let config = ModelConfig::default();
     let mut messages = vec![ChatMessage::user("loop forever")];
 
@@ -209,12 +226,7 @@ async fn test_agent_loop_respects_max_iterations() {
     // Loop increments iteration at the top, then checks > max_iterations.
     // So it runs max_iters iterations, then on iteration max_iters+1 it breaks.
     assert_eq!(result.iterations, max_iters + 1);
-    assert!(
-        observer
-            .statuses
-            .iter()
-            .any(|s| s.contains("exceeded")),
-    );
+    assert!(observer.statuses.iter().any(|s| s.contains("exceeded")),);
 }
 
 #[tokio::test]
@@ -236,6 +248,10 @@ async fn test_agent_loop_interrupt() {
             "never"
         }
 
+        fn capabilities(&self) -> &ModelCapabilities {
+            mock_capabilities()
+        }
+
         async fn list_models(&self) -> mermaid_cli::models::Result<Vec<String>> {
             Ok(vec![])
         }
@@ -255,8 +271,7 @@ async fn test_agent_loop_interrupt() {
         fn on_generation_complete(&mut self, _: usize) {}
     }
 
-    let model: Arc<RwLock<Box<dyn Model>>> =
-        Arc::new(RwLock::new(Box::new(NeverCalledModel)));
+    let model: Arc<RwLock<Box<dyn Model>>> = Arc::new(RwLock::new(Box::new(NeverCalledModel)));
     let config = ModelConfig::default();
     let mut messages = vec![ChatMessage::user("test")];
 

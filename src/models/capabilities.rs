@@ -1,0 +1,65 @@
+//! Per-model capability metadata.
+//!
+//! Adapters expose `ModelCapabilities` via `Model::capabilities()` so the
+//! rest of the codebase can ask facts like "does this model support tool
+//! calls?" or "what reasoning levels does it accept?" without per-provider
+//! string matching scattered through the codebase. This is the same
+//! pattern Roo Code uses on its `ModelInfo` struct (`supports_reasoning_*`
+//! flags) and Codex CLI uses on `ModelPreset.supported_reasoning_efforts`.
+//!
+//! For Step 1 the values are hardcoded conservative defaults. A future
+//! step can add per-model lookup (similar to https://models.dev) or
+//! runtime probing (Ollama `/api/show`).
+
+use super::reasoning::ReasoningCapability;
+
+/// Capability flags advertised by a model adapter.
+#[derive(Debug, Clone)]
+pub struct ModelCapabilities {
+    /// Model accepts tool/function-calling requests in the chat API.
+    pub supports_tools: bool,
+    /// Model accepts image inputs in messages (vision-capable).
+    pub supports_vision: bool,
+    /// Reasoning controls the model exposes — see `ReasoningCapability`.
+    pub supports_reasoning: ReasoningCapability,
+    /// Maximum context window in tokens, if known.
+    pub max_context_tokens: Option<usize>,
+}
+
+impl ModelCapabilities {
+    /// Conservative defaults for an Ollama-served model. We assume tool
+    /// calling (every modern Ollama-supported model the project targets
+    /// has it), assume no vision (the safer default — vision support is
+    /// detected via response errors at runtime in `loop_coordinator.rs`),
+    /// and treat reasoning as binary on/off (matches the `think: bool`
+    /// semantics for everything except gpt-oss).
+    pub fn ollama_default() -> Self {
+        Self {
+            supports_tools: true,
+            supports_vision: false,
+            supports_reasoning: ReasoningCapability::Binary,
+            max_context_tokens: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ollama_default_is_conservative() {
+        let caps = ModelCapabilities::ollama_default();
+        assert!(caps.supports_tools);
+        assert!(!caps.supports_vision);
+        assert_eq!(caps.supports_reasoning, ReasoningCapability::Binary);
+        assert!(caps.max_context_tokens.is_none());
+    }
+
+    #[test]
+    fn capabilities_are_cloneable() {
+        let caps = ModelCapabilities::ollama_default();
+        let cloned = caps.clone();
+        assert_eq!(cloned.supports_tools, caps.supports_tools);
+    }
+}

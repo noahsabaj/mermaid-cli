@@ -3,7 +3,7 @@
 
 // Private submodules - not directly accessible from outside
 mod action_executor;
-mod computer_use;
+pub(crate) mod computer_use;
 mod executor;
 mod filesystem;
 mod subagent;
@@ -15,7 +15,10 @@ pub use action_executor::{
     describe_action, execute_action, get_mcp_manager, mark_mcp_init_complete,
     mark_mcp_init_started, set_mcp_manager,
 };
-pub use filesystem::{is_binary_file, read_binary_file, read_file};
+pub use filesystem::{
+    DIFF_ADDED_MARKER, DIFF_REMOVED_MARKER, DiffLineKind, is_binary_file, parse_diff_line,
+    read_binary_file, read_file,
+};
 pub use subagent::{
     SubagentProgress, SubagentResult, SubagentStatus, collect_subagent_results,
     format_subagent_tool_result, spawn_subagents,

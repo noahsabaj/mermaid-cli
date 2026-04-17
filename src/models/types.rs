@@ -1,6 +1,5 @@
 use crate::agents::ActionDisplay;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 /// Represents a chat message
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +27,13 @@ pub struct ChatMessage {
     /// This tells the model which function's result is being returned
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// Anthropic thinking-block signature — encrypted server state that
+    /// MUST round-trip back into the next request when extended thinking
+    /// is enabled, or the API returns 400 `invalid_request_error`. Set
+    /// only by the Anthropic adapter; other adapters leave it `None`
+    /// and other providers ignore it on the wire.
+    #[serde(default)]
+    pub thinking_signature: Option<String>,
 }
 
 impl ChatMessage {
@@ -62,6 +68,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             tool_name: Some(tool_name.into()),
+            thinking_signature: None,
         }
     }
 
@@ -77,6 +84,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            thinking_signature: None,
         }
     }
 
@@ -96,43 +104,40 @@ impl ChatMessage {
         self
     }
 
-    /// Extract thinking blocks from message content
-    /// Returns (thinking_content, answer_content)
+    /// Builder: attach an Anthropic thinking signature. Used by the
+    /// Anthropic adapter when committing assistant messages so the
+    /// signature can round-trip on the next request.
+    pub fn with_thinking_signature(mut self, signature: impl Into<String>) -> Self {
+        self.thinking_signature = Some(signature.into());
+        self
+    }
+
+    /// Extract thinking blocks from message content.
+    /// Returns `(thinking_content, answer_content)`.
     ///
-    /// Safety: `str::find()` returns byte offsets. The markers "Thinking..." and
-    /// "...done thinking." are pure ASCII, so adding their `.len()` to the byte
-    /// offset always lands on a valid UTF-8 char boundary.
+    /// Performs a single `find` for the start marker; the previous version
+    /// scanned twice (`contains` + `find`) and called `find("Thinking...")`
+    /// again inside the if-let-chain.
+    ///
+    /// Safety: `str::find()` returns byte offsets. The markers `"Thinking..."`
+    /// and `"...done thinking."` are pure ASCII, so adding their `.len()`
+    /// always lands on a valid UTF-8 char boundary.
     pub fn extract_thinking(text: &str) -> (Option<String>, String) {
-        // Check if the text contains thinking blocks
-        if !text.contains("Thinking...") {
+        let Some(thinking_start) = text.find("Thinking...") else {
             return (None, text.to_string());
-        }
+        };
+        let content_start = thinking_start + "Thinking...".len();
 
-        // Find thinking block boundaries
-        if let Some(thinking_start) = text.find("Thinking...")
-            && let Some(thinking_end) = text.find("...done thinking.")
-        {
-            // Extract thinking content (everything between markers)
-            let thinking_content_start = thinking_start + "Thinking...".len();
-            let thinking_text = text[thinking_content_start..thinking_end]
-                .trim()
-                .to_string();
-
-            // Extract answer (everything after thinking block)
+        if let Some(thinking_end) = text.find("...done thinking.") {
+            let thinking_text = text[content_start..thinking_end].trim().to_string();
             let answer_start = thinking_end + "...done thinking.".len();
             let answer_text = text[answer_start..].trim().to_string();
-
             return (Some(thinking_text), answer_text);
         }
 
-        // If we found "Thinking..." but not the end marker, treat it all as thinking in progress
-        if let Some(thinking_start) = text.find("Thinking...") {
-            let thinking_content_start = thinking_start + "Thinking...".len();
-            let thinking_text = text[thinking_content_start..].trim().to_string();
-            return (Some(thinking_text), String::new());
-        }
-
-        (None, text.to_string())
+        // Start marker without end marker — thinking is still in progress.
+        let thinking_text = text[content_start..].trim().to_string();
+        (Some(thinking_text), String::new())
     }
 }
 
@@ -158,6 +163,13 @@ pub struct ModelResponse {
     pub thinking: Option<String>,
     /// Tool calls from the model (Ollama native function calling)
     pub tool_calls: Option<Vec<crate::models::tool_call::ToolCall>>,
+    /// Anthropic thinking-block signature (encrypted server state). Set
+    /// only by `AnthropicAdapter`; other adapters leave it `None`. The
+    /// agent loop's commit step copies this onto the resulting assistant
+    /// `ChatMessage::thinking_signature` so it round-trips on the next
+    /// turn — without this, multi-turn Claude conversations with
+    /// extended thinking 400 with `invalid_request_error`.
+    pub thinking_signature: Option<String>,
 }
 
 /// Token usage statistics
@@ -167,9 +179,6 @@ pub struct TokenUsage {
     pub completion_tokens: usize,
     pub total_tokens: usize,
 }
-
-/// Stream callback type for real-time response streaming
-pub type StreamCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[cfg(test)]
 mod tests {
@@ -223,6 +232,60 @@ mod tests {
         assert_eq!(usage.total_tokens, 150);
     }
 
+    // --- extract_thinking ---
+
+    #[test]
+    fn extract_thinking_no_marker_returns_text_unchanged() {
+        let (thinking, answer) = ChatMessage::extract_thinking("just a plain answer");
+        assert_eq!(thinking, None);
+        assert_eq!(answer, "just a plain answer");
+    }
+
+    #[test]
+    fn extract_thinking_complete_block() {
+        let raw = "Thinking...\n  reasoning here\n...done thinking.\n\nFinal answer";
+        let (thinking, answer) = ChatMessage::extract_thinking(raw);
+        assert_eq!(thinking.as_deref(), Some("reasoning here"));
+        assert_eq!(answer, "Final answer");
+    }
+
+    #[test]
+    fn thinking_signature_round_trips_through_serde() {
+        // Anthropic encrypted server state — must survive
+        // serialize/deserialize so saved conversations resume cleanly.
+        let msg = ChatMessage::assistant("Step 3 lives.")
+            .with_thinking_signature("sig_abc123_encrypted_blob");
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let back: ChatMessage = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.thinking_signature.as_deref(),
+            Some("sig_abc123_encrypted_blob")
+        );
+        assert_eq!(back.content, "Step 3 lives.");
+    }
+
+    #[test]
+    fn thinking_signature_defaults_to_none() {
+        // Backward compat: messages saved before Step 3 won't have the
+        // field. Serde default kicks in — None — and deserialize
+        // succeeds without errors.
+        let pre_step3_json = r#"{
+            "role": "Assistant",
+            "content": "hello",
+            "timestamp": "2026-04-16T12:00:00-04:00"
+        }"#;
+        let msg: ChatMessage = serde_json::from_str(pre_step3_json).expect("backward compat");
+        assert!(msg.thinking_signature.is_none());
+    }
+
+    #[test]
+    fn extract_thinking_in_progress_no_end_marker() {
+        let raw = "Thinking...\n  partial reasoning so far";
+        let (thinking, answer) = ChatMessage::extract_thinking(raw);
+        assert_eq!(thinking.as_deref(), Some("partial reasoning so far"));
+        assert_eq!(answer, "");
+    }
+
     #[test]
     fn test_model_response_creation() {
         let usage = TokenUsage {
@@ -237,6 +300,7 @@ mod tests {
             model_name: "ollama/tinyllama".to_string(),
             thinking: None,
             tool_calls: None,
+            thinking_signature: None,
         };
 
         assert_eq!(response.content, "Hello, world!");

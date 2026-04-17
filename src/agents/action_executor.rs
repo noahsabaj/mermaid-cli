@@ -94,11 +94,13 @@ pub fn describe_action(action: &AgentAction) -> String {
             }
         },
         AgentAction::ListWindows => "List windows".to_string(),
-        AgentAction::Click { x, y, button } => format!("Click {} at ({}, {})", button, x, y),
-        AgentAction::TypeText { text } => format!("Type: {}", text.chars().take(30).collect::<String>()),
+        AgentAction::Click { x, y, button, .. } => format!("Click {} at ({}, {})", button, x, y),
+        AgentAction::TypeText { text } => {
+            format!("Type: {}", text.chars().take(30).collect::<String>())
+        },
         AgentAction::PressKey { key } => format!("Press key: {}", key),
         AgentAction::Scroll { direction, amount } => format!("Scroll {} by {}", direction, amount),
-        AgentAction::MouseMove { x, y } => format!("Move mouse to ({}, {})", x, y),
+        AgentAction::MouseMove { x, y, .. } => format!("Move mouse to ({}, {})", x, y),
         AgentAction::McpToolCall {
             server_name,
             tool_name,
@@ -129,7 +131,10 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
             old_string,
             new_string,
         } => match filesystem::edit_file(path, old_string, new_string) {
-            Ok(diff) => ActionResult::Success { output: diff, images: None },
+            Ok(diff) => ActionResult::Success {
+                output: diff,
+                images: None,
+            },
             Err(e) => ActionResult::Error {
                 error: e.to_string(),
             },
@@ -163,7 +168,12 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
             error: "SpawnAgent must be handled at the agent loop level, not execute_action"
                 .to_string(),
         },
-        AgentAction::Screenshot { mode, monitor, region, window } => {
+        AgentAction::Screenshot {
+            mode,
+            monitor,
+            region,
+            window,
+        } => {
             super::computer_use::execute_screenshot(
                 mode,
                 monitor.as_deref(),
@@ -173,17 +183,22 @@ pub async fn execute_action(action: &AgentAction) -> ActionResult {
             .await
         },
         AgentAction::ListWindows => super::computer_use::execute_list_windows().await,
-        AgentAction::Click { x, y, button } => {
-            super::computer_use::execute_click(*x, *y, button).await
-        },
+        AgentAction::Click {
+            x,
+            y,
+            button,
+            screenshot_id,
+        } => super::computer_use::execute_click(*x, *y, button, *screenshot_id).await,
         AgentAction::TypeText { text } => super::computer_use::execute_type_text(text).await,
         AgentAction::PressKey { key } => super::computer_use::execute_press_key(key).await,
         AgentAction::Scroll { direction, amount } => {
             super::computer_use::execute_scroll(direction, *amount).await
         },
-        AgentAction::MouseMove { x, y } => {
-            super::computer_use::execute_mouse_move(*x, *y).await
-        },
+        AgentAction::MouseMove {
+            x,
+            y,
+            screenshot_id,
+        } => super::computer_use::execute_mouse_move(*x, *y, *screenshot_id).await,
         AgentAction::McpToolCall {
             server_name,
             tool_name,
@@ -206,7 +221,10 @@ async fn execute_read_files(paths: &[String]) -> ActionResult {
     // Single file: simple synchronous read
     if paths.len() == 1 {
         return match filesystem::read_file(&paths[0]) {
-            Ok(content) => ActionResult::Success { output: content, images: None },
+            Ok(content) => ActionResult::Success {
+                output: content,
+                images: None,
+            },
             Err(e) => ActionResult::Error {
                 error: e.to_string(),
             },
@@ -271,7 +289,10 @@ async fn execute_read_files(paths: &[String]) -> ActionResult {
     }
 
     output.push_str(&format!("(Completed in {:.1}s)", duration));
-    ActionResult::Success { output, images: None }
+    ActionResult::Success {
+        output,
+        images: None,
+    }
 }
 
 /// Resolve the Ollama Cloud API key, returning an error ActionResult if not configured
@@ -310,7 +331,16 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
         return match client.search_query(query, *result_count).await {
             Ok(results) => {
                 let formatted = client.format_results(&results);
-                ActionResult::Success { output: formatted, images: None }
+                // Aggregate cap: per-result content is already truncated, but
+                // many medium-size results can still blow the model's context.
+                let capped = crate::utils::truncate_content(
+                    &formatted,
+                    crate::constants::WEB_SEARCH_AGGREGATE_MAX_CHARS,
+                );
+                ActionResult::Success {
+                    output: capped,
+                    images: None,
+                }
             },
             Err(e) => {
                 let error_str = e.to_string();
@@ -390,7 +420,14 @@ async fn execute_web_searches(queries: &[(String, usize)]) -> ActionResult {
     }
 
     output.push_str(&format!("(Completed in {:.1}s)", duration));
-    ActionResult::Success { output, images: None }
+    // Aggregate cap (see comment on the single-query path above): bound the
+    // formatter output so a multi-query batch can't spike the context window.
+    let capped =
+        crate::utils::truncate_content(&output, crate::constants::WEB_SEARCH_AGGREGATE_MAX_CHARS);
+    ActionResult::Success {
+        output: capped,
+        images: None,
+    }
 }
 
 /// Execute an MCP tool call via the global server manager.
@@ -404,13 +441,20 @@ async fn execute_mcp_tool(
     tool_name: &str,
     arguments: &serde_json::Value,
 ) -> ActionResult {
-    // If MCP init is still in progress, wait for it
+    // If MCP init is still in progress, wait for it.
+    //
+    // We must register the waiter (via Notified::enable()) BEFORE re-checking
+    // MCP_INIT_COMPLETE. Notified futures do not register until polled, so a
+    // plain `if flag { timeout(..., notified).await }` races with
+    // mark_mcp_init_complete(): if notify_waiters() fires between the flag
+    // load and the future's first poll, the notification is lost and this
+    // call waits the full 30s for nothing.
+    let notified = MCP_READY_NOTIFY.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+
     if !MCP_INIT_COMPLETE.load(Ordering::Acquire) {
-        let wait_result = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            MCP_READY_NOTIFY.notified(),
-        )
-        .await;
+        let wait_result = tokio::time::timeout(std::time::Duration::from_secs(30), notified).await;
         if wait_result.is_err() {
             return ActionResult::Error {
                 error: "MCP servers still starting after 30s. Try again.".to_string(),
@@ -463,14 +507,16 @@ async fn execute_web_fetch(url: &str) -> ActionResult {
                 "Title: {}\nURL: {}\nContent:\n{}",
                 result.title, url, content
             );
-            ActionResult::Success { output, images: None }
+            ActionResult::Success {
+                output,
+                images: None,
+            }
         },
         Err(e) => ActionResult::Error {
             error: format!("Failed to fetch {}: {}", url, e),
         },
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -534,7 +580,6 @@ mod tests {
             },
         }
     }
-
 
     #[tokio::test]
     async fn test_execute_command_safe_action() {

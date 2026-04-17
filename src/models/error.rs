@@ -76,6 +76,11 @@ pub enum ModelError {
 
     /// Authentication error
     Authentication(String),
+
+    /// The adapter does not implement the requested feature (e.g. an
+    /// Anthropic adapter has no `list_models` endpoint, so the trait's
+    /// default impl returns this).
+    Unsupported { feature: String },
 }
 
 impl fmt::Display for ModelError {
@@ -95,11 +100,15 @@ impl fmt::Display for ModelError {
                 operation,
                 duration_secs,
             } => {
-                write!(
-                    f,
-                    "Operation '{}' timed out after {} seconds",
-                    operation, duration_secs
-                )
+                if *duration_secs == 0 {
+                    write!(f, "Operation '{}' timed out", operation)
+                } else {
+                    write!(
+                        f,
+                        "Operation '{}' timed out after {} seconds",
+                        operation, duration_secs
+                    )
+                }
             },
             ModelError::RateLimit { retry_after } => {
                 if let Some(secs) = retry_after {
@@ -118,6 +127,9 @@ impl fmt::Display for ModelError {
             },
             ModelError::StreamError(msg) => write!(f, "Stream error: {}", msg),
             ModelError::Authentication(msg) => write!(f, "Authentication error: {}", msg),
+            ModelError::Unsupported { feature } => {
+                write!(f, "Feature not supported by this adapter: {}", feature)
+            },
         }
     }
 }
@@ -258,7 +270,11 @@ impl ModelError {
                 duration_secs,
             } => UserFacingError {
                 summary: "Request timed out".to_string(),
-                message: format!("'{}' timed out after {} seconds", operation, duration_secs),
+                message: if *duration_secs == 0 {
+                    format!("'{}' timed out", operation)
+                } else {
+                    format!("'{}' timed out after {} seconds", operation, duration_secs)
+                },
                 suggestion: "The model might be overloaded - try a smaller model or wait and retry"
                     .to_string(),
                 category: ErrorCategory::Temporary,
@@ -309,6 +325,16 @@ impl ModelError {
                     "Check your API key in ~/.config/mermaid/config.toml or environment variables"
                         .to_string(),
                 category: ErrorCategory::Auth,
+                recoverable: false,
+            },
+            ModelError::Unsupported { feature } => UserFacingError {
+                summary: "Unsupported feature".to_string(),
+                message: format!("The current model adapter does not support '{}'.", feature),
+                suggestion: format!(
+                    "Switch to a provider/model that supports '{}', or omit this operation.",
+                    feature
+                ),
+                category: ErrorCategory::Internal,
                 recoverable: false,
             },
         }
@@ -431,9 +457,15 @@ impl From<anyhow::Error> for ModelError {
 impl From<reqwest::Error> for ModelError {
     fn from(err: reqwest::Error) -> Self {
         if err.is_timeout() {
+            // reqwest::Error doesn't expose the actual elapsed duration,
+            // and the adapter only sets a connect_timeout (no global
+            // request timeout), so there is no truthful number to report.
+            // 0 is a sentinel meaning "unknown" — the Display and
+            // to_user_facing impls for ModelError::Timeout omit the
+            // "after N seconds" suffix when duration_secs == 0.
             ModelError::Timeout {
                 operation: "HTTP request".to_string(),
-                duration_secs: 120,
+                duration_secs: 0,
             }
         } else if err.is_connect() {
             ModelError::Backend(BackendError::ConnectionFailed {
@@ -466,5 +498,45 @@ impl From<serde_json::Error> for ModelError {
             message: err.to_string(),
             raw: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_display_omits_zero_duration() {
+        let err = ModelError::Timeout {
+            operation: "HTTP request".to_string(),
+            duration_secs: 0,
+        };
+        let rendered = err.to_string();
+        assert_eq!(rendered, "Operation 'HTTP request' timed out");
+        assert!(!rendered.contains("0 seconds"));
+    }
+
+    #[test]
+    fn timeout_display_shows_nonzero_duration() {
+        let err = ModelError::Timeout {
+            operation: "HTTP request".to_string(),
+            duration_secs: 45,
+        };
+        let rendered = err.to_string();
+        assert_eq!(
+            rendered,
+            "Operation 'HTTP request' timed out after 45 seconds"
+        );
+    }
+
+    #[test]
+    fn timeout_user_facing_omits_zero_duration() {
+        let err = ModelError::Timeout {
+            operation: "HTTP request".to_string(),
+            duration_secs: 0,
+        };
+        let ufe = err.to_user_facing();
+        assert_eq!(ufe.message, "'HTTP request' timed out");
+        assert!(!ufe.message.contains("0 seconds"));
     }
 }

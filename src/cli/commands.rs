@@ -1,9 +1,10 @@
 use anyhow::Result;
 
 use crate::{
-    app::{get_config_dir, init_config, load_config},
-    models::ModelFactory,
-    ollama::{is_installed as is_ollama_installed, list_models_async as get_ollama_models},
+    app::{Config, get_config_dir, init_config, load_config},
+    models::{ModelFactory, PROVIDER_REGISTRY, lookup_provider},
+    ollama::is_installed as is_ollama_installed,
+    utils::resolve_api_key,
 };
 
 use super::Commands;
@@ -11,7 +12,7 @@ use super::Commands;
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
 /// Returns Ok(false) if we should continue to the main application
-pub async fn handle_command(command: &Commands) -> Result<bool> {
+pub async fn handle_command(command: &Commands, config: &Config) -> Result<bool> {
     match command {
         Commands::Init => {
             println!("Initializing Mermaid configuration...");
@@ -20,7 +21,7 @@ pub async fn handle_command(command: &Commands) -> Result<bool> {
             Ok(true)
         },
         Commands::List => {
-            list_models().await?;
+            list_models(config).await?;
             Ok(true)
         },
         Commands::Version => {
@@ -28,7 +29,7 @@ pub async fn handle_command(command: &Commands) -> Result<bool> {
             Ok(true)
         },
         Commands::Status => {
-            show_status().await?;
+            show_status(config).await?;
             Ok(true)
         },
         Commands::Add { name } => {
@@ -48,9 +49,9 @@ pub async fn handle_command(command: &Commands) -> Result<bool> {
     }
 }
 
-/// List available models across all backends
-pub async fn list_models() -> Result<()> {
-    let models = ModelFactory::list_all_models().await?;
+/// List available models across all backends (honors user config).
+pub async fn list_models(config: &Config) -> Result<()> {
+    let models = ModelFactory::list_all_models(config).await?;
 
     if models.is_empty() {
         println!("No models found across any backends");
@@ -78,7 +79,6 @@ fn show_mcp_servers() {
         println!("Add one with: mermaid add <name>");
         println!("Examples:");
         println!("  mermaid add context7     # Library documentation");
-        println!("  mermaid add github       # GitHub API integration");
         println!("  mermaid add playwright   # Browser automation");
         println!("  mermaid add memory       # Persistent knowledge graph");
         return;
@@ -95,7 +95,14 @@ fn show_mcp_servers() {
         let env_display = if env_keys.is_empty() {
             String::new()
         } else {
-            format!(" (env: {})", env_keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "))
+            format!(
+                " (env: {})",
+                env_keys
+                    .iter()
+                    .map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
         println!("  {} — {}{}", name, package, env_display);
     }
@@ -103,13 +110,12 @@ fn show_mcp_servers() {
 }
 
 /// Show status of all dependencies
-async fn show_status() -> Result<()> {
+async fn show_status(config: &Config) -> Result<()> {
     println!("Mermaid Status:");
     println!();
 
     // Check available backends (use user's config for host/port)
-    let status_config = load_config().unwrap_or_default();
-    let factory = ModelFactory::from_config(&status_config);
+    let factory = ModelFactory::from_config(config);
     let backends = factory.available_providers_pub().await;
     if backends.is_empty() {
         println!("  [WARNING] Backends: None available");
@@ -117,9 +123,9 @@ async fn show_status() -> Result<()> {
         println!("  [OK] Backends: {}", backends.join(", "));
     }
 
-    // Check Ollama
+    // Check Ollama (via HTTP, so remote deployments are honored)
     if is_ollama_installed() {
-        let models = get_ollama_models().await.unwrap_or_default();
+        let models = factory.list_models("ollama").await.unwrap_or_default();
         if models.is_empty() {
             println!("  [WARNING] Ollama: Installed (no models)");
         } else {
@@ -146,33 +152,140 @@ async fn show_status() -> Result<()> {
     }
 
     // MCP Servers
-    if let Ok(cfg) = load_config() {
-        if cfg.mcp_servers.is_empty() {
-            println!("  [INFO] MCP Servers: None configured (use 'mermaid add <name>')");
-        } else {
+    if config.mcp_servers.is_empty() {
+        println!("  [INFO] MCP Servers: None configured (use 'mermaid add <name>')");
+    } else {
+        println!(
+            "  [OK] MCP Servers: {} configured",
+            config.mcp_servers.len()
+        );
+        for (name, server_cfg) in &config.mcp_servers {
             println!(
-                "  [OK] MCP Servers: {} configured",
-                cfg.mcp_servers.len()
+                "      - {} ({})",
+                name,
+                server_cfg.args.get(1).unwrap_or(&server_cfg.command)
             );
-            for (name, server_cfg) in &cfg.mcp_servers {
-                println!(
-                    "      - {} ({})",
-                    name,
-                    server_cfg.args.get(1).unwrap_or(&server_cfg.command)
-                );
-            }
         }
     }
 
+    // Project instructions (Step 5h). Walks UP from cwd to git root or
+    // $HOME to find the nearest MERMAID.md.
+    {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match crate::app::instructions::find_mermaid_md(&cwd) {
+            Some(path) => match crate::app::instructions::load_from_path(&path) {
+                Some(loaded) => {
+                    println!(
+                        "  [OK] MERMAID.md: {} ({} bytes{})",
+                        loaded.path.display(),
+                        loaded.byte_len,
+                        if loaded.truncated { ", truncated" } else { "" }
+                    );
+                },
+                None => {
+                    println!(
+                        "  [WARNING] MERMAID.md: found at {} but unreadable",
+                        path.display()
+                    );
+                },
+            },
+            None => {
+                println!(
+                    "  [INFO] MERMAID.md: not found (create one to add persistent project instructions)"
+                );
+            },
+        }
+    }
+
+    // OpenAI-compatible providers — list anything from the built-in
+    // registry whose API key resolves, plus any user-defined custom
+    // providers. No network probe (would slow `mermaid status`).
+    show_provider_status(config);
+
     // Environment variables (for API providers)
     println!("\n  Environment:");
-    if std::env::var("OPENROUTER_API_KEY").is_ok() {
-        println!("    - OPENROUTER_API_KEY: Set");
-    }
     if std::env::var("OLLAMA_API_KEY").is_ok() {
         println!("    - OLLAMA_API_KEY: Set (for Ollama Cloud)");
     }
 
     println!();
     Ok(())
+}
+
+/// Print the remote-providers status block. Includes Anthropic (bespoke
+/// Messages API) and any OpenAI-compatible provider whose API key resolves.
+/// Custom providers from `[providers.<name>]` are listed if `base_url`
+/// and `api_key_env` are both set and the env var resolves.
+fn show_provider_status(config: &Config) {
+    let mut configured: Vec<(String, String)> = Vec::new(); // (name, base_url)
+
+    // Anthropic — checked first because it's not in the OpenAI-compat
+    // registry but is a top-tier provider users care about.
+    let anth_cfg = config.providers.get("anthropic");
+    if resolve_api_key(
+        "ANTHROPIC_API_KEY",
+        anth_cfg.and_then(|c| c.api_key_env.as_deref()),
+    )
+    .is_some()
+    {
+        let url = anth_cfg
+            .and_then(|c| c.base_url.clone())
+            .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
+        configured.push(("anthropic".to_string(), url));
+    }
+
+    // Gemini — also bespoke (not in OpenAI-compat registry).
+    let gem_cfg = config.providers.get("gemini");
+    if resolve_api_key(
+        "GOOGLE_API_KEY",
+        gem_cfg.and_then(|c| c.api_key_env.as_deref()),
+    )
+    .is_some()
+    {
+        let url = gem_cfg
+            .and_then(|c| c.base_url.clone())
+            .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
+        configured.push(("gemini".to_string(), url));
+    }
+
+    for profile in PROVIDER_REGISTRY {
+        let user_cfg = config.providers.get(profile.name);
+        let api_key_present = resolve_api_key(
+            profile.api_key_env,
+            user_cfg.and_then(|c| c.api_key_env.as_deref()),
+        )
+        .is_some();
+        if api_key_present {
+            let url = user_cfg
+                .and_then(|c| c.base_url.clone())
+                .unwrap_or_else(|| profile.base_url.to_string());
+            configured.push((profile.name.to_string(), url));
+        }
+    }
+
+    // Custom providers — anything in config.providers not in registry
+    // and not "anthropic" / "gemini" (already handled above).
+    for (name, cfg) in &config.providers {
+        if name == "anthropic" || name == "gemini" || lookup_provider(name).is_some() {
+            continue;
+        }
+        if let (Some(url), Some(env)) = (&cfg.base_url, cfg.api_key_env.as_deref())
+            && resolve_api_key(env, None).is_some()
+        {
+            configured.push((name.clone(), url.clone()));
+        }
+    }
+
+    if configured.is_empty() {
+        println!(
+            "  [INFO] Remote providers: None configured (set $ANTHROPIC_API_KEY, \
+             $GOOGLE_API_KEY, $OPENAI_API_KEY, $GROQ_API_KEY, $OPENROUTER_API_KEY, etc., or \
+             add [providers.<name>] to config.toml)"
+        );
+    } else {
+        println!("  [OK] Remote providers: {} configured", configured.len());
+        for (name, url) in configured {
+            println!("      - {} ({})", name, url);
+        }
+    }
 }

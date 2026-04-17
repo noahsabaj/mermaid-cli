@@ -4,14 +4,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentAction {
     /// Read one or more files (executor decides parallelization)
-    ReadFile {
-        paths: Vec<String>,
-    },
+    ReadFile { paths: Vec<String> },
     /// Write or create a file
-    WriteFile {
-        path: String,
-        content: String,
-    },
+    WriteFile { path: String, content: String },
     /// Make targeted edits to a file by replacing specific text
     EditFile {
         path: String,
@@ -19,13 +14,9 @@ pub enum AgentAction {
         new_string: String,
     },
     /// Delete a file
-    DeleteFile {
-        path: String,
-    },
+    DeleteFile { path: String },
     /// Create a directory
-    CreateDirectory {
-        path: String,
-    },
+    CreateDirectory { path: String },
     /// Execute a shell command
     ExecuteCommand {
         command: String,
@@ -33,18 +24,11 @@ pub enum AgentAction {
         timeout: Option<u64>,
     },
     /// Web search via Ollama Cloud API (executor decides parallelization)
-    WebSearch {
-        queries: Vec<(String, usize)>,
-    },
+    WebSearch { queries: Vec<(String, usize)> },
     /// Fetch a URL's content via Ollama Cloud API
-    WebFetch {
-        url: String,
-    },
+    WebFetch { url: String },
     /// Spawn an autonomous sub-agent with its own conversation context
-    SpawnAgent {
-        prompt: String,
-        description: String,
-    },
+    SpawnAgent { prompt: String, description: String },
     /// Capture a screenshot of the screen (or a focused window/monitor/region/window)
     Screenshot {
         mode: String,            // "fullscreen", "focused", "monitor", "region", "window"
@@ -53,7 +37,18 @@ pub enum AgentAction {
         window: Option<String>,  // window title for "window" mode (e.g., "Discord")
     },
     /// Click at screen coordinates
-    Click { x: i32, y: i32, button: String },
+    Click {
+        x: i32,
+        y: i32,
+        button: String,
+        /// Optional ID of the screenshot whose coordinate space these
+        /// `(x, y)` refer to. When omitted, the most recent screenshot
+        /// is used (preserves backward compatibility). When specified
+        /// and the registry has evicted that ID, the click errors
+        /// cleanly instead of silently using the wrong scale/offset.
+        #[serde(default)]
+        screenshot_id: Option<u64>,
+    },
     /// Type a text string at the current cursor position
     TypeText { text: String },
     /// Press a key or key combination
@@ -61,7 +56,13 @@ pub enum AgentAction {
     /// Scroll in a direction
     Scroll { direction: String, amount: i32 },
     /// Move mouse cursor to coordinates
-    MouseMove { x: i32, y: i32 },
+    MouseMove {
+        x: i32,
+        y: i32,
+        /// Same semantic as `Click::screenshot_id`.
+        #[serde(default)]
+        screenshot_id: Option<u64>,
+    },
     /// List all visible window titles (lightweight, no screenshot)
     ListWindows,
     /// Dynamic MCP tool call (dispatched to an MCP server at runtime)
@@ -71,9 +72,7 @@ pub enum AgentAction {
         arguments: serde_json::Value,
     },
     /// Placeholder for tool calls that failed to parse (never executed)
-    ParseError {
-        message: String,
-    },
+    ParseError { message: String },
 }
 
 /// Result of an agent action
@@ -127,17 +126,15 @@ impl AgentAction {
                 };
                 ("Screenshot", target)
             },
-            AgentAction::Click { x, y, button } => {
+            AgentAction::Click { x, y, button, .. } => {
                 ("Click", format!("({}, {}) {}", x, y, button))
             },
-            AgentAction::TypeText { text } => {
-                ("Type", text.chars().take(30).collect())
-            },
+            AgentAction::TypeText { text } => ("Type", text.chars().take(30).collect()),
             AgentAction::PressKey { key } => ("Key", key.clone()),
             AgentAction::Scroll { direction, amount } => {
                 ("Scroll", format!("{} {}", direction, amount))
             },
-            AgentAction::MouseMove { x, y } => ("Move", format!("({}, {})", x, y)),
+            AgentAction::MouseMove { x, y, .. } => ("Move", format!("({}, {})", x, y)),
             AgentAction::ListWindows => ("ListWindows", "visible windows".to_string()),
             AgentAction::McpToolCall {
                 server_name,
@@ -183,4 +180,3 @@ pub enum ActionDetails {
     /// Agent completion with summary and tool use count
     Agent { summary: String, tool_uses: usize },
 }
-

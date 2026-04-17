@@ -3,6 +3,49 @@ use base64::{Engine as _, engine::general_purpose};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Marker string used in `generate_diff` output to denote a REMOVED line.
+///
+/// The TUI renderer in `src/tui/widgets/chat.rs` consumes this through
+/// `parse_diff_line` (below), which keeps producer and consumer in
+/// lockstep — no inline regex / substring heuristic in the renderer.
+pub const DIFF_REMOVED_MARKER: &str = " - ";
+
+/// Marker string used in `generate_diff` output to denote an ADDED line.
+/// See `DIFF_REMOVED_MARKER` for the renderer-coupling note.
+pub const DIFF_ADDED_MARKER: &str = " + ";
+
+/// Classification of a line emitted by `generate_diff`. The TUI renderer
+/// uses this to decide which background color (red / green / none) to
+/// apply, instead of re-deriving the kind from substring + digit-prefix
+/// heuristics that drift when the format changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Context,
+    Removed,
+    Added,
+}
+
+/// Parse a single line from `generate_diff` output. The format is
+/// `format!("{:>4}{marker}{content}", line_num, marker, content)` where
+/// `marker` is one of `"   "` (context), `" - "` (removed), `" + "` (added)
+/// — all 3 bytes wide. Lives next to the markers above so the producer and
+/// the parser cannot drift independently.
+///
+/// Lines that don't follow the expected shape (no leading digit, no marker
+/// after the digits, etc.) fall through to `Context`. That keeps the
+/// renderer's match exhaustive without panicking on malformed input.
+pub fn parse_diff_line(line: &str) -> DiffLineKind {
+    let trimmed = line.trim_start();
+    let after_num = trimmed.trim_start_matches(|c: char| c.is_ascii_digit());
+    if after_num.starts_with(DIFF_REMOVED_MARKER) {
+        DiffLineKind::Removed
+    } else if after_num.starts_with(DIFF_ADDED_MARKER) {
+        DiffLineKind::Added
+    } else {
+        DiffLineKind::Context
+    }
+}
+
 /// Read a file from the filesystem
 pub fn read_file(path: &str) -> Result<String> {
     let path = normalize_path_for_read(path)?;
@@ -164,8 +207,8 @@ fn generate_diff(
     let added_count = new_string.lines().count();
 
     // Find where the change starts in the old content
-    let prefix_len = old_content[..old_content.find(old_string).unwrap_or(0)].len();
-    let change_start_line = old_content[..prefix_len].matches('\n').count();
+    let change_start = old_content.find(old_string).unwrap_or(0);
+    let change_start_line = old_content[..change_start].matches('\n').count();
 
     let context_lines = 3;
     let diff_start = change_start_line.saturating_sub(context_lines);
@@ -188,7 +231,12 @@ fn generate_diff(
     for i in 0..removed_count {
         let line_num = change_start_line + i;
         if line_num < old_lines.len() {
-            output.push_str(&format!("{:>4} - {}\n", line_num + 1, old_lines[line_num]));
+            output.push_str(&format!(
+                "{:>4}{}{}\n",
+                line_num + 1,
+                DIFF_REMOVED_MARKER,
+                old_lines[line_num]
+            ));
         }
     }
 
@@ -196,7 +244,12 @@ fn generate_diff(
     for i in 0..added_count {
         let line_num = change_start_line + i;
         if line_num < new_lines.len() {
-            output.push_str(&format!("{:>4} + {}\n", line_num + 1, new_lines[line_num]));
+            output.push_str(&format!(
+                "{:>4}{}{}\n",
+                line_num + 1,
+                DIFF_ADDED_MARKER,
+                new_lines[line_num]
+            ));
         }
     }
 
@@ -287,7 +340,14 @@ fn is_sensitive_path(path: &Path) -> bool {
     // Directory components that are always sensitive
     let sensitive_dirs = [".ssh", ".aws", ".gnupg", ".docker"];
 
-    // Filenames/extensions that are sensitive
+    // Filenames/extensions that are sensitive.
+    //
+    // Note: "config.json" is intentionally NOT listed here. That name is
+    // far too common (frontend tooling, editor configs, language servers)
+    // and a bare match would false-positive on legit project files. The
+    // Docker-credential case (~/.docker/config.json) is already covered
+    // by the ".docker" sensitive-directory rule below, which matches any
+    // file inside a .docker directory.
     let sensitive_filenames = [
         ".npmrc",
         ".pypirc",
@@ -300,18 +360,12 @@ fn is_sensitive_path(path: &Path) -> bool {
         "secrets.yaml",
         "secrets.yml",
         "token.json",
-        "config.json", // Docker registry auth, various credential stores
     ];
 
     // File extensions that are sensitive
     let sensitive_extensions = ["pem", "key"];
 
     let path_str = path.to_string_lossy();
-
-    // Check for .git/config specifically (substring is fine here, it's unique)
-    if path_str.contains(".git/config") || path_str.contains(".git\\config") {
-        return true;
-    }
 
     // Check for mermaid config (contains cloud_api_key)
     if (path_str.contains("mermaid/config.toml") || path_str.contains("mermaid\\config.toml"))
@@ -320,8 +374,18 @@ fn is_sensitive_path(path: &Path) -> bool {
         return true;
     }
 
+    // Walk components for path-segment matches. Tracks `prev_was_dot_git` so
+    // we can detect the `.git/config` pair as adjacent components and avoid
+    // false-positives like `.git/config-template` or `.git/config.local`.
+    let mut prev_was_dot_git = false;
     for component in path.components() {
         let name = component.as_os_str().to_string_lossy();
+
+        // .git/config (file) — exact-equality on the component name
+        if prev_was_dot_git && name == "config" {
+            return true;
+        }
+        prev_was_dot_git = name == ".git";
 
         // Check sensitive directories
         for dir in &sensitive_dirs {
@@ -442,6 +506,84 @@ fn validate_canonical_path(canonical: &Path, current_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- parse_diff_line: producer/consumer co-locality ---
+
+    #[test]
+    fn parse_diff_line_classifies_each_marker() {
+        // Spot-check: a real generate_diff call exercises the parser end-
+        // to-end (next test). Here we hand-craft the format so we don't
+        // have to worry about the surrounding context lines.
+        assert_eq!(
+            parse_diff_line(&format!("{:>4}{}two", 2, DIFF_REMOVED_MARKER)),
+            DiffLineKind::Removed,
+        );
+        assert_eq!(
+            parse_diff_line(&format!("{:>4}{}two-updated", 2, DIFF_ADDED_MARKER)),
+            DiffLineKind::Added,
+        );
+        // Context line: 3 spaces between the digit and content (no marker).
+        assert_eq!(parse_diff_line("   1   one"), DiffLineKind::Context);
+    }
+
+    #[test]
+    fn parse_diff_line_treats_malformed_as_context() {
+        // No leading digit, empty, marker without digit prefix — all fall
+        // through to Context so the renderer's match stays exhaustive.
+        assert_eq!(parse_diff_line(""), DiffLineKind::Context);
+        assert_eq!(parse_diff_line("garbage"), DiffLineKind::Context);
+        assert_eq!(parse_diff_line(" - no digit prefix"), DiffLineKind::Context);
+    }
+
+    #[test]
+    fn generate_diff_lines_round_trip_through_parse_diff_line() {
+        // End-to-end: feed real generate_diff output through parse_diff_line
+        // and confirm the headers / context / +/- lines are classified as
+        // expected. Catches drift between the producer's `format!` and the
+        // parser's matchers.
+        let old = "one\ntwo\nthree\n";
+        let new = "one\ntwo-updated\nthree\n";
+        let diff = generate_diff(old, new, "two", "two-updated");
+
+        let mut saw_removed = false;
+        let mut saw_added = false;
+        for line in diff.lines() {
+            match parse_diff_line(line) {
+                DiffLineKind::Removed => saw_removed = true,
+                DiffLineKind::Added => saw_added = true,
+                DiffLineKind::Context => {},
+            }
+        }
+        assert!(saw_removed, "diff should classify the old line as Removed");
+        assert!(saw_added, "diff should classify the new line as Added");
+    }
+
+    /// generate_diff's output format is parsed back by
+    /// `src/tui/widgets/chat.rs::render_actions` via `parse_diff_line`,
+    /// which lives next to the markers and shares the same constants.
+    /// This test guards against silent drift: if the format changes, the
+    /// generator and parser share the same `pub const` so both update
+    /// together — but the constants must continue to appear in generated
+    /// output.
+    #[test]
+    fn generate_diff_uses_shared_markers() {
+        let old = "one\ntwo\nthree\n";
+        let new = "one\ntwo-updated\nthree\n";
+        let diff = generate_diff(old, new, "two", "two-updated");
+
+        assert!(
+            diff.contains(DIFF_REMOVED_MARKER),
+            "diff output should contain DIFF_REMOVED_MARKER ({:?}); got:\n{}",
+            DIFF_REMOVED_MARKER,
+            diff
+        );
+        assert!(
+            diff.contains(DIFF_ADDED_MARKER),
+            "diff output should contain DIFF_ADDED_MARKER ({:?}); got:\n{}",
+            DIFF_ADDED_MARKER,
+            diff
+        );
+    }
 
     // Phase 2 Test Suite: Filesystem Operations - 10 comprehensive tests
 
@@ -579,6 +721,32 @@ mod tests {
     }
 
     #[test]
+    fn test_git_config_path_component_matching() {
+        // Exact `.git/config` file is blocked.
+        assert!(is_sensitive_path(Path::new("/repo/.git/config")));
+        assert!(is_sensitive_path(Path::new(".git/config")));
+
+        // Nested `.git/config` (deeper than the repo root) still blocked.
+        assert!(is_sensitive_path(Path::new("/some/path/.git/config")));
+
+        // Files that merely START with `config` inside `.git/` must NOT be blocked.
+        // Previously the substring check `.git/config` matched all of these.
+        assert!(!is_sensitive_path(Path::new("/repo/.git/config-template")));
+        assert!(!is_sensitive_path(Path::new("/repo/.git/config.local")));
+        assert!(!is_sensitive_path(Path::new(
+            "/repo/.git/configuration.json"
+        )));
+
+        // Other `.git/` files unaffected.
+        assert!(!is_sensitive_path(Path::new("/repo/.git/HEAD")));
+        assert!(!is_sensitive_path(Path::new("/repo/.git/hooks/pre-commit")));
+
+        // A `config` file outside any `.git` directory is fine.
+        assert!(!is_sensitive_path(Path::new("/repo/notgit/config")));
+        assert!(!is_sensitive_path(Path::new("/etc/git-style/config")));
+    }
+
+    #[test]
     fn test_path_validation_blocks_new_sensitive_patterns() {
         // Verify the expanded blocklist
         assert!(is_sensitive_path(Path::new("/home/user/credentials.json")));
@@ -589,7 +757,8 @@ mod tests {
         assert!(is_sensitive_path(Path::new(
             "/home/user/.gnupg/pubring.kbx"
         )));
-        // Docker and netrc
+        // Docker creds still blocked via the .docker directory rule
+        // (not via a bare "config.json" filename match).
         assert!(is_sensitive_path(Path::new(
             "/home/user/.docker/config.json"
         )));
@@ -600,5 +769,9 @@ mod tests {
         )));
         // But NOT arbitrary config.toml files in project directories
         assert!(!is_sensitive_path(Path::new("/project/config.toml")));
+        // A bare config.json in a project directory must NOT be blocked —
+        // it's used by frontend tooling, editors, language servers, etc.
+        assert!(!is_sensitive_path(Path::new("/project/config.json")));
+        assert!(!is_sensitive_path(Path::new("/project/src/config.json")));
     }
 }

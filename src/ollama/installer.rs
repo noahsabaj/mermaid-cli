@@ -1,9 +1,23 @@
 use super::detector;
 use super::guide;
+use crate::app::Config;
+use crate::models::ModelFactory;
 use anyhow::Result;
 
-/// Validate that a model exists, auto-pull if not found
-pub async fn ensure_model(model_name: &str) -> Result<()> {
+/// List installed Ollama models via the HTTP API using the user's config.
+///
+/// Replaces the old CLI-parsing `list_models_async` path. Falls back to
+/// an empty list on any HTTP error (matching the prior behavior).
+async fn list_installed_models(config: &Config) -> Vec<String> {
+    let factory = ModelFactory::from_config(config);
+    factory.list_models("ollama").await.unwrap_or_default()
+}
+
+/// Validate that a model exists, auto-pull if not found.
+///
+/// Uses the user's configured Ollama host/port (via `config`) so a remote
+/// Ollama instance is honored.
+pub async fn ensure_model(model_name: &str, config: &Config) -> Result<()> {
     // Check if Ollama is installed
     if !detector::is_installed() {
         guide::detect_and_guide();
@@ -13,8 +27,8 @@ pub async fn ensure_model(model_name: &str) -> Result<()> {
     // Get the model name without provider prefix (all models route through Ollama)
     let model = model_name.strip_prefix("ollama/").unwrap_or(model_name);
 
-    // Check available models
-    let models = detector::list_models_async().await?;
+    // Check available models via HTTP (honors user's host/port)
+    let models = list_installed_models(config).await;
 
     // Check if the requested model exists (exact match or implicit :latest)
     let model_exists = models
@@ -55,15 +69,15 @@ pub async fn ensure_model(model_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Check if any Ollama models are available, return error with setup instructions if not
-pub async fn require_any_model() -> Result<Vec<String>> {
+/// Check if any Ollama models are available, return error with setup instructions if not.
+pub async fn require_any_model(config: &Config) -> Result<Vec<String>> {
     // Check if Ollama is installed
     if !detector::is_installed() {
         guide::detect_and_guide();
         anyhow::bail!("Ollama is not installed. See instructions above.");
     }
 
-    let models = detector::list_models_async().await?;
+    let models = list_installed_models(config).await;
 
     if models.is_empty() {
         anyhow::bail!(

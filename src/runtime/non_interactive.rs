@@ -9,7 +9,9 @@ use crate::{
     agents::{ActionResult as AgentActionResult, AgentAction},
     app::Config,
     cli::OutputFormat,
-    models::{ChatMessage, Model, ModelConfig, ModelFactory},
+    models::{
+        ChatMessage, Model, ModelConfig, ModelFactory, StreamCallback, StreamEvent, ToolCall,
+    },
     prompts,
 };
 
@@ -59,6 +61,10 @@ pub struct NonInteractiveRunner {
     model: Arc<RwLock<Box<dyn Model>>>,
     no_execute: bool,
     model_config: ModelConfig,
+    /// Project instructions auto-loaded from MERMAID.md (Step 5h).
+    /// Non-interactive mode is one-shot — load once at construction,
+    /// no auto-reload (single execute() call, no per-turn loop).
+    instructions: Option<crate::app::instructions::LoadedInstructions>,
 }
 
 impl NonInteractiveRunner {
@@ -68,21 +74,37 @@ impl NonInteractiveRunner {
         config: Config,
         no_execute: bool,
         max_tokens: Option<usize>,
+        reasoning: Option<crate::models::ReasoningLevel>,
     ) -> Result<Self> {
         // Create model instance
         let model = ModelFactory::create(&model_id, Some(&config)).await?;
 
         // Build base config from app config, then apply CLI overrides
         let mut model_config = ModelConfig::from_app_config(&config, &model_id);
-        model_config.thinking_enabled = Some(false);
         if let Some(mt) = max_tokens {
             model_config.max_tokens = mt;
         }
+        // CLI `--reasoning` wins over the config-file default. Without
+        // it, `from_app_config` already populated `reasoning` from
+        // `[default_model].reasoning` (Wave 2). Non-interactive mode
+        // historically forced thinking off; users now pick that
+        // explicitly via `--reasoning none` if that's what they want.
+        if let Some(level) = reasoning {
+            model_config.reasoning = level;
+        }
+
+        // Step 5h: discover MERMAID.md once at construction. The
+        // run-once nature of this path means there's no per-turn
+        // refresh — you get whatever's on disk when you start.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let instructions = crate::app::instructions::find_mermaid_md(&cwd)
+            .and_then(|p| crate::app::instructions::load_from_path(&p));
 
         Ok(Self {
             model: Arc::new(RwLock::new(model)),
             no_execute,
             model_config,
+            instructions,
         })
     }
 
@@ -97,16 +119,30 @@ impl NonInteractiveRunner {
         let user_message = ChatMessage::user(prompt.clone());
         let mut messages = vec![system_message, user_message];
 
-        // Use pre-built model config
-        let model_config = &self.model_config;
+        // Use pre-built model config; inject the MERMAID.md suffix
+        // (Step 5h) loaded at construction. One-shot mode means no
+        // mid-run reload — suffix is whatever was on disk at startup.
+        let mut effective_config = self.model_config.clone();
+        effective_config.dynamic_system_suffix =
+            self.instructions.as_ref().map(|i| i.content.clone());
+        let model_config = &effective_config;
         let model_name = model_config.model.clone();
 
-        // First model call to get the initial response
+        // First model call. Accumulate text + tool calls from typed events;
+        // ignore reasoning chunks (`ModelResponse.thinking` is still
+        // populated and surfaced via the result if needed).
         let response_text = Arc::new(std::sync::Mutex::new(String::new()));
-        let response_clone = Arc::clone(&response_text);
-        let callback = Arc::new(move |chunk: &str| {
-            let mut resp = response_clone.lock_mut_safe();
-            resp.push_str(chunk);
+        let typed_tool_calls = Arc::new(std::sync::Mutex::new(Vec::<ToolCall>::new()));
+        let text_clone = Arc::clone(&response_text);
+        let tool_clone = Arc::clone(&typed_tool_calls);
+        let callback: StreamCallback = Arc::new(move |event| match event {
+            StreamEvent::Text(chunk) => {
+                text_clone.lock_mut_safe().push_str(&chunk);
+            },
+            StreamEvent::ToolCall(tc) => {
+                tool_clone.lock_mut_safe().push(tc);
+            },
+            StreamEvent::Reasoning(_) | StreamEvent::Done { .. } => {},
         });
 
         let result = {
@@ -116,14 +152,19 @@ impl NonInteractiveRunner {
 
         let (content, initial_tool_calls) = match result {
             Ok(response) => {
-                let callback_content = response_text.lock_mut_safe().clone();
-                let content = if !callback_content.is_empty() {
-                    callback_content
+                let streamed_text = response_text.lock_mut_safe().clone();
+                let content = if !streamed_text.is_empty() {
+                    streamed_text
                 } else {
                     response.content
                 };
                 total_tokens += response.usage.map(|u| u.total_tokens).unwrap_or(0);
-                let tool_calls = response.tool_calls.unwrap_or_default();
+                let streamed_tool_calls = std::mem::take(&mut *typed_tool_calls.lock_mut_safe());
+                let tool_calls = if !streamed_tool_calls.is_empty() {
+                    streamed_tool_calls
+                } else {
+                    response.tool_calls.unwrap_or_default()
+                };
                 (content, tool_calls)
             },
             Err(e) => {
@@ -226,15 +267,13 @@ impl NonInteractiveRunner {
             },
         })
     }
-
 }
 
 /// Format a non-interactive result according to the output format
 pub fn format_result(result: &NonInteractiveResult, format: OutputFormat) -> String {
     match format {
-        OutputFormat::Json => serde_json::to_string_pretty(result).unwrap_or_else(|e| {
-            format!("{{\"error\": \"Failed to serialize result: {}\"}}", e)
-        }),
+        OutputFormat::Json => serde_json::to_string_pretty(result)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize result: {}\"}}", e)),
         OutputFormat::Text => {
             let mut output = String::new();
             output.push_str(&result.response);

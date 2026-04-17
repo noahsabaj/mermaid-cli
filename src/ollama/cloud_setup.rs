@@ -43,13 +43,11 @@ pub fn setup_cloud_interactive() -> Result<bool> {
         return Ok(false);
     }
 
-    // Prompt for API key
-    print!("\nEnter your Ollama Cloud API key: ");
-    io::stdout().flush()?;
-
-    let mut api_key = String::new();
-    io::stdin().read_line(&mut api_key)?;
-    let api_key = api_key.trim();
+    // Prompt for API key without echoing to terminal (shell history /
+    // scrollback safety). Falls back to read_line on platforms where
+    // rpassword can't hide input.
+    let api_key_input = rpassword::prompt_password("\nEnter your Ollama Cloud API key: ")?;
+    let api_key = api_key_input.trim();
 
     if api_key.is_empty() {
         println!("\nNo API key provided. Setup cancelled.");

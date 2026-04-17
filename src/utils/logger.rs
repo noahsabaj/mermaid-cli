@@ -1,13 +1,34 @@
 use std::fs::OpenOptions;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+/// Rotate the log file when it reaches this size. Bounded: at most two
+/// log files (`mermaid.log` current + `mermaid.log.old` previous), so
+/// worst-case disk use is ~2x this value between restarts.
+const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+
 /// Get the log file path (~/.mermaid/mermaid.log)
 fn get_log_file_path() -> Option<PathBuf> {
+    // Fall back to USERPROFILE on Windows where HOME is not conventionally
+    // set; mirrors the pattern used in app::config::get_config_dir.
     std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
         .ok()
         .map(|home| PathBuf::from(home).join(".mermaid").join("mermaid.log"))
+}
+
+/// If the log file exceeds MAX_LOG_SIZE, rename it to `.log.old`
+/// (overwriting any prior `.log.old`). Best-effort — rotation failures
+/// are silent because logging is non-critical. Runs once per startup.
+fn rotate_if_large(path: &Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() >= MAX_LOG_SIZE {
+        let rotated = path.with_extension("log.old");
+        let _ = std::fs::rename(path, rotated);
+    }
 }
 
 /// Initialize the logging system with tracing
@@ -27,6 +48,9 @@ pub fn init_logger(verbose: bool) {
         if let Some(parent) = log_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+
+        // Rotate at startup if the previous session left a large file.
+        rotate_if_large(&log_path);
 
         // Open log file for appending
         if let Ok(file) = OpenOptions::new().create(true).append(true).open(&log_path) {
@@ -73,4 +97,69 @@ pub fn log_debug(message: impl std::fmt::Display) {
 /// Progress indicator for startup sequence
 pub fn log_progress(step: usize, total: usize, message: impl std::fmt::Display) {
     info!(step = step, total = total, "{}", message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotate_small_file_is_noop() {
+        let tmp = std::env::temp_dir().join("mermaid_logger_small.log");
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(tmp.with_extension("log.old"));
+        std::fs::write(&tmp, b"hello world").unwrap();
+
+        rotate_if_large(&tmp);
+
+        assert!(tmp.exists(), "small file should NOT be rotated");
+        assert!(
+            !tmp.with_extension("log.old").exists(),
+            "no .log.old should be created for small files"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn rotate_large_file_renames_to_old() {
+        let tmp = std::env::temp_dir().join("mermaid_logger_large.log");
+        let _ = std::fs::remove_file(&tmp);
+        let old = tmp.with_extension("log.old");
+        let _ = std::fs::remove_file(&old);
+
+        let file = std::fs::File::create(&tmp).unwrap();
+        file.set_len(MAX_LOG_SIZE + 1).unwrap();
+        drop(file);
+
+        rotate_if_large(&tmp);
+
+        assert!(!tmp.exists(), "oversized file should be rotated away");
+        assert!(old.exists(), ".log.old should now exist");
+
+        let _ = std::fs::remove_file(&old);
+    }
+
+    #[test]
+    fn rotate_overwrites_prior_old() {
+        let tmp = std::env::temp_dir().join("mermaid_logger_overwrite.log");
+        let _ = std::fs::remove_file(&tmp);
+        let old = tmp.with_extension("log.old");
+        std::fs::write(&old, b"stale previous rotation").unwrap();
+
+        let file = std::fs::File::create(&tmp).unwrap();
+        file.set_len(MAX_LOG_SIZE + 1).unwrap();
+        drop(file);
+
+        rotate_if_large(&tmp);
+
+        // Previous .old should have been replaced by the freshly rotated file.
+        let rotated_size = std::fs::metadata(&old).unwrap().len();
+        assert!(
+            rotated_size >= MAX_LOG_SIZE,
+            "the rotated file should be the large one, not the stale old"
+        );
+
+        let _ = std::fs::remove_file(&old);
+    }
 }

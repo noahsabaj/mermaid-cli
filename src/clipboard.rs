@@ -93,12 +93,16 @@ pub fn has_image() -> bool {
                 .unwrap_or(false)
         },
         Some(ClipboardBackend::Windows) => {
-            // PowerShell: check if clipboard contains an image
+            // PowerShell: check if clipboard contains an image.
+            // `Add-Type` is required on PowerShell 7 (Core) and locked-down
+            // environments where System.Windows.Forms isn't auto-loaded.
+            // Matches the pattern used in read_image_bytes below.
             Command::new("powershell")
                 .args([
                     "-NoProfile",
                     "-Command",
-                    "[System.Windows.Forms.Clipboard]::ContainsImage()",
+                    "Add-Type -AssemblyName System.Windows.Forms; \
+                     [System.Windows.Forms.Clipboard]::ContainsImage()",
                 ])
                 .output()
                 .map(|o| {
