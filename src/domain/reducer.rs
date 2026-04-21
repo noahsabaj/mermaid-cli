@@ -642,15 +642,28 @@ fn handle_stream_done(
 }
 
 fn handle_upstream_error(state: &mut State, error: crate::models::UserFacingError) {
-    // End the current turn. Commit an error line so the user sees it
-    // and the assistant history isn't left dangling.
+    // End the current turn. Surface the error through a single
+    // channel — the ActionDisplay attached to an empty assistant
+    // message. The chat widget paints ActionDisplays as colored
+    // error blocks, so committing to both `content` and `actions`
+    // would paint the same error twice (v0.6's regression from
+    // before the rendering was unified, and one this reducer
+    // originally repeated — now fixed).
     state.turn = TurnState::Idle;
-    let line = format!("{}: {}", error.summary, error.message);
-    let mut msg = ChatMessage {
+    let summary_line = format!("{}: {}", error.summary, error.message);
+    let msg = ChatMessage {
         role: MessageRole::Assistant,
-        content: line.clone(),
+        content: String::new(),
         timestamp: chrono::Local::now(),
-        actions: Vec::new(),
+        actions: vec![crate::agents::ActionDisplay {
+            action_type: "Error".to_string(),
+            target: error.summary.clone(),
+            result: crate::agents::ActionResult::Error {
+                error: error.message.clone(),
+            },
+            details: crate::agents::ActionDetails::Simple,
+            duration_seconds: None,
+        }],
         thinking: None,
         images: None,
         tool_calls: None,
@@ -658,18 +671,9 @@ fn handle_upstream_error(state: &mut State, error: crate::models::UserFacingErro
         tool_name: None,
         thinking_signature: None,
     };
-    msg.actions.push(crate::agents::ActionDisplay {
-        action_type: "Error".to_string(),
-        target: error.summary.clone(),
-        result: crate::agents::ActionResult::Error {
-            error: error.message.clone(),
-        },
-        details: crate::agents::ActionDetails::Simple,
-        duration_seconds: None,
-    });
     state.session.append(msg);
     state.status = Some(StatusLine {
-        text: line,
+        text: summary_line,
         kind: StatusKind::Error,
         shown_at: std::time::SystemTime::now(),
     });
@@ -1001,8 +1005,12 @@ mod tests {
         assert!(matches!(state.turn, TurnState::Idle));
         assert_eq!(state.session.messages().len(), 1);
         let m = &state.session.messages()[0];
-        assert!(m.content.contains("Server error"));
+        // Error surfaces through the ActionDisplay only — content is
+        // intentionally empty so the chat widget doesn't paint the
+        // error twice (once as a content line, once as an action).
+        assert_eq!(m.content, "");
         assert_eq!(m.actions.len(), 1);
+        assert_eq!(m.actions[0].target, "Server error");
     }
 
     #[test]
