@@ -9,6 +9,7 @@ pub mod mcp;
 pub mod models;
 pub mod ollama;
 pub mod prompts;
+pub mod providers;
 pub mod runtime;
 pub mod session;
 pub mod tui;

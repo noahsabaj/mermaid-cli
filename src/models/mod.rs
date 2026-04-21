@@ -2,10 +2,10 @@
 // All external access must go through this gateway
 
 // Core modules
-mod adapters; // Provider adapters (Ollama, OpenAI-compatible)
+pub(crate) mod adapters; // Provider adapters (Ollama, OpenAI-compatible) — pub(crate) so new providers/ wrappers can delegate during C3–C9 migration
 mod backend; // ModelFactory (single factory)
 mod capabilities; // Per-model capability flags
-mod config; // Unified configuration
+pub(crate) mod config; // Unified configuration — same rationale as adapters
 mod error; // Structured error types
 mod providers; // OpenAI-compatible provider profiles + registry
 mod reasoning; // ReasoningLevel, ReasoningCapability, nearest_effort
