@@ -6,7 +6,10 @@
 //! migration so the old runtime keeps compiling; both trees
 //! delete together in C10 when the new main loop goes live.
 
+pub mod anthropic;
+pub mod gemini;
 pub mod ollama;
+pub mod openai_compat;
 
 use async_trait::async_trait;
 
@@ -37,4 +40,7 @@ pub trait ModelProvider: Send + Sync {
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse>;
 }
 
+pub use anthropic::AnthropicProvider;
+pub use gemini::GeminiProvider;
 pub use ollama::OllamaProvider;
+pub use openai_compat::OpenAICompatProvider;

@@ -25,7 +25,7 @@ pub use ctx::{
     ExecContext, FinalResponse, ProgressEvent, StreamContext, StreamEvent, clone_messages,
     test_exec_context, test_stream_context,
 };
-pub use model::{ModelProvider, OllamaProvider};
+pub use model::{AnthropicProvider, GeminiProvider, ModelProvider, OllamaProvider, OpenAICompatProvider};
 pub use tool::{ToolExecutor, ToolRegistry};
 
 use std::sync::Arc;
