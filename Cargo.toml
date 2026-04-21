@@ -23,11 +23,20 @@ path = "src/main.rs"
 # Async runtime. 1.44 closes RUSTSEC-2025-0023 (broadcast channel unsoundness).
 tokio = { version = "1.44", features = ["full"] }
 tokio-stream = "0.1"
+# `CancellationToken` for per-turn structured concurrency in
+# `src/effect/`. The v0.7 architecture uses one token per `TurnScope`
+# so cancelling a turn aborts every child task at its next await —
+# replaces the polling-based check_interrupt pattern in the old agent
+# loop. Minimum-viable feature set only (sync primitives).
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 futures = "0.3"
 
 # TUI
 ratatui = { version = "0.30", features = ["scrolling-regions", "palette", "macros"] }
-crossterm = "0.29"
+# `event-stream` flips crossterm's event reader into a `Stream` so the
+# v0.7 main loop can drive crossterm events + effect results off one
+# `tokio::select!`. No more dual event loops.
+crossterm = { version = "0.29", features = ["event-stream"] }
 tui-textarea = "0.7"
 
 # Config & Serialization

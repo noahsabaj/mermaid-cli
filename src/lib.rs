@@ -4,6 +4,7 @@ pub mod cli;
 pub mod clipboard;
 pub mod constants;
 pub mod domain;
+pub mod effect;
 pub mod mcp;
 pub mod models;
 pub mod ollama;
