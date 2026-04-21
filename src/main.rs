@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use mermaid_cli::{
-    app::{load_config, persist_last_model, resolve_model_id},
+    app::{load_config, persist_last_model, resolve_model_id, run_v7, v7_opted_in},
     cli::{Cli, Commands, OutputFormat},
     ollama::ensure_model as ensure_ollama_model,
     runtime::{NonInteractiveRunner, Orchestrator, actionable_init_error, format_result},
@@ -26,6 +26,17 @@ async fn main() -> Result<()> {
     }) = &cli.command
     {
         return run_non_interactive(&cli, prompt.clone(), *format, *max_tokens, *no_execute).await;
+    }
+
+    // v0.7 experimental main loop, opt-in via `MERMAID_V7=1`. The
+    // entire architecture flip lives under the flag during migration
+    // — both paths coexist until C10 flips the default and deletes
+    // the old runtime.
+    if v7_opted_in() {
+        let config = load_config().unwrap_or_default();
+        let model_id = resolve_model_id(cli.model.as_deref(), &config).await?;
+        let cwd = std::env::current_dir()?;
+        return run_v7(config, cwd, model_id).await;
     }
 
     // Create and run the orchestrator for interactive mode
