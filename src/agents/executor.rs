@@ -43,7 +43,15 @@ pub async fn execute_command(
         .arg(command)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // If the task running this command is aborted (e.g., user
+        // pressed Ctrl+C during tool execution — see
+        // `runtime::agent_loop::run_tool_with_cancel_polling`), tokio
+        // will kill and reap the child process on drop. Without this,
+        // aborting a running `execute_command` would leak subprocesses
+        // on Unix. Matches the pattern used by `mcp::transport` for
+        // MCP server child processes.
+        .kill_on_drop(true);
 
     // Set working directory if specified
     if let Some(dir) = working_dir {

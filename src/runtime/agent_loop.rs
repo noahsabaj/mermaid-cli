@@ -30,6 +30,71 @@ use crate::utils::MutexExt;
 /// Default maximum iterations for the agent loop
 pub const MAX_AGENT_ITERATIONS: usize = 25;
 
+/// Tool interruption signal — see `run_tool_with_cancel_polling`.
+enum ToolOutcome {
+    /// Tool finished on its own; use the contained `AgentActionResult`.
+    Finished(AgentActionResult),
+    /// User hit Esc / Ctrl+C mid-tool. Task was aborted; caller should
+    /// break out of the agent loop and record placeholder tool results
+    /// for the aborted + any not-yet-started tools.
+    Cancelled,
+}
+
+/// Run an `AgentAction` in a spawned task and poll for user cancellation
+/// every `UI_POLL_INTERVAL_MS`. A slow tool (30s `web_search`, 300s
+/// `execute_command`, 30s MCP wait) no longer blocks Ctrl+C — the abort
+/// is honored within ~50ms. Tools that fork subprocesses must be
+/// abort-safe (see `kill_on_drop(true)` in `agents/executor.rs`); IO-
+/// bound tools (reqwest, filesystem, MCP) drop cleanly.
+async fn run_tool_with_cancel_polling(
+    action: AgentAction,
+    observer: &mut dyn AgentObserver,
+) -> ToolOutcome {
+    let mut task = tokio::spawn(async move { execute_action(&action).await });
+
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(crate::constants::UI_POLL_INTERVAL_MS),
+            &mut task,
+        )
+        .await
+        {
+            Ok(Ok(result)) => return ToolOutcome::Finished(result),
+            Ok(Err(join_err)) => {
+                // Task panicked or was externally aborted. Surface as
+                // a tool error so history stays consistent.
+                return ToolOutcome::Finished(AgentActionResult::Error {
+                    error: format!("tool task failed: {}", join_err),
+                });
+            },
+            Err(_timeout) => {
+                if observer.cancel_requested() {
+                    task.abort();
+                    return ToolOutcome::Cancelled;
+                }
+            },
+        }
+    }
+}
+
+/// Placeholder body pushed as the tool result for a call that was
+/// aborted or never started because the user cancelled mid-loop. Keeps
+/// message history consistent — strict providers (OpenAI, Anthropic)
+/// require every `tool_call` in an assistant message to have a matching
+/// tool-role response in the next turn.
+const SKIPPED_TOOL_PLACEHOLDER: &str = "(tool call skipped — user interrupted the agent loop)";
+
+/// Synthesize a default tool_call_id matching the pattern
+/// `run_agent_loop` uses when the model omits the field. Must match
+/// the format at the execution sites to avoid duplicate-key surprises.
+fn fallback_tool_call_id(iteration: usize, idx: usize, name: &str) -> String {
+    format!("call_{}_{}_{}", iteration, idx, name)
+}
+
+fn fallback_agent_call_id(iteration: usize, idx: usize) -> String {
+    format!("call_agent_{}_{}", iteration, idx)
+}
+
 /// Output of a single model call, returned from the `call_model` hook.
 #[derive(Debug, Clone, Default)]
 pub struct ModelCallOutput {
@@ -52,6 +117,23 @@ pub trait AgentObserver: Send {
     /// Returns `LoopControl::Continue` to proceed, `Interrupt` to stop,
     /// or `InjectMessage(text)` to redirect the agent with new user input.
     fn check_interrupt(&mut self) -> LoopControl;
+
+    /// Lightweight "did the user press Esc / Ctrl+C?" probe for use
+    /// INSIDE a tool execution. Unlike `check_interrupt`, this must NOT
+    /// consume queued user messages — those are picked up by the full
+    /// `check_interrupt` at the next iteration boundary.
+    ///
+    /// Returns `true` if the user requested cancellation since the last
+    /// call, `false` otherwise. Default implementation returns `false`
+    /// (appropriate for silent / subagent observers with no user input).
+    ///
+    /// The agent loop polls this every `UI_POLL_INTERVAL_MS` during tool
+    /// execution so Ctrl+C takes effect within ~50ms instead of waiting
+    /// for a slow tool's internal timeout (up to 300s for
+    /// `execute_command`, 30s for MCP / web).
+    fn cancel_requested(&mut self) -> bool {
+        false
+    }
 
     /// Called when the loop status changes (e.g., "Iteration 3 - executing tools")
     fn on_status(&mut self, message: &str);
@@ -221,7 +303,7 @@ pub async fn run_agent_loop(
     let mut final_response = String::new();
     let mut interrupted = false;
 
-    while !current_tool_calls.is_empty() {
+    'agent_loop: while !current_tool_calls.is_empty() {
         iteration += 1;
         if iteration > max_iterations {
             observer.on_status(&format!(
@@ -267,11 +349,22 @@ pub async fn run_agent_loop(
             // The fallback id includes the in-iteration index so two calls
             // to the same tool (e.g., two `read_file`s in parallel) don't
             // collide when the model omits the `id` field.
+            //
+            // Each tool is spawned as a task and polled every 50ms for
+            // user cancellation (`observer.cancel_requested`). Without
+            // this, a 30-300s tool timeout buffered every Ctrl+C press
+            // until completion — the user perceived mermaid as hung.
+            // On cancel we abort the task and fill placeholder tool
+            // results for the aborted + remaining regular + any
+            // unstarted agent calls so message history stays consistent
+            // (strict providers need every `tool_call` to have a
+            // matching tool response).
+            let mut cancel_at_idx: Option<usize> = None;
             for (idx, tc) in regular_calls.iter().enumerate() {
                 let tool_call_id = tc
                     .id
                     .clone()
-                    .unwrap_or_else(|| format!("call_{}_{}_{}", iteration, idx, tc.function.name));
+                    .unwrap_or_else(|| fallback_tool_call_id(iteration, idx, &tc.function.name));
                 let tool_name = tc.function.name.clone();
 
                 let agent_action = match tc.to_agent_action() {
@@ -295,7 +388,14 @@ pub async fn run_agent_loop(
                     },
                 };
 
-                let result = execute_action(&agent_action).await;
+                let result =
+                    match run_tool_with_cancel_polling(agent_action.clone(), observer).await {
+                        ToolOutcome::Finished(r) => r,
+                        ToolOutcome::Cancelled => {
+                            cancel_at_idx = Some(idx);
+                            break;
+                        },
+                    };
                 let (success, output, images) = match &result {
                     AgentActionResult::Success { output, images } => {
                         (true, output.clone(), images.clone())
@@ -321,6 +421,60 @@ pub async fn run_agent_loop(
                     output,
                     images,
                 });
+            }
+
+            // Cancel handling: fill placeholder tool results for every
+            // `tool_call` in the assistant message that didn't get an
+            // executed response — both the cancelled regular tool and
+            // any remaining regular + agent tools that never ran. Then
+            // break out of the agent loop with `interrupted = true`.
+            if let Some(cancel_idx) = cancel_at_idx {
+                // Aborted + remaining regular tools.
+                for (idx, tc) in regular_calls.iter().enumerate().skip(cancel_idx) {
+                    let tool_call_id = tc.id.clone().unwrap_or_else(|| {
+                        fallback_tool_call_id(iteration, idx, &tc.function.name)
+                    });
+                    let tool_name = tc.function.name.clone();
+                    let tool_msg =
+                        ChatMessage::tool(&tool_call_id, &tool_name, SKIPPED_TOOL_PLACEHOLDER);
+                    observer.on_message_appended(&tool_msg);
+                    messages.push(tool_msg);
+                    all_tool_results.push(ToolExecutionResult {
+                        tool_call_id,
+                        tool_name,
+                        action: AgentAction::ParseError {
+                            message: SKIPPED_TOOL_PLACEHOLDER.to_string(),
+                        },
+                        success: false,
+                        output: SKIPPED_TOOL_PLACEHOLDER.to_string(),
+                        images: None,
+                    });
+                }
+                // Agent tools that never ran — same placeholder policy.
+                for (idx, tc) in agent_calls.iter().enumerate() {
+                    let tool_call_id = tc
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| fallback_agent_call_id(iteration, idx));
+                    let tool_name = "agent".to_string();
+                    let tool_msg =
+                        ChatMessage::tool(&tool_call_id, &tool_name, SKIPPED_TOOL_PLACEHOLDER);
+                    observer.on_message_appended(&tool_msg);
+                    messages.push(tool_msg);
+                    all_tool_results.push(ToolExecutionResult {
+                        tool_call_id,
+                        tool_name,
+                        action: AgentAction::SpawnAgent {
+                            prompt: String::new(),
+                            description: SKIPPED_TOOL_PLACEHOLDER.to_string(),
+                        },
+                        success: false,
+                        output: SKIPPED_TOOL_PLACEHOLDER.to_string(),
+                        images: None,
+                    });
+                }
+                interrupted = true;
+                break 'agent_loop;
             }
 
             // Execute agent tool calls in parallel via the observer hook

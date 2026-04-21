@@ -291,6 +291,19 @@ impl<'a> AgentObserver for TuiObserver<'a> {
         let _ = self.render();
     }
 
+    fn cancel_requested(&mut self) -> bool {
+        // Re-render so the user sees any state changes that happened
+        // while a tool was running (tool result appended, etc.).
+        let _ = self.render();
+        // `drain_events` returns true on Esc / Ctrl+C. It also processes
+        // other input (types chars into the input buffer, queues
+        // messages on Enter, handles scroll) — which is exactly what we
+        // want during tool execution: the UI stays responsive, only
+        // the actual cancel key aborts the tool. Queued messages stay
+        // in the queue for the next full `check_interrupt` call.
+        self.drain_events().unwrap_or(false)
+    }
+
     fn on_error(&mut self, error: &str) {
         // `run_agent_loop` calls this when `call_model` returns Err. For
         // stream errors that arrived via `TuiStreamEvent::Error`, the

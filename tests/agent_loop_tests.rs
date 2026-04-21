@@ -299,3 +299,166 @@ async fn test_agent_loop_interrupt() {
     // iteration is incremented before check_interrupt is called
     assert_eq!(result.iterations, 1);
 }
+
+/// Ctrl+C / Esc during a long-running tool should abort the tool within
+/// ~50ms and fill placeholder tool results for aborted + remaining
+/// sequential tools, so message history stays consistent (every
+/// `tool_call` has a matching tool response). Before the
+/// `cancel_requested` polling fix, the user had to wait for all N
+/// tools' internal timeouts to elapse — up to minutes for a batch of
+/// `execute_command` calls.
+#[tokio::test]
+async fn test_agent_loop_cancels_mid_tool_and_fills_placeholders() {
+    /// Observer that signals cancel on the FIRST `cancel_requested`
+    /// call (during tool execution), letting the other trait methods
+    /// run normally. `check_interrupt` always returns Continue so we
+    /// don't trip the existing iteration-boundary interrupt path.
+    struct CancelDuringToolObserver {
+        cancel_delivered: bool,
+    }
+
+    impl AgentObserver for CancelDuringToolObserver {
+        fn check_interrupt(&mut self) -> LoopControl {
+            LoopControl::Continue
+        }
+        fn cancel_requested(&mut self) -> bool {
+            if self.cancel_delivered {
+                return false;
+            }
+            self.cancel_delivered = true;
+            true
+        }
+        fn on_status(&mut self, _: &str) {}
+        fn on_tool_result(&mut self, _: &str, _: &str, _: &AgentAction, _: &AgentActionResult) {}
+        fn on_error(&mut self, _: &str) {}
+        fn on_generation_start(&mut self) {}
+        fn on_generation_complete(&mut self, _: usize) {}
+    }
+
+    /// Model that must never be called — we cancel during the first
+    /// tool, which should break the loop before model.chat fires again.
+    struct UnreachableModel;
+
+    #[async_trait]
+    impl Model for UnreachableModel {
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _config: &ModelConfig,
+            _stream_callback: Option<StreamCallback>,
+        ) -> mermaid_cli::models::Result<ModelResponse> {
+            panic!("model should not be called after mid-tool cancel");
+        }
+        fn name(&self) -> &str {
+            "unreachable"
+        }
+        fn capabilities(&self) -> &ModelCapabilities {
+            mock_capabilities()
+        }
+        async fn list_models(&self) -> mermaid_cli::models::Result<Vec<String>> {
+            Ok(vec![])
+        }
+    }
+
+    let model: Arc<RwLock<Box<dyn Model>>> = Arc::new(RwLock::new(Box::new(UnreachableModel)));
+    let config = ModelConfig::default();
+
+    let mut messages = vec![ChatMessage::user("do three things please")];
+
+    // Three tool calls. The first is a slow execute_command (`sleep 60`)
+    // that will definitely still be running when the observer signals
+    // cancel on the first 50ms poll. Tools 2 and 3 never run; they
+    // should land as placeholders in the history.
+    let initial_tool_calls = vec![
+        ToolCall {
+            id: Some("call_slow".to_string()),
+            function: FunctionCall {
+                name: "execute_command".to_string(),
+                arguments: serde_json::json!({
+                    "command": "sleep 60",
+                    "timeout": 120,
+                }),
+            },
+        },
+        ToolCall {
+            id: Some("call_later_1".to_string()),
+            function: FunctionCall {
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "Cargo.toml"}),
+            },
+        },
+        ToolCall {
+            id: Some("call_later_2".to_string()),
+            function: FunctionCall {
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "README.md"}),
+            },
+        },
+    ];
+
+    let mut observer = CancelDuringToolObserver {
+        cancel_delivered: false,
+    };
+
+    let start = std::time::Instant::now();
+    let result = run_agent_loop(
+        model,
+        &config,
+        &mut messages,
+        initial_tool_calls,
+        &mut observer,
+        MAX_AGENT_ITERATIONS,
+    )
+    .await
+    .unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(result.interrupted, "loop should report interrupted=true");
+    assert_eq!(result.iterations, 1);
+    // The cancel must take effect fast — the sleep 60 must have been
+    // aborted. Cap at 5s to be generous about CI noise; in practice
+    // this runs in well under a second.
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "cancel should abort in <5s, took {:?}",
+        elapsed
+    );
+    // All three tool_calls got recorded as results (one real + two
+    // placeholders) so the assistant message's tool_calls each have a
+    // matching response.
+    assert_eq!(
+        result.tool_results.len(),
+        3,
+        "every tool_call needs a tool_result for history consistency"
+    );
+    // First one was the cancelled tool — also landed as a placeholder.
+    assert!(!result.tool_results[0].success);
+    assert!(!result.tool_results[1].success);
+    assert!(!result.tool_results[2].success);
+    assert!(
+        result.tool_results[1].output.contains("skipped"),
+        "placeholder should mention 'skipped', got {:?}",
+        result.tool_results[1].output
+    );
+}
+
+/// Default `cancel_requested` on a bare `AgentObserver` returns false —
+/// critical for silent / subagent observers that have no user to
+/// interrupt. Regression guard so future trait changes don't silently
+/// flip the default.
+#[test]
+fn default_cancel_requested_is_false() {
+    struct MinimalObserver;
+    impl AgentObserver for MinimalObserver {
+        fn check_interrupt(&mut self) -> LoopControl {
+            LoopControl::Continue
+        }
+        fn on_status(&mut self, _: &str) {}
+        fn on_tool_result(&mut self, _: &str, _: &str, _: &AgentAction, _: &AgentActionResult) {}
+        fn on_error(&mut self, _: &str) {}
+        fn on_generation_start(&mut self) {}
+        fn on_generation_complete(&mut self, _: usize) {}
+    }
+    let mut obs = MinimalObserver;
+    assert!(!obs.cancel_requested());
+}
