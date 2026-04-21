@@ -96,6 +96,134 @@ impl ToolExecutor for ReadFileTool {
     }
 }
 
+/// `edit_file` — exact-match string replacement. Used for targeted
+/// edits rather than full file rewrites. Errors if the `old_string`
+/// doesn't appear exactly once (matching v0.6 semantics).
+pub struct EditFileTool;
+
+#[async_trait]
+impl ToolExecutor for EditFileTool {
+    fn name(&self) -> &'static str {
+        "edit_file"
+    }
+
+    async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
+        let Some(raw_path) = args.get("path").and_then(|v| v.as_str()) else {
+            return err("edit_file requires 'path'", 0.0);
+        };
+        let Some(old_string) = args.get("old_string").and_then(|v| v.as_str()) else {
+            return err("edit_file requires 'old_string'", 0.0);
+        };
+        let Some(new_string) = args.get("new_string").and_then(|v| v.as_str()) else {
+            return err("edit_file requires 'new_string'", 0.0);
+        };
+
+        let start = std::time::Instant::now();
+        let abs = resolve_path(&ctx.workdir, raw_path);
+        let old_owned = old_string.to_string();
+        let new_owned = new_string.to_string();
+        let abs_clone = abs.clone();
+        let display_path = raw_path.to_string();
+
+        tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => ToolOutcome::Cancelled,
+            result = tokio::task::spawn_blocking(move || edit_blocking(&abs_clone, &old_owned, &new_owned)) => {
+                match result {
+                    Ok(Ok(replacements)) => ToolOutcome::Finished {
+                        output: format!("Edited {} ({} replacement{})",
+                            display_path,
+                            replacements,
+                            if replacements == 1 { "" } else { "s" }),
+                        images: None,
+                        duration_secs: start.elapsed().as_secs_f64(),
+                    },
+                    Ok(Err(e)) => err(&format!("edit_file({}): {}", display_path, e),
+                                       start.elapsed().as_secs_f64()),
+                    Err(e) => err(&format!("edit_file join error: {}", e),
+                                   start.elapsed().as_secs_f64()),
+                }
+            }
+        }
+    }
+}
+
+/// `delete_file` — unlink a file. Errors on directories (use
+/// `execute_command rm -rf` for those — the model shouldn't be
+/// blowing away directories as a routine op).
+pub struct DeleteFileTool;
+
+#[async_trait]
+impl ToolExecutor for DeleteFileTool {
+    fn name(&self) -> &'static str {
+        "delete_file"
+    }
+
+    async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
+        let Some(raw_path) = args.get("path").and_then(|v| v.as_str()) else {
+            return err("delete_file requires 'path'", 0.0);
+        };
+        let start = std::time::Instant::now();
+        let abs = resolve_path(&ctx.workdir, raw_path);
+        let display = raw_path.to_string();
+
+        tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => ToolOutcome::Cancelled,
+            result = tokio::task::spawn_blocking(move || std::fs::remove_file(&abs)) => {
+                match result {
+                    Ok(Ok(())) => ToolOutcome::Finished {
+                        output: format!("Deleted {}", display),
+                        images: None,
+                        duration_secs: start.elapsed().as_secs_f64(),
+                    },
+                    Ok(Err(e)) => err(&format!("delete_file({}): {}", display, e),
+                                       start.elapsed().as_secs_f64()),
+                    Err(e) => err(&format!("delete_file join error: {}", e),
+                                   start.elapsed().as_secs_f64()),
+                }
+            }
+        }
+    }
+}
+
+/// `create_directory` — `mkdir -p` semantics.
+pub struct CreateDirectoryTool;
+
+#[async_trait]
+impl ToolExecutor for CreateDirectoryTool {
+    fn name(&self) -> &'static str {
+        "create_directory"
+    }
+
+    async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
+        let Some(raw_path) = args.get("path").and_then(|v| v.as_str()) else {
+            return err("create_directory requires 'path'", 0.0);
+        };
+        let start = std::time::Instant::now();
+        let abs = resolve_path(&ctx.workdir, raw_path);
+        let display = raw_path.to_string();
+
+        tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => ToolOutcome::Cancelled,
+            result = tokio::task::spawn_blocking(move || std::fs::create_dir_all(&abs)) => {
+                match result {
+                    Ok(Ok(())) => ToolOutcome::Finished {
+                        output: format!("Created directory {}", display),
+                        images: None,
+                        duration_secs: start.elapsed().as_secs_f64(),
+                    },
+                    Ok(Err(e)) => err(&format!("create_directory({}): {}", display, e),
+                                       start.elapsed().as_secs_f64()),
+                    Err(e) => err(&format!("create_directory join error: {}", e),
+                                   start.elapsed().as_secs_f64()),
+                }
+            }
+        }
+    }
+}
+
 /// `write_file` — write a single file, creating parent dirs as needed.
 pub struct WriteFileTool;
 
@@ -206,6 +334,32 @@ fn write_one_blocking(path: &Path, content: &str) -> std::io::Result<usize> {
     }
     std::fs::write(path, content)?;
     Ok(content.lines().count())
+}
+
+fn edit_blocking(path: &Path, old_string: &str, new_string: &str) -> std::io::Result<usize> {
+    let current = std::fs::read_to_string(path)?;
+    let count = current.matches(old_string).count();
+    if count == 0 {
+        return Err(std::io::Error::other(
+            "old_string not found (is the snippet correct? use read_file to verify)",
+        ));
+    }
+    if count > 1 {
+        return Err(std::io::Error::other(format!(
+            "old_string appears {} times — add more context so the match is unique",
+            count
+        )));
+    }
+    let updated = current.replacen(old_string, new_string, 1);
+    std::fs::write(path, updated)?;
+    Ok(1)
+}
+
+fn err(msg: &str, duration_secs: f64) -> ToolOutcome {
+    ToolOutcome::Error {
+        error: msg.to_string(),
+        duration_secs,
+    }
 }
 
 #[cfg(test)]

@@ -11,7 +11,10 @@
 //!   3. Register it in the `tool::registry()` assembly.
 //!   4. Add a `ToolDefinition` entry for the outgoing request schema.
 
+pub mod exec;
 pub mod filesystem;
+pub mod mcp;
+pub mod web;
 
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -75,6 +78,10 @@ impl Default for ToolRegistry {
         let mut r = Self::new();
         r.register(Arc::new(filesystem::ReadFileTool));
         r.register(Arc::new(filesystem::WriteFileTool));
+        r.register(Arc::new(filesystem::EditFileTool));
+        r.register(Arc::new(filesystem::DeleteFileTool));
+        r.register(Arc::new(filesystem::CreateDirectoryTool));
+        r.register(Arc::new(exec::ExecuteCommandTool));
         r
     }
 }
@@ -84,12 +91,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_registry_has_read_and_write() {
+    fn default_registry_has_builtin_tools() {
         let r = ToolRegistry::default();
-        assert!(r.get("read_file").is_some());
-        assert!(r.get("write_file").is_some());
+        for name in &[
+            "read_file",
+            "write_file",
+            "edit_file",
+            "delete_file",
+            "create_directory",
+            "execute_command",
+        ] {
+            assert!(r.get(name).is_some(), "missing: {}", name);
+        }
         assert!(r.get("not_a_tool").is_none());
-        assert_eq!(r.len(), 2);
+        assert!(r.len() >= 6);
     }
 
     #[test]
