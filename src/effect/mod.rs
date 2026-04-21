@@ -35,7 +35,10 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::app::Config;
 use crate::domain::{Cmd, Msg, TurnId};
+use crate::providers::{ProviderFactory, StreamEvent, ToolRegistry};
+use crate::providers::ctx::{ExecContext, StreamContext};
 
 pub use middleware::{DEFAULT_MAX_ATTEMPTS, retry_transient_http};
 pub use turn_scope::TurnScope;
@@ -70,7 +73,13 @@ pub struct EffectRunner {
     /// MCP manager handle is held elsewhere (`crate::mcp` has a
     /// `OnceLock` for its global manager); we just note workdir so
     /// handlers can construct absolute paths.
-    _workdir: PathBuf,
+    workdir: PathBuf,
+    /// Lazy provider registry. `CallModel` resolves through this.
+    /// `None` in the scaffold path (the C2 tests); production
+    /// construction via `with_bindings` sets it.
+    providers: Option<Arc<ProviderFactory>>,
+    /// Shared tool registry. `None` in scaffold paths.
+    tools: Option<Arc<ToolRegistry>>,
 }
 
 impl EffectRunner {
@@ -80,8 +89,25 @@ impl EffectRunner {
             msg_tx,
             scopes: HashMap::new(),
             detached: tokio::task::JoinSet::new(),
-            _workdir: workdir,
+            workdir,
+            providers: None,
+            tools: None,
         }
+    }
+
+    /// Attach real provider + tool registries. The new main loop
+    /// calls this after constructing the runner; the C2 scaffold
+    /// tests don't. When absent, `CallModel` / `ExecuteTool` emit
+    /// the `not wired` placeholder Msgs (useful for tests that
+    /// don't care about real providers).
+    pub fn with_bindings(
+        mut self,
+        providers: Arc<ProviderFactory>,
+        tools: Arc<ToolRegistry>,
+    ) -> Self {
+        self.providers = Some(providers);
+        self.tools = Some(tools);
+        self
     }
 
     /// Pair-constructor: returns both the runner and the receiving
@@ -90,6 +116,18 @@ impl EffectRunner {
     pub fn pair(workdir: PathBuf) -> (Self, mpsc::Receiver<Msg>) {
         let (tx, rx) = mpsc::channel(MSG_CHANNEL_CAPACITY);
         (Self::new(tx, workdir), rx)
+    }
+
+    /// Pair constructor that also wires the real provider factory +
+    /// tool registry. Used by `app::run_v7`.
+    pub fn pair_with_bindings(
+        workdir: PathBuf,
+        config: Config,
+        tools: Arc<ToolRegistry>,
+    ) -> (Self, mpsc::Receiver<Msg>) {
+        let (tx, rx) = mpsc::channel(MSG_CHANNEL_CAPACITY);
+        let providers = Arc::new(ProviderFactory::new(config));
+        (Self::new(tx, workdir).with_bindings(providers, tools), rx)
     }
 
     /// Get or create the scope for a turn. Idempotent. The scope is
@@ -127,33 +165,11 @@ impl EffectRunner {
         match cmd {
             Cmd::CallModel { turn, request } => {
                 let tx = self.msg_tx.clone();
+                let providers = self.providers.clone();
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
-                    // Scaffold: real dispatch lives in commit 3 when
-                    // ModelProvider is introduced. For now we emit an
-                    // UpstreamError so any caller wiring this runner
-                    // into the reducer observes a well-formed end of
-                    // turn rather than hanging forever.
-                    tokio::select! {
-                        _ = token.cancelled() => {
-                            tracing::trace!(turn = %turn, "call_model cancelled (scaffold)");
-                        },
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
-                            let _ = request; // consume
-                            let error = crate::models::UserFacingError {
-                                summary: "not wired".to_string(),
-                                message: "CallModel dispatch is scaffold-only in this commit; \
-                                          real adapter lands in C3+".to_string(),
-                                suggestion: "wait for v0.7.0 release".to_string(),
-                                category: crate::models::ErrorCategory::Internal,
-                                recoverable: false,
-                            };
-                            let _ = tx
-                                .send(Msg::UpstreamError { turn, error })
-                                .await;
-                        },
-                    }
+                    dispatch_call_model(tx, providers, turn, request, token).await;
                 });
             },
             Cmd::ExecuteTool {
@@ -162,38 +178,15 @@ impl EffectRunner {
                 source,
             } => {
                 let tx = self.msg_tx.clone();
+                let tools = self.tools.clone();
+                let workdir = self.workdir.clone();
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
-                    // Scaffold — real ToolExecutor dispatch lands in C5.
-                    let _ = tx
-                        .send(Msg::ToolStarted { turn, call_id })
-                        .await;
-                    tokio::select! {
-                        _ = token.cancelled() => {
-                            let _ = tx
-                                .send(Msg::ToolFinished {
-                                    turn,
-                                    call_id,
-                                    outcome: crate::domain::ToolOutcome::Cancelled,
-                                })
-                                .await;
-                        },
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
-                            let _ = source;
-                            let _ = tx
-                                .send(Msg::ToolFinished {
-                                    turn,
-                                    call_id,
-                                    outcome: crate::domain::ToolOutcome::Error {
-                                        error: "ExecuteTool is scaffold-only in this commit"
-                                            .to_string(),
-                                        duration_secs: 0.0,
-                                    },
-                                })
-                                .await;
-                        },
-                    }
+                    dispatch_execute_tool(
+                        tx, tools, workdir, turn, call_id, source, token,
+                    )
+                    .await;
                 });
             },
             Cmd::SpawnSubagents { turn, specs: _ } => {
@@ -206,24 +199,42 @@ impl EffectRunner {
             Cmd::CancelScope(turn) => {
                 self.drop_scope(turn);
             },
-            Cmd::SaveConversation(_) => {
-                // Detached — persistence isn't turn-scoped. Emits
-                // `SessionSaved` when complete.
+            Cmd::SaveConversation(history) => {
                 let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
                 self.detached.spawn(async move {
-                    let _ = tx.send(Msg::SessionSaved).await;
+                    if let Ok(manager) =
+                        crate::session::ConversationManager::new(&workdir)
+                        && manager.save_conversation(&history).is_ok()
+                    {
+                        let _ = tx.send(Msg::SessionSaved).await;
+                    } else {
+                        tracing::warn!("SaveConversation: failed to write to disk");
+                    }
                 });
             },
-            Cmd::PersistLastModel(_)
-            | Cmd::PersistDefaultReasoning(_)
-            | Cmd::PersistReasoningFor { .. } => {
-                // Placeholder — real fs writes in C6.
+            Cmd::PersistLastModel(model) => {
+                self.detached.spawn(async move {
+                    let _ = crate::app::persist_last_model(&model);
+                });
+            },
+            Cmd::PersistDefaultReasoning(level) => {
+                self.detached.spawn(async move {
+                    let _ = crate::app::persist_default_reasoning(level);
+                });
+            },
+            Cmd::PersistReasoningFor { model_id, level } => {
+                self.detached.spawn(async move {
+                    let _ = crate::app::persist_reasoning_for_model(&model_id, level);
+                });
             },
             Cmd::RefreshInstructions => {
                 let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
                 self.detached.spawn(async move {
-                    // Placeholder — real walk+refresh in C6.
-                    let _ = tx.send(Msg::InstructionsChanged(None)).await;
+                    let (loaded, _outcome) =
+                        crate::app::instructions::refresh(None, &workdir);
+                    let _ = tx.send(Msg::InstructionsChanged(loaded)).await;
                 });
             },
             Cmd::LoadConversation(_) => {
@@ -345,6 +356,218 @@ impl Runner for SharedRunner {
         tokio::spawn(async move {
             inner.lock().await.dispatch(cmd);
         });
+    }
+}
+
+/// Dispatch a `CallModel` command. If a `ProviderFactory` is bound,
+/// resolves the provider and streams its events onto the Msg
+/// channel. Without bindings (scaffold tests) falls back to a
+/// placeholder `UpstreamError` so the reducer sees a clean end of
+/// turn.
+async fn dispatch_call_model(
+    msg_tx: MsgSender,
+    providers: Option<Arc<ProviderFactory>>,
+    turn: TurnId,
+    request: crate::domain::ChatRequest,
+    token: tokio_util::sync::CancellationToken,
+) {
+    use crate::models::UserFacingError;
+
+    let Some(factory) = providers else {
+        let error = UserFacingError {
+            summary: "not wired".to_string(),
+            message: "EffectRunner has no ProviderFactory bound".to_string(),
+            suggestion: "construct via EffectRunner::pair_with_bindings".to_string(),
+            category: crate::models::ErrorCategory::Internal,
+            recoverable: false,
+        };
+        let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
+        return;
+    };
+
+    // Lazily resolve the provider for this model.
+    let provider = match factory.resolve(&request.model_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            let error = classify_error_for_ui(&e);
+            let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
+            return;
+        },
+    };
+
+    // Build a StreamContext — provider writes typed events into the
+    // internal sink; we relay each to the reducer as a Msg.
+    let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
+    let ctx = StreamContext::new(token.clone(), stream_tx, turn);
+
+    // Drain stream events into Msgs on a sibling task. Drops when
+    // the sink closes (provider's final `Done` or cancel).
+    let relay_tx = msg_tx.clone();
+    let relay = tokio::spawn(async move {
+        while let Some(event) = stream_rx.recv().await {
+            let msg = match event {
+                StreamEvent::Text(chunk) => Msg::StreamText { turn, chunk },
+                StreamEvent::Reasoning(chunk) => Msg::StreamReasoning { turn, chunk },
+                StreamEvent::ToolCall(call) => Msg::StreamToolCall { turn, call },
+                StreamEvent::ThinkingSignature(_) => continue, // folded into Done below
+                StreamEvent::Done {
+                    usage,
+                    thinking_signature,
+                } => Msg::StreamDone {
+                    turn,
+                    usage,
+                    thinking_signature,
+                },
+            };
+            if relay_tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Run the actual provider. On error, the relay will have
+    // already emitted partial events; we follow with a single
+    // UpstreamError to terminate the turn cleanly.
+    match provider.chat(request, ctx).await {
+        Ok(_final_response) => {
+            // Success — the final `Done` flowed through the sink.
+        },
+        Err(e) => {
+            let error = classify_error_for_ui(&e);
+            let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
+        },
+    }
+
+    let _ = relay.await;
+}
+
+/// Dispatch an `ExecuteTool` command.
+async fn dispatch_execute_tool(
+    msg_tx: MsgSender,
+    tools: Option<Arc<ToolRegistry>>,
+    workdir: PathBuf,
+    turn: TurnId,
+    call_id: crate::domain::ToolCallId,
+    source: crate::models::tool_call::ToolCall,
+    token: tokio_util::sync::CancellationToken,
+) {
+    let _ = msg_tx.send(Msg::ToolStarted { turn, call_id }).await;
+
+    let Some(registry) = tools else {
+        let _ = msg_tx
+            .send(Msg::ToolFinished {
+                turn,
+                call_id,
+                outcome: crate::domain::ToolOutcome::Error {
+                    error: "EffectRunner has no ToolRegistry bound".to_string(),
+                    duration_secs: 0.0,
+                },
+            })
+            .await;
+        return;
+    };
+
+    // Route MCP-prefixed calls to the mcp proxy, which takes
+    // {server_name, tool_name, arguments}. The raw model call has
+    // those embedded in the function name and arguments respectively.
+    let (tool_key, args) = if source.function.name.starts_with("mcp__") {
+        let rest = &source.function.name[5..];
+        if let Some((server, tool)) = rest.split_once("__") {
+            (
+                "mcp_proxy",
+                serde_json::json!({
+                    "server_name": server,
+                    "tool_name": tool,
+                    "arguments": source.function.arguments.clone(),
+                }),
+            )
+        } else {
+            let _ = msg_tx
+                .send(Msg::ToolFinished {
+                    turn,
+                    call_id,
+                    outcome: crate::domain::ToolOutcome::Error {
+                        error: format!(
+                            "invalid MCP tool name: {}",
+                            source.function.name
+                        ),
+                        duration_secs: 0.0,
+                    },
+                })
+                .await;
+            return;
+        }
+    } else {
+        (
+            source.function.name.as_str(),
+            source.function.arguments.clone(),
+        )
+    };
+
+    let Some(tool) = registry.get(tool_key) else {
+        let _ = msg_tx
+            .send(Msg::ToolFinished {
+                turn,
+                call_id,
+                outcome: crate::domain::ToolOutcome::Error {
+                    error: format!("unknown tool: {}", tool_key),
+                    duration_secs: 0.0,
+                },
+            })
+            .await;
+        return;
+    };
+
+    let (progress_tx, _progress_rx) = mpsc::channel(16);
+    let ctx = ExecContext::new(token, progress_tx, call_id, turn, workdir);
+    let outcome = tool.execute(args, ctx).await;
+    let _ = msg_tx
+        .send(Msg::ToolFinished {
+            turn,
+            call_id,
+            outcome,
+        })
+        .await;
+}
+
+fn classify_error_for_ui(e: &crate::models::ModelError) -> crate::models::UserFacingError {
+    use crate::models::{ErrorCategory, ModelError, UserFacingError};
+    match e {
+        ModelError::Backend(b) => UserFacingError {
+            summary: "Backend error".to_string(),
+            message: b.to_string(),
+            suggestion: "Check the provider endpoint / API key.".to_string(),
+            category: ErrorCategory::Connection,
+            recoverable: true,
+        },
+        ModelError::Authentication(msg) => UserFacingError {
+            summary: "Auth error".to_string(),
+            message: msg.clone(),
+            suggestion: "Set the env var the provider expects.".to_string(),
+            category: ErrorCategory::Auth,
+            recoverable: false,
+        },
+        ModelError::RateLimit { retry_after } => UserFacingError {
+            summary: "Rate limit".to_string(),
+            message: format!("retry after {:?}", retry_after),
+            suggestion: "Wait and try again.".to_string(),
+            category: ErrorCategory::Temporary,
+            recoverable: true,
+        },
+        ModelError::StreamError(msg) => UserFacingError {
+            summary: "Stream error".to_string(),
+            message: msg.clone(),
+            suggestion: "Retry the request.".to_string(),
+            category: ErrorCategory::Connection,
+            recoverable: true,
+        },
+        other => UserFacingError {
+            summary: "Model error".to_string(),
+            message: other.to_string(),
+            suggestion: String::new(),
+            category: ErrorCategory::Internal,
+            recoverable: false,
+        },
     }
 }
 

@@ -17,6 +17,7 @@
 
 pub mod capabilities;
 pub mod ctx;
+pub mod factory;
 pub mod model;
 pub mod tool;
 
@@ -25,6 +26,7 @@ pub use ctx::{
     ExecContext, FinalResponse, ProgressEvent, StreamContext, StreamEvent, clone_messages,
     test_exec_context, test_stream_context,
 };
+pub use factory::ProviderFactory;
 pub use model::{AnthropicProvider, GeminiProvider, ModelProvider, OllamaProvider, OpenAICompatProvider};
 pub use tool::{ToolExecutor, ToolRegistry};
 
