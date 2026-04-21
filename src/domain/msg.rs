@@ -4,8 +4,8 @@
 //!
 //!   1. **User intent** — key presses, pastes, slash commands, submit,
 //!      cancel, quit. Originates from `app::event_source`.
-//!   2. **Effect results** — stream chunks, tool outcomes, subagent
-//!      progress, MCP lifecycle, save/load completion. Originates from
+//!   2. **Effect results** — stream chunks, tool outcomes, MCP
+//!      lifecycle, save/load completion. Originates from
 //!      `effect::EffectRunner` when a spawned task finishes a unit of
 //!      work.
 //!   3. **Housekeeping** — `Tick` (timer-driven redraw), `StatusDismiss`,
@@ -24,8 +24,8 @@ use crate::app::instructions::LoadedInstructions;
 use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError};
 
-use super::ids::{SubagentId, ToolCallId, TurnId};
-use super::state::{McpToolSpec, SubagentStatus, ToolOutcome};
+use super::ids::{ToolCallId, TurnId};
+use super::state::{ConversationSummary, McpToolSpec, ToolOutcome};
 
 /// Single reducer input. Non-exhaustive is intentional: adding a new
 /// variant is a deliberate act that forces every reducer arm to
@@ -111,17 +111,6 @@ pub enum Msg {
         outcome: ToolOutcome,
     },
 
-    // ── Subagents (from effect::subagent) ───────────────────────────
-    SubagentStatusChanged {
-        turn: TurnId,
-        subagent: SubagentId,
-        status: SubagentStatus,
-    },
-    SubagentToolUseTick {
-        turn: TurnId,
-        subagent: SubagentId,
-    },
-
     // ── MCP (from effect::mcp) ──────────────────────────────────────
     /// `initialize` succeeded; server is ready to dispatch tools.
     McpServerReady {
@@ -144,12 +133,18 @@ pub enum Msg {
     SessionSaved,
     /// `/load <id>` — a saved conversation has been read off disk.
     ConversationLoaded(crate::session::ConversationHistory),
+    /// Response to `Cmd::ListConversations`. Populates the `/load`
+    /// picker's candidate list.
+    ConversationsListed(Vec<ConversationSummary>),
 
     // ── Misc model operations ───────────────────────────────────────
     /// `/model <name>` finished pulling (Ollama only).
     ModelPullFinished {
         model: String,
     },
+    /// Streaming stdout line from an `ollama pull` subprocess.
+    /// Reducer forwards to the status line for the user to watch.
+    ModelPullProgress(String),
 
     // ── Housekeeping ────────────────────────────────────────────────
     /// 1/60s timer tick. Used for spinner animation + elapsed-time
@@ -270,9 +265,7 @@ impl Msg {
             | Msg::UpstreamError { turn, .. }
             | Msg::ToolStarted { turn, .. }
             | Msg::ToolProgress { turn, .. }
-            | Msg::ToolFinished { turn, .. }
-            | Msg::SubagentStatusChanged { turn, .. }
-            | Msg::SubagentToolUseTick { turn, .. } => Some(*turn),
+            | Msg::ToolFinished { turn, .. } => Some(*turn),
             _ => None,
         }
     }
@@ -296,16 +289,15 @@ impl Msg {
             Msg::ToolStarted { .. } => MsgKind::ToolStarted,
             Msg::ToolProgress { .. } => MsgKind::ToolProgress,
             Msg::ToolFinished { .. } => MsgKind::ToolFinished,
-            Msg::SubagentStatusChanged { .. } | Msg::SubagentToolUseTick { .. } => {
-                MsgKind::Subagent
-            },
             Msg::McpServerReady { .. }
             | Msg::McpServerErrored { .. }
             | Msg::McpServerStopped { .. } => MsgKind::Mcp,
             Msg::InstructionsChanged(_) => MsgKind::InstructionsChanged,
             Msg::SessionSaved => MsgKind::SessionSaved,
             Msg::ConversationLoaded(_) => MsgKind::ConversationLoaded,
+            Msg::ConversationsListed(_) => MsgKind::ConversationsListed,
             Msg::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
+            Msg::ModelPullProgress(_) => MsgKind::ModelPullProgress,
             Msg::Tick => MsgKind::Tick,
             Msg::StatusDismiss => MsgKind::StatusDismiss,
             Msg::Resize { .. } => MsgKind::Resize,
@@ -331,12 +323,13 @@ pub enum MsgKind {
     ToolStarted,
     ToolProgress,
     ToolFinished,
-    Subagent,
     Mcp,
     InstructionsChanged,
     SessionSaved,
     ConversationLoaded,
+    ConversationsListed,
     ModelPullFinished,
+    ModelPullProgress,
     Tick,
     StatusDismiss,
     Resize,

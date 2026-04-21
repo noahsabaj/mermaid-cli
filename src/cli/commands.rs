@@ -45,6 +45,13 @@ pub async fn handle_command(command: &Commands, config: &Config) -> Result<bool>
             show_mcp_servers();
             Ok(true)
         },
+        Commands::CloudSetup => {
+            // Interactive stdin prompt — runs before the TUI enters
+            // raw mode so rpassword works. The in-TUI slash command
+            // `/cloud-setup` just points users here.
+            let _ = crate::ollama::setup_cloud_interactive();
+            Ok(true)
+        },
         Commands::Chat => Ok(false),       // Continue to chat interface
         Commands::Run { .. } => Ok(false), // Handled by main.rs
     }

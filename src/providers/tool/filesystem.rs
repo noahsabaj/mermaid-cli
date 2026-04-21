@@ -17,10 +17,21 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use crate::constants::MAX_RESPONSE_CHARS as MAX_FILE_READ_BYTES;
-use crate::domain::ToolOutcome;
+use crate::domain::{ToolDefinition, ToolOutcome};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
+
+/// Small helper for building a `ToolDefinition` with a typical
+/// JSON-schema-shaped input_schema. Keeps the per-tool definitions
+/// readable.
+fn defn(name: &str, description: &str, input_schema: serde_json::Value) -> ToolDefinition {
+    ToolDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        input_schema,
+    }
+}
 
 /// `read_file` — read one or more files and return their contents
 /// joined with section markers (matches the v0.6 multi-file output
@@ -31,6 +42,28 @@ pub struct ReadFileTool;
 impl ToolExecutor for ReadFileTool {
     fn name(&self) -> &'static str {
         "read_file"
+    }
+
+    fn schema(&self) -> ToolDefinition {
+        defn(
+            "read_file",
+            "Read the contents of one or more files from disk. Prefer relative paths; absolute paths outside the project are blocked.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File to read (single)." },
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Multiple files to read in parallel."
+                    }
+                },
+                "oneOf": [
+                    { "required": ["path"] },
+                    { "required": ["paths"] }
+                ]
+            }),
+        )
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
@@ -107,6 +140,22 @@ impl ToolExecutor for EditFileTool {
         "edit_file"
     }
 
+    fn schema(&self) -> ToolDefinition {
+        defn(
+            "edit_file",
+            "Replace exactly one occurrence of `old_string` with `new_string` in the file at `path`. Fails if `old_string` doesn't appear or appears more than once — add surrounding context until the match is unique.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "old_string": { "type": "string", "description": "Exact text to replace. Must appear exactly once." },
+                    "new_string": { "type": "string", "description": "Replacement text." }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        )
+    }
+
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(raw_path) = args.get("path").and_then(|v| v.as_str()) else {
             return err("edit_file requires 'path'", 0.0);
@@ -159,6 +208,18 @@ impl ToolExecutor for DeleteFileTool {
         "delete_file"
     }
 
+    fn schema(&self) -> ToolDefinition {
+        defn(
+            "delete_file",
+            "Remove a file from disk. Fails on directories — use `execute_command rm -rf` for those.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+        )
+    }
+
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(raw_path) = args.get("path").and_then(|v| v.as_str()) else {
             return err("delete_file requires 'path'", 0.0);
@@ -196,6 +257,18 @@ impl ToolExecutor for CreateDirectoryTool {
         "create_directory"
     }
 
+    fn schema(&self) -> ToolDefinition {
+        defn(
+            "create_directory",
+            "Create a directory (and any missing parents) at the given path.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+        )
+    }
+
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(raw_path) = args.get("path").and_then(|v| v.as_str()) else {
             return err("create_directory requires 'path'", 0.0);
@@ -231,6 +304,21 @@ pub struct WriteFileTool;
 impl ToolExecutor for WriteFileTool {
     fn name(&self) -> &'static str {
         "write_file"
+    }
+
+    fn schema(&self) -> ToolDefinition {
+        defn(
+            "write_file",
+            "Write (overwrite) a file at `path` with `content`. Creates parent directories automatically. Prefer `edit_file` for small targeted changes.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"]
+            }),
+        )
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {

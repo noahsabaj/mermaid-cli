@@ -33,7 +33,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
-use crate::domain::ToolOutcome;
+use crate::domain::{ToolDefinition, ToolOutcome};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
@@ -53,6 +53,27 @@ pub struct ExecuteCommandTool;
 impl ToolExecutor for ExecuteCommandTool {
     fn name(&self) -> &'static str {
         "execute_command"
+    }
+
+    fn schema(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "execute_command".to_string(),
+            description:
+                "Run a shell command. Output is returned after the command completes or times out. Ctrl+C during execution aborts the child immediately."
+                    .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command to run." },
+                    "working_dir": { "type": "string", "description": "Override working directory (absolute)." },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Per-call timeout in seconds. Default 30, max 300."
+                    }
+                },
+                "required": ["command"]
+            }),
+        }
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
@@ -139,9 +160,8 @@ impl ToolExecutor for ExecuteCommandTool {
 
 /// Drive the child process, pumping stdout+stderr concurrently so
 /// the kernel pipe buffer never wedges the child. Emits
-/// `ProgressEvent::Output` chunks so the TUI renderer can show
-/// running subprocess output later (the reducer ignores them today;
-/// C7 wires them in).
+/// `ProgressEvent::Output` chunks on `ExecContext::progress` for
+/// any future consumer that wants to show live subprocess output.
 async fn run_command(
     mut cmd: Command,
     progress: tokio::sync::mpsc::Sender<ProgressEvent>,

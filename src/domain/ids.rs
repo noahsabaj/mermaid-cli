@@ -46,21 +46,9 @@ impl fmt::Display for ToolCallId {
     }
 }
 
-/// Stable identifier for a nested subagent spawn. Independent of
-/// `ToolCallId` because a single `SpawnAgent` tool call can launch
-/// multiple subagents in parallel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct SubagentId(pub u64);
-
-impl fmt::Display for SubagentId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "sub#{}", self.0)
-    }
-}
-
 /// Monotonic ID allocator. `State` owns one of these per "kind" (turn,
-/// tool call, subagent) and hands out fresh IDs by incrementing. Reset
-/// happens only on a full session replay.
+/// tool call) and hands out fresh IDs by incrementing. Reset happens
+/// only on a full session replay.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct IdAllocator {
     next: u64,
@@ -132,7 +120,6 @@ mod tests {
     fn turn_id_display_format() {
         assert_eq!(format!("{}", TurnId(42)), "turn#42");
         assert_eq!(format!("{}", ToolCallId(7)), "tool#7");
-        assert_eq!(format!("{}", SubagentId(3)), "sub#3");
     }
 
     #[test]

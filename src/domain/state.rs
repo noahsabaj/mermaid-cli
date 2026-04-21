@@ -26,7 +26,8 @@ use crate::models::ReasoningLevel;
 use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::session::ConversationHistory;
 
-use super::ids::{IdAllocator, SubagentId, ToolCallId, TurnId};
+use super::ids::{IdAllocator, ToolCallId, TurnId};
+use super::msg::Msg;
 
 /// Root state. The reducer takes `State` by value, returns a new
 /// `State`, and emits any side-effects as a `Vec<Cmd>`. No `&mut` — a
@@ -162,16 +163,17 @@ pub enum TurnState {
         /// attach it to the committed assistant message. `None` until
         /// the Anthropic adapter emits a signature event.
         thinking_signature: Option<String>,
+        /// Tool calls the model has streamed so far this turn.
+        /// `StreamToolCall` messages push here; `StreamDone` drains
+        /// the vec, allocates `PendingToolCall` entries, and
+        /// transitions to `ExecutingTools`. When the vec is empty at
+        /// stream end, the turn returns to `Idle`.
+        pending_tool_calls: Vec<ModelToolCall>,
     },
     ExecutingTools {
         id: TurnId,
         calls: Vec<PendingToolCall>,
         outcomes: Vec<Option<ToolOutcome>>,
-    },
-    RunningSubagents {
-        id: TurnId,
-        specs: Vec<SubagentSpec>,
-        progress: Vec<SubagentProgress>,
     },
     /// `CancelTurn` was dispatched. The reducer has already emitted a
     /// `Cmd::CancelScope` — now we wait for the final `Cancelled` /
@@ -192,7 +194,6 @@ impl TurnState {
             TurnState::Idle => None,
             TurnState::Generating { id, .. }
             | TurnState::ExecutingTools { id, .. }
-            | TurnState::RunningSubagents { id, .. }
             | TurnState::Cancelling { id, .. } => Some(*id),
         }
     }
@@ -276,30 +277,6 @@ impl ToolOutcome {
     }
 }
 
-/// A subagent the reducer has requested be spawned.
-#[derive(Debug, Clone)]
-pub struct SubagentSpec {
-    pub id: SubagentId,
-    pub description: String,
-    pub prompt: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct SubagentProgress {
-    pub id: SubagentId,
-    pub status: SubagentStatus,
-    pub tool_uses: usize,
-}
-
-#[derive(Debug, Clone)]
-pub enum SubagentStatus {
-    Starting,
-    Running,
-    Finished { summary: String },
-    Failed { error: String },
-    Cancelled,
-}
-
 /// All UI-only state. Things in `UiState` never affect what gets sent
 /// to the model — only what the user sees.
 #[derive(Debug, Clone, Default)]
@@ -332,9 +309,25 @@ pub struct UiState {
     /// `StreamDone`. FIFO order.
     pub queued_messages: VecDeque<String>,
     /// Last terminal title dispatched via `Cmd::SetTerminalTitle`.
-    /// Used by the reducer to avoid spamming the cmd every frame —
-    /// emit only when the derived title actually changes.
+    /// Arms that change `session.conversation.title` consult this
+    /// and emit a fresh `SetTerminalTitle` only on diff.
     pub last_title_dispatched: Option<String>,
+    /// Follow-up `Msg`s the reducer has queued for re-entry. The
+    /// outer `update()` drains this after each single-step call so
+    /// a handler can emit a synthetic event (e.g. Enter-on-slash
+    /// queuing `Msg::Slash(cmd)`) without self-invoking the
+    /// reducer. Bounded drain depth guards against runaway loops.
+    pub pending_msgs: VecDeque<Msg>,
+    /// Up-arrow history navigation cursor into
+    /// `session.conversation.input_history`. `None` = not
+    /// navigating (input_buffer is whatever the user typed).
+    /// `Some(i)` = currently displaying history entry at index `i`
+    /// from the END (0 = newest).
+    pub input_history_cursor: Option<usize>,
+    /// Whatever the user had typed before hitting Up. Preserved so
+    /// stepping past the newest history entry with Down restores
+    /// the partial input unchanged. Cleared on any non-nav key.
+    pub history_draft: String,
 }
 
 /// Top-level UI mode. Like `TurnState` this is a sum type instead of a
@@ -345,10 +338,25 @@ pub enum UiMode {
     EditingInput,
     /// Slash-command palette open (user typed `/`).
     Palette,
-    /// `/load` — list of saved conversations visible.
-    ConversationList,
+    /// `/load` — list of saved conversations visible. `candidates`
+    /// holds what the effect handler returned; `cursor` is the
+    /// highlighted row.
+    ConversationList {
+        candidates: Vec<ConversationSummary>,
+        cursor: usize,
+    },
     /// `/model` — list of available models visible.
     ModelList,
+}
+
+/// Summary row for the conversation picker. Produced by
+/// `Cmd::ListConversations` → `Msg::ConversationsListed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationSummary {
+    pub id: String,
+    pub title: String,
+    pub message_count: usize,
+    pub updated_at: String,
 }
 
 /// One pasted image, ready to send. Kept in the reducer state — not on
@@ -445,7 +453,6 @@ pub enum StatusKind {
 pub struct IdAllocatorBundle {
     pub turn: IdAllocator,
     pub tool_call: IdAllocator,
-    pub subagent: IdAllocator,
 }
 
 impl IdAllocatorBundle {
@@ -455,10 +462,6 @@ impl IdAllocatorBundle {
 
     pub fn fresh_tool_call(&mut self) -> ToolCallId {
         ToolCallId(self.tool_call.next())
-    }
-
-    pub fn fresh_subagent(&mut self) -> SubagentId {
-        SubagentId(self.subagent.next())
     }
 }
 
@@ -492,6 +495,7 @@ mod tests {
             tokens: 0,
             phase: GenPhase::Sending,
             thinking_signature: None,
+            pending_tool_calls: Vec::new(),
         };
         assert!(s.accepts(TurnId(7)));
         assert!(!s.accepts(TurnId(6)));
@@ -513,7 +517,6 @@ mod tests {
         assert_eq!(bundle.fresh_tool_call(), ToolCallId(1));
         // Cross-allocator independence — fresh turns don't consume
         // tool call IDs.
-        assert_eq!(bundle.fresh_subagent(), SubagentId(1));
     }
 
     #[test]

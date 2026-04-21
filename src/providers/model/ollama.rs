@@ -1,19 +1,11 @@
-//! Ollama provider — C3 wrapper over the existing `OllamaAdapter`.
+//! Ollama provider wrapping `OllamaAdapter`.
 //!
-//! This is a delegating shim. It satisfies the v0.7 `ModelProvider`
-//! trait by translating `ChatRequest` + `StreamContext` into the
-//! shapes the v0.6 adapter expects, and forwarding streaming events
-//! back through the typed sink. In C4 the adapter's internals get
-//! folded directly under this file; in C10 the old
-//! `src/models/adapters/ollama.rs` is deleted entirely. Until then,
-//! the two live side by side.
-//!
-//! Why a wrapper instead of a rewrite here? The wire format,
-//! gpt-oss dispatch, NDJSON framing, truncation marker, and retry
-//! logic in the v0.6 adapter are all correct and tested. Re-typing
-//! 700 lines of that up-front bakes in a diff the size of the
-//! architecture change itself. The wrapper pattern lets us prove
-//! the trait shape end-to-end now, and mechanical move later.
+//! The adapter owns the wire format (NDJSON framing, gpt-oss
+//! reasoning dispatch, truncation marker, retry). The wrapper
+//! translates `ChatRequest` ↔ `ModelConfig` and bridges the
+//! adapter's legacy `StreamCallback` to v0.7's typed `StreamEvent`
+//! sink. Adapter-internals stay where they are; the architecture
+//! boundary is at `ModelProvider::chat`.
 
 use std::sync::Arc;
 
@@ -121,6 +113,7 @@ fn build_model_config(request: &ChatRequest) -> ModelConfig {
         reasoning: request.reasoning,
         system_prompt: Some(request.system_prompt.clone()),
         dynamic_system_suffix: request.instructions.clone(),
+        tools: request.tools.iter().map(|t| t.to_openai_json()).collect(),
         ..Default::default()
     }
 }

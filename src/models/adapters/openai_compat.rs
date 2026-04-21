@@ -198,28 +198,20 @@ impl OpenAICompatAdapter {
             json_messages.push(json_msg);
         }
 
-        // Tool definitions: reuse the Ollama-format cache — the shape is
-        // byte-identical to OpenAI's `tools` array (verified by the
-        // Step 2 explore agent against `src/models/tools.rs`).
-        let all_tools = crate::models::ToolRegistry::ollama_tools_cached();
+        // Tools come from `config.tools` (OpenAI-compat shape is the
+        // canonical one we pass around; the Anthropic / Gemini
+        // adapters translate from it). Drop web tools without a
+        // cloud API key.
         let no_cloud_key = crate::ollama::get_cloud_api_key().is_none();
-        let tools: Vec<&Value> = all_tools
+        let tools: Vec<&Value> = config
+            .tools
             .iter()
             .filter(|t| {
                 let name = t
                     .pointer("/function/name")
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
-                if no_cloud_key && (name == "web_search" || name == "web_fetch") {
-                    return false;
-                }
-                if config.is_subagent && name == "agent" {
-                    return false;
-                }
-                if config.is_subagent && crate::constants::GUI_TOOL_NAMES.contains(&name) {
-                    return false;
-                }
-                true
+                !(no_cloud_key && (name == "web_search" || name == "web_fetch"))
             })
             .collect();
 
@@ -262,18 +254,6 @@ impl OpenAICompatAdapter {
                 for (k, v) in obj {
                     body[k] = v.clone();
                 }
-            }
-        }
-
-        // Append MCP tools (dynamic, discovered at runtime). Same shape
-        // as built-in tools so we reuse the body["tools"] array.
-        if !config.mcp_tools.is_empty() {
-            if let Some(existing) = body.get_mut("tools").and_then(|v| v.as_array_mut()) {
-                for mcp_tool in &config.mcp_tools {
-                    existing.push(mcp_tool.clone());
-                }
-            } else {
-                body["tools"] = json!(config.mcp_tools);
             }
         }
 
@@ -1104,10 +1084,26 @@ mod tests {
     fn build_request_body_includes_tools_and_temperature() {
         let adapter = test_adapter();
         let messages = vec![ChatMessage::user("hi")];
-        let config = ModelConfig::default();
+        // v7: tools come from config (populated by the provider
+        // wrapper); adapter passes them through in OpenAI shape.
+        let config = ModelConfig {
+            tools: (0..5)
+                .map(|i| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": format!("tool_{}", i),
+                            "description": "a test tool",
+                            "parameters": {"type": "object"}
+                        }
+                    })
+                })
+                .collect(),
+            ..Default::default()
+        };
         let body = adapter.build_request_body(&messages, &config, true);
         assert!(body["tools"].is_array());
-        assert!(body["tools"].as_array().unwrap().len() >= 5);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 5);
         assert_eq!(body["temperature"], config.temperature);
     }
 

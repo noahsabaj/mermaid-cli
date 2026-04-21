@@ -1,10 +1,10 @@
 //! Model adapters wrapped as `ModelProvider` implementations.
 //!
-//! In C3 only Ollama lands here (proof of pattern). C4 moves
-//! OpenAI-compat, Anthropic, and Gemini over. The v0.6 adapter
-//! tree at `src/models/adapters/*.rs` stays in parallel during
-//! migration so the old runtime keeps compiling; both trees
-//! delete together in C10 when the new main loop goes live.
+//! Four providers today: Ollama, Anthropic, Gemini, and OpenAI-
+//! compat (covering OpenAI, OpenRouter, Groq, Cerebras, DeepInfra,
+//! Together, and user-defined endpoints). Each wraps the
+//! corresponding adapter in `crate::models::adapters`; the adapter
+//! owns the wire format and the wrapper owns the trait shape.
 
 pub mod anthropic;
 pub mod gemini;

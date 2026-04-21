@@ -1,17 +1,18 @@
-//! Pure view: `fn render(&State, &mut RenderState, &mut Frame)`.
+//! Pure view: `fn render(&State, &mut RenderCache, &mut Frame)`.
 //!
 //! Three contracts:
 //!   1. Never mutates `State`. The view is fully derived.
 //!   2. Never performs I/O. All state — model lists, MCP status,
 //!      file contents — is whatever the reducer put in `State`.
 //!   3. Never holds a `&mut App` / `&mut anything` other than the
-//!      `Frame` ratatui owns and the render-layer `RenderState`
+//!      `Frame` ratatui owns and the render-layer `RenderCache`
 //!      (which is memoization + scroll-position bookkeeping, not
 //!      reducer state).
 //!
-//! Layout and widgets lifted verbatim from v0.6's `tui::render`.
-//! The only changes are field accesses: every `&App` read becomes
-//! a `&State` read through the equivalent path.
+//! Signature: `fn render(&State, &mut RenderCache, &mut Frame)`.
+//! The `&mut RenderCache` is memoization only (markdown parse
+//! cache, scroll position, theme choice) — it never affects
+//! reducer outcomes or persisted state.
 
 pub mod diff;
 pub mod layout;
@@ -32,19 +33,20 @@ use widgets::{
 };
 
 /// Transient render-layer state that lives across frames but isn't
-/// reducer state. Owned by `app::run_v7`; passed as `&mut` to
-/// `render()` per frame.
+/// reducer state. Owned by `app::run_interactive`; passed as `&mut`
+/// to `render()` per frame.
 ///
 /// Contents are pure memoization + UI affordances (scroll position,
-/// markdown cache). Nothing here affects what the reducer sees or
-/// what ends up on disk.
-pub struct RenderState {
+/// markdown cache, theme choice). Nothing here affects what the
+/// reducer sees or what ends up on disk — the cache can be dropped
+/// and rebuilt from `&State` at any time.
+pub struct RenderCache {
     pub chat: ChatState,
     pub markdown_cache: FxHashMap<u64, Vec<ratatui::text::Line<'static>>>,
     pub theme: theme::Theme,
 }
 
-impl Default for RenderState {
+impl Default for RenderCache {
     fn default() -> Self {
         Self {
             chat: ChatState::new(),
@@ -54,14 +56,14 @@ impl Default for RenderState {
     }
 }
 
-impl RenderState {
+impl RenderCache {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 /// The entrypoint. Call once per render pass from the main loop.
-pub fn render(state: &State, rstate: &mut RenderState, frame: &mut Frame) {
+pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // Input height: content-aware, respecting CJK/emoji widths.
     let terminal_width = frame.area().width.saturating_sub(4) as usize;
     let input_lines = if state.ui.input_buffer.is_empty() {
@@ -95,9 +97,19 @@ pub fn render(state: &State, rstate: &mut RenderState, frame: &mut Frame) {
         1
     };
 
-    // Bottom region: palette overlay (10 lines) vs status bar (2 lines).
-    let palette_open = state.ui.input_buffer.starts_with('/');
-    let bottom_height = if palette_open {
+    // Bottom region: one of three widgets based on UI mode.
+    //   - ConversationList picker: 12-line pane.
+    //   - Slash palette (input starts with `/`): 3–10 lines based on
+    //     filter match count.
+    //   - Otherwise: 2-line status bar.
+    let conv_list_open = matches!(
+        state.ui.mode,
+        crate::domain::UiMode::ConversationList { .. }
+    );
+    let palette_open = !conv_list_open && state.ui.input_buffer.starts_with('/');
+    let bottom_height = if conv_list_open {
+        12
+    } else if palette_open {
         let typed = state
             .ui
             .input_buffer
@@ -216,8 +228,17 @@ pub fn render(state: &State, rstate: &mut RenderState, frame: &mut Frame) {
         Some(requested)
     };
 
-    // Bottom: palette overlay or status bar.
-    if palette_open {
+    // Bottom: conversation-list picker, slash-palette overlay, or
+    // persistent status bar — whichever the UI mode dictates.
+    if let crate::domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
+        use widgets::ConversationListWidget;
+        let widget = ConversationListWidget {
+            theme: &rstate.theme,
+            candidates,
+            cursor: *cursor,
+        };
+        frame.render_widget(widget, chunks[4]);
+    } else if palette_open {
         let typed = state
             .ui
             .input_buffer
@@ -311,7 +332,7 @@ mod tests {
     fn render_to_string(state: &State) -> String {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        let mut rstate = RenderState::new();
+        let mut rstate = RenderCache::new();
         terminal
             .draw(|f| render(state, &mut rstate, f))
             .expect("draw");

@@ -453,35 +453,22 @@ impl AnthropicAdapter {
         let temp = config.temperature.clamp(0.0, 1.0);
         body["temperature"] = json!(temp);
 
-        // Tools: translate from OpenAI shape, filter the same way as the
-        // Ollama / OpenAI-compat adapters (no web tools without cloud
-        // key, no agent + no computer-use tools for subagents).
-        let all_tools = crate::models::ToolRegistry::ollama_tools_cached();
+        // Tools come from `config.tools` (OpenAI-compat shape,
+        // populated by the provider wrapper). Translate to Anthropic
+        // `type: "custom"` entries; drop web tools when no cloud key
+        // is available.
         let no_cloud_key = crate::ollama::get_cloud_api_key().is_none();
-        let mut filtered: Vec<&Value> = all_tools
+        let filtered: Vec<&Value> = config
+            .tools
             .iter()
             .filter(|t| {
                 let name = t
                     .pointer("/function/name")
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
-                if no_cloud_key && (name == "web_search" || name == "web_fetch") {
-                    return false;
-                }
-                if config.is_subagent && name == "agent" {
-                    return false;
-                }
-                if config.is_subagent && crate::constants::GUI_TOOL_NAMES.contains(&name) {
-                    return false;
-                }
-                true
+                !(no_cloud_key && (name == "web_search" || name == "web_fetch"))
             })
             .collect();
-        // MCP tools also pass through. They're already in OpenAI shape
-        // because that's what `mcp_tools_to_ollama` produces.
-        for mcp_tool in &config.mcp_tools {
-            filtered.push(mcp_tool);
-        }
         let mut anthropic_tools = to_anthropic_tools(&filtered);
         if !anthropic_tools.is_empty() {
             // Mark the LAST tool with `cache_control: ephemeral` (Step
@@ -1585,12 +1572,23 @@ mod tests {
     fn build_request_body_includes_tools_in_anthropic_shape() {
         let adapter = test_adapter();
         let messages = vec![ChatMessage::user("Hi")];
-        let config = ModelConfig::default();
+        // Config carries OpenAI-shape tools (populated by the v7
+        // provider wrapper from ChatRequest.tools); the adapter
+        // translates to Anthropic's flat `type: "custom"` shape.
+        let config = ModelConfig {
+            tools: vec![serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "test_tool",
+                    "description": "a test tool",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            })],
+            ..Default::default()
+        };
         let body = adapter.build_request_body(&messages, &config);
         let tools = body["tools"].as_array().expect("tools array");
-        assert!(!tools.is_empty(), "should include built-in tools");
-        // Anthropic shape: flat fields with `type: "custom"` (Step 5c),
-        // NO OpenAI `function: {...}` wrapper.
+        assert!(!tools.is_empty());
         for tool in tools {
             assert_eq!(tool["type"], "custom");
             assert!(tool.get("function").is_none());
@@ -1607,7 +1605,35 @@ mod tests {
     fn build_request_body_marks_only_last_tool_with_cache_control() {
         let adapter = test_adapter();
         let messages = vec![ChatMessage::user("Hi")];
-        let config = ModelConfig::default();
+        let config = ModelConfig {
+            tools: vec![
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": "tool_a",
+                        "description": "first",
+                        "parameters": {"type": "object"}
+                    }
+                }),
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": "tool_b",
+                        "description": "second",
+                        "parameters": {"type": "object"}
+                    }
+                }),
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": "tool_c",
+                        "description": "third",
+                        "parameters": {"type": "object"}
+                    }
+                }),
+            ],
+            ..Default::default()
+        };
         let body = adapter.build_request_body(&messages, &config);
         let tools = body["tools"].as_array().expect("tools array");
         assert!(
@@ -1643,36 +1669,6 @@ mod tests {
         // reach the cache_control insertion with no last element.
         let result = to_anthropic_tools(&[]);
         assert!(result.is_empty(), "empty input must produce empty output");
-    }
-
-    /// Step 5f Wave 2: subagent context must exclude all GUI tools
-    /// from the request body. Uses the centralized `GUI_TOOL_NAMES`
-    /// const so any future rename is caught here too.
-    #[test]
-    fn subagent_filter_excludes_all_gui_tools() {
-        let adapter = test_adapter();
-        let messages = vec![ChatMessage::user("hi")];
-        let config = ModelConfig {
-            is_subagent: true,
-            ..Default::default()
-        };
-        let body = adapter.build_request_body(&messages, &config);
-        let tools = body["tools"].as_array().expect("tools array");
-        let names: Vec<&str> = tools
-            .iter()
-            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
-            .collect();
-        for gui_name in crate::constants::GUI_TOOL_NAMES {
-            assert!(
-                !names.contains(gui_name),
-                "subagent context must NOT include GUI tool '{}', but tools were {:?}",
-                gui_name,
-                names
-            );
-        }
-        // The agent tool itself should also be excluded for subagents
-        // (prevents recursive nesting). Existing test logic, double-check.
-        assert!(!names.contains(&"agent"), "subagent must not see 'agent'");
     }
 
     #[test]

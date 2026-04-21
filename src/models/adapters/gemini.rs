@@ -457,33 +457,21 @@ impl GeminiAdapter {
         }
         body["generationConfig"] = gen_config;
 
-        // Tools: translate from OpenAI shape, filter the same way as the
-        // other adapters (no web tools without cloud key, no agent + no
-        // computer-use tools for subagents).
-        let all_tools = crate::models::ToolRegistry::ollama_tools_cached();
+        // Tools come from `config.tools` (OpenAI-compat shape,
+        // populated by the provider wrapper). Drop web tools when no
+        // cloud key is set.
         let no_cloud_key = crate::ollama::get_cloud_api_key().is_none();
-        let mut filtered: Vec<&Value> = all_tools
+        let filtered: Vec<&Value> = config
+            .tools
             .iter()
             .filter(|t| {
                 let name = t
                     .pointer("/function/name")
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
-                if no_cloud_key && (name == "web_search" || name == "web_fetch") {
-                    return false;
-                }
-                if config.is_subagent && name == "agent" {
-                    return false;
-                }
-                if config.is_subagent && crate::constants::GUI_TOOL_NAMES.contains(&name) {
-                    return false;
-                }
-                true
+                !(no_cloud_key && (name == "web_search" || name == "web_fetch"))
             })
             .collect();
-        for mcp_tool in &config.mcp_tools {
-            filtered.push(mcp_tool);
-        }
         let gemini_tools = to_gemini_tools(&filtered);
         if !gemini_tools.is_empty() {
             body["tools"] = json!(gemini_tools);
@@ -1399,15 +1387,30 @@ mod tests {
     fn build_request_body_includes_tools_in_function_declarations_shape() {
         let adapter = test_adapter();
         let messages = vec![ChatMessage::user("hi")];
-        let config = ModelConfig::default();
+        // v7: config carries OpenAI-shape tools populated by the
+        // provider wrapper; adapter translates to Gemini's
+        // functionDeclarations shape.
+        let config = ModelConfig {
+            tools: (0..5)
+                .map(|i| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": format!("tool_{}", i),
+                            "description": "a test tool",
+                            "parameters": {"type": "object"}
+                        }
+                    })
+                })
+                .collect(),
+            ..Default::default()
+        };
         let body = adapter.build_request_body(&messages, &config);
-        // Tools should be present (the registry has built-in tools).
         let tools = body["tools"].as_array().expect("tools array");
         assert!(!tools.is_empty());
-        // Single tool group with functionDeclarations.
         assert!(tools[0]["functionDeclarations"].is_array());
         let decls = tools[0]["functionDeclarations"].as_array().unwrap();
-        assert!(decls.len() >= 5, "expected at least 5 built-in tools");
+        assert_eq!(decls.len(), 5);
     }
 
     #[test]

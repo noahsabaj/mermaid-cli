@@ -6,6 +6,7 @@
 
 mod attachment;
 mod chat;
+mod conversation_list;
 mod input;
 mod slash_palette;
 mod status;
@@ -13,6 +14,7 @@ mod status_line;
 
 pub use attachment::AttachmentWidget;
 pub use chat::{ChatState, ChatWidget, ImageClickTarget};
+pub use conversation_list::ConversationListWidget;
 pub use input::{InputState, InputWidget};
 pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
@@ -41,10 +43,10 @@ impl GenerationStatus {
     }
 
     /// Convert from the reducer's typed turn state. `TurnState::Idle`
-    /// maps to `Idle`; `Generating.phase` maps 1:1;
-    /// `ExecutingTools` / `RunningSubagents` / `Cancelling` all map to
-    /// `Streaming` (the status-line widget doesn't distinguish
-    /// beyond the basic upstream/downstream arrow).
+    /// maps to `Idle`; `Generating.phase` maps 1:1; every other
+    /// active variant maps to `Streaming` (the status-line widget
+    /// doesn't distinguish beyond the basic upstream/downstream
+    /// arrow).
     pub fn from_turn(turn: &crate::domain::TurnState) -> Self {
         use crate::domain::{GenPhase, TurnState};
         match turn {
@@ -54,9 +56,9 @@ impl GenerationStatus {
                 GenPhase::Thinking => GenerationStatus::Thinking,
                 GenPhase::Streaming => GenerationStatus::Streaming,
             },
-            TurnState::ExecutingTools { .. }
-            | TurnState::RunningSubagents { .. }
-            | TurnState::Cancelling { .. } => GenerationStatus::Streaming,
+            TurnState::ExecutingTools { .. } | TurnState::Cancelling { .. } => {
+                GenerationStatus::Streaming
+            },
         }
     }
 }

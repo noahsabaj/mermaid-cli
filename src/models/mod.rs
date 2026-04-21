@@ -9,7 +9,7 @@ mod providers; // OpenAI-compatible provider profiles + registry
 mod reasoning; // ReasoningLevel, ReasoningCapability, nearest_effort
 mod stream; // Typed StreamEvent enum
 pub mod tool_call; // Tool call parsing (native function calling)
-pub mod tools; // Tool definitions
+
 mod traits; // Model trait (public API)
 mod types; // Core types (ChatMessage, etc)
 
@@ -24,6 +24,6 @@ pub use providers::{
 pub use reasoning::{ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort};
 pub use stream::{StreamCallback, StreamEvent};
 pub use tool_call::{FunctionCall, ToolCall};
-pub use tools::{Tool, ToolFunction, ToolRegistry};
+
 pub use traits::Model;
 pub use types::{ChatMessage, MessageRole, ModelResponse, TokenUsage};

@@ -34,10 +34,11 @@ pub use tool::{ToolExecutor, ToolRegistry};
 
 use std::sync::Arc;
 
-/// Registry of available `ModelProvider`s keyed by model ID
-/// (`provider/name`). C4 wires the full lookup; for now this is an
-/// empty shell so the effect runner can consult it once the full
-/// ecosystem is in.
+/// Optional static registry of `ModelProvider` instances, keyed by
+/// model ID. Currently unused — the effect runner resolves providers
+/// lazily via `ProviderFactory::resolve`. Kept for potential
+/// eager-preload use cases (tests, warm-up) where constructing the
+/// HTTP clients up front is worth it.
 pub struct Providers {
     entries: std::collections::HashMap<String, Arc<dyn ModelProvider>>,
 }

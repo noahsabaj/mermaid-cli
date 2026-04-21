@@ -13,7 +13,7 @@
 
 use async_trait::async_trait;
 
-use crate::domain::ToolOutcome;
+use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::mcp::{McpServerManager, manager_ref};
 
 use super::super::ctx::ExecContext;
@@ -28,6 +28,30 @@ pub struct McpToolProxy;
 impl ToolExecutor for McpToolProxy {
     fn name(&self) -> &'static str {
         "mcp_proxy"
+    }
+
+    fn is_internal(&self) -> bool {
+        true
+    }
+
+    fn schema(&self) -> ToolDefinition {
+        // The proxy isn't itself advertised to the model; per-MCP
+        // tool schemas are sourced from `State.mcp.servers.*.tools`
+        // in the reducer. This schema is kept for registry-cohesion
+        // but never lands in `request.tools`.
+        ToolDefinition {
+            name: "mcp_proxy".to_string(),
+            description: "Internal dispatch target for mcp__* tool calls.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server_name": { "type": "string" },
+                    "tool_name": { "type": "string" },
+                    "arguments": { "type": "object" }
+                },
+                "required": ["server_name", "tool_name"]
+            }),
+        }
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {

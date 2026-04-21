@@ -13,11 +13,15 @@
 //!   4. **Cancellation is explicit.** The only way to abort in-flight
 //!      work is `Cmd::CancelScope(turn)`. No `handle.abort()` anywhere.
 //!
-//! The reducer is "transitional" for this commit — it recognizes the
-//! full `Msg` vocabulary but several arms currently no-op with a TODO
-//! breadcrumb. The scaffolding is here so future commits can fill in
-//! behavior one arm at a time while tests pin down the regressions
-//! that would otherwise be invisible.
+//! Internal split:
+//!
+//!   - `update_step(State, Msg) -> (State, Vec<Cmd>)` — a single
+//!     reducer call. Pure, deterministic, exhaustive match.
+//!   - `update(State, Msg) -> (State, Vec<Cmd>)` — runs a step,
+//!     then drains `state.ui.pending_msgs` in a bounded loop so
+//!     handlers can enqueue follow-up events (Enter-on-slash,
+//!     queued-message auto-submit) without self-invoking the
+//!     reducer.
 
 use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE};
 use crate::models::{ChatMessage, MessageRole};
@@ -34,9 +38,42 @@ use super::transition::{
     tool_result_messages, try_complete_outcomes,
 };
 
-/// Single entry point. Takes state by value, returns the new state
-/// plus any side-effects to dispatch.
+/// Cap on how many queued follow-up messages get drained per
+/// external `update()` call. Arms typically enqueue zero or one
+/// follow-up; this cap catches runaway loops from future arms that
+/// might enqueue unboundedly.
+const MAX_PENDING_DRAIN: usize = 16;
+
+/// The public reducer entry point. Runs one `update_step` for the
+/// incoming `msg`, then drains any follow-up `Msg`s the handler
+/// pushed onto `state.ui.pending_msgs`. All emitted `Cmd`s coalesce
+/// into the returned vector.
 pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
+    let (new_state, mut cmds) = update_step(state, msg);
+    state = new_state;
+    let mut depth = 0usize;
+    while let Some(follow) = state.ui.pending_msgs.pop_front() {
+        if depth >= MAX_PENDING_DRAIN {
+            tracing::warn!(
+                max = MAX_PENDING_DRAIN,
+                remaining = state.ui.pending_msgs.len(),
+                "reducer: pending_msgs drain cap hit — follow-ups dropped this tick"
+            );
+            state.ui.pending_msgs.clear();
+            break;
+        }
+        let (s, c) = update_step(state, follow);
+        state = s;
+        cmds.extend(c);
+        depth += 1;
+    }
+    (state, cmds)
+}
+
+/// Single-step reducer: one `Msg` in, new `State` + `Cmd`s out.
+/// Callers interested in re-entry (queued follow-up messages) go
+/// through `update()`; this function returns after a single pass.
+pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
     let mut cmds = Vec::new();
 
     // Stale-event filter: if this is an effect result for a turn we're
@@ -159,26 +196,6 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             handle_tool_finished(&mut state, &mut cmds, turn, call_id, outcome);
         },
 
-        // ── Subagents ───────────────────────────────────────────────
-        Msg::SubagentStatusChanged {
-            turn: _,
-            subagent,
-            status,
-        } => {
-            if let TurnState::RunningSubagents { progress, .. } = &mut state.turn
-                && let Some(entry) = progress.iter_mut().find(|p| p.id == subagent)
-            {
-                entry.status = status;
-            }
-        },
-        Msg::SubagentToolUseTick { turn: _, subagent } => {
-            if let TurnState::RunningSubagents { progress, .. } = &mut state.turn
-                && let Some(entry) = progress.iter_mut().find(|p| p.id == subagent)
-            {
-                entry.tool_uses = entry.tool_uses.saturating_add(1);
-            }
-        },
-
         // ── MCP ─────────────────────────────────────────────────────
         Msg::McpServerReady { name, tools } => {
             if let Some(entry) = state.mcp.servers.get_mut(&name) {
@@ -214,6 +231,18 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::ConversationLoaded(history) => {
             state.session.conversation = history;
             state.turn = TurnState::Idle;
+            state.ui.mode = UiMode::EditingInput;
+            emit_title_if_changed(&mut state, &mut cmds);
+        },
+        Msg::ConversationsListed(candidates) => {
+            if let UiMode::ConversationList { cursor, .. } = state.ui.mode {
+                state.ui.mode = UiMode::ConversationList {
+                    candidates,
+                    cursor: cursor.min(0),
+                };
+            }
+            // If the user already navigated away (Esc before the
+            // list landed), the event silently drops.
         },
         Msg::ModelPullFinished { model } => {
             state.status = Some(StatusLine {
@@ -222,6 +251,15 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 shown_at: std::time::SystemTime::now(),
             });
             cmds.push(Cmd::DismissStatusAfter { ms: 2_000 });
+        },
+        Msg::ModelPullProgress(line) => {
+            state.status = Some(StatusLine {
+                text: format!("ollama: {}", line),
+                kind: StatusKind::Info,
+                shown_at: std::time::SystemTime::now(),
+            });
+            // Don't dismiss — the next progress line will overwrite
+            // this one; the final ModelPullFinished dismisses.
         },
 
         // ── Housekeeping ────────────────────────────────────────────
@@ -238,20 +276,20 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
     }
 
-    // Per-step: if the conversation's derived title changed (user
-    // first prompt just landed, or a load/clear shuffled things),
-    // emit one SetTerminalTitle Cmd. The diff against
-    // `last_title_dispatched` stops this from firing every frame.
-    let current_title = state.session.conversation.title.clone();
-    if state.ui.last_title_dispatched.as_deref() != Some(current_title.as_str()) {
-        cmds.push(Cmd::SetTerminalTitle(format!(
-            "mermaid - {}",
-            current_title
-        )));
-        state.ui.last_title_dispatched = Some(current_title);
-    }
-
     (state, cmds)
+}
+
+/// Emit `Cmd::SetTerminalTitle` iff the derived title changed since
+/// the last emission. Called from arms that actually mutate
+/// `state.session.conversation.title` (SubmitPrompt, ConversationLoaded,
+/// ConfirmAccepted → ClearConversation) — never at the tail of every
+/// update() so `Tick`/resize/etc. stay free.
+fn emit_title_if_changed(state: &mut State, cmds: &mut Vec<Cmd>) {
+    let current = state.session.conversation.title.clone();
+    if state.ui.last_title_dispatched.as_deref() != Some(current.as_str()) {
+        cmds.push(Cmd::SetTerminalTitle(format!("mermaid - {}", current)));
+        state.ui.last_title_dispatched = Some(current);
+    }
 }
 
 // ─── helpers ────────────────────────────────────────────────────────
@@ -296,6 +334,13 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             shown_at: std::time::SystemTime::now(),
         });
         cmds.push(Cmd::DismissStatusAfter { ms: 2_000 });
+        return;
+    }
+
+    // Conversation-list picker (UiMode::ConversationList): ↑/↓
+    // navigate, Enter loads the highlighted session, Esc dismisses.
+    if matches!(state.ui.mode, UiMode::ConversationList { .. }) {
+        handle_conversation_list_key(state, cmds, code);
         return;
     }
 
@@ -371,7 +416,11 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     }
 
     // Enter submits the current input (or triggers the slash palette
-    // pick). Shift+Enter is a newline for multi-line input.
+    // pick). Shift+Enter is a newline for multi-line input. This arm
+    // enqueues a synthetic `Msg` on `pending_msgs` rather than
+    // invoking the dispatch directly — the outer `update()` drain
+    // will run the follow-up with stale-filter + pending-msgs
+    // guarantees intact.
     if code == KeyCode::Enter && !mods.shift {
         let buf = state.ui.input_buffer.trim().to_string();
         if buf.is_empty() {
@@ -382,12 +431,15 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             state.ui.input_buffer.clear();
             state.ui.input_cursor = 0;
             state.ui.palette_cursor = None;
-            handle_slash(state, cmds, slash);
+            state.ui.pending_msgs.push_back(Msg::Slash(slash));
         } else {
             let text = std::mem::take(&mut state.ui.input_buffer);
             state.ui.input_cursor = 0;
             let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
-            handle_submit_prompt(state, cmds, text, &attachment_ids);
+            state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
+                text,
+                attachment_ids,
+            });
         }
         return;
     }
@@ -395,7 +447,11 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     if mods.is_empty() || mods.shift {
         match code {
             KeyCode::Char(c) => {
-                // Insert at cursor, then advance.
+                // Any text mutation resets history nav — the user's
+                // typing wins over whatever historical entry was
+                // on-screen.
+                state.ui.input_history_cursor = None;
+                state.ui.history_draft.clear();
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
                 state.ui.input_buffer.insert(pos, c);
                 state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + c.len_utf8());
@@ -408,6 +464,8 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 }
             },
             KeyCode::Backspace => {
+                state.ui.input_history_cursor = None;
+                state.ui.history_draft.clear();
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
                 if pos > 0 {
                     let new_pos = state.ui.input_buffer.floor_char_boundary(pos - 1);
@@ -421,6 +479,8 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 }
             },
             KeyCode::Delete => {
+                state.ui.input_history_cursor = None;
+                state.ui.history_draft.clear();
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
                 if pos < state.ui.input_buffer.len() {
                     let next = state.ui.input_buffer.ceil_char_boundary(pos + 1);
@@ -447,21 +507,66 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             KeyCode::Home => state.ui.input_cursor = 0,
             KeyCode::End => state.ui.input_cursor = state.ui.input_buffer.len(),
             KeyCode::Up => {
-                // Focus the attachment bar if it has entries; otherwise
-                // fall through (future: history nav).
-                if !state.ui.attachments.is_empty() {
+                // Up precedence: attachment focus wins ONLY when the
+                // input is empty AND attachments exist — otherwise
+                // step back through input history.
+                if state.ui.input_buffer.is_empty() && !state.ui.attachments.is_empty() {
                     state.ui.attachment_focused = true;
                     state.ui.attachment_selected = state
                         .ui
                         .attachment_selected
                         .min(state.ui.attachments.len() - 1);
+                } else {
+                    history_nav_back(state);
                 }
+            },
+            KeyCode::Down => {
+                history_nav_forward(state);
             },
             KeyCode::Escape => {
                 state.ui.attachment_focused = false;
+                // Also clear any in-progress history nav.
+                state.ui.input_history_cursor = None;
+                state.ui.history_draft.clear();
             },
             _ => {},
         }
+    }
+}
+
+/// Handle keyboard input while the conversation-list picker is open.
+/// Up/Down walk the cursor within the candidate list; Enter loads the
+/// highlighted session; Esc dismisses.
+fn handle_conversation_list_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+    let UiMode::ConversationList {
+        ref candidates,
+        ref mut cursor,
+    } = state.ui.mode
+    else {
+        return;
+    };
+    match code {
+        KeyCode::Up => {
+            *cursor = cursor.saturating_sub(1);
+        },
+        KeyCode::Down => {
+            let max = candidates.len().saturating_sub(1);
+            if *cursor < max {
+                *cursor += 1;
+            }
+        },
+        KeyCode::Enter => {
+            if let Some(summary) = candidates.get(*cursor) {
+                cmds.push(Cmd::LoadConversation(summary.id.clone()));
+            }
+            // Mode flips on `Msg::ConversationLoaded` — leave as-is
+            // until then so the user sees the list until the load
+            // completes.
+        },
+        KeyCode::Escape => {
+            state.ui.mode = UiMode::EditingInput;
+        },
+        _ => {},
     }
 }
 
@@ -510,6 +615,63 @@ fn handle_attachment_key(state: &mut State, code: KeyCode) {
 fn clamp_cursor(s: &str, pos: usize) -> usize {
     let capped = pos.min(s.len());
     s.floor_char_boundary(capped)
+}
+
+/// Step BACK through input history (Up arrow). The first press saves
+/// the user's in-progress draft and replaces the buffer with the
+/// newest history entry; subsequent presses step older.
+fn history_nav_back(state: &mut State) {
+    let history = &state.session.conversation.input_history;
+    if history.is_empty() {
+        return;
+    }
+    let next_cursor = match state.ui.input_history_cursor {
+        None => {
+            // First Up press — snapshot the current draft.
+            state.ui.history_draft = state.ui.input_buffer.clone();
+            0
+        },
+        Some(i) => (i + 1).min(history.len() - 1),
+    };
+    state.ui.input_history_cursor = Some(next_cursor);
+    // `input_history` is a VecDeque with newest at the back. Index
+    // 0 from the end = newest, 1 = one older, etc.
+    let historical = history
+        .iter()
+        .rev()
+        .nth(next_cursor)
+        .cloned()
+        .unwrap_or_default();
+    state.ui.input_buffer = historical;
+    state.ui.input_cursor = state.ui.input_buffer.len();
+}
+
+/// Step FORWARD through input history (Down arrow). Stepping past
+/// the newest entry restores the user's original draft.
+fn history_nav_forward(state: &mut State) {
+    let Some(cursor) = state.ui.input_history_cursor else {
+        return;
+    };
+    if cursor == 0 {
+        // Back to the live draft.
+        state.ui.input_buffer = std::mem::take(&mut state.ui.history_draft);
+        state.ui.input_cursor = state.ui.input_buffer.len();
+        state.ui.input_history_cursor = None;
+        return;
+    }
+    let new_cursor = cursor - 1;
+    state.ui.input_history_cursor = Some(new_cursor);
+    let historical = state
+        .session
+        .conversation
+        .input_history
+        .iter()
+        .rev()
+        .nth(new_cursor)
+        .cloned()
+        .unwrap_or_default();
+    state.ui.input_buffer = historical;
+    state.ui.input_cursor = state.ui.input_buffer.len();
 }
 
 /// Cycle ReasoningLevel through every variant, wrapping around. Used
@@ -585,6 +747,11 @@ fn handle_submit_prompt(
     state.session.conversation.add_to_input_history(text);
     state.ui.input_buffer.clear();
 
+    // The first user message derives the conversation title; every
+    // subsequent message keeps it. Either way, emit SetTerminalTitle
+    // only on actual change.
+    emit_title_if_changed(state, cmds);
+
     let turn = state.ids.fresh_turn();
     state.turn = start_generating(turn);
     cmds.push(Cmd::CallModel {
@@ -637,11 +804,27 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::LoadConversation(id));
         },
         SlashCmd::Load(None) | SlashCmd::List => {
-            state.ui.mode = UiMode::ConversationList;
+            // Transition to the picker. Effect handler scans the
+            // conversations directory; the reducer fills in
+            // candidates when `Msg::ConversationsListed` arrives.
+            state.ui.mode = UiMode::ConversationList {
+                candidates: Vec::new(),
+                cursor: 0,
+            };
+            cmds.push(Cmd::ListConversations);
         },
         SlashCmd::CloudSetup => {
-            // Handed off to the terminal app-layer in the old code;
-            // reserved here for the event source to route.
+            // Cloud setup needs interactive stdin (rpassword) which
+            // fights with ratatui's raw mode. The in-TUI command
+            // points users at the `mermaid cloud-setup` subcommand
+            // instead — clean separation of modes.
+            state.status = Some(StatusLine {
+                text: "Run `mermaid cloud-setup` from your shell, then restart mermaid."
+                    .to_string(),
+                kind: StatusKind::Info,
+                shown_at: std::time::SystemTime::now(),
+            });
+            cmds.push(Cmd::DismissStatusAfter { ms: 5_000 });
         },
         SlashCmd::Help => {
             state.status = Some(StatusLine {
@@ -682,31 +865,44 @@ fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
     };
 }
 
-fn handle_confirm_accepted(state: &mut State, _cmds: &mut [Cmd]) {
+fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
     let Some(confirm) = state.confirm.take() else {
         return;
     };
     match confirm.accept_msg_token {
         super::state::ConfirmationTarget::ClearConversation => {
-            state.session.conversation.messages.clear();
-            state.session.conversation.updated_at = chrono::Local::now();
+            // Clear = start a fresh conversation: new ID, new default
+            // title, empty history, zero cumulative tokens. Matches
+            // user mental model ("wipe everything").
+            let project_path = state.session.conversation.project_path.clone();
+            let model_name = state.session.conversation.model_name.clone();
+            state.session.conversation =
+                crate::session::ConversationHistory::new(project_path, model_name);
+            state.session.cumulative_tokens = 0;
+            emit_title_if_changed(state, cmds);
         },
         super::state::ConfirmationTarget::OverwriteSavedConversation { .. } => {
-            // Reserved — effect layer in commit 6 will handle actual
-            // filesystem replacement.
+            // Reserved for future filesystem-replacement workflow.
+            // Today no arm issues this confirmation, so this branch
+            // is unreachable; kept for exhaustive match.
         },
     }
 }
 
 fn handle_stream_tool_call(
-    _state: &mut State,
-    _turn: TurnId,
-    _call: crate::models::tool_call::ToolCall,
+    state: &mut State,
+    turn: TurnId,
+    call: crate::models::tool_call::ToolCall,
 ) {
-    // Reserved. In the full cutover (commit 3), model-emitted tool
-    // calls buffer on the `Generating` variant and transition to
-    // `ExecutingTools` on `StreamDone`. For the scaffold we no-op so
-    // the Msg variant is live but the behaviour lands wired-in later.
+    if let TurnState::Generating {
+        id,
+        pending_tool_calls,
+        ..
+    } = &mut state.turn
+        && *id == turn
+    {
+        pending_tool_calls.push(call);
+    }
 }
 
 fn handle_stream_done(
@@ -716,28 +912,41 @@ fn handle_stream_done(
     usage: Option<crate::models::TokenUsage>,
     thinking_signature: Option<String>,
 ) {
-    // Take the generating state out so we can replace it.
+    // Unpack the Generating state, drop it into Idle temporarily;
+    // the branch below decides whether to stay Idle (no tool calls)
+    // or transition to ExecutingTools (calls buffered).
     let generating = match std::mem::replace(&mut state.turn, TurnState::Idle) {
         TurnState::Generating {
             id,
             partial_text,
             partial_reasoning,
             thinking_signature: accumulated_sig,
+            pending_tool_calls,
             ..
-        } if id == turn => (partial_text, partial_reasoning, accumulated_sig),
+        } if id == turn => (
+            partial_text,
+            partial_reasoning,
+            accumulated_sig,
+            pending_tool_calls,
+        ),
         other => {
             state.turn = other;
             return;
         },
     };
 
-    let (partial_text, partial_reasoning, accumulated_sig) = generating;
+    let (partial_text, partial_reasoning, accumulated_sig, tool_calls) = generating;
     let final_sig = thinking_signature.or(accumulated_sig);
 
-    // No tool calls in this scaffold pass; commit assistant message
-    // and return to Idle. (Commit 3 wires tool calls through via a
-    // `pending: Vec<PendingToolCall>` slot on the Generating variant.)
-    let msg = commit_assistant_message(partial_text, partial_reasoning, vec![], final_sig);
+    // Commit the assistant message (with any tool calls attached —
+    // the adapter will serialize them into the next conversation
+    // turn).
+    let msg = commit_assistant_message(
+        partial_text,
+        partial_reasoning,
+        tool_calls.clone(),
+        final_sig,
+    );
     state.session.append(msg);
 
     // Running total the status widget reads. Token count may be
@@ -752,11 +961,40 @@ fn handle_stream_done(
 
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
 
-    // Drain the queued-message FIFO. If the user typed anything
-    // while this turn was in flight, auto-submit the oldest now.
+    // If the model asked for any tools, transition to ExecutingTools
+    // and dispatch one ExecuteTool per call. The Vec<Option<ToolOutcome>>
+    // invariant now has a real producer — ToolFinished messages
+    // populate the slots, and try_complete_outcomes gates the
+    // transition to the follow-up Generating turn.
+    if !tool_calls.is_empty() {
+        let pending: Vec<super::state::PendingToolCall> = tool_calls
+            .into_iter()
+            .map(|source| super::state::PendingToolCall {
+                call_id: state.ids.fresh_tool_call(),
+                source,
+            })
+            .collect();
+        for call in &pending {
+            cmds.push(Cmd::ExecuteTool {
+                turn,
+                call_id: call.call_id,
+                source: call.source.clone(),
+            });
+        }
+        state.turn = super::transition::start_executing_tools(turn, pending);
+        return;
+    }
+
+    // No tool calls — turn ends here. Drain the queued-message FIFO.
+    // The follow-up goes through `pending_msgs` so the outer
+    // `update()` re-enters cleanly — preserves stale-filter
+    // semantics instead of inline-invoking.
     if let Some(next) = state.ui.queued_messages.pop_front() {
-        let ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
-        handle_submit_prompt(state, cmds, next, &ids);
+        let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
+        state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
+            text: next,
+            attachment_ids,
+        });
     }
 }
 
@@ -854,23 +1092,54 @@ fn handle_tool_finished(
 /// reasoning choice + the tools surface.
 pub fn build_chat_request(state: &State) -> ChatRequest {
     let instructions = state.instructions.as_ref().map(|i| i.content.clone());
+
+    // Pass user-configured values verbatim. `ModelSettings::default()`
+    // already supplies `DEFAULT_TEMPERATURE` / `DEFAULT_MAX_TOKENS`,
+    // so config never has a real "zero" — the old `.max(DEFAULT_*)`
+    // was clobbering low user settings (e.g. temperature=0.1 became
+    // 0.7).
+    let settings = &state.settings.default_model;
+    let temperature = if settings.temperature > 0.0 {
+        settings.temperature
+    } else {
+        DEFAULT_TEMPERATURE
+    };
+    let max_tokens = if settings.max_tokens > 0 {
+        settings.max_tokens
+    } else {
+        DEFAULT_MAX_TOKENS
+    };
+
+    // MCP tools the model should see — each advertised by a Ready
+    // server, fully-qualified as `mcp__<server>__<tool>`. The effect
+    // runner prepends built-in tools before dispatching, so this
+    // vector is the MCP-only portion.
+    let mcp_tools: Vec<crate::domain::ToolDefinition> = state
+        .mcp
+        .servers
+        .iter()
+        .filter(|(_, entry)| matches!(entry.status, crate::domain::McpServerStatus::Ready))
+        .flat_map(|(server_name, entry)| {
+            entry
+                .tools
+                .iter()
+                .map(move |tool| crate::domain::ToolDefinition {
+                    name: format!("mcp__{}__{}", server_name, tool.name),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                })
+        })
+        .collect();
+
     ChatRequest {
         model_id: state.session.model_id.clone(),
         messages: state.session.messages().to_vec(),
         system_prompt: get_system_prompt(),
         instructions,
         reasoning: state.session.reasoning,
-        temperature: state
-            .settings
-            .default_model
-            .temperature
-            .max(DEFAULT_TEMPERATURE),
-        max_tokens: state
-            .settings
-            .default_model
-            .max_tokens
-            .max(DEFAULT_MAX_TOKENS),
-        tools: Vec::new(),
+        temperature,
+        max_tokens,
+        tools: mcp_tools,
     }
 }
 
@@ -1088,6 +1357,7 @@ mod tests {
             tokens: 0,
             phase: GenPhase::Streaming,
             thinking_signature: None,
+            pending_tool_calls: Vec::new(),
         };
         let (state, cmds) = update(
             state,

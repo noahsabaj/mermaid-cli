@@ -47,36 +47,32 @@ pub struct ModelConfig {
     /// Hide the reasoning trace from the user-visible stream while still
     /// allowing the model to reason server-side. Maps to Ollama's
     /// `--hidethinking` semantics and Anthropic's `thinking.display:
-    /// "omitted"`. Independent of `reasoning` (you can have full reasoning
-    /// depth with the trace hidden, or no reasoning at all — the two
-    /// concerns are orthogonal).
+    /// Hide reasoning traces from the user-facing stream while still
+    /// allowing the model to reason server-side. Internal plumbing;
+    /// the v7 reducer currently never sets this (no UI toggle) but
+    /// the adapter pipeline honors it when a future toggle lands.
     #[serde(default)]
     pub hide_reasoning_trace: bool,
-
-    /// Whether this is a subagent context (excludes the agent tool to prevent nesting).
-    /// Runtime-only flag -- never persisted to disk.
-    #[serde(skip)]
-    pub is_subagent: bool,
 
     /// Backend-specific options (provider name -> key/value pairs)
     /// Example: {"ollama": {"num_gpu": "10", "num_ctx": "8192"}}
     #[serde(default)]
     pub backend_options: HashMap<String, HashMap<String, String>>,
 
-    /// MCP tool definitions in Ollama JSON format (runtime-only, never persisted).
-    /// Merged with built-in tools when sending requests to the model.
+    /// Tool definitions the model sees, already translated into
+    /// OpenAI-compatible `{type: "function", function: {name,
+    /// description, parameters}}` shape. Runtime-only. Populated by
+    /// provider wrappers from `ChatRequest.tools` — adapters iterate
+    /// this directly, no internal registry.
     #[serde(skip)]
-    pub mcp_tools: Vec<serde_json::Value>,
+    pub tools: Vec<serde_json::Value>,
 }
 
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             // Intentionally empty — every real construction goes through
-            // `from_app_config` which sets this immediately. Leaving a
-            // concrete model here (e.g. "ollama/tinyllama") would silently
-            // boot an unintended model if the default ever leaked to a
-            // call site; an empty string produces a clearer server error.
+            // a provider wrapper that sets `model` immediately.
             model: String::new(),
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
@@ -84,9 +80,8 @@ impl Default for ModelConfig {
             dynamic_system_suffix: None,
             reasoning: ReasoningLevel::default(),
             hide_reasoning_trace: false,
-            is_subagent: false,
             backend_options: HashMap::new(),
-            mcp_tools: Vec::new(),
+            tools: Vec::new(),
         }
     }
 }

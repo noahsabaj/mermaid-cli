@@ -53,7 +53,11 @@ async fn dispatch_interactive(cli: Cli, config: mermaid_cli::app::Config) -> Res
     }
 
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
-    run_interactive(config, cwd, model_id).await
+    let recorder = match cli.record.as_ref() {
+        Some(path) => Some(mermaid_cli::app::Recorder::open(path.clone())?),
+        None => None,
+    };
+    run_interactive(config, cwd, model_id, recorder).await
 }
 
 async fn dispatch_non_interactive(

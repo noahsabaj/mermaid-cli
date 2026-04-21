@@ -23,15 +23,14 @@ pub mod transition;
 
 pub use action::{ActionDetails, ActionDisplay, ActionResult};
 pub use cmd::{ChatRequest, Cmd, ToolDefinition};
-pub use ids::{IdAllocator, SubagentId, ToolCallId, TurnId};
+pub use ids::{IdAllocator, ToolCallId, TurnId};
 pub use msg::{Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig};
 pub use reducer::{build_chat_request, update};
 pub use slash_commands::{COMMAND_REGISTRY, SlashCommand, filter_by_prefix};
 pub use state::{
-    Attachment, Confirmation, ConfirmationTarget, GenPhase, IdAllocatorBundle, McpServerEntry,
-    McpServerStatus, McpState, McpToolSpec, PendingToolCall, Session, State, StatusKind,
-    StatusLine, SubagentProgress, SubagentSpec, SubagentStatus, ToolOutcome, TurnState, UiMode,
-    UiState,
+    Attachment, Confirmation, ConfirmationTarget, ConversationSummary, GenPhase, IdAllocatorBundle,
+    McpServerEntry, McpServerStatus, McpState, McpToolSpec, PendingToolCall, Session, State,
+    StatusKind, StatusLine, ToolOutcome, TurnState, UiMode, UiState,
 };
 pub use transition::{
     action_display_for, commit_assistant_message, fill_outcome, start_executing_tools,

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::ToolOutcome;
+use crate::domain::{ToolDefinition, ToolOutcome};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
@@ -34,6 +34,33 @@ impl WebSearchTool {
 impl ToolExecutor for WebSearchTool {
     fn name(&self) -> &'static str {
         "web_search"
+    }
+
+    fn schema(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "web_search".to_string(),
+            description:
+                "Search the web via Ollama Cloud's search API. Takes either a single `query` + `max_results`, or an array of `queries` for parallel fan-out."
+                    .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 },
+                    "queries": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "query": { "type": "string" },
+                                "max_results": { "type": "integer", "minimum": 1, "maximum": 10 }
+                            },
+                            "required": ["query"]
+                        }
+                    }
+                }
+            }),
+        }
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
@@ -117,6 +144,19 @@ impl WebFetchTool {
 impl ToolExecutor for WebFetchTool {
     fn name(&self) -> &'static str {
         "web_fetch"
+    }
+
+    fn schema(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "web_fetch".to_string(),
+            description: "Retrieve a single URL's main content as text (Ollama Cloud fetch API)."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"]
+            }),
+        }
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {

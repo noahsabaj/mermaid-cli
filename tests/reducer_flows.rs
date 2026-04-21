@@ -381,6 +381,51 @@ fn quit_saves_and_sets_exit() {
 // ─── Tick is pure no-op ────────────────────────────────────────────
 
 #[test]
+fn stream_tool_call_buffers_then_stream_done_transitions_to_executing_tools() {
+    // The v7 critical path: a model-emitted tool call in a streaming
+    // response must buffer on `TurnState::Generating.pending_tool_calls`
+    // and transition to `ExecutingTools` when `StreamDone` arrives
+    // non-empty. Guards the "tool call arrives, nothing happens"
+    // regression that was live in v0.7.0.
+    let (state, _) = user_submit(fresh(), "do a thing");
+    let id = state.current_turn_id().unwrap();
+
+    let (state, _) = update(
+        state,
+        Msg::StreamToolCall {
+            turn: id,
+            call: ModelToolCall {
+                id: Some("call_1".to_string()),
+                function: FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "x"}),
+                },
+            },
+        },
+    );
+
+    let (state, cmds) = update(
+        state,
+        Msg::StreamDone {
+            turn: id,
+            usage: None,
+            thinking_signature: None,
+        },
+    );
+
+    assert!(
+        matches!(state.turn, TurnState::ExecutingTools { .. }),
+        "expected ExecutingTools; got {:?}",
+        state.turn
+    );
+    assert!(
+        cmds.iter().any(|c| matches!(c, Cmd::ExecuteTool { .. })),
+        "expected Cmd::ExecuteTool; got {:?}",
+        cmds.iter().map(|c| c.tag()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn tick_never_mutates_visible_state() {
     let before = fresh();
     let before_msg_count = before.session.messages().len();

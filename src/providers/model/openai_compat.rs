@@ -99,6 +99,7 @@ fn build_model_config(request: &ChatRequest) -> ModelConfig {
         reasoning: request.reasoning,
         system_prompt: Some(request.system_prompt.clone()),
         dynamic_system_suffix: request.instructions.clone(),
+        tools: request.tools.iter().map(|t| t.to_openai_json()).collect(),
         ..Default::default()
     }
 }

@@ -34,6 +34,11 @@ pub struct Cli {
     #[arg(long = "continue", conflicts_with = "sessions")]
     pub continue_session: bool,
 
+    /// Append every reducer `Msg` to a JSONL file at this path for
+    /// debugging / post-mortem replay. Interactive mode only.
+    #[arg(long, value_name = "FILE")]
+    pub record: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -62,6 +67,10 @@ pub enum Commands {
     },
     /// List configured MCP servers
     Mcp,
+    /// Configure Ollama Cloud API key (interactive prompt). Run this
+    /// from your shell before starting mermaid — it reads stdin and
+    /// doesn't work from inside the TUI.
+    CloudSetup,
     /// Run a single prompt non-interactively
     Run {
         /// The prompt to execute

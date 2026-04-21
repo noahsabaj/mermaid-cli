@@ -20,11 +20,16 @@
 //!                                                 main loop (next iteration)
 //! ```
 //!
-//! For commit 2 this file ships the **scaffold**: `EffectRunner`
-//! exists, dispatches every `Cmd` variant, manages `TurnScope`
-//! lifecycles, and emits placeholder Msgs where the real handler will
-//! live. Commits 3–5 fill in the actual ModelProvider / ToolExecutor
-//! bodies; commit 8 wires the runner into a real main loop.
+//! The runner dispatches every `Cmd` variant to a real handler —
+//! model streaming (`CallModel` → `ModelProvider::chat`), tool
+//! execution (`ExecuteTool` → `ToolExecutor::execute`), persistence
+//! (`SaveConversation`, `LoadConversation`, `PersistLastModel`,
+//! `PersistReasoningFor`, `RefreshInstructions`), MCP lifecycle
+//! (`InitMcpServers`, `StopMcpServer`), local side-effects
+//! (`WriteImageToTemp`, `OpenInSystem`, `PullOllamaModel`,
+//! `SetTerminalTitle`, `DismissStatusAfter`). Cancellation flows
+//! through `Cmd::CancelScope(TurnId)` → the scope's
+//! `CancellationToken`.
 
 mod middleware;
 mod turn_scope;
@@ -75,10 +80,12 @@ pub struct EffectRunner {
     /// handlers can construct absolute paths.
     workdir: PathBuf,
     /// Lazy provider registry. `CallModel` resolves through this.
-    /// `None` in the scaffold path (the C2 tests); production
+    /// Tests that don't care about real providers leave this `None`
+    /// and observe the fallback `UpstreamError` Msg; production
     /// construction via `with_bindings` sets it.
     providers: Option<Arc<ProviderFactory>>,
-    /// Shared tool registry. `None` in scaffold paths.
+    /// Shared tool registry. See `providers` — same optionality
+    /// rationale for unit tests.
     tools: Option<Arc<ToolRegistry>>,
 }
 
@@ -95,11 +102,10 @@ impl EffectRunner {
         }
     }
 
-    /// Attach real provider + tool registries. The new main loop
-    /// calls this after constructing the runner; the C2 scaffold
-    /// tests don't. When absent, `CallModel` / `ExecuteTool` emit
-    /// the `not wired` placeholder Msgs (useful for tests that
-    /// don't care about real providers).
+    /// Attach provider + tool registries. Production wiring uses
+    /// this; unit tests that don't need real dispatch can skip.
+    /// Without bindings, `CallModel` / `ExecuteTool` emit well-
+    /// formed error Msgs so the reducer still transitions cleanly.
     pub fn with_bindings(
         mut self,
         providers: Arc<ProviderFactory>,
@@ -119,7 +125,7 @@ impl EffectRunner {
     }
 
     /// Pair constructor that also wires the real provider factory +
-    /// tool registry. Used by `app::run_v7`.
+    /// tool registry. Used by `app::run_interactive`.
     pub fn pair_with_bindings(
         workdir: PathBuf,
         config: Config,
@@ -165,9 +171,20 @@ impl EffectRunner {
         tracing::trace!(cmd = %cmd.summary(), "effect: dispatch");
 
         match cmd {
-            Cmd::CallModel { turn, request } => {
+            Cmd::CallModel { turn, mut request } => {
                 let tx = self.msg_tx.clone();
                 let providers = self.providers.clone();
+                // Enrich `request.tools` with every user-facing
+                // tool in the bound registry. The reducer has
+                // already populated MCP tools from `state.mcp`;
+                // built-ins come from the runner (which holds the
+                // registry). This keeps `ChatRequest.tools` the
+                // single source of truth for what the model sees.
+                if let Some(tools) = &self.tools {
+                    let mut enriched = tools.describe_all();
+                    enriched.append(&mut request.tools);
+                    request.tools = enriched;
+                }
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
@@ -186,13 +203,6 @@ impl EffectRunner {
                 let token = scope.token();
                 scope.spawn(async move {
                     dispatch_execute_tool(tx, tools, workdir, turn, call_id, source, token).await;
-                });
-            },
-            Cmd::SpawnSubagents { turn, specs: _ } => {
-                let tx = self.msg_tx.clone();
-                let scope = self.scope_mut(turn);
-                scope.spawn(async move {
-                    let _ = tx; // unused in scaffold
                 });
             },
             Cmd::CancelScope(turn) => {
@@ -216,11 +226,6 @@ impl EffectRunner {
                     let _ = crate::app::persist_last_model(&model);
                 });
             },
-            Cmd::PersistDefaultReasoning(level) => {
-                self.detached.spawn(async move {
-                    let _ = crate::app::persist_default_reasoning(level);
-                });
-            },
             Cmd::PersistReasoningFor { model_id, level } => {
                 self.detached.spawn(async move {
                     let _ = crate::app::persist_reasoning_for_model(&model_id, level);
@@ -234,8 +239,45 @@ impl EffectRunner {
                     let _ = tx.send(Msg::InstructionsChanged(loaded)).await;
                 });
             },
-            Cmd::LoadConversation(_) => {
-                // Real impl in C6. No-op for now.
+            Cmd::LoadConversation(id) => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    match crate::session::ConversationManager::new(&workdir) {
+                        Ok(mgr) => match mgr.load_conversation(&id) {
+                            Ok(history) => {
+                                let _ = tx.send(Msg::ConversationLoaded(history)).await;
+                            },
+                            Err(e) => {
+                                tracing::warn!(id = %id, error = %e, "LoadConversation failed");
+                            },
+                        },
+                        Err(e) => {
+                            tracing::warn!(error = %e, "ConversationManager init failed");
+                        },
+                    }
+                });
+            },
+            Cmd::ListConversations => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    let summaries = match crate::session::ConversationManager::new(&workdir) {
+                        Ok(mgr) => mgr
+                            .list_conversations()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|h| crate::domain::ConversationSummary {
+                                id: h.id.clone(),
+                                title: h.title.clone(),
+                                message_count: h.messages.len(),
+                                updated_at: h.updated_at.to_rfc3339(),
+                            })
+                            .collect(),
+                        Err(_) => Vec::new(),
+                    };
+                    let _ = tx.send(Msg::ConversationsListed(summaries)).await;
+                });
             },
             Cmd::InitMcpServers(configs) => {
                 let tx = self.msg_tx.clone();
@@ -289,11 +331,16 @@ impl EffectRunner {
             Cmd::PullOllamaModel { model } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn(async move {
-                    let _ = tx.send(Msg::ModelPullFinished { model }).await;
+                    dispatch_pull_ollama_model(tx, model).await;
                 });
             },
-            Cmd::OpenInSystem(_) => {
-                // Fire and forget via `crate::utils::open` in C6.
+            Cmd::OpenInSystem(path) => {
+                self.detached.spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::utils::open_file(&path);
+                    })
+                    .await;
+                });
             },
             Cmd::DismissStatusAfter { ms } => {
                 let tx = self.msg_tx.clone();
@@ -302,8 +349,14 @@ impl EffectRunner {
                     let _ = tx.send(Msg::StatusDismiss).await;
                 });
             },
-            Cmd::WriteImageToTemp { .. } => {
-                // Real impl in C6.
+            Cmd::WriteImageToTemp { id, bytes, format } => {
+                self.detached.spawn(async move {
+                    let path =
+                        std::env::temp_dir().join(format!("mermaid-img-{}.{}", id, format));
+                    if let Err(e) = tokio::fs::write(&path, &bytes).await {
+                        tracing::warn!(path = %path.display(), error = %e, "WriteImageToTemp failed");
+                    }
+                });
             },
             Cmd::Exit => {
                 // The main loop observes `state.should_exit` after
@@ -318,20 +371,6 @@ impl EffectRunner {
                     let mut stdout = std::io::stdout();
                     let _ = stdout.write_all(seq.as_bytes());
                     let _ = stdout.flush();
-                });
-            },
-            Cmd::CancelSubagent { turn, subagent } => {
-                // Scaffold — per-subagent cancellation wires into
-                // `effect::subagent` in C5.
-                let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
-                    let _ = tx
-                        .send(Msg::SubagentStatusChanged {
-                            turn,
-                            subagent,
-                            status: crate::domain::SubagentStatus::Cancelled,
-                        })
-                        .await;
                 });
             },
         }
@@ -373,42 +412,10 @@ impl EffectRunner {
     }
 }
 
-/// Effect runner trait so nested reducers (subagents) can supply
-/// their own. Production always uses the concrete `EffectRunner`.
-#[async_trait::async_trait]
-pub trait Runner: Send + Sync {
-    fn dispatch(&self, cmd: Cmd);
-}
-
-/// Shim that wraps a `Mutex<EffectRunner>` for trait use. Not used in
-/// the production path — reserved for nested subagent reducers in C5.
-pub struct SharedRunner {
-    inner: Arc<tokio::sync::Mutex<EffectRunner>>,
-}
-
-impl SharedRunner {
-    pub fn new(runner: EffectRunner) -> Self {
-        Self {
-            inner: Arc::new(tokio::sync::Mutex::new(runner)),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Runner for SharedRunner {
-    fn dispatch(&self, cmd: Cmd) {
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            inner.lock().await.dispatch(cmd);
-        });
-    }
-}
-
-/// Dispatch a `CallModel` command. If a `ProviderFactory` is bound,
-/// resolves the provider and streams its events onto the Msg
-/// channel. Without bindings (scaffold tests) falls back to a
-/// placeholder `UpstreamError` so the reducer sees a clean end of
-/// turn.
+/// Dispatch a `CallModel` command. Resolves the provider (lazy,
+/// cached) and streams its events onto the Msg channel. Without a
+/// bound `ProviderFactory` (unit tests), emits a single
+/// `UpstreamError` so the reducer ends the turn cleanly.
 async fn dispatch_call_model(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
@@ -572,6 +579,68 @@ async fn dispatch_execute_tool(
         .await;
 }
 
+/// Spawn `ollama pull <model>` and stream its stdout lines as
+/// `Msg::ModelPullProgress` status updates. Emits a final
+/// `Msg::ModelPullFinished` on successful exit; on failure, emits a
+/// single `ModelPullProgress` with the error text.
+async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    let mut cmd = Command::new("ollama");
+    cmd.arg("pull")
+        .arg(&model)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx
+                .send(Msg::ModelPullProgress(format!(
+                    "ollama pull failed to start: {}",
+                    e
+                )))
+                .await;
+            return;
+        },
+    };
+
+    if let Some(stdout) = child.stdout.take() {
+        let tx_inner = tx.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let _ = tx_inner.send(Msg::ModelPullProgress(line)).await;
+            }
+        });
+    }
+
+    match child.wait().await {
+        Ok(status) if status.success() => {
+            let _ = tx.send(Msg::ModelPullFinished { model }).await;
+        },
+        Ok(status) => {
+            let _ = tx
+                .send(Msg::ModelPullProgress(format!(
+                    "ollama pull exited with status {}",
+                    status.code().unwrap_or(-1)
+                )))
+                .await;
+        },
+        Err(e) => {
+            let _ = tx
+                .send(Msg::ModelPullProgress(format!(
+                    "ollama pull wait error: {}",
+                    e
+                )))
+                .await;
+        },
+    }
+}
+
 fn classify_error_for_ui(e: &crate::models::ModelError) -> crate::models::UserFacingError {
     use crate::models::{ErrorCategory, ModelError, UserFacingError};
     match e {
@@ -616,7 +685,7 @@ fn classify_error_for_ui(e: &crate::models::ModelError) -> crate::models::UserFa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{SubagentId, ToolCallId};
+    use crate::domain::ToolCallId;
     use std::time::Duration;
 
     fn runner() -> (EffectRunner, mpsc::Receiver<Msg>) {
@@ -725,31 +794,6 @@ mod tests {
 
         r.dispatch(Cmd::CancelScope(turn));
         assert_eq!(r.scope_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn subagent_cancel_emits_status_changed() {
-        let (mut r, mut rx) = runner();
-        r.dispatch(Cmd::CancelSubagent {
-            turn: TurnId(3),
-            subagent: SubagentId(5),
-        });
-        let msg = tokio::time::timeout(Duration::from_millis(200), rx.recv())
-            .await
-            .expect("msg")
-            .expect("channel");
-        match msg {
-            Msg::SubagentStatusChanged {
-                turn,
-                subagent,
-                status,
-            } => {
-                assert_eq!(turn, TurnId(3));
-                assert_eq!(subagent, SubagentId(5));
-                assert!(matches!(status, crate::domain::SubagentStatus::Cancelled));
-            },
-            _ => panic!("wrong variant"),
-        }
     }
 
     #[tokio::test]

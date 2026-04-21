@@ -74,6 +74,7 @@ pub fn start_generating(id: TurnId) -> TurnState {
         tokens: 0,
         phase: GenPhase::Sending,
         thinking_signature: None,
+        pending_tool_calls: Vec::new(),
     }
 }
 

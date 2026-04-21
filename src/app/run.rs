@@ -25,26 +25,33 @@ use tokio::time::{Duration, interval};
 
 use crate::app::Config;
 use crate::app::event_source::event_to_msg;
+use crate::app::recorder::Recorder;
 use crate::app::terminal::TerminalGuard;
 use crate::domain::{Cmd, Msg, State, update};
 use crate::effect::EffectRunner;
 use crate::providers::ToolRegistry;
-use crate::render::{RenderState, render};
+use crate::render::{RenderCache, render};
 
-/// Interactive TUI main loop.
-pub async fn run_interactive(config: Config, cwd: PathBuf, model_id: String) -> Result<()> {
+/// Interactive TUI main loop. `recorder` (if provided) appends one
+/// JSONL line per reducer input to the file for debugging / replay.
+pub async fn run_interactive(
+    config: Config,
+    cwd: PathBuf,
+    model_id: String,
+    mut recorder: Option<Recorder>,
+) -> Result<()> {
     let mut state = State::new(config.clone(), cwd.clone(), model_id);
     let tools = Arc::new(ToolRegistry::default());
     let (mut runner, mut msg_rx) =
         EffectRunner::pair_with_bindings(cwd.clone(), config.clone(), tools);
     let mut terminal = TerminalGuard::setup()?;
-    let mut rstate = RenderState::new();
+    let mut rstate = RenderCache::new();
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(16));
 
-    // Boot effects — in C10 this will include initial MCP server
-    // startup + session load, etc. For now, just nudge the
-    // instructions loader.
+    // Boot effects: MCP server init (if configured) + an initial
+    // instructions refresh so MERMAID.md content is in State before
+    // the first prompt.
     for cmd in bootstrap_cmds(&config) {
         runner.dispatch(cmd);
     }
@@ -74,6 +81,15 @@ pub async fn run_interactive(config: Config, cwd: PathBuf, model_id: String) -> 
         };
 
         let Some(msg) = msg else { continue };
+
+        // Optional recording: one JSONL line per Msg, before the
+        // reducer runs so the log captures even no-op inputs.
+        if let Some(r) = recorder.as_mut() {
+            let body = serde_json::json!({
+                "kind": format!("{:?}", msg.kind()),
+            });
+            let _ = r.record_kind(msg.kind(), msg.turn_id(), body);
+        }
 
         let (new_state, cmds) = update(state, msg);
         state = new_state;

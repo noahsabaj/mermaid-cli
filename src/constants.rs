@@ -3,20 +3,6 @@
 // Network Configuration
 pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 
-/// Computer-use tool names. Adapters strip these from the outgoing
-/// tool list when the request is for a subagent, since subagents
-/// shouldn't be wiggling the user's mouse. Single source of truth
-/// so the adapter filter + the tool registry don't drift.
-pub const GUI_TOOL_NAMES: &[&str] = &[
-    "screenshot",
-    "list_windows",
-    "click",
-    "type_text",
-    "press_key",
-    "scroll",
-    "mouse_move",
-];
-
 // Timeouts
 pub const COMMAND_TIMEOUT_SECS: u64 = 30;
 pub const COMMAND_MAX_TIMEOUT_SECS: u64 = 300;

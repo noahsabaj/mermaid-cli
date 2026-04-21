@@ -388,10 +388,13 @@ impl OllamaAdapter {
             json_messages.push(json_msg);
         }
 
-        // Built-in tools, with subagent / cloud-key filtering applied.
-        let all_tools = crate::models::ToolRegistry::ollama_tools_cached();
+        // Tools come from `config.tools` (populated by the provider
+        // wrapper from `ChatRequest.tools`). Cloud-key-gated web
+        // tools are filtered here — no point advertising them when
+        // the adapter couldn't call through without a bearer token.
         let no_cloud_key = crate::ollama::get_cloud_api_key().is_none();
-        let mut tools: Vec<&serde_json::Value> = all_tools
+        let tools: Vec<&serde_json::Value> = config
+            .tools
             .iter()
             .filter(|t| {
                 let name = t
@@ -401,18 +404,9 @@ impl OllamaAdapter {
                 if no_cloud_key && (name == "web_search" || name == "web_fetch") {
                     return false;
                 }
-                if config.is_subagent && name == "agent" {
-                    return false;
-                }
-                if config.is_subagent && crate::constants::GUI_TOOL_NAMES.contains(&name) {
-                    return false;
-                }
                 true
             })
             .collect();
-        for mcp_tool in &config.mcp_tools {
-            tools.push(mcp_tool);
-        }
 
         let mut request_body = json!({
             "model": self.model_name,
