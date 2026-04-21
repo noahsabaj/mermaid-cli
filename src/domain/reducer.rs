@@ -265,6 +265,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         } else {
             state.ui.input_buffer.clear();
             state.ui.input_cursor = 0;
+            state.ui.palette_cursor = None;
         }
         return;
     }
@@ -277,10 +278,93 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Alt+T cycles reasoning depth. Persists per-model so cycling on
+    // Sonnet doesn't bleed into the next session with Ollama.
+    if mods.alt && code == KeyCode::Char('t') {
+        let next = cycle_reasoning(state.session.reasoning);
+        state.session.reasoning = next;
+        cmds.push(Cmd::PersistReasoningFor {
+            model_id: state.session.model_id.clone(),
+            level: next,
+        });
+        state.status = Some(StatusLine {
+            text: format!("Reasoning: {}", next.as_str()),
+            kind: StatusKind::Info,
+            shown_at: std::time::SystemTime::now(),
+        });
+        cmds.push(Cmd::DismissStatusAfter { ms: 2_000 });
+        return;
+    }
+
     // Attachment-focus mode: keyboard navigates the bar.
     if state.ui.attachment_focused {
         handle_attachment_key(state, code);
         return;
+    }
+
+    // Slash-palette navigation — intercepts ↑/↓/Tab/Esc while the
+    // input buffer opens with `/`. Enter falls through to the normal
+    // handler below so the command actually dispatches.
+    if state.ui.input_buffer.starts_with('/') {
+        use crate::tui::slash_commands::filter_by_prefix;
+        let typed = state
+            .ui
+            .input_buffer
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        let candidates = filter_by_prefix(typed);
+        match code {
+            KeyCode::Up => {
+                let cur = state.ui.palette_cursor.unwrap_or(0);
+                state.ui.palette_cursor = Some(cur.saturating_sub(1));
+                return;
+            },
+            KeyCode::Down => {
+                let max = candidates.len().saturating_sub(1);
+                let cur = state.ui.palette_cursor.unwrap_or(0);
+                state.ui.palette_cursor = Some((cur + 1).min(max));
+                return;
+            },
+            KeyCode::Tab => {
+                let sel = state.ui.palette_cursor.unwrap_or(0);
+                if let Some(cmd) = candidates.get(sel) {
+                    state.ui.input_buffer = format!("/{} ", cmd.name);
+                    state.ui.input_cursor = state.ui.input_buffer.len();
+                    state.ui.palette_cursor = Some(0);
+                }
+                return;
+            },
+            KeyCode::Escape => {
+                state.ui.input_buffer.clear();
+                state.ui.input_cursor = 0;
+                state.ui.palette_cursor = None;
+                return;
+            },
+            KeyCode::Enter if !mods.shift => {
+                // Complete-then-execute: replace the command word with
+                // the highlighted candidate (preserving any args the
+                // user already typed), then fall through to the Enter
+                // handler below so the command actually dispatches.
+                let sel = state.ui.palette_cursor.unwrap_or(0);
+                if let Some(cmd) = candidates.get(sel) {
+                    let raw = state.ui.input_buffer.clone();
+                    let after_slash = raw.trim_start_matches('/');
+                    let rest = match after_slash.find(char::is_whitespace) {
+                        Some(idx) => &after_slash[idx..],
+                        None => "",
+                    };
+                    state.ui.input_buffer = format!("/{}{}", cmd.name, rest);
+                    state.ui.input_cursor = state.ui.input_buffer.len();
+                }
+                // Fall through to the Enter handler below.
+            },
+            _ => {
+                // Fall through to normal key handling (char/Backspace
+                // update the filter; palette_cursor gets reset below).
+            },
+        }
     }
 
     // Enter submits the current input (or triggers the slash palette
@@ -294,6 +378,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             let slash = crate::app::event_source::parse_slash_command(rest);
             state.ui.input_buffer.clear();
             state.ui.input_cursor = 0;
+            state.ui.palette_cursor = None;
             handle_slash(state, cmds, slash);
         } else {
             let text = std::mem::take(&mut state.ui.input_buffer);
@@ -315,6 +400,13 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                     &state.ui.input_buffer,
                     pos + c.len_utf8(),
                 );
+                // Opening the palette, or editing its filter, resets
+                // the cursor to the first candidate — stops stale
+                // indices from pointing past the end of a shrinking
+                // filter result.
+                if state.ui.input_buffer.starts_with('/') {
+                    state.ui.palette_cursor = Some(0);
+                }
             },
             KeyCode::Backspace => {
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
@@ -323,12 +415,22 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                     state.ui.input_buffer.drain(new_pos..pos);
                     state.ui.input_cursor = new_pos;
                 }
+                if state.ui.input_buffer.starts_with('/') {
+                    state.ui.palette_cursor = Some(0);
+                } else {
+                    state.ui.palette_cursor = None;
+                }
             },
             KeyCode::Delete => {
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
                 if pos < state.ui.input_buffer.len() {
                     let next = state.ui.input_buffer.ceil_char_boundary(pos + 1);
                     state.ui.input_buffer.drain(pos..next);
+                }
+                if state.ui.input_buffer.starts_with('/') {
+                    state.ui.palette_cursor = Some(0);
+                } else {
+                    state.ui.palette_cursor = None;
                 }
             },
             KeyCode::Left => {
@@ -409,6 +511,22 @@ fn handle_attachment_key(state: &mut State, code: KeyCode) {
 fn clamp_cursor(s: &str, pos: usize) -> usize {
     let capped = pos.min(s.len());
     s.floor_char_boundary(capped)
+}
+
+/// Cycle ReasoningLevel through every variant, wrapping around. Used
+/// by Alt+T. Order matches the `Ord` impl so the cycle walks from
+/// lowest to highest and back to None.
+fn cycle_reasoning(current: crate::models::ReasoningLevel) -> crate::models::ReasoningLevel {
+    use crate::models::ReasoningLevel as R;
+    match current {
+        R::None => R::Minimal,
+        R::Minimal => R::Low,
+        R::Low => R::Medium,
+        R::Medium => R::High,
+        R::High => R::XHigh,
+        R::XHigh => R::Max,
+        R::Max => R::None,
+    }
 }
 
 fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
