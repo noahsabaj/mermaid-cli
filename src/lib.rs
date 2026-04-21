@@ -3,6 +3,7 @@ pub mod app;
 pub mod cli;
 pub mod clipboard;
 pub mod constants;
+pub mod domain;
 pub mod mcp;
 pub mod models;
 pub mod ollama;

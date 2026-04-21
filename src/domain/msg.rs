@@ -1,0 +1,414 @@
+//! Every input to the reducer.
+//!
+//! `Msg` is an exhaustive sum over three categories:
+//!
+//!   1. **User intent** — key presses, pastes, slash commands, submit,
+//!      cancel, quit. Originates from `app::event_source`.
+//!   2. **Effect results** — stream chunks, tool outcomes, subagent
+//!      progress, MCP lifecycle, save/load completion. Originates from
+//!      `effect::EffectRunner` when a spawned task finishes a unit of
+//!      work.
+//!   3. **Housekeeping** — `Tick` (timer-driven redraw), `StatusDismiss`,
+//!      `InstructionsChanged` (mtime watcher).
+//!
+//! Every effect-result variant carries a `TurnId`. The reducer's first
+//! gate on any such message is `if state.turn.accepts(msg.turn_id())`
+//! — messages for a cancelled / superseded turn are dropped without
+//! state change. This is the architectural guarantee that stale
+//! streaming events can never corrupt the current turn.
+
+use std::path::PathBuf;
+
+use crate::app::McpServerConfig;
+use crate::app::instructions::LoadedInstructions;
+use crate::models::tool_call::ToolCall as ModelToolCall;
+use crate::models::{ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError};
+
+use super::ids::{SubagentId, ToolCallId, TurnId};
+use super::state::{McpToolSpec, SubagentStatus, ToolOutcome};
+
+/// Single reducer input. Non-exhaustive is intentional: adding a new
+/// variant is a deliberate act that forces every reducer arm to
+/// consider it at compile time (the reducer's match is NOT
+/// `_ =>` — see `reducer.rs`).
+#[derive(Debug, Clone)]
+pub enum Msg {
+    // ── User intent ─────────────────────────────────────────────────
+    /// Raw key event from crossterm, after the event source has
+    /// stripped mouse/resize/paste.
+    Key(Key),
+    /// A full paste (text OR image) from the terminal.
+    Paste(Paste),
+    /// User hit Enter on a non-empty input. The event source has
+    /// already stripped the slash-command routing.
+    SubmitPrompt {
+        text: String,
+        /// Attachment IDs the reducer should consume from state.
+        attachment_ids: Vec<u64>,
+    },
+    /// User ran a slash command (post-routing from `app::event_source`).
+    Slash(SlashCmd),
+    /// Ctrl+C / Esc during an active turn.
+    CancelTurn,
+    /// Confirmation modal answer.
+    ConfirmAccepted,
+    ConfirmDeclined,
+    /// User wants to exit cleanly (Ctrl+D with empty input, or `/quit`).
+    Quit,
+
+    // ── Streaming (from effect::model) ──────────────────────────────
+    /// Chunk of assistant text. Append to `partial_text`.
+    StreamText {
+        turn: TurnId,
+        chunk: String,
+    },
+    /// Chunk of reasoning / thinking content.
+    StreamReasoning {
+        turn: TurnId,
+        chunk: ReasoningChunk,
+    },
+    /// Model emitted a tool call. Append to the outgoing call list;
+    /// actual execution dispatches on `StreamDone`.
+    StreamToolCall {
+        turn: TurnId,
+        call: ModelToolCall,
+    },
+    /// Stream complete. Carries final token count (0 if unknown) and,
+    /// for Anthropic, the thinking signature that must round-trip on
+    /// the next request.
+    StreamDone {
+        turn: TurnId,
+        usage: Option<TokenUsage>,
+        thinking_signature: Option<String>,
+    },
+    /// Upstream returned a recoverable or terminal error. Reducer
+    /// commits an error line and returns to `Idle` (or surfaces a
+    /// retry affordance, if `recoverable`).
+    UpstreamError {
+        turn: TurnId,
+        error: UserFacingError,
+    },
+
+    // ── Tools (from effect::tool) ───────────────────────────────────
+    /// Tool was picked up by the executor — useful for "spinner
+    /// started" UI transitions.
+    ToolStarted {
+        turn: TurnId,
+        call_id: ToolCallId,
+    },
+    /// Mid-flight progress (e.g. streaming subprocess output). Today
+    /// the reducer just forwards to the UI; future middleware may
+    /// aggregate.
+    ToolProgress {
+        turn: TurnId,
+        call_id: ToolCallId,
+        chunk: String,
+    },
+    /// Tool finished (one of Finished / Error / Cancelled).
+    ToolFinished {
+        turn: TurnId,
+        call_id: ToolCallId,
+        outcome: ToolOutcome,
+    },
+
+    // ── Subagents (from effect::subagent) ───────────────────────────
+    SubagentStatusChanged {
+        turn: TurnId,
+        subagent: SubagentId,
+        status: SubagentStatus,
+    },
+    SubagentToolUseTick {
+        turn: TurnId,
+        subagent: SubagentId,
+    },
+
+    // ── MCP (from effect::mcp) ──────────────────────────────────────
+    /// `initialize` succeeded; server is ready to dispatch tools.
+    McpServerReady {
+        name: String,
+        tools: Vec<McpToolSpec>,
+    },
+    /// Server startup failed OR the child exited with non-zero.
+    McpServerErrored {
+        name: String,
+        reason: String,
+    },
+    McpServerStopped {
+        name: String,
+    },
+
+    // ── Persistence (from effect::persistence) ──────────────────────
+    /// `MERMAID.md` loaded / changed / removed since last check.
+    InstructionsChanged(Option<LoadedInstructions>),
+    /// `save_conversation` finished.
+    SessionSaved,
+    /// `/load <id>` — a saved conversation has been read off disk.
+    ConversationLoaded(crate::session::ConversationHistory),
+
+    // ── Misc model operations ───────────────────────────────────────
+    /// `/model <name>` finished pulling (Ollama only).
+    ModelPullFinished {
+        model: String,
+    },
+
+    // ── Housekeeping ────────────────────────────────────────────────
+    /// 1/60s timer tick. Used for spinner animation + elapsed-time
+    /// display. Reducer only advances derived fields.
+    Tick,
+    /// Status line expired (self-clear) or user dismissed.
+    StatusDismiss,
+    /// Terminal was resized. Reducer normally no-ops; render consumes.
+    Resize {
+        width: u16,
+        height: u16,
+    },
+}
+
+/// Bare key event — deliberately smaller than crossterm's `KeyEvent`
+/// so the reducer doesn't depend on crossterm. The app event source
+/// does the conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Key {
+    pub code: KeyCode,
+    pub modifiers: KeyMods,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyCode {
+    Char(char),
+    Enter,
+    Escape,
+    Backspace,
+    Delete,
+    Tab,
+    BackTab,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    F(u8),
+    /// Anything we don't care about (media keys, etc.).
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeyMods {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+impl KeyMods {
+    pub const NONE: Self = Self {
+        ctrl: false,
+        alt: false,
+        shift: false,
+    };
+
+    pub const fn ctrl() -> Self {
+        Self {
+            ctrl: true,
+            ..Self::NONE
+        }
+    }
+
+    pub const fn alt() -> Self {
+        Self {
+            alt: true,
+            ..Self::NONE
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        !self.ctrl && !self.alt && !self.shift
+    }
+}
+
+/// Paste payload. Images come in as raw bytes; text as UTF-8.
+#[derive(Debug, Clone)]
+pub enum Paste {
+    Text(String),
+    Image { bytes: Vec<u8>, format: String },
+}
+
+/// Slash commands — a typed surface over what the user typed as
+/// `/<name> [args]`. Parsed in `app::event_source` against the single
+/// `COMMAND_REGISTRY`; unknown commands produce `SlashCmd::Unknown`
+/// so the reducer can issue a "no such command" status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlashCmd {
+    /// No arg → show current; `Some` → switch (and pull if needed).
+    Model(Option<String>),
+    Reasoning(Option<ReasoningLevel>),
+    Clear,
+    Save(Option<String>),
+    Load(Option<String>),
+    List,
+    CloudSetup,
+    Help,
+    Quit,
+    /// User typed something that isn't in the registry; carries the
+    /// raw name for the error message.
+    Unknown(String),
+}
+
+impl Msg {
+    /// Extract the `TurnId` for effect-result variants. Returns `None`
+    /// for variants that aren't turn-scoped (user intent,
+    /// housekeeping, MCP lifecycle). The reducer uses this to
+    /// short-circuit stale events.
+    pub fn turn_id(&self) -> Option<TurnId> {
+        match self {
+            Msg::StreamText { turn, .. }
+            | Msg::StreamReasoning { turn, .. }
+            | Msg::StreamToolCall { turn, .. }
+            | Msg::StreamDone { turn, .. }
+            | Msg::UpstreamError { turn, .. }
+            | Msg::ToolStarted { turn, .. }
+            | Msg::ToolProgress { turn, .. }
+            | Msg::ToolFinished { turn, .. }
+            | Msg::SubagentStatusChanged { turn, .. }
+            | Msg::SubagentToolUseTick { turn, .. } => Some(*turn),
+            _ => None,
+        }
+    }
+
+    /// Classification for telemetry / replay tooling. Cheaper than a
+    /// full `Debug` string and stable across refactors.
+    pub fn kind(&self) -> MsgKind {
+        match self {
+            Msg::Key(_) => MsgKind::Key,
+            Msg::Paste(_) => MsgKind::Paste,
+            Msg::SubmitPrompt { .. } => MsgKind::SubmitPrompt,
+            Msg::Slash(_) => MsgKind::Slash,
+            Msg::CancelTurn => MsgKind::CancelTurn,
+            Msg::ConfirmAccepted | Msg::ConfirmDeclined => MsgKind::Confirm,
+            Msg::Quit => MsgKind::Quit,
+            Msg::StreamText { .. } => MsgKind::StreamText,
+            Msg::StreamReasoning { .. } => MsgKind::StreamReasoning,
+            Msg::StreamToolCall { .. } => MsgKind::StreamToolCall,
+            Msg::StreamDone { .. } => MsgKind::StreamDone,
+            Msg::UpstreamError { .. } => MsgKind::UpstreamError,
+            Msg::ToolStarted { .. } => MsgKind::ToolStarted,
+            Msg::ToolProgress { .. } => MsgKind::ToolProgress,
+            Msg::ToolFinished { .. } => MsgKind::ToolFinished,
+            Msg::SubagentStatusChanged { .. } | Msg::SubagentToolUseTick { .. } => {
+                MsgKind::Subagent
+            },
+            Msg::McpServerReady { .. }
+            | Msg::McpServerErrored { .. }
+            | Msg::McpServerStopped { .. } => MsgKind::Mcp,
+            Msg::InstructionsChanged(_) => MsgKind::InstructionsChanged,
+            Msg::SessionSaved => MsgKind::SessionSaved,
+            Msg::ConversationLoaded(_) => MsgKind::ConversationLoaded,
+            Msg::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
+            Msg::Tick => MsgKind::Tick,
+            Msg::StatusDismiss => MsgKind::StatusDismiss,
+            Msg::Resize { .. } => MsgKind::Resize,
+        }
+    }
+}
+
+/// Compact kind tag for tracing / replay indexing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsgKind {
+    Key,
+    Paste,
+    SubmitPrompt,
+    Slash,
+    CancelTurn,
+    Confirm,
+    Quit,
+    StreamText,
+    StreamReasoning,
+    StreamToolCall,
+    StreamDone,
+    UpstreamError,
+    ToolStarted,
+    ToolProgress,
+    ToolFinished,
+    Subagent,
+    Mcp,
+    InstructionsChanged,
+    SessionSaved,
+    ConversationLoaded,
+    ModelPullFinished,
+    Tick,
+    StatusDismiss,
+    Resize,
+}
+
+/// Helper for `app::event_source` — pass through the MCP config that
+/// effect::mcp needs to dispatch `InitMcpServers` as its first effect.
+/// Not a `Msg` because it's startup-only.
+#[derive(Debug, Clone)]
+pub struct StartupConfig {
+    pub mcp_servers: std::collections::HashMap<String, McpServerConfig>,
+    pub cwd: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_id_extracted_from_stream_messages() {
+        let m = Msg::StreamText {
+            turn: TurnId(7),
+            chunk: "hi".to_string(),
+        };
+        assert_eq!(m.turn_id(), Some(TurnId(7)));
+    }
+
+    #[test]
+    fn turn_id_none_for_user_intent() {
+        let m = Msg::CancelTurn;
+        assert_eq!(m.turn_id(), None);
+        let m = Msg::Quit;
+        assert_eq!(m.turn_id(), None);
+        let m = Msg::Tick;
+        assert_eq!(m.turn_id(), None);
+    }
+
+    #[test]
+    fn turn_id_none_for_mcp_lifecycle() {
+        let m = Msg::McpServerReady {
+            name: "s".to_string(),
+            tools: vec![],
+        };
+        assert_eq!(m.turn_id(), None);
+    }
+
+    #[test]
+    fn key_mods_builder_defaults_match_const() {
+        assert_eq!(KeyMods::default(), KeyMods::NONE);
+        assert!(KeyMods::ctrl().ctrl);
+        assert!(!KeyMods::ctrl().alt);
+        assert!(!KeyMods::ctrl().shift);
+    }
+
+    #[test]
+    fn kind_stable_across_variants() {
+        assert_eq!(Msg::Quit.kind(), MsgKind::Quit);
+        assert_eq!(Msg::Tick.kind(), MsgKind::Tick);
+        assert_eq!(
+            Msg::StreamText {
+                turn: TurnId(1),
+                chunk: String::new()
+            }
+            .kind(),
+            MsgKind::StreamText
+        );
+    }
+
+    #[test]
+    fn slash_cmd_carries_none_for_no_arg() {
+        let c = SlashCmd::Model(None);
+        assert_eq!(c, SlashCmd::Model(None));
+        assert_ne!(c, SlashCmd::Model(Some("ollama/qwen3".to_string())));
+    }
+}
