@@ -42,14 +42,12 @@ impl ModelProvider for GeminiProvider {
         &self.capabilities
     }
 
-    async fn chat(
-        &self,
-        request: ChatRequest,
-        ctx: StreamContext,
-    ) -> Result<FinalResponse> {
+    async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
         let config = build_model_config(&request);
         let callback = forward_callback(ctx.sink.clone());
-        let chat_fut = self.adapter.chat(&request.messages, &config, Some(callback));
+        let chat_fut = self
+            .adapter
+            .chat(&request.messages, &config, Some(callback));
 
         let response = tokio::select! {
             biased;

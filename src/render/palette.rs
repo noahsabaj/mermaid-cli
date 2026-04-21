@@ -25,7 +25,9 @@ pub fn maybe_render_palette(state: &State, frame: &mut Frame, area: Rect) {
             let highlighted = Some(i) == state.ui.palette_cursor;
             let prefix = if highlighted { " > " } else { "   " };
             let style = if highlighted {
-                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };

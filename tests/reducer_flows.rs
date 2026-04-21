@@ -161,7 +161,9 @@ fn tool_outcomes_must_all_land_before_followup_call() {
     // Plant the prior assistant message so action displays attach.
     state
         .session
-        .append(mermaid_cli::models::ChatMessage::assistant("ok let me call tools"));
+        .append(mermaid_cli::models::ChatMessage::assistant(
+            "ok let me call tools",
+        ));
 
     // Only first tool finishes — must stay in ExecutingTools.
     let (state, cmds) = update(
@@ -250,7 +252,8 @@ fn cancel_emits_scope_cancel_and_transitions_cancelling() {
         "active turn must be in Cancelling"
     );
     assert!(
-        cmds.iter().any(|c| matches!(c, Cmd::CancelScope(TurnId(7)))),
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::CancelScope(TurnId(7)))),
         "reducer must emit Cmd::CancelScope so the runner tears down"
     );
 }
@@ -355,7 +358,10 @@ fn slash_save_emits_save_conversation() {
 fn slash_unknown_sets_warn_status() {
     let (state, cmds) = update(fresh(), Msg::Slash(SlashCmd::Unknown("nope".to_string())));
     assert!(state.status.is_some());
-    assert!(matches!(state.status.as_ref().unwrap().kind, StatusKind::Warn));
+    assert!(matches!(
+        state.status.as_ref().unwrap().kind,
+        StatusKind::Warn
+    ));
     assert!(
         cmds.iter()
             .any(|c| matches!(c, Cmd::DismissStatusAfter { .. }))

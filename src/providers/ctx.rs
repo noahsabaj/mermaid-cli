@@ -25,8 +25,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{ToolCallId, TurnId};
-use crate::models::{ChatMessage, ReasoningChunk, TokenUsage};
 use crate::models::tool_call::ToolCall as ModelToolCall;
+use crate::models::{ChatMessage, ReasoningChunk, TokenUsage};
 
 /// What a `ModelProvider::chat()` receives.
 #[derive(Debug)]
@@ -145,10 +145,7 @@ pub fn test_exec_context(
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
     let token = CancellationToken::new();
     let (tx, rx) = mpsc::channel(64);
-    (
-        ExecContext::new(token, tx, call_id, turn, workdir),
-        rx,
-    )
+    (ExecContext::new(token, tx, call_id, turn, workdir), rx)
 }
 
 /// Convenience: build a Send+Sync sharable sink for tests.
@@ -170,11 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_context_propagates_cancel_signal() {
-        let (ctx, _rx) = test_exec_context(
-            TurnId(1),
-            ToolCallId(2),
-            PathBuf::from("/tmp"),
-        );
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(2), PathBuf::from("/tmp"));
         let token = ctx.token.clone();
         tokio::spawn(async move {
             token.cancel();
@@ -186,11 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn progress_event_round_trips_through_channel() {
-        let (ctx, mut rx) = test_exec_context(
-            TurnId(1),
-            ToolCallId(2),
-            PathBuf::from("/tmp"),
-        );
+        let (ctx, mut rx) = test_exec_context(TurnId(1), ToolCallId(2), PathBuf::from("/tmp"));
         ctx.progress
             .send(ProgressEvent::Status("halfway".to_string()))
             .await

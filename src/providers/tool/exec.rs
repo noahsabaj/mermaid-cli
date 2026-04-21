@@ -301,16 +301,9 @@ mod tests {
 
     #[tokio::test]
     async fn safe_command_runs_and_captures_output() {
-        let (ctx, _rx) = test_exec_context(
-            TurnId(1),
-            ToolCallId(1),
-            PathBuf::from("/tmp"),
-        );
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let outcome = ExecuteCommandTool
-            .execute(
-                serde_json::json!({"command": "echo hello world"}),
-                ctx,
-            )
+            .execute(serde_json::json!({"command": "echo hello world"}), ctx)
             .await;
         match outcome {
             ToolOutcome::Finished { output, .. } => assert!(output.contains("hello world")),
@@ -320,11 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn dangerous_command_blocked() {
-        let (ctx, _rx) = test_exec_context(
-            TurnId(1),
-            ToolCallId(1),
-            PathBuf::from("/tmp"),
-        );
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let outcome = ExecuteCommandTool
             .execute(serde_json::json!({"command": "rm -rf /"}), ctx)
             .await;
@@ -336,18 +325,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_aborts_long_running_command() {
-        let (ctx, _rx) = test_exec_context(
-            TurnId(1),
-            ToolCallId(1),
-            PathBuf::from("/tmp"),
-        );
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let token = ctx.token.clone();
         let handle = tokio::spawn(async move {
             ExecuteCommandTool
-                .execute(
-                    serde_json::json!({"command": "sleep 10"}),
-                    ctx,
-                )
+                .execute(serde_json::json!({"command": "sleep 10"}), ctx)
                 .await
         });
         // Give the child a beat to spawn, then cancel.
@@ -357,8 +339,7 @@ mod tests {
         let outcome = tokio::time::timeout(Duration::from_millis(500), handle)
             .await
             .expect("didn't hang")
-            .expect("join")
-            ;
+            .expect("join");
         let elapsed = start.elapsed();
         assert!(matches!(outcome, ToolOutcome::Cancelled));
         assert!(
@@ -370,16 +351,9 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_honored() {
-        let (ctx, _rx) = test_exec_context(
-            TurnId(1),
-            ToolCallId(1),
-            PathBuf::from("/tmp"),
-        );
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let outcome = ExecuteCommandTool
-            .execute(
-                serde_json::json!({"command": "sleep 5", "timeout": 1}),
-                ctx,
-            )
+            .execute(serde_json::json!({"command": "sleep 5", "timeout": 1}), ctx)
             .await;
         match outcome {
             ToolOutcome::Finished { output, .. } => {

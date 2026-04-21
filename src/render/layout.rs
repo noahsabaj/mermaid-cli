@@ -26,7 +26,11 @@ impl Zones {
         let input_lines = estimate_input_lines(&state.ui.input_buffer, area.width);
         let input_height = (input_lines + 2).min(7) as u16; // borders + cap
 
-        let attachment_height = if state.ui.attachments.is_empty() { 0 } else { 1 };
+        let attachment_height = if state.ui.attachments.is_empty() {
+            0
+        } else {
+            1
+        };
         let status_height = if state.status.is_some() { 1 } else { 0 };
 
         let chunks = Layout::default()

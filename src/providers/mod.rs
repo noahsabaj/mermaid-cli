@@ -27,7 +27,9 @@ pub use ctx::{
     test_exec_context, test_stream_context,
 };
 pub use factory::ProviderFactory;
-pub use model::{AnthropicProvider, GeminiProvider, ModelProvider, OllamaProvider, OpenAICompatProvider};
+pub use model::{
+    AnthropicProvider, GeminiProvider, ModelProvider, OllamaProvider, OpenAICompatProvider,
+};
 pub use tool::{ToolExecutor, ToolRegistry};
 
 use std::sync::Arc;

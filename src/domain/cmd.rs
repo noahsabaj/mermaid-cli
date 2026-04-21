@@ -241,7 +241,12 @@ impl Cmd {
             Cmd::OpenInSystem(p) => format!("open_in_system({})", p.display()),
             Cmd::DismissStatusAfter { ms } => format!("dismiss_status_after({}ms)", ms),
             Cmd::WriteImageToTemp { id, format, bytes } => {
-                format!("write_image_to_temp(id={}, fmt={}, n={})", id, format, bytes.len())
+                format!(
+                    "write_image_to_temp(id={}, fmt={}, n={})",
+                    id,
+                    format,
+                    bytes.len()
+                )
             },
             Cmd::Exit => "exit".to_string(),
             Cmd::CancelSubagent { turn, subagent } => {

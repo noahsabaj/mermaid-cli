@@ -69,9 +69,7 @@ impl State {
             session: Session {
                 conversation,
                 model_id,
-                reasoning: settings
-                    .default_model
-                    .reasoning,
+                reasoning: settings.default_model.reasoning,
             },
             turn: TurnState::Idle,
             ui: UiState::default(),
@@ -361,7 +359,9 @@ pub enum McpServerStatus {
     /// `initialize` request dispatched, not yet acknowledged.
     Starting,
     Ready,
-    Errored { reason: String },
+    Errored {
+        reason: String,
+    },
     Stopped,
 }
 

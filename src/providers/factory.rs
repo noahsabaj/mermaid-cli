@@ -26,10 +26,7 @@ use crate::utils::resolve_api_key;
 /// env name.
 fn require_key(provider: &str, env_var: &str) -> Result<String> {
     resolve_api_key(env_var, None).ok_or_else(|| {
-        ModelError::Authentication(format!(
-            "{} requires env var {}",
-            provider, env_var
-        ))
+        ModelError::Authentication(format!("{} requires env var {}", provider, env_var))
     })
 }
 
@@ -85,10 +82,7 @@ impl ProviderFactory {
 ///   4. Other builtin providers (openai, openrouter, groq, …) → OpenAICompatProvider.
 ///   5. User-defined `[providers.<name>]` → custom OpenAICompatProvider.
 ///   6. Bare model name → OllamaProvider (legacy compat).
-async fn build_provider(
-    config: &Config,
-    model_id: &str,
-) -> Result<Box<dyn ModelProvider>> {
+async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn ModelProvider>> {
     let (provider, model_name) = parse_model_id(model_id);
     let provider_lc = provider.to_lowercase();
 
@@ -118,9 +112,7 @@ async fn build_provider(
         let user_cfg = config.providers.get("gemini");
         let base_url = user_cfg
             .and_then(|c| c.base_url.clone())
-            .unwrap_or_else(|| {
-                "https://generativelanguage.googleapis.com/v1beta".to_string()
-            });
+            .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
         let api_key_env = user_cfg
             .and_then(|c| c.api_key_env.as_deref())
             .unwrap_or("GEMINI_API_KEY");
@@ -157,24 +149,18 @@ async fn build_provider(
     if let Some(user_cfg) = config.providers.get(&provider_lc)
         && let Some(profile) = user_profile_to_static(&provider_lc, user_cfg)
     {
-        let base_url = user_cfg
-            .base_url
-            .clone()
-            .ok_or_else(|| {
-                ModelError::InvalidRequest(format!(
-                    "custom provider '{}' requires base_url in config",
-                    provider_lc
-                ))
-            })?;
-        let api_key_env = user_cfg
-            .api_key_env
-            .as_deref()
-            .ok_or_else(|| {
-                ModelError::InvalidRequest(format!(
-                    "custom provider '{}' requires api_key_env in config",
-                    provider_lc
-                ))
-            })?;
+        let base_url = user_cfg.base_url.clone().ok_or_else(|| {
+            ModelError::InvalidRequest(format!(
+                "custom provider '{}' requires base_url in config",
+                provider_lc
+            ))
+        })?;
+        let api_key_env = user_cfg.api_key_env.as_deref().ok_or_else(|| {
+            ModelError::InvalidRequest(format!(
+                "custom provider '{}' requires api_key_env in config",
+                provider_lc
+            ))
+        })?;
         let api_key = require_key(&provider_lc, api_key_env)?;
         let p = OpenAICompatProvider::new(
             profile,

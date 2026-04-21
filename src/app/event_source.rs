@@ -63,7 +63,10 @@ pub fn event_to_msg(event: CtEvent) -> Option<Msg> {
             },
             _ => None,
         },
-        CtEvent::Resize(w, h) => Some(Msg::Resize { width: w, height: h }),
+        CtEvent::Resize(w, h) => Some(Msg::Resize {
+            width: w,
+            height: h,
+        }),
         CtEvent::FocusGained | CtEvent::FocusLost => None,
     }
 }

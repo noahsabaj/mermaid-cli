@@ -46,7 +46,10 @@ impl ToolExecutor for McpToolProxy {
                 duration_secs: 0.0,
             };
         };
-        let tool_args = args.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+        let tool_args = args
+            .get("arguments")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
 
         let Some(manager) = get_mcp_manager() else {
             return ToolOutcome::Error {

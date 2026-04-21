@@ -97,8 +97,8 @@ pub struct Replay {
 impl Replay {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        let file = File::open(&path)
-            .with_context(|| format!("open {} for replay", path.display()))?;
+        let file =
+            File::open(&path).with_context(|| format!("open {} for replay", path.display()))?;
         Ok(Self {
             lines: BufReader::new(file).lines(),
             path,
@@ -150,12 +150,8 @@ mod tests {
 
         {
             let mut r = Recorder::open(&path).expect("open");
-            r.record_kind(
-                MsgKind::Tick,
-                None,
-                serde_json::json!({}),
-            )
-            .expect("record");
+            r.record_kind(MsgKind::Tick, None, serde_json::json!({}))
+                .expect("record");
             r.record_kind(
                 MsgKind::SubmitPrompt,
                 None,

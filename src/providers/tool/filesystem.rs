@@ -286,9 +286,7 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
         let mut out = Vec::with_capacity(arr.len());
         for v in arr {
             let Some(s) = v.as_str() else {
-                return Err(
-                    "read_file 'paths' must be an array of strings".to_string()
-                );
+                return Err("read_file 'paths' must be an array of strings".to_string());
             };
             out.push(s.to_string());
         }
@@ -299,11 +297,7 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
 
 fn resolve_path(workdir: &Path, raw: &str) -> PathBuf {
     let p = PathBuf::from(raw);
-    if p.is_absolute() {
-        p
-    } else {
-        workdir.join(p)
-    }
+    if p.is_absolute() { p } else { workdir.join(p) }
 }
 
 async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<String> {
@@ -384,10 +378,7 @@ mod tests {
 
         let tool = ReadFileTool;
         let outcome = tool
-            .execute(
-                serde_json::json!({"path": "a.txt"}),
-                ctx,
-            )
+            .execute(serde_json::json!({"path": "a.txt"}), ctx)
             .await;
         match outcome {
             ToolOutcome::Finished { output, .. } => assert_eq!(output, "hello"),
@@ -400,9 +391,7 @@ mod tests {
     async fn read_file_missing_path_errors() {
         let dir = temp_root("read_missing_path");
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
-        let outcome = ReadFileTool
-            .execute(serde_json::json!({}), ctx)
-            .await;
+        let outcome = ReadFileTool.execute(serde_json::json!({}), ctx).await;
         assert!(matches!(outcome, ToolOutcome::Error { .. }));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -412,10 +401,7 @@ mod tests {
         let dir = temp_root("read_nonex");
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
         let outcome = ReadFileTool
-            .execute(
-                serde_json::json!({"path": "does_not_exist.txt"}),
-                ctx,
-            )
+            .execute(serde_json::json!({"path": "does_not_exist.txt"}), ctx)
             .await;
         assert!(matches!(outcome, ToolOutcome::Error { .. }));
         let _ = fs::remove_dir_all(&dir);
@@ -428,10 +414,7 @@ mod tests {
         fs::write(dir.join("b.txt"), "beta").expect("write");
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
         let outcome = ReadFileTool
-            .execute(
-                serde_json::json!({"paths": ["a.txt", "b.txt"]}),
-                ctx,
-            )
+            .execute(serde_json::json!({"paths": ["a.txt", "b.txt"]}), ctx)
             .await;
         match outcome {
             ToolOutcome::Finished { output, .. } => {

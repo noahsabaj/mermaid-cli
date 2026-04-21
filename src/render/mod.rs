@@ -56,9 +56,7 @@ mod tests {
     fn render_to_string(state: &State) -> String {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|f| render(state, f))
-            .expect("draw");
+        terminal.draw(|f| render(state, f)).expect("draw");
         let buf = terminal.backend().buffer();
         let mut out = String::new();
         for y in 0..buf.area.height {
@@ -101,7 +99,8 @@ mod tests {
     #[test]
     fn committed_message_appears_in_chat_pane() {
         let mut s = mock_state();
-        s.session.append(crate::models::ChatMessage::user("unique-user-token-xyz"));
+        s.session
+            .append(crate::models::ChatMessage::user("unique-user-token-xyz"));
         let frame = render_to_string(&s);
         assert!(frame.contains("unique-user-token-xyz"));
     }

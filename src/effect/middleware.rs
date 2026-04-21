@@ -161,17 +161,14 @@ mod tests {
     async fn retries_5xx_then_succeeds() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
-        let result = retry_transient_http_with(
-            RetryPolicy { max_attempts: 3 },
-            &mut move || {
-                let c = Arc::clone(&cc);
-                async move {
-                    let n = c.fetch_add(1, Ordering::SeqCst);
-                    let status = if n < 2 { 500 } else { 200 };
-                    Ok(fake_response(status).await)
-                }
-            },
-        )
+        let result = retry_transient_http_with(RetryPolicy { max_attempts: 3 }, &mut move || {
+            let c = Arc::clone(&cc);
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                let status = if n < 2 { 500 } else { 200 };
+                Ok(fake_response(status).await)
+            }
+        })
         .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status().as_u16(), 200);
@@ -182,16 +179,13 @@ mod tests {
     async fn does_not_retry_4xx_client_errors() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
-        let result = retry_transient_http_with(
-            RetryPolicy { max_attempts: 3 },
-            &mut move || {
-                let c = Arc::clone(&cc);
-                async move {
-                    c.fetch_add(1, Ordering::SeqCst);
-                    Ok(fake_response(400).await)
-                }
-            },
-        )
+        let result = retry_transient_http_with(RetryPolicy { max_attempts: 3 }, &mut move || {
+            let c = Arc::clone(&cc);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(fake_response(400).await)
+            }
+        })
         .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status().as_u16(), 400);
@@ -202,16 +196,13 @@ mod tests {
     async fn retries_429() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
-        let result = retry_transient_http_with(
-            RetryPolicy { max_attempts: 2 },
-            &mut move || {
-                let c = Arc::clone(&cc);
-                async move {
-                    c.fetch_add(1, Ordering::SeqCst);
-                    Ok(fake_response(429).await)
-                }
-            },
-        )
+        let result = retry_transient_http_with(RetryPolicy { max_attempts: 2 }, &mut move || {
+            let c = Arc::clone(&cc);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(fake_response(429).await)
+            }
+        })
         .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status().as_u16(), 429);
@@ -222,24 +213,21 @@ mod tests {
     async fn retries_connection_failed_error() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
-        let result = retry_transient_http_with(
-            RetryPolicy { max_attempts: 3 },
-            &mut move || {
-                let c = Arc::clone(&cc);
-                async move {
-                    let n = c.fetch_add(1, Ordering::SeqCst);
-                    if n < 2 {
-                        Err(ModelError::Backend(BackendError::ConnectionFailed {
-                            backend: "test".to_string(),
-                            url: "http://nope".to_string(),
-                            reason: "dns".to_string(),
-                        }))
-                    } else {
-                        Ok(fake_response(200).await)
-                    }
+        let result = retry_transient_http_with(RetryPolicy { max_attempts: 3 }, &mut move || {
+            let c = Arc::clone(&cc);
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(ModelError::Backend(BackendError::ConnectionFailed {
+                        backend: "test".to_string(),
+                        url: "http://nope".to_string(),
+                        reason: "dns".to_string(),
+                    }))
+                } else {
+                    Ok(fake_response(200).await)
                 }
-            },
-        )
+            }
+        })
         .await;
         assert!(result.is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 3);

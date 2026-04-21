@@ -15,7 +15,7 @@ use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ChatMessage, MessageRole};
 
 use super::ids::{ToolCallId, TurnId};
-use super::state::{GenPhase, PendingToolCall, TurnState, ToolOutcome};
+use super::state::{GenPhase, PendingToolCall, ToolOutcome, TurnState};
 
 /// Flatten `Vec<Option<ToolOutcome>>` into `Vec<ToolOutcome>` iff
 /// every slot is populated. `None` means "still waiting on at least
@@ -27,9 +27,7 @@ use super::state::{GenPhase, PendingToolCall, TurnState, ToolOutcome};
 /// constructor for `Vec<ToolOutcome>` elsewhere in the codebase, and
 /// the follow-up transition's builder function takes `Vec<ToolOutcome>`
 /// by value.
-pub fn try_complete_outcomes(
-    outcomes: &[Option<ToolOutcome>],
-) -> Option<Vec<ToolOutcome>> {
+pub fn try_complete_outcomes(outcomes: &[Option<ToolOutcome>]) -> Option<Vec<ToolOutcome>> {
     let mut out = Vec::with_capacity(outcomes.len());
     for slot in outcomes {
         match slot {
@@ -158,10 +156,7 @@ pub fn tool_result_messages(
 /// Convert a completed tool outcome into an `ActionDisplay` entry
 /// attached to the assistant message that triggered the call. Used so
 /// the chat renderer can show "Read main.rs → 1,234 bytes" etc.
-pub fn action_display_for(
-    call: &PendingToolCall,
-    outcome: &ToolOutcome,
-) -> ActionDisplay {
+pub fn action_display_for(call: &PendingToolCall, outcome: &ToolOutcome) -> ActionDisplay {
     let (action_type, target) = display_info_for(call);
     let (result, duration) = match outcome {
         ToolOutcome::Finished {
@@ -175,7 +170,10 @@ pub fn action_display_for(
             },
             Some(*duration_secs),
         ),
-        ToolOutcome::Error { error, duration_secs } => (
+        ToolOutcome::Error {
+            error,
+            duration_secs,
+        } => (
             ActionResult::Error {
                 error: error.clone(),
             },
@@ -258,18 +256,10 @@ mod tests {
 
     #[test]
     fn fill_outcome_writes_to_correct_slot() {
-        let calls = vec![
-            sample_call(1, "read_file"),
-            sample_call(2, "write_file"),
-        ];
+        let calls = vec![sample_call(1, "read_file"), sample_call(2, "write_file")];
         let mut outcomes = vec![None, None];
 
-        let wrote = fill_outcome(
-            &calls,
-            &mut outcomes,
-            ToolCallId(2),
-            ToolOutcome::Cancelled,
-        );
+        let wrote = fill_outcome(&calls, &mut outcomes, ToolCallId(2), ToolOutcome::Cancelled);
         assert!(wrote);
         assert!(outcomes[0].is_none());
         assert!(outcomes[1].is_some());
@@ -297,12 +287,7 @@ mod tests {
             images: None,
             duration_secs: 0.0,
         })];
-        let wrote = fill_outcome(
-            &calls,
-            &mut outcomes,
-            ToolCallId(1),
-            ToolOutcome::Cancelled,
-        );
+        let wrote = fill_outcome(&calls, &mut outcomes, ToolCallId(1), ToolOutcome::Cancelled);
         assert!(!wrote);
         match &outcomes[0] {
             Some(ToolOutcome::Finished { output, .. }) => {
@@ -332,7 +317,11 @@ mod tests {
 
     #[test]
     fn start_executing_tools_allocates_outcome_slots() {
-        let calls = vec![sample_call(1, "a"), sample_call(2, "b"), sample_call(3, "c")];
+        let calls = vec![
+            sample_call(1, "a"),
+            sample_call(2, "b"),
+            sample_call(3, "c"),
+        ];
         let s = start_executing_tools(TurnId(1), calls);
         match s {
             TurnState::ExecutingTools {
@@ -361,12 +350,7 @@ mod tests {
 
     #[test]
     fn commit_assistant_message_empty_reasoning_is_none() {
-        let m = commit_assistant_message(
-            "hi".to_string(),
-            String::new(),
-            vec![],
-            None,
-        );
+        let m = commit_assistant_message("hi".to_string(), String::new(), vec![], None);
         assert!(m.thinking.is_none());
     }
 

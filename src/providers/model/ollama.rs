@@ -21,11 +21,11 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::ChatRequest;
+use crate::models::adapters::ollama::OllamaAdapter;
 use crate::models::{
     BackendConfig, Model, ModelConfig, ModelError, ReasoningChunk, Result, StreamCallback,
     StreamEvent as ModelStreamEvent,
 };
-use crate::models::adapters::ollama::OllamaAdapter;
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
@@ -57,11 +57,7 @@ impl ModelProvider for OllamaProvider {
         &self.capabilities
     }
 
-    async fn chat(
-        &self,
-        request: ChatRequest,
-        ctx: StreamContext,
-    ) -> Result<FinalResponse> {
+    async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
         let config = build_model_config(&request);
         let callback = stream_callback_for(ctx.sink.clone());
 

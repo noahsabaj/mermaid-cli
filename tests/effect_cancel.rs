@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use mermaid_cli::domain::{ToolCallId, ToolOutcome, TurnId};
 use mermaid_cli::providers::ctx::test_exec_context;
-use mermaid_cli::providers::tool::exec::ExecuteCommandTool;
 use mermaid_cli::providers::tool::ToolExecutor;
+use mermaid_cli::providers::tool::exec::ExecuteCommandTool;
 
 #[tokio::test]
 async fn execute_command_cancels_within_100ms() {
@@ -29,11 +29,7 @@ async fn execute_command_cancels_within_100ms() {
     // v0.6 would wait up to 300s (the timeout cap) because the
     // tool's await loop had no idea a cancel was pending. v0.7's
     // token-based select! aborts immediately.
-    let (ctx, _rx) = test_exec_context(
-        TurnId(1),
-        ToolCallId(1),
-        PathBuf::from("/tmp"),
-    );
+    let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
     let token = ctx.token.clone();
 
     let handle = tokio::spawn(async move {
@@ -65,11 +61,7 @@ async fn execute_command_cancels_within_100ms() {
 async fn execute_command_timeout_honored() {
     // Assert the timeout argument still works. 1s timeout on a 10s
     // sleep should produce a "timed out" Finished outcome, NOT hang.
-    let (ctx, _rx) = test_exec_context(
-        TurnId(2),
-        ToolCallId(1),
-        PathBuf::from("/tmp"),
-    );
+    let (ctx, _rx) = test_exec_context(TurnId(2), ToolCallId(1), PathBuf::from("/tmp"));
     let start = Instant::now();
     let outcome = ExecuteCommandTool
         .execute(

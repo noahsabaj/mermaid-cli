@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::agents::{WebSearchClient, ActionResult};
+use crate::agents::{ActionResult, WebSearchClient};
 use crate::domain::ToolOutcome;
 
 use super::super::ctx::{ExecContext, ProgressEvent};

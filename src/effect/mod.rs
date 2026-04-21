@@ -37,8 +37,8 @@ use tokio::sync::mpsc;
 
 use crate::app::Config;
 use crate::domain::{Cmd, Msg, TurnId};
-use crate::providers::{ProviderFactory, StreamEvent, ToolRegistry};
 use crate::providers::ctx::{ExecContext, StreamContext};
+use crate::providers::{ProviderFactory, StreamEvent, ToolRegistry};
 
 pub use middleware::{DEFAULT_MAX_ATTEMPTS, retry_transient_http};
 pub use turn_scope::TurnScope;
@@ -134,7 +134,9 @@ impl EffectRunner {
     /// retained until `CancelScope` tears it down or it naturally
     /// drains.
     fn scope_mut(&mut self, turn: TurnId) -> &mut TurnScope {
-        self.scopes.entry(turn).or_insert_with(|| TurnScope::new(turn))
+        self.scopes
+            .entry(turn)
+            .or_insert_with(|| TurnScope::new(turn))
     }
 
     /// Drop the scope for a turn, signalling cancellation to every
@@ -183,10 +185,7 @@ impl EffectRunner {
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
-                    dispatch_execute_tool(
-                        tx, tools, workdir, turn, call_id, source, token,
-                    )
-                    .await;
+                    dispatch_execute_tool(tx, tools, workdir, turn, call_id, source, token).await;
                 });
             },
             Cmd::SpawnSubagents { turn, specs: _ } => {
@@ -203,8 +202,7 @@ impl EffectRunner {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
                 self.detached.spawn(async move {
-                    if let Ok(manager) =
-                        crate::session::ConversationManager::new(&workdir)
+                    if let Ok(manager) = crate::session::ConversationManager::new(&workdir)
                         && manager.save_conversation(&history).is_ok()
                     {
                         let _ = tx.send(Msg::SessionSaved).await;
@@ -232,8 +230,7 @@ impl EffectRunner {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
                 self.detached.spawn(async move {
-                    let (loaded, _outcome) =
-                        crate::app::instructions::refresh(None, &workdir);
+                    let (loaded, _outcome) = crate::app::instructions::refresh(None, &workdir);
                     let _ = tx.send(Msg::InstructionsChanged(loaded)).await;
                 });
             },
@@ -301,8 +298,7 @@ impl EffectRunner {
         }
 
         // Drain with a bounded timeout.
-        let shutdown_deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let shutdown_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
 
         let drain = async {
             for (_, mut scope) in self.scopes.drain() {
@@ -487,10 +483,7 @@ async fn dispatch_execute_tool(
                     turn,
                     call_id,
                     outcome: crate::domain::ToolOutcome::Error {
-                        error: format!(
-                            "invalid MCP tool name: {}",
-                            source.function.name
-                        ),
+                        error: format!("invalid MCP tool name: {}", source.function.name),
                         duration_secs: 0.0,
                     },
                 })

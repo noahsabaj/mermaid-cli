@@ -136,7 +136,10 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
 
         // ── Tools ───────────────────────────────────────────────────
-        Msg::ToolStarted { turn: _, call_id: _ } => {
+        Msg::ToolStarted {
+            turn: _,
+            call_id: _,
+        } => {
             // Informational — render layer derives spinner state from
             // `outcomes[i].is_none()`, so no state change needed yet.
         },
@@ -168,10 +171,7 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 entry.status = status;
             }
         },
-        Msg::SubagentToolUseTick {
-            turn: _,
-            subagent,
-        } => {
+        Msg::SubagentToolUseTick { turn: _, subagent } => {
             if let TurnState::RunningSubagents { progress, .. } = &mut state.turn
                 && let Some(entry) = progress.iter_mut().find(|p| p.id == subagent)
             {
@@ -287,8 +287,7 @@ fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
         Paste::Text(t) => state.ui.input_buffer.push_str(&t),
         Paste::Image { bytes, format } => {
             let id = state.ids.tool_call.next();
-            let temp_path =
-                std::env::temp_dir().join(format!("mermaid-img-{}.{}", id, format));
+            let temp_path = std::env::temp_dir().join(format!("mermaid-img-{}.{}", id, format));
             state.ui.attachments.push(super::state::Attachment {
                 id,
                 base64_data: base64::Engine::encode(
@@ -449,7 +448,11 @@ fn handle_confirm_accepted(state: &mut State, _cmds: &mut [Cmd]) {
     }
 }
 
-fn handle_stream_tool_call(_state: &mut State, _turn: TurnId, _call: crate::models::tool_call::ToolCall) {
+fn handle_stream_tool_call(
+    _state: &mut State,
+    _turn: TurnId,
+    _call: crate::models::tool_call::ToolCall,
+) {
     // Reserved. In the full cutover (commit 3), model-emitted tool
     // calls buffer on the `Generating` variant and transition to
     // `ExecutingTools` on `StreamDone`. For the scaffold we no-op so
@@ -661,8 +664,14 @@ mod tests {
             modifiers: KeyMods::ctrl(),
         });
         let (state, cmds) = update(state, msg);
-        assert!(matches!(state.turn, TurnState::Cancelling { id: TurnId(5), .. }));
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::CancelScope(TurnId(5)))));
+        assert!(matches!(
+            state.turn,
+            TurnState::Cancelling { id: TurnId(5), .. }
+        ));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::CancelScope(TurnId(5))))
+        );
     }
 
     #[test]
@@ -702,7 +711,10 @@ mod tests {
             attachment_ids: vec![],
         };
         let (state, cmds) = update(state, msg);
-        assert!(matches!(state.turn, TurnState::Generating { id: TurnId(1), .. }));
+        assert!(matches!(
+            state.turn,
+            TurnState::Generating { id: TurnId(1), .. }
+        ));
         assert!(cmds.is_empty());
         assert!(state.session.messages().is_empty());
     }
@@ -847,7 +859,10 @@ mod tests {
     #[test]
     fn slash_model_with_arg_persists_and_updates_session() {
         let state = fresh_state();
-        let (state, cmds) = update(state, Msg::Slash(SlashCmd::Model(Some("anthropic/opus".to_string()))));
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Model(Some("anthropic/opus".to_string()))),
+        );
         assert_eq!(state.session.model_id, "anthropic/opus");
         assert!(cmds.iter().any(|c| matches!(c, Cmd::PersistLastModel(_))));
     }
@@ -865,9 +880,7 @@ mod tests {
         let emitted = cmds
             .iter()
             .find_map(|c| match c {
-                Cmd::PersistReasoningFor { model_id, level } => {
-                    Some((model_id.clone(), *level))
-                },
+                Cmd::PersistReasoningFor { model_id, level } => Some((model_id.clone(), *level)),
                 _ => None,
             })
             .expect("persist cmd emitted");
@@ -1108,7 +1121,13 @@ mod tests {
 
     #[test]
     fn resize_is_noop() {
-        let (state, cmds) = update(fresh_state(), Msg::Resize { width: 80, height: 24 });
+        let (state, cmds) = update(
+            fresh_state(),
+            Msg::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
         assert!(cmds.is_empty());
         assert!(matches!(state.turn, TurnState::Idle));
     }

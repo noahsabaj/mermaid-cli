@@ -20,10 +20,18 @@ pub fn render_chat(state: &State, frame: &mut Frame, area: Rect) {
 
     for msg in state.session.messages() {
         let (prefix, style) = match msg.role {
-            MessageRole::User => ("you> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            MessageRole::Assistant => {
-                ("mermaid> ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-            },
+            MessageRole::User => (
+                "you> ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            MessageRole::Assistant => (
+                "mermaid> ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             MessageRole::System => ("system> ", Style::default().fg(Color::DarkGray)),
             MessageRole::Tool => ("tool> ", Style::default().fg(Color::Yellow)),
         };
@@ -60,14 +68,18 @@ pub fn render_chat(state: &State, frame: &mut Frame, area: Rect) {
         if !partial_reasoning.is_empty() {
             lines.push(Line::from(Span::styled(
                 format!("  thinking: {}", truncate(partial_reasoning, 500)),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             )));
         }
         if !partial_text.is_empty() {
             lines.push(Line::from(vec![
                 Span::styled(
                     "mermaid> ",
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(truncate(partial_text, 2_000)),
             ]));
@@ -81,7 +93,9 @@ pub fn render_chat(state: &State, frame: &mut Frame, area: Rect) {
             };
             lines.push(Line::from(Span::styled(
                 hint.to_string(),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             )));
         }
     }
