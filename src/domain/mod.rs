@@ -12,17 +12,21 @@
 //! against these types. See `docs/architecture.md` (added in commit
 //! 11) for the full rationale.
 
+pub mod action;
 pub mod cmd;
 pub mod ids;
 pub mod msg;
 pub mod reducer;
+pub mod slash_commands;
 pub mod state;
 pub mod transition;
 
+pub use action::{ActionDetails, ActionDisplay, ActionResult};
 pub use cmd::{ChatRequest, Cmd, ToolDefinition};
 pub use ids::{IdAllocator, SubagentId, ToolCallId, TurnId};
 pub use msg::{Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig};
 pub use reducer::{build_chat_request, update};
+pub use slash_commands::{COMMAND_REGISTRY, SlashCommand, filter_by_prefix};
 pub use state::{
     Attachment, Confirmation, ConfirmationTarget, GenPhase, IdAllocatorBundle, McpServerEntry,
     McpServerStatus, McpState, McpToolSpec, PendingToolCall, Session, State, StatusKind,

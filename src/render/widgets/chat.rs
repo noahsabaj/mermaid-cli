@@ -10,11 +10,9 @@ use ratatui::{
 use rustc_hash::FxHashMap;
 use unicode_width::UnicodeWidthStr;
 
-use crate::agents::{
-    ActionDetails, ActionDisplay, ActionResult, DiffLineKind, SubagentProgress, SubagentStatus,
-    parse_diff_line,
-};
+use crate::domain::{ActionDetails, ActionDisplay, ActionResult};
 use crate::models::{ChatMessage, MessageRole};
+use crate::render::diff::{DiffLineKind, parse_diff_line};
 use crate::render::markdown::parse_markdown;
 use crate::render::theme::Theme;
 use crate::utils::format_relative_timestamp;
@@ -129,10 +127,8 @@ impl Default for ChatState {
 pub struct ChatWidget<'a> {
     pub messages: &'a [ChatMessage],
     pub theme: &'a Theme,
-    /// Shared markdown parse cache: (message_index, content_len) -> parsed lines
+    /// Shared markdown parse cache: content hash → parsed lines.
     pub markdown_cache: &'a mut FxHashMap<u64, Vec<Line<'static>>>,
-    /// Live progress of active subagents (None when no agents running)
-    pub active_subagents: Option<Vec<SubagentProgress>>,
 }
 
 impl<'a> StatefulWidget for ChatWidget<'a> {
@@ -331,78 +327,6 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             }
 
             lines.push(Line::from(""));
-        }
-
-        // Render active subagent progress (live, during execution)
-        if let Some(ref agents) = self.active_subagents
-            && !agents.is_empty()
-        {
-            lines.push(Line::from(""));
-
-            for agent in agents {
-                let agent_color = self.theme.colors.info.to_color();
-
-                // Header: "  Agent(description)"
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::new()),
-                    Span::styled("Agent(", Style::new().fg(agent_color).bold()),
-                    Span::styled(
-                        agent.description.clone(),
-                        Style::new().fg(self.theme.colors.text_secondary.to_color()),
-                    ),
-                    Span::styled(")", Style::new().fg(agent_color).bold()),
-                ]));
-
-                // Progress line: "  ⎿ In progress... · N tool uses · X.Xk tokens"
-                let status_text = match &agent.status {
-                    SubagentStatus::Running => "In progress...".to_string(),
-                    SubagentStatus::Completed => "Completed".to_string(),
-                    SubagentStatus::Failed(msg) => format!("Failed: {}", msg),
-                };
-                let token_display = crate::utils::format_tokens(agent.tokens);
-                let elapsed =
-                    crate::utils::format_duration(agent.started_at.elapsed().as_secs() as f64);
-
-                lines.push(Line::from(vec![
-                    Span::styled("  \u{23bf} ", Style::new().fg(agent_color)),
-                    Span::styled(
-                        status_text,
-                        Style::new().fg(self.theme.colors.text_secondary.to_color()),
-                    ),
-                    Span::styled(
-                        " \u{00b7} ",
-                        Style::new().fg(self.theme.colors.text_disabled.to_color()),
-                    ),
-                    Span::styled(
-                        format!("{}", agent.tool_uses),
-                        Style::new()
-                            .fg(self.theme.colors.text_primary.to_color())
-                            .bold(),
-                    ),
-                    Span::styled(
-                        " tool uses",
-                        Style::new().fg(self.theme.colors.text_secondary.to_color()),
-                    ),
-                    Span::styled(
-                        " \u{00b7} ",
-                        Style::new().fg(self.theme.colors.text_disabled.to_color()),
-                    ),
-                    Span::styled(
-                        token_display,
-                        Style::new().fg(self.theme.colors.text_secondary.to_color()),
-                    ),
-                    Span::styled(
-                        " \u{00b7} ",
-                        Style::new().fg(self.theme.colors.text_disabled.to_color()),
-                    ),
-                    Span::styled(
-                        elapsed,
-                        Style::new().fg(self.theme.colors.text_secondary.to_color()),
-                    ),
-                ]));
-
-                lines.push(Line::from(""));
-            }
         }
 
         // NOTE: The response buffer is NOT rendered during streaming (buffering mode).

@@ -14,10 +14,6 @@
 //! No parallel event loops, no observer callbacks, no polling. One
 //! select!, one reducer call per message, effects dispatched into
 //! structured concurrency per turn.
-//!
-//! Behind `MERMAID_V7=1` (env var) or `--experimental-v7` (CLI flag,
-//! wired in C10). Users can flip between this and the old runtime
-//! for side-by-side testing during the migration window.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,9 +31,8 @@ use crate::effect::EffectRunner;
 use crate::providers::ToolRegistry;
 use crate::render::{RenderState, render};
 
-/// The v0.7 main loop. External behavior is intended to match the
-/// v0.6 runtime; differences are bugs.
-pub async fn run(config: Config, cwd: PathBuf, model_id: String) -> Result<()> {
+/// Interactive TUI main loop.
+pub async fn run_interactive(config: Config, cwd: PathBuf, model_id: String) -> Result<()> {
     let mut state = State::new(config.clone(), cwd.clone(), model_id);
     let tools = Arc::new(ToolRegistry::default());
     let (mut runner, mut msg_rx) =
@@ -98,18 +93,14 @@ pub async fn run(config: Config, cwd: PathBuf, model_id: String) -> Result<()> {
 }
 
 /// Commands dispatched on startup before the first iteration of the
-/// loop. Grows in later commits as MCP init + session load are
-/// folded in.
-fn bootstrap_cmds(_config: &Config) -> Vec<Cmd> {
-    vec![Cmd::RefreshInstructions]
-}
-
-/// True when the user has opted into the v0.7 path for this
-/// session. Checks CLI flag (wired in C10) and the `MERMAID_V7`
-/// environment variable. Returns false by default so the old
-/// runtime stays in charge until we flip the switch.
-pub fn opted_in() -> bool {
-    std::env::var("MERMAID_V7").is_ok_and(|v| v == "1")
+/// loop. Fires MCP init (if configured) + an initial instructions
+/// sweep so MERMAID.md content lands before the first prompt.
+fn bootstrap_cmds(config: &Config) -> Vec<Cmd> {
+    let mut cmds = vec![Cmd::RefreshInstructions];
+    if !config.mcp_servers.is_empty() {
+        cmds.push(Cmd::InitMcpServers(config.mcp_servers.clone()));
+    }
+    cmds
 }
 
 #[cfg(test)]
@@ -117,23 +108,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opted_in_respects_env_var() {
-        // This test is racy if the project sets MERMAID_V7 globally;
-        // guard with a temp-env lock.
-        temp_env::with_var("MERMAID_V7", Some("1"), || {
-            assert!(opted_in());
-        });
-        temp_env::with_var("MERMAID_V7", Some("0"), || {
-            assert!(!opted_in());
-        });
-        temp_env::with_var::<_, &str, _, _>("MERMAID_V7", None, || {
-            assert!(!opted_in());
-        });
-    }
-
-    #[test]
     fn bootstrap_includes_refresh_instructions() {
         let cmds = bootstrap_cmds(&Config::default());
         assert!(cmds.iter().any(|c| matches!(c, Cmd::RefreshInstructions)));
+    }
+
+    #[test]
+    fn bootstrap_skips_mcp_init_when_no_servers_configured() {
+        let cmds = bootstrap_cmds(&Config::default());
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::InitMcpServers(_))));
+    }
+
+    #[test]
+    fn bootstrap_includes_mcp_init_when_servers_configured() {
+        let mut cfg = Config::default();
+        cfg.mcp_servers.insert(
+            "example".to_string(),
+            crate::app::McpServerConfig {
+                command: "echo".to_string(),
+                args: vec![],
+                env: std::collections::HashMap::new(),
+            },
+        );
+        let cmds = bootstrap_cmds(&cfg);
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::InitMcpServers(_))));
     }
 }

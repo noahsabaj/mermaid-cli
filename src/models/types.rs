@@ -1,4 +1,4 @@
-use crate::agents::ActionDisplay;
+use crate::domain::ActionDisplay;
 use serde::{Deserialize, Serialize};
 
 /// Represents a chat message

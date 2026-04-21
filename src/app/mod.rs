@@ -7,6 +7,7 @@ pub mod event_source;
 pub mod instructions;
 pub mod recorder;
 pub mod run;
+pub mod run_non_interactive;
 pub mod terminal;
 
 // Public re-exports - the ONLY way to access app functionality
@@ -17,5 +18,6 @@ pub use config::{
 };
 pub use event_source::{event_to_msg, parse_slash_command};
 pub use recorder::{Recorder, Replay, ReplayEntry};
-pub use run::{opted_in as v7_opted_in, run as run_v7};
+pub use run::run_interactive;
+pub use run_non_interactive::{RunResult, format_result, run_non_interactive};
 pub use terminal::TerminalGuard;

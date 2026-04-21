@@ -13,9 +13,8 @@
 
 use async_trait::async_trait;
 
-use crate::agents::get_mcp_manager;
 use crate::domain::ToolOutcome;
-use crate::mcp::McpServerManager;
+use crate::mcp::{McpServerManager, manager_ref};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
@@ -51,7 +50,18 @@ impl ToolExecutor for McpToolProxy {
             .cloned()
             .unwrap_or(serde_json::json!({}));
 
-        let Some(manager) = get_mcp_manager() else {
+        // If init is still racing, park briefly — the model might
+        // have sprinted ahead on its very first message. If it never
+        // finishes within a reasonable bound we still fall through
+        // to a clean error rather than hanging forever.
+        if !manager_ref::is_ready() {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                manager_ref::wait_ready(),
+            )
+            .await;
+        }
+        let Some(manager) = manager_ref::get() else {
             return ToolOutcome::Error {
                 error: "MCP servers not initialized".to_string(),
                 duration_secs: 0.0,

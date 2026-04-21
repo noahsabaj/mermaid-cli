@@ -15,6 +15,7 @@ pub mod exec;
 pub mod filesystem;
 pub mod mcp;
 pub mod web;
+pub mod web_client;
 
 use async_trait::async_trait;
 use std::collections::HashMap;

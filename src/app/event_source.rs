@@ -114,7 +114,7 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
     };
 
     // Route through the registry so command aliases (/q → /quit) work.
-    use crate::tui::slash_commands::COMMAND_REGISTRY;
+    use crate::domain::slash_commands::COMMAND_REGISTRY;
     let canonical = COMMAND_REGISTRY
         .iter()
         .find(|c| c.name == name.as_str() || c.aliases.contains(&name.as_str()))

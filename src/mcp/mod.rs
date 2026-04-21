@@ -4,6 +4,7 @@
 /// Servers are configured in config.toml and spawned as child processes.
 pub mod add;
 mod client;
+pub mod manager_ref;
 mod registry;
 mod server_manager;
 mod transport;

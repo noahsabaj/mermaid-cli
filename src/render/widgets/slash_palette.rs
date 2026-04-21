@@ -15,7 +15,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::tui::slash_commands::SlashCommand;
+use crate::domain::slash_commands::SlashCommand;
 use crate::render::theme::Theme;
 
 /// Hard cap on visible rows — anything beyond is hidden until the user

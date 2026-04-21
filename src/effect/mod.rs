@@ -237,8 +237,48 @@ impl EffectRunner {
             Cmd::LoadConversation(_) => {
                 // Real impl in C6. No-op for now.
             },
-            Cmd::InitMcpServers(_) => {
-                // Real impl wraps the existing `McpServerManager` in C5.
+            Cmd::InitMcpServers(configs) => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    if configs.is_empty() {
+                        return;
+                    }
+                    crate::mcp::manager_ref::mark_init_started();
+                    let manager =
+                        std::sync::Arc::new(crate::mcp::McpServerManager::start(&configs).await);
+                    // Emit a Ready or Errored per server based on
+                    // what came up. The manager tracks this in its
+                    // internal state; we probe through get_all_tools.
+                    for (name, _cfg) in configs.iter() {
+                        let server_tools: Vec<crate::domain::McpToolSpec> = manager
+                            .get_all_tools()
+                            .iter()
+                            .filter(|(server, _)| server == name)
+                            .map(|(_, def)| crate::domain::McpToolSpec {
+                                name: def.name.clone(),
+                                description: def.description.clone(),
+                                input_schema: def.input_schema.clone(),
+                            })
+                            .collect();
+                        if server_tools.is_empty() {
+                            let _ = tx
+                                .send(Msg::McpServerErrored {
+                                    name: name.clone(),
+                                    reason: "server did not advertise any tools".to_string(),
+                                })
+                                .await;
+                        } else {
+                            let _ = tx
+                                .send(Msg::McpServerReady {
+                                    name: name.clone(),
+                                    tools: server_tools,
+                                })
+                                .await;
+                        }
+                    }
+                    crate::mcp::manager_ref::set_manager(manager);
+                    crate::mcp::manager_ref::mark_init_complete();
+                });
             },
             Cmd::StopMcpServer { name } => {
                 let tx = self.msg_tx.clone();

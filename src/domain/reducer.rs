@@ -244,7 +244,10 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
     // `last_title_dispatched` stops this from firing every frame.
     let current_title = state.session.conversation.title.clone();
     if state.ui.last_title_dispatched.as_deref() != Some(current_title.as_str()) {
-        cmds.push(Cmd::SetTerminalTitle(format!("mermaid - {}", current_title)));
+        cmds.push(Cmd::SetTerminalTitle(format!(
+            "mermaid - {}",
+            current_title
+        )));
         state.ui.last_title_dispatched = Some(current_title);
     }
 
@@ -306,7 +309,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // input buffer opens with `/`. Enter falls through to the normal
     // handler below so the command actually dispatches.
     if state.ui.input_buffer.starts_with('/') {
-        use crate::tui::slash_commands::filter_by_prefix;
+        use crate::domain::slash_commands::filter_by_prefix;
         let typed = state
             .ui
             .input_buffer
@@ -383,8 +386,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         } else {
             let text = std::mem::take(&mut state.ui.input_buffer);
             state.ui.input_cursor = 0;
-            let attachment_ids: Vec<u64> =
-                state.ui.attachments.iter().map(|a| a.id).collect();
+            let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
             handle_submit_prompt(state, cmds, text, &attachment_ids);
         }
         return;
@@ -396,10 +398,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 // Insert at cursor, then advance.
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
                 state.ui.input_buffer.insert(pos, c);
-                state.ui.input_cursor = clamp_cursor(
-                    &state.ui.input_buffer,
-                    pos + c.len_utf8(),
-                );
+                state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + c.len_utf8());
                 // Opening the palette, or editing its filter, resets
                 // the cursor to the first candidate — stops stale
                 // indices from pointing past the end of a shrinking
@@ -436,15 +435,13 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             KeyCode::Left => {
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
                 if pos > 0 {
-                    state.ui.input_cursor =
-                        state.ui.input_buffer.floor_char_boundary(pos - 1);
+                    state.ui.input_cursor = state.ui.input_buffer.floor_char_boundary(pos - 1);
                 }
             },
             KeyCode::Right => {
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
                 if pos < state.ui.input_buffer.len() {
-                    state.ui.input_cursor =
-                        state.ui.input_buffer.ceil_char_boundary(pos + 1);
+                    state.ui.input_cursor = state.ui.input_buffer.ceil_char_boundary(pos + 1);
                 }
             },
             KeyCode::Home => state.ui.input_cursor = 0,
@@ -454,8 +451,10 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 // fall through (future: history nav).
                 if !state.ui.attachments.is_empty() {
                     state.ui.attachment_focused = true;
-                    state.ui.attachment_selected =
-                        state.ui.attachment_selected.min(state.ui.attachments.len() - 1);
+                    state.ui.attachment_selected = state
+                        .ui
+                        .attachment_selected
+                        .min(state.ui.attachments.len() - 1);
                 }
             },
             KeyCode::Escape => {
@@ -745,8 +744,10 @@ fn handle_stream_done(
     // unknown (provider didn't report) — then we just don't
     // advance.
     if let Some(u) = usage {
-        state.session.cumulative_tokens =
-            state.session.cumulative_tokens.saturating_add(u.total_tokens);
+        state.session.cumulative_tokens = state
+            .session
+            .cumulative_tokens
+            .saturating_add(u.total_tokens);
     }
 
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
@@ -773,13 +774,13 @@ fn handle_upstream_error(state: &mut State, error: crate::models::UserFacingErro
         role: MessageRole::Assistant,
         content: String::new(),
         timestamp: chrono::Local::now(),
-        actions: vec![crate::agents::ActionDisplay {
+        actions: vec![super::action::ActionDisplay {
             action_type: "Error".to_string(),
             target: error.summary.clone(),
-            result: crate::agents::ActionResult::Error {
+            result: super::action::ActionResult::Error {
                 error: error.message.clone(),
             },
-            details: crate::agents::ActionDetails::Simple,
+            details: super::action::ActionDetails::Simple,
             duration_seconds: None,
         }],
         thinking: None,

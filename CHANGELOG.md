@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **v0.6 runtime deleted.** The `MERMAID_V7=1` opt-in is gone; the
+  v0.7 architecture is now the only code path. `src/tui/`,
+  `src/runtime/`, `src/agents/`, `src/models/backend.rs`, and
+  `src/models/retry.rs` are all removed. Net ~8,000 LOC of old code
+  gone from the tree.
+- Non-interactive `mermaid run <prompt>` now runs on the v0.7 reducer
+  + effect runner (same as interactive); output shape matches the
+  v0.6 `NonInteractiveResult` so scripts keep working.
+- Slash commands, diff helpers, action value types, MCP manager
+  accessor, and the web search client all moved out of the v0.6
+  namespace into `src/domain/`, `src/render/`, `src/mcp/`, and
+  `src/providers/tool/`. No behaviour changes — just no longer
+  reaching back into deleted modules.
+
+### Removed
+
+- Two integration test files that exercised the v0.6 runtime
+  (`tests/agent_loop_tests.rs`, `tests/tui_behavior_tests.rs`). The
+  reducer + effect parity suites (`tests/reducer_flows.rs`,
+  `tests/effect_cancel.rs`) cover the equivalents.
+
+### Added (free, via the new architecture)
+
+- MCP servers initialize automatically at startup via
+  `Cmd::InitMcpServers`. v0.6 only init'd in the interactive path;
+  non-interactive invocations now get MCP tools too.
+- `manager_ref::wait_ready()` — if a tool call races startup, it
+  parks briefly for init to complete instead of immediately
+  erroring.
+
 ## [0.7.0] - 2026-04-21
 
 The Architecture Release. This is a big-bang rewrite of Mermaid's

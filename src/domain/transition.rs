@@ -10,10 +10,10 @@
 
 use std::time::SystemTime;
 
-use crate::agents::{ActionDetails, ActionDisplay, ActionResult};
 use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ChatMessage, MessageRole};
 
+use super::action::{ActionDetails, ActionDisplay, ActionResult};
 use super::ids::{ToolCallId, TurnId};
 use super::state::{GenPhase, PendingToolCall, ToolOutcome, TurnState};
 
@@ -195,16 +195,73 @@ pub fn action_display_for(call: &PendingToolCall, outcome: &ToolOutcome) -> Acti
     }
 }
 
-/// Best-effort name + target extraction from a tool call, for display.
-/// Reuses `AgentAction::display_info` if the tool call parses cleanly;
-/// falls back to the raw function name otherwise.
+/// Best-effort name + target extraction from a tool call, for chat
+/// display ("Read src/main.rs", "Bash cargo test", etc). Matches on
+/// the wire-format tool name + arguments; unknown tools fall through
+/// to the raw function name.
 fn display_info_for(call: &PendingToolCall) -> (String, String) {
-    match call.source.to_agent_action() {
-        Ok(action) => {
-            let (t, target) = action.display_info();
-            (t.to_string(), target)
+    let name = call.source.function.name.as_str();
+    let args = &call.source.function.arguments;
+    let string_arg =
+        |k: &str| -> Option<String> { args.get(k).and_then(|v| v.as_str()).map(str::to_string) };
+    match name {
+        "read_file" => {
+            let target = string_arg("path")
+                .or_else(|| {
+                    args.get("paths")
+                        .and_then(|v| v.as_array())
+                        .map(|a| match a.len() {
+                            0 => "(no paths)".to_string(),
+                            1 => a[0].as_str().unwrap_or("").to_string(),
+                            n => format!("{} files", n),
+                        })
+                })
+                .unwrap_or_default();
+            ("Read".to_string(), target)
         },
-        Err(_) => (call.source.function.name.clone(), String::new()),
+        "write_file" => ("Write".to_string(), string_arg("path").unwrap_or_default()),
+        "edit_file" => ("Edit".to_string(), string_arg("path").unwrap_or_default()),
+        "delete_file" => ("Delete".to_string(), string_arg("path").unwrap_or_default()),
+        "create_directory" => (
+            "Bash".to_string(),
+            format!("mkdir -p {}", string_arg("path").unwrap_or_default()),
+        ),
+        "execute_command" => (
+            "Bash".to_string(),
+            string_arg("command").unwrap_or_default(),
+        ),
+        "web_search" => {
+            let target = string_arg("query")
+                .or_else(|| {
+                    args.get("queries")
+                        .and_then(|v| v.as_array())
+                        .map(|a| match a.len() {
+                            0 => "(no queries)".to_string(),
+                            1 => a[0]
+                                .get("query")
+                                .and_then(|q| q.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            n => format!("{} queries", n),
+                        })
+                })
+                .unwrap_or_default();
+            ("Web Search".to_string(), target)
+        },
+        "web_fetch" => (
+            "Web Fetch".to_string(),
+            string_arg("url").unwrap_or_default(),
+        ),
+        "agent" => (
+            "Agent".to_string(),
+            string_arg("description").unwrap_or_default(),
+        ),
+        n if n.starts_with("mcp__") => {
+            let rest = &n[5..];
+            let target = rest.replacen("__", ":", 1);
+            ("MCP".to_string(), target)
+        },
+        _ => (name.to_string(), String::new()),
     }
 }
 

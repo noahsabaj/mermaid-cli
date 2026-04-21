@@ -404,8 +404,7 @@ impl OllamaAdapter {
                 if config.is_subagent && name == "agent" {
                     return false;
                 }
-                if config.is_subagent && crate::agents::computer_use::GUI_TOOL_NAMES.contains(&name)
-                {
+                if config.is_subagent && crate::constants::GUI_TOOL_NAMES.contains(&name) {
                     return false;
                 }
                 true
@@ -463,12 +462,12 @@ impl OllamaAdapter {
 
     /// POST /api/chat with the given body and return the raw response.
     /// Transparently retries on 5xx, 429, or reqwest connect failures
-    /// via `crate::models::retry_transient_http`. Mid-stream failures
+    /// via `crate::effect::retry_transient_http`. Mid-stream failures
     /// (body consumption) are NOT retried — partial content has already
     /// reached the caller at that point.
     async fn send_chat(&self, body: &serde_json::Value) -> Result<reqwest::Response> {
         let url = format!("{}/api/chat", self.base_url);
-        crate::models::retry_transient_http(|| async {
+        crate::effect::retry_transient_http(|| async {
             self.client.post(&url).json(body).send().await.map_err(|e| {
                 ModelError::Backend(BackendError::ConnectionFailed {
                     backend: "ollama".to_string(),

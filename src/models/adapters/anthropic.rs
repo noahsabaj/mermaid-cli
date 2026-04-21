@@ -471,8 +471,7 @@ impl AnthropicAdapter {
                 if config.is_subagent && name == "agent" {
                     return false;
                 }
-                if config.is_subagent && crate::agents::computer_use::GUI_TOOL_NAMES.contains(&name)
-                {
+                if config.is_subagent && crate::constants::GUI_TOOL_NAMES.contains(&name) {
                     return false;
                 }
                 true
@@ -558,10 +557,10 @@ impl AnthropicAdapter {
 
     /// POST `/v1/messages` and return the raw response.
     /// Transparently retries on 5xx, 429, or reqwest connect failures
-    /// via `crate::models::retry_transient_http`.
+    /// via `crate::effect::retry_transient_http`.
     async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
-        crate::models::retry_transient_http(|| async {
+        crate::effect::retry_transient_http(|| async {
             self.client
                 .post(&url)
                 .header("x-api-key", &self.api_key)
@@ -1663,7 +1662,7 @@ mod tests {
             .iter()
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
             .collect();
-        for gui_name in crate::agents::computer_use::GUI_TOOL_NAMES {
+        for gui_name in crate::constants::GUI_TOOL_NAMES {
             assert!(
                 !names.contains(gui_name),
                 "subagent context must NOT include GUI tool '{}', but tools were {:?}",

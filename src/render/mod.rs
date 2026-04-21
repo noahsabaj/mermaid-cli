@@ -13,6 +13,7 @@
 //! The only changes are field accesses: every `&App` read becomes
 //! a `&State` read through the equivalent path.
 
+pub mod diff;
 pub mod layout;
 pub mod markdown;
 pub mod theme;
@@ -104,7 +105,7 @@ pub fn render(state: &State, rstate: &mut RenderState, frame: &mut Frame) {
             .split_whitespace()
             .next()
             .unwrap_or("");
-        let row_count = crate::tui::slash_commands::filter_by_prefix(typed)
+        let row_count = crate::domain::slash_commands::filter_by_prefix(typed)
             .len()
             .clamp(1, 8);
         (row_count as u16) + 2
@@ -136,7 +137,6 @@ pub fn render(state: &State, rstate: &mut RenderState, frame: &mut Frame) {
         messages: &live_messages,
         theme: &rstate.theme,
         markdown_cache: &mut rstate.markdown_cache,
-        active_subagents: None, // v7 reducer doesn't wire subagent progress yet
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut rstate.chat);
 
@@ -197,10 +197,7 @@ pub fn render(state: &State, rstate: &mut RenderState, frame: &mut Frame) {
             state.ui.input_cursor.min(state.ui.input_buffer.len()),
             content_width,
         );
-        frame.set_cursor_position((
-            input_area.x + cursor_col + 2,
-            input_area.y + 1 + cursor_row,
-        ));
+        frame.set_cursor_position((input_area.x + cursor_col + 2, input_area.y + 1 + cursor_row));
     }
 
     // Effective reasoning level (v7 doesn't have a per-model
@@ -228,7 +225,7 @@ pub fn render(state: &State, rstate: &mut RenderState, frame: &mut Frame) {
             .split_whitespace()
             .next()
             .unwrap_or("");
-        let commands = crate::tui::slash_commands::filter_by_prefix(typed);
+        let commands = crate::domain::slash_commands::filter_by_prefix(typed);
         let palette_widget = SlashPaletteWidget {
             theme: &rstate.theme,
             commands,

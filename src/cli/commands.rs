@@ -1,8 +1,9 @@
 use anyhow::Result;
+use std::sync::Arc;
 
 use crate::{
     app::{Config, get_config_dir, init_config, load_config},
-    models::{ModelFactory, PROVIDER_REGISTRY, lookup_provider},
+    models::{BackendConfig, Model, PROVIDER_REGISTRY, lookup_provider},
     ollama::is_installed as is_ollama_installed,
     utils::resolve_api_key,
 };
@@ -51,17 +52,50 @@ pub async fn handle_command(command: &Commands, config: &Config) -> Result<bool>
 
 /// List available models across all backends (honors user config).
 pub async fn list_models(config: &Config) -> Result<()> {
-    let models = ModelFactory::list_all_models(config).await?;
-
-    if models.is_empty() {
-        println!("No models found across any backends");
+    let ollama_models = list_ollama_models(config).await;
+    if ollama_models.is_empty() {
+        println!("No Ollama models installed locally.");
     } else {
-        println!("Available models:");
-        for model in models {
-            println!("  - {}", model);
+        println!("Ollama models (local/cloud):");
+        for name in &ollama_models {
+            println!("  - ollama/{}", name);
         }
     }
+
+    println!("\nConfigured remote providers:");
+    let mut any = false;
+    for profile in PROVIDER_REGISTRY {
+        let env = config
+            .providers
+            .get(profile.name)
+            .and_then(|c| c.api_key_env.as_deref())
+            .unwrap_or(profile.api_key_env);
+        if resolve_api_key(env, None).is_some() {
+            any = true;
+            println!("  - {} (via ${})", profile.name, env);
+        }
+    }
+    if !any {
+        println!("  (none — set a provider API key env var to enable)");
+    }
+    println!("\nSwitch models in-session with /model <name>.");
     Ok(())
+}
+
+/// Ask the local Ollama daemon for its list of models. Empty on
+/// failure — the status widget separately shows whether Ollama is
+/// reachable.
+async fn list_ollama_models(config: &Config) -> Vec<String> {
+    use crate::models::adapters::ollama::OllamaAdapter;
+    let backend = BackendConfig {
+        ollama_url: format!("http://{}:{}", config.ollama.host, config.ollama.port),
+        timeout_secs: 5,
+        max_idle_per_host: 2,
+    };
+    match OllamaAdapter::new("__list__", Arc::new(backend)).await {
+        Ok(adapter) => adapter.list_models().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Show version information
@@ -114,18 +148,28 @@ async fn show_status(config: &Config) -> Result<()> {
     println!("Mermaid Status:");
     println!();
 
-    // Check available backends (use user's config for host/port)
-    let factory = ModelFactory::from_config(config);
-    let backends = factory.available_providers_pub().await;
-    if backends.is_empty() {
-        println!("  [WARNING] Backends: None available");
+    // Check remote providers by API-key env presence (matches the
+    // routing ProviderFactory uses when the user picks a model).
+    let mut available: Vec<&'static str> = Vec::new();
+    for profile in PROVIDER_REGISTRY {
+        let env = config
+            .providers
+            .get(profile.name)
+            .and_then(|c| c.api_key_env.as_deref())
+            .unwrap_or(profile.api_key_env);
+        if resolve_api_key(env, None).is_some() {
+            available.push(profile.name);
+        }
+    }
+    if available.is_empty() {
+        println!("  [WARNING] Remote providers: none (no API keys in env)");
     } else {
-        println!("  [OK] Backends: {}", backends.join(", "));
+        println!("  [OK] Remote providers: {}", available.join(", "));
     }
 
-    // Check Ollama (via HTTP, so remote deployments are honored)
+    // Check Ollama (via HTTP, so remote deployments are honored).
     if is_ollama_installed() {
-        let models = factory.list_models("ollama").await.unwrap_or_default();
+        let models = list_ollama_models(config).await;
         if models.is_empty() {
             println!("  [WARNING] Ollama: Installed (no models)");
         } else {

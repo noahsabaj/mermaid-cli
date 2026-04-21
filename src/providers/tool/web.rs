@@ -1,7 +1,7 @@
 //! Web tools: `web_search` and `web_fetch`.
 //!
-//! Both delegate to `crate::agents::web_search::WebSearchClient`,
-//! which talks to Ollama Cloud's web API (the bearer-token path, via
+//! Both delegate to `web_client::WebSearchClient` — a thin HTTP
+//! client for Ollama Cloud's web API (bearer-token path, via
 //! `OLLAMA_API_KEY`). The wrapper's job is cancellation plumbing +
 //! multi-query fan-out.
 
@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::agents::{ActionResult, WebSearchClient};
 use crate::domain::ToolOutcome;
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
+use super::web_client::{WebFetchResult, WebSearchClient};
 
 /// `web_search` — query Ollama Cloud's web-search endpoint. Accepts a
 /// single `{query, max_results}` OR a list of `{queries: [{query,
@@ -147,7 +147,7 @@ impl ToolExecutor for WebFetchTool {
     }
 }
 
-fn format_fetch(url: &str, page: &crate::agents::WebFetchResult) -> String {
+fn format_fetch(url: &str, page: &WebFetchResult) -> String {
     let title = if page.title.is_empty() {
         "(no title)"
     } else {
@@ -189,10 +189,6 @@ fn parse_queries(args: &serde_json::Value) -> Result<Vec<(String, usize)>, Strin
     }
     Err("web_search requires 'query' (string) or 'queries' (array)".to_string())
 }
-
-// Compile-time: ensure we're using ActionResult only if/when fold-in happens later.
-#[allow(dead_code)]
-fn _action_result_touch(_: &ActionResult) {}
 
 #[cfg(test)]
 mod tests {

@@ -17,15 +17,9 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Message Queuing** — type while the model generates, messages send in order
 - **Non-Interactive Mode** — script with `mermaid run "prompt"` for CI/automation
 
-### New in v0.7: The Architecture Release
+### Architecture
 
-v0.7 ships a full rewrite of Mermaid's runtime on the Elm/MVU pattern: one pure reducer, effects as data, structured concurrency per turn. Several whole classes of bug the old architecture let slip — the duplicate "Server error" chat line, the 20-press Ctrl+C during tool execution, stale stream events corrupting a new turn — become impossible to express against the new types.
-
-The new path is available behind `MERMAID_V7=1` while the default runtime finishes its migration. Try it:
-
-```bash
-MERMAID_V7=1 mermaid
-```
+Mermaid's runtime is an Elm/MVU pattern: one pure reducer (`fn update(State, Msg) -> (State, Vec<Cmd>)`), effects as data, structured concurrency per turn. Whole classes of bug the old architecture let slip — duplicate error display, 20-press Ctrl+C during tool execution, stale stream events corrupting a new turn — are statically impossible against the new types.
 
 Read [`docs/architecture.md`](docs/architecture.md) for the full tour. The [adding a tool](docs/adding_tools.md) and [adding a provider](docs/adding_providers.md) recipes are one file each; [`docs/replay_debugging.md`](docs/replay_debugging.md) covers record/replay for reproducing bugs.
 

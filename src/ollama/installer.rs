@@ -1,16 +1,23 @@
 use super::detector;
 use super::guide;
 use crate::app::Config;
-use crate::models::ModelFactory;
+use crate::models::adapters::ollama::OllamaAdapter;
+use crate::models::{BackendConfig, Model};
 use anyhow::Result;
+use std::sync::Arc;
 
-/// List installed Ollama models via the HTTP API using the user's config.
-///
-/// Replaces the old CLI-parsing `list_models_async` path. Falls back to
-/// an empty list on any HTTP error (matching the prior behavior).
+/// List installed Ollama models via the HTTP API using the user's
+/// config. Falls back to an empty list on any HTTP error.
 async fn list_installed_models(config: &Config) -> Vec<String> {
-    let factory = ModelFactory::from_config(config);
-    factory.list_models("ollama").await.unwrap_or_default()
+    let backend = BackendConfig {
+        ollama_url: format!("http://{}:{}", config.ollama.host, config.ollama.port),
+        timeout_secs: 5,
+        max_idle_per_host: 2,
+    };
+    match OllamaAdapter::new("__list__", Arc::new(backend)).await {
+        Ok(adapter) => adapter.list_models().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Validate that a model exists, auto-pull if not found.

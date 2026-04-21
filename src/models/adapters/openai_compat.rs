@@ -216,8 +216,7 @@ impl OpenAICompatAdapter {
                 if config.is_subagent && name == "agent" {
                     return false;
                 }
-                if config.is_subagent && crate::agents::computer_use::GUI_TOOL_NAMES.contains(&name)
-                {
+                if config.is_subagent && crate::constants::GUI_TOOL_NAMES.contains(&name) {
                     return false;
                 }
                 true
@@ -283,11 +282,11 @@ impl OpenAICompatAdapter {
 
     /// POST `/chat/completions` and return the raw response.
     /// Transparently retries on 5xx, 429, or reqwest connect failures
-    /// via `crate::models::retry_transient_http`. Useful for Groq /
+    /// via `crate::effect::retry_transient_http`. Useful for Groq /
     /// OpenRouter / etc. when an upstream relay hiccups.
     async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        crate::models::retry_transient_http(|| async {
+        crate::effect::retry_transient_http(|| async {
             let mut req = self.client.post(&url).bearer_auth(&self.api_key).json(body);
             for (name, value) in &self.extra_headers {
                 req = req.header(name, value);
