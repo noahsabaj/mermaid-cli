@@ -34,8 +34,7 @@ fn defn(name: &str, description: &str, input_schema: serde_json::Value) -> ToolD
 }
 
 /// `read_file` — read one or more files and return their contents
-/// joined with section markers (matches the v0.6 multi-file output
-/// shape so the model's prompt-engineering expectations carry over).
+/// joined with section markers.
 pub struct ReadFileTool;
 
 #[async_trait]
@@ -131,7 +130,7 @@ impl ToolExecutor for ReadFileTool {
 
 /// `edit_file` — exact-match string replacement. Used for targeted
 /// edits rather than full file rewrites. Errors if the `old_string`
-/// doesn't appear exactly once (matching v0.6 semantics).
+/// doesn't appear exactly once.
 pub struct EditFileTool;
 
 #[async_trait]
@@ -394,7 +393,7 @@ async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<String> {
     let content = tokio::task::spawn_blocking(move || {
         let data = std::fs::read(&abs_clone)?;
         if data.len() > MAX_FILE_READ_BYTES {
-            // Match v0.6 truncation shape — char-boundary-safe.
+            // Char-boundary-safe truncation with a marker footer.
             let mut s = String::from_utf8_lossy(&data).into_owned();
             let cut = s.floor_char_boundary(MAX_FILE_READ_BYTES);
             s.truncate(cut);

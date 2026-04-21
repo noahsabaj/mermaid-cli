@@ -4,12 +4,6 @@
 //! `Arc<dyn ModelProvider>`. The effect runner holds one of these
 //! and asks it to build a provider the first time a new model is
 //! referenced; subsequent lookups hit the cache.
-//!
-//! This replaces the v0.6 `ModelFactory` for the v0.7 path. The old
-//! factory returned `Box<dyn Model>` (the legacy trait); we return
-//! providers implementing the new `ModelProvider` trait defined in
-//! `super::model`. The underlying adapter crates are the same — C3
-//! and C4's wrappers delegate to them.
 
 use std::sync::Arc;
 
@@ -74,14 +68,13 @@ impl ProviderFactory {
     }
 }
 
-/// Build a provider for the given `model_id`, applying the same
-/// routing rules as the v0.6 `ModelFactory::create_model`:
+/// Build a provider for the given `model_id`:
 ///   1. `ollama/<model>` → OllamaProvider.
 ///   2. `anthropic/<model>` → AnthropicProvider.
 ///   3. `gemini/<model>` → GeminiProvider.
 ///   4. Other builtin providers (openai, openrouter, groq, …) → OpenAICompatProvider.
 ///   5. User-defined `[providers.<name>]` → custom OpenAICompatProvider.
-///   6. Bare model name → OllamaProvider (legacy compat).
+///   6. Bare model name → OllamaProvider.
 async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn ModelProvider>> {
     let (provider, model_name) = parse_model_id(model_id);
     let provider_lc = provider.to_lowercase();

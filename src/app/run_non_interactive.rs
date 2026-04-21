@@ -20,8 +20,7 @@ use crate::effect::EffectRunner;
 use crate::models::MessageRole;
 use crate::providers::ToolRegistry;
 
-/// Output shape the CLI prints. Mirrors v0.6's `NonInteractiveResult`
-/// so scripts that parsed the old output keep working.
+/// Output shape the CLI prints.
 #[derive(Debug, Default)]
 pub struct RunResult {
     pub response: String,
@@ -126,8 +125,7 @@ fn build_result(state: &State) -> RunResult {
     out
 }
 
-/// Render a `RunResult` in the requested output format. Matches
-/// v0.6's `format_result` shapes so scripts keep working.
+/// Render a `RunResult` in the requested output format.
 pub fn format_result(result: &RunResult, format: OutputFormat) -> String {
     match format {
         OutputFormat::Text => {

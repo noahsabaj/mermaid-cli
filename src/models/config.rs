@@ -44,13 +44,12 @@ pub struct ModelConfig {
     #[serde(default)]
     pub reasoning: ReasoningLevel,
 
-    /// Hide the reasoning trace from the user-visible stream while still
+    /// Hide reasoning traces from the user-facing stream while still
     /// allowing the model to reason server-side. Maps to Ollama's
     /// `--hidethinking` semantics and Anthropic's `thinking.display:
-    /// Hide reasoning traces from the user-facing stream while still
-    /// allowing the model to reason server-side. Internal plumbing;
-    /// the v7 reducer currently never sets this (no UI toggle) but
-    /// the adapter pipeline honors it when a future toggle lands.
+    /// "hidden"`. Internal plumbing; the reducer currently never
+    /// sets this (no UI toggle) but the adapter pipeline honors it
+    /// when a future toggle lands.
     #[serde(default)]
     pub hide_reasoning_trace: bool,
 
@@ -225,7 +224,7 @@ fn default_max_tokens() -> usize {
 }
 
 fn default_ollama_url() -> String {
-    // Real callers always go through `ModelFactory::config_to_backend_config`,
+    // Real callers always go through `the `providers::factory::ProviderFactory` path`,
     // which reads `app::Config.ollama.host/port` (the single documented config
     // path). This default only fires when constructing `BackendConfig::default`
     // directly (no app config supplied) — primarily tests. Keep it static so

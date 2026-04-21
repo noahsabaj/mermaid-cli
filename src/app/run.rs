@@ -1,6 +1,7 @@
 //! The ~30-line main loop.
 //!
-//! This is the single entry point the v0.7 architecture composes:
+//! Single entry point that composes crossterm events, the reducer,
+//! and the effect runner:
 //!
 //! ```text
 //!   crossterm events ──┐

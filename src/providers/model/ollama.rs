@@ -3,14 +3,13 @@
 //! The adapter owns the wire format (NDJSON framing, gpt-oss
 //! reasoning dispatch, truncation marker, retry). The wrapper
 //! translates `ChatRequest` ↔ `ModelConfig` and bridges the
-//! adapter's legacy `StreamCallback` to v0.7's typed `StreamEvent`
+//! adapter's legacy `StreamCallback` to the typed `StreamEvent`
 //! sink. Adapter-internals stay where they are; the architecture
 //! boundary is at `ModelProvider::chat`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
 
 use crate::domain::ChatRequest;
 use crate::models::adapters::ollama::OllamaAdapter;
@@ -96,8 +95,6 @@ impl ModelProvider for OllamaProvider {
         Ok(FinalResponse {
             usage,
             thinking_signature,
-            full_text: response.content,
-            full_thinking: response.thinking,
             tool_calls: response.tool_calls.unwrap_or_default(),
         })
     }
@@ -156,14 +153,6 @@ fn stream_callback_for(sink: tokio::sync::mpsc::Sender<StreamEvent>) -> StreamCa
             let _ = sink.send(mapped).await;
         });
     })
-}
-
-/// Unused-warning suppressor — ensures the `_` binding doesn't trip
-/// clippy by retaining a reference to the cancellation token even
-/// when the select! branch isn't active.
-#[allow(dead_code)]
-fn _touch_token(token: &CancellationToken) {
-    let _ = token.is_cancelled();
 }
 
 #[cfg(test)]

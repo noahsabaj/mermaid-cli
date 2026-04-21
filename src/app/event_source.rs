@@ -1,19 +1,11 @@
 //! Crossterm event stream → `Msg`.
 //!
-//! In the v0.7 main loop, this module's output is one of two
-//! branches in the central `select!`. Crossterm's `EventStream` is a
-//! `Stream<Item = Result<Event>>` that yields key presses, mouse
-//! events, pastes, and resize notifications; we translate each into
-//! the typed `Msg` vocabulary the reducer understands.
+//! One of two branches in the main loop's central `select!`.
+//! Crossterm's `EventStream` yields key presses, mouse events,
+//! pastes, and resize notifications; we translate each into the
+//! typed `Msg` vocabulary the reducer understands.
 //!
-//! This replaces the v0.6 `tui::event_handler` which:
-//!
-//!   - Mutated `App` state directly (bypassing the reducer).
-//!   - Returned an ad-hoc `EventAction` enum that the caller
-//!     interpreted with chained match arms.
-//!   - Needed a `viewport_height` parameter to route mouse events.
-//!
-//! Here the event source knows nothing about state. The reducer owns
+//! The event source knows nothing about state. The reducer owns
 //! the transitions; the event source just produces typed inputs.
 //!
 //! For `--replay`, a second event source (in `recorder.rs`) reads
@@ -253,8 +245,7 @@ mod tests {
     #[test]
     fn parse_slash_reasoning_invalid_level_is_none_arg() {
         // Argument exists but can't be parsed to a level — degrades
-        // to showing current (None arg) rather than erroring. Matches
-        // v0.6 /reasoning behavior.
+        // to showing current (None arg) rather than erroring.
         assert_eq!(
             parse_slash_command("reasoning bogus"),
             SlashCmd::Reasoning(None),

@@ -6,10 +6,9 @@
 //! inputs are accepted. Future replacements for models.dev
 //! (static-lookup) or `/api/show` (runtime probe) plug in here.
 //!
-//! For the v0.7 port, `Capabilities` is a superset of the v0.6
-//! `ModelCapabilities` — the old type is retained for backward
-//! compatibility inside `models/adapters/*.rs` until C10. The new
-//! provider layer only reads through this enum.
+//! `Capabilities` is a superset of the adapter-layer
+//! `ModelCapabilities`. Adapters translate via `from_legacy` so the
+//! provider layer doesn't duplicate capability logic.
 
 use crate::models::{ModelCapabilities, ReasoningCapability};
 
@@ -32,8 +31,9 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// Construct from a v0.6 `ModelCapabilities`. Used by the C3/C4
-    /// wrappers so we don't duplicate adapter-side capability logic.
+    /// Construct from the adapter-layer `ModelCapabilities`. Used by
+    /// provider wrappers so we don't duplicate adapter-side capability
+    /// logic.
     pub fn from_legacy(caps: &ModelCapabilities) -> Self {
         Self {
             supports_tools: caps.supports_tools,

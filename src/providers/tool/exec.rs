@@ -1,13 +1,7 @@
-//! `execute_command` tool — the one that's been hurting most.
+//! `execute_command` tool.
 //!
-//! The v0.6 impl at `src/agents/executor.rs` shipped
-//! `kill_on_drop(true)` and a timeout-based select, but the tool was
-//! invoked through a synchronous dispatcher that had no idea a turn
-//! might be cancelled mid-run. The 300-second timeout meant Ctrl+C
-//! during a long-running build had to wait for the timer.
-//!
-//! In the v0.7 architecture, the `ExecContext::token` races the
-//! subprocess wait in the same `select!`. When the user Ctrl+C's:
+//! The `ExecContext::token` races the subprocess wait in a `select!`.
+//! When the user Ctrl+C's:
 //!
 //!   1. Reducer emits `Cmd::CancelScope(turn)`.
 //!   2. Effect runner cancels the turn's scope token.
@@ -16,14 +10,13 @@
 //!      Cancelled` flows back to the reducer.
 //!
 //! End-to-end latency: microseconds plus whatever it takes `SIGKILL`
-//! to arrive. The unresponsiveness bug from v0.6 is architecturally
-//! impossible here — there's no polling loop to "forget" to include.
+//! to arrive. No polling loop to "forget" to include.
 //!
-//! The dangerous-command blocklist is preserved verbatim from v0.6.
-//! It's defense-in-depth, not a security boundary: the real boundary
-//! is the user's decision to run Mermaid with shell access. But the
-//! known destructive shapes (`rm -rf /`, fork bombs, dd to device,
-//! etc.) are cheap to catch upfront.
+//! The dangerous-command blocklist is defense-in-depth, not a
+//! security boundary: the real boundary is the user's decision to
+//! run Mermaid with shell access. But the known destructive shapes
+//! (`rm -rf /`, fork bombs, dd to device, etc.) are cheap to catch
+//! upfront.
 
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -117,7 +110,7 @@ impl ToolExecutor for ExecuteCommandTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // Same `kill_on_drop` the v0.6 adapter uses — when this
+            // `kill_on_drop` on the `Command` — when this
             // Command is dropped (by select! falling through the
             // cancel branch), tokio reaps the child. No orphans.
             .kill_on_drop(true);
@@ -220,7 +213,7 @@ async fn run_command(
 }
 
 /// Defense-in-depth check for obviously destructive commands. Same
-/// logic as v0.6 `src/agents/executor.rs::contains_dangerous_command`
+/// Applies the same patterns historically shipped with Mermaid
 /// — documented there as a blocklist, NOT a security boundary. The
 /// real boundary is the user's decision to grant shell access to the
 /// AI.

@@ -30,8 +30,9 @@ pub trait ModelProvider: Send + Sync {
     fn capabilities(&self) -> &Capabilities;
 
     /// Stream a chat turn. Typed events flow through
-    /// `ctx.sink`; the returned `FinalResponse` is consumed by the
-    /// effect runner for logging + subagent bookkeeping.
+    /// `ctx.sink`; the returned `FinalResponse` carries token usage
+    /// and the Anthropic thinking-signature (opaque blob required to
+    /// continue extended thinking across turns).
     ///
     /// Cancellation: the provider MUST select! on `ctx.token.
     /// cancelled()` inside any await that could block for more than

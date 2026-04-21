@@ -183,10 +183,20 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::ToolProgress {
             turn: _,
             call_id: _,
-            chunk: _,
+            chunk,
         } => {
-            // Reserved for streaming subprocess output; render layer
-            // not wired for it yet.
+            // Surface live tool output (streaming subprocess stdout,
+            // multi-file read progress, etc.) on the status line.
+            // The next progress chunk overwrites; the terminal
+            // `ToolFinished` lets the line fade via its own
+            // dismissal path.
+            if !chunk.trim().is_empty() {
+                state.status = Some(StatusLine {
+                    text: chunk,
+                    kind: StatusKind::Info,
+                    shown_at: std::time::SystemTime::now(),
+                });
+            }
         },
         Msg::ToolFinished {
             turn,
@@ -881,11 +891,6 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.cumulative_tokens = 0;
             emit_title_if_changed(state, cmds);
         },
-        super::state::ConfirmationTarget::OverwriteSavedConversation { .. } => {
-            // Reserved for future filesystem-replacement workflow.
-            // Today no arm issues this confirmation, so this branch
-            // is unreachable; kept for exhaustive match.
-        },
     }
 }
 
@@ -1003,9 +1008,7 @@ fn handle_upstream_error(state: &mut State, error: crate::models::UserFacingErro
     // channel — the ActionDisplay attached to an empty assistant
     // message. The chat widget paints ActionDisplays as colored
     // error blocks, so committing to both `content` and `actions`
-    // would paint the same error twice (v0.6's regression from
-    // before the rendering was unified, and one this reducer
-    // originally repeated — now fixed).
+    // would paint the same error twice.
     state.turn = TurnState::Idle;
     let summary_line = format!("{}: {}", error.summary, error.message);
     let msg = ChatMessage {

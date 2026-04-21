@@ -1657,9 +1657,9 @@ mod tests {
         );
     }
 
-    /// When the tool filter produces an empty list (e.g. all tools
-    /// excluded for a subagent), the request body must omit the `tools`
-    /// field entirely. No orphan `cache_control` marker on a non-existent
+    /// When the tool list is empty (no tools registered for this
+    /// request), the request body must omit the `tools` field
+    /// entirely. No orphan `cache_control` marker on a non-existent
     /// last tool, no panic.
     #[test]
     fn build_request_body_handles_empty_tools_without_panicking() {

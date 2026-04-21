@@ -1,8 +1,8 @@
-//! Ported v0.6 widgets, rewired to read from v0.7 `State`.
+//! Stateless TUI widgets.
 //!
-//! Each widget takes explicit props (not `&App`); the compose
-//! function in `render::mod` pulls those props from `State` per
-//! frame. No widget holds a reference to `App`.
+//! Each widget takes explicit props; the compose function in
+//! `render::mod` pulls those props from `State` per frame. No widget
+//! holds a reference to any god-object.
 
 mod attachment;
 mod chat;
@@ -20,10 +20,10 @@ pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
 pub use status_line::StatusLineWidget;
 
-/// Local-to-render-layer generation phase enum. Mirrors v0.6's
-/// `tui::state::GenerationStatus` exactly so the ported widget code
-/// can stay byte-identical; the compose function converts from
-/// `domain::TurnState` + `domain::GenPhase`.
+/// Local-to-render-layer generation phase enum. The compose function
+/// converts from `domain::TurnState` + `domain::GenPhase` into one of
+/// these four states; widgets render off this local view so they
+/// don't need to pattern-match the full domain enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerationStatus {
     Idle,

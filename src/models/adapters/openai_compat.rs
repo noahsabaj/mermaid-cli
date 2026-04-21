@@ -34,7 +34,7 @@
 //!
 //! When/if a Responses-only feature becomes load-bearing for Mermaid,
 //! the right move is a focused new adapter (`openai_responses.rs`)
-//! routed through `ModelFactory::create_model` for `provider == "openai"`,
+//! routed through `providers::factory::ProviderFactory` for `provider == "openai"`,
 //! leaving this OpenAI-compat path for everyone else.
 
 use std::collections::HashMap;
@@ -83,7 +83,7 @@ fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) 
 
 /// OpenAI-compatible model adapter.
 ///
-/// Constructed via `OpenAICompatAdapter::new` from `ModelFactory` once the
+/// Constructed via `OpenAICompatAdapter::new` from `providers::factory::ProviderFactory` once the
 /// provider name has been resolved against the registry / user config.
 /// All fields are owned (not borrowed) so the adapter outlives the
 /// factory call that built it.

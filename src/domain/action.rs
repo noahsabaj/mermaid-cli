@@ -2,9 +2,7 @@
 //!
 //! These ride alongside `ChatMessage::actions` — the chat renderer
 //! paints one per tool call attached to an assistant message. Pure
-//! data; no runtime, no I/O. Moved from the old `src/agents/types.rs`
-//! where they were tangled up with `AgentAction` (the v0.6 tool
-//! dispatch enum, deleted alongside the rest of the v0.6 runtime).
+//! data; no runtime, no I/O.
 //!
 //! New tool executions land here via `domain::transition::
 //! action_display_for`, which reads the `PendingToolCall` and
@@ -64,6 +62,4 @@ pub enum ActionDetails {
     FileContent { line_count: usize, content: String },
     /// Targeted edit — renders summary + diff.
     Diff { summary: String, diff: String },
-    /// Subagent completion — summary + tool call count.
-    Agent { summary: String, tool_uses: usize },
 }

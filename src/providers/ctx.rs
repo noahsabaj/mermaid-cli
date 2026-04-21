@@ -65,18 +65,12 @@ pub enum StreamEvent {
 
 /// Final response returned by `ModelProvider::chat()` after the
 /// stream drains. Carries what the reducer can't derive from the
-/// stream events themselves — mostly for logging and for the v0.6
-/// `ModelResponse` compatibility during migration.
+/// stream events themselves — token usage and the opaque thinking
+/// signature needed for Anthropic extended-thinking continuation.
 #[derive(Debug, Clone)]
 pub struct FinalResponse {
     pub usage: Option<TokenUsage>,
     pub thinking_signature: Option<String>,
-    /// Echo of the last committed assistant content. Only used by
-    /// subagents (which bypass the reducer's partial_text buffer);
-    /// the TUI reducer ignores this because it already accumulated.
-    pub full_text: String,
-    /// Same rationale — only subagents consume this.
-    pub full_thinking: Option<String>,
     pub tool_calls: Vec<ModelToolCall>,
 }
 

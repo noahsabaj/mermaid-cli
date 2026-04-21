@@ -212,9 +212,9 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         frame.set_cursor_position((input_area.x + cursor_col + 2, input_area.y + 1 + cursor_row));
     }
 
-    // Effective reasoning level (v7 doesn't have a per-model
-    // supported_reasoning cap yet; default to no snap indicator until
-    // ProviderFactory::capabilities is threaded here).
+    // Effective reasoning level. Per-model supported_reasoning cap
+    // isn't threaded through `State` yet; defaults to no snap
+    // indicator until `ProviderFactory::capabilities` reaches here.
     let requested = state.session.reasoning;
     let effective = match supported_reasoning_for(state) {
         Some(ReasoningCapability::Levels(supp)) => {
@@ -305,9 +305,9 @@ fn build_live_messages(
 }
 
 /// Future hook: consult `ProviderFactory` for per-model capabilities.
-/// Today returns `None` — reasoning snap indicator is suppressed in
-/// v7 until the factory is threaded through `State` (or an
-/// equivalent capability table).
+/// Today returns `None` — reasoning snap indicator is suppressed
+/// until the factory is threaded through `State` (or an equivalent
+/// capability table).
 fn supported_reasoning_for(_state: &State) -> Option<ReasoningCapability> {
     None
 }

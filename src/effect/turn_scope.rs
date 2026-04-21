@@ -14,15 +14,12 @@
 //! next await point — microseconds for HTTP streams, milliseconds for
 //! tool subprocess fan-out.
 //!
-//! This is the v0.7 architectural replacement for the "drain events
-//! every 50ms" polling pattern in `runtime::agent_loop`. That pattern
-//! was correct by convention: you had to remember to call
-//! `drain_events()` inside every long-running op, or cancellation
-//! would hang until timeout. Forgetting was silent — which is how
-//! `web_search` (30s) and `execute_command` (300s) both shipped with
-//! the same bug. Here, forgetting is impossible: the token is baked
-//! into every adapter's `StreamContext` / `ExecContext`, and the
-//! adapter must `select!` on it to proceed.
+//! Forgetting cancellation is impossible: the token is baked into
+//! every adapter's `StreamContext` / `ExecContext`, and the adapter
+//! must `select!` on it to proceed. Contrast with a "drain events
+//! every 50ms" polling pattern, where long-running ops (web search,
+//! execute command) had to remember to check a shared flag — silent
+//! forgetting there shipped as hangs-until-timeout bugs.
 
 use std::future::Future;
 

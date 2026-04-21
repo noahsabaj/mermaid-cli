@@ -392,7 +392,6 @@ fn render_actions(
                     },
                     ActionDetails::Diff { summary, .. } => summary.clone(),
                     ActionDetails::Preview { text, .. } => text.clone(),
-                    ActionDetails::Agent { summary, .. } => summary.clone(),
                     ActionDetails::Simple => match action.action_type.as_str() {
                         "Delete" => format!("Deleted {}", action.target),
                         _ => "Success".to_string(),
@@ -409,12 +408,6 @@ fn render_actions(
                         ),
                     ]));
                 }
-
-                // (No "Completed in X seconds" line for Preview details:
-                // `build_action_display` only sets `duration_seconds` for
-                // Agent actions, which use `ActionDetails::Agent` and embed
-                // the duration in the summary directly. The branch that used
-                // to live here was unreachable.)
 
                 // Write: syntax-highlighted file preview
                 if let ActionDetails::FileContent {

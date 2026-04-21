@@ -784,7 +784,7 @@ impl Model for GeminiAdapter {
     }
 
     /// Gemini does expose `/v1beta/models` for discovery, but Mermaid's
-    /// per-provider model list is curated in `ModelFactory::list_models`
+    /// per-provider model list is curated in ``providers::factory::ProviderFactory``
     /// to keep `mermaid list` snappy and predictable. Surface the
     /// adapter-level fact rather than drift from that.
     async fn list_models(&self) -> Result<Vec<String>> {

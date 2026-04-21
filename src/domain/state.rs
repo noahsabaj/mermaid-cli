@@ -3,8 +3,8 @@
 //! `State` is the value the reducer operates on. Everything the UI
 //! shows — from the chat log to the input buffer to the "Thinking…"
 //! animation — is derived from fields in this struct. Mutation happens
-//! only inside `update(state, msg)`; no other code in the new v0.7
-//! architecture is allowed to hold a `&mut State`.
+//! only inside `update(state, msg)`; no other code is allowed to hold
+//! a `&mut State`.
 //!
 //! The sub-state enums (`TurnState`, `UiMode`, `McpServerStatus`) are
 //! intentionally explicit sum types. A previous generation of this
@@ -425,7 +425,6 @@ pub struct Confirmation {
 #[derive(Debug, Clone)]
 pub enum ConfirmationTarget {
     ClearConversation,
-    OverwriteSavedConversation { name: String },
 }
 
 /// Transient status line shown under the input box. Self-clears after

@@ -1,16 +1,14 @@
 //! Pure-function reducer: `fn update(State, Msg) -> (State, Vec<Cmd>)`.
 //!
-//! This module is the heart of the v0.7 architecture. Everything here
-//! is synchronous, does no I/O, and is testable without tokio or a
-//! terminal. The effect runner (`crate::effect`) takes the `Cmd`
-//! values the reducer emits and performs the actual work; results
-//! come back as `Msg` events that feed into another `update` call.
+//! Heart of the MVU architecture. Everything here is synchronous,
+//! does no I/O, and is testable without tokio or a terminal. The
+//! effect runner (`crate::effect`) takes the `Cmd` values the reducer
+//! emits and performs the actual work; results come back as `Msg`
+//! events that feed into another `update` call.
 //!
-//! The split is load-bearing: bugs that the old architecture made
-//! possible (stale events racing with cancellation, lost tool results,
-//! two event loops competing for input) are impossible to express
-//! against these types. See `docs/architecture.md` (added in commit
-//! 11) for the full rationale.
+//! The split is load-bearing: stale events racing with cancellation,
+//! lost tool results, and two event loops competing for input are all
+//! impossible to express against these types.
 
 pub mod action;
 pub mod cmd;

@@ -1,9 +1,8 @@
-//! Anthropic provider — C4 wrapper over the v0.6 `AnthropicAdapter`.
+//! Anthropic provider — wraps `models::adapters::anthropic::AnthropicAdapter`.
 //!
-//! Same pattern as `ollama.rs`: the adapter's internals (wire format,
-//! cache_control blocks, extended-thinking signature round-trip) are
-//! preserved verbatim; the wrapper just plumbs `ChatRequest` /
-//! `StreamContext` into the legacy shapes.
+//! Same pattern as `ollama.rs`: the adapter handles the wire format
+//! (cache_control blocks, extended-thinking signature round-trip);
+//! this wrapper plumbs `ChatRequest` / `StreamContext` into it.
 //!
 //! Anthropic is the one provider that emits a `thinking_signature`
 //! that MUST round-trip on the next request. The adapter's
@@ -82,8 +81,6 @@ impl ModelProvider for AnthropicProvider {
         Ok(FinalResponse {
             usage,
             thinking_signature,
-            full_text: response.content,
-            full_thinking: response.thinking,
             tool_calls: response.tool_calls.unwrap_or_default(),
         })
     }

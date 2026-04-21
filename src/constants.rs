@@ -41,10 +41,6 @@ pub const MAX_RESPONSE_CHARS: usize = 400_000;
 /// Maximum entries in the markdown parse cache before eviction
 pub const MARKDOWN_CACHE_MAX_ENTRIES: usize = 200;
 
-// Subagent Configuration
-/// Maximum number of concurrent subagents that can be spawned by a single parent call
-pub const MAX_CONCURRENT_AGENTS: usize = 10;
-
 // Computer Use
 /// Maximum width for screenshots sent to models (pixels)
 pub const SCREENSHOT_MAX_WIDTH: u32 = 1280;

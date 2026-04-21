@@ -1,12 +1,12 @@
-//! OpenAI-compatible provider — C4 wrapper over the v0.6
-//! `OpenAICompatAdapter`.
+//! OpenAI-compatible provider — wraps
+//! `models::adapters::openai_compat::OpenAICompatAdapter`.
 //!
 //! This provider covers the OpenAI long-tail: OpenRouter, Groq,
 //! Fireworks, Together, custom vLLM endpoints, plus the user-defined
-//! entries in `[providers.*]`. The v0.6 adapter looks up a
+//! entries in `[providers.*]`. The adapter looks up a
 //! `ProviderProfile` (registry entry) and applies per-provider
 //! reasoning shapes (flat `reasoning_effort` vs nested `reasoning:
-//! {effort}`). The wrapper just forwards.
+//! {effort}`). This wrapper just forwards.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -84,8 +84,6 @@ impl ModelProvider for OpenAICompatProvider {
         Ok(FinalResponse {
             usage,
             thinking_signature: None,
-            full_text: response.content,
-            full_thinking: response.thinking,
             tool_calls: response.tool_calls.unwrap_or_default(),
         })
     }

@@ -9,11 +9,6 @@
 //! file — no observer plumbing, no dispatch wiring, no adapter-
 //! specific retry logic. The traits carry the full surface; the
 //! effect runner just looks up an impl and calls it.
-//!
-//! C3 ships the trait definitions + Ollama as the proof-of-pattern
-//! `ModelProvider` + `ReadFileTool`/`WriteFileTool` as the
-//! proof-of-pattern `ToolExecutor`. C4 ports the remaining three
-//! provider adapters; C5 ports the remaining tools.
 
 pub mod capabilities;
 pub mod ctx;
@@ -32,56 +27,15 @@ pub use model::{
 };
 pub use tool::{ToolExecutor, ToolRegistry};
 
-use std::sync::Arc;
-
-/// Optional static registry of `ModelProvider` instances, keyed by
-/// model ID. Currently unused — the effect runner resolves providers
-/// lazily via `ProviderFactory::resolve`. Kept for potential
-/// eager-preload use cases (tests, warm-up) where constructing the
-/// HTTP clients up front is worth it.
-pub struct Providers {
-    entries: std::collections::HashMap<String, Arc<dyn ModelProvider>>,
-}
-
-impl Providers {
-    pub fn new() -> Self {
-        Self {
-            entries: std::collections::HashMap::new(),
-        }
-    }
-
-    pub fn register(&mut self, key: impl Into<String>, provider: Arc<dyn ModelProvider>) {
-        self.entries.insert(key.into(), provider);
-    }
-
-    pub fn get(&self, key: &str) -> Option<Arc<dyn ModelProvider>> {
-        self.entries.get(key).cloned()
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-}
-
-impl Default for Providers {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn fresh_registry_is_empty() {
-        let p = Providers::default();
-        assert!(p.is_empty());
-        assert_eq!(p.len(), 0);
-        assert!(p.get("anything").is_none());
+    fn trait_is_object_safe() {
+        // Compile-time guard: `dyn ModelProvider` must stay
+        // object-safe so `ProviderFactory` can hand out
+        // `Arc<dyn ModelProvider>`.
+        fn _assert(_: &dyn ModelProvider) {}
     }
 }

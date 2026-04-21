@@ -1,15 +1,12 @@
 //! Terminal setup and teardown.
 //!
-//! Extracted from v0.6's `src/tui/ui.rs::run_ui` so the new main loop
-//! can reuse it without pulling in the `App` god-object. The sequence
-//! is unchanged — same raw-mode, same alternate screen, same panic
-//! hook restoration.
+//! Raw mode, alternate screen, bracketed paste, mouse capture, and
+//! panic-hook restoration — all entered and exited through
+//! `TerminalGuard`.
 //!
 //! The `TerminalGuard` type is the important piece: putting teardown
 //! inside a `Drop` impl means a panic in the render loop still
-//! restores the user's shell. v0.6 had this in an explicit function
-//! at the end of `run_ui`; a panic anywhere above it left the
-//! terminal in a cursed state. That doesn't happen here.
+//! restores the user's shell, no matter where it happens.
 
 use std::io::{self, Stdout};
 

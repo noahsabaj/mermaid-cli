@@ -1,7 +1,7 @@
 //! The effect runner: dispatches `Cmd` values into tokio tasks.
 //!
-//! There are exactly two places in the v0.7 codebase that spawn a
-//! tokio task: this module and tests. Everywhere else asks the
+//! There are exactly two places in the codebase that spawn a tokio
+//! task: this module and tests. Everywhere else asks the
 //! reducer to return a `Cmd`, and the runner handles it. That
 //! centralization is what makes structured concurrency per turn
 //! actually work — nothing can accidentally spawn a detached task
@@ -567,9 +567,36 @@ async fn dispatch_execute_tool(
         return;
     };
 
-    let (progress_tx, _progress_rx) = mpsc::channel(16);
+    // Bridge the tool's progress channel to `Msg::ToolProgress`.
+    // A sibling task drains progress events while the tool runs.
+    // The channel closes when `progress_tx` drops (when `ctx`
+    // drops at the end of `tool.execute`), which terminates the
+    // relay loop cleanly.
+    let (progress_tx, mut progress_rx) = mpsc::channel(16);
+    let relay_tx = msg_tx.clone();
+    let progress_relay = tokio::spawn(async move {
+        while let Some(event) = progress_rx.recv().await {
+            let chunk = match event {
+                crate::providers::ProgressEvent::Output(s) => s,
+                crate::providers::ProgressEvent::Status(s) => s,
+            };
+            if relay_tx
+                .send(Msg::ToolProgress {
+                    turn,
+                    call_id,
+                    chunk,
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
     let ctx = ExecContext::new(token, progress_tx, call_id, turn, workdir);
     let outcome = tool.execute(args, ctx).await;
+    let _ = progress_relay.await;
     let _ = msg_tx
         .send(Msg::ToolFinished {
             turn,

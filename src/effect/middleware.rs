@@ -1,16 +1,10 @@
 //! Cross-cutting wrappers over effect handlers.
 //!
-//! Retry-on-5xx, tracing, rate-limiting — all the concerns that used
-//! to be re-implemented per-adapter in the old `src/models/adapters/`
-//! tree. In the v0.7 architecture they live here and wrap any effect
-//! handler once, uniformly.
-//!
-//! The retry policy is lifted verbatim from the v0.6 `src/models/
-//! retry.rs` (which gets deleted in commit 10). Same classification
-//! function, same 500ms→3s exponential backoff, same 3-attempt cap.
-//! Moving it to middleware rather than keeping it inline in each
-//! adapter means future providers get retry for free; and the test
-//! suite doesn't need an in-process HTTP server per adapter.
+//! Retry-on-5xx, tracing, rate-limiting — all concerns that would
+//! otherwise be re-implemented per-adapter. Living here means any
+//! new effect handler picks them up uniformly; 500ms→3s exponential
+//! backoff, 3-attempt cap, same classification function for every
+//! provider.
 
 use std::time::Duration;
 

@@ -1,9 +1,9 @@
-//! Gemini provider — C4 wrapper over the v0.6 `GeminiAdapter`.
+//! Gemini provider — wraps `models::adapters::gemini::GeminiAdapter`.
 //!
 //! Google's Gemini family uses a different wire format from OpenAI-
 //! compat (`:streamGenerateContent?alt=sse` + protobuf-ish JSON
-//! shape). The v0.6 adapter handles all of that; we wrap and
-//! forward.
+//! shape). The adapter handles all of that; this wrapper just
+//! forwards.
 
 use std::sync::Arc;
 
@@ -73,8 +73,6 @@ impl ModelProvider for GeminiProvider {
         Ok(FinalResponse {
             usage,
             thinking_signature: None,
-            full_text: response.content,
-            full_thinking: response.thinking,
             tool_calls: response.tool_calls.unwrap_or_default(),
         })
     }
