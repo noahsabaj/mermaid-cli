@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-21
+
+The Architecture Release. This is a big-bang rewrite of Mermaid's
+runtime on the Elm/MVU pattern: one pure reducer, effects as data,
+structured concurrency per turn. External behaviour is intended to
+match v0.6; several whole classes of bug that v0.6 let slip become
+impossible to express against the new types.
+
+The new path ships behind `MERMAID_V7=1` for the v0.7.0 release so
+the v0.6 runtime keeps running by default during the migration
+window. Flipping the default happens in a follow-up once the v7
+path has been exercised against real sessions.
+
+### Added
+
+- **Pure reducer** (`src/domain/reducer.rs`) — `fn update(State, Msg)
+  -> (State, Vec<Cmd>)`. Synchronous. Stale events filter by embedded
+  `TurnId` before any state transition. Tool-result completeness is
+  type-enforced (`Vec<Option<ToolOutcome>>` can't advance to the
+  follow-up call until every slot is `Some(_)`). Exhaustive match on
+  `Msg`; clippy catches any missing variant.
+- **Effect runner** (`src/effect/`) — the single place in the
+  codebase where tokio tasks spawn. Owns per-turn `TurnScope`
+  (`CancellationToken` + `JoinSet`) so cancellation is a signal, not
+  a poll. Retry/tracing middleware (from v0.6's
+  `src/models/retry.rs`) now wraps any adapter uniformly.
+- **`ModelProvider` + `ToolExecutor` traits** (`src/providers/`) —
+  the adapter surface. Four model providers (Ollama, Anthropic,
+  Gemini, OpenAI-compat) + six built-in tools (read_file,
+  write_file, edit_file, delete_file, create_directory,
+  execute_command) all implement these. MCP dispatch lives at
+  `tool::McpToolProxy`.
+- **`StreamContext` + `ExecContext`** — typed per-call contexts
+  carrying the turn's cancellation token. Providers and tools that
+  ignore the token don't get past code review; the type signature
+  makes the race explicit.
+- **Pure view function** (`src/render/`) — `fn render(&State, &mut
+  Frame)`. Never mutates state, never performs I/O, never holds a
+  `&mut App`. Testable against ratatui's `TestBackend` without a
+  runtime or terminal.
+- **Single event loop** (`src/app/run.rs`) — one `tokio::select!`
+  over crossterm `EventStream` + effect-result mpsc + tick timer.
+  Replaces v0.6's two competing event loops. Behind
+  `MERMAID_V7=1`.
+- **`TerminalGuard`** — raw-mode/alt-screen setup with panic-safe
+  teardown. A panic mid-render restores the shell.
+- **Recorder / Replay** (`src/app/recorder.rs`) — JSONL msg logs.
+  Reducer is event-sourced by design, so record is one line per
+  reducer input and replay is a fold. Regression tests as flat
+  files; bug reports as replay logs.
+
+### Changed
+
+- `ExecuteCommandTool` now races subprocess wait against the turn's
+  cancellation token. Ctrl+C during a long-running build aborts
+  within microseconds (plus SIGKILL travel) instead of waiting for
+  the 300-second timeout. Structural fix for the v0.6 "20-press
+  Ctrl+C" report — tokens can't be forgotten; they're in the type.
+- Retry middleware moves from `src/models/retry.rs` (deleted in
+  follow-up) to `src/effect/middleware.rs`. Behaviour identical:
+  3 attempts, 500ms→3s exponential backoff, retry on 5xx / 429 /
+  `ConnectionFailed`.
+
+### Docs
+
+- `docs/architecture.md` — full tour of the new design + invariants.
+- `docs/adding_tools.md` — one-file tool recipe.
+- `docs/adding_providers.md` — adapter recipe.
+- `docs/replay_debugging.md` — record/replay usage.
+
+### Tests
+
+- 558 tests pass: 516 library, 42 integration.
+- `tests/reducer_flows.rs` — 15 multi-message flow tests (stale
+  events, tool-outcome completeness, cancel, quit, slash commands).
+- `tests/effect_cancel.rs` — 5 real-tokio tests (Ctrl+C aborts a
+  `sleep 60` within 300ms; bounded shutdown).
+- Ratatui `TestBackend` renderer tests (5).
+
+### Not yet in v0.7.0
+
+- Default binary path still runs v0.6 runtime. Flip happens in a
+  follow-up release once v7 parity is verified against real
+  sessions.
+- Subagent dispatch, MCP startup, and several modals (conversation
+  load, /cloud-setup, model list) still route through v0.6 code.
+  Reducer has the `Msg` vocabulary; implementations mechanical.
+
 ## [0.6.0] - 2026-04-16
 
 Major release: multi-provider adapter support. Mermaid is no longer
