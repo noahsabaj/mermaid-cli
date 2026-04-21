@@ -126,6 +126,10 @@ pub enum Cmd {
     /// Exit the main loop. No reply message — the loop observes
     /// `state.should_exit` after the reducer returns and breaks out.
     Exit,
+    /// Write the OSC 2 terminal-title sequence. Reducer diffs
+    /// against `ui.last_title_dispatched` so this only fires on
+    /// actual title changes, not every frame.
+    SetTerminalTitle(String),
 
     // ── Subagent cancellation ───────────────────────────────────────
     CancelSubagent {
@@ -186,6 +190,7 @@ impl Cmd {
             Cmd::DismissStatusAfter { .. } => "dismiss_status_after",
             Cmd::WriteImageToTemp { .. } => "write_image_to_temp",
             Cmd::Exit => "exit",
+            Cmd::SetTerminalTitle(_) => "set_terminal_title",
             Cmd::CancelSubagent { .. } => "cancel_subagent",
         }
     }
@@ -249,6 +254,7 @@ impl Cmd {
                 )
             },
             Cmd::Exit => "exit".to_string(),
+            Cmd::SetTerminalTitle(t) => format!("set_terminal_title({})", t),
             Cmd::CancelSubagent { turn, subagent } => {
                 format!("cancel_subagent(turn={}, sub={})", turn, subagent)
             },

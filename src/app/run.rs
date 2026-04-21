@@ -33,7 +33,7 @@ use crate::app::terminal::TerminalGuard;
 use crate::domain::{Cmd, Msg, State, update};
 use crate::effect::EffectRunner;
 use crate::providers::ToolRegistry;
-use crate::render::render;
+use crate::render::{RenderState, render};
 
 /// The v0.7 main loop. External behavior is intended to match the
 /// v0.6 runtime; differences are bugs.
@@ -43,6 +43,7 @@ pub async fn run(config: Config, cwd: PathBuf, model_id: String) -> Result<()> {
     let (mut runner, mut msg_rx) =
         EffectRunner::pair_with_bindings(cwd.clone(), config.clone(), tools);
     let mut terminal = TerminalGuard::setup()?;
+    let mut rstate = RenderState::new();
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(16));
 
@@ -57,7 +58,9 @@ pub async fn run(config: Config, cwd: PathBuf, model_id: String) -> Result<()> {
     loop {
         // Render the current state. ratatui's draw closure captures
         // &state, so we don't thread &mut state through the renderer.
-        terminal.inner_mut().draw(|f| render(&state, f))?;
+        terminal
+            .inner_mut()
+            .draw(|f| render(&state, &mut rstate, f))?;
 
         let msg = tokio::select! {
             biased;

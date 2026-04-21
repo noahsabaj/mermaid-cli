@@ -238,6 +238,16 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
     }
 
+    // Per-step: if the conversation's derived title changed (user
+    // first prompt just landed, or a load/clear shuffled things),
+    // emit one SetTerminalTitle Cmd. The diff against
+    // `last_title_dispatched` stops this from firing every frame.
+    let current_title = state.session.conversation.title.clone();
+    if state.ui.last_title_dispatched.as_deref() != Some(current_title.as_str()) {
+        cmds.push(Cmd::SetTerminalTitle(format!("mermaid - {}", current_title)));
+        state.ui.last_title_dispatched = Some(current_title);
+    }
+
     (state, cmds)
 }
 
@@ -254,6 +264,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             cmds.push(Cmd::Exit);
         } else {
             state.ui.input_buffer.clear();
+            state.ui.input_cursor = 0;
         }
         return;
     }
@@ -266,20 +277,138 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
-    // The rest is rudimentary text input — real keybind handling
-    // (arrow-key history nav, tab completion, Alt+T reasoning cycle,
-    // etc.) lands in commit 6/7 when we port the event source. For
-    // now we just accumulate printable chars so the reducer can be
-    // exercised in tests.
+    // Attachment-focus mode: keyboard navigates the bar.
+    if state.ui.attachment_focused {
+        handle_attachment_key(state, code);
+        return;
+    }
+
+    // Enter submits the current input (or triggers the slash palette
+    // pick). Shift+Enter is a newline for multi-line input.
+    if code == KeyCode::Enter && !mods.shift {
+        let buf = state.ui.input_buffer.trim().to_string();
+        if buf.is_empty() {
+            return;
+        }
+        if let Some(rest) = buf.strip_prefix('/') {
+            let slash = crate::app::event_source::parse_slash_command(rest);
+            state.ui.input_buffer.clear();
+            state.ui.input_cursor = 0;
+            handle_slash(state, cmds, slash);
+        } else {
+            let text = std::mem::take(&mut state.ui.input_buffer);
+            state.ui.input_cursor = 0;
+            let attachment_ids: Vec<u64> =
+                state.ui.attachments.iter().map(|a| a.id).collect();
+            handle_submit_prompt(state, cmds, text, &attachment_ids);
+        }
+        return;
+    }
+
     if mods.is_empty() || mods.shift {
         match code {
-            KeyCode::Char(c) => state.ui.input_buffer.push(c),
+            KeyCode::Char(c) => {
+                // Insert at cursor, then advance.
+                let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
+                state.ui.input_buffer.insert(pos, c);
+                state.ui.input_cursor = clamp_cursor(
+                    &state.ui.input_buffer,
+                    pos + c.len_utf8(),
+                );
+            },
             KeyCode::Backspace => {
-                state.ui.input_buffer.pop();
+                let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
+                if pos > 0 {
+                    let new_pos = state.ui.input_buffer.floor_char_boundary(pos - 1);
+                    state.ui.input_buffer.drain(new_pos..pos);
+                    state.ui.input_cursor = new_pos;
+                }
+            },
+            KeyCode::Delete => {
+                let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
+                if pos < state.ui.input_buffer.len() {
+                    let next = state.ui.input_buffer.ceil_char_boundary(pos + 1);
+                    state.ui.input_buffer.drain(pos..next);
+                }
+            },
+            KeyCode::Left => {
+                let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
+                if pos > 0 {
+                    state.ui.input_cursor =
+                        state.ui.input_buffer.floor_char_boundary(pos - 1);
+                }
+            },
+            KeyCode::Right => {
+                let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
+                if pos < state.ui.input_buffer.len() {
+                    state.ui.input_cursor =
+                        state.ui.input_buffer.ceil_char_boundary(pos + 1);
+                }
+            },
+            KeyCode::Home => state.ui.input_cursor = 0,
+            KeyCode::End => state.ui.input_cursor = state.ui.input_buffer.len(),
+            KeyCode::Up => {
+                // Focus the attachment bar if it has entries; otherwise
+                // fall through (future: history nav).
+                if !state.ui.attachments.is_empty() {
+                    state.ui.attachment_focused = true;
+                    state.ui.attachment_selected =
+                        state.ui.attachment_selected.min(state.ui.attachments.len() - 1);
+                }
+            },
+            KeyCode::Escape => {
+                state.ui.attachment_focused = false;
             },
             _ => {},
         }
     }
+}
+
+/// Handle keyboard input while the attachment bar has keyboard
+/// focus. Returns without emitting Cmds; attachment removal happens
+/// inline on state.ui.attachments.
+fn handle_attachment_key(state: &mut State, code: KeyCode) {
+    match code {
+        KeyCode::Escape | KeyCode::Down => {
+            state.ui.attachment_focused = false;
+        },
+        KeyCode::Left => {
+            if !state.ui.attachments.is_empty() {
+                state.ui.attachment_selected = state
+                    .ui
+                    .attachment_selected
+                    .checked_sub(1)
+                    .unwrap_or(state.ui.attachments.len() - 1);
+            }
+        },
+        KeyCode::Right => {
+            if !state.ui.attachments.is_empty() {
+                state.ui.attachment_selected =
+                    (state.ui.attachment_selected + 1) % state.ui.attachments.len();
+            }
+        },
+        KeyCode::Delete | KeyCode::Backspace => {
+            let idx = state.ui.attachment_selected;
+            if idx < state.ui.attachments.len() {
+                state.ui.attachments.remove(idx);
+            }
+            if state.ui.attachments.is_empty() {
+                state.ui.attachment_focused = false;
+                state.ui.attachment_selected = 0;
+            } else if state.ui.attachment_selected >= state.ui.attachments.len() {
+                state.ui.attachment_selected = state.ui.attachments.len() - 1;
+            }
+        },
+        _ => {},
+    }
+}
+
+/// Clamp a raw byte offset onto the nearest preceding char boundary
+/// in `s`. Callers that trust their cursor is already valid can skip
+/// this; paste + multi-step transformations should use it.
+fn clamp_cursor(s: &str, pos: usize) -> usize {
+    let capped = pos.min(s.len());
+    s.floor_char_boundary(capped)
 }
 
 fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
@@ -309,10 +438,14 @@ fn handle_submit_prompt(
     text: String,
     attachment_ids: &[u64],
 ) {
-    if !matches!(state.turn, TurnState::Idle) {
+    if text.trim().is_empty() {
         return;
     }
-    if text.trim().is_empty() {
+    // If a turn is already in flight, queue this message. The
+    // reducer's StreamDone arm pops the oldest queued message and
+    // auto-submits it.
+    if !matches!(state.turn, TurnState::Idle) {
+        state.ui.queued_messages.push_back(text);
         return;
     }
 
@@ -463,7 +596,7 @@ fn handle_stream_done(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     turn: TurnId,
-    _usage: Option<crate::models::TokenUsage>,
+    usage: Option<crate::models::TokenUsage>,
     thinking_signature: Option<String>,
 ) {
     // Take the generating state out so we can replace it.
@@ -489,7 +622,23 @@ fn handle_stream_done(
     // `pending: Vec<PendingToolCall>` slot on the Generating variant.)
     let msg = commit_assistant_message(partial_text, partial_reasoning, vec![], final_sig);
     state.session.append(msg);
+
+    // Running total the status widget reads. Token count may be
+    // unknown (provider didn't report) — then we just don't
+    // advance.
+    if let Some(u) = usage {
+        state.session.cumulative_tokens =
+            state.session.cumulative_tokens.saturating_add(u.total_tokens);
+    }
+
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+
+    // Drain the queued-message FIFO. If the user typed anything
+    // while this turn was in flight, auto-submit the oldest now.
+    if let Some(next) = state.ui.queued_messages.pop_front() {
+        let ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
+        handle_submit_prompt(state, cmds, next, &ids);
+    }
 }
 
 fn handle_upstream_error(state: &mut State, error: crate::models::UserFacingError) {

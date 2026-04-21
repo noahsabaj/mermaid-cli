@@ -15,7 +15,7 @@
 //! at once, and the reducer can pattern-match instead of guarding with
 //! if-chains.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -65,14 +65,19 @@ impl State {
     pub fn new(settings: Config, cwd: PathBuf, model_id: String) -> Self {
         let project_path = cwd.display().to_string();
         let conversation = ConversationHistory::new(project_path, model_id.clone());
+        let initial_title = conversation.title.clone();
         Self {
             session: Session {
                 conversation,
                 model_id,
                 reasoning: settings.default_model.reasoning,
+                cumulative_tokens: 0,
             },
             turn: TurnState::Idle,
-            ui: UiState::default(),
+            ui: UiState {
+                last_title_dispatched: Some(initial_title),
+                ..UiState::default()
+            },
             mcp: McpState::default(),
             settings,
             instructions: None,
@@ -109,6 +114,11 @@ pub struct Session {
     pub conversation: ConversationHistory,
     pub model_id: String,
     pub reasoning: ReasoningLevel,
+    /// Running total of tokens consumed across every turn in this
+    /// session. The reducer adds `StreamDone.usage.total_tokens` on
+    /// each successful turn end; status widget reads it for the
+    /// bottom-right counter.
+    pub cumulative_tokens: usize,
 }
 
 impl Session {
@@ -296,8 +306,18 @@ pub enum SubagentStatus {
 pub struct UiState {
     pub mode: UiMode,
     pub input_buffer: String,
+    /// Byte position within `input_buffer`. The reducer normalizes to
+    /// a UTF-8 char boundary on every mutation via
+    /// `floor_char_boundary`, so widgets can slice safely.
+    pub input_cursor: usize,
     /// Pending image pastes queued for the next user message.
     pub attachments: Vec<Attachment>,
+    /// When true, keyboard focus is on the attachment bar (up arrow
+    /// from input moves focus up here; Esc returns focus to input).
+    pub attachment_focused: bool,
+    /// Highlighted attachment index when focused. Ignored when
+    /// `attachment_focused` is false.
+    pub attachment_selected: usize,
     /// Scroll offset for the chat pane.
     pub chat_scroll: usize,
     /// When the slash-palette is open, this holds the filter prefix
@@ -307,6 +327,14 @@ pub struct UiState {
     /// When `Some(i)`, the palette has a highlighted row. `None` =
     /// closed / not showing.
     pub palette_cursor: Option<usize>,
+    /// Messages the user typed while a turn was in flight. The
+    /// reducer pops the oldest and auto-submits on a successful
+    /// `StreamDone`. FIFO order.
+    pub queued_messages: VecDeque<String>,
+    /// Last terminal title dispatched via `Cmd::SetTerminalTitle`.
+    /// Used by the reducer to avoid spamming the cmd every frame —
+    /// emit only when the derived title actually changes.
+    pub last_title_dispatched: Option<String>,
 }
 
 /// Top-level UI mode. Like `TurnState` this is a sum type instead of a

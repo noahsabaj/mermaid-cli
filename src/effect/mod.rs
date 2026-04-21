@@ -271,6 +271,15 @@ impl EffectRunner {
                 // take any special action. Documented here for
                 // exhaustiveness.
             },
+            Cmd::SetTerminalTitle(title) => {
+                self.detached.spawn(async move {
+                    use std::io::Write;
+                    let seq = format!("\x1b]2;{}\x07", title);
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(seq.as_bytes());
+                    let _ = stdout.flush();
+                });
+            },
             Cmd::CancelSubagent { turn, subagent } => {
                 // Scaffold — per-subagent cancellation wires into
                 // `effect::subagent` in C5.
