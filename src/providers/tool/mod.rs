@@ -15,6 +15,7 @@
 //! name + JSON schema the model sees cannot drift from the handler
 //! that runs when the model calls it. Single source of truth.
 
+pub mod computer_use;
 pub mod exec;
 pub mod filesystem;
 pub mod mcp;
@@ -160,6 +161,22 @@ impl ToolRegistry {
         if let Some(key) = crate::utils::resolve_api_key("OLLAMA_API_KEY", None) {
             r.register(Arc::new(web::WebSearchTool::new(key.clone())));
             r.register(Arc::new(web::WebFetchTool::new(key)));
+        }
+
+        // Computer-use tools only register when (a) the process runs
+        // interactively (Headless CI has no user to watch a screenshot)
+        // AND (b) a display backend passes the startup probe. Failed
+        // probe → tools aren't advertised → model can't call them.
+        if _mode == TuiMode::Interactive {
+            let backend = computer_use::probe();
+            if backend.is_usable() {
+                let driver = Arc::new(computer_use::ComputerUseDriver::new(backend));
+                r.register(Arc::new(computer_use::ScreenshotTool::new(driver.clone())));
+                // Commit 5 adds the remaining six tools (click,
+                // type_text, press_key, scroll, mouse_move,
+                // list_windows) against the same driver.
+                let _ = driver;
+            }
         }
 
         Arc::new(r)
