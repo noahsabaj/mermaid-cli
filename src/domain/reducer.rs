@@ -1192,7 +1192,7 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
 
     ChatRequest {
         model_id: state.session.model_id.clone(),
-        messages: state.session.messages().to_vec(),
+        messages: evict_stale_screenshots(state.session.messages().to_vec()),
         system_prompt: get_system_prompt(),
         instructions,
         reasoning: state.session.reasoning,
@@ -1200,6 +1200,47 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         max_tokens,
         tools: mcp_tools,
     }
+}
+
+/// Walk the message log and retain only the `MAX_RETAINED_SCREENSHOTS`
+/// most recent images across the whole conversation. Older messages
+/// that had images get `images: None` AND an appended
+/// `[Image elided — superseded by newer screenshot]` marker in
+/// `content`, so the model still knows something visual was there.
+///
+/// Why: an agentic GUI loop can generate 10+ screenshots in a single
+/// session. At 2MB/PNG that's 20MB uncompressed in every outgoing
+/// request body — request bloat compounds across turns and slows the
+/// model. The on-screen chat history still shows all images (this
+/// transformation is on the CLONED Vec passed to the provider); only
+/// the wire payload is slimmed.
+fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    use crate::constants::MAX_RETAINED_SCREENSHOTS;
+    let mut seen = 0usize;
+    for msg in messages.iter_mut().rev() {
+        let Some(imgs) = msg.images.as_ref() else {
+            continue;
+        };
+        if imgs.is_empty() {
+            continue;
+        }
+        if seen < MAX_RETAINED_SCREENSHOTS {
+            seen += imgs.len();
+            continue;
+        }
+        // Beyond the cap — elide.
+        let elided_count = imgs.len();
+        msg.images = None;
+        let marker = if elided_count == 1 {
+            "\n[Image elided — superseded by newer screenshot]"
+        } else {
+            "\n[Images elided — superseded by newer screenshots]"
+        };
+        if !msg.content.ends_with(marker) {
+            msg.content.push_str(marker);
+        }
+    }
+    messages
 }
 
 #[cfg(test)]
@@ -1217,6 +1258,81 @@ mod tests {
             PathBuf::from("/tmp/project"),
             "ollama/test".to_string(),
         )
+    }
+
+    #[test]
+    fn evict_stale_screenshots_retains_most_recent_and_elides_rest() {
+        use crate::constants::MAX_RETAINED_SCREENSHOTS;
+        let mut msgs = Vec::new();
+        for i in 0..(MAX_RETAINED_SCREENSHOTS + 3) {
+            msgs.push(ChatMessage {
+                role: MessageRole::Assistant,
+                content: format!("turn {}", i),
+                timestamp: chrono::Local::now(),
+                actions: vec![],
+                thinking: None,
+                images: Some(vec![format!("png-base64-{}", i)]),
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+                thinking_signature: None,
+            });
+        }
+        let out = super::evict_stale_screenshots(msgs);
+        // Last MAX_RETAINED_SCREENSHOTS entries still carry images.
+        for m in out.iter().rev().take(MAX_RETAINED_SCREENSHOTS) {
+            assert!(m.images.is_some(), "most-recent images must survive");
+        }
+        // Everything before the cap is elided.
+        for m in out.iter().rev().skip(MAX_RETAINED_SCREENSHOTS) {
+            assert!(m.images.is_none(), "older images must be elided");
+            assert!(
+                m.content.contains("elided"),
+                "elision marker must land in content"
+            );
+        }
+    }
+
+    #[test]
+    fn evict_stale_screenshots_preserves_messages_without_images() {
+        use crate::constants::MAX_RETAINED_SCREENSHOTS;
+        // 5 text-only + 2 with images (under the cap) — nothing should
+        // be elided.
+        let mut msgs = Vec::new();
+        for i in 0..5 {
+            msgs.push(ChatMessage {
+                role: MessageRole::User,
+                content: format!("text only {}", i),
+                timestamp: chrono::Local::now(),
+                actions: vec![],
+                thinking: None,
+                images: None,
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+                thinking_signature: None,
+            });
+        }
+        for i in 0..2 {
+            msgs.push(ChatMessage {
+                role: MessageRole::Assistant,
+                content: format!("with image {}", i),
+                timestamp: chrono::Local::now(),
+                actions: vec![],
+                thinking: None,
+                images: Some(vec![format!("png-{}", i)]),
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+                thinking_signature: None,
+            });
+        }
+        const { assert!(2 < MAX_RETAINED_SCREENSHOTS, "test premise") };
+        let out = super::evict_stale_screenshots(msgs);
+        // All 7 messages unchanged.
+        let with_images = out.iter().filter(|m| m.images.is_some()).count();
+        assert_eq!(with_images, 2);
+        assert!(!out.iter().any(|m| m.content.contains("elided")));
     }
 
     #[test]
