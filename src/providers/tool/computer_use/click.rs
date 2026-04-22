@@ -1,0 +1,144 @@
+//! `click` — mouse click at model-space `(x, y)`. `screenshot_id`
+//! selects which capture the coords refer to (None = latest). After
+//! clicking, auto-captures the focused window so the model can
+//! verify the result inline.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use async_trait::async_trait;
+use serde_json::Value;
+
+use crate::constants::POST_CLICK_DELAY_MS;
+use crate::domain::{ToolDefinition, ToolOutcome};
+use crate::providers::ctx::{ExecContext, ProgressEvent};
+
+use super::super::ToolExecutor;
+use super::driver::ComputerUseDriver;
+
+pub struct ClickTool {
+    driver: Arc<ComputerUseDriver>,
+}
+
+impl ClickTool {
+    pub fn new(driver: Arc<ComputerUseDriver>) -> Self {
+        Self { driver }
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for ClickTool {
+    fn name(&self) -> &'static str {
+        "click"
+    }
+
+    fn schema(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "click".to_string(),
+            description:
+                "Click at model-space (x, y). Pass `screenshot_id` to lock coordinates to a \
+                 specific past screenshot; omit for the most recent. Auto-captures the \
+                 focused window afterwards so the result is visible inline."
+                    .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "x": { "type": "integer" },
+                    "y": { "type": "integer" },
+                    "button": { "type": "string", "enum": ["left", "middle", "right"], "default": "left" },
+                    "screenshot_id": { "type": "integer" }
+                },
+                "required": ["x", "y"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
+        let started = Instant::now();
+        if let Err(o) = self.driver.ensure_alive() {
+            return o;
+        }
+
+        let x = args.get("x").and_then(|v| v.as_i64()).map(|n| n as i32);
+        let y = args.get("y").and_then(|v| v.as_i64()).map(|n| n as i32);
+        let (x, y) = match (x, y) {
+            (Some(x), Some(y)) => (x, y),
+            _ => {
+                return ToolOutcome::Error {
+                    error: "click requires integer `x` and `y`".to_string(),
+                    duration_secs: started.elapsed().as_secs_f64(),
+                };
+            },
+        };
+        let button = args
+            .get("button")
+            .and_then(|v| v.as_str())
+            .unwrap_or("left")
+            .to_string();
+        let screenshot_id = args.get("screenshot_id").and_then(|v| v.as_u64());
+
+        let (sx, sy) = match self.driver.scale_coords(x, y, screenshot_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return ToolOutcome::Error {
+                    error: e,
+                    duration_secs: started.elapsed().as_secs_f64(),
+                };
+            },
+        };
+
+        let click_res = tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => return ToolOutcome::Cancelled,
+            r = self.driver.click(sx, sy, &button, &ctx.token) => r,
+        };
+        if let Err(e) = click_res {
+            return ToolOutcome::Error {
+                error: format!("click failed: {}", e),
+                duration_secs: started.elapsed().as_secs_f64(),
+            };
+        }
+
+        // Let the WM process focus change + UI update before the
+        // auto-screenshot captures the result.
+        tokio::time::sleep(std::time::Duration::from_millis(POST_CLICK_DELAY_MS)).await;
+
+        let mut msg = format!(
+            "Clicked {} at ({}, {}) [screen: ({}, {})]",
+            button, x, y, sx, sy
+        );
+        if let Some(warning) = self.driver.check_cursor_landed(sx, sy).await {
+            msg.push('\n');
+            msg.push_str(&warning);
+        }
+
+        let (summary, image) = match self.driver.capture_focused_for_autoshot(&ctx.token).await {
+            Some((s, b64)) => (Some(s), Some(b64)),
+            None => (None, None),
+        };
+
+        if let Some(b64) = &image
+            && let Ok(bytes) =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+        {
+            let _ = ctx
+                .progress
+                .send(ProgressEvent::Artifact {
+                    mime: "image/png".to_string(),
+                    data: bytes,
+                    caption: Some("click auto-screenshot".to_string()),
+                })
+                .await;
+        }
+
+        let final_output = match &summary {
+            Some(s) => format!("{}\n[auto-screenshot: {}]", msg, s),
+            None => msg,
+        };
+        ToolOutcome::Finished {
+            output: final_output,
+            images: image.map(|b| vec![b]),
+            duration_secs: started.elapsed().as_secs_f64(),
+        }
+    }
+}

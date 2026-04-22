@@ -22,14 +22,26 @@
 //! the X server is actually unreachable (SSH forwarding without an
 //! X server, detached display, laptop lid closed).
 
+pub mod click;
 pub mod driver;
+pub mod list_windows;
+pub mod mouse_move;
+pub mod press_key;
 pub mod screenshot;
+pub mod scroll;
+pub mod type_text;
 
 use std::path::Path;
 use std::process::Command;
 
+pub use click::ClickTool;
 pub use driver::ComputerUseDriver;
+pub use list_windows::ListWindowsTool;
+pub use mouse_move::MouseMoveTool;
+pub use press_key::PressKeyTool;
 pub use screenshot::ScreenshotTool;
+pub use scroll::ScrollTool;
+pub use type_text::TypeTextTool;
 
 /// Platform / display-server the driver dispatches to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +111,7 @@ pub fn display_is_reachable(backend: Backend) -> bool {
     }
 }
 
-fn has_command(name: &str) -> bool {
+pub(super) fn has_command(name: &str) -> bool {
     // `which` returns 0 iff the binary is on PATH. Cheap and universal
     // across Linux + macOS; Windows would want `where.exe` but
     // computer-use on Windows is stubbed out anyway.

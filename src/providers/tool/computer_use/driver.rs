@@ -264,6 +264,293 @@ impl ComputerUseDriver {
             summary,
         })
     }
+
+    /// Convenience for click/type/key tools: capture the focused
+    /// window and return `(summary, base64_png)` for inclusion in
+    /// the tool's auto-screenshot. Best-effort — on error returns
+    /// `None` and the caller can fall back to a screenshot-less
+    /// outcome.
+    pub async fn capture_focused_for_autoshot(
+        &self,
+        token: &CancellationToken,
+    ) -> Option<(String, String)> {
+        let cap = self.capture(ScreenshotSpec::Focused, token).await.ok()?;
+        Some((cap.summary, cap.base64_png))
+    }
+
+    /// X11-only: verify the cursor actually landed where xdotool was
+    /// told to move it. Returns `Some(warning)` if the cursor ended
+    /// up more than `CURSOR_LANDED_TOLERANCE_PX` away (focus change,
+    /// window moved, WM rejected the move). `None` if within
+    /// tolerance or the probe itself failed (best-effort — never
+    /// blocks the click).
+    pub async fn check_cursor_landed(&self, sx: i32, sy: i32) -> Option<String> {
+        if !matches!(self.backend, Backend::X11) {
+            return None;
+        }
+        let out = run_cmd_stdout(Command::new("xdotool").arg("getmouselocation"))
+            .await
+            .ok()?;
+        let mut actual_x: Option<i32> = None;
+        let mut actual_y: Option<i32> = None;
+        for tok in out.split_whitespace() {
+            if let Some(v) = tok.strip_prefix("X:") {
+                actual_x = v.parse().ok();
+            } else if let Some(v) = tok.strip_prefix("Y:") {
+                actual_y = v.parse().ok();
+            }
+        }
+        let (ax, ay) = (actual_x?, actual_y?);
+        if (ax - sx).abs() > CURSOR_LANDED_TOLERANCE_PX
+            || (ay - sy).abs() > CURSOR_LANDED_TOLERANCE_PX
+        {
+            Some(format!(
+                "WARNING: cursor at ({}, {}), expected ({}, {}). Window may have moved \
+                 or focus changed before the click landed.",
+                ax, ay, sx, sy
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+/// HiDPI fractional scaling can put the cursor a pixel or two off the
+/// exact target; >5px means something other than rounding is wrong.
+const CURSOR_LANDED_TOLERANCE_PX: i32 = 5;
+
+// ───── action dispatch (shared by click / type / key / scroll / move / list) ──
+
+impl ComputerUseDriver {
+    /// Click at the given SCREEN coordinates (already scaled by
+    /// `scale_coords`). `button` is `"left" | "middle" | "right"`.
+    pub async fn click(
+        &self,
+        sx: i32,
+        sy: i32,
+        button: &str,
+        token: &CancellationToken,
+    ) -> Result<()> {
+        let code = match button {
+            "middle" => "2",
+            "right" => "3",
+            _ => "1",
+        };
+        match self.backend {
+            Backend::X11 => {
+                run_cmd_cancellable(
+                    Command::new("xdotool").args([
+                        "mousemove",
+                        "--sync",
+                        &sx.to_string(),
+                        &sy.to_string(),
+                        "click",
+                        "--clearmodifiers",
+                        code,
+                    ]),
+                    token,
+                )
+                .await
+            },
+            Backend::Wayland => {
+                if !super::has_command("ydotool") {
+                    anyhow::bail!("ydotool required for Wayland mouse control")
+                }
+                run_cmd_cancellable(
+                    Command::new("ydotool").args([
+                        "mousemove",
+                        "--absolute",
+                        "-x",
+                        &sx.to_string(),
+                        "-y",
+                        &sy.to_string(),
+                    ]),
+                    token,
+                )
+                .await?;
+                run_cmd_cancellable(
+                    Command::new("ydotool").args(["click", &format!("0x{}", code)]),
+                    token,
+                )
+                .await
+            },
+            _ => anyhow::bail!("click not supported on this platform"),
+        }
+    }
+
+    /// Type text at the current focus. Per-keystroke delay from
+    /// `TYPE_KEY_DELAY_MS` — empirically needed for slow Electron /
+    /// web targets that drop characters at lower rates.
+    pub async fn type_text(&self, text: &str, token: &CancellationToken) -> Result<()> {
+        let delay = crate::constants::TYPE_KEY_DELAY_MS.to_string();
+        match self.backend {
+            Backend::X11 => {
+                run_cmd_cancellable(
+                    Command::new("xdotool").args([
+                        "type",
+                        "--clearmodifiers",
+                        "--delay",
+                        &delay,
+                        text,
+                    ]),
+                    token,
+                )
+                .await
+            },
+            Backend::Wayland => {
+                if super::has_command("wtype") {
+                    run_cmd_cancellable(Command::new("wtype").arg(text), token).await
+                } else if super::has_command("ydotool") {
+                    run_cmd_cancellable(
+                        Command::new("ydotool").args(["type", "--delay", &delay, text]),
+                        token,
+                    )
+                    .await
+                } else {
+                    anyhow::bail!("wtype or ydotool required for Wayland text input")
+                }
+            },
+            _ => anyhow::bail!("type_text not supported on this platform"),
+        }
+    }
+
+    /// Press a key (or key combination like `"ctrl+shift+t"`).
+    pub async fn press_key(&self, key: &str, token: &CancellationToken) -> Result<()> {
+        match self.backend {
+            Backend::X11 => {
+                run_cmd_cancellable(Command::new("xdotool").args(["key", key]), token).await
+            },
+            Backend::Wayland => {
+                if super::has_command("wtype") {
+                    // wtype: -M/-m modifiers around -k final key.
+                    let parts: Vec<&str> = key.split('+').collect();
+                    let mut args: Vec<String> = Vec::new();
+                    for (i, part) in parts.iter().enumerate() {
+                        if i < parts.len() - 1 {
+                            args.push("-M".to_string());
+                            args.push(part.to_string());
+                        } else {
+                            args.push("-k".to_string());
+                            args.push(part.to_string());
+                        }
+                    }
+                    for part in parts.iter().take(parts.len().saturating_sub(1)) {
+                        args.push("-m".to_string());
+                        args.push(part.to_string());
+                    }
+                    run_cmd_cancellable(Command::new("wtype").args(&args), token).await
+                } else if super::has_command("ydotool") {
+                    run_cmd_cancellable(Command::new("ydotool").args(["key", key]), token).await
+                } else {
+                    anyhow::bail!("wtype or ydotool required for Wayland key input")
+                }
+            },
+            _ => anyhow::bail!("press_key not supported on this platform"),
+        }
+    }
+
+    /// Scroll `amount` ticks in `direction` ("up" / "down").
+    pub async fn scroll(
+        &self,
+        direction: &str,
+        amount: i32,
+        token: &CancellationToken,
+    ) -> Result<()> {
+        match self.backend {
+            Backend::X11 => {
+                // xdotool: button 4 = scroll up, 5 = scroll down.
+                let button = if direction == "up" { "4" } else { "5" };
+                let mut args: Vec<String> = Vec::new();
+                for _ in 0..amount {
+                    args.push("click".to_string());
+                    args.push(button.to_string());
+                }
+                run_cmd_cancellable(Command::new("xdotool").args(&args), token).await
+            },
+            Backend::Wayland => {
+                if !super::has_command("ydotool") {
+                    anyhow::bail!("ydotool required for Wayland scroll")
+                }
+                let wheel_amount = if direction == "up" { -amount } else { amount };
+                run_cmd_cancellable(
+                    Command::new("ydotool").args([
+                        "mousemove",
+                        "--wheel",
+                        &wheel_amount.to_string(),
+                    ]),
+                    token,
+                )
+                .await
+            },
+            _ => anyhow::bail!("scroll not supported on this platform"),
+        }
+    }
+
+    /// Move the mouse cursor to SCREEN coords (already scaled).
+    pub async fn mouse_move(&self, sx: i32, sy: i32, token: &CancellationToken) -> Result<()> {
+        match self.backend {
+            Backend::X11 => {
+                run_cmd_cancellable(
+                    Command::new("xdotool").args([
+                        "mousemove",
+                        "--sync",
+                        &sx.to_string(),
+                        &sy.to_string(),
+                    ]),
+                    token,
+                )
+                .await
+            },
+            Backend::Wayland => {
+                if !super::has_command("ydotool") {
+                    anyhow::bail!("ydotool required for Wayland mouse control")
+                }
+                run_cmd_cancellable(
+                    Command::new("ydotool").args([
+                        "mousemove",
+                        "--absolute",
+                        "-x",
+                        &sx.to_string(),
+                        "-y",
+                        &sy.to_string(),
+                    ]),
+                    token,
+                )
+                .await
+            },
+            _ => anyhow::bail!("mouse_move not supported on this platform"),
+        }
+    }
+
+    /// List visible window titles. X11 only; Wayland has no portable
+    /// enumeration primitive.
+    pub async fn list_windows(&self, _token: &CancellationToken) -> Result<Vec<String>> {
+        if !matches!(self.backend, Backend::X11) {
+            anyhow::bail!(
+                "list_windows requires X11. Wayland has no portable window-enumeration \
+                 primitive. Run mermaid from an X11 session."
+            );
+        }
+        let wids =
+            run_cmd_stdout(Command::new("xdotool").args(["search", "--onlyvisible", "--name", ""]))
+                .await?;
+        let mut windows = Vec::new();
+        for wid in wids.lines() {
+            let wid = wid.trim();
+            if wid.is_empty() {
+                continue;
+            }
+            if let Ok(name) =
+                run_cmd_stdout(Command::new("xdotool").args(["getwindowname", wid])).await
+            {
+                let name = name.trim().to_string();
+                if !name.is_empty() && !windows.contains(&name) {
+                    windows.push(name);
+                }
+            }
+        }
+        Ok(windows)
+    }
 }
 
 // ───── RAII temp-file cleanup ──────────────────────────────────────

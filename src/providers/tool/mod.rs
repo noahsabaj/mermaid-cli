@@ -172,10 +172,12 @@ impl ToolRegistry {
             if backend.is_usable() {
                 let driver = Arc::new(computer_use::ComputerUseDriver::new(backend));
                 r.register(Arc::new(computer_use::ScreenshotTool::new(driver.clone())));
-                // Commit 5 adds the remaining six tools (click,
-                // type_text, press_key, scroll, mouse_move,
-                // list_windows) against the same driver.
-                let _ = driver;
+                r.register(Arc::new(computer_use::ClickTool::new(driver.clone())));
+                r.register(Arc::new(computer_use::TypeTextTool::new(driver.clone())));
+                r.register(Arc::new(computer_use::PressKeyTool::new(driver.clone())));
+                r.register(Arc::new(computer_use::ScrollTool::new(driver.clone())));
+                r.register(Arc::new(computer_use::MouseMoveTool::new(driver.clone())));
+                r.register(Arc::new(computer_use::ListWindowsTool::new(driver)));
             }
         }
 
@@ -241,13 +243,16 @@ mod tests {
         }
     }
 
+    /// Serialization guard for tests that mutate the `OLLAMA_API_KEY`
+    /// env var. Cargo's default test harness runs tests in parallel
+    /// threads inside one process; without this mutex two env-touching
+    /// tests would race and occasionally flip each other's expectations.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn build_registers_web_tools_when_key_present() {
-        // Isolate from the host env by setting a sentinel key.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("OLLAMA_API_KEY").ok();
-        // SAFETY: mutating process env in tests is risky under parallel
-        // runs; `#[serial]` would be ideal, but we're single-threaded
-        // here because `cargo test --lib` uses the default harness.
         unsafe {
             std::env::set_var("OLLAMA_API_KEY", "test-key-build");
         }
@@ -265,6 +270,7 @@ mod tests {
 
     #[test]
     fn build_skips_web_tools_without_key() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("OLLAMA_API_KEY").ok();
         unsafe {
             std::env::remove_var("OLLAMA_API_KEY");
@@ -273,7 +279,6 @@ mod tests {
         let r = ToolRegistry::build(&cfg, TuiMode::Headless);
         assert!(r.get("web_search").is_none(), "web_search skipped");
         assert!(r.get("web_fetch").is_none(), "web_fetch skipped");
-        // Still has the core tools.
         assert!(r.get("read_file").is_some());
         assert!(r.get("execute_command").is_some());
         unsafe {
