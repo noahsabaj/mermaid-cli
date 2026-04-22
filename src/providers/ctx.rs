@@ -104,13 +104,48 @@ impl ExecContext {
 
 /// Tool-side progress event. The reducer already knows `ToolStarted`
 /// and `ToolFinished`; this carries everything in between (streaming
-/// subprocess output, long-running download status, etc.).
+/// subprocess output, long-running download status, multimodal
+/// artifacts like inline screenshots, and nested activity from
+/// subagents).
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
     /// Partial stdout/stderr chunk.
     Output(String),
     /// Arbitrary status string for display.
     Status(String),
+    /// Byte-count progress for long downloads/transfers. `total` is
+    /// None when the producer doesn't know the final size.
+    Bytes { done: u64, total: Option<u64> },
+    /// Binary artifact produced mid-execution (screenshot preview,
+    /// generated file, etc.). MIME string determines routing in the
+    /// reducer — `image/*` attaches inline to the active assistant
+    /// message; anything else lands on the status line as a label.
+    Artifact {
+        mime: String,
+        data: Vec<u8>,
+        caption: Option<String>,
+    },
+    /// A child subagent just started or finished a tool call. Carries
+    /// the CHILD's call identity + tool name + phase so the parent UI
+    /// can surface it without needing to recurse into the child's
+    /// event vocabulary.
+    SubagentToolCall {
+        child_call_id: ToolCallId,
+        tool_name: String,
+        phase: SubagentPhase,
+    },
+    /// A chunk of assistant text produced by a child subagent. Mostly
+    /// UI flavor — lets the parent status line show what the sub is
+    /// "saying" in real time.
+    SubagentText(String),
+}
+
+/// Phase a subagent tool-call is in, from the parent's perspective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentPhase {
+    Started,
+    Finished,
+    Errored,
 }
 
 /// Narrow shim from the reducer's `ChatRequest` to the adapter-facing

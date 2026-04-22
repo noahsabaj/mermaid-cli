@@ -18,8 +18,8 @@ pub mod tool;
 
 pub use capabilities::Capabilities;
 pub use ctx::{
-    ExecContext, FinalResponse, ProgressEvent, StreamContext, StreamEvent, clone_messages,
-    test_exec_context, test_stream_context,
+    ExecContext, FinalResponse, ProgressEvent, StreamContext, StreamEvent, SubagentPhase,
+    clone_messages, test_exec_context, test_stream_context,
 };
 pub use factory::ProviderFactory;
 pub use model::{

@@ -575,10 +575,31 @@ async fn dispatch_execute_tool(
     let (progress_tx, mut progress_rx) = mpsc::channel(16);
     let relay_tx = msg_tx.clone();
     let progress_relay = tokio::spawn(async move {
+        use crate::providers::{ProgressEvent, SubagentPhase};
         while let Some(event) = progress_rx.recv().await {
+            // Commit 2 replaces this stringification with typed
+            // pattern-matching in the reducer; for now flatten to
+            // a status line so no reducer changes are required in
+            // Commit 1.
             let chunk = match event {
-                crate::providers::ProgressEvent::Output(s) => s,
-                crate::providers::ProgressEvent::Status(s) => s,
+                ProgressEvent::Output(s) => s,
+                ProgressEvent::Status(s) => s,
+                ProgressEvent::Bytes { done, total } => match total {
+                    Some(t) => format!("{} / {} bytes", done, t),
+                    None => format!("{} bytes", done),
+                },
+                ProgressEvent::Artifact { mime, data, caption } => {
+                    let label = caption.unwrap_or_else(|| mime.clone());
+                    format!("[{} {}b] {}", mime, data.len(), label)
+                },
+                ProgressEvent::SubagentToolCall {
+                    tool_name, phase, ..
+                } => match phase {
+                    SubagentPhase::Started => format!("subagent: {} …", tool_name),
+                    SubagentPhase::Finished => format!("subagent: {} ✓", tool_name),
+                    SubagentPhase::Errored => format!("subagent: {} ✗", tool_name),
+                },
+                ProgressEvent::SubagentText(s) => s,
             };
             if relay_tx
                 .send(Msg::ToolProgress {
