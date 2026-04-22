@@ -17,7 +17,6 @@
 //! structured concurrency per turn.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Result;
 use crossterm::event::EventStream;
@@ -42,7 +41,7 @@ pub async fn run_interactive(
     mut recorder: Option<Recorder>,
 ) -> Result<()> {
     let mut state = State::new(config.clone(), cwd.clone(), model_id);
-    let tools = Arc::new(ToolRegistry::default());
+    let tools = ToolRegistry::build(&config, crate::providers::TuiMode::Interactive);
     let (mut runner, mut msg_rx) =
         EffectRunner::pair_with_bindings(cwd.clone(), config.clone(), tools);
     let mut terminal = TerminalGuard::setup()?;

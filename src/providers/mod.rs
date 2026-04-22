@@ -25,7 +25,7 @@ pub use factory::ProviderFactory;
 pub use model::{
     AnthropicProvider, GeminiProvider, ModelProvider, OllamaProvider, OpenAICompatProvider,
 };
-pub use tool::{ToolExecutor, ToolRegistry};
+pub use tool::{ToolExecutor, ToolRegistry, TuiMode};
 
 #[cfg(test)]
 mod tests {

@@ -7,7 +7,6 @@
 //! `state.turn == Idle` and the queue is empty.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -37,7 +36,7 @@ pub async fn run_non_interactive(
     model_id: String,
     prompt: String,
 ) -> Result<RunResult> {
-    let tools = Arc::new(ToolRegistry::default());
+    let tools = ToolRegistry::build(&config, crate::providers::TuiMode::Headless);
     let (mut runner, mut msg_rx) =
         EffectRunner::pair_with_bindings(cwd.clone(), config.clone(), tools);
 

@@ -125,6 +125,47 @@ impl Default for ToolRegistry {
     }
 }
 
+/// Whether the host mermaid process is running interactively (TUI)
+/// or headlessly (one-shot `mermaid run <prompt>` / CI). Controls
+/// which tools get registered: headless mode never advertises
+/// GUI / computer-use tools even when a display probes alive, because
+/// a CI job has no user to watch the screenshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiMode {
+    Interactive,
+    Headless,
+}
+
+impl ToolRegistry {
+    /// Config-aware factory. Always registers filesystem + exec +
+    /// the MCP proxy. Conditionally registers:
+    ///
+    ///   - `web_search` + `web_fetch` iff `OLLAMA_API_KEY` resolves
+    ///     (via `utils::resolve_api_key`). Without a key, the tools
+    ///     would error on every call — so we don't advertise them at
+    ///     all.
+    ///
+    /// Returns `Arc<Self>` so the effect runner can share a handle
+    /// across turns without cloning the underlying HashMap.
+    pub fn build(_config: &crate::app::Config, _mode: TuiMode) -> Arc<Self> {
+        let mut r = Self::new();
+        r.register(Arc::new(filesystem::ReadFileTool));
+        r.register(Arc::new(filesystem::WriteFileTool));
+        r.register(Arc::new(filesystem::EditFileTool));
+        r.register(Arc::new(filesystem::DeleteFileTool));
+        r.register(Arc::new(filesystem::CreateDirectoryTool));
+        r.register(Arc::new(exec::ExecuteCommandTool));
+        r.register(Arc::new(mcp::McpToolProxy));
+
+        if let Some(key) = crate::utils::resolve_api_key("OLLAMA_API_KEY", None) {
+            r.register(Arc::new(web::WebSearchTool::new(key.clone())));
+            r.register(Arc::new(web::WebFetchTool::new(key)));
+        }
+
+        Arc::new(r)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +221,48 @@ mod tests {
         for name in r.names() {
             let tool = r.get(name).unwrap();
             assert_eq!(tool.name(), tool.schema().name.as_str());
+        }
+    }
+
+    #[test]
+    fn build_registers_web_tools_when_key_present() {
+        // Isolate from the host env by setting a sentinel key.
+        let prior = std::env::var("OLLAMA_API_KEY").ok();
+        // SAFETY: mutating process env in tests is risky under parallel
+        // runs; `#[serial]` would be ideal, but we're single-threaded
+        // here because `cargo test --lib` uses the default harness.
+        unsafe {
+            std::env::set_var("OLLAMA_API_KEY", "test-key-build");
+        }
+        let cfg = crate::app::Config::default();
+        let r = ToolRegistry::build(&cfg, TuiMode::Interactive);
+        assert!(r.get("web_search").is_some(), "web_search registered");
+        assert!(r.get("web_fetch").is_some(), "web_fetch registered");
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("OLLAMA_API_KEY", v),
+                None => std::env::remove_var("OLLAMA_API_KEY"),
+            }
+        }
+    }
+
+    #[test]
+    fn build_skips_web_tools_without_key() {
+        let prior = std::env::var("OLLAMA_API_KEY").ok();
+        unsafe {
+            std::env::remove_var("OLLAMA_API_KEY");
+        }
+        let cfg = crate::app::Config::default();
+        let r = ToolRegistry::build(&cfg, TuiMode::Headless);
+        assert!(r.get("web_search").is_none(), "web_search skipped");
+        assert!(r.get("web_fetch").is_none(), "web_fetch skipped");
+        // Still has the core tools.
+        assert!(r.get("read_file").is_some());
+        assert!(r.get("execute_command").is_some());
+        unsafe {
+            if let Some(v) = prior {
+                std::env::set_var("OLLAMA_API_KEY", v);
+            }
         }
     }
 }
