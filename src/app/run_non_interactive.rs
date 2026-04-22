@@ -36,9 +36,13 @@ pub async fn run_non_interactive(
     model_id: String,
     prompt: String,
 ) -> Result<RunResult> {
-    let tools = ToolRegistry::build(&config, crate::providers::TuiMode::Headless);
-    let (mut runner, mut msg_rx) =
-        EffectRunner::pair_with_bindings(cwd.clone(), config.clone(), tools);
+    let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
+    let tools = ToolRegistry::build(
+        &config,
+        crate::providers::TuiMode::Headless,
+        providers.clone(),
+    );
+    let (mut runner, mut msg_rx) = EffectRunner::pair_from(cwd.clone(), providers, tools);
 
     let mut state = State::new(config.clone(), cwd, model_id);
 

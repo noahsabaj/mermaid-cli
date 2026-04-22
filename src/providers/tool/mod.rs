@@ -19,6 +19,7 @@ pub mod computer_use;
 pub mod exec;
 pub mod filesystem;
 pub mod mcp;
+pub mod subagent;
 pub mod web;
 pub mod web_client;
 
@@ -139,16 +140,26 @@ pub enum TuiMode {
 
 impl ToolRegistry {
     /// Config-aware factory. Always registers filesystem + exec +
-    /// the MCP proxy. Conditionally registers:
+    /// the MCP proxy + the subagent tool. Conditionally registers:
     ///
     ///   - `web_search` + `web_fetch` iff `OLLAMA_API_KEY` resolves
     ///     (via `utils::resolve_api_key`). Without a key, the tools
     ///     would error on every call — so we don't advertise them at
     ///     all.
+    ///   - All seven computer-use tools iff `mode == Interactive`
+    ///     AND `computer_use::probe()` returns a usable backend.
+    ///
+    /// `providers` is the shared `ProviderFactory` that the effect
+    /// runner also holds; the `SubagentSpawner` needs it so child
+    /// reducer loops hit the same provider cache.
     ///
     /// Returns `Arc<Self>` so the effect runner can share a handle
     /// across turns without cloning the underlying HashMap.
-    pub fn build(_config: &crate::app::Config, _mode: TuiMode) -> Arc<Self> {
+    pub fn build(
+        _config: &crate::app::Config,
+        mode: TuiMode,
+        providers: Arc<crate::providers::ProviderFactory>,
+    ) -> Arc<Self> {
         let mut r = Self::new();
         r.register(Arc::new(filesystem::ReadFileTool));
         r.register(Arc::new(filesystem::WriteFileTool));
@@ -167,7 +178,7 @@ impl ToolRegistry {
         // interactively (Headless CI has no user to watch a screenshot)
         // AND (b) a display backend passes the startup probe. Failed
         // probe → tools aren't advertised → model can't call them.
-        if _mode == TuiMode::Interactive {
+        if mode == TuiMode::Interactive {
             let backend = computer_use::probe();
             if backend.is_usable() {
                 let driver = Arc::new(computer_use::ComputerUseDriver::new(backend));
@@ -180,6 +191,13 @@ impl ToolRegistry {
                 r.register(Arc::new(computer_use::ListWindowsTool::new(driver)));
             }
         }
+
+        // Subagents: always register. Depth + breadth caps live on
+        // `SubagentSpawner`; the tool itself is harmless when nobody
+        // calls it. Headless runs do register the agent — a CI prompt
+        // may still delegate to subagents for batched work.
+        let spawner = Arc::new(subagent::SubagentSpawner::new(providers));
+        r.register(Arc::new(subagent::SubagentTool::new(spawner)));
 
         Arc::new(r)
     }
@@ -257,7 +275,8 @@ mod tests {
             std::env::set_var("OLLAMA_API_KEY", "test-key-build");
         }
         let cfg = crate::app::Config::default();
-        let r = ToolRegistry::build(&cfg, TuiMode::Interactive);
+        let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
+        let r = ToolRegistry::build(&cfg, TuiMode::Interactive, providers);
         assert!(r.get("web_search").is_some(), "web_search registered");
         assert!(r.get("web_fetch").is_some(), "web_fetch registered");
         unsafe {
@@ -276,7 +295,8 @@ mod tests {
             std::env::remove_var("OLLAMA_API_KEY");
         }
         let cfg = crate::app::Config::default();
-        let r = ToolRegistry::build(&cfg, TuiMode::Headless);
+        let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
+        let r = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
         assert!(r.get("web_search").is_none(), "web_search skipped");
         assert!(r.get("web_fetch").is_none(), "web_fetch skipped");
         assert!(r.get("read_file").is_some());

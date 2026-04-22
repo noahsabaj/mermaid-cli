@@ -41,9 +41,13 @@ pub async fn run_interactive(
     mut recorder: Option<Recorder>,
 ) -> Result<()> {
     let mut state = State::new(config.clone(), cwd.clone(), model_id);
-    let tools = ToolRegistry::build(&config, crate::providers::TuiMode::Interactive);
-    let (mut runner, mut msg_rx) =
-        EffectRunner::pair_with_bindings(cwd.clone(), config.clone(), tools);
+    let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
+    let tools = ToolRegistry::build(
+        &config,
+        crate::providers::TuiMode::Interactive,
+        providers.clone(),
+    );
+    let (mut runner, mut msg_rx) = EffectRunner::pair_from(cwd.clone(), providers, tools);
     let mut terminal = TerminalGuard::setup()?;
     let mut rstate = RenderCache::new();
     let mut events = EventStream::new();

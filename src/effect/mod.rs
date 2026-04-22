@@ -131,9 +131,34 @@ impl EffectRunner {
         config: Config,
         tools: Arc<ToolRegistry>,
     ) -> (Self, mpsc::Receiver<Msg>) {
-        let (tx, rx) = mpsc::channel(MSG_CHANNEL_CAPACITY);
         let providers = Arc::new(ProviderFactory::new(config));
+        Self::pair_from(workdir, providers, tools)
+    }
+
+    /// Pair constructor that takes a pre-built `ProviderFactory`.
+    /// Used when the caller needs to share a `ProviderFactory` with
+    /// the `SubagentSpawner` so subagents can issue model calls
+    /// through the same cache.
+    pub fn pair_from(
+        workdir: PathBuf,
+        providers: Arc<ProviderFactory>,
+        tools: Arc<ToolRegistry>,
+    ) -> (Self, mpsc::Receiver<Msg>) {
+        let (tx, rx) = mpsc::channel(MSG_CHANNEL_CAPACITY);
         (Self::new(tx, workdir).with_bindings(providers, tools), rx)
+    }
+
+    /// Construct a runner that shares a pre-derived cancellation
+    /// token for its turn scopes. Used by `SubagentSpawner` so the
+    /// child runner's work aborts as soon as the parent's `ctx.token`
+    /// fires.
+    pub fn new_child(
+        msg_tx: MsgSender,
+        workdir: PathBuf,
+        providers: Arc<ProviderFactory>,
+        tools: Arc<ToolRegistry>,
+    ) -> Self {
+        Self::new(msg_tx, workdir).with_bindings(providers, tools)
     }
 
     /// Get or create the scope for a turn. Idempotent. The scope is
