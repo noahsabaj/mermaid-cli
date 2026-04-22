@@ -301,8 +301,13 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 }
             }
 
-            // Show image attachment indicators under user messages (like tool action sub-items)
-            if matches!(msg.role, MessageRole::User)
+            // Show image indicators under user and assistant messages.
+            // User images come from clipboard paste (`Attachment`); assistant
+            // images come from tool executions that emitted `ProgressEvent::
+            // Artifact` during their run — screenshot captures, inline
+            // previews from computer-use, etc. Both land in `msg.images` as
+            // base64 strings and render the same way.
+            if matches!(msg.role, MessageRole::User | MessageRole::Assistant)
                 && let Some(ref images) = msg.images
                 && !images.is_empty()
             {
