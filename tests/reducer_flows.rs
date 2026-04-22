@@ -426,6 +426,73 @@ fn stream_tool_call_buffers_then_stream_done_transitions_to_executing_tools() {
 }
 
 #[test]
+fn tool_progress_artifact_routes_image_to_assistant_message() {
+    // Commit 2 wire: an `Artifact` event with `image/*` mime arriving
+    // during ExecutingTools should land base64-encoded on the last
+    // assistant message's `images` field so the chat widget renders
+    // it without waiting for ToolFinished.
+    use mermaid_cli::providers::ProgressEvent;
+
+    // Build a state with a committed assistant message and
+    // ExecutingTools turn state (the shape a tool runs inside).
+    let (state, _) = user_submit(fresh(), "take a screenshot");
+    let id = state.current_turn_id().unwrap();
+
+    // Simulate the assistant having already committed a message
+    // (e.g. after StreamDone with a tool call). We bypass the full
+    // flow and construct the state manually.
+    let mut state = state;
+    state.session.append(mermaid_cli::models::ChatMessage {
+        role: MessageRole::Assistant,
+        content: String::new(),
+        timestamp: chrono::Local::now(),
+        actions: vec![],
+        thinking: None,
+        images: None,
+        tool_calls: None,
+        tool_call_id: None,
+        tool_name: None,
+        thinking_signature: None,
+    });
+    state.turn = start_executing_tools(
+        id,
+        vec![PendingToolCall {
+            call_id: ToolCallId(1),
+            source: ModelToolCall {
+                id: Some("c1".to_string()),
+                function: FunctionCall {
+                    name: "screenshot".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+            },
+        }],
+    );
+
+    let data = vec![0x89, 0x50, 0x4E, 0x47]; // PNG magic bytes — content doesn't matter
+    let (state, _) = update(
+        state,
+        Msg::ToolProgress {
+            turn: id,
+            call_id: ToolCallId(1),
+            event: ProgressEvent::Artifact {
+                mime: "image/png".to_string(),
+                data: data.clone(),
+                caption: Some("preview".to_string()),
+            },
+        },
+    );
+
+    let last = state.session.messages().last().expect("last msg");
+    assert_eq!(last.role, MessageRole::Assistant);
+    let imgs = last.images.as_ref().expect("images attached");
+    assert_eq!(imgs.len(), 1, "one artifact appended");
+    // Roundtrip: base64-decode and confirm bytes match.
+    use base64::{Engine as _, engine::general_purpose};
+    let decoded = general_purpose::STANDARD.decode(&imgs[0]).unwrap();
+    assert_eq!(decoded, data);
+}
+
+#[test]
 fn tick_never_mutates_visible_state() {
     let before = fresh();
     let before_msg_count = before.session.messages().len();

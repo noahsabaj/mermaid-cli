@@ -96,13 +96,16 @@ pub enum Msg {
         turn: TurnId,
         call_id: ToolCallId,
     },
-    /// Mid-flight progress (e.g. streaming subprocess output). Today
-    /// the reducer just forwards to the UI; future middleware may
-    /// aggregate.
+    /// Mid-flight progress (streaming subprocess output, byte-count
+    /// updates, multimodal artifacts, nested subagent activity).
+    /// Reducer pattern-matches the variant and routes accordingly:
+    /// text variants update the status line; `Artifact` with an
+    /// `image/*` mime attaches to the in-flight assistant message;
+    /// `Subagent*` variants render as indented status.
     ToolProgress {
         turn: TurnId,
         call_id: ToolCallId,
-        chunk: String,
+        event: crate::providers::ProgressEvent,
     },
     /// Tool finished (one of Finished / Error / Cancelled).
     ToolFinished {

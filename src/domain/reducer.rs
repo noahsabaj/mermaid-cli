@@ -181,22 +181,11 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // `outcomes[i].is_none()`, so no state change needed yet.
         },
         Msg::ToolProgress {
-            turn: _,
+            turn,
             call_id: _,
-            chunk,
+            event,
         } => {
-            // Surface live tool output (streaming subprocess stdout,
-            // multi-file read progress, etc.) on the status line.
-            // The next progress chunk overwrites; the terminal
-            // `ToolFinished` lets the line fade via its own
-            // dismissal path.
-            if !chunk.trim().is_empty() {
-                state.status = Some(StatusLine {
-                    text: chunk,
-                    kind: StatusKind::Info,
-                    shown_at: std::time::SystemTime::now(),
-                });
-            }
+            handle_tool_progress(&mut state, turn, event);
         },
         Msg::ToolFinished {
             turn,
@@ -1037,6 +1026,73 @@ fn handle_upstream_error(state: &mut State, error: crate::models::UserFacingErro
         kind: StatusKind::Error,
         shown_at: std::time::SystemTime::now(),
     });
+}
+
+/// Route a typed `ProgressEvent` to the right state surface.
+///
+/// - `Output` / `Status` / `Bytes` → transient status line (same as
+///   the old String-chunk behavior, with `Bytes` formatted).
+/// - `Artifact` with `image/*` mime → append base64 to the in-flight
+///   assistant message's `images` for immediate display in chat.
+///   Non-image artifacts surface as a status-line label.
+/// - `SubagentToolCall` / `SubagentText` → status line with an
+///   indented "subagent:" prefix so nested activity is visible
+///   without the parent reducer needing to understand child Msgs.
+fn handle_tool_progress(state: &mut State, _turn: TurnId, event: crate::providers::ProgressEvent) {
+    use crate::providers::{ProgressEvent, SubagentPhase};
+    use base64::{Engine as _, engine::general_purpose};
+
+    let status = |state: &mut State, text: String| {
+        if !text.trim().is_empty() {
+            state.status = Some(StatusLine {
+                text,
+                kind: StatusKind::Info,
+                shown_at: std::time::SystemTime::now(),
+            });
+        }
+    };
+
+    match event {
+        ProgressEvent::Output(s) | ProgressEvent::Status(s) | ProgressEvent::SubagentText(s) => {
+            status(state, s);
+        },
+        ProgressEvent::Bytes { done, total } => {
+            let text = match total {
+                Some(t) => format!("{} / {} bytes", done, t),
+                None => format!("{} bytes", done),
+            };
+            status(state, text);
+        },
+        ProgressEvent::Artifact {
+            mime,
+            data,
+            caption,
+        } => {
+            if mime.starts_with("image/")
+                && matches!(
+                    state.turn,
+                    TurnState::ExecutingTools { .. } | TurnState::Generating { .. }
+                )
+                && let Some(last) = state.session.conversation.messages.last_mut()
+                && last.role == MessageRole::Assistant
+            {
+                let encoded = general_purpose::STANDARD.encode(&data);
+                last.images.get_or_insert_with(Vec::new).push(encoded);
+            }
+            let label = caption.unwrap_or_else(|| format!("{} ({}b)", mime, data.len()));
+            status(state, label);
+        },
+        ProgressEvent::SubagentToolCall {
+            tool_name, phase, ..
+        } => {
+            let text = match phase {
+                SubagentPhase::Started => format!("  ⎿ subagent: {} …", tool_name),
+                SubagentPhase::Finished => format!("  ⎿ subagent: {} ✓", tool_name),
+                SubagentPhase::Errored => format!("  ⎿ subagent: {} ✗", tool_name),
+            };
+            status(state, text);
+        },
+    }
 }
 
 fn handle_tool_finished(
