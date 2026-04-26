@@ -17,6 +17,7 @@ use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::{ExecContext, ProgressEvent};
 
 use super::super::ToolExecutor;
+use super::computer_use_success;
 use super::driver::{ComputerUseDriver, ScreenshotSpec};
 
 pub struct ScreenshotTool {
@@ -61,33 +62,28 @@ impl ToolExecutor for ScreenshotTool {
     async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
 
-        if let Err(outcome) = self.driver.ensure_alive() {
-            return outcome;
+        if let Err(error) = self.driver.ensure_alive() {
+            return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
 
         let spec = match parse_spec(&args) {
             Ok(s) => s,
-            Err(e) => {
-                return ToolOutcome::Error {
-                    error: e,
-                    duration_secs: started.elapsed().as_secs_f64(),
-                };
-            },
+            Err(e) => return ToolOutcome::error(e, started.elapsed().as_secs_f64()),
         };
 
         let result = tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => return ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
             r = self.driver.capture(spec, &ctx.token) => r,
         };
 
         let cap = match result {
             Ok(c) => c,
             Err(e) => {
-                return ToolOutcome::Error {
-                    error: format!("screenshot capture failed: {}", e),
-                    duration_secs: started.elapsed().as_secs_f64(),
-                };
+                return ToolOutcome::error(
+                    format!("screenshot capture failed: {}", e),
+                    started.elapsed().as_secs_f64(),
+                );
             },
         };
 
@@ -106,11 +102,13 @@ impl ToolExecutor for ScreenshotTool {
             })
             .await;
 
-        ToolOutcome::Finished {
-            output: cap.summary,
-            images: Some(vec![cap.base64_png]),
-            duration_secs: started.elapsed().as_secs_f64(),
-        }
+        computer_use_success(
+            "screenshot",
+            args,
+            cap.summary,
+            started.elapsed().as_secs_f64(),
+        )
+        .with_images(vec![cap.base64_png])
     }
 }
 

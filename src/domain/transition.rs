@@ -15,6 +15,7 @@ use crate::models::{ChatMessage, MessageRole};
 
 use super::action::{ActionDetails, ActionDisplay, ActionResult};
 use super::ids::{ToolCallId, TurnId};
+use super::runtime::ToolMetadata;
 use super::state::{GenPhase, PendingToolCall, ToolOutcome, TurnState};
 
 /// Flatten `Vec<Option<ToolOutcome>>` into `Vec<ToolOutcome>` iff
@@ -110,6 +111,8 @@ pub fn commit_assistant_message(
         role: MessageRole::Assistant,
         content: partial_text,
         timestamp: chrono::Local::now(),
+        kind: crate::models::ChatMessageKind::Normal,
+        metadata: None,
         actions: Vec::new(),
         thinking,
         images: None,
@@ -159,41 +162,189 @@ pub fn tool_result_messages(
 /// the chat renderer can show "Read main.rs → 1,234 bytes" etc.
 pub fn action_display_for(call: &PendingToolCall, outcome: &ToolOutcome) -> ActionDisplay {
     let (action_type, target) = display_info_for(call);
-    let (result, duration) = match outcome {
-        ToolOutcome::Finished {
-            output,
-            images,
-            duration_secs,
-        } => (
-            ActionResult::Success {
-                output: output.clone(),
-                images: images.clone(),
-            },
-            Some(*duration_secs),
-        ),
-        ToolOutcome::Error {
-            error,
-            duration_secs,
-        } => (
-            ActionResult::Error {
-                error: error.clone(),
-            },
-            Some(*duration_secs),
-        ),
-        ToolOutcome::Cancelled => (
-            ActionResult::Error {
-                error: "[cancelled]".to_string(),
-            },
-            None,
-        ),
+    let duration = outcome.duration_secs;
+    let result = if outcome.is_success() {
+        ActionResult::Success {
+            output: outcome.output().to_string(),
+            images: outcome.images(),
+        }
+    } else {
+        ActionResult::Error {
+            error: outcome.error_message().unwrap_or("[cancelled]").to_string(),
+        }
     };
+    let details = action_details_for(call, outcome, duration);
     ActionDisplay {
         action_type,
         target,
         result,
-        details: ActionDetails::Simple,
+        details,
         duration_seconds: duration,
+        metadata: Some((*outcome.metadata).clone()),
     }
+}
+
+fn action_details_for(
+    call: &PendingToolCall,
+    outcome: &ToolOutcome,
+    duration: Option<f64>,
+) -> ActionDetails {
+    if !outcome.is_success() {
+        return ActionDetails::Simple;
+    }
+
+    let name = call.source.function.name.as_str();
+    let args = &call.source.function.arguments;
+    match name {
+        "read_file" => {
+            let line_count = outcome
+                .metadata
+                .line_count
+                .or_else(|| metadata_line_count(&outcome.metadata.detail))
+                .unwrap_or_else(|| outcome.output().lines().count());
+            ActionDetails::Preview {
+                text: success_summary(
+                    format!("{} {} read", line_count, pluralize("line", line_count)),
+                    duration,
+                ),
+                line_count: Some(line_count),
+            }
+        },
+        "write_file" => {
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let line_count = outcome
+                .metadata
+                .line_count
+                .or_else(|| metadata_line_count(&outcome.metadata.detail))
+                .unwrap_or_else(|| content.lines().count());
+            ActionDetails::FileContent {
+                line_count,
+                content,
+            }
+        },
+        "web_search" => {
+            let result_count = outcome
+                .metadata
+                .result_count
+                .or_else(|| metadata_result_count(&outcome.metadata.detail))
+                .unwrap_or_else(|| count_search_results(outcome.output()));
+            ActionDetails::Preview {
+                text: success_summary(
+                    format!(
+                        "{} {} returned",
+                        result_count,
+                        pluralize("result", result_count)
+                    ),
+                    duration,
+                ),
+                line_count: None,
+            }
+        },
+        "web_fetch" => {
+            let line_count = outcome
+                .metadata
+                .line_count
+                .or_else(|| metadata_line_count(&outcome.metadata.detail))
+                .unwrap_or_else(|| outcome.output().lines().count());
+            ActionDetails::Preview {
+                text: success_summary(
+                    format!("{} {} fetched", line_count, pluralize("line", line_count)),
+                    duration,
+                ),
+                line_count: Some(line_count),
+            }
+        },
+        "execute_command" => ActionDetails::Preview {
+            text: command_success_summary(outcome, duration),
+            line_count: outcome
+                .metadata
+                .line_count
+                .or_else(|| metadata_line_count(&outcome.metadata.detail))
+                .or_else(|| Some(outcome.output().lines().count())),
+        },
+        "edit_file" => ActionDetails::Preview {
+            text: success_summary(outcome.summary.clone(), duration),
+            line_count: None,
+        },
+        _ => ActionDetails::Simple,
+    }
+}
+
+fn metadata_line_count(metadata: &ToolMetadata) -> Option<usize> {
+    match metadata {
+        ToolMetadata::ReadFile { line_count, .. }
+        | ToolMetadata::WriteFile { line_count, .. }
+        | ToolMetadata::WebFetch { line_count, .. } => Some(*line_count),
+        ToolMetadata::ExecuteCommand {
+            stdout_lines,
+            stderr_lines,
+            ..
+        } => Some(stdout_lines + stderr_lines),
+        _ => None,
+    }
+}
+
+fn metadata_result_count(metadata: &ToolMetadata) -> Option<usize> {
+    match metadata {
+        ToolMetadata::WebSearch { result_count, .. } => Some(*result_count),
+        _ => None,
+    }
+}
+
+fn success_summary(detail: String, duration: Option<f64>) -> String {
+    match duration {
+        Some(seconds) => format!("Success, {}, took {}", detail, format_duration(seconds)),
+        None => format!("Success, {}", detail),
+    }
+}
+
+fn command_success_summary(outcome: &ToolOutcome, duration: Option<f64>) -> String {
+    if outcome.metadata.process.is_none() {
+        return success_summary("command completed".to_string(), duration);
+    }
+
+    let mut lines = vec![success_summary(
+        "background process started".to_string(),
+        duration,
+    )];
+    for line in outcome.output().lines().skip(1) {
+        if line.starts_with("--- startup output ---") {
+            break;
+        }
+        if !line.trim().is_empty() {
+            lines.push(line.to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+fn format_duration(seconds: f64) -> String {
+    if seconds < 1.0 {
+        format!("{}ms", (seconds * 1000.0).round().max(1.0) as u64)
+    } else if seconds < 10.0 {
+        format!("{:.1}s", seconds)
+    } else {
+        format!("{}s", seconds.round() as u64)
+    }
+}
+
+fn pluralize(word: &str, count: usize) -> String {
+    if count == 1 {
+        word.to_string()
+    } else {
+        format!("{}s", word)
+    }
+}
+
+fn count_search_results(output: &str) -> usize {
+    output
+        .lines()
+        .filter(|line| line.starts_with('[') && line.contains("] Title:"))
+        .count()
 }
 
 /// Best-effort name + target extraction from a tool call, for chat
@@ -269,43 +420,166 @@ fn display_info_for(call: &PendingToolCall) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{ManagedProcess, ManagedProcessStatus, ToolMetadata, ToolRunMetadata};
     use crate::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
 
     fn sample_call(id: u64, name: &str) -> PendingToolCall {
+        sample_call_args(id, name, serde_json::json!({}))
+    }
+
+    fn sample_call_args(id: u64, name: &str, arguments: serde_json::Value) -> PendingToolCall {
         PendingToolCall {
             call_id: ToolCallId(id),
             source: ModelToolCall {
                 id: Some(format!("c{}", id)),
                 function: FunctionCall {
                     name: name.to_string(),
-                    arguments: serde_json::json!({}),
+                    arguments,
                 },
             },
         }
     }
 
     #[test]
+    fn action_display_read_reports_line_count_and_duration() {
+        let call = sample_call_args(1, "read_file", serde_json::json!({"path": "src/main.rs"}));
+        let action = action_display_for(
+            &call,
+            &ToolOutcome::success("one\ntwo\nthree\n", "3 lines read", 1.25),
+        );
+
+        assert_eq!(action.action_type, "Read");
+        match action.details {
+            ActionDetails::Preview { text, line_count } => {
+                assert_eq!(line_count, Some(3));
+                assert!(text.contains("Success, 3 lines read"));
+                assert!(text.contains("took 1.2s"));
+            },
+            other => panic!("expected preview details, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn action_display_write_carries_file_content_preview_data() {
+        let call = sample_call_args(
+            1,
+            "write_file",
+            serde_json::json!({"path": "petal/index.html", "content": "a\nb\n"}),
+        );
+        let action = action_display_for(
+            &call,
+            &ToolOutcome::success("Wrote petal/index.html (2 lines)", "2 lines written", 0.05),
+        );
+
+        match action.details {
+            ActionDetails::FileContent {
+                line_count,
+                content,
+            } => {
+                assert_eq!(line_count, 2);
+                assert_eq!(content, "a\nb\n");
+            },
+            other => panic!("expected file content details, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn action_display_web_search_reports_result_count() {
+        let call = sample_call_args(1, "web_search", serde_json::json!({"query": "rust"}));
+        let output = "[SEARCH_RESULTS]\n[1] Title: A\nURL: https://a.test\nContent:\nA\n---\n[2] Title: B\nURL: https://b.test\nContent:\nB\n---\n";
+        let outcome = ToolOutcome::success(output, "2 results returned", 15.2).with_metadata(
+            ToolRunMetadata {
+                detail: ToolMetadata::WebSearch {
+                    queries: vec!["rust".to_string()],
+                    requested_count: 5,
+                    result_count: 2,
+                    sources: vec!["https://a.test".to_string(), "https://b.test".to_string()],
+                },
+                result_count: Some(2),
+                ..ToolRunMetadata::default()
+            },
+        );
+        let action = action_display_for(&call, &outcome);
+
+        match action.details {
+            ActionDetails::Preview { text, .. } => {
+                assert!(text.contains("Success, 2 results returned"));
+                assert!(text.contains("took 15s"));
+            },
+            other => panic!("expected preview details, got {:?}", other),
+        }
+        let metadata = action.metadata.expect("metadata");
+        assert_eq!(metadata.result_count, Some(2));
+        assert_eq!(metadata.duration_secs, Some(15.2));
+    }
+
+    #[test]
+    fn action_display_background_command_surfaces_pid_and_log() {
+        let call = sample_call_args(
+            1,
+            "execute_command",
+            serde_json::json!({"command": "npm run dev", "mode": "background"}),
+        );
+        let output = "Background command started.\nPID: 123\nLog: /tmp/mermaid-bg.log\nReady: matched pattern \"Local:\"\nDetected URL: http://127.0.0.1:5173\n\n--- startup output ---\nLocal: http://127.0.0.1:5173";
+        let outcome = ToolOutcome::success(output, "background process started", 0.8)
+            .with_metadata(ToolRunMetadata {
+                detail: ToolMetadata::ExecuteCommand {
+                    command: "npm run dev".to_string(),
+                    working_dir: None,
+                    exit_code: None,
+                    timed_out: false,
+                    background: true,
+                    stdout_lines: 1,
+                    stderr_lines: 0,
+                    detected_urls: vec!["http://127.0.0.1:5173".to_string()],
+                    pid: Some(123),
+                    log_path: Some("/tmp/mermaid-bg.log".to_string()),
+                },
+                process: Some(ManagedProcess {
+                    id: "bg-123".to_string(),
+                    pid: 123,
+                    command: "npm run dev".to_string(),
+                    cwd: None,
+                    log_path: "/tmp/mermaid-bg.log".to_string(),
+                    detected_url: Some("http://127.0.0.1:5173".to_string()),
+                    status: ManagedProcessStatus::Running,
+                }),
+                ..ToolRunMetadata::default()
+            });
+        let action = action_display_for(&call, &outcome);
+
+        match action.details {
+            ActionDetails::Preview { text, .. } => {
+                assert!(text.contains("Success, background process started"));
+                assert!(text.contains("PID: 123"));
+                assert!(text.contains("Log: /tmp/mermaid-bg.log"));
+                assert!(text.contains("Detected URL: http://127.0.0.1:5173"));
+                assert!(!text.contains("startup output"));
+            },
+            other => panic!("expected preview details, got {:?}", other),
+        }
+        let metadata = action.metadata.expect("metadata");
+        let process = metadata.process.expect("process metadata");
+        assert_eq!(process.id, "bg-123");
+        assert_eq!(process.pid, 123);
+        assert_eq!(process.command, "npm run dev");
+        assert_eq!(
+            process.detected_url.as_deref(),
+            Some("http://127.0.0.1:5173")
+        );
+    }
+
+    #[test]
     fn try_complete_outcomes_returns_none_on_incomplete() {
-        let outcomes = vec![
-            Some(ToolOutcome::Finished {
-                output: "a".to_string(),
-                images: None,
-                duration_secs: 0.1,
-            }),
-            None,
-        ];
+        let outcomes = vec![Some(ToolOutcome::success("a", "a", 0.1)), None];
         assert!(try_complete_outcomes(&outcomes).is_none());
     }
 
     #[test]
     fn try_complete_outcomes_returns_vec_on_complete() {
         let outcomes = vec![
-            Some(ToolOutcome::Finished {
-                output: "a".to_string(),
-                images: None,
-                duration_secs: 0.1,
-            }),
-            Some(ToolOutcome::Cancelled),
+            Some(ToolOutcome::success("a", "a", 0.1)),
+            Some(ToolOutcome::cancelled()),
         ];
         let result = try_complete_outcomes(&outcomes);
         assert!(result.is_some());
@@ -317,7 +591,12 @@ mod tests {
         let calls = vec![sample_call(1, "read_file"), sample_call(2, "write_file")];
         let mut outcomes = vec![None, None];
 
-        let wrote = fill_outcome(&calls, &mut outcomes, ToolCallId(2), ToolOutcome::Cancelled);
+        let wrote = fill_outcome(
+            &calls,
+            &mut outcomes,
+            ToolCallId(2),
+            ToolOutcome::cancelled(),
+        );
         assert!(wrote);
         assert!(outcomes[0].is_none());
         assert!(outcomes[1].is_some());
@@ -331,7 +610,7 @@ mod tests {
             &calls,
             &mut outcomes,
             ToolCallId(999),
-            ToolOutcome::Cancelled,
+            ToolOutcome::cancelled(),
         );
         assert!(!wrote);
         assert!(outcomes[0].is_none());
@@ -340,17 +619,16 @@ mod tests {
     #[test]
     fn fill_outcome_duplicate_write_ignored() {
         let calls = vec![sample_call(1, "read_file")];
-        let mut outcomes = vec![Some(ToolOutcome::Finished {
-            output: "first".to_string(),
-            images: None,
-            duration_secs: 0.0,
-        })];
-        let wrote = fill_outcome(&calls, &mut outcomes, ToolCallId(1), ToolOutcome::Cancelled);
+        let mut outcomes = vec![Some(ToolOutcome::success("first", "first", 0.0))];
+        let wrote = fill_outcome(
+            &calls,
+            &mut outcomes,
+            ToolCallId(1),
+            ToolOutcome::cancelled(),
+        );
         assert!(!wrote);
         match &outcomes[0] {
-            Some(ToolOutcome::Finished { output, .. }) => {
-                assert_eq!(output, "first");
-            },
+            Some(outcome) if outcome.is_success() => assert_eq!(outcome.output(), "first"),
             _ => panic!("original outcome was overwritten"),
         }
     }
@@ -416,12 +694,8 @@ mod tests {
     fn tool_result_messages_align_call_id_and_name() {
         let calls = vec![sample_call(1, "read_file"), sample_call(2, "write_file")];
         let outcomes = vec![
-            ToolOutcome::Finished {
-                output: "contents".to_string(),
-                images: None,
-                duration_secs: 0.1,
-            },
-            ToolOutcome::Cancelled,
+            ToolOutcome::success("contents", "contents", 0.1),
+            ToolOutcome::cancelled(),
         ];
         let msgs = tool_result_messages(&calls, outcomes);
         assert_eq!(msgs.len(), 2);

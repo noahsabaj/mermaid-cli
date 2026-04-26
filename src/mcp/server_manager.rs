@@ -91,6 +91,12 @@ impl McpServerManager {
         &self.tools
     }
 
+    /// True iff the named server started and has an active client,
+    /// even if it advertised zero tools.
+    pub fn has_server(&self, name: &str) -> bool {
+        self.servers.contains_key(name)
+    }
+
     /// Check if any MCP servers are active.
     pub fn has_servers(&self) -> bool {
         !self.servers.is_empty()

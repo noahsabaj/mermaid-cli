@@ -31,7 +31,9 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{Msg, State, ToolDefinition, ToolOutcome, TurnState, update};
+use crate::domain::{
+    Msg, State, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata, TurnState, update,
+};
 use crate::effect::{EffectRunner, MSG_CHANNEL_CAPACITY};
 use crate::models::MessageRole;
 use crate::providers::ProviderFactory;
@@ -131,20 +133,14 @@ impl ToolExecutor for SubagentTool {
         // Depth gate: if we're already at the cap, return immediately.
         let current_depth = SUBAGENT_DEPTH.try_with(|d| *d).unwrap_or(0);
         if current_depth >= MAX_DEPTH {
-            return ToolOutcome::Error {
-                error: format!("subagent depth limit {} reached", MAX_DEPTH),
-                duration_secs: 0.0,
-            };
+            return ToolOutcome::error(format!("subagent depth limit {} reached", MAX_DEPTH), 0.0);
         }
 
         // Parse args.
         let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
             Some(s) if !s.trim().is_empty() => s.to_string(),
             _ => {
-                return ToolOutcome::Error {
-                    error: "agent requires non-empty `prompt`".to_string(),
-                    duration_secs: 0.0,
-                };
+                return ToolOutcome::error("agent requires non-empty `prompt`", 0.0);
             },
         };
         let description = args
@@ -158,24 +154,33 @@ impl ToolExecutor for SubagentTool {
         // Ctrl+C response hostage.
         let permit = tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => return ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
             p = self.spawner.inflight.clone().acquire_owned() => match p {
                 Ok(permit) => permit,
-                Err(_) => return ToolOutcome::Error {
-                    error: "subagent semaphore closed".to_string(),
-                    duration_secs: started.elapsed().as_secs_f64(),
-                },
+                Err(_) => return ToolOutcome::error(
+                    "subagent semaphore closed",
+                    started.elapsed().as_secs_f64(),
+                ),
             },
         };
 
         // Build the child runtime. The child uses the same parent
         // config + cwd + model id, with a fresh `State` and a tool
         // registry filtered to remove self-recursion and GUI tools.
-        // TODO: allow model override via args when the model selector
-        // is threaded through — for now subagents inherit the model.
-        let config = ctx_to_config(&ctx);
+        //
+        // F7: `ExecContext` now carries the parent's `Config` +
+        // `model_id`. Previously we built `Config::default()` here and
+        // the child model id defaulted to `config.default_model.name`
+        // (usually empty), which made subagents fail at provider
+        // resolution.
+        let config = (*ctx.config).clone();
         let cwd = ctx.workdir.clone();
-        let model_id = default_model_id(&config);
+        let model_id = if ctx.model_id.is_empty() {
+            default_model_id(&config)
+        } else {
+            ctx.model_id.clone()
+        };
+        let child_model_id = model_id.clone();
         let child_state = State::new(config.clone(), cwd.clone(), model_id);
 
         let child_tools = build_child_registry(self.spawner.providers.clone());
@@ -206,24 +211,29 @@ impl ToolExecutor for SubagentTool {
 
         let elapsed = started.elapsed().as_secs_f64();
         match result {
-            Ok(Ok(summary)) => ToolOutcome::Finished {
-                output: summary,
-                images: None,
-                duration_secs: elapsed,
+            Ok(Ok(summary)) => ToolOutcome::success(summary, "subagent completed", elapsed)
+                .with_metadata(subagent_metadata(child_model_id)),
+            Ok(Err(DriveError::Cancelled)) => ToolOutcome::cancelled(),
+            Ok(Err(DriveError::Errored(e))) => {
+                ToolOutcome::error(format!("subagent ({}): {}", description, e), elapsed)
+                    .with_metadata(subagent_metadata(child_model_id))
             },
-            Ok(Err(DriveError::Cancelled)) => ToolOutcome::Cancelled,
-            Ok(Err(DriveError::Errored(e))) => ToolOutcome::Error {
-                error: format!("subagent ({}): {}", description, e),
-                duration_secs: elapsed,
-            },
-            Err(_) => ToolOutcome::Error {
-                error: format!(
+            Err(_) => ToolOutcome::error(
+                format!(
                     "subagent ({}) exceeded {}s timeout",
                     description, DEFAULT_TIMEOUT_SECS
                 ),
-                duration_secs: elapsed,
-            },
+                elapsed,
+            )
+            .with_metadata(subagent_metadata(child_model_id)),
         }
+    }
+}
+
+fn subagent_metadata(model_id: String) -> ToolRunMetadata {
+    ToolRunMetadata {
+        detail: ToolMetadata::Subagent { model_id },
+        ..ToolRunMetadata::default()
     }
 }
 
@@ -350,10 +360,10 @@ async fn forward_child_event(msg: &Msg, progress: &mpsc::Sender<ProgressEvent>, 
             outcome,
         } => {
             let tool_name = lookup_tool_name(state, *call_id).unwrap_or_else(|| "tool".to_string());
-            let phase = match outcome {
-                ToolOutcome::Finished { .. } => SubagentPhase::Finished,
-                ToolOutcome::Error { .. } => SubagentPhase::Errored,
-                ToolOutcome::Cancelled => SubagentPhase::Errored,
+            let phase = if outcome.is_success() {
+                SubagentPhase::Finished
+            } else {
+                SubagentPhase::Errored
             };
             let _ = progress
                 .send(ProgressEvent::SubagentToolCall {
@@ -425,19 +435,19 @@ fn build_child_registry(providers: Arc<ProviderFactory>) -> Arc<ToolRegistry> {
     Arc::new(r)
 }
 
-/// Extract a `Config` from whatever the parent's ExecContext exposes.
-/// Today only `workdir` is available on `ExecContext`, so we fall
-/// back to the process default — good enough because subagents
-/// mostly care about `default_model` + `reasoning` which are carried
-/// by that default. When the need arises to pass a richer context,
-/// we'll add a `SubagentEnv` field to `ExecContext` and remove this.
-fn ctx_to_config(_ctx: &ExecContext) -> crate::app::Config {
-    crate::app::Config::default()
-}
-
-/// Pick a child model id. Inherits the parent's `default_model.name`.
+/// Fallback child model id when `ExecContext::model_id` is empty
+/// (e.g. a test harness that uses the default `test_exec_context`
+/// builder). Production code always provides the parent's active model
+/// id via `Cmd::ExecuteTool::model_id`.
 fn default_model_id(config: &crate::app::Config) -> String {
-    config.default_model.name.clone()
+    if !config.default_model.provider.is_empty() && !config.default_model.name.is_empty() {
+        format!(
+            "{}/{}",
+            config.default_model.provider, config.default_model.name
+        )
+    } else {
+        config.default_model.name.clone()
+    }
 }
 
 #[cfg(test)]
@@ -461,16 +471,12 @@ mod tests {
                 tool.execute(serde_json::json!({"prompt": "hi"}), ctx),
             )
             .await;
-        match outcome {
-            ToolOutcome::Error { error, .. } => {
-                assert!(
-                    error.contains("depth limit"),
-                    "expected depth-limit error, got: {}",
-                    error
-                );
-            },
-            other => panic!("expected Error, got {:?}", other),
-        }
+        let error = outcome.error_message().expect("expected error");
+        assert!(
+            error.contains("depth limit"),
+            "expected depth-limit error, got: {}",
+            error
+        );
     }
 
     #[tokio::test]
@@ -481,7 +487,27 @@ mod tests {
         let tool = SubagentTool::new(spawner);
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let outcome = tool.execute(serde_json::json!({"prompt": "  "}), ctx).await;
-        assert!(matches!(outcome, ToolOutcome::Error { .. }));
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+    }
+
+    /// F7: when `ExecContext::model_id` is empty (the test builder's
+    /// default), the fallback walks `config.default_model.{provider,name}`.
+    /// This pins the happy-path behavior.
+    #[test]
+    fn default_model_id_reads_config_provider_and_name() {
+        let mut cfg = crate::app::Config::default();
+        cfg.default_model.provider = "ollama".to_string();
+        cfg.default_model.name = "qwen3-coder:30b".to_string();
+        assert_eq!(default_model_id(&cfg), "ollama/qwen3-coder:30b");
+    }
+
+    #[test]
+    fn default_model_id_returns_bare_name_when_provider_empty() {
+        let mut cfg = crate::app::Config::default();
+        cfg.default_model.name = "just-a-name".to_string();
+        // provider is empty — single-slash shape would be
+        // "/just-a-name", which provider resolution would reject.
+        assert_eq!(default_model_id(&cfg), "just-a-name");
     }
 
     #[test]

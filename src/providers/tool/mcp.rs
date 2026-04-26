@@ -13,7 +13,7 @@
 
 use async_trait::async_trait;
 
-use crate::domain::{ToolDefinition, ToolOutcome};
+use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use crate::mcp::{McpServerManager, manager_ref};
 
 use super::super::ctx::ExecContext;
@@ -58,16 +58,10 @@ impl ToolExecutor for McpToolProxy {
         // Args shape: { server_name, tool_name, arguments }. The effect
         // runner constructs this from the model-emitted tool call.
         let Some(server_name) = args.get("server_name").and_then(|v| v.as_str()) else {
-            return ToolOutcome::Error {
-                error: "mcp_proxy requires 'server_name'".to_string(),
-                duration_secs: 0.0,
-            };
+            return ToolOutcome::error("mcp_proxy requires 'server_name'", 0.0);
         };
         let Some(tool_name) = args.get("tool_name").and_then(|v| v.as_str()) else {
-            return ToolOutcome::Error {
-                error: "mcp_proxy requires 'tool_name'".to_string(),
-                duration_secs: 0.0,
-            };
+            return ToolOutcome::error("mcp_proxy requires 'tool_name'", 0.0);
         };
         let tool_args = args
             .get("arguments")
@@ -86,10 +80,7 @@ impl ToolExecutor for McpToolProxy {
             .await;
         }
         let Some(manager) = manager_ref::get() else {
-            return ToolOutcome::Error {
-                error: "MCP servers not initialized".to_string(),
-                duration_secs: 0.0,
-            };
+            return ToolOutcome::error("MCP servers not initialized", 0.0);
         };
 
         let start = std::time::Instant::now();
@@ -97,22 +88,38 @@ impl ToolExecutor for McpToolProxy {
 
         tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             result = call => match result {
                 Ok(tool_result) => {
                     let (text, images) = McpServerManager::format_tool_result(&tool_result);
-                    ToolOutcome::Finished {
-                        output: text,
-                        images,
-                        duration_secs: start.elapsed().as_secs_f64(),
+                    let mut outcome = ToolOutcome::success(
+                        text,
+                        format!("{}:{} completed", server_name, tool_name),
+                        start.elapsed().as_secs_f64(),
+                    )
+                    .with_metadata(mcp_metadata(server_name, tool_name));
+                    if let Some(images) = images {
+                        outcome = outcome.with_images(images);
                     }
+                    outcome
                 },
-                Err(e) => ToolOutcome::Error {
-                    error: format!("mcp_proxy({}:{}): {}", server_name, tool_name, e),
-                    duration_secs: start.elapsed().as_secs_f64(),
-                },
+                Err(e) => ToolOutcome::error(
+                    format!("mcp_proxy({}:{}): {}", server_name, tool_name, e),
+                    start.elapsed().as_secs_f64(),
+                )
+                .with_metadata(mcp_metadata(server_name, tool_name)),
             },
         }
+    }
+}
+
+fn mcp_metadata(server_name: &str, tool_name: &str) -> ToolRunMetadata {
+    ToolRunMetadata {
+        detail: ToolMetadata::Mcp {
+            server: server_name.to_string(),
+            tool: tool_name.to_string(),
+        },
+        ..ToolRunMetadata::default()
     }
 }
 
@@ -129,7 +136,7 @@ mod tests {
         let outcome = McpToolProxy
             .execute(serde_json::json!({"tool_name": "x"}), ctx)
             .await;
-        assert!(matches!(outcome, ToolOutcome::Error { .. }));
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
     }
 
     #[tokio::test]
@@ -138,7 +145,7 @@ mod tests {
         let outcome = McpToolProxy
             .execute(serde_json::json!({"server_name": "x"}), ctx)
             .await;
-        assert!(matches!(outcome, ToolOutcome::Error { .. }));
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
     }
 
     #[tokio::test]
@@ -154,6 +161,6 @@ mod tests {
             .await;
         // Either Error (uninitialized) or Error (server not found) —
         // both acceptable; the test asserts *not Finished*.
-        assert!(matches!(outcome, ToolOutcome::Error { .. }));
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
     }
 }

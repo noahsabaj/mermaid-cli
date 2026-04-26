@@ -12,7 +12,10 @@ use tokio::sync::Mutex;
 use crate::app::Config;
 use crate::models::config::BackendConfig;
 use crate::models::{ModelError, Result, lookup_provider};
-use crate::utils::resolve_api_key;
+use crate::utils::{resolve_api_key, resolve_api_key_with_fallback};
+
+const GEMINI_API_KEY_ENV: &str = "GOOGLE_API_KEY";
+const GEMINI_LEGACY_API_KEY_ENV: &str = "GEMINI_API_KEY";
 
 /// Resolve an API key or return a clear `ModelError` when the env
 /// var isn't set. Takes `default_env` (the registry-default name)
@@ -21,6 +24,19 @@ use crate::utils::resolve_api_key;
 fn require_key(provider: &str, env_var: &str) -> Result<String> {
     resolve_api_key(env_var, None).ok_or_else(|| {
         ModelError::Authentication(format!("{} requires env var {}", provider, env_var))
+    })
+}
+
+fn require_key_with_fallback(
+    provider: &str,
+    env_var: &str,
+    fallback_env_var: &str,
+) -> Result<String> {
+    resolve_api_key_with_fallback(env_var, fallback_env_var, None).ok_or_else(|| {
+        ModelError::Authentication(format!(
+            "{} requires env var {} (or legacy {})",
+            provider, env_var, fallback_env_var
+        ))
     })
 }
 
@@ -79,10 +95,16 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
     let (provider, model_name) = parse_model_id(model_id);
     let provider_lc = provider.to_lowercase();
 
-    // 1. Ollama (and bare names).
+    // 1. Ollama (and bare names). F11: pass Arc<Config> so the wrapper
+    // can forward Ollama hardware options to the adapter.
     if provider_lc == "ollama" {
         let backend = ollama_backend_config(config);
-        let p = OllamaProvider::new(model_name, Arc::new(backend)).await?;
+        let p = OllamaProvider::with_app_config(
+            model_name,
+            Arc::new(backend),
+            Arc::new(config.clone()),
+        )
+        .await?;
         return Ok(Box::new(p));
     }
 
@@ -106,10 +128,12 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
         let base_url = user_cfg
             .and_then(|c| c.base_url.clone())
             .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
-        let api_key_env = user_cfg
-            .and_then(|c| c.api_key_env.as_deref())
-            .unwrap_or("GEMINI_API_KEY");
-        let api_key = require_key("gemini", api_key_env)?;
+        let api_key = match user_cfg.and_then(|c| c.api_key_env.as_deref()) {
+            Some(api_key_env) => require_key("gemini", api_key_env)?,
+            None => {
+                require_key_with_fallback("gemini", GEMINI_API_KEY_ENV, GEMINI_LEGACY_API_KEY_ENV)?
+            },
+        };
         let p = GeminiProvider::new(api_key, model_name.to_string(), base_url)?;
         return Ok(Box::new(p));
     }
@@ -234,6 +258,17 @@ fn user_profile_to_static(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn unique_env(prefix: &str) -> String {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        format!(
+            "{}_{}_{}",
+            prefix,
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        )
+    }
 
     #[test]
     fn parse_bare_name_defaults_to_ollama() {
@@ -247,6 +282,37 @@ mod tests {
         let (p, m) = parse_model_id("anthropic/claude-opus-4-7");
         assert_eq!(p, "anthropic");
         assert_eq!(m, "claude-opus-4-7");
+    }
+
+    #[test]
+    fn gemini_key_resolution_accepts_legacy_fallback() {
+        let primary = unique_env("MERMAID_FACTORY_GEMINI_PRIMARY");
+        let legacy = unique_env("MERMAID_FACTORY_GEMINI_LEGACY");
+        temp_env::with_vars(
+            [(primary.as_str(), None), (legacy.as_str(), Some("legacy"))],
+            || {
+                let resolved = require_key_with_fallback("gemini", &primary, &legacy)
+                    .expect("legacy fallback should resolve");
+                assert_eq!(resolved, "legacy");
+            },
+        );
+    }
+
+    #[test]
+    fn gemini_key_resolution_prefers_google_primary() {
+        let primary = unique_env("MERMAID_FACTORY_GEMINI_PRIMARY2");
+        let legacy = unique_env("MERMAID_FACTORY_GEMINI_LEGACY2");
+        temp_env::with_vars(
+            [
+                (primary.as_str(), Some("google")),
+                (legacy.as_str(), Some("legacy")),
+            ],
+            || {
+                let resolved = require_key_with_fallback("gemini", &primary, &legacy)
+                    .expect("primary should resolve");
+                assert_eq!(resolved, "google");
+            },
+        );
     }
 
     #[tokio::test]

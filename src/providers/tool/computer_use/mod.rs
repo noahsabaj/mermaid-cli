@@ -34,6 +34,10 @@ pub mod type_text;
 use std::path::Path;
 use std::process::Command;
 
+use serde_json::Value;
+
+use crate::domain::{ToolMetadata, ToolOutcome, ToolRunMetadata};
+
 pub use click::ClickTool;
 pub use driver::ComputerUseDriver;
 pub use list_windows::ListWindowsTool;
@@ -157,6 +161,23 @@ pub(crate) fn path_stem(p: &Path) -> String {
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub(super) fn computer_use_success(
+    action: &'static str,
+    params: Value,
+    output: String,
+    duration_secs: f64,
+) -> ToolOutcome {
+    ToolOutcome::success(output, format!("{} completed", action), duration_secs).with_metadata(
+        ToolRunMetadata {
+            detail: ToolMetadata::ComputerUse {
+                action: action.to_string(),
+                params,
+            },
+            ..ToolRunMetadata::default()
+        },
+    )
 }
 
 #[cfg(test)]

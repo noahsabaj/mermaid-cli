@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use crate::constants::MAX_RESPONSE_CHARS as MAX_FILE_READ_BYTES;
-use crate::domain::{ToolDefinition, ToolOutcome};
+use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
@@ -46,7 +46,7 @@ impl ToolExecutor for ReadFileTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "read_file",
-            "Read the contents of one or more files from disk. Prefer relative paths; absolute paths outside the project are blocked.",
+            "Read the contents of one or more files from disk. Prefer relative paths; absolute paths must resolve inside the project directory or the call is rejected.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -68,18 +68,10 @@ impl ToolExecutor for ReadFileTool {
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let paths = match extract_paths(&args) {
             Ok(p) => p,
-            Err(e) => {
-                return ToolOutcome::Error {
-                    error: e,
-                    duration_secs: 0.0,
-                };
-            },
+            Err(e) => return ToolOutcome::error(e, 0.0),
         };
         if paths.is_empty() {
-            return ToolOutcome::Error {
-                error: "read_file requires at least one path".to_string(),
-                duration_secs: 0.0,
-            };
+            return ToolOutcome::error("read_file requires at least one path", 0.0);
         }
 
         let start = std::time::Instant::now();
@@ -92,7 +84,7 @@ impl ToolExecutor for ReadFileTool {
             tokio::select! {
                 biased;
                 _ = ctx.token.cancelled() => {
-                    return ToolOutcome::Cancelled;
+                    return ToolOutcome::cancelled();
                 },
                 read = read_one(&workdir, raw_path) => {
                     match read {
@@ -110,21 +102,40 @@ impl ToolExecutor for ReadFileTool {
                             }
                         },
                         Err(e) => {
-                            return ToolOutcome::Error {
-                                error: format!("{}: {}", raw_path, e),
-                                duration_secs: start.elapsed().as_secs_f64(),
-                            };
+                            return ToolOutcome::error(
+                                format!("{}: {}", raw_path, e),
+                                start.elapsed().as_secs_f64(),
+                            );
                         },
                     }
                 },
             }
         }
 
-        ToolOutcome::Finished {
-            output: combined,
-            images: None,
-            duration_secs: start.elapsed().as_secs_f64(),
-        }
+        let duration_secs = start.elapsed().as_secs_f64();
+        let line_count = combined.lines().count();
+        let byte_count = combined.len();
+        let truncated = combined.contains("[TRUNCATED: file exceeded read cap]");
+        ToolOutcome::success(
+            combined,
+            format!(
+                "{} {} read",
+                line_count,
+                plural(line_count, "line", "lines")
+            ),
+            duration_secs,
+        )
+        .with_metadata(ToolRunMetadata {
+            detail: ToolMetadata::ReadFile {
+                paths,
+                line_count,
+                byte_count,
+                truncated,
+            },
+            line_count: Some(line_count),
+            byte_count: Some(byte_count),
+            ..ToolRunMetadata::default()
+        })
     }
 }
 
@@ -167,7 +178,10 @@ impl ToolExecutor for EditFileTool {
         };
 
         let start = std::time::Instant::now();
-        let abs = resolve_path(&ctx.workdir, raw_path);
+        let abs = match resolve_path_safe(&ctx.workdir, raw_path) {
+            Ok(p) => p,
+            Err(e) => return err(&format!("edit_file: {}", e), 0.0),
+        };
         let old_owned = old_string.to_string();
         let new_owned = new_string.to_string();
         let abs_clone = abs.clone();
@@ -175,16 +189,26 @@ impl ToolExecutor for EditFileTool {
 
         tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             result = tokio::task::spawn_blocking(move || edit_blocking(&abs_clone, &old_owned, &new_owned)) => {
                 match result {
-                    Ok(Ok(replacements)) => ToolOutcome::Finished {
-                        output: format!("Edited {} ({} replacement{})",
+                    Ok(Ok(replacements)) => {
+                        let duration_secs = start.elapsed().as_secs_f64();
+                        ToolOutcome::success(
+                            format!("Edited {} ({} replacement{})",
                             display_path,
                             replacements,
                             if replacements == 1 { "" } else { "s" }),
-                        images: None,
-                        duration_secs: start.elapsed().as_secs_f64(),
+                            format!("{} replacement{}", replacements, if replacements == 1 { "" } else { "s" }),
+                            duration_secs,
+                        )
+                        .with_metadata(ToolRunMetadata {
+                            detail: ToolMetadata::EditFile {
+                                path: display_path,
+                                replacements,
+                            },
+                            ..ToolRunMetadata::default()
+                        })
                     },
                     Ok(Err(e)) => err(&format!("edit_file({}): {}", display_path, e),
                                        start.elapsed().as_secs_f64()),
@@ -224,18 +248,28 @@ impl ToolExecutor for DeleteFileTool {
             return err("delete_file requires 'path'", 0.0);
         };
         let start = std::time::Instant::now();
-        let abs = resolve_path(&ctx.workdir, raw_path);
+        let abs = match resolve_path_safe(&ctx.workdir, raw_path) {
+            Ok(p) => p,
+            Err(e) => return err(&format!("delete_file: {}", e), 0.0),
+        };
         let display = raw_path.to_string();
 
         tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             result = tokio::task::spawn_blocking(move || std::fs::remove_file(&abs)) => {
                 match result {
-                    Ok(Ok(())) => ToolOutcome::Finished {
-                        output: format!("Deleted {}", display),
-                        images: None,
-                        duration_secs: start.elapsed().as_secs_f64(),
+                    Ok(Ok(())) => {
+                        let duration_secs = start.elapsed().as_secs_f64();
+                        ToolOutcome::success(
+                            format!("Deleted {}", display),
+                            "file deleted",
+                            duration_secs,
+                        )
+                        .with_metadata(ToolRunMetadata {
+                            detail: ToolMetadata::DeleteFile { path: display },
+                            ..ToolRunMetadata::default()
+                        })
                     },
                     Ok(Err(e)) => err(&format!("delete_file({}): {}", display, e),
                                        start.elapsed().as_secs_f64()),
@@ -273,18 +307,28 @@ impl ToolExecutor for CreateDirectoryTool {
             return err("create_directory requires 'path'", 0.0);
         };
         let start = std::time::Instant::now();
-        let abs = resolve_path(&ctx.workdir, raw_path);
+        let abs = match resolve_path_safe(&ctx.workdir, raw_path) {
+            Ok(p) => p,
+            Err(e) => return err(&format!("create_directory: {}", e), 0.0),
+        };
         let display = raw_path.to_string();
 
         tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             result = tokio::task::spawn_blocking(move || std::fs::create_dir_all(&abs)) => {
                 match result {
-                    Ok(Ok(())) => ToolOutcome::Finished {
-                        output: format!("Created directory {}", display),
-                        images: None,
-                        duration_secs: start.elapsed().as_secs_f64(),
+                    Ok(Ok(())) => {
+                        let duration_secs = start.elapsed().as_secs_f64();
+                        ToolOutcome::success(
+                            format!("Created directory {}", display),
+                            "directory created",
+                            duration_secs,
+                        )
+                        .with_metadata(ToolRunMetadata {
+                            detail: ToolMetadata::CreateDirectory { path: display },
+                            ..ToolRunMetadata::default()
+                        })
                     },
                     Ok(Err(e)) => err(&format!("create_directory({}): {}", display, e),
                                        start.elapsed().as_secs_f64()),
@@ -322,40 +366,55 @@ impl ToolExecutor for WriteFileTool {
 
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
-            return ToolOutcome::Error {
-                error: "write_file requires 'path' (string)".to_string(),
-                duration_secs: 0.0,
-            };
+            return ToolOutcome::error("write_file requires 'path' (string)", 0.0);
         };
         let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-            return ToolOutcome::Error {
-                error: "write_file requires 'content' (string)".to_string(),
-                duration_secs: 0.0,
-            };
+            return ToolOutcome::error("write_file requires 'content' (string)", 0.0);
         };
 
         let start = std::time::Instant::now();
-        let abs_path = resolve_path(&ctx.workdir, path);
+        let abs_path = match resolve_path_safe(&ctx.workdir, path) {
+            Ok(p) => p,
+            Err(e) => return ToolOutcome::error(format!("write_file: {}", e), 0.0),
+        };
+        let display_path = path.to_string();
+        let line_count = content.lines().count();
+        let byte_count = content.len();
+        let created = Some(!abs_path.exists());
         let content = content.to_string();
 
         tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             result = tokio::task::spawn_blocking(move || write_one_blocking(&abs_path, &content)) => {
                 match result {
-                    Ok(Ok(line_count)) => ToolOutcome::Finished {
-                        output: format!("Wrote {} ({} lines)", path, line_count),
-                        images: None,
-                        duration_secs: start.elapsed().as_secs_f64(),
+                    Ok(Ok(actual_line_count)) => {
+                        let duration_secs = start.elapsed().as_secs_f64();
+                        ToolOutcome::success(
+                            format!("Wrote {} ({} lines)", display_path, actual_line_count),
+                            format!("{} {} written", actual_line_count, plural(actual_line_count, "line", "lines")),
+                            duration_secs,
+                        )
+                        .with_metadata(ToolRunMetadata {
+                            detail: ToolMetadata::WriteFile {
+                                path: display_path,
+                                line_count,
+                                byte_count,
+                                created,
+                            },
+                            line_count: Some(line_count),
+                            byte_count: Some(byte_count),
+                            ..ToolRunMetadata::default()
+                        })
                     },
-                    Ok(Err(e)) => ToolOutcome::Error {
-                        error: format!("write_file({}): {}", path, e),
-                        duration_secs: start.elapsed().as_secs_f64(),
-                    },
-                    Err(e) => ToolOutcome::Error {
-                        error: format!("write_file join error: {}", e),
-                        duration_secs: start.elapsed().as_secs_f64(),
-                    },
+                    Ok(Err(e)) => ToolOutcome::error(
+                        format!("write_file({}): {}", display_path, e),
+                        start.elapsed().as_secs_f64(),
+                    ),
+                    Err(e) => ToolOutcome::error(
+                        format!("write_file join error: {}", e),
+                        start.elapsed().as_secs_f64(),
+                    ),
                 }
             }
         }
@@ -382,13 +441,71 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
     Err("read_file requires 'path' or 'paths'".to_string())
 }
 
-fn resolve_path(workdir: &Path, raw: &str) -> PathBuf {
+/// Resolve a caller-supplied path against `workdir`, enforcing the
+/// "absolute paths outside the project are blocked" contract advertised
+/// in the tool schema.
+///
+/// Rules (F10):
+/// - Relative paths → joined onto `workdir` unchanged. `..` components
+///   are NOT rejected here — a relative `../foo` resolves against the
+///   workdir and then gets the same absolute-path containment check as
+///   an absolute input.
+/// - Absolute paths → canonicalized (resolves `..` + symlinks) and
+///   checked against the canonicalized `workdir`. Escape → `Err`.
+/// - Non-existent paths that won't canonicalize → lexical fallback:
+///   normalize `..` components manually, then compare prefixes. This
+///   matters for `write_file` / `create_directory` where the target
+///   doesn't exist yet.
+fn resolve_path_safe(workdir: &Path, raw: &str) -> Result<PathBuf, String> {
     let p = PathBuf::from(raw);
-    if p.is_absolute() { p } else { workdir.join(p) }
+    let candidate = if p.is_absolute() { p } else { workdir.join(p) };
+
+    // Canonicalize the workdir once. If workdir itself can't canonicalize
+    // (shouldn't happen — `cwd` is the running process's cwd), fall back
+    // to the supplied path so the block still applies lexically.
+    let root = std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
+
+    let canonical =
+        std::fs::canonicalize(&candidate).unwrap_or_else(|_| lexical_normalize(&candidate));
+
+    if canonical.starts_with(&root) {
+        Ok(candidate)
+    } else {
+        Err(format!(
+            "path '{}' is outside the project directory '{}'",
+            raw,
+            workdir.display()
+        ))
+    }
+}
+
+/// Normalize a path lexically (no filesystem access), collapsing `.` and
+/// resolving `..` without symlink expansion. Used when a target doesn't
+/// exist yet (write_file / create_directory) so `canonicalize` would
+/// fail but we still want to reject `..`-escapes.
+fn lexical_normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                // Drop the last segment if one exists; otherwise keep
+                // the `..` (can only happen on relative paths, which
+                // the caller has already joined against workdir).
+                if !out.pop() {
+                    out.push("..");
+                }
+            },
+            Component::CurDir => {},
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<String> {
-    let abs = resolve_path(workdir, raw);
+    let abs = resolve_path_safe(workdir, raw)
+        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg))?;
     let abs_clone = abs.clone();
     let content = tokio::task::spawn_blocking(move || {
         let data = std::fs::read(&abs_clone)?;
@@ -437,10 +554,11 @@ fn edit_blocking(path: &Path, old_string: &str, new_string: &str) -> std::io::Re
 }
 
 fn err(msg: &str, duration_secs: f64) -> ToolOutcome {
-    ToolOutcome::Error {
-        error: msg.to_string(),
-        duration_secs,
-    }
+    ToolOutcome::error(msg, duration_secs)
+}
+
+fn plural(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
+    if count == 1 { singular } else { plural }
 }
 
 #[cfg(test)]
@@ -467,10 +585,8 @@ mod tests {
         let outcome = tool
             .execute(serde_json::json!({"path": "a.txt"}), ctx)
             .await;
-        match outcome {
-            ToolOutcome::Finished { output, .. } => assert_eq!(output, "hello"),
-            _ => panic!("expected Finished"),
-        }
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert_eq!(outcome.output(), "hello");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -479,7 +595,7 @@ mod tests {
         let dir = temp_root("read_missing_path");
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
         let outcome = ReadFileTool.execute(serde_json::json!({}), ctx).await;
-        assert!(matches!(outcome, ToolOutcome::Error { .. }));
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -490,7 +606,7 @@ mod tests {
         let outcome = ReadFileTool
             .execute(serde_json::json!({"path": "does_not_exist.txt"}), ctx)
             .await;
-        assert!(matches!(outcome, ToolOutcome::Error { .. }));
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -503,15 +619,12 @@ mod tests {
         let outcome = ReadFileTool
             .execute(serde_json::json!({"paths": ["a.txt", "b.txt"]}), ctx)
             .await;
-        match outcome {
-            ToolOutcome::Finished { output, .. } => {
-                assert!(output.contains("=== a.txt ==="));
-                assert!(output.contains("alpha"));
-                assert!(output.contains("=== b.txt ==="));
-                assert!(output.contains("beta"));
-            },
-            _ => panic!("expected Finished"),
-        }
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        let output = outcome.output();
+        assert!(output.contains("=== a.txt ==="));
+        assert!(output.contains("alpha"));
+        assert!(output.contains("=== b.txt ==="));
+        assert!(output.contains("beta"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -527,7 +640,7 @@ mod tests {
         let outcome = ReadFileTool
             .execute(serde_json::json!({"path": "x.txt"}), ctx)
             .await;
-        assert!(matches!(outcome, ToolOutcome::Cancelled));
+        assert!(outcome.was_cancelled());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -541,12 +654,8 @@ mod tests {
                 ctx,
             )
             .await;
-        match outcome {
-            ToolOutcome::Finished { output, .. } => {
-                assert!(output.contains("3 lines"));
-            },
-            _ => panic!("expected Finished"),
-        }
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.output().contains("3 lines"));
         let written = fs::read_to_string(dir.join("out.txt")).expect("read");
         assert!(written.contains("line1"));
         let _ = fs::remove_dir_all(&dir);
@@ -565,7 +674,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert!(matches!(outcome, ToolOutcome::Finished { .. }));
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
         assert!(dir.join("sub/nested/out.txt").exists());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -577,7 +686,93 @@ mod tests {
         let outcome = WriteFileTool
             .execute(serde_json::json!({"path": "x.txt"}), ctx)
             .await;
-        assert!(matches!(outcome, ToolOutcome::Error { .. }));
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ─── F10: absolute-path block ───────────────────────────────────
+
+    /// Reading `/etc/passwd` (or any absolute path outside workdir)
+    /// must fail with a clear "outside the project" error. The tool
+    /// schema advertises this contract; before F10 it was a lie.
+    #[tokio::test]
+    async fn read_file_rejects_absolute_path_outside_workdir() {
+        let dir = temp_root("read_abs_escape");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        // Pick a path that's definitely outside a fresh /tmp/* workdir.
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "/etc/passwd"}), ctx)
+            .await;
+        let error = outcome.error_message().expect("expected error");
+        assert!(
+            error.contains("outside the project"),
+            "expected security reject, got: {}",
+            error
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Absolute path that lives INSIDE the workdir is allowed.
+    #[tokio::test]
+    async fn read_file_accepts_absolute_path_inside_workdir() {
+        let dir = temp_root("read_abs_inside");
+        let file = dir.join("hello.txt");
+        fs::write(&file, "ok").expect("write fixture");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = ReadFileTool
+            .execute(
+                serde_json::json!({"path": file.to_string_lossy().to_string()}),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Relative `..`-escape must also be blocked — they resolve against
+    /// the workdir and land outside it, so the lexical normalization
+    /// in `resolve_path_safe` catches them.
+    #[tokio::test]
+    async fn write_file_rejects_relative_parent_escape() {
+        let dir = temp_root("write_dotdot_escape");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = WriteFileTool
+            .execute(
+                serde_json::json!({
+                    "path": "../escape.txt",
+                    "content": "should not write",
+                }),
+                ctx,
+            )
+            .await;
+        let error = outcome.error_message().expect("expected error");
+        assert!(
+            error.contains("outside the project"),
+            "expected security reject, got: {}",
+            error
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `create_directory` needs the lexical-normalization fallback
+    /// because the target doesn't exist yet (can't canonicalize).
+    /// Verify the escape check still fires for non-existent targets.
+    #[tokio::test]
+    async fn create_directory_rejects_absolute_path_outside_workdir() {
+        let dir = temp_root("mkdir_abs_escape");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = CreateDirectoryTool
+            .execute(
+                serde_json::json!({"path": "/tmp/mermaid_fs_escape_target"}),
+                ctx,
+            )
+            .await;
+        let error = outcome.error_message().expect("expected error");
+        assert!(
+            error.contains("outside the project"),
+            "expected security reject, got: {}",
+            error
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

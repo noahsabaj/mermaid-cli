@@ -82,6 +82,15 @@ pub struct ExecContext {
     pub call_id: ToolCallId,
     pub turn: TurnId,
     pub workdir: PathBuf,
+    /// Parent session's `app::Config`. Needed by `SubagentTool` so the
+    /// child reducer uses the same Ollama host, reasoning prefs, MCP
+    /// servers, etc. Other tools don't consult it — keeping it as a
+    /// typed field (rather than a global) means the dependency is
+    /// explicit in the signature.
+    pub config: Arc<crate::app::Config>,
+    /// Parent session's active model id (e.g. `"anthropic/claude-opus-4-7"`).
+    /// Subagents inherit this so they hit the same provider.
+    pub model_id: String,
 }
 
 impl ExecContext {
@@ -91,6 +100,8 @@ impl ExecContext {
         call_id: ToolCallId,
         turn: TurnId,
         workdir: PathBuf,
+        config: Arc<crate::app::Config>,
+        model_id: String,
     ) -> Self {
         Self {
             token,
@@ -98,6 +109,8 @@ impl ExecContext {
             call_id,
             turn,
             workdir,
+            config,
+            model_id,
         }
     }
 }
@@ -166,7 +179,10 @@ pub fn test_stream_context(turn: TurnId) -> (StreamContext, mpsc::Receiver<Strea
     (StreamContext::new(token, tx, turn), rx)
 }
 
-/// Builder counterpart for `ExecContext`.
+/// Builder counterpart for `ExecContext`. Uses a default `Config` and
+/// empty `model_id` — tests that specifically exercise subagent model
+/// inheritance should construct `ExecContext::new` directly with their
+/// chosen values.
 pub fn test_exec_context(
     turn: TurnId,
     call_id: ToolCallId,
@@ -174,7 +190,11 @@ pub fn test_exec_context(
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
     let token = CancellationToken::new();
     let (tx, rx) = mpsc::channel(64);
-    (ExecContext::new(token, tx, call_id, turn, workdir), rx)
+    let config = Arc::new(crate::app::Config::default());
+    (
+        ExecContext::new(token, tx, call_id, turn, workdir, config, String::new()),
+        rx,
+    )
 }
 
 /// Convenience: build a Send+Sync sharable sink for tests.

@@ -12,6 +12,7 @@ use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::ExecContext;
 
 use super::super::ToolExecutor;
+use super::computer_use_success;
 use super::driver::ComputerUseDriver;
 
 pub struct ListWindowsTool {
@@ -41,21 +42,21 @@ impl ToolExecutor for ListWindowsTool {
         }
     }
 
-    async fn execute(&self, _args: Value, ctx: ExecContext) -> ToolOutcome {
+    async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
-        if let Err(o) = self.driver.ensure_alive() {
-            return o;
+        if let Err(error) = self.driver.ensure_alive() {
+            return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
 
         let windows = tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => return ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
             r = self.driver.list_windows(&ctx.token) => match r {
                 Ok(w) => w,
-                Err(e) => return ToolOutcome::Error {
-                    error: format!("list_windows failed: {}", e),
-                    duration_secs: started.elapsed().as_secs_f64(),
-                },
+                Err(e) => return ToolOutcome::error(
+                    format!("list_windows failed: {}", e),
+                    started.elapsed().as_secs_f64(),
+                ),
             },
         };
 
@@ -70,10 +71,11 @@ impl ToolExecutor for ListWindowsTool {
             format!("Visible windows ({}):\n{}", windows.len(), list)
         };
 
-        ToolOutcome::Finished {
+        computer_use_success(
+            "list_windows",
+            args,
             output,
-            images: None,
-            duration_secs: started.elapsed().as_secs_f64(),
-        }
+            started.elapsed().as_secs_f64(),
+        )
     }
 }

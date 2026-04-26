@@ -30,7 +30,6 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use crate::constants::{SCREENSHOT_MAX_WIDTH, SCREENSHOT_REGISTRY_CAPACITY};
-use crate::domain::ToolOutcome;
 
 use super::Backend;
 
@@ -147,18 +146,15 @@ impl ComputerUseDriver {
     /// `execute()`; if the display went away after registration,
     /// they return a clean error instead of hanging on subprocess
     /// dispatch.
-    pub fn ensure_alive(&self) -> Result<(), ToolOutcome> {
+    pub fn ensure_alive(&self) -> Result<(), String> {
         if super::display_is_reachable(self.backend) {
             Ok(())
         } else {
-            Err(ToolOutcome::Error {
-                error: format!(
-                    "Display unreachable (backend={:?}). Was the session \
-                     detached, or did `DISPLAY` change?",
-                    self.backend
-                ),
-                duration_secs: 0.0,
-            })
+            Err(format!(
+                "Display unreachable (backend={:?}). Was the session \
+                 detached, or did `DISPLAY` change?",
+                self.backend
+            ))
         }
     }
 
@@ -219,10 +215,8 @@ impl ComputerUseDriver {
         spec: ScreenshotSpec,
         token: &CancellationToken,
     ) -> Result<CaptureResult> {
-        self.ensure_alive().map_err(|outcome| match outcome {
-            ToolOutcome::Error { error, .. } => anyhow::anyhow!(error),
-            _ => anyhow::anyhow!("display unreachable"),
-        })?;
+        self.ensure_alive()
+            .map_err(|error| anyhow::anyhow!(error))?;
 
         let seq = self.file_counter.fetch_add(1, Ordering::Relaxed);
         let temp_path = std::env::temp_dir().join(format!("mermaid-screenshot-{}.png", seq));

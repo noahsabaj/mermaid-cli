@@ -14,6 +14,7 @@ use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::ExecContext;
 
 use super::super::ToolExecutor;
+use super::computer_use_success;
 use super::driver::ComputerUseDriver;
 
 pub struct ScrollTool {
@@ -52,8 +53,8 @@ impl ToolExecutor for ScrollTool {
 
     async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
-        if let Err(o) = self.driver.ensure_alive() {
-            return o;
+        if let Err(error) = self.driver.ensure_alive() {
+            return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
 
         let direction = args
@@ -62,13 +63,13 @@ impl ToolExecutor for ScrollTool {
             .unwrap_or("down")
             .to_string();
         if direction != "up" && direction != "down" {
-            return ToolOutcome::Error {
-                error: format!(
+            return ToolOutcome::error(
+                format!(
                     "scroll: direction must be 'up' or 'down', got '{}'",
                     direction
                 ),
-                duration_secs: started.elapsed().as_secs_f64(),
-            };
+                started.elapsed().as_secs_f64(),
+            );
         }
         let requested = args
             .get("amount")
@@ -79,14 +80,14 @@ impl ToolExecutor for ScrollTool {
 
         let res = tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => return ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
             r = self.driver.scroll(&direction, amount, &ctx.token) => r,
         };
         if let Err(e) = res {
-            return ToolOutcome::Error {
-                error: format!("scroll failed: {}", e),
-                duration_secs: started.elapsed().as_secs_f64(),
-            };
+            return ToolOutcome::error(
+                format!("scroll failed: {}", e),
+                started.elapsed().as_secs_f64(),
+            );
         }
 
         let clamp_note = if requested != amount {
@@ -94,10 +95,11 @@ impl ToolExecutor for ScrollTool {
         } else {
             String::new()
         };
-        ToolOutcome::Finished {
-            output: format!("Scrolled {} by {}{}", direction, amount, clamp_note),
-            images: None,
-            duration_secs: started.elapsed().as_secs_f64(),
-        }
+        computer_use_success(
+            "scroll",
+            args,
+            format!("Scrolled {} by {}{}", direction, amount, clamp_note),
+            started.elapsed().as_secs_f64(),
+        )
     }
 }

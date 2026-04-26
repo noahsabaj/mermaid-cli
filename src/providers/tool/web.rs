@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::{ToolDefinition, ToolOutcome};
+use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
@@ -66,22 +66,16 @@ impl ToolExecutor for WebSearchTool {
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let queries = match parse_queries(&args) {
             Ok(q) => q,
-            Err(e) => {
-                return ToolOutcome::Error {
-                    error: e,
-                    duration_secs: 0.0,
-                };
-            },
+            Err(e) => return ToolOutcome::error(e, 0.0),
         };
         if queries.is_empty() {
-            return ToolOutcome::Error {
-                error: "web_search requires at least one query".to_string(),
-                duration_secs: 0.0,
-            };
+            return ToolOutcome::error("web_search requires at least one query", 0.0);
         }
 
         let start = std::time::Instant::now();
         let mut combined = String::new();
+        let mut result_count = 0usize;
+        let mut sources = Vec::new();
         for (idx, (query, count)) in queries.iter().enumerate() {
             let _ = ctx
                 .progress
@@ -96,10 +90,12 @@ impl ToolExecutor for WebSearchTool {
             let search = self.client.search_query(query, *count);
             tokio::select! {
                 biased;
-                _ = ctx.token.cancelled() => return ToolOutcome::Cancelled,
+                _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
                 result = search => {
                     match result {
                         Ok(results) => {
+                            result_count += results.len();
+                            sources.extend(results.iter().map(|result| result.url.clone()));
                             let formatted = self.client.format_results(&results);
                             if queries.len() > 1 {
                                 combined.push_str(&format!("=== query: {} ===\n{}\n\n", query, formatted));
@@ -108,21 +104,42 @@ impl ToolExecutor for WebSearchTool {
                             }
                         },
                         Err(e) => {
-                            return ToolOutcome::Error {
-                                error: format!("web_search({}): {}", query, e),
-                                duration_secs: start.elapsed().as_secs_f64(),
-                            };
+                            return ToolOutcome::error(
+                                format!("web_search({}): {}", query, e),
+                                start.elapsed().as_secs_f64(),
+                            );
                         },
                     }
                 }
             }
         }
 
-        ToolOutcome::Finished {
-            output: combined,
-            images: None,
-            duration_secs: start.elapsed().as_secs_f64(),
-        }
+        let duration_secs = start.elapsed().as_secs_f64();
+        let requested_count = queries.iter().map(|(_, count)| *count).sum();
+        let query_texts = queries.iter().map(|(query, _)| query.clone()).collect();
+        ToolOutcome::success(
+            combined,
+            format!(
+                "{} {} returned",
+                result_count,
+                if result_count == 1 {
+                    "result"
+                } else {
+                    "results"
+                }
+            ),
+            duration_secs,
+        )
+        .with_metadata(ToolRunMetadata {
+            detail: ToolMetadata::WebSearch {
+                queries: query_texts,
+                requested_count,
+                result_count,
+                sources,
+            },
+            result_count: Some(result_count),
+            ..ToolRunMetadata::default()
+        })
     }
 }
 
@@ -161,27 +178,46 @@ impl ToolExecutor for WebFetchTool {
 
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(url) = args.get("url").and_then(|v| v.as_str()) else {
-            return ToolOutcome::Error {
-                error: "web_fetch requires 'url' (string)".to_string(),
-                duration_secs: 0.0,
-            };
+            return ToolOutcome::error("web_fetch requires 'url' (string)", 0.0);
         };
         let start = std::time::Instant::now();
         let fetch = self.client.fetch_url(url);
 
         tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             result = fetch => match result {
-                Ok(page) => ToolOutcome::Finished {
-                    output: format_fetch(url, &page),
-                    images: None,
-                    duration_secs: start.elapsed().as_secs_f64(),
+                Ok(page) => {
+                    let output = format_fetch(url, &page);
+                    let duration_secs = start.elapsed().as_secs_f64();
+                    let line_count = output.lines().count();
+                    let byte_count = output.len();
+                    let title = if page.title.is_empty() {
+                        None
+                    } else {
+                        Some(page.title)
+                    };
+                    ToolOutcome::success(
+                        output,
+                        format!("{} {} fetched", line_count, if line_count == 1 { "line" } else { "lines" }),
+                        duration_secs,
+                    )
+                    .with_metadata(ToolRunMetadata {
+                        detail: ToolMetadata::WebFetch {
+                            url: url.to_string(),
+                            title,
+                            line_count,
+                            byte_count,
+                        },
+                        line_count: Some(line_count),
+                        byte_count: Some(byte_count),
+                        ..ToolRunMetadata::default()
+                    })
                 },
-                Err(e) => ToolOutcome::Error {
-                    error: format!("web_fetch({}): {}", url, e),
-                    duration_secs: start.elapsed().as_secs_f64(),
-                },
+                Err(e) => ToolOutcome::error(
+                    format!("web_fetch({}): {}", url, e),
+                    start.elapsed().as_secs_f64(),
+                ),
             },
         }
     }

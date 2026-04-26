@@ -14,6 +14,7 @@ use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::{ExecContext, ProgressEvent};
 
 use super::super::ToolExecutor;
+use super::computer_use_success;
 use super::driver::ComputerUseDriver;
 
 pub struct ClickTool {
@@ -55,8 +56,8 @@ impl ToolExecutor for ClickTool {
 
     async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
-        if let Err(o) = self.driver.ensure_alive() {
-            return o;
+        if let Err(error) = self.driver.ensure_alive() {
+            return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
 
         let x = args.get("x").and_then(|v| v.as_i64()).map(|n| n as i32);
@@ -64,10 +65,10 @@ impl ToolExecutor for ClickTool {
         let (x, y) = match (x, y) {
             (Some(x), Some(y)) => (x, y),
             _ => {
-                return ToolOutcome::Error {
-                    error: "click requires integer `x` and `y`".to_string(),
-                    duration_secs: started.elapsed().as_secs_f64(),
-                };
+                return ToolOutcome::error(
+                    "click requires integer `x` and `y`",
+                    started.elapsed().as_secs_f64(),
+                );
             },
         };
         let button = args
@@ -79,24 +80,19 @@ impl ToolExecutor for ClickTool {
 
         let (sx, sy) = match self.driver.scale_coords(x, y, screenshot_id) {
             Ok(p) => p,
-            Err(e) => {
-                return ToolOutcome::Error {
-                    error: e,
-                    duration_secs: started.elapsed().as_secs_f64(),
-                };
-            },
+            Err(e) => return ToolOutcome::error(e, started.elapsed().as_secs_f64()),
         };
 
         let click_res = tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => return ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
             r = self.driver.click(sx, sy, &button, &ctx.token) => r,
         };
         if let Err(e) = click_res {
-            return ToolOutcome::Error {
-                error: format!("click failed: {}", e),
-                duration_secs: started.elapsed().as_secs_f64(),
-            };
+            return ToolOutcome::error(
+                format!("click failed: {}", e),
+                started.elapsed().as_secs_f64(),
+            );
         }
 
         // Let the WM process focus change + UI update before the
@@ -135,10 +131,11 @@ impl ToolExecutor for ClickTool {
             Some(s) => format!("{}\n[auto-screenshot: {}]", msg, s),
             None => msg,
         };
-        ToolOutcome::Finished {
-            output: final_output,
-            images: image.map(|b| vec![b]),
-            duration_secs: started.elapsed().as_secs_f64(),
+        let mut outcome =
+            computer_use_success("click", args, final_output, started.elapsed().as_secs_f64());
+        if let Some(image) = image {
+            outcome = outcome.with_images(vec![image]);
         }
+        outcome
     }
 }

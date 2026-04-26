@@ -13,6 +13,7 @@ use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::{ExecContext, ProgressEvent};
 
 use super::super::ToolExecutor;
+use super::computer_use_success;
 use super::driver::ComputerUseDriver;
 
 pub struct TypeTextTool {
@@ -49,29 +50,29 @@ impl ToolExecutor for TypeTextTool {
 
     async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
-        if let Err(o) = self.driver.ensure_alive() {
-            return o;
+        if let Err(error) = self.driver.ensure_alive() {
+            return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
         let text = match args.get("text").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
             None => {
-                return ToolOutcome::Error {
-                    error: "type_text requires `text` string".to_string(),
-                    duration_secs: started.elapsed().as_secs_f64(),
-                };
+                return ToolOutcome::error(
+                    "type_text requires `text` string",
+                    started.elapsed().as_secs_f64(),
+                );
             },
         };
 
         let res = tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => return ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
             r = self.driver.type_text(&text, &ctx.token) => r,
         };
         if let Err(e) = res {
-            return ToolOutcome::Error {
-                error: format!("type_text failed: {}", e),
-                duration_secs: started.elapsed().as_secs_f64(),
-            };
+            return ToolOutcome::error(
+                format!("type_text failed: {}", e),
+                started.elapsed().as_secs_f64(),
+            );
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(POST_TYPE_DELAY_MS)).await;
@@ -102,10 +103,11 @@ impl ToolExecutor for TypeTextTool {
             Some(s) => format!("{}\n[auto-screenshot: {}]", base_msg, s),
             None => base_msg,
         };
-        ToolOutcome::Finished {
-            output: out,
-            images: image.map(|b| vec![b]),
-            duration_secs: started.elapsed().as_secs_f64(),
+        let mut outcome =
+            computer_use_success("type_text", args, out, started.elapsed().as_secs_f64());
+        if let Some(image) = image {
+            outcome = outcome.with_images(vec![image]);
         }
+        outcome
     }
 }

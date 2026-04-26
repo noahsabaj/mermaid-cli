@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::runtime::ToolRunMetadata;
+
 /// Result shape carried on an `ActionDisplay`. Discriminates the
 /// success/error path; the chat widget colors them differently and
 /// `Success` may carry image data for multimodal tools.
@@ -42,6 +44,10 @@ pub struct ActionDisplay {
     pub details: ActionDetails,
     /// Wall-clock time in seconds, for long-running operations.
     pub duration_seconds: Option<f64>,
+    /// Structured facts about the tool run. Optional for old saved
+    /// conversations and simple actions.
+    #[serde(default)]
+    pub metadata: Option<ToolRunMetadata>,
 }
 
 /// Per-action-type display payload. The chat widget matches on this

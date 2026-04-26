@@ -15,6 +15,7 @@ use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::{ExecContext, ProgressEvent};
 
 use super::super::ToolExecutor;
+use super::computer_use_success;
 use super::driver::ComputerUseDriver;
 
 pub struct PressKeyTool {
@@ -50,29 +51,29 @@ impl ToolExecutor for PressKeyTool {
 
     async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
-        if let Err(o) = self.driver.ensure_alive() {
-            return o;
+        if let Err(error) = self.driver.ensure_alive() {
+            return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
         let key = match args.get("key").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
             None => {
-                return ToolOutcome::Error {
-                    error: "press_key requires `key` string".to_string(),
-                    duration_secs: started.elapsed().as_secs_f64(),
-                };
+                return ToolOutcome::error(
+                    "press_key requires `key` string",
+                    started.elapsed().as_secs_f64(),
+                );
             },
         };
 
         let res = tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => return ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
             r = self.driver.press_key(&key, &ctx.token) => r,
         };
         if let Err(e) = res {
-            return ToolOutcome::Error {
-                error: format!("press_key failed: {}", e),
-                duration_secs: started.elapsed().as_secs_f64(),
-            };
+            return ToolOutcome::error(
+                format!("press_key failed: {}", e),
+                started.elapsed().as_secs_f64(),
+            );
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(POST_KEY_DELAY_MS)).await;
@@ -101,10 +102,11 @@ impl ToolExecutor for PressKeyTool {
             Some(s) => format!("{}\n[auto-screenshot: {}]", base_msg, s),
             None => base_msg,
         };
-        ToolOutcome::Finished {
-            output: out,
-            images: image.map(|b| vec![b]),
-            duration_secs: started.elapsed().as_secs_f64(),
+        let mut outcome =
+            computer_use_success("press_key", args, out, started.elapsed().as_secs_f64());
+        if let Some(image) = image {
+            outcome = outcome.with_images(vec![image]);
         }
+        outcome
     }
 }
