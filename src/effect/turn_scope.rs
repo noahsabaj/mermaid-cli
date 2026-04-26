@@ -92,6 +92,15 @@ impl TurnScope {
         self.joins.is_empty()
     }
 
+    /// Drain any already-completed tasks from the JoinSet without
+    /// blocking. `JoinSet::is_empty` only flips to true after finished
+    /// tasks are explicitly harvested via `join_next`; without this,
+    /// `EffectRunner::reap_empty_scopes` would see finished-but-not-
+    /// joined scopes as "still busy" and never reap them. F12.
+    pub fn drain_completed(&mut self) {
+        while self.joins.try_join_next().is_some() {}
+    }
+
     pub fn len(&self) -> usize {
         self.joins.len()
     }

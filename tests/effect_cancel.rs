@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use mermaid_cli::domain::{ToolCallId, ToolOutcome, TurnId};
+use mermaid_cli::domain::{ToolCallId, TurnId};
 use mermaid_cli::providers::ctx::test_exec_context;
 use mermaid_cli::providers::tool::ToolExecutor;
 use mermaid_cli::providers::tool::exec::ExecuteCommandTool;
@@ -49,7 +49,7 @@ async fn execute_command_cancels_within_100ms() {
         .expect("join");
     let elapsed = cancel_at.elapsed();
 
-    assert!(matches!(outcome, ToolOutcome::Cancelled));
+    assert!(outcome.was_cancelled());
     assert!(
         elapsed < Duration::from_millis(300),
         "cancellation took {:?} — v0.6 regression?",
@@ -71,12 +71,10 @@ async fn execute_command_timeout_honored() {
         .await;
     let elapsed = start.elapsed();
 
-    match outcome {
-        ToolOutcome::Finished { output, .. } => {
-            assert!(output.contains("timed out"), "got: {}", output);
-        },
-        other => panic!("expected timeout Finished, got {:?}", other),
-    }
+    assert_eq!(outcome.status, mermaid_cli::domain::ToolStatus::Error);
+    let output = outcome.as_tool_message_content();
+    assert!(output.contains("timed out"), "got: {}", output);
+    assert!(output.contains("was killed"), "got: {}", output);
     assert!(
         elapsed >= Duration::from_millis(900) && elapsed < Duration::from_millis(1500),
         "timeout duration off: {:?}",

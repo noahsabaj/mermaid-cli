@@ -1,0 +1,84 @@
+//! Process lifecycle signal handling.
+//!
+//! Crossterm raw mode turns a typed Ctrl+C into a key event, but OS
+//! signals can still arrive from `kill`, terminal close, or a process
+//! manager. This module converts those signals into reducer messages
+//! so shutdown follows the same path as `/quit`.
+
+use tokio::sync::mpsc;
+
+use crate::domain::{Msg, RuntimeSignal};
+
+/// Small signal stream consumed by the app main loops.
+pub struct RuntimeLifecycle {
+    rx: mpsc::UnboundedReceiver<RuntimeSignal>,
+}
+
+impl RuntimeLifecycle {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        spawn_signal_tasks(tx);
+        Self { rx }
+    }
+
+    pub async fn next_msg(&mut self) -> Option<Msg> {
+        self.rx.recv().await.map(Msg::RuntimeSignal)
+    }
+}
+
+impl Default for RuntimeLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn spawn_signal_tasks(tx: mpsc::UnboundedSender<RuntimeSignal>) {
+    let ctrl_c_tx = tx.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = ctrl_c_tx.send(RuntimeSignal::Interrupt);
+        }
+    });
+
+    spawn_unix_signal_tasks(tx);
+}
+
+#[cfg(unix)]
+fn spawn_unix_signal_tasks(tx: mpsc::UnboundedSender<RuntimeSignal>) {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let terminate_tx = tx.clone();
+    tokio::spawn(async move {
+        if let Ok(mut sigterm) = signal(SignalKind::terminate())
+            && sigterm.recv().await.is_some()
+        {
+            let _ = terminate_tx.send(RuntimeSignal::Terminate);
+        }
+    });
+
+    tokio::spawn(async move {
+        if let Ok(mut sighup) = signal(SignalKind::hangup())
+            && sighup.recv().await.is_some()
+        {
+            let _ = tx.send(RuntimeSignal::Hangup);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_unix_signal_tasks(_tx: mpsc::UnboundedSender<RuntimeSignal>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_wraps_signal_as_reducer_msg() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut lifecycle = RuntimeLifecycle { rx };
+        tx.send(RuntimeSignal::Terminate).expect("send signal");
+
+        let msg = lifecycle.next_msg().await.expect("signal msg");
+        assert!(matches!(msg, Msg::RuntimeSignal(RuntimeSignal::Terminate)));
+    }
+}

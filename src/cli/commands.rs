@@ -5,7 +5,7 @@ use crate::{
     app::{Config, get_config_dir, init_config, load_config},
     models::{BackendConfig, Model, PROVIDER_REGISTRY, lookup_provider},
     ollama::is_installed as is_ollama_installed,
-    utils::resolve_api_key,
+    utils::{resolve_api_key, resolve_api_key_with_fallback},
 };
 
 use super::Commands;
@@ -287,8 +287,9 @@ fn show_provider_status(config: &Config) {
 
     // Gemini — also bespoke (not in OpenAI-compat registry).
     let gem_cfg = config.providers.get("gemini");
-    if resolve_api_key(
+    if resolve_api_key_with_fallback(
         "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
         gem_cfg.and_then(|c| c.api_key_env.as_deref()),
     )
     .is_some()
