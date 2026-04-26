@@ -12,7 +12,7 @@ The name is what the model sees when it decides to call your tool. Keep it `snak
 // src/providers/tool/my_tool.rs
 use async_trait::async_trait;
 
-use crate::domain::ToolOutcome;
+use crate::domain::{ToolMetadata, ToolOutcome, ToolRunMetadata};
 use crate::providers::ctx::ExecContext;
 use crate::providers::tool::ToolExecutor;
 
@@ -26,10 +26,7 @@ impl ToolExecutor for MyTool {
 
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(input) = args.get("input").and_then(|v| v.as_str()) else {
-            return ToolOutcome::Error {
-                error: "my_tool requires 'input' (string)".to_string(),
-                duration_secs: 0.0,
-            };
+            return ToolOutcome::error("my_tool requires 'input' (string)", 0.0);
         };
 
         let start = std::time::Instant::now();
@@ -40,17 +37,24 @@ impl ToolExecutor for MyTool {
         // Ctrl+C won't abort cleanly.
         tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => ToolOutcome::Cancelled,
+            _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             result = do_the_work(input, &ctx.workdir) => match result {
-                Ok(output) => ToolOutcome::Finished {
+                Ok(output) => ToolOutcome::success(
                     output,
-                    images: None,
-                    duration_secs: start.elapsed().as_secs_f64(),
-                },
-                Err(e) => ToolOutcome::Error {
-                    error: format!("my_tool: {}", e),
-                    duration_secs: start.elapsed().as_secs_f64(),
-                },
+                    "my_tool completed",
+                    start.elapsed().as_secs_f64(),
+                )
+                .with_metadata(ToolRunMetadata {
+                    detail: ToolMetadata::Custom {
+                        name: "my_tool".to_string(),
+                        data: serde_json::json!({ "input": input }),
+                    },
+                    ..ToolRunMetadata::default()
+                }),
+                Err(e) => ToolOutcome::error(
+                    format!("my_tool: {}", e),
+                    start.elapsed().as_secs_f64(),
+                ),
             },
         }
     }
@@ -89,7 +93,9 @@ The registry routes calls; the model needs to know the name + schema. Add a `Too
 
 **Don't** call `tokio::time::sleep` or any other long await without racing it against `ctx.token.cancelled()`. Users expect Ctrl+C to abort; forgetting the select race is the structural bug the old architecture let slip repeatedly.
 
-**Do** return `ToolOutcome::Error` for expected failures (bad input, missing file, permission denied). The error message lands in the tool-result message the model sees next turn — make it useful.
+**Do** return `ToolOutcome::error(...)` for expected failures (bad input, missing file, permission denied). The error message lands in the tool-result message the model sees next turn, so make it useful.
+
+**Do** attach typed metadata with `with_metadata(...)` when the UI or recorder should know facts like line counts, result counts, process ids, or generated artifacts. The model still receives `model_content`; Mermaid renders and records from the structured fields.
 
 **Don't** hand back paths outside `ctx.workdir` unless the tool explicitly accepts absolute paths. Relative args should resolve against the working directory so the behavior matches user expectations.
 
@@ -98,6 +104,6 @@ The registry routes calls; the model needs to know the name + schema. Add a `Too
 ## Testing checklist
 
 - Happy path: valid args, success outcome.
-- Missing args: returns `Error`.
-- Cancellation: pre-cancel the token, call execute, assert `Cancelled`.
+- Missing args: returns `ToolStatus::Error`.
+- Cancellation: pre-cancel the token, call execute, assert `outcome.was_cancelled()`.
 - Workdir handling: relative paths resolve against `ctx.workdir`.

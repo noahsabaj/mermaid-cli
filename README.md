@@ -52,7 +52,7 @@ sudo apt install grim ydotool wtype
 sudo apt install imagemagick
 ```
 
-macOS and Windows are supported through `screencapture`/`pngpaste` and PowerShell respectively. See `src/agents/computer_use.rs` for the full platform matrix.
+macOS and Windows are supported through `screencapture`/`pngpaste` and PowerShell respectively. See `src/providers/tool/computer_use/` for the full platform matrix.
 
 ## Usage
 
@@ -87,7 +87,6 @@ mermaid mcp                                     # List configured MCP servers
 | Ctrl+C | Quit (auto-saves the session) |
 | Alt+T | Cycle reasoning level: `None → Low → Medium → High → Max → None` |
 | Ctrl+V | Paste image or text from clipboard |
-| Ctrl+O | Preview attached image |
 | Ctrl+Click | Open image from chat history |
 | `/` | Open slash-command palette (filter-as-you-type) |
 | Tab | In palette: complete highlighted command name |
@@ -124,7 +123,7 @@ The model uses these autonomously via native tool calling:
 | `edit_file` | Targeted text replacement with diff |
 | `delete_file` | Delete files (timestamped backup) |
 | `create_directory` | Create directories |
-| `execute_command` | Run any command — terminal, GUI apps, scripts, servers |
+| `execute_command` | Run shell commands; background mode registers PID/log/URL metadata for GUI apps and dev servers |
 | `web_search` | Search the web (Ollama Cloud) |
 | `web_fetch` | Fetch URL content as markdown (Ollama Cloud) |
 | `agent` | Spawn autonomous sub-agent for parallel tasks |
@@ -195,7 +194,7 @@ no_execute = false
 # api_key_env = "MY_ANTHROPIC_KEY"  # default: ANTHROPIC_API_KEY
 
 [providers.gemini]
-# api_key_env = "MY_GOOGLE_KEY"  # default: GOOGLE_API_KEY
+# api_key_env = "MY_GOOGLE_KEY"  # default: GOOGLE_API_KEY; GEMINI_API_KEY is accepted as a legacy fallback
 
 [providers.groq]
 # api_key_env = "MY_GROQ_KEY"    # default: GROQ_API_KEY
@@ -220,7 +219,7 @@ Set the appropriate environment variable (or override via `[providers.<name>].ap
 | Provider | Env var | Example model |
 |----------|---------|---------------|
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic/claude-opus-4-7` |
-| Google Gemini | `GOOGLE_API_KEY` | `gemini/gemini-3.1-pro-preview` |
+| Google Gemini | `GOOGLE_API_KEY` (`GEMINI_API_KEY` legacy fallback) | `gemini/gemini-3.1-pro-preview` |
 | OpenAI | `OPENAI_API_KEY` | `openai/gpt-5` |
 | Groq | `GROQ_API_KEY` | `groq/qwen-qwq-32b` |
 | OpenRouter | `OPENROUTER_API_KEY` | `openrouter/anthropic/claude-3.7-sonnet` |

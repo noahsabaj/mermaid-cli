@@ -1,6 +1,6 @@
 [package]
 name = "mermaid-cli"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 # `str::floor_char_boundary` (used in several places for UTF-8-safe slicing)
 # stabilized in Rust 1.91.0 — confirmed by clippy::incompatible_msrv.
@@ -37,7 +37,6 @@ ratatui = { version = "0.30", features = ["scrolling-regions", "palette", "macro
 # v0.7 main loop can drive crossterm events + effect results off one
 # `tokio::select!`. No more dual event loops.
 crossterm = { version = "0.29", features = ["event-stream"] }
-tui-textarea = "0.7"
 
 # Config & Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -67,19 +66,15 @@ regex = "1.12"
 rustc-hash = "2.0"  # Faster non-cryptographic hash for HashMap
 base64 = "0.22"  # Base64 encoding for binary files (PDFs, images)
 rpassword = "7.4.0"
-# `tui-textarea 0.7` pulls in `ratatui 0.29` (the project also depends
-# on `ratatui 0.30` directly), and 0.29 exact-pins `unicode-width
-# =0.2.0`. This pin makes the dual-ratatui resolution deterministic and
-# drops once `tui-textarea` upgrades past its 0.29 dep. Upstream PR #118
-# (ratatui 0.30 support) is merged but unreleased; `tui-textarea-2` fork
-# is available if we need to unblock sooner.
-unicode-width = "=0.2.0"
+unicode-width = "0.2"
 
 [dev-dependencies]
 # Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`
 # patterns in model + auth tests. Safer under `--test-threads > 1`.
 # `async_closure` feature enables `async_with_vars` for tokio-test paths.
 temp-env = { version = "0.3", features = ["async_closure"] }
+# Real pseudo-terminal harness for exit/terminal-mode regression tests.
+portable-pty = "0.9"
 
 [profile.release]
 lto = true

@@ -18,17 +18,25 @@ One JSON object per line (JSONL). Each object shape:
 - `ts` — RFC3339 timestamp; informational only.
 - `kind` — `MsgKind` variant (see `src/domain/msg.rs`).
 - `turn` — embedded `TurnId` for effect-result messages; `null` for user-intent and housekeeping.
-- `body` — serde-serialized payload. Variants that carry raw binary data (paste images) are skipped on record.
+- `body` — best-effort structured payload from `record_msg_body`. Variants that carry raw binary or runtime-only data are marked with `"recordable": false` and include compact metadata instead of the full payload.
+
+Runtime lifecycle events are recorded as normal reducer inputs. For example, an external SIGTERM records `{"kind":"RuntimeSignal","body":{"signal":"terminate"}}`, which lets debugging distinguish a clean user quit from a process-manager shutdown.
 
 ## Recording
 
-Today this ships as an opt-in during development. The public CLI flag (`--record <file>`) lands in a follow-up. To capture while iterating:
+Pass `--record <file>` at startup to write a JSONL log of every reducer input:
+
+```bash
+mermaid --record /tmp/session.jsonl
+```
+
+Library callers can also construct a `Recorder` directly:
 
 ```rust
-use mermaid_cli::app::Recorder;
+use mermaid_cli::app::{Recorder, record_msg_body};
 let mut recorder = Recorder::open("session.jsonl")?;
-// Inside the main loop, after each update():
-recorder.record_kind(msg.kind(), msg.turn_id(), serde_json::to_value(&msg).unwrap_or_default())?;
+// Inside the main loop, before each update():
+recorder.record_kind(msg.kind(), msg.turn_id(), record_msg_body(&msg))?;
 ```
 
 ## Replaying
@@ -42,12 +50,12 @@ for entry in replay {
 }
 ```
 
-The reconstruction step is explicit (and hand-coded by variant today) because `Msg` doesn't currently round-trip through serde — a few variants carry non-serializable fields. A full `impl Deserialize for Msg` lands when every in-flight variant is covered.
+The reconstruction step is explicit (and hand-coded by variant today) because `Msg` doesn't currently round-trip through serde. Replay logs are structured and useful for debugging, but variants marked `"recordable": false` are observability records rather than deterministic replay inputs.
 
 ## Use cases that land for free
 
 - **Regression tests.** Save a JSONL log of any interesting session. A future commit that changes reducer behavior can be tested against the log: fold over the Msg stream, assert the final `State` equals the known-good snapshot.
-- **Bug reports.** When a user reports weird behavior, ask them to `MERMAID_V7_RECORD=/tmp/session.jsonl mermaid` next time and send you the log. You can replay it locally against your build.
+- **Bug reports.** When a user reports weird behavior, ask them to run `mermaid --record /tmp/session.jsonl` and send you the log. You can replay it locally against your build.
 - **Fuzz-style property testing.** Generate random `Msg` sequences, fold over them, assert invariants (every committed assistant message has a matching user, every `ExecutingTools` eventually resolves or cancels, etc.).
 
 ## Why this is nearly free architecturally

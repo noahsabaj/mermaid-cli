@@ -47,6 +47,7 @@ src/
 ├── app/        — the thin outer shell.
 │   ├── run.rs          ~40-line main loop
 │   ├── event_source.rs crossterm Event → Msg
+│   ├── lifecycle.rs    SIGINT/SIGTERM/SIGHUP → Msg
 │   ├── terminal.rs     TerminalGuard (panic-safe teardown)
 │   └── recorder.rs     --record / --replay
 │
@@ -80,6 +81,10 @@ In v0.6, the equivalent was 30 lines of placeholder bookkeeping added after a cu
 
 `ExecContext::token` and `StreamContext::token` are `CancellationToken`s threaded into every provider and tool. Adapters race `token.cancelled()` against their main future inside `tokio::select!`. Abort latency is bounded by how long `SIGKILL` takes to arrive, not by whatever polling interval the code happened to choose.
 
+### Runtime metadata is typed.
+
+`domain::runtime` holds lifecycle signals, provider capability snapshots, tool-run metadata, and managed background processes. The renderer can still show friendly strings, but long-lived state like "PID 123 is a background dev server with log `/tmp/...`" lives as data on `State::runtime`, not as text scraped out of chat output.
+
 ## The message loop
 
 ```rust
@@ -90,6 +95,7 @@ loop {
     let msg = tokio::select! {
         m = msg_rx.recv()   => m,                    // effect results
         e = events.next()   => event_to_msg(e),      // crossterm
+        s = lifecycle.next_msg() => s,               // process signals
         _ = tick.tick()     => Some(Msg::Tick),      // 60 Hz
     };
 
@@ -103,6 +109,8 @@ loop {
 
 That's the whole thing. There is no second runtime. There are no observer callbacks. The render is pure — it takes `&State`, paints into ratatui, mutates nothing.
 
+On exit, the app restores the terminal before async shutdown drains saves, MCP cleanup, and cancelled turn scopes. `TerminalGuard::restore_now()` is idempotent, so normal exit, signal exit, panic cleanup, and `Drop` all share the same teardown without stacking alternate-screen or mouse-capture state.
+
 ## Adding a provider
 
 See [`docs/adding_providers.md`](adding_providers.md). tl;dr: implement `ModelProvider` for a struct, register it in `ProviderFactory::build_provider`. One file; no dispatch plumbing to update.
@@ -115,13 +123,6 @@ See [`docs/adding_tools.md`](adding_tools.md). tl;dr: implement `ToolExecutor` f
 
 See [`docs/replay_debugging.md`](replay_debugging.md). Event sourcing is nearly free in an MVU architecture; we capture every `Msg` the reducer sees, and a replay is a straight fold.
 
-## What's still old (v0.7.0)
+## Migration status
 
-The new path is opt-in via `MERMAID_V7=1`. The v0.6 runtime still runs by default. Every piece of the new architecture is live — domain, effect, providers, render, app::run — but the default binary path hasn't flipped yet. The plan is to flip once v7 has been exercised against real sessions and any parity gaps close.
-
-Gaps the default path still has to fill:
-- Subagent dispatch (the `agent` tool) runs through v0.6's code.
-- MCP server init happens in v0.6's bootstrap; the `OnceLock` singleton is shared.
-- Conversation load modal / /cloud-setup interactive flow / model list modal — reducer has the Msg vocabulary, render layer doesn't paint the full UIs yet.
-
-Those land in follow-up commits before the default flip.
+The v0.6 runtime is gone. The v0.7 architecture is the only code path — subagent dispatch, MCP init, conversation load, and the model list modal all run through the reducer + effect runner described above. `MERMAID_V7=1` used to gate the v0.7 runtime during the migration; it's a no-op now and will be removed in a future release.

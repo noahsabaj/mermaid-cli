@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-04-26
+
+Runtime hardening, typed tool output, token accounting, and context
+compaction on top of the v0.7 architecture.
+
+### Added
+
+- **Manual and automatic context compaction.** `/compact [instructions]`
+  now creates a model-visible checkpoint, archives the removed raw
+  messages under `.mermaid/compactions/`, and replaces old history
+  with a structured handoff plus the most recent turns. Mermaid also
+  auto-compacts near the model's context limit and retries once after
+  provider context-limit errors.
+- **Typed tool-result metadata.** Tool outcomes now carry structured
+  status, duration, line counts, byte counts, result counts, artifacts,
+  and tool-specific metadata. The TUI renders friendly summaries such
+  as read/write line counts, web-search result counts, command exit
+  status, and background process details without scraping model-facing
+  text.
+- **Runtime metadata layer.** `domain::runtime` tracks lifecycle
+  signals, provider capability snapshots, managed background
+  processes, tool metadata, and a lightweight runtime timeline.
+- **Background command registration.** `execute_command` can run
+  long-lived commands in background mode, capture startup logs, detect
+  local URLs, and register PID/log metadata for Mermaid to display and
+  persist.
+- **Subagent tool.** The `agent` tool can spawn autonomous child agents
+  using the active model/provider, with depth limits and a child tool
+  registry that excludes unsafe/self-recursive tools.
+- **Computer-use tools.** The v0.7 tool registry now includes the
+  screenshot, click, mouse-move, keypress, type-text, scroll, and
+  window-list computer-use tools.
+- **Chat image artifacts.** Tool-produced images can be attached to
+  assistant messages, rendered in the chat history, and opened from the
+  TUI.
+- **Lifecycle signal handling.** SIGINT, SIGTERM, and SIGHUP now flow
+  through reducer messages so Mermaid can restore the terminal and save
+  state consistently.
+- **Context and usage slash commands.** `/usage` and `/context` report
+  provider token usage, session totals, estimated prompt budget, model
+  context capacity, and recent compaction metadata.
+
 ### Changed
 
 - **v0.6 runtime deleted.** The `MERMAID_V7=1` opt-in is gone; the
@@ -22,6 +64,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespace into `src/domain/`, `src/render/`, `src/mcp/`, and
   `src/providers/tool/`. No behaviour changes — just no longer
   reaching back into deleted modules.
+- Token accounting now distinguishes provider-reported usage from
+  local estimates. The footer shows current context usage separately
+  from last API usage and cumulative session totals, avoiding the old
+  inflated "session tokens" display.
+- Model/provider requests now use a stream bridge shared across
+  providers, making cancellation and done/usage events more uniform.
+- Terminal teardown now restores raw mode, mouse capture, bracketed
+  paste, and the alternate screen before asynchronous shutdown work
+  drains.
+
+### Fixed
+
+- Ctrl+C from an idle, empty TUI exits and restores the user's terminal
+  reliably instead of requiring repeated keypresses or leaking terminal
+  escape sequences back into the shell.
+- Cancelled turns now drain through `TurnCancelled`, preventing stale
+  provider/tool events from leaving the reducer stuck in `Cancelling`.
+- Tool cancellation now returns typed cancelled outcomes instead of
+  relying on textual placeholders.
+- Stale screenshots are evicted from outgoing model requests while the
+  latest relevant image remains available in chat history.
+- Gemini API key resolution now documents and preserves the
+  `GEMINI_API_KEY` legacy fallback alongside `GOOGLE_API_KEY`.
 
 ### Removed
 
@@ -38,6 +103,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `manager_ref::wait_ready()` — if a tool call races startup, it
   parks briefly for init to complete instead of immediately
   erroring.
+- `--record <file>` now records structured reducer input events,
+  including lifecycle and compaction events, for replay/debugging.
+
+### Docs
+
+- Updated the architecture, adding-tools, replay-debugging, and README
+  docs for the v0.7-only runtime, typed metadata, background commands,
+  computer-use path changes, and current provider key behavior.
+
+### Tests
+
+- Added regression coverage for terminal-mode restoration on Ctrl+C,
+  context compaction planning/replacement, slash-command parsing,
+  compact event rendering, token-status rendering, background command
+  metadata, and subagent/tool registry behavior.
 
 ## [0.7.0] - 2026-04-21
 
@@ -461,7 +541,9 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.4.1...v0.5.0
