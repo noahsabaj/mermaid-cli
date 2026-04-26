@@ -45,14 +45,15 @@ pub fn event_to_msg(event: CtEvent) -> Option<Msg> {
             }
         },
         CtEvent::Mouse(mouse) => match mouse.kind {
-            CtMouseKind::ScrollUp | CtMouseKind::ScrollDown => {
-                // Scroll bindings are rendered-only; the reducer
-                // doesn't need mouse state. Map to a sentinel Key
-                // so the UI layer can still update chat_scroll —
-                // actually for now, just drop. Mouse support will
-                // re-land in C7 when the render layer ports.
-                None
-            },
+            // F13: wire mouse wheel scroll. `UI_MOUSE_SCROLL_LINES`
+            // sets the delta per wheel tick to match the READMEs
+            // "mouse wheel scrolls the chat" contract.
+            CtMouseKind::ScrollUp => Some(Msg::MouseScroll {
+                delta: crate::constants::UI_MOUSE_SCROLL_LINES as i16,
+            }),
+            CtMouseKind::ScrollDown => Some(Msg::MouseScroll {
+                delta: -(crate::constants::UI_MOUSE_SCROLL_LINES as i16),
+            }),
             _ => None,
         },
         CtEvent::Resize(w, h) => Some(Msg::Resize {
@@ -127,6 +128,9 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("save") => SlashCmd::Save(arg),
         Some("load") => SlashCmd::Load(arg),
         Some("list") => SlashCmd::List,
+        Some("usage") => SlashCmd::Usage,
+        Some("context") => SlashCmd::Context,
+        Some("compact") => SlashCmd::Compact(arg),
         Some("cloud-setup") => SlashCmd::CloudSetup,
         Some("help") => SlashCmd::Help,
         Some("quit") => SlashCmd::Quit,
@@ -232,6 +236,23 @@ mod tests {
     #[test]
     fn parse_slash_quit_alias_q() {
         assert_eq!(parse_slash_command("q"), SlashCmd::Quit);
+    }
+
+    #[test]
+    fn parse_slash_usage_and_context() {
+        assert_eq!(parse_slash_command("usage"), SlashCmd::Usage);
+        assert_eq!(parse_slash_command("context"), SlashCmd::Context);
+    }
+
+    #[test]
+    fn parse_slash_compact_and_aliases() {
+        assert_eq!(parse_slash_command("compact"), SlashCmd::Compact(None));
+        assert_eq!(
+            parse_slash_command("compact focus on tests"),
+            SlashCmd::Compact(Some("focus on tests".to_string()))
+        );
+        assert_eq!(parse_slash_command("compress"), SlashCmd::Compact(None));
+        assert_eq!(parse_slash_command("summarize"), SlashCmd::Compact(None));
     }
 
     #[test]

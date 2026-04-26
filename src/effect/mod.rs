@@ -37,16 +37,26 @@ mod turn_scope;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::mpsc;
 
 use crate::app::Config;
-use crate::domain::{Cmd, Msg, TurnId};
+use crate::domain::{
+    Cmd, CompactionPolicy, CompactionRequest, CompactionResult, CompactionTrigger, Msg, TurnId,
+};
+use crate::models::{ModelError, TokenUsage};
 use crate::providers::ctx::{ExecContext, StreamContext};
+use crate::providers::model::ModelProvider;
 use crate::providers::{ProviderFactory, StreamEvent, ToolRegistry};
 
 pub use middleware::{DEFAULT_MAX_ATTEMPTS, retry_transient_http};
 pub use turn_scope::TurnScope;
+
+#[cfg(not(test))]
+const CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(test)]
+const CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Single channel back to the reducer. `EffectRunner` holds the
 /// sender; every spawned task clones this so it can emit `Msg` as
@@ -67,9 +77,10 @@ pub const MSG_CHANNEL_CAPACITY: usize = 512;
 pub struct EffectRunner {
     msg_tx: MsgSender,
     /// Per-turn scopes. Populated lazily: the first `Cmd` bearing a
-    /// TurnId creates a scope; `Cmd::CancelScope` tears it down. A
-    /// scope is also auto-reaped when its JoinSet drains empty, so
-    /// completed turns don't accumulate.
+    /// TurnId creates a scope; `Cmd::CancelScope` tears it down.
+    /// Empty (drained) scopes are reaped by `reap_empty_scopes`, which
+    /// runs at the top of every `dispatch` call so the map stays
+    /// bounded across long sessions (F12).
     scopes: HashMap<TurnId, TurnScope>,
     /// Detached work (saves, persists, MCP lifecycle) lives here.
     /// This one set never gets cancelled piecemeal — shutdown drains
@@ -172,14 +183,30 @@ impl EffectRunner {
 
     /// Drop the scope for a turn, signalling cancellation to every
     /// child first. Safe to call for non-existent turns.
+    ///
+    /// After the scope is cancelled, a detached task moves it off the
+    /// runner, drains its `JoinSet` (so child tasks unwind), then emits
+    /// `Msg::TurnCancelled(turn)` so the reducer can transition
+    /// `Cancelling → Idle`. Without this terminal event the TUI would
+    /// stick in `Cancelling` — the reducer has no other way to learn
+    /// that the abort fully landed.
     fn drop_scope(&mut self, turn: TurnId) {
-        if let Some(scope) = self.scopes.remove(&turn) {
+        if let Some(mut scope) = self.scopes.remove(&turn) {
             scope.cancel();
-            // Scope is dropped here → JoinSet is dropped → every
-            // child task is aborted. Cooperative cancellation via the
-            // token should already have unwound them at their next
-            // await, so this is just the belt-and-suspenders.
-            drop(scope);
+            let tx = self.msg_tx.clone();
+            self.detached.spawn(async move {
+                if tokio::time::timeout(CANCEL_DRAIN_TIMEOUT, scope.drain())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        turn = %turn,
+                        timeout_ms = CANCEL_DRAIN_TIMEOUT.as_millis(),
+                        "cancel drain timed out; aborting remaining scoped tasks"
+                    );
+                }
+                let _ = tx.send(Msg::TurnCancelled(turn)).await;
+            });
         }
     }
 
@@ -189,10 +216,28 @@ impl EffectRunner {
         self.scopes.len()
     }
 
+    /// F12: remove scope entries whose `JoinSet` is empty — every
+    /// child task has completed, so the scope is just an orphan key
+    /// in the map. Called at the top of `dispatch` so the map stays
+    /// bounded over long sessions. Cheap: one linear walk, no async.
+    ///
+    /// `JoinSet::is_empty` only returns true after completed tasks are
+    /// harvested via `join_next`/`try_join_next`, so we first drain
+    /// any ready completions per scope.
+    fn reap_empty_scopes(&mut self) {
+        self.scopes.retain(|_, scope| {
+            scope.drain_completed();
+            !scope.is_empty()
+        });
+    }
+
     /// Route a single `Cmd` into the appropriate spawn + handler.
     /// Returns immediately; handlers work asynchronously and emit
     /// `Msg` back through the sender channel.
     pub fn dispatch(&mut self, cmd: Cmd) {
+        // F12: reap any drained scopes before touching the map. Keeps
+        // `scope_count()` bounded as the session grows.
+        self.reap_empty_scopes();
         tracing::trace!(cmd = %cmd.summary(), "effect: dispatch");
 
         match cmd {
@@ -216,18 +261,45 @@ impl EffectRunner {
                     dispatch_call_model(tx, providers, turn, request, token).await;
                 });
             },
+            Cmd::CompactConversation { turn, mut request } => {
+                let tx = self.msg_tx.clone();
+                let providers = self.providers.clone();
+                if let Some(tools) = &self.tools {
+                    let mut enriched = tools.describe_all();
+                    enriched.append(&mut request.chat.tools);
+                    request.chat.tools = enriched;
+                }
+                let scope = self.scope_mut(turn);
+                let token = scope.token();
+                scope.spawn(async move {
+                    dispatch_compact_conversation(tx, providers, turn, request, token).await;
+                });
+            },
             Cmd::ExecuteTool {
                 turn,
                 call_id,
                 source,
+                model_id,
             } => {
                 let tx = self.msg_tx.clone();
                 let tools = self.tools.clone();
                 let workdir = self.workdir.clone();
+                // Pass the shared Config from ProviderFactory so
+                // subagents inherit it (F7). Falls back to
+                // Config::default() when providers aren't bound (unit
+                // tests without real wiring).
+                let config = self
+                    .providers
+                    .as_ref()
+                    .map(|p| Arc::new(p.config().clone()))
+                    .unwrap_or_else(|| Arc::new(crate::app::Config::default()));
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
-                    dispatch_execute_tool(tx, tools, workdir, turn, call_id, source, token).await;
+                    dispatch_execute_tool(
+                        tx, tools, workdir, turn, call_id, source, token, config, model_id,
+                    )
+                    .await;
                 });
             },
             Cmd::CancelScope(turn) => {
@@ -243,6 +315,16 @@ impl EffectRunner {
                         let _ = tx.send(Msg::SessionSaved).await;
                     } else {
                         tracing::warn!("SaveConversation: failed to write to disk");
+                    }
+                });
+            },
+            Cmd::SaveCompactionArchive(archive) => {
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    if let Ok(manager) = crate::session::ConversationManager::new(&workdir)
+                        && let Err(err) = manager.save_compaction_archive(&archive)
+                    {
+                        tracing::warn!(error = %err, "SaveCompactionArchive: failed to write archive");
                     }
                 });
             },
@@ -314,8 +396,8 @@ impl EffectRunner {
                     let manager =
                         std::sync::Arc::new(crate::mcp::McpServerManager::start(&configs).await);
                     // Emit a Ready or Errored per server based on
-                    // what came up. The manager tracks this in its
-                    // internal state; we probe through get_all_tools.
+                    // what came up. Zero-tool servers are still ready
+                    // if the manager has an active client for them.
                     for (name, _cfg) in configs.iter() {
                         let server_tools: Vec<crate::domain::McpToolSpec> = manager
                             .get_all_tools()
@@ -327,21 +409,8 @@ impl EffectRunner {
                                 input_schema: def.input_schema.clone(),
                             })
                             .collect();
-                        if server_tools.is_empty() {
-                            let _ = tx
-                                .send(Msg::McpServerErrored {
-                                    name: name.clone(),
-                                    reason: "server did not advertise any tools".to_string(),
-                                })
-                                .await;
-                        } else {
-                            let _ = tx
-                                .send(Msg::McpServerReady {
-                                    name: name.clone(),
-                                    tools: server_tools,
-                                })
-                                .await;
-                        }
+                        let msg = mcp_startup_msg(name, manager.has_server(name), server_tools);
+                        let _ = tx.send(msg).await;
                     }
                     crate::mcp::manager_ref::set_manager(manager);
                     crate::mcp::manager_ref::mark_init_complete();
@@ -374,13 +443,21 @@ impl EffectRunner {
                     let _ = tx.send(Msg::StatusDismiss).await;
                 });
             },
-            Cmd::WriteImageToTemp { id, bytes, format } => {
+            Cmd::WriteImageToTemp {
+                path,
+                bytes,
+                format: _,
+            } => {
                 self.detached.spawn(async move {
-                    let path =
-                        std::env::temp_dir().join(format!("mermaid-img-{}.{}", id, format));
                     if let Err(e) = tokio::fs::write(&path, &bytes).await {
                         tracing::warn!(path = %path.display(), error = %e, "WriteImageToTemp failed");
                     }
+                });
+            },
+            Cmd::ReadClipboard => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    dispatch_read_clipboard(tx).await;
                 });
             },
             Cmd::Exit => {
@@ -445,7 +522,7 @@ async fn dispatch_call_model(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
     turn: TurnId,
-    request: crate::domain::ChatRequest,
+    mut request: crate::domain::ChatRequest,
     token: tokio_util::sync::CancellationToken,
 ) {
     use crate::models::UserFacingError;
@@ -471,6 +548,70 @@ async fn dispatch_call_model(
             return;
         },
     };
+
+    let max_context_tokens = provider.capabilities().max_context_tokens.or_else(|| {
+        crate::domain::runtime::infer_static_context_window_for_model_id(&request.model_id)
+    });
+    let context_snapshot =
+        crate::domain::estimate_context_usage_for_request(&request, max_context_tokens);
+    let _ = msg_tx
+        .send(Msg::ContextUsageEstimated {
+            turn,
+            snapshot: context_snapshot.clone(),
+        })
+        .await;
+
+    let policy = CompactionPolicy::default();
+    let mut compacted_before_stream = false;
+    if crate::domain::should_auto_compact(&context_snapshot, &request, policy).is_ok() {
+        let compaction = CompactionRequest::auto(request.clone(), CompactionTrigger::AutoThreshold);
+        match run_compaction(
+            Arc::clone(&provider),
+            turn,
+            compaction,
+            context_snapshot.clone(),
+            max_context_tokens,
+            token.clone(),
+        )
+        .await
+        {
+            Ok(result) => {
+                request.messages = result.replacement_messages.clone();
+                compacted_before_stream = true;
+                let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
+            },
+            Err(err) => {
+                let hard_limit =
+                    crate::domain::context_exceeds_hard_limit(&context_snapshot, &request, policy);
+                let _ = msg_tx
+                    .send(Msg::CompactionFailed {
+                        turn,
+                        trigger: CompactionTrigger::AutoThreshold,
+                        message: err.to_string(),
+                        kind: if hard_limit {
+                            crate::domain::StatusKind::Error
+                        } else {
+                            crate::domain::StatusKind::Warn
+                        },
+                    })
+                    .await;
+                if hard_limit {
+                    let error = UserFacingError {
+                        summary: "Context too large".to_string(),
+                        message: format!(
+                            "The next request needs {} tokens before response reserve, and automatic compaction failed: {}",
+                            context_snapshot.used_tokens, err
+                        ),
+                        suggestion: "Run /compact with focus instructions, or /clear to start a fresh session.".to_string(),
+                        category: crate::models::ErrorCategory::Config,
+                        recoverable: true,
+                    };
+                    let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
+                    return;
+                }
+            },
+        }
+    }
 
     // Build a StreamContext — provider writes typed events into the
     // internal sink; we relay each to the reducer as a Msg.
@@ -505,10 +646,98 @@ async fn dispatch_call_model(
     // Run the actual provider. On error, the relay will have
     // already emitted partial events; we follow with a single
     // UpstreamError to terminate the turn cleanly.
-    match provider.chat(request, ctx).await {
+    //
+    // `ModelError::Cancelled` is swallowed — the terminal
+    // `Msg::TurnCancelled` is emitted from `drop_scope` after the
+    // turn's `TurnScope` drains. Emitting `UpstreamError` here would
+    // commit a "cancelled" message the user didn't ask to see.
+    match provider.chat(request.clone(), ctx).await {
         Ok(_final_response) => {
             // Success — the final `Done` flowed through the sink.
         },
+        Err(crate::models::ModelError::Cancelled) => {
+            // Silent: `drop_scope` will emit `Msg::TurnCancelled`.
+        },
+        Err(e) => {
+            let retry_context_limit = !compacted_before_stream && is_context_limit_error(&e);
+            if retry_context_limit {
+                let latest_snapshot =
+                    crate::domain::estimate_context_usage_for_request(&request, max_context_tokens);
+                let compaction =
+                    CompactionRequest::auto(request.clone(), CompactionTrigger::ContextLimitRetry);
+                match run_compaction(
+                    Arc::clone(&provider),
+                    turn,
+                    compaction,
+                    latest_snapshot,
+                    max_context_tokens,
+                    token.clone(),
+                )
+                .await
+                {
+                    Ok(result) => {
+                        let mut retry_request = request;
+                        retry_request.messages = result.replacement_messages.clone();
+                        let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
+                        let _ = relay.await;
+                        dispatch_provider_stream(msg_tx, provider, turn, retry_request, token)
+                            .await;
+                        return;
+                    },
+                    Err(compact_err) => {
+                        let _ = msg_tx
+                            .send(Msg::CompactionFailed {
+                                turn,
+                                trigger: CompactionTrigger::ContextLimitRetry,
+                                message: compact_err.to_string(),
+                                kind: crate::domain::StatusKind::Error,
+                            })
+                            .await;
+                    },
+                }
+            }
+            let error = classify_error_for_ui(&e);
+            let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
+        },
+    }
+
+    let _ = relay.await;
+}
+
+async fn dispatch_provider_stream(
+    msg_tx: MsgSender,
+    provider: Arc<dyn ModelProvider>,
+    turn: TurnId,
+    request: crate::domain::ChatRequest,
+    token: tokio_util::sync::CancellationToken,
+) {
+    let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
+    let ctx = StreamContext::new(token.clone(), stream_tx, turn);
+    let relay_tx = msg_tx.clone();
+    let relay = tokio::spawn(async move {
+        while let Some(event) = stream_rx.recv().await {
+            let msg = match event {
+                StreamEvent::Text(chunk) => Msg::StreamText { turn, chunk },
+                StreamEvent::Reasoning(chunk) => Msg::StreamReasoning { turn, chunk },
+                StreamEvent::ToolCall(call) => Msg::StreamToolCall { turn, call },
+                StreamEvent::ThinkingSignature(_) => continue,
+                StreamEvent::Done {
+                    usage,
+                    thinking_signature,
+                } => Msg::StreamDone {
+                    turn,
+                    usage,
+                    thinking_signature,
+                },
+            };
+            if relay_tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    match provider.chat(request, ctx).await {
+        Ok(_) | Err(ModelError::Cancelled) => {},
         Err(e) => {
             let error = classify_error_for_ui(&e);
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
@@ -518,7 +747,223 @@ async fn dispatch_call_model(
     let _ = relay.await;
 }
 
+async fn dispatch_compact_conversation(
+    msg_tx: MsgSender,
+    providers: Option<Arc<ProviderFactory>>,
+    turn: TurnId,
+    request: CompactionRequest,
+    token: tokio_util::sync::CancellationToken,
+) {
+    let Some(factory) = providers else {
+        let _ = msg_tx
+            .send(Msg::CompactionFailed {
+                turn,
+                trigger: request.trigger,
+                message: "EffectRunner has no ProviderFactory bound".to_string(),
+                kind: crate::domain::StatusKind::Error,
+            })
+            .await;
+        return;
+    };
+
+    let provider = match factory.resolve(&request.chat.model_id).await {
+        Ok(provider) => provider,
+        Err(err) => {
+            let _ = msg_tx
+                .send(Msg::CompactionFailed {
+                    turn,
+                    trigger: request.trigger,
+                    message: err.to_string(),
+                    kind: crate::domain::StatusKind::Error,
+                })
+                .await;
+            return;
+        },
+    };
+
+    let max_context_tokens = provider.capabilities().max_context_tokens.or_else(|| {
+        crate::domain::runtime::infer_static_context_window_for_model_id(&request.chat.model_id)
+    });
+    let before_snapshot =
+        crate::domain::estimate_context_usage_for_request(&request.chat, max_context_tokens);
+
+    let trigger = request.trigger;
+    match run_compaction(
+        provider,
+        turn,
+        request,
+        before_snapshot,
+        max_context_tokens,
+        token,
+    )
+    .await
+    {
+        Ok(result) => {
+            let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
+        },
+        Err(err) => {
+            let _ = msg_tx
+                .send(Msg::CompactionFailed {
+                    turn,
+                    trigger,
+                    message: err.to_string(),
+                    kind: crate::domain::StatusKind::Error,
+                })
+                .await;
+        },
+    }
+}
+
+async fn run_compaction(
+    provider: Arc<dyn ModelProvider>,
+    turn: TurnId,
+    request: CompactionRequest,
+    before_snapshot: crate::domain::ContextUsageSnapshot,
+    max_context_tokens: Option<usize>,
+    token: tokio_util::sync::CancellationToken,
+) -> Result<CompactionResult, ModelError> {
+    let started = Instant::now();
+    let prepared = crate::domain::prepare_compaction(&request, max_context_tokens)
+        .map_err(|skip| ModelError::InvalidRequest(skip.to_string()))?;
+
+    let summary_request = crate::domain::build_summary_request(
+        &request.chat,
+        &prepared,
+        request.instructions.as_deref(),
+        request.policy,
+    );
+    let (draft, draft_usage) =
+        collect_compaction_text(Arc::clone(&provider), turn, summary_request, token.clone())
+            .await?;
+    let draft_summary = crate::domain::normalize_summary(&draft);
+    if draft_summary.trim().is_empty() {
+        return Err(ModelError::InvalidRequest(
+            "compaction produced an empty summary".to_string(),
+        ));
+    }
+
+    let verify_request = crate::domain::build_verification_request(
+        &request.chat,
+        &prepared,
+        &draft_summary,
+        request.instructions.as_deref(),
+        request.policy,
+    );
+    let (verified, verify_usage) =
+        collect_compaction_text(Arc::clone(&provider), turn, verify_request, token).await?;
+    let verified_summary = crate::domain::normalize_summary(&verified);
+    let final_summary = if verified_summary.trim().is_empty() {
+        draft_summary
+    } else {
+        verified_summary
+    };
+
+    let id = format!(
+        "compact_{}",
+        chrono::Local::now().format("%Y%m%d_%H%M%S_%3f")
+    );
+    let mut record = crate::domain::CompactionRecord {
+        id,
+        trigger: request.trigger,
+        created_at: chrono::Local::now(),
+        before_tokens: before_snapshot.used_tokens,
+        after_tokens: 0,
+        archived_message_count: prepared.archived_messages.len(),
+        preserved_message_count: prepared.preserved_messages.len(),
+        summary_tokens: final_summary.len().div_ceil(4),
+        duration_secs: started.elapsed().as_secs_f64(),
+        focus: request.instructions.clone(),
+        archive_path: None,
+    };
+
+    let mut replacement =
+        crate::domain::build_replacement_messages(&final_summary, &prepared, &record);
+    let mut compacted_request = request.chat.clone();
+    compacted_request.messages = replacement.clone();
+    let mut after_snapshot =
+        crate::domain::estimate_context_usage_for_request(&compacted_request, max_context_tokens);
+    record.after_tokens = after_snapshot.used_tokens;
+    record.duration_secs = started.elapsed().as_secs_f64();
+    replacement = crate::domain::build_replacement_messages(&final_summary, &prepared, &record);
+    compacted_request.messages = replacement.clone();
+    after_snapshot =
+        crate::domain::estimate_context_usage_for_request(&compacted_request, max_context_tokens);
+    record.after_tokens = after_snapshot.used_tokens;
+
+    if after_snapshot.used_tokens >= before_snapshot.used_tokens {
+        return Err(ModelError::InvalidRequest(format!(
+            "compaction did not reduce context ({} -> {} tokens)",
+            before_snapshot.used_tokens, after_snapshot.used_tokens
+        )));
+    }
+
+    if crate::domain::context_exceeds_hard_limit(
+        &after_snapshot,
+        &compacted_request,
+        request.policy,
+    ) {
+        return Err(ModelError::InvalidRequest(format!(
+            "compacted context still exceeds response reserve ({} tokens used)",
+            after_snapshot.used_tokens
+        )));
+    }
+
+    Ok(CompactionResult {
+        record,
+        replacement_messages: replacement,
+        archived_messages: prepared.archived_messages,
+        before_snapshot,
+        after_snapshot,
+        usage: crate::domain::combine_usage(draft_usage, verify_usage),
+    })
+}
+
+async fn collect_compaction_text(
+    provider: Arc<dyn ModelProvider>,
+    turn: TurnId,
+    request: crate::domain::ChatRequest,
+    token: tokio_util::sync::CancellationToken,
+) -> Result<(String, Option<TokenUsage>), ModelError> {
+    let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(128);
+    let ctx = StreamContext::new(token, stream_tx, turn);
+    let collector = tokio::spawn(async move {
+        let mut text = String::new();
+        let mut usage = None;
+        while let Some(event) = stream_rx.recv().await {
+            match event {
+                StreamEvent::Text(chunk) => text.push_str(&chunk),
+                StreamEvent::Done {
+                    usage: done_usage, ..
+                } => usage = done_usage,
+                StreamEvent::Reasoning(_)
+                | StreamEvent::ToolCall(_)
+                | StreamEvent::ThinkingSignature(_) => {},
+            }
+        }
+        (text, usage)
+    });
+
+    let response = provider.chat(request, ctx).await;
+    let (text, stream_usage) = collector
+        .await
+        .map_err(|err| ModelError::StreamError(format!("compaction collector failed: {}", err)))?;
+    match response {
+        Ok(final_response) => Ok((text, final_response.usage.or(stream_usage))),
+        Err(err) => Err(err),
+    }
+}
+
+fn is_context_limit_error(error: &ModelError) -> bool {
+    let text = error.to_string().to_lowercase();
+    text.contains("context")
+        && (text.contains("too large")
+            || text.contains("exceed")
+            || text.contains("maximum")
+            || text.contains("token"))
+}
+
 /// Dispatch an `ExecuteTool` command.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_execute_tool(
     msg_tx: MsgSender,
     tools: Option<Arc<ToolRegistry>>,
@@ -527,6 +972,8 @@ async fn dispatch_execute_tool(
     call_id: crate::domain::ToolCallId,
     source: crate::models::tool_call::ToolCall,
     token: tokio_util::sync::CancellationToken,
+    config: Arc<crate::app::Config>,
+    model_id: String,
 ) {
     let _ = msg_tx.send(Msg::ToolStarted { turn, call_id }).await;
 
@@ -535,10 +982,10 @@ async fn dispatch_execute_tool(
             .send(Msg::ToolFinished {
                 turn,
                 call_id,
-                outcome: crate::domain::ToolOutcome::Error {
-                    error: "EffectRunner has no ToolRegistry bound".to_string(),
-                    duration_secs: 0.0,
-                },
+                outcome: crate::domain::ToolOutcome::error(
+                    "EffectRunner has no ToolRegistry bound",
+                    0.0,
+                ),
             })
             .await;
         return;
@@ -563,10 +1010,10 @@ async fn dispatch_execute_tool(
                 .send(Msg::ToolFinished {
                     turn,
                     call_id,
-                    outcome: crate::domain::ToolOutcome::Error {
-                        error: format!("invalid MCP tool name: {}", source.function.name),
-                        duration_secs: 0.0,
-                    },
+                    outcome: crate::domain::ToolOutcome::error(
+                        format!("invalid MCP tool name: {}", source.function.name),
+                        0.0,
+                    ),
                 })
                 .await;
             return;
@@ -583,10 +1030,10 @@ async fn dispatch_execute_tool(
             .send(Msg::ToolFinished {
                 turn,
                 call_id,
-                outcome: crate::domain::ToolOutcome::Error {
-                    error: format!("unknown tool: {}", tool_key),
-                    duration_secs: 0.0,
-                },
+                outcome: crate::domain::ToolOutcome::error(
+                    format!("unknown tool: {}", tool_key),
+                    0.0,
+                ),
             })
             .await;
         return;
@@ -615,7 +1062,7 @@ async fn dispatch_execute_tool(
         }
     });
 
-    let ctx = ExecContext::new(token, progress_tx, call_id, turn, workdir);
+    let ctx = ExecContext::new(token, progress_tx, call_id, turn, workdir, config, model_id);
     let outcome = tool.execute(args, ctx).await;
     let _ = progress_relay.await;
     let _ = msg_tx
@@ -687,6 +1134,73 @@ async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
                 .await;
         },
     }
+}
+
+fn mcp_startup_msg(name: &str, started: bool, tools: Vec<crate::domain::McpToolSpec>) -> Msg {
+    if started {
+        Msg::McpServerReady {
+            name: name.to_string(),
+            tools,
+        }
+    } else {
+        Msg::McpServerErrored {
+            name: name.to_string(),
+            reason: "server failed to start or initialize".to_string(),
+        }
+    }
+}
+
+/// Read the system clipboard on a blocking thread and emit a `Msg`
+/// back into the main loop. Image content wins when present; falls
+/// back to text; empty or error surface as `Msg::TransientStatus` so
+/// the user gets visible feedback (a silent no-op on Ctrl+V would be
+/// confusing, especially on macOS where `osascript` can take ~300ms).
+///
+/// `tokio::task::spawn_blocking` is the right primitive: `clipboard::
+/// has_image` / `read_image_bytes` / `read_text` shell out to xclip /
+/// wl-paste / pngpaste / PowerShell, all of which block synchronously.
+async fn dispatch_read_clipboard(tx: MsgSender) {
+    use crate::domain::{Paste, StatusKind};
+
+    enum Outcome {
+        Image { bytes: Vec<u8>, format: String },
+        Text(String),
+        Empty,
+        Error(String),
+    }
+
+    let outcome = tokio::task::spawn_blocking(|| {
+        if crate::clipboard::has_image() {
+            match crate::clipboard::read_image_bytes() {
+                Ok((bytes, format)) => Outcome::Image { bytes, format },
+                Err(e) => Outcome::Error(format!("Clipboard image read failed: {}", e)),
+            }
+        } else {
+            match crate::clipboard::read_text() {
+                Ok(t) if !t.is_empty() => Outcome::Text(t),
+                Ok(_) => Outcome::Empty,
+                Err(e) => Outcome::Error(format!("Clipboard empty / read failed: {}", e)),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Outcome::Error(format!("clipboard spawn_blocking: {}", e)));
+
+    let msg = match outcome {
+        Outcome::Image { bytes, format } => Msg::Paste(Paste::Image { bytes, format }),
+        Outcome::Text(text) => Msg::Paste(Paste::Text(text)),
+        Outcome::Empty => Msg::TransientStatus {
+            text: "Clipboard is empty".to_string(),
+            kind: StatusKind::Info,
+            dismiss_ms: 2_000,
+        },
+        Outcome::Error(text) => Msg::TransientStatus {
+            text,
+            kind: StatusKind::Warn,
+            dismiss_ms: 4_000,
+        },
+    };
+    let _ = tx.send(msg).await;
 }
 
 fn classify_error_for_ui(e: &crate::models::ModelError) -> crate::models::UserFacingError {
@@ -773,6 +1287,52 @@ mod tests {
         assert!(t0.elapsed() >= Duration::from_millis(25));
     }
 
+    #[test]
+    fn mcp_startup_msg_treats_zero_tool_started_server_as_ready() {
+        let msg = mcp_startup_msg("empty", true, Vec::new());
+        assert!(matches!(
+            msg,
+            Msg::McpServerReady { name, tools } if name == "empty" && tools.is_empty()
+        ));
+    }
+
+    #[test]
+    fn mcp_startup_msg_reports_unstarted_server_as_error() {
+        let msg = mcp_startup_msg("bad", false, Vec::new());
+        assert!(matches!(
+            msg,
+            Msg::McpServerErrored { name, reason }
+                if name == "bad" && reason.contains("failed to start")
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_scope_emits_turn_cancelled_after_bounded_timeout() {
+        let (mut r, mut rx) = runner();
+        let turn = TurnId(77);
+        {
+            let scope = r.scope_mut(turn);
+            scope.spawn(async {
+                std::future::pending::<()>().await;
+            });
+        }
+        assert_eq!(r.scope_count(), 1);
+
+        let start = std::time::Instant::now();
+        r.dispatch(Cmd::CancelScope(turn));
+        assert_eq!(r.scope_count(), 0);
+        let msg = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("bounded cancel should emit terminal message")
+            .expect("channel alive");
+        assert!(matches!(msg, Msg::TurnCancelled(t) if t == turn));
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "cancel terminal message took {:?}",
+            start.elapsed()
+        );
+    }
+
     #[tokio::test]
     async fn dispatch_call_model_creates_scope() {
         let (mut r, _rx) = runner();
@@ -791,6 +1351,48 @@ mod tests {
         assert_eq!(r.scope_count(), 1);
     }
 
+    /// F12: after a spawned task completes (here via the
+    /// no-ProviderFactory error path), the next `dispatch` call reaps
+    /// the empty scope instead of leaving an orphan entry in the map.
+    #[tokio::test]
+    async fn empty_scopes_are_reaped_on_next_dispatch() {
+        let (mut r, mut rx) = runner();
+        let turn = TurnId(42);
+        let request = crate::domain::ChatRequest {
+            model_id: "test/m".to_string(),
+            messages: vec![],
+            system_prompt: String::new(),
+            instructions: None,
+            reasoning: crate::models::ReasoningLevel::Medium,
+            temperature: 0.7,
+            max_tokens: 4096,
+            tools: vec![],
+        };
+        r.dispatch(Cmd::CallModel { turn, request });
+        assert_eq!(r.scope_count(), 1);
+
+        // Runner has no provider bindings → dispatch_call_model hits
+        // the "not wired" error path and emits UpstreamError, then the
+        // spawned task returns. Drain that message so we know the task
+        // ran to completion.
+        let msg = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("upstream error arrived")
+            .expect("channel alive");
+        assert!(matches!(msg, Msg::UpstreamError { .. }));
+
+        // Give the JoinSet a tick to notice the task finished.
+        tokio::task::yield_now().await;
+
+        // Any subsequent dispatch reaps the now-empty scope.
+        r.dispatch(Cmd::DismissStatusAfter { ms: 10 });
+        assert_eq!(
+            r.scope_count(),
+            0,
+            "completed scope must be reaped on next dispatch"
+        );
+    }
+
     #[tokio::test]
     async fn dispatch_execute_tool_under_turn_emits_tool_started() {
         let (mut r, mut rx) = runner();
@@ -807,6 +1409,7 @@ mod tests {
             turn,
             call_id,
             source,
+            model_id: "ollama/test".to_string(),
         });
         let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await

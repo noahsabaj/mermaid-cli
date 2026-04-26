@@ -13,6 +13,7 @@ use anyhow::Result;
 use tokio::time::timeout;
 
 use crate::app::Config;
+use crate::app::lifecycle::RuntimeLifecycle;
 use crate::cli::OutputFormat;
 use crate::domain::{Msg, State, TurnState, update};
 use crate::effect::EffectRunner;
@@ -28,6 +29,18 @@ pub struct RunResult {
     pub errors: Vec<String>,
 }
 
+/// Per-invocation options for `run_non_interactive`.
+///
+/// Added as a struct so new flags can land without reshuffling the
+/// function's positional args. All fields default to "no change".
+#[derive(Debug, Default, Clone)]
+pub struct RunOptions {
+    /// When true, register an empty `ToolRegistry` — the model sees no
+    /// tools and can't take actions. Dry-run mode for
+    /// `mermaid run --no-execute`.
+    pub no_execute: bool,
+}
+
 /// Drive one prompt to completion. Bounded by a generous 20-minute
 /// wall-clock so a runaway model doesn't hang a script.
 pub async fn run_non_interactive(
@@ -36,24 +49,50 @@ pub async fn run_non_interactive(
     model_id: String,
     prompt: String,
 ) -> Result<RunResult> {
+    run_non_interactive_with(config, cwd, model_id, prompt, RunOptions::default()).await
+}
+
+/// Same as `run_non_interactive` but with explicit per-call options.
+/// Kept separate so existing call sites keep compiling unchanged.
+pub async fn run_non_interactive_with(
+    config: Config,
+    cwd: PathBuf,
+    model_id: String,
+    prompt: String,
+    opts: RunOptions,
+) -> Result<RunResult> {
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
-    let tools = ToolRegistry::build(
-        &config,
-        crate::providers::TuiMode::Headless,
-        providers.clone(),
-    );
+    // F6 `--no-execute`: build an empty tool registry so the model can
+    // plan but never act. MCP init below is also skipped to match.
+    let tools = if opts.no_execute {
+        std::sync::Arc::new(ToolRegistry::new())
+    } else {
+        ToolRegistry::build(
+            &config,
+            crate::providers::TuiMode::Headless,
+            providers.clone(),
+        )
+    };
     let (mut runner, mut msg_rx) = EffectRunner::pair_from(cwd.clone(), providers, tools);
 
     let mut state = State::new(config.clone(), cwd, model_id);
+    let mut lifecycle = RuntimeLifecycle::new();
 
-    // Bootstrap effects (MCP init, instructions refresh) before the
-    // first prompt. Same sequence the interactive path uses.
-    if !config.mcp_servers.is_empty() {
+    // Bootstrap effects (MCP init) before the first prompt. The
+    // instructions refresh used to dispatch here too, but F8 moved it
+    // inline into `handle_submit_prompt` (synchronous stat + optional
+    // small read) so the very first call actually sees the current
+    // MERMAID.md — previously the dispatch race meant run #1 missed
+    // edits and only run #2 picked them up.
+    //
+    // Skip MCP init when `--no-execute` — MCP tools would advertise
+    // through the registry we just emptied, so spinning up their
+    // processes is wasted work.
+    if !config.mcp_servers.is_empty() && !opts.no_execute {
         runner.dispatch(crate::domain::Cmd::InitMcpServers(
             config.mcp_servers.clone(),
         ));
     }
-    runner.dispatch(crate::domain::Cmd::RefreshInstructions);
 
     // Seed the turn.
     let seed = Msg::SubmitPrompt {
@@ -70,9 +109,15 @@ pub async fn run_non_interactive(
 
     let drive = async {
         while !matches!(state.turn, TurnState::Idle) || !state.ui.queued_messages.is_empty() {
-            let msg = match msg_rx.recv().await {
-                Some(m) => m,
-                None => break,
+            let msg = tokio::select! {
+                m = msg_rx.recv() => match m {
+                    Some(m) => m,
+                    None => break,
+                },
+                s = lifecycle.next_msg() => match s {
+                    Some(s) => s,
+                    None => continue,
+                },
             };
             let (new_state, cmds) = update(state, msg);
             state = new_state;
@@ -101,7 +146,7 @@ pub async fn run_non_interactive(
 /// assistant response + any errors encountered.
 fn build_result(state: &State) -> RunResult {
     let mut out = RunResult {
-        total_tokens: state.session.cumulative_tokens,
+        total_tokens: state.session.cumulative_token_usage.total_tokens,
         ..RunResult::default()
     };
 

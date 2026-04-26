@@ -613,12 +613,20 @@ impl AnthropicAdapter {
             }
         }
 
-        let usage = TokenUsage {
-            prompt_tokens: json.usage.input_tokens.unwrap_or(0),
-            completion_tokens: json.usage.output_tokens.unwrap_or(0),
-            total_tokens: json.usage.input_tokens.unwrap_or(0)
-                + json.usage.output_tokens.unwrap_or(0),
-        };
+        let prompt_tokens = json.usage.input_tokens.unwrap_or(0);
+        let completion_tokens = json.usage.output_tokens.unwrap_or(0);
+        let cache_creation = json.usage.cache_creation_input_tokens.unwrap_or(0);
+        let cache_read = json.usage.cache_read_input_tokens.unwrap_or(0);
+        let usage = TokenUsage::provider(
+            prompt_tokens,
+            completion_tokens,
+            prompt_tokens
+                .saturating_add(completion_tokens)
+                .saturating_add(cache_creation)
+                .saturating_add(cache_read),
+        )
+        .with_cache_creation(cache_creation)
+        .with_cached_input(cache_read);
 
         Ok(ModelResponse {
             content: text_acc,
@@ -660,6 +668,8 @@ impl AnthropicAdapter {
         let mut truncated = false;
         let mut prompt_tokens: usize = 0;
         let mut completion_tokens: usize = 0;
+        let mut cache_creation_tokens: usize = 0;
+        let mut cache_read_tokens: usize = 0;
         // Per-block-index accumulators. Anthropic emits content_block_*
         // events tagged with an `index` field; multiple blocks (text +
         // thinking + tool_use) interleave, so we track each by index.
@@ -688,6 +698,18 @@ impl AnthropicAdapter {
                             .and_then(|v| v.as_u64())
                         {
                             prompt_tokens = input as usize;
+                        }
+                        if let Some(cache_creation) = parsed
+                            .pointer("/message/usage/cache_creation_input_tokens")
+                            .and_then(|v| v.as_u64())
+                        {
+                            cache_creation_tokens = cache_creation as usize;
+                        }
+                        if let Some(cache_read) = parsed
+                            .pointer("/message/usage/cache_read_input_tokens")
+                            .and_then(|v| v.as_u64())
+                        {
+                            cache_read_tokens = cache_read as usize;
                         }
                     },
                     "content_block_start" => {
@@ -867,18 +889,22 @@ impl AnthropicAdapter {
             }
         }
 
-        let total_tokens = prompt_tokens + completion_tokens;
-        callback(StreamEvent::Done {
-            tokens: total_tokens,
-        });
+        let total_tokens = prompt_tokens
+            .saturating_add(completion_tokens)
+            .saturating_add(cache_creation_tokens)
+            .saturating_add(cache_read_tokens);
+        // F3: `Done` is emitted by the v0.7 wrapper from the returned
+        // `ModelResponse` so the `thinking_signature` round-trips. If we
+        // emitted it here, the reducer would commit the assistant
+        // message on our signature-less Done and drop the real one.
 
         Ok(ModelResponse {
             content: text_acc,
-            usage: Some(TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-            }),
+            usage: Some(
+                TokenUsage::provider(prompt_tokens, completion_tokens, total_tokens)
+                    .with_cache_creation(cache_creation_tokens)
+                    .with_cached_input(cache_read_tokens),
+            ),
             model_name: self.model_name.clone(),
             thinking: if thinking_acc.is_empty() {
                 None
@@ -950,6 +976,10 @@ struct UsageOut {
     input_tokens: Option<usize>,
     #[serde(default)]
     output_tokens: Option<usize>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<usize>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<usize>,
 }
 
 /// Output content blocks Anthropic returns (subset we care about).

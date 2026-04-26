@@ -81,6 +81,13 @@ pub enum ModelError {
     /// Anthropic adapter has no `list_models` endpoint, so the trait's
     /// default impl returns this).
     Unsupported { feature: String },
+
+    /// The provider call was aborted by the turn's cancellation
+    /// token. The effect runner swallows this silently — the
+    /// terminal `Msg::TurnCancelled` is emitted from `drop_scope`
+    /// after the scope's `JoinSet` drains, so no `UpstreamError`
+    /// should reach the reducer for cancelled turns.
+    Cancelled,
 }
 
 impl fmt::Display for ModelError {
@@ -130,6 +137,7 @@ impl fmt::Display for ModelError {
             ModelError::Unsupported { feature } => {
                 write!(f, "Feature not supported by this adapter: {}", feature)
             },
+            ModelError::Cancelled => write!(f, "Cancelled by user"),
         }
     }
 }
@@ -349,6 +357,13 @@ impl ModelError {
                 ),
                 category: ErrorCategory::Internal,
                 recoverable: false,
+            },
+            ModelError::Cancelled => UserFacingError {
+                summary: "Cancelled".to_string(),
+                message: "The request was cancelled.".to_string(),
+                suggestion: String::new(),
+                category: ErrorCategory::Temporary,
+                recoverable: true,
             },
         }
     }

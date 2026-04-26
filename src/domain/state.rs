@@ -22,12 +22,15 @@ use std::time::SystemTime;
 use crate::app::instructions::LoadedInstructions;
 use crate::app::{Config, McpServerConfig};
 use crate::models::ChatMessage;
-use crate::models::ReasoningLevel;
 use crate::models::tool_call::ToolCall as ModelToolCall;
+use crate::models::{ReasoningLevel, TokenUsage, TokenUsageSource};
 use crate::session::ConversationHistory;
 
+use super::cmd::ChatRequest;
+use super::compaction::CompactionTrigger;
 use super::ids::{IdAllocator, ToolCallId, TurnId};
 use super::msg::Msg;
+use super::runtime::{RuntimeState, ToolArtifact, ToolRunMetadata, ToolStatus};
 
 /// Root state. The reducer takes `State` by value, returns a new
 /// `State`, and emits any side-effects as a `Vec<Cmd>`. No `&mut` — a
@@ -55,6 +58,10 @@ pub struct State {
     /// `Msg::StatusConsumed` or by the next rendered frame depending on
     /// `StatusKind`.
     pub status: Option<StatusLine>,
+    /// Runtime-only observability state: process registry, provider
+    /// capability snapshot, and lifecycle timeline. Not sent to the
+    /// model.
+    pub runtime: RuntimeState,
     /// Quit flag. When set, the main loop drains pending effects and
     /// exits. The reducer never panics on its own; it sets this instead.
     pub should_exit: bool,
@@ -67,25 +74,57 @@ impl State {
         let project_path = cwd.display().to_string();
         let conversation = ConversationHistory::new(project_path, model_id.clone());
         let initial_title = conversation.title.clone();
+        // F5: seed `mcp.servers` from the user's configured MCP
+        // servers with `Starting` status. Previously the map started
+        // empty, and `McpServerReady` handlers used `get_mut` —
+        // configured servers never populated, so their tools never
+        // reached `build_chat_request`'s outgoing tool list.
+        let mcp = {
+            let mut m = McpState::default();
+            for (name, cfg) in &settings.mcp_servers {
+                m.servers.insert(
+                    name.clone(),
+                    McpServerEntry {
+                        config: cfg.clone(),
+                        status: McpServerStatus::Starting,
+                        tools: Vec::new(),
+                    },
+                );
+            }
+            m
+        };
+        // F11: honor the per-model reasoning preference (persisted via
+        // `/reasoning high` while using a specific model). Falls back to
+        // the global default when no entry exists.
+        let reasoning = settings
+            .reasoning_per_model
+            .get(&model_id)
+            .copied()
+            .unwrap_or(settings.default_model.reasoning);
+        let runtime = RuntimeState::new(&model_id);
         Self {
             session: Session {
                 conversation,
                 model_id,
-                reasoning: settings.default_model.reasoning,
+                reasoning,
                 cumulative_tokens: 0,
+                last_token_usage: None,
+                cumulative_token_usage: TokenUsageTotals::default(),
+                context_usage: None,
             },
             turn: TurnState::Idle,
             ui: UiState {
                 last_title_dispatched: Some(initial_title),
                 ..UiState::default()
             },
-            mcp: McpState::default(),
+            mcp,
             settings,
             instructions: None,
             cwd,
             ids: IdAllocatorBundle::default(),
             confirm: None,
             status: None,
+            runtime,
             should_exit: false,
         }
     }
@@ -105,6 +144,225 @@ impl State {
     }
 }
 
+/// Prompt/completion/total token counts normalized for UI display.
+/// Providers report usage per API request; the session keeps both the
+/// last request and the cumulative API usage so the footer does not
+/// imply this is the current model context length.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsageTotals {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub total_tokens: usize,
+    pub cached_input_tokens: usize,
+    pub cache_creation_input_tokens: usize,
+    pub reasoning_output_tokens: usize,
+}
+
+impl TokenUsageTotals {
+    pub fn from_usage(usage: &TokenUsage) -> Self {
+        Self {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            reasoning_output_tokens: usage.reasoning_output_tokens,
+        }
+    }
+
+    pub fn add_assign(&mut self, other: Self) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(other.completion_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(other.cached_input_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(other.cache_creation_input_tokens);
+        self.reasoning_output_tokens = self
+            .reasoning_output_tokens
+            .saturating_add(other.reasoning_output_tokens);
+    }
+
+    pub fn input_total_tokens(&self) -> usize {
+        self.prompt_tokens
+            .saturating_add(self.cached_input_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
+    }
+
+    pub fn output_total_tokens(&self) -> usize {
+        self.completion_tokens
+            .saturating_add(self.reasoning_output_tokens)
+    }
+}
+
+/// Approximate request-context breakdown used before provider usage
+/// arrives. These numbers are diagnostic estimates, not billing facts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptTokenBreakdown {
+    pub system_tokens: usize,
+    pub instructions_tokens: usize,
+    pub message_tokens: usize,
+    pub tool_schema_tokens: usize,
+    pub image_count: usize,
+    pub message_count: usize,
+    pub tool_count: usize,
+}
+
+impl PromptTokenBreakdown {
+    pub fn total_tokens(&self) -> usize {
+        self.system_tokens
+            .saturating_add(self.instructions_tokens)
+            .saturating_add(self.message_tokens)
+            .saturating_add(self.tool_schema_tokens)
+    }
+}
+
+/// The model-visible context for the latest request. This is separate
+/// from cumulative session usage, which is an API/accounting total.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextUsageSnapshot {
+    pub used_tokens: usize,
+    pub max_tokens: Option<usize>,
+    pub remaining_tokens: Option<usize>,
+    pub used_percent: Option<u8>,
+    pub source: TokenUsageSource,
+    pub prompt_tokens: usize,
+    pub cached_input_tokens: usize,
+    pub cache_creation_input_tokens: usize,
+    pub completion_tokens: usize,
+    pub reasoning_output_tokens: usize,
+    pub breakdown: Option<PromptTokenBreakdown>,
+}
+
+impl ContextUsageSnapshot {
+    pub fn from_usage(usage: &TokenUsage, max_tokens: Option<usize>) -> Self {
+        Self::new(
+            usage.total_tokens,
+            max_tokens,
+            usage.source,
+            usage.prompt_tokens,
+            usage.cached_input_tokens,
+            usage.cache_creation_input_tokens,
+            usage.completion_tokens,
+            usage.reasoning_output_tokens,
+            None,
+        )
+    }
+
+    pub fn from_estimate(breakdown: PromptTokenBreakdown, max_tokens: Option<usize>) -> Self {
+        let used = breakdown.total_tokens();
+        Self::new(
+            used,
+            max_tokens,
+            TokenUsageSource::Estimate,
+            used,
+            0,
+            0,
+            0,
+            0,
+            Some(breakdown),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        used_tokens: usize,
+        max_tokens: Option<usize>,
+        source: TokenUsageSource,
+        prompt_tokens: usize,
+        cached_input_tokens: usize,
+        cache_creation_input_tokens: usize,
+        completion_tokens: usize,
+        reasoning_output_tokens: usize,
+        breakdown: Option<PromptTokenBreakdown>,
+    ) -> Self {
+        let remaining_tokens = max_tokens.map(|max| max.saturating_sub(used_tokens));
+        let used_percent = max_tokens
+            .filter(|max| *max > 0)
+            .map(|max| ((used_tokens.saturating_mul(100)) / max).min(100) as u8);
+        Self {
+            used_tokens,
+            max_tokens,
+            remaining_tokens,
+            used_percent,
+            source,
+            prompt_tokens,
+            cached_input_tokens,
+            cache_creation_input_tokens,
+            completion_tokens,
+            reasoning_output_tokens,
+            breakdown,
+        }
+    }
+
+    pub fn is_estimate(&self) -> bool {
+        self.source == TokenUsageSource::Estimate
+    }
+}
+
+pub fn estimate_context_usage_for_request(
+    request: &ChatRequest,
+    max_tokens: Option<usize>,
+) -> ContextUsageSnapshot {
+    let system_tokens = approx_tokens(&request.system_prompt);
+    let instructions_tokens = request
+        .instructions
+        .as_deref()
+        .map(approx_tokens)
+        .unwrap_or(0);
+    let message_tokens = request
+        .messages
+        .iter()
+        .map(|msg| {
+            let image_chars = msg
+                .images
+                .as_ref()
+                .map(|imgs| imgs.iter().map(|img| img.len()).sum::<usize>())
+                .unwrap_or(0);
+            approx_tokens(&msg.content).saturating_add(approx_tokens(&format!(
+                "{:?}{}{}",
+                msg.role,
+                msg.tool_name.as_deref().unwrap_or(""),
+                msg.tool_call_id.as_deref().unwrap_or("")
+            ))) + image_chars.div_ceil(4)
+        })
+        .sum();
+    let tool_schema: Vec<_> = request
+        .tools
+        .iter()
+        .map(|tool| tool.to_openai_json())
+        .collect();
+    let tool_schema_tokens = serde_json::to_string(&tool_schema)
+        .map(|s| approx_tokens(&s))
+        .unwrap_or(0);
+    let image_count = request
+        .messages
+        .iter()
+        .filter_map(|msg| msg.images.as_ref())
+        .map(Vec::len)
+        .sum();
+    ContextUsageSnapshot::from_estimate(
+        PromptTokenBreakdown {
+            system_tokens,
+            instructions_tokens,
+            message_tokens,
+            tool_schema_tokens,
+            image_count,
+            message_count: request.messages.len(),
+            tool_count: request.tools.len(),
+        },
+        max_tokens,
+    )
+}
+
+fn approx_tokens(text: &str) -> usize {
+    text.len().div_ceil(4)
+}
+
 /// Persistent conversational state that survives across turns.
 ///
 /// "Session" here means the user-visible chat session, not the tokio
@@ -115,11 +373,19 @@ pub struct Session {
     pub conversation: ConversationHistory,
     pub model_id: String,
     pub reasoning: ReasoningLevel,
-    /// Running total of tokens consumed across every turn in this
-    /// session. The reducer adds `StreamDone.usage.total_tokens` on
-    /// each successful turn end; status widget reads it for the
-    /// bottom-right counter.
+    /// Running total of tokens consumed across every API request in
+    /// this session. Kept for CLI JSON compatibility; the richer
+    /// prompt/completion breakdown lives in `cumulative_token_usage`.
     pub cumulative_tokens: usize,
+    /// Token usage for the most recent completed provider request.
+    /// `None` means the provider did not report usage for that turn.
+    pub last_token_usage: Option<TokenUsageTotals>,
+    /// Prompt/completion/total API usage accumulated for this session.
+    pub cumulative_token_usage: TokenUsageTotals,
+    /// Latest model-visible context snapshot. This may be an estimate
+    /// while a request is in flight and is replaced by provider-reported
+    /// usage when available.
+    pub context_usage: Option<ContextUsageSnapshot>,
 }
 
 impl Session {
@@ -175,6 +441,15 @@ pub enum TurnState {
         calls: Vec<PendingToolCall>,
         outcomes: Vec<Option<ToolOutcome>>,
     },
+    /// A manual `/compact` request is summarizing history. Auto
+    /// compaction runs while `Generating` because it is preflight for
+    /// the same user turn; this variant is only for explicit user
+    /// compaction.
+    Compacting {
+        id: TurnId,
+        started: SystemTime,
+        trigger: CompactionTrigger,
+    },
     /// `CancelTurn` was dispatched. The reducer has already emitted a
     /// `Cmd::CancelScope` — now we wait for the final `Cancelled` /
     /// `StreamDone` that the effect runner sends back when the scope's
@@ -194,6 +469,7 @@ impl TurnState {
             TurnState::Idle => None,
             TurnState::Generating { id, .. }
             | TurnState::ExecutingTools { id, .. }
+            | TurnState::Compacting { id, .. }
             | TurnState::Cancelling { id, .. } => Some(*id),
         }
     }
@@ -233,33 +509,125 @@ pub struct PendingToolCall {
     pub source: ModelToolCall,
 }
 
-/// Outcome of a single tool execution. The `Cancelled` variant is
-/// distinct from `Error` on purpose: cancellation is a user-initiated
-/// abort with a different UX (no error toast, no retry suggestion),
-/// not an error.
-#[derive(Debug, Clone)]
-pub enum ToolOutcome {
-    Finished {
-        output: String,
-        /// For multimodal tools (screenshots) — base64-encoded images
-        /// returned alongside the textual output.
-        images: Option<Vec<String>>,
-        /// Wall-clock duration, for UI display.
-        duration_secs: f64,
-    },
-    Error {
-        error: String,
-        duration_secs: f64,
-    },
-    /// The scope's `CancellationToken` fired before the tool produced
-    /// a result. Tool's child processes (if any) were killed via
-    /// `kill_on_drop`.
-    Cancelled,
+/// Outcome of a single tool execution.
+///
+/// `model_content` is the text that goes back to the model in the
+/// follow-up tool message. Everything else is Mermaid-owned
+/// structure for rendering, replay, process tracking, and timeline
+/// inspection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolOutcome {
+    pub status: ToolStatus,
+    pub summary: String,
+    pub model_content: String,
+    pub error: Option<String>,
+    pub metadata: Box<ToolRunMetadata>,
+    pub artifacts: Vec<ToolArtifact>,
+    pub duration_secs: Option<f64>,
 }
 
 impl ToolOutcome {
+    pub fn success(
+        model_content: impl Into<String>,
+        summary: impl Into<String>,
+        duration_secs: f64,
+    ) -> Self {
+        let duration = Some(duration_secs);
+        let metadata = ToolRunMetadata {
+            duration_secs: duration,
+            ..ToolRunMetadata::default()
+        };
+        Self {
+            status: ToolStatus::Success,
+            summary: summary.into(),
+            model_content: model_content.into(),
+            error: None,
+            metadata: Box::new(metadata),
+            artifacts: Vec::new(),
+            duration_secs: duration,
+        }
+    }
+
+    pub fn error(error: impl Into<String>, duration_secs: f64) -> Self {
+        let error = error.into();
+        let duration = Some(duration_secs);
+        Self {
+            status: ToolStatus::Error,
+            summary: error.clone(),
+            model_content: format!("Error: {}", error),
+            error: Some(error),
+            metadata: Box::new(ToolRunMetadata {
+                duration_secs: duration,
+                ..ToolRunMetadata::default()
+            }),
+            artifacts: Vec::new(),
+            duration_secs: duration,
+        }
+    }
+
+    pub fn cancelled() -> Self {
+        Self {
+            status: ToolStatus::Cancelled,
+            summary: "[cancelled]".to_string(),
+            model_content: "[Tool call skipped: the user cancelled before execution]".to_string(),
+            error: None,
+            metadata: Box::new(ToolRunMetadata::default()),
+            artifacts: Vec::new(),
+            duration_secs: None,
+        }
+    }
+
+    pub fn with_metadata(mut self, mut metadata: ToolRunMetadata) -> Self {
+        metadata.duration_secs = self.duration_secs;
+        self.metadata = Box::new(metadata);
+        self
+    }
+
+    pub fn with_artifacts(mut self, artifacts: Vec<ToolArtifact>) -> Self {
+        self.artifacts = artifacts.clone();
+        self.metadata.artifacts = artifacts;
+        self
+    }
+
+    pub fn with_images(self, images: Vec<String>) -> Self {
+        self.with_artifacts(
+            images
+                .into_iter()
+                .map(|data| ToolArtifact::Image { data })
+                .collect(),
+        )
+    }
+
     pub fn was_cancelled(&self) -> bool {
-        matches!(self, ToolOutcome::Cancelled)
+        self.status == ToolStatus::Cancelled
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.status == ToolStatus::Success
+    }
+
+    pub fn output(&self) -> &str {
+        &self.model_content
+    }
+
+    pub fn error_message(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub fn images(&self) -> Option<Vec<String>> {
+        let images: Vec<String> = self
+            .artifacts
+            .iter()
+            .filter_map(|artifact| match artifact {
+                ToolArtifact::Image { data } => Some(data.clone()),
+                _ => None,
+            })
+            .collect();
+        if images.is_empty() {
+            None
+        } else {
+            Some(images)
+        }
     }
 
     /// Convert to a textual representation suitable for embedding in
@@ -267,13 +635,7 @@ impl ToolOutcome {
     /// placeholder so the model sees "this was skipped" rather than
     /// the history becoming malformed.
     pub fn as_tool_message_content(&self) -> String {
-        match self {
-            ToolOutcome::Finished { output, .. } => output.clone(),
-            ToolOutcome::Error { error, .. } => format!("Error: {}", error),
-            ToolOutcome::Cancelled => {
-                "[Tool call skipped: the user cancelled before execution]".to_string()
-            },
-        }
+        self.model_content.clone()
     }
 }
 
@@ -328,6 +690,13 @@ pub struct UiState {
     /// stepping past the newest history entry with Down restores
     /// the partial input unchanged. Cleared on any non-nav key.
     pub history_draft: String,
+    /// Running accumulator for mouse-wheel scroll events (F13). The
+    /// reducer adds the delta here on `Msg::MouseScroll`; the render
+    /// layer compares against its last-seen snapshot and applies the
+    /// diff to the chat pane's `ChatState`. This keeps the reducer
+    /// pure — it doesn't touch render-layer state, it just publishes
+    /// an intent. `i32` wraps at ~2 billion scrolls (never).
+    pub mouse_scroll_accum: i32,
 }
 
 /// Top-level UI mode. Like `TurnState` this is a sum type instead of a
@@ -520,7 +889,7 @@ mod tests {
 
     #[test]
     fn tool_outcome_cancelled_content_is_placeholder() {
-        let o = ToolOutcome::Cancelled;
+        let o = ToolOutcome::cancelled();
         assert!(o.was_cancelled());
         let content = o.as_tool_message_content();
         assert!(content.contains("cancelled"));
@@ -528,11 +897,7 @@ mod tests {
 
     #[test]
     fn tool_outcome_finished_returns_output_verbatim() {
-        let o = ToolOutcome::Finished {
-            output: "hello world".to_string(),
-            images: None,
-            duration_secs: 0.1,
-        };
+        let o = ToolOutcome::success("hello world", "hello world", 0.1);
         assert_eq!(o.as_tool_message_content(), "hello world");
         assert!(!o.was_cancelled());
     }

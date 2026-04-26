@@ -62,6 +62,24 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         arg_hint: None,
     },
     SlashCommand {
+        name: "usage",
+        aliases: &[],
+        description: "Show provider token usage and session totals",
+        arg_hint: None,
+    },
+    SlashCommand {
+        name: "context",
+        aliases: &[],
+        description: "Show current context-window estimate and prompt budget",
+        arg_hint: None,
+    },
+    SlashCommand {
+        name: "compact",
+        aliases: &["compress", "summarize"],
+        description: "Compact conversation context with optional focus instructions",
+        arg_hint: Some("[instructions]"),
+    },
+    SlashCommand {
         name: "cloud-setup",
         aliases: &[],
         description: "Configure Ollama Cloud API key",

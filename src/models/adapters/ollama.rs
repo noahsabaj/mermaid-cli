@@ -240,21 +240,20 @@ impl OllamaAdapter {
         };
         let total_tokens = acc.prompt_tokens + acc.completion_tokens;
 
-        // Final `Done` event so the typed-callback consumer knows the
-        // stream is complete and learns the token total.
-        if let Some(cb) = callback.as_ref() {
-            cb(StreamEvent::Done {
-                tokens: total_tokens,
-            });
-        }
+        // F3: the adapter no longer emits a terminal `Done` through the
+        // callback. The v0.7 provider wrapper (`providers::model::*`)
+        // emits the authoritative `StreamEvent::Done { usage,
+        // thinking_signature }` from the returned `ModelResponse`.
+        // Emitting here would race the wrapper's Done (ordering aside)
+        // and drop the thinking_signature for Anthropic.
 
         Ok(ModelResponse {
             content: acc.content,
-            usage: Some(TokenUsage {
-                prompt_tokens: acc.prompt_tokens,
-                completion_tokens: acc.completion_tokens,
+            usage: Some(TokenUsage::provider(
+                acc.prompt_tokens,
+                acc.completion_tokens,
                 total_tokens,
-            }),
+            )),
             model_name: self.model_name.clone(),
             thinking,
             tool_calls,
@@ -497,9 +496,16 @@ impl OllamaAdapter {
         let thinking = json.message.thinking.filter(|t| !t.is_empty());
         let tool_calls = json.message.tool_calls.filter(|tc| !tc.is_empty());
 
+        let prompt_tokens = json.prompt_eval_count.unwrap_or(0);
+        let completion_tokens = json.eval_count.unwrap_or(0);
+
         Ok(ModelResponse {
             content: json.message.content,
-            usage: None,
+            usage: Some(TokenUsage::provider(
+                prompt_tokens,
+                completion_tokens,
+                prompt_tokens.saturating_add(completion_tokens),
+            )),
             model_name: self.model_name.clone(),
             thinking,
             tool_calls,

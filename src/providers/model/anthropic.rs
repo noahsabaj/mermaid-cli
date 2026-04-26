@@ -51,7 +51,9 @@ impl ModelProvider for AnthropicProvider {
 
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
         let config = build_model_config(&request);
-        let callback = forward_callback(ctx.sink.clone());
+        // F2: ordered relay — see stream_bridge docs.
+        let relay_tx = super::stream_bridge::ordered_relay(ctx.sink.clone());
+        let callback = forward_callback(relay_tx);
         let chat_fut = self
             .adapter
             .chat(&request.messages, &config, Some(callback));
@@ -59,11 +61,7 @@ impl ModelProvider for AnthropicProvider {
         let response = tokio::select! {
             biased;
             _ = ctx.token.cancelled() => {
-                let _ = ctx.sink.send(StreamEvent::Done {
-                    usage: None,
-                    thinking_signature: None,
-                }).await;
-                return Err(ModelError::StreamError("cancelled by user".to_string()));
+                return Err(ModelError::Cancelled);
             },
             r = chat_fut => r?,
         };
@@ -99,9 +97,8 @@ fn build_model_config(request: &ChatRequest) -> ModelConfig {
     }
 }
 
-fn forward_callback(sink: tokio::sync::mpsc::Sender<StreamEvent>) -> StreamCallback {
+fn forward_callback(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) -> StreamCallback {
     Arc::new(move |event: ModelStreamEvent| {
-        let sink = sink.clone();
         let mapped = match event {
             ModelStreamEvent::Text(s) => StreamEvent::Text(s),
             ModelStreamEvent::Reasoning(chunk) => StreamEvent::Reasoning(ReasoningChunk {
@@ -111,20 +108,14 @@ fn forward_callback(sink: tokio::sync::mpsc::Sender<StreamEvent>) -> StreamCallb
             ModelStreamEvent::ToolCall(tc) => StreamEvent::ToolCall(tc),
             ModelStreamEvent::Done { tokens } => StreamEvent::Done {
                 usage: if tokens > 0 {
-                    Some(crate::models::TokenUsage {
-                        prompt_tokens: 0,
-                        completion_tokens: tokens,
-                        total_tokens: tokens,
-                    })
+                    Some(crate::models::TokenUsage::provider(0, tokens, tokens))
                 } else {
                     None
                 },
                 thinking_signature: None,
             },
         };
-        tokio::spawn(async move {
-            let _ = sink.send(mapped).await;
-        });
+        let _ = sink.send(mapped);
     })
 }
 

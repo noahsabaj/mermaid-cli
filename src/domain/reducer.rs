@@ -27,11 +27,16 @@ use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE};
 use crate::models::{ChatMessage, MessageRole};
 use crate::prompts::get_system_prompt;
 
+use super::COMMAND_REGISTRY;
 use super::cmd::{ChatRequest, Cmd};
+use super::compaction::{
+    CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger, compaction_receipt,
+};
 use super::ids::TurnId;
 use super::msg::{KeyCode, KeyMods, Msg, Paste, SlashCmd};
 use super::state::{
-    GenPhase, McpServerStatus, State, StatusKind, StatusLine, ToolOutcome, TurnState, UiMode,
+    GenPhase, McpServerEntry, McpServerStatus, State, StatusKind, StatusLine, TokenUsageTotals,
+    ToolOutcome, TurnState, UiMode,
 };
 use super::transition::{
     action_display_for, commit_assistant_message, fill_outcome, start_generating,
@@ -119,9 +124,11 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             state.confirm = None;
         },
         Msg::Quit => {
-            state.should_exit = true;
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
-            cmds.push(Cmd::Exit);
+            request_exit(&mut state, &mut cmds);
+        },
+        Msg::RuntimeSignal(signal) => {
+            state.runtime.record_signal(signal);
+            request_exit(&mut state, &mut cmds);
         },
 
         // ── Streaming ───────────────────────────────────────────────
@@ -161,6 +168,22 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::StreamToolCall { turn, call } => {
             handle_stream_tool_call(&mut state, turn, call);
         },
+        Msg::ContextUsageEstimated { turn, snapshot } => {
+            if state.turn.accepts(turn) {
+                state.session.context_usage = Some(snapshot);
+            }
+        },
+        Msg::CompactionFinished { turn, result } => {
+            handle_compaction_finished(&mut state, &mut cmds, turn, result);
+        },
+        Msg::CompactionFailed {
+            turn,
+            trigger,
+            message,
+            kind,
+        } => {
+            handle_compaction_failed(&mut state, turn, trigger, message, kind);
+        },
         Msg::StreamDone {
             turn,
             usage,
@@ -168,8 +191,11 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         } => {
             handle_stream_done(&mut state, &mut cmds, turn, usage, thinking_signature);
         },
-        Msg::UpstreamError { turn: _, error } => {
-            handle_upstream_error(&mut state, error);
+        Msg::UpstreamError { turn, error } => {
+            handle_upstream_error(&mut state, turn, error);
+        },
+        Msg::TurnCancelled(turn) => {
+            handle_turn_cancelled(&mut state, turn);
         },
 
         // ── Tools ───────────────────────────────────────────────────
@@ -185,7 +211,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             call_id: _,
             event,
         } => {
-            handle_tool_progress(&mut state, turn, event);
+            handle_tool_progress(&mut state, &mut cmds, turn, event);
         },
         Msg::ToolFinished {
             turn,
@@ -196,18 +222,48 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
 
         // ── MCP ─────────────────────────────────────────────────────
+        // F5: upsert semantics. State::new seeds entries for configured
+        // servers in `Starting` status, so these handlers normally find
+        // an existing entry to update. But a server discovered at
+        // runtime (hypothetical future path) should still land in the
+        // map — insert rather than silently drop.
         Msg::McpServerReady { name, tools } => {
-            if let Some(entry) = state.mcp.servers.get_mut(&name) {
-                entry.status = McpServerStatus::Ready;
-                entry.tools = tools;
-            }
+            state
+                .mcp
+                .servers
+                .entry(name)
+                .and_modify(|e| {
+                    e.status = McpServerStatus::Ready;
+                    e.tools = tools.clone();
+                })
+                .or_insert_with(|| McpServerEntry {
+                    config: crate::app::McpServerConfig {
+                        command: String::new(),
+                        args: Vec::new(),
+                        env: std::collections::HashMap::new(),
+                    },
+                    status: McpServerStatus::Ready,
+                    tools,
+                });
         },
         Msg::McpServerErrored { name, reason } => {
-            if let Some(entry) = state.mcp.servers.get_mut(&name) {
-                entry.status = McpServerStatus::Errored {
-                    reason: reason.clone(),
-                };
-            }
+            let status = McpServerStatus::Errored {
+                reason: reason.clone(),
+            };
+            state
+                .mcp
+                .servers
+                .entry(name.clone())
+                .and_modify(|e| e.status = status.clone())
+                .or_insert_with(|| McpServerEntry {
+                    config: crate::app::McpServerConfig {
+                        command: String::new(),
+                        args: Vec::new(),
+                        env: std::collections::HashMap::new(),
+                    },
+                    status,
+                    tools: Vec::new(),
+                });
             state.status = Some(StatusLine {
                 text: format!("MCP server {} errored: {}", name, reason),
                 kind: StatusKind::Error,
@@ -273,6 +329,36 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // Render layer recomputes layout from the new area — no
             // reducer state depends on raw terminal dimensions.
         },
+        Msg::MouseScroll { delta } => {
+            // F13: accumulate into a counter. Render layer diffs
+            // against its last-seen value and applies the resulting
+            // delta to ChatState. `saturating_add` never overflows.
+            state.ui.mouse_scroll_accum = state.ui.mouse_scroll_accum.saturating_add(delta as i32);
+        },
+        Msg::TransientStatus {
+            text,
+            kind,
+            dismiss_ms,
+        } => {
+            // F14: generic async-feedback banner. An effect handler
+            // that wants to say "clipboard is empty", "config saved",
+            // etc. ships its one-liner here; we render it via the
+            // existing StatusBannerWidget and self-dismiss.
+            state.status = Some(StatusLine {
+                text,
+                kind,
+                shown_at: std::time::SystemTime::now(),
+            });
+            if dismiss_ms > 0 {
+                cmds.push(Cmd::DismissStatusAfter { ms: dismiss_ms });
+            }
+        },
+        Msg::OpenImageAt {
+            message_index,
+            image_index,
+        } => {
+            handle_open_image_at(&mut state, &mut cmds, message_index, image_index);
+        },
     }
 
     (state, cmds)
@@ -294,27 +380,44 @@ fn emit_title_if_changed(state: &mut State, cmds: &mut Vec<Cmd>) {
 // ─── helpers ────────────────────────────────────────────────────────
 
 fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
-    // Ctrl+C: cancel if busy, quit if idle with empty input.
+    // Ctrl+C is the hard "leave the TUI" path. If work is active,
+    // emit a cancellation first so shutdown does not wait on a live
+    // provider/tool scope before returning the terminal.
     if mods.ctrl && code == KeyCode::Char('c') {
-        if state.is_busy() {
-            handle_cancel_turn(state, cmds);
-        } else if state.ui.input_buffer.is_empty() {
-            state.should_exit = true;
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
-            cmds.push(Cmd::Exit);
+        request_exit(state, cmds);
+        return;
+    }
+
+    // Esc interrupts active work. When idle it falls through to the
+    // palette/input/focus handlers below.
+    if mods.is_empty() && code == KeyCode::Escape && state.is_busy() {
+        if matches!(state.turn, TurnState::Cancelling { .. }) {
+            request_exit(state, cmds);
         } else {
-            state.ui.input_buffer.clear();
-            state.ui.input_cursor = 0;
-            state.ui.palette_cursor = None;
+            handle_cancel_turn(state, cmds);
         }
         return;
     }
 
     // Ctrl+D on empty input quits.
     if mods.ctrl && code == KeyCode::Char('d') && state.ui.input_buffer.is_empty() {
-        state.should_exit = true;
-        cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
-        cmds.push(Cmd::Exit);
+        request_exit(state, cmds);
+        return;
+    }
+
+    // Ctrl+V: read the system clipboard and paste its contents. Gate
+    // on `EditingInput` + no confirmation modal so the palette and
+    // conversation-list picker don't swallow the keystroke. The
+    // actual clipboard read happens off-thread in the effect runner
+    // (xclip / wl-paste / pngpaste / PowerShell can block for
+    // hundreds of ms on macOS); result comes back as
+    // `Msg::Paste(Image|Text)` or `Msg::TransientStatus` on failure.
+    if mods.ctrl
+        && code == KeyCode::Char('v')
+        && matches!(state.ui.mode, UiMode::EditingInput)
+        && state.confirm.is_none()
+    {
+        cmds.push(Cmd::ReadClipboard);
         return;
     }
 
@@ -701,11 +804,15 @@ fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
                     &base64::engine::general_purpose::STANDARD,
                     &bytes,
                 ),
-                temp_path,
+                temp_path: temp_path.clone(),
                 size_bytes: bytes.len(),
                 format: format.clone(),
             });
-            cmds.push(Cmd::WriteImageToTemp { id, bytes, format });
+            cmds.push(Cmd::WriteImageToTemp {
+                path: temp_path,
+                bytes,
+                format,
+            });
         },
     }
 }
@@ -751,13 +858,23 @@ fn handle_submit_prompt(
     // only on actual change.
     emit_title_if_changed(state, cmds);
 
+    // F8: refresh MERMAID.md synchronously BEFORE building the chat
+    // request, so edits the user made between turns land in the very
+    // next call instead of the one after. The reducer's "no I/O" law
+    // has a deliberate exception for this: a single `stat` on a local
+    // file (plus an optional <40KB read on mtime change) is
+    // microseconds and doesn't need an async ceremony. See
+    // `crate::app::instructions::refresh`.
+    let (refreshed, _outcome) =
+        crate::app::instructions::refresh(state.instructions.take(), &state.cwd);
+    state.instructions = refreshed;
+
     let turn = state.ids.fresh_turn();
     state.turn = start_generating(turn);
     cmds.push(Cmd::CallModel {
         turn,
         request: build_chat_request(state),
     });
-    cmds.push(Cmd::RefreshInstructions);
 }
 
 fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
@@ -771,8 +888,19 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::DismissStatusAfter { ms: 3_000 });
         },
         SlashCmd::Model(Some(new_model)) => {
+            let pull_target = ollama_pull_target(&new_model);
             state.session.model_id = new_model.clone();
+            state.runtime.set_model(&new_model);
+            state.status = Some(StatusLine {
+                text: format!("Model: {}", new_model),
+                kind: StatusKind::Info,
+                shown_at: std::time::SystemTime::now(),
+            });
             cmds.push(Cmd::PersistLastModel(new_model));
+            if let Some(model) = pull_target {
+                cmds.push(Cmd::PullOllamaModel { model });
+            }
+            cmds.push(Cmd::DismissStatusAfter { ms: 3_000 });
         },
         SlashCmd::Reasoning(None) => {
             state.status = Some(StatusLine {
@@ -812,6 +940,19 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             };
             cmds.push(Cmd::ListConversations);
         },
+        SlashCmd::Usage => {
+            state.session.append(ChatMessage::system(usage_text(state)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        SlashCmd::Context => {
+            state
+                .session
+                .append(ChatMessage::system(context_text(state)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        SlashCmd::Compact(instructions) => {
+            handle_manual_compact(state, cmds, instructions);
+        },
         SlashCmd::CloudSetup => {
             // Cloud setup needs interactive stdin (rpassword) which
             // fights with ratatui's raw mode. The in-TUI command
@@ -826,17 +967,11 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::DismissStatusAfter { ms: 5_000 });
         },
         SlashCmd::Help => {
-            state.status = Some(StatusLine {
-                text: "See /help output in chat".to_string(),
-                kind: StatusKind::Info,
-                shown_at: std::time::SystemTime::now(),
-            });
-            cmds.push(Cmd::DismissStatusAfter { ms: 2_000 });
+            state.session.append(ChatMessage::system(help_text()));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         SlashCmd::Quit => {
-            state.should_exit = true;
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
-            cmds.push(Cmd::Exit);
+            request_exit(state, cmds);
         },
         SlashCmd::Unknown(name) => {
             state.status = Some(StatusLine {
@@ -846,6 +981,299 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             });
             cmds.push(Cmd::DismissStatusAfter { ms: 2_500 });
         },
+    }
+}
+
+fn ollama_pull_target(model_id: &str) -> Option<String> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return None;
+    }
+    let (provider, model) = match model_id.split_once('/') {
+        Some((provider, model)) => (provider, model),
+        None => ("ollama", model_id),
+    };
+    if !provider.eq_ignore_ascii_case("ollama") {
+        return None;
+    }
+    let model = model.trim();
+    if model.is_empty() || model.ends_with(":cloud") {
+        None
+    } else {
+        Some(model.to_string())
+    }
+}
+
+fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: Option<String>) {
+    if !matches!(state.turn, TurnState::Idle) {
+        state.status = Some(StatusLine {
+            text: "Cannot compact while a turn is active.".to_string(),
+            kind: StatusKind::Warn,
+            shown_at: std::time::SystemTime::now(),
+        });
+        cmds.push(Cmd::DismissStatusAfter { ms: 3_000 });
+        return;
+    }
+
+    if state.session.messages().len() < 3 {
+        state.status = Some(StatusLine {
+            text: "Not enough conversation history to compact.".to_string(),
+            kind: StatusKind::Info,
+            shown_at: std::time::SystemTime::now(),
+        });
+        cmds.push(Cmd::DismissStatusAfter { ms: 3_000 });
+        return;
+    }
+
+    let (refreshed, _outcome) =
+        crate::app::instructions::refresh(state.instructions.take(), &state.cwd);
+    state.instructions = refreshed;
+
+    let turn = state.ids.fresh_turn();
+    state.turn = TurnState::Compacting {
+        id: turn,
+        started: std::time::SystemTime::now(),
+        trigger: CompactionTrigger::Manual,
+    };
+    state.status = Some(StatusLine {
+        text: "Compacting context...".to_string(),
+        kind: StatusKind::Persistent,
+        shown_at: std::time::SystemTime::now(),
+    });
+    cmds.push(Cmd::CompactConversation {
+        turn,
+        request: CompactionRequest::manual(build_chat_request(state), instructions),
+    });
+}
+
+fn help_text() -> String {
+    let mut lines = Vec::with_capacity(COMMAND_REGISTRY.len() + 1);
+    lines.push("Available commands:".to_string());
+    for command in COMMAND_REGISTRY {
+        let hint = command.arg_hint.unwrap_or("");
+        let aliases = if command.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", command.aliases.join(", "))
+        };
+        let suffix = if hint.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", hint)
+        };
+        lines.push(format!(
+            "/{}{}{} - {}",
+            command.name, suffix, aliases, command.description
+        ));
+    }
+    lines.join("\n")
+}
+
+fn usage_text(state: &State) -> String {
+    let mut lines = Vec::new();
+    lines.push("Usage".to_string());
+    lines.push(format!("Model: {}", state.session.model_id));
+    lines.push(String::new());
+
+    match &state.session.context_usage {
+        Some(context) => {
+            let source = if context.is_estimate() {
+                "estimated"
+            } else {
+                "provider-reported"
+            };
+            lines.push(format!(
+                "Current context: {}{}{}",
+                format_compact_count(context.used_tokens),
+                context
+                    .max_tokens
+                    .map(|max| format!(" / {}", format_compact_count(max)))
+                    .unwrap_or_else(|| " / unknown".to_string()),
+                context
+                    .used_percent
+                    .map(|p| format!(" ({}%, {})", p, source))
+                    .unwrap_or_else(|| format!(" ({})", source))
+            ));
+        },
+        None => lines.push("Current context: n/a".to_string()),
+    }
+
+    match state.session.last_token_usage {
+        Some(last) => lines.push(format!("Last API request: {}", usage_totals_line(last))),
+        None => lines.push("Last API request: n/a".to_string()),
+    }
+    lines.push(format!(
+        "Session processed: {}",
+        usage_totals_line(state.session.cumulative_token_usage)
+    ));
+
+    lines.join("\n")
+}
+
+fn context_text(state: &State) -> String {
+    let mut lines = Vec::new();
+    lines.push("Context".to_string());
+    lines.push(format!("Model: {}", state.session.model_id));
+    lines.push(format!(
+        "Provider: {}",
+        state.runtime.provider_capabilities.provider
+    ));
+    lines.push(String::new());
+
+    if let Some(context) = &state.session.context_usage {
+        let source = if context.is_estimate() {
+            "estimated"
+        } else {
+            "provider-reported"
+        };
+        lines.push(format!(
+            "Used: {}{} ({})",
+            format_compact_count(context.used_tokens),
+            context
+                .max_tokens
+                .map(|max| format!(" / {}", format_compact_count(max)))
+                .unwrap_or_else(|| " / unknown".to_string()),
+            source
+        ));
+        if let Some(remaining) = context.remaining_tokens {
+            lines.push(format!("Remaining: {}", format_compact_count(remaining)));
+        }
+        if let Some(breakdown) = &context.breakdown {
+            lines.push(String::new());
+            lines.push("Prompt budget estimate:".to_string());
+            lines.push(format!(
+                "- system prompt: {}",
+                format_compact_count(breakdown.system_tokens)
+            ));
+            lines.push(format!(
+                "- MERMAID.md: {}",
+                format_compact_count(breakdown.instructions_tokens)
+            ));
+            lines.push(format!(
+                "- messages ({}): {}",
+                breakdown.message_count,
+                format_compact_count(breakdown.message_tokens)
+            ));
+            lines.push(format!(
+                "- tool schemas ({}): {}",
+                breakdown.tool_count,
+                format_compact_count(breakdown.tool_schema_tokens)
+            ));
+            if breakdown.image_count > 0 {
+                lines.push(format!("- images: {}", breakdown.image_count));
+            }
+        }
+    } else {
+        let request = build_chat_request(state);
+        let snapshot = super::state::estimate_context_usage_for_request(
+            &request,
+            state.runtime.provider_capabilities.max_context_tokens,
+        );
+        lines.push(format!(
+            "Estimated current request: {}{}",
+            format_compact_count(snapshot.used_tokens),
+            snapshot
+                .max_tokens
+                .map(|max| format!(" / {}", format_compact_count(max)))
+                .unwrap_or_else(|| " / unknown".to_string())
+        ));
+        if let Some(breakdown) = snapshot.breakdown {
+            lines.push(String::new());
+            lines.push("Prompt budget estimate:".to_string());
+            lines.push(format!(
+                "- system prompt: {}",
+                format_compact_count(breakdown.system_tokens)
+            ));
+            lines.push(format!(
+                "- MERMAID.md: {}",
+                format_compact_count(breakdown.instructions_tokens)
+            ));
+            lines.push(format!(
+                "- messages ({}): {}",
+                breakdown.message_count,
+                format_compact_count(breakdown.message_tokens)
+            ));
+            lines.push(format!(
+                "- MCP tool schemas ({}): {}",
+                breakdown.tool_count,
+                format_compact_count(breakdown.tool_schema_tokens)
+            ));
+            lines.push("Built-in tool schemas are measured on the next model call after dispatch enrichment.".to_string());
+        }
+    }
+
+    if let Some(last) = state.session.conversation.compactions.last() {
+        lines.push(String::new());
+        lines.push("Last compaction:".to_string());
+        lines.push(format!("- trigger: {}", last.trigger.label()));
+        lines.push(format!(
+            "- context: {} -> {} tokens",
+            format_compact_count(last.before_tokens),
+            format_compact_count(last.after_tokens)
+        ));
+        lines.push(format!(
+            "- archived: {} messages",
+            last.archived_message_count
+        ));
+        lines.push(format!(
+            "- preserved: {} messages",
+            last.preserved_message_count
+        ));
+        if let Some(path) = &last.archive_path {
+            lines.push(format!("- archive: {}", path));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn usage_totals_line(usage: TokenUsageTotals) -> String {
+    let mut parts = vec![
+        format!("total {}", format_compact_count(usage.total_tokens)),
+        format!("input {}", format_compact_count(usage.input_total_tokens())),
+        format!(
+            "output {}",
+            format_compact_count(usage.output_total_tokens())
+        ),
+    ];
+    if usage.cached_input_tokens > 0 {
+        parts.push(format!(
+            "cache read {}",
+            format_compact_count(usage.cached_input_tokens)
+        ));
+    }
+    if usage.cache_creation_input_tokens > 0 {
+        parts.push(format!(
+            "cache write {}",
+            format_compact_count(usage.cache_creation_input_tokens)
+        ));
+    }
+    if usage.reasoning_output_tokens > 0 {
+        parts.push(format!(
+            "reasoning {}",
+            format_compact_count(usage.reasoning_output_tokens)
+        ));
+    }
+    parts.join(", ")
+}
+
+fn format_compact_count(value: usize) -> String {
+    if value >= 1_000_000 {
+        format_scaled(value, 1_000_000, "m")
+    } else if value >= 10_000 {
+        format_scaled(value, 1_000, "k")
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_scaled(value: usize, divisor: usize, suffix: &str) -> String {
+    let whole = value / divisor;
+    let decimal = ((value % divisor) * 10) / divisor;
+    if decimal == 0 {
+        format!("{}{}", whole, suffix)
+    } else {
+        format!("{}.{}{}", whole, decimal, suffix)
     }
 }
 
@@ -864,6 +1292,19 @@ fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
     };
 }
 
+fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
+    if state.should_exit {
+        return;
+    }
+    if let Some(id) = state.turn.id() {
+        cmds.push(Cmd::CancelScope(id));
+    }
+    state.should_exit = true;
+    state.ui.pending_msgs.clear();
+    cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+    cmds.push(Cmd::Exit);
+}
+
 fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
     let Some(confirm) = state.confirm.take() else {
         return;
@@ -878,9 +1319,95 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.conversation =
                 crate::session::ConversationHistory::new(project_path, model_name);
             state.session.cumulative_tokens = 0;
+            state.session.last_token_usage = None;
+            state.session.cumulative_token_usage = TokenUsageTotals::default();
+            state.session.context_usage = None;
             emit_title_if_changed(state, cmds);
         },
     }
+}
+
+fn handle_compaction_finished(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    turn: TurnId,
+    result: CompactionResult,
+) {
+    let manual = match state.turn {
+        TurnState::Compacting { id, .. } if id == turn => true,
+        TurnState::Generating { id, .. } if id == turn => false,
+        _ => return,
+    };
+
+    let conversation_id = state.session.conversation.id.clone();
+    let mut record = result.record;
+    record.archive_path = Some(format!(
+        ".mermaid/compactions/{}/{}.json",
+        conversation_id, record.id
+    ));
+    let archive = CompactionArchive {
+        id: record.id.clone(),
+        conversation_id,
+        created_at: record.created_at,
+        messages: result.archived_messages,
+    };
+
+    state
+        .session
+        .conversation
+        .replace_messages(result.replacement_messages);
+    state.session.conversation.add_compaction(record.clone());
+    state.session.context_usage = Some(result.after_snapshot);
+
+    if let Some(usage) = result.usage {
+        let totals = TokenUsageTotals::from_usage(&usage);
+        state.session.last_token_usage = Some(totals);
+        state.session.cumulative_token_usage.add_assign(totals);
+        state.session.cumulative_tokens = state
+            .session
+            .cumulative_tokens
+            .saturating_add(usage.total_tokens);
+    }
+
+    if manual {
+        state.turn = TurnState::Idle;
+    }
+
+    state.status = Some(StatusLine {
+        text: compaction_receipt(&record),
+        kind: StatusKind::Info,
+        shown_at: std::time::SystemTime::now(),
+    });
+    cmds.push(Cmd::SaveCompactionArchive(archive));
+    cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+    cmds.push(Cmd::DismissStatusAfter { ms: 5_000 });
+}
+
+fn handle_compaction_failed(
+    state: &mut State,
+    turn: TurnId,
+    trigger: CompactionTrigger,
+    message: String,
+    kind: StatusKind,
+) {
+    match state.turn {
+        TurnState::Compacting { id, .. } if id == turn => {
+            state.turn = TurnState::Idle;
+        },
+        TurnState::Generating { id, .. } if id == turn => {},
+        _ => return,
+    }
+
+    let prefix = match trigger {
+        CompactionTrigger::Manual => "Compaction failed",
+        CompactionTrigger::AutoThreshold => "Auto-compaction skipped",
+        CompactionTrigger::ContextLimitRetry => "Context-limit compaction failed",
+    };
+    state.status = Some(StatusLine {
+        text: format!("{}: {}", prefix, message),
+        kind,
+        shown_at: std::time::SystemTime::now(),
+    });
 }
 
 fn handle_stream_tool_call(
@@ -943,14 +1470,32 @@ fn handle_stream_done(
     );
     state.session.append(msg);
 
-    // Running total the status widget reads. Token count may be
-    // unknown (provider didn't report) — then we just don't
-    // advance.
+    // Provider token usage is per API request. Track both the last
+    // reported request and the session total so the footer can label
+    // the number honestly instead of presenting a giant raw counter.
     if let Some(u) = usage {
+        let totals = TokenUsageTotals::from_usage(&u);
+        state.session.last_token_usage = Some(totals);
+        state.session.cumulative_token_usage.add_assign(totals);
         state.session.cumulative_tokens = state
             .session
             .cumulative_tokens
             .saturating_add(u.total_tokens);
+        let max_context = state
+            .session
+            .context_usage
+            .as_ref()
+            .and_then(|snapshot| snapshot.max_tokens)
+            .or(state.runtime.provider_capabilities.max_context_tokens);
+        let mut context = super::state::ContextUsageSnapshot::from_usage(&u, max_context);
+        if let Some(prev) = state.session.context_usage.as_ref()
+            && context.breakdown.is_none()
+        {
+            context.breakdown = prev.breakdown.clone();
+        }
+        state.session.context_usage = Some(context);
+    } else {
+        state.session.last_token_usage = None;
     }
 
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
@@ -973,6 +1518,9 @@ fn handle_stream_done(
                 turn,
                 call_id: call.call_id,
                 source: call.source.clone(),
+                // F7: pass the session's current model id so subagent
+                // tools can spawn children against the same provider.
+                model_id: state.session.model_id.clone(),
             });
         }
         state.turn = super::transition::start_executing_tools(turn, pending);
@@ -992,18 +1540,97 @@ fn handle_stream_done(
     }
 }
 
-fn handle_upstream_error(state: &mut State, error: crate::models::UserFacingError) {
+/// Handle `Msg::OpenImageAt { message_index, image_index }`. Resolves
+/// the base64 payload from the committed message history, writes it
+/// to a temp file, and dispatches `Cmd::OpenInSystem` so the user's
+/// default image viewer opens it. F13.
+fn handle_open_image_at(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    message_index: usize,
+    image_index: usize,
+) {
+    let msg = match state.session.messages().get(message_index) {
+        Some(m) => m,
+        None => return,
+    };
+    let Some(images) = msg.images.as_ref() else {
+        return;
+    };
+    let Some(b64) = images.get(image_index) else {
+        return;
+    };
+    use base64::{Engine, engine::general_purpose};
+    let Ok(bytes) = general_purpose::STANDARD.decode(b64) else {
+        return;
+    };
+    let id = state.ids.tool_call.next();
+    let temp_path = std::env::temp_dir().join(format!("mermaid-img-{}.png", id));
+    cmds.push(Cmd::WriteImageToTemp {
+        path: temp_path.clone(),
+        bytes,
+        format: "png".to_string(),
+    });
+    cmds.push(Cmd::OpenInSystem(temp_path));
+}
+
+/// Handle `Msg::TurnCancelled(turn)`. The effect runner's `drop_scope`
+/// emits this after the cancelled turn's `TurnScope` drains. Transitions
+/// `Cancelling(id) → Idle` when the ids match; also closes out the
+/// degenerate case where the scope drained but state is already `Idle`
+/// (e.g. the stream-done raced). Drains one queued message on the way
+/// out, same as the no-tool-calls tail of `handle_stream_done`.
+///
+/// Stale filter at the top of `update_step` catches mismatched turn ids
+/// before we get here, so this handler is branch-light.
+fn handle_turn_cancelled(state: &mut State, turn: TurnId) {
+    match state.turn {
+        TurnState::Cancelling { id, .. } if id == turn => {
+            state.turn = TurnState::Idle;
+            if let Some(next) = state.ui.queued_messages.pop_front() {
+                let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
+                state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
+                    text: next,
+                    attachment_ids,
+                });
+            }
+        },
+        _ => {
+            // Stream already completed / already idle / stale id —
+            // silently no-op. The filter at update_step's top would
+            // have caught a truly stale id; this branch handles the
+            // benign race where the scope drained after a successful
+            // StreamDone committed normally.
+        },
+    }
+}
+
+fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::UserFacingError) {
+    // Defense in depth (F4): even though the stale-filter at the top of
+    // `update_step` gates on `turn_id()`, re-check here so a future
+    // refactor that weakens the filter can't silently wipe the active
+    // turn with an error message that belongs to a superseded one.
+    if state.turn.id() != Some(turn) {
+        return;
+    }
+
     // End the current turn. Surface the error through a single
     // channel — the ActionDisplay attached to an empty assistant
     // message. The chat widget paints ActionDisplays as colored
     // error blocks, so committing to both `content` and `actions`
     // would paint the same error twice.
+    //
+    // Do NOT also set `state.status`: the F9 banner would render the
+    // same error a second time directly above the input, which is
+    // just noise. The chat entry is persistent (scrollable);
+    // duplicating as a transient banner adds nothing.
     state.turn = TurnState::Idle;
-    let summary_line = format!("{}: {}", error.summary, error.message);
     let msg = ChatMessage {
         role: MessageRole::Assistant,
         content: String::new(),
         timestamp: chrono::Local::now(),
+        kind: crate::models::ChatMessageKind::Normal,
+        metadata: None,
         actions: vec![super::action::ActionDisplay {
             action_type: "Error".to_string(),
             target: error.summary.clone(),
@@ -1012,6 +1639,7 @@ fn handle_upstream_error(state: &mut State, error: crate::models::UserFacingErro
             },
             details: super::action::ActionDetails::Simple,
             duration_seconds: None,
+            metadata: None,
         }],
         thinking: None,
         images: None,
@@ -1021,11 +1649,6 @@ fn handle_upstream_error(state: &mut State, error: crate::models::UserFacingErro
         thinking_signature: None,
     };
     state.session.append(msg);
-    state.status = Some(StatusLine {
-        text: summary_line,
-        kind: StatusKind::Error,
-        shown_at: std::time::SystemTime::now(),
-    });
 }
 
 /// Route a typed `ProgressEvent` to the right state surface.
@@ -1038,30 +1661,45 @@ fn handle_upstream_error(state: &mut State, error: crate::models::UserFacingErro
 /// - `SubagentToolCall` / `SubagentText` → status line with an
 ///   indented "subagent:" prefix so nested activity is visible
 ///   without the parent reducer needing to understand child Msgs.
-fn handle_tool_progress(state: &mut State, _turn: TurnId, event: crate::providers::ProgressEvent) {
+fn handle_tool_progress(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    _turn: TurnId,
+    event: crate::providers::ProgressEvent,
+) {
     use crate::providers::{ProgressEvent, SubagentPhase};
     use base64::{Engine as _, engine::general_purpose};
 
-    let status = |state: &mut State, text: String| {
+    /// How long a tool-progress banner sticks after the last update.
+    /// Every update pushes a fresh dismiss, so the timer effectively
+    /// resets while output keeps flowing; once output stops (including
+    /// at tool-finish), the banner clears after this delay. Fixes the
+    /// "last ls line stuck above input" bug the user hit after F9.
+    const PROGRESS_DISMISS_MS: u64 = 2_000;
+
+    let set_status = |state: &mut State, text: String, cmds: &mut Vec<Cmd>| {
         if !text.trim().is_empty() {
             state.status = Some(StatusLine {
                 text,
                 kind: StatusKind::Info,
                 shown_at: std::time::SystemTime::now(),
             });
+            cmds.push(Cmd::DismissStatusAfter {
+                ms: PROGRESS_DISMISS_MS,
+            });
         }
     };
 
     match event {
         ProgressEvent::Output(s) | ProgressEvent::Status(s) | ProgressEvent::SubagentText(s) => {
-            status(state, s);
+            set_status(state, s, cmds);
         },
         ProgressEvent::Bytes { done, total } => {
             let text = match total {
                 Some(t) => format!("{} / {} bytes", done, t),
                 None => format!("{} bytes", done),
             };
-            status(state, text);
+            set_status(state, text, cmds);
         },
         ProgressEvent::Artifact {
             mime,
@@ -1080,7 +1718,7 @@ fn handle_tool_progress(state: &mut State, _turn: TurnId, event: crate::provider
                 last.images.get_or_insert_with(Vec::new).push(encoded);
             }
             let label = caption.unwrap_or_else(|| format!("{} ({}b)", mime, data.len()));
-            status(state, label);
+            set_status(state, label, cmds);
         },
         ProgressEvent::SubagentToolCall {
             tool_name, phase, ..
@@ -1090,7 +1728,7 @@ fn handle_tool_progress(state: &mut State, _turn: TurnId, event: crate::provider
                 SubagentPhase::Finished => format!("  ⎿ subagent: {} ✓", tool_name),
                 SubagentPhase::Errored => format!("  ⎿ subagent: {} ✗", tool_name),
             };
-            status(state, text);
+            set_status(state, text, cmds);
         },
     }
 }
@@ -1115,11 +1753,20 @@ fn handle_tool_finished(
             }
             // Attach action display to the last assistant message so
             // the renderer can show it.
-            if let Some(call) = calls.iter().find(|c| c.call_id == call_id)
-                && let Some(last) = state.session.conversation.messages.last_mut()
-                && last.role == MessageRole::Assistant
-            {
-                last.actions.push(action_display_for(call, &outcome));
+            if let Some(call) = calls.iter().find(|c| c.call_id == call_id) {
+                let action = action_display_for(call, &outcome);
+                if let Some(process) = action
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.process.clone())
+                {
+                    state.runtime.register_process(process);
+                }
+                if let Some(last) = state.session.conversation.messages.last_mut()
+                    && last.role == MessageRole::Assistant
+                {
+                    last.actions.push(action);
+                }
             }
             try_complete_outcomes(outcomes)
         },
@@ -1193,13 +1840,21 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     ChatRequest {
         model_id: state.session.model_id.clone(),
         messages: evict_stale_screenshots(state.session.messages().to_vec()),
-        system_prompt: get_system_prompt(),
+        system_prompt: system_prompt_for_state(state),
         instructions,
         reasoning: state.session.reasoning,
         temperature,
         max_tokens,
         tools: mcp_tools,
     }
+}
+
+fn system_prompt_for_state(state: &State) -> String {
+    format!(
+        "{}\n\n## Current Session\nCurrent working directory: {}\nTreat this as the project root unless the user specifies a different path.",
+        get_system_prompt(),
+        state.cwd.display()
+    )
 }
 
 /// Walk the message log and retain only the `MAX_RETAINED_SCREENSHOTS`
@@ -1269,6 +1924,8 @@ mod tests {
                 role: MessageRole::Assistant,
                 content: format!("turn {}", i),
                 timestamp: chrono::Local::now(),
+                kind: crate::models::ChatMessageKind::Normal,
+                metadata: None,
                 actions: vec![],
                 thinking: None,
                 images: Some(vec![format!("png-base64-{}", i)]),
@@ -1304,6 +1961,8 @@ mod tests {
                 role: MessageRole::User,
                 content: format!("text only {}", i),
                 timestamp: chrono::Local::now(),
+                kind: crate::models::ChatMessageKind::Normal,
+                metadata: None,
                 actions: vec![],
                 thinking: None,
                 images: None,
@@ -1318,6 +1977,8 @@ mod tests {
                 role: MessageRole::Assistant,
                 content: format!("with image {}", i),
                 timestamp: chrono::Local::now(),
+                kind: crate::models::ChatMessageKind::Normal,
+                metadata: None,
                 actions: vec![],
                 thinking: None,
                 images: Some(vec![format!("png-{}", i)]),
@@ -1358,7 +2019,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_on_idle_with_input_clears_input_only() {
+    fn ctrl_c_on_idle_with_input_exits() {
         let mut state = fresh_state();
         state.ui.input_buffer = "partial".to_string();
         let msg = Msg::Key(Key {
@@ -1366,18 +2027,249 @@ mod tests {
             modifiers: KeyMods::ctrl(),
         });
         let (state, cmds) = update(state, msg);
-        assert!(!state.should_exit);
-        assert!(state.ui.input_buffer.is_empty());
-        assert!(cmds.is_empty());
+        assert!(state.should_exit);
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
+    }
+
+    /// F15: every tool-progress status push must schedule a
+    /// dismiss so the last progress line doesn't stick on the banner
+    /// forever after the tool finishes. Reported by the user: after
+    /// `execute_command ls -la`, the last directory entry sat above
+    /// the input indefinitely because F9 surfaced `state.status` but
+    /// tool progress never cleared it.
+    #[test]
+    fn tool_progress_schedules_dismiss_on_banner_update() {
+        use crate::providers::ProgressEvent;
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(1));
+        let turn = state.current_turn_id().unwrap();
+
+        let (state, cmds) = update(
+            state,
+            Msg::ToolProgress {
+                turn,
+                call_id: super::super::ids::ToolCallId(1),
+                event: ProgressEvent::Output(
+                    "drwxrwxr-x  3 nsabaj nsabaj 4096 Mar 30 14:02 .mermaid".to_string(),
+                ),
+            },
+        );
+        assert!(state.status.is_some(), "status should be set from output");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::DismissStatusAfter { .. })),
+            "tool progress must schedule a dismiss so the banner clears"
+        );
+    }
+
+    /// F14: Ctrl+V in the chat input emits `Cmd::ReadClipboard`. The
+    /// reducer stays pure — the actual clipboard read runs off-thread
+    /// in the effect runner.
+    #[test]
+    fn ctrl_v_in_editing_input_emits_read_clipboard() {
+        let state = fresh_state();
+        assert!(matches!(state.ui.mode, UiMode::EditingInput));
+        let (_, cmds) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('v'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::ReadClipboard)),
+            "Ctrl+V should dispatch Cmd::ReadClipboard; got tags: {:?}",
+            cmds.iter().map(|c| c.tag()).collect::<Vec<_>>(),
+        );
+    }
+
+    /// F14: Ctrl+V while a confirmation modal is open should NOT
+    /// hijack the keystroke — the user might be mid-confirmation and
+    /// accidentally paste into dismissed UI. Gated out.
+    #[test]
+    fn ctrl_v_with_confirm_modal_open_is_noop() {
+        let mut state = fresh_state();
+        state.confirm = Some(super::super::state::Confirmation {
+            prompt: "Clear conversation history?".to_string(),
+            accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
+        });
+        let (_, cmds) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('v'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::ReadClipboard)));
+    }
+
+    /// F14: Ctrl+V in the conversation-list picker must not trigger
+    /// a clipboard read. The picker has its own key handling.
+    #[test]
+    fn ctrl_v_in_conversation_list_mode_is_noop() {
+        let mut state = fresh_state();
+        state.ui.mode = UiMode::ConversationList {
+            candidates: Vec::new(),
+            cursor: 0,
+        };
+        let (_, cmds) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('v'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::ReadClipboard)));
+    }
+
+    /// F14: `Msg::TransientStatus` sets `state.status` and schedules
+    /// auto-dismissal. This is the generic "async effect wants to show
+    /// a banner" path — used by clipboard-read feedback.
+    #[test]
+    fn transient_status_sets_banner_and_schedules_dismiss() {
+        let state = fresh_state();
+        let (state, cmds) = update(
+            state,
+            Msg::TransientStatus {
+                text: "Clipboard is empty".to_string(),
+                kind: StatusKind::Info,
+                dismiss_ms: 2_000,
+            },
+        );
+        let s = state.status.expect("status set");
+        assert_eq!(s.text, "Clipboard is empty");
+        assert_eq!(s.kind, StatusKind::Info);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::DismissStatusAfter { ms: 2_000 }))
+        );
+    }
+
+    /// F14: a Paste::Image Msg (whatever its origin — bracketed paste,
+    /// Ctrl+V via clipboard, or a future drag-drop) creates an
+    /// Attachment entry and emits Cmd::WriteImageToTemp. This is the
+    /// existing contract; the test pins it so the Ctrl+V wiring has a
+    /// known-good downstream to rely on.
+    #[test]
+    fn paste_image_creates_attachment_and_writes_temp() {
+        let state = fresh_state();
+        let (state, cmds) = update(
+            state,
+            Msg::Paste(super::super::msg::Paste::Image {
+                bytes: vec![0x89, 0x50, 0x4E, 0x47], // PNG magic bytes
+                format: "png".to_string(),
+            }),
+        );
+        assert_eq!(state.ui.attachments.len(), 1);
+        let att = &state.ui.attachments[0];
+        assert_eq!(att.format, "png");
+        assert_eq!(att.size_bytes, 4);
+        assert!(cmds.iter().any(|c| {
+            matches!(c, Cmd::WriteImageToTemp { path, .. } if path == &att.temp_path)
+        }));
     }
 
     #[test]
-    fn ctrl_c_during_turn_transitions_to_cancelling() {
+    fn open_image_writes_and_opens_the_same_temp_path() {
+        let mut state = fresh_state();
+        let image =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"image bytes");
+        state
+            .session
+            .append(ChatMessage::assistant("image").with_images(vec![image]));
+
+        let (_, cmds) = update(
+            state,
+            Msg::OpenImageAt {
+                message_index: 0,
+                image_index: 0,
+            },
+        );
+
+        let write_path = cmds.iter().find_map(|cmd| match cmd {
+            Cmd::WriteImageToTemp { path, .. } => Some(path.clone()),
+            _ => None,
+        });
+        let open_path = cmds.iter().find_map(|cmd| match cmd {
+            Cmd::OpenInSystem(path) => Some(path.clone()),
+            _ => None,
+        });
+        assert_eq!(write_path, open_path);
+    }
+
+    #[test]
+    fn ctrl_c_during_turn_exits_and_cancels_scope() {
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(5));
         let msg = Msg::Key(Key {
             code: KeyCode::Char('c'),
             modifiers: KeyMods::ctrl(),
+        });
+        let (state, cmds) = update(state, msg);
+        assert!(state.should_exit);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::CancelScope(TurnId(5))))
+        );
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
+    }
+
+    #[test]
+    fn runtime_signal_exits_and_records_timeline() {
+        let state = fresh_state();
+        let (state, cmds) = update(
+            state,
+            Msg::RuntimeSignal(super::super::runtime::RuntimeSignal::Terminate),
+        );
+        assert!(state.should_exit);
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
+        assert!(
+            state
+                .runtime
+                .timeline
+                .iter()
+                .any(|event| event.message.contains("terminate"))
+        );
+    }
+
+    #[test]
+    fn model_switch_updates_provider_capability_snapshot() {
+        let state = fresh_state();
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Model(Some(
+                "anthropic/claude-opus-4-7".to_string(),
+            ))),
+        );
+        assert_eq!(state.runtime.provider_capabilities.provider, "anthropic");
+        assert!(state.runtime.provider_capabilities.supports_vision);
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::PersistLastModel(_))));
+    }
+
+    #[test]
+    fn build_chat_request_includes_current_working_directory() {
+        let state = fresh_state();
+        let request = build_chat_request(&state);
+        assert!(request.system_prompt.contains("Current Session"));
+        assert!(
+            request
+                .system_prompt
+                .contains("Current working directory: /tmp/project")
+        );
+        assert!(
+            request
+                .system_prompt
+                .contains("Treat this as the project root")
+        );
+    }
+
+    #[test]
+    fn esc_during_turn_transitions_to_cancelling() {
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(5));
+        let msg = Msg::Key(Key {
+            code: KeyCode::Escape,
+            modifiers: KeyMods::default(),
         });
         let (state, cmds) = update(state, msg);
         assert!(matches!(
@@ -1388,6 +2280,26 @@ mod tests {
             cmds.iter()
                 .any(|c| matches!(c, Cmd::CancelScope(TurnId(5))))
         );
+    }
+
+    #[test]
+    fn esc_while_already_cancelling_forces_exit() {
+        let mut state = fresh_state();
+        state.turn = TurnState::Cancelling {
+            id: TurnId(5),
+            since: std::time::SystemTime::now(),
+        };
+        let msg = Msg::Key(Key {
+            code: KeyCode::Escape,
+            modifiers: KeyMods::default(),
+        });
+        let (state, cmds) = update(state, msg);
+        assert!(state.should_exit);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::CancelScope(TurnId(5))))
+        );
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
     }
 
     #[test]
@@ -1410,9 +2322,14 @@ mod tests {
         };
         let (state, cmds) = update(state, msg);
         assert!(matches!(state.turn, TurnState::Generating { .. }));
-        // CallModel + RefreshInstructions
+        // F8: CallModel only — RefreshInstructions is now a synchronous
+        // pre-flight inside handle_submit_prompt, so the Cmd stays
+        // available for explicit refreshes but isn't emitted here.
         assert!(cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::RefreshInstructions)));
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Cmd::RefreshInstructions)),
+            "F8: refresh happens inline; no longer queued as a Cmd",
+        );
         // user message committed
         assert_eq!(state.session.messages().len(), 1);
         assert_eq!(state.session.messages()[0].content, "hi there");
@@ -1549,6 +2466,103 @@ mod tests {
     }
 
     #[test]
+    fn stream_done_tracks_last_and_cumulative_token_usage() {
+        let mut state = fresh_state();
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: "final answer".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        };
+
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: Some(crate::models::TokenUsage::provider(120, 30, 150)),
+                thinking_signature: None,
+            },
+        );
+
+        assert_eq!(state.session.last_token_usage.unwrap().prompt_tokens, 120);
+        assert_eq!(state.session.cumulative_token_usage.total_tokens, 150);
+        assert_eq!(state.session.cumulative_tokens, 150);
+        assert_eq!(
+            state.session.context_usage.as_ref().unwrap().used_tokens,
+            150
+        );
+    }
+
+    #[test]
+    fn context_usage_estimate_is_stored_during_generation() {
+        let mut state = fresh_state();
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: String::new(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Thinking,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        };
+        let snapshot = crate::domain::state::ContextUsageSnapshot::from_estimate(
+            crate::domain::state::PromptTokenBreakdown {
+                system_tokens: 10,
+                instructions_tokens: 0,
+                message_tokens: 20,
+                tool_schema_tokens: 30,
+                image_count: 0,
+                message_count: 1,
+                tool_count: 2,
+            },
+            Some(1_000),
+        );
+
+        let (state, _) = update(
+            state,
+            Msg::ContextUsageEstimated {
+                turn: TurnId(5),
+                snapshot,
+            },
+        );
+
+        let context = state.session.context_usage.expect("context usage");
+        assert!(context.is_estimate());
+        assert_eq!(context.used_tokens, 60);
+        assert_eq!(context.used_percent, Some(6));
+    }
+
+    /// F4 defense-in-depth: if a later refactor weakens the stale
+    /// filter at the top of `update_step`, `handle_upstream_error`
+    /// still refuses to mutate state when the error's turn id doesn't
+    /// match the active turn. Direct-call the helper to exercise the
+    /// guard without relying on the outer filter.
+    #[test]
+    fn handle_upstream_error_refuses_mismatched_turn_id() {
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(5));
+        let err = crate::models::UserFacingError {
+            summary: "Stale".to_string(),
+            message: "wrong turn".to_string(),
+            suggestion: String::new(),
+            category: crate::models::ErrorCategory::Temporary,
+            recoverable: true,
+        };
+        super::handle_upstream_error(&mut state, TurnId(999), err);
+        // Active turn must be untouched and no error message committed.
+        assert!(matches!(
+            state.turn,
+            TurnState::Generating { id: TurnId(5), .. }
+        ));
+        assert!(state.session.messages().is_empty());
+    }
+
+    #[test]
     fn upstream_error_ends_turn_and_records_line() {
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(1));
@@ -1586,6 +2600,68 @@ mod tests {
         );
         assert_eq!(state.session.model_id, "anthropic/opus");
         assert!(cmds.iter().any(|c| matches!(c, Cmd::PersistLastModel(_))));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::PullOllamaModel { .. }))
+        );
+    }
+
+    #[test]
+    fn slash_model_local_ollama_auto_pulls() {
+        let state = fresh_state();
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Model(Some("ollama/qwen3:8b".to_string()))),
+        );
+        assert_eq!(state.session.model_id, "ollama/qwen3:8b");
+        assert!(
+            cmds.iter()
+                .any(|c| { matches!(c, Cmd::PullOllamaModel { model } if model == "qwen3:8b") }),
+            "local Ollama model should dispatch pull: {:?}",
+            cmds
+        );
+    }
+
+    #[test]
+    fn slash_model_bare_name_auto_pulls_as_ollama() {
+        let state = fresh_state();
+        let (_, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Model(Some("qwen3-coder:30b".to_string()))),
+        );
+        assert!(
+            cmds.iter().any(|c| {
+                matches!(c, Cmd::PullOllamaModel { model } if model == "qwen3-coder:30b")
+            }),
+            "bare model names should dispatch an Ollama pull: {:?}",
+            cmds
+        );
+    }
+
+    #[test]
+    fn slash_model_ollama_cloud_skips_local_pull() {
+        let state = fresh_state();
+        let (_, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Model(Some("ollama/gpt-oss:cloud".to_string()))),
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::PullOllamaModel { .. }))
+        );
+    }
+
+    #[test]
+    fn slash_help_appends_system_help_and_persists() {
+        let state = fresh_state();
+        let (state, cmds) = update(state, Msg::Slash(SlashCmd::Help));
+        let msg = state.session.messages().last().expect("help message");
+        assert_eq!(msg.role, MessageRole::System);
+        assert!(msg.content.contains("/model"));
+        assert!(msg.content.contains("/help"));
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
     }
 
     #[test]
@@ -1734,11 +2810,7 @@ mod tests {
             Msg::ToolFinished {
                 turn: TurnId(3),
                 call_id: super::super::ids::ToolCallId(1),
-                outcome: ToolOutcome::Finished {
-                    output: "file contents".to_string(),
-                    images: None,
-                    duration_secs: 0.05,
-                },
+                outcome: ToolOutcome::success("file contents", "file contents", 0.05),
             },
         );
 
@@ -1747,6 +2819,62 @@ mod tests {
         // Tool result message was appended.
         let last = state.session.messages().last().unwrap();
         assert_eq!(last.role, MessageRole::Tool);
+    }
+
+    #[test]
+    fn background_command_tool_finish_registers_process() {
+        let mut state = fresh_state();
+        let call = PendingToolCall {
+            call_id: super::super::ids::ToolCallId(1),
+            source: crate::models::tool_call::ToolCall {
+                id: Some("c1".to_string()),
+                function: crate::models::tool_call::FunctionCall {
+                    name: "execute_command".to_string(),
+                    arguments: serde_json::json!({
+                        "command": "npm run dev",
+                        "mode": "background",
+                        "working_dir": "/tmp/project",
+                    }),
+                },
+            },
+        };
+        state.turn = start_executing_tools(TurnId(3), vec![call]);
+        state.session.append(ChatMessage::assistant("tools follow"));
+
+        let (state, _) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(3),
+                call_id: super::super::ids::ToolCallId(1),
+                outcome: ToolOutcome::success(
+                    "Background command started.\nPID: 123\nLog: /tmp/mermaid-bg.log\nReady: matched pattern \"Local:\"\nDetected URL: http://127.0.0.1:5173\n",
+                    "background process started",
+                    0.2,
+                )
+                .with_metadata(crate::domain::ToolRunMetadata {
+                    process: Some(crate::domain::ManagedProcess {
+                        id: "bg-123".to_string(),
+                        pid: 123,
+                        command: "npm run dev".to_string(),
+                        cwd: Some("/tmp/project".to_string()),
+                        log_path: "/tmp/mermaid-bg.log".to_string(),
+                        detected_url: Some("http://127.0.0.1:5173".to_string()),
+                        status: crate::domain::ManagedProcessStatus::Running,
+                    }),
+                    ..crate::domain::ToolRunMetadata::default()
+                }),
+            },
+        );
+
+        assert_eq!(state.runtime.processes.len(), 1);
+        let process = &state.runtime.processes[0];
+        assert_eq!(process.pid, 123);
+        assert_eq!(process.command, "npm run dev");
+        assert_eq!(process.cwd.as_deref(), Some("/tmp/project"));
+        assert_eq!(
+            process.detected_url.as_deref(),
+            Some("http://127.0.0.1:5173")
+        );
     }
 
     #[test]
@@ -1782,7 +2910,7 @@ mod tests {
             Msg::ToolFinished {
                 turn: TurnId(3),
                 call_id: super::super::ids::ToolCallId(1),
-                outcome: ToolOutcome::Cancelled,
+                outcome: ToolOutcome::cancelled(),
             },
         );
 
@@ -1820,7 +2948,7 @@ mod tests {
             Msg::ToolFinished {
                 turn: TurnId(999),
                 call_id: super::super::ids::ToolCallId(1),
-                outcome: ToolOutcome::Cancelled,
+                outcome: ToolOutcome::cancelled(),
             },
         );
         match &state.turn {

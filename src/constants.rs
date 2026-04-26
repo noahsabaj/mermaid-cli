@@ -21,6 +21,23 @@ pub const DEFAULT_MAX_TOKENS: usize = 4096;
 pub const MAX_CONTEXT_TOKENS: usize = 75_000;
 /// Tokens reserved for the model's response within the context window
 pub const CONTEXT_RESERVE_TOKENS: usize = 4_000;
+/// Auto-compact once the fully-enriched request reaches this percentage
+/// of the model's known context window.
+pub const COMPACTION_AUTO_THRESHOLD_PERCENT: u8 = 85;
+/// Default number of recent user turns preserved verbatim after compaction.
+pub const COMPACTION_TAIL_TURNS: usize = 2;
+/// Maximum estimated tokens to preserve as the recent tail.
+pub const COMPACTION_TAIL_TOKEN_BUDGET: usize = 8_000;
+/// Maximum characters of old tool output included in the summarization prompt.
+pub const COMPACTION_TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
+/// Maximum tokens requested from the compaction summarizer.
+pub const COMPACTION_SUMMARY_MAX_TOKENS: usize = 8_000;
+/// Maximum estimated input tokens sent to the summarizer.
+pub const COMPACTION_SUMMARIZER_INPUT_TOKEN_BUDGET: usize = 64_000;
+/// Minimum response reserve when deciding whether the next request fits.
+pub const COMPACTION_MIN_RESPONSE_RESERVE_TOKENS: usize = 4_000;
+/// Maximum response reserve when deciding whether the next request fits.
+pub const COMPACTION_MAX_RESPONSE_RESERVE_TOKENS: usize = 20_000;
 
 // Web Content
 /// Maximum characters to keep when truncating fetched web content

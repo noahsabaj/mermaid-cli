@@ -7,14 +7,17 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::models::ReasoningLevel;
+use crate::domain::{ContextUsageSnapshot, TokenUsageTotals};
+use crate::models::{ReasoningLevel, TokenUsageSource};
 use crate::render::theme::Theme;
 
 /// Props for StatusWidget (stateless widget)
 pub struct StatusWidget<'a> {
     pub theme: &'a Theme,
     pub working_dir: &'a str,
-    pub cumulative_tokens: usize,
+    pub context_usage: Option<&'a ContextUsageSnapshot>,
+    pub last_usage: Option<TokenUsageTotals>,
+    pub session_usage: TokenUsageTotals,
     pub model_name: &'a str,
     /// Effective reasoning depth — what the API actually saw after
     /// `nearest_effort` snapping against the model's capabilities. Always
@@ -36,9 +39,10 @@ impl<'a> Widget for StatusWidget<'a> {
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "user".to_string());
 
-        // Line 1: username@hostname:/path (left) | tokens (right, fixed position)
+        // Line 1: username@hostname:/path (left) | token usage (right, fixed position)
         let directory_text = format!("{}@{}:{}", username, hostname, self.working_dir);
-        let token_text = format!("{} tokens", self.cumulative_tokens);
+        let token_text =
+            format_token_status(self.context_usage, self.last_usage, self.session_usage);
 
         // Calculate padding to push tokens to right edge. Use display-cell
         // widths so CJK / emoji chars in working_dir or hostname don't
@@ -117,5 +121,133 @@ impl<'a> Widget for StatusWidget<'a> {
         let status_bar = Paragraph::new(vec![line1, line2]);
 
         status_bar.render(area, buf);
+    }
+}
+
+pub(crate) fn format_token_status(
+    context_usage: Option<&ContextUsageSnapshot>,
+    last_usage: Option<TokenUsageTotals>,
+    session_usage: TokenUsageTotals,
+) -> String {
+    let session = format_compact_count(session_usage.total_tokens);
+    let context = match context_usage {
+        Some(snapshot) => format_context_snapshot(snapshot),
+        None => "context: n/a".to_string(),
+    };
+    match last_usage {
+        Some(usage) => format!(
+            "{} | last api: {} | session: {}",
+            context,
+            format_compact_count(usage.total_tokens),
+            session
+        ),
+        None => format!("{} | session: {}", context, session),
+    }
+}
+
+fn format_context_snapshot(snapshot: &ContextUsageSnapshot) -> String {
+    let used = format_compact_count(snapshot.used_tokens);
+    let source = match snapshot.source {
+        TokenUsageSource::Provider => "",
+        TokenUsageSource::Estimate => "~",
+    };
+    match (snapshot.max_tokens, snapshot.used_percent) {
+        (Some(max), Some(percent)) => format!(
+            "context: {}{} / {} ({}%)",
+            source,
+            used,
+            format_compact_count(max),
+            percent
+        ),
+        _ => format!("context: {}{} / unknown", source, used),
+    }
+}
+
+fn format_compact_count(value: usize) -> String {
+    if value >= 1_000_000 {
+        format_scaled(value, 1_000_000, "m")
+    } else if value >= 10_000 {
+        format_scaled(value, 1_000, "k")
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_scaled(value: usize, divisor: usize, suffix: &str) -> String {
+    let whole = value / divisor;
+    let decimal = ((value % divisor) * 10) / divisor;
+    if decimal == 0 {
+        format!("{}{}", whole, suffix)
+    } else {
+        format!("{}.{}{}", whole, decimal, suffix)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_status_labels_last_and_session_usage() {
+        let context = ContextUsageSnapshot::from_usage(
+            &crate::models::TokenUsage::provider(12_000, 456, 12_456),
+            Some(128_000),
+        );
+        assert_eq!(
+            format_token_status(
+                Some(&context),
+                Some(TokenUsageTotals {
+                    prompt_tokens: 12_000,
+                    completion_tokens: 456,
+                    total_tokens: 12_456,
+                    ..TokenUsageTotals::default()
+                }),
+                TokenUsageTotals {
+                    prompt_tokens: 500_000,
+                    completion_tokens: 73_443,
+                    total_tokens: 573_443,
+                    ..TokenUsageTotals::default()
+                },
+            ),
+            "context: 12.4k / 128k (9%) | last api: 12.4k | session: 573.4k"
+        );
+    }
+
+    #[test]
+    fn token_status_handles_missing_last_usage() {
+        assert_eq!(
+            format_token_status(
+                None,
+                None,
+                TokenUsageTotals {
+                    prompt_tokens: 900,
+                    completion_tokens: 50,
+                    total_tokens: 950,
+                    ..TokenUsageTotals::default()
+                },
+            ),
+            "context: n/a | session: 950"
+        );
+    }
+
+    #[test]
+    fn token_status_marks_estimates() {
+        let context = ContextUsageSnapshot::from_estimate(
+            crate::domain::PromptTokenBreakdown {
+                system_tokens: 10,
+                instructions_tokens: 0,
+                message_tokens: 20,
+                tool_schema_tokens: 70,
+                image_count: 0,
+                message_count: 1,
+                tool_count: 4,
+            },
+            None,
+        );
+
+        assert_eq!(
+            format_token_status(Some(&context), None, TokenUsageTotals::default()),
+            "context: ~100 / unknown | session: 0"
+        );
     }
 }

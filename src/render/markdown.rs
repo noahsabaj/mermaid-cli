@@ -4,6 +4,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+#[derive(Debug, Clone)]
+struct ListState {
+    next_number: Option<u64>,
+}
+
 /// Parse markdown and convert to styled ratatui Lines
 pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
     let mut options = Options::empty();
@@ -16,7 +21,7 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
     let mut style_stack = vec![Style::default()];
     let mut in_code_block = false;
     let mut code_block_content = String::new();
-    let mut list_depth: usize = 0;
+    let mut list_stack: Vec<ListState> = Vec::new();
 
     // Table state
     let mut in_table = false;
@@ -72,20 +77,30 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         }
                         Style::default().fg(Color::Gray)
                     },
-                    Tag::List(_) => {
-                        list_depth += 1;
+                    Tag::List(start) => {
+                        list_stack.push(ListState { next_number: start });
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
                         }
                         style_stack.last().copied().unwrap_or_default()
                     },
                     Tag::Item => {
-                        // Add bullet point with 2-space base indentation plus nesting levels
-                        // list_depth=1: 2 spaces, list_depth=2: 4 spaces, etc.
-                        let indent = "  ".repeat(list_depth);
+                        // Add marker with 2-space base indentation plus nesting levels.
+                        // depth=1: 2 spaces, depth=2: 4 spaces, etc.
+                        let indent = "  ".repeat(list_stack.len());
+                        let marker = if let Some(state) = list_stack.last_mut() {
+                            if let Some(current) = state.next_number {
+                                state.next_number = Some(current + 1);
+                                format!("{}. ", current)
+                            } else {
+                                "• ".to_string()
+                            }
+                        } else {
+                            "• ".to_string()
+                        };
                         current_line_spans.push(Span::raw(indent));
                         current_line_spans
-                            .push(Span::styled("• ", Style::default().fg(Color::Yellow)));
+                            .push(Span::styled(marker, Style::default().fg(Color::Yellow)));
                         style_stack.last().copied().unwrap_or_default()
                     },
                     Tag::Table(_alignments) => {
@@ -158,9 +173,9 @@ pub fn parse_markdown(input: &str) -> Vec<Line<'static>> {
                         code_block_content.clear();
                     },
                     TagEnd::List(_) => {
-                        list_depth = list_depth.saturating_sub(1);
+                        let _ = list_stack.pop();
                         // Add blank line after list ends (when returning to depth 0)
-                        if list_depth == 0 {
+                        if list_stack.is_empty() {
                             lines.push(Line::from(""));
                         }
                     },
@@ -362,6 +377,17 @@ mod tests {
         assert!(text.contains("Item 3"));
         // Should have bullet characters
         assert!(text.contains("•"));
+    }
+
+    #[test]
+    fn test_ordered_list_preserves_numbers() {
+        let input = "1. First\n2. Second\n3. Third";
+        let lines = parse_markdown(input);
+        let text = lines_to_text(&lines);
+        assert!(text.contains("1. First"));
+        assert!(text.contains("2. Second"));
+        assert!(text.contains("3. Third"));
+        assert!(!text.contains("• First"));
     }
 
     #[test]

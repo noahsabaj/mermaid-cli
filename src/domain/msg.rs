@@ -25,7 +25,11 @@ use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError};
 
 use super::ids::{ToolCallId, TurnId};
+use super::runtime::RuntimeSignal;
+use super::state::ContextUsageSnapshot;
+use super::state::StatusKind;
 use super::state::{ConversationSummary, McpToolSpec, ToolOutcome};
+use super::{CompactionResult, CompactionTrigger};
 
 /// Single reducer input. Non-exhaustive is intentional: adding a new
 /// variant is a deliberate act that forces every reducer arm to
@@ -48,13 +52,17 @@ pub enum Msg {
     },
     /// User ran a slash command (post-routing from `app::event_source`).
     Slash(SlashCmd),
-    /// Ctrl+C / Esc during an active turn.
+    /// Esc or another explicit cancellation source during an active turn.
     CancelTurn,
     /// Confirmation modal answer.
     ConfirmAccepted,
     ConfirmDeclined,
     /// User wants to exit cleanly (Ctrl+D with empty input, or `/quit`).
     Quit,
+    /// External process lifecycle signal. In raw-mode TUI sessions a
+    /// typed Ctrl+C still arrives as `Msg::Key`; this variant covers
+    /// OS-level SIGINT/SIGTERM/SIGHUP delivered from outside.
+    RuntimeSignal(RuntimeSignal),
 
     // ── Streaming (from effect::model) ──────────────────────────────
     /// Chunk of assistant text. Append to `partial_text`.
@@ -73,6 +81,26 @@ pub enum Msg {
         turn: TurnId,
         call: ModelToolCall,
     },
+    /// Effect runner estimated the fully-enriched request context
+    /// after built-in and MCP tool schemas were attached.
+    ContextUsageEstimated {
+        turn: TurnId,
+        snapshot: ContextUsageSnapshot,
+    },
+    /// Context compaction completed and produced a replacement
+    /// model-visible history.
+    CompactionFinished {
+        turn: TurnId,
+        result: CompactionResult,
+    },
+    /// Context compaction failed or no-oped. Manual failures end the
+    /// compaction turn; auto failures may leave generation running.
+    CompactionFailed {
+        turn: TurnId,
+        trigger: CompactionTrigger,
+        message: String,
+        kind: StatusKind,
+    },
     /// Stream complete. Carries final token count (0 if unknown) and,
     /// for Anthropic, the thinking signature that must round-trip on
     /// the next request.
@@ -88,6 +116,16 @@ pub enum Msg {
         turn: TurnId,
         error: UserFacingError,
     },
+    /// Terminal event for a cancelled turn. Emitted by the effect
+    /// runner's `drop_scope` once every child task in the turn's
+    /// `TurnScope` has unwound. Reducer transitions
+    /// `Cancelling(id) → Idle` when it arrives.
+    ///
+    /// Without this, the reducer relies on the (wrong) side-channel of
+    /// `UpstreamError` arriving from a cancelled provider call to exit
+    /// `Cancelling`. If the provider task is aborted before it can
+    /// emit an error, the state would stick in `Cancelling` forever.
+    TurnCancelled(TurnId),
 
     // ── Tools (from effect::tool) ───────────────────────────────────
     /// Tool was picked up by the executor — useful for "spinner
@@ -159,6 +197,42 @@ pub enum Msg {
     Resize {
         width: u16,
         height: u16,
+    },
+
+    // ── Status feedback from async effects ─────────────────────────
+    /// Set `state.status` to `(text, kind)` and schedule automatic
+    /// dismissal after `dismiss_ms`. Used by effect handlers that
+    /// need to surface user-visible feedback without a bespoke Msg
+    /// per effect — today that's clipboard-read success / failure
+    /// (F14), but the variant is general and other effects will reuse
+    /// it. Reducer handles this arm by setting `state.status` and
+    /// pushing `Cmd::DismissStatusAfter { ms: dismiss_ms }`.
+    TransientStatus {
+        text: String,
+        kind: super::state::StatusKind,
+        dismiss_ms: u64,
+    },
+
+    // ── Mouse (F13) ─────────────────────────────────────────────────
+    /// Mouse-wheel scroll in the chat pane. Positive delta = scroll
+    /// toward older messages (up), negative = toward newer (down). The
+    /// reducer tracks the scroll offset on `ui.chat_scroll`; the
+    /// ChatWidget reads it during render.
+    MouseScroll {
+        delta: i16,
+    },
+    /// Ctrl+Click on an image thumbnail in the chat pane. The
+    /// coordinates are absolute screen row/col; the render cache's
+    /// `ChatState::find_image_at_screen_pos` maps them to a
+    /// `(message_index, image_index)` pair. The main loop handles the
+    /// lookup before forwarding this message to the reducer, so by
+    /// the time the reducer sees it, the target has already been
+    /// resolved into a base64 payload and this Msg carries the
+    /// already-decoded image. The reducer just emits
+    /// `Cmd::WriteImageToTemp` + `Cmd::OpenInSystem`.
+    OpenImageAt {
+        message_index: usize,
+        image_index: usize,
     },
 }
 
@@ -246,6 +320,9 @@ pub enum SlashCmd {
     Save(Option<String>),
     Load(Option<String>),
     List,
+    Usage,
+    Context,
+    Compact(Option<String>),
     CloudSetup,
     Help,
     Quit,
@@ -264,11 +341,15 @@ impl Msg {
             Msg::StreamText { turn, .. }
             | Msg::StreamReasoning { turn, .. }
             | Msg::StreamToolCall { turn, .. }
+            | Msg::ContextUsageEstimated { turn, .. }
+            | Msg::CompactionFinished { turn, .. }
+            | Msg::CompactionFailed { turn, .. }
             | Msg::StreamDone { turn, .. }
             | Msg::UpstreamError { turn, .. }
             | Msg::ToolStarted { turn, .. }
             | Msg::ToolProgress { turn, .. }
             | Msg::ToolFinished { turn, .. } => Some(*turn),
+            Msg::TurnCancelled(turn) => Some(*turn),
             _ => None,
         }
     }
@@ -284,14 +365,19 @@ impl Msg {
             Msg::CancelTurn => MsgKind::CancelTurn,
             Msg::ConfirmAccepted | Msg::ConfirmDeclined => MsgKind::Confirm,
             Msg::Quit => MsgKind::Quit,
+            Msg::RuntimeSignal(_) => MsgKind::RuntimeSignal,
             Msg::StreamText { .. } => MsgKind::StreamText,
             Msg::StreamReasoning { .. } => MsgKind::StreamReasoning,
             Msg::StreamToolCall { .. } => MsgKind::StreamToolCall,
+            Msg::ContextUsageEstimated { .. } => MsgKind::ContextUsageEstimated,
+            Msg::CompactionFinished { .. } => MsgKind::CompactionFinished,
+            Msg::CompactionFailed { .. } => MsgKind::CompactionFailed,
             Msg::StreamDone { .. } => MsgKind::StreamDone,
             Msg::UpstreamError { .. } => MsgKind::UpstreamError,
             Msg::ToolStarted { .. } => MsgKind::ToolStarted,
             Msg::ToolProgress { .. } => MsgKind::ToolProgress,
             Msg::ToolFinished { .. } => MsgKind::ToolFinished,
+            Msg::TurnCancelled(_) => MsgKind::TurnCancelled,
             Msg::McpServerReady { .. }
             | Msg::McpServerErrored { .. }
             | Msg::McpServerStopped { .. } => MsgKind::Mcp,
@@ -304,6 +390,9 @@ impl Msg {
             Msg::Tick => MsgKind::Tick,
             Msg::StatusDismiss => MsgKind::StatusDismiss,
             Msg::Resize { .. } => MsgKind::Resize,
+            Msg::MouseScroll { .. } => MsgKind::MouseScroll,
+            Msg::OpenImageAt { .. } => MsgKind::OpenImageAt,
+            Msg::TransientStatus { .. } => MsgKind::TransientStatus,
         }
     }
 }
@@ -318,14 +407,19 @@ pub enum MsgKind {
     CancelTurn,
     Confirm,
     Quit,
+    RuntimeSignal,
     StreamText,
     StreamReasoning,
     StreamToolCall,
+    ContextUsageEstimated,
+    CompactionFinished,
+    CompactionFailed,
     StreamDone,
     UpstreamError,
     ToolStarted,
     ToolProgress,
     ToolFinished,
+    TurnCancelled,
     Mcp,
     InstructionsChanged,
     SessionSaved,
@@ -336,6 +430,9 @@ pub enum MsgKind {
     Tick,
     StatusDismiss,
     Resize,
+    MouseScroll,
+    OpenImageAt,
+    TransientStatus,
 }
 
 /// Helper for `app::event_source` — pass through the MCP config that

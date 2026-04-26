@@ -11,11 +11,12 @@ use std::path::PathBuf;
 
 use mermaid_cli::app::Config;
 use mermaid_cli::domain::{
-    Cmd, Msg, PendingToolCall, SlashCmd, State, StatusKind, ToolCallId, ToolOutcome, TurnId,
-    TurnState, start_executing_tools, start_generating, update,
+    Cmd, CompactionRecord, CompactionResult, CompactionTrigger, ContextUsageSnapshot, Msg,
+    PendingToolCall, PromptTokenBreakdown, SlashCmd, State, StatusKind, ToolCallId, ToolOutcome,
+    TurnId, TurnState, start_executing_tools, start_generating, update,
 };
-use mermaid_cli::models::MessageRole;
 use mermaid_cli::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
+use mermaid_cli::models::{ChatMessage, ChatMessageKind, MessageRole};
 
 fn fresh() -> State {
     State::new(
@@ -171,11 +172,7 @@ fn tool_outcomes_must_all_land_before_followup_call() {
         Msg::ToolFinished {
             turn: TurnId(1),
             call_id: ToolCallId(1),
-            outcome: ToolOutcome::Finished {
-                output: "first done".to_string(),
-                images: None,
-                duration_secs: 0.1,
-            },
+            outcome: ToolOutcome::success("first done", "first done", 0.1),
         },
     );
     assert!(matches!(state.turn, TurnState::ExecutingTools { .. }));
@@ -187,11 +184,7 @@ fn tool_outcomes_must_all_land_before_followup_call() {
         Msg::ToolFinished {
             turn: TurnId(1),
             call_id: ToolCallId(2),
-            outcome: ToolOutcome::Finished {
-                output: "second done".to_string(),
-                images: None,
-                duration_secs: 0.1,
-            },
+            outcome: ToolOutcome::success("second done", "second done", 0.1),
         },
     );
     assert!(matches!(state.turn, TurnState::Generating { .. }));
@@ -230,7 +223,7 @@ fn cancelled_tool_produces_placeholder_in_history() {
         Msg::ToolFinished {
             turn: TurnId(3),
             call_id: ToolCallId(1),
-            outcome: ToolOutcome::Cancelled,
+            outcome: ToolOutcome::cancelled(),
         },
     );
 
@@ -276,6 +269,45 @@ fn double_cancel_does_not_emit_a_second_cancel_scope() {
     assert!(cmds.iter().all(|c| !matches!(c, Cmd::CancelScope(_))));
 }
 
+/// Full cancellation lifecycle: Idle → Generating → Cancelling →
+/// TurnCancelled → Idle. Before F1 the reducer had no arm for the
+/// terminal event and the TUI stuck in `Cancelling` until an
+/// `UpstreamError` from the aborted provider happened to land — a
+/// side-effect that couldn't be relied on once providers started
+/// returning `ModelError::Cancelled` silently.
+#[test]
+fn cancel_then_turn_cancelled_returns_to_idle() {
+    let (state, _) = user_submit(fresh(), "will be cancelled");
+    let id = state.current_turn_id().expect("turn in flight");
+
+    let (state, cmds) = update(state, Msg::CancelTurn);
+    assert!(matches!(state.turn, TurnState::Cancelling { .. }));
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::CancelScope(_))));
+
+    // Runner would emit this after the TurnScope drains.
+    let (state, _) = update(state, Msg::TurnCancelled(id));
+    assert!(
+        matches!(state.turn, TurnState::Idle),
+        "TurnCancelled should clear Cancelling; got {:?}",
+        state.turn,
+    );
+}
+
+/// A `TurnCancelled` for a non-current turn is filtered out before the
+/// handler runs. Protects against the effect runner emitting a stale
+/// terminal event for a turn the reducer already finished via another
+/// path (e.g. successful StreamDone raced cancel).
+#[test]
+fn stale_turn_cancelled_does_not_mutate_state() {
+    let (state, _) = user_submit(fresh(), "active turn");
+    let live = state.current_turn_id().unwrap();
+    let stale = TurnId(live.0 + 100);
+
+    let (state, cmds) = update(state, Msg::TurnCancelled(stale));
+    assert!(matches!(state.turn, TurnState::Generating { .. }));
+    assert!(cmds.is_empty());
+}
+
 // ─── upstream errors ───────────────────────────────────────────────
 
 #[test]
@@ -302,11 +334,15 @@ fn upstream_error_ends_turn_exactly_once() {
     // guards against was v0.6's double-commit: once from the
     // streaming callback, once from the final error path.
     assert_eq!(state.session.messages().len(), 1);
-    assert!(state.status.is_some());
-    assert!(matches!(
-        state.status.as_ref().unwrap().kind,
-        StatusKind::Error
-    ));
+    // The error is surfaced only through the ActionDisplay in chat —
+    // we deliberately do NOT also set state.status, because the F9
+    // banner would render the same error a second time directly
+    // above the input (redundant noise). User reported this after
+    // F9 landed; removing the banner setter was the fix.
+    assert!(
+        state.status.is_none(),
+        "upstream errors must not set a status banner; chat already shows them"
+    );
 }
 
 #[test]
@@ -352,6 +388,115 @@ fn slash_clear_requires_confirmation_before_wiping() {
 fn slash_save_emits_save_conversation() {
     let (_state, cmds) = update(fresh(), Msg::Slash(SlashCmd::Save(None)));
     assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+}
+
+#[test]
+fn slash_compact_emits_compaction_command() {
+    let mut state = fresh();
+    state.session.append(ChatMessage::user("old prompt"));
+    state.session.append(ChatMessage::assistant("old answer"));
+    state.session.append(ChatMessage::user("new prompt"));
+
+    let (state, cmds) = update(
+        state,
+        Msg::Slash(SlashCmd::Compact(Some("focus on tests".to_string()))),
+    );
+
+    assert!(matches!(state.turn, TurnState::Compacting { .. }));
+    assert!(state.status.as_ref().unwrap().text.contains("Compacting"));
+    assert!(cmds.iter().any(|cmd| {
+        matches!(
+            cmd,
+            Cmd::CompactConversation { request, .. }
+                if request.instructions.as_deref() == Some("focus on tests")
+        )
+    }));
+}
+
+#[test]
+fn compaction_finished_replaces_history_and_archives_head() {
+    let mut state = fresh();
+    state.session.append(ChatMessage::user("old prompt"));
+    state.session.append(ChatMessage::assistant("old answer"));
+    state.session.append(ChatMessage::user("new prompt"));
+    let (state, cmds) = update(state, Msg::Slash(SlashCmd::Compact(None)));
+    let turn = state.turn.id().expect("compaction turn");
+    assert!(
+        cmds.iter()
+            .any(|cmd| matches!(cmd, Cmd::CompactConversation { .. }))
+    );
+
+    let before = ContextUsageSnapshot::from_estimate(
+        PromptTokenBreakdown {
+            system_tokens: 10,
+            instructions_tokens: 0,
+            message_tokens: 90,
+            tool_schema_tokens: 0,
+            image_count: 0,
+            message_count: 3,
+            tool_count: 0,
+        },
+        Some(1_000),
+    );
+    let after = ContextUsageSnapshot::from_estimate(
+        PromptTokenBreakdown {
+            system_tokens: 10,
+            instructions_tokens: 0,
+            message_tokens: 20,
+            tool_schema_tokens: 0,
+            image_count: 0,
+            message_count: 3,
+            tool_count: 0,
+        },
+        Some(1_000),
+    );
+    let mut checkpoint = ChatMessage::user("MERMAID CONTEXT CHECKPOINT\n## Goal\n- continue");
+    checkpoint.kind = ChatMessageKind::ContextCheckpoint;
+    let replacement = vec![
+        checkpoint,
+        ChatMessage::assistant("Context compacted: 100 -> 30 tokens."),
+        ChatMessage::user("new prompt"),
+    ];
+    let result = CompactionResult {
+        record: CompactionRecord {
+            id: "compact_test".to_string(),
+            trigger: CompactionTrigger::Manual,
+            created_at: chrono::Local::now(),
+            before_tokens: 100,
+            after_tokens: 30,
+            archived_message_count: 2,
+            preserved_message_count: 1,
+            summary_tokens: 10,
+            duration_secs: 0.5,
+            focus: None,
+            archive_path: None,
+        },
+        replacement_messages: replacement,
+        archived_messages: vec![
+            ChatMessage::user("old prompt"),
+            ChatMessage::assistant("old answer"),
+        ],
+        before_snapshot: before,
+        after_snapshot: after,
+        usage: None,
+    };
+
+    let (state, cmds) = update(state, Msg::CompactionFinished { turn, result });
+    assert!(matches!(state.turn, TurnState::Idle));
+    assert_eq!(state.session.messages().len(), 3);
+    assert_eq!(
+        state.session.messages()[0].kind,
+        ChatMessageKind::ContextCheckpoint
+    );
+    assert_eq!(state.session.conversation.compactions.len(), 1);
+    assert!(
+        cmds.iter()
+            .any(|cmd| matches!(cmd, Cmd::SaveConversation(_)))
+    );
+    assert!(
+        cmds.iter()
+            .any(|cmd| matches!(cmd, Cmd::SaveCompactionArchive(_)))
+    );
 }
 
 #[test]
@@ -446,6 +591,8 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
         role: MessageRole::Assistant,
         content: String::new(),
         timestamp: chrono::Local::now(),
+        kind: mermaid_cli::models::ChatMessageKind::Normal,
+        metadata: None,
         actions: vec![],
         thinking: None,
         images: None,
@@ -490,6 +637,53 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
     use base64::{Engine as _, engine::general_purpose};
     let decoded = general_purpose::STANDARD.decode(&imgs[0]).unwrap();
     assert_eq!(decoded, data);
+}
+
+/// F5: configured MCP servers must seed the state map so their
+/// `McpServerReady` events can land. Before this, `state.mcp.servers`
+/// started empty and `get_mut` silently dropped ready events —
+/// configured MCP tools never reached the outgoing `ChatRequest.tools`.
+#[test]
+fn configured_mcp_servers_seed_state_and_ready_updates() {
+    use mermaid_cli::app::{Config as AppConfig, McpServerConfig};
+    use mermaid_cli::domain::{McpServerStatus, McpToolSpec};
+
+    let mut cfg = AppConfig::default();
+    cfg.mcp_servers.insert(
+        "context7".to_string(),
+        McpServerConfig {
+            command: "npx".to_string(),
+            args: vec!["-y".to_string(), "@upstash/context7-mcp".to_string()],
+            env: std::collections::HashMap::new(),
+        },
+    );
+    let state = State::new(cfg, PathBuf::from("/tmp/p"), "ollama/test".to_string());
+
+    // Seed placed the entry in Starting status before any effects run.
+    let entry = state
+        .mcp
+        .servers
+        .get("context7")
+        .expect("configured server must be seeded");
+    assert_eq!(entry.status, McpServerStatus::Starting);
+    assert!(entry.tools.is_empty());
+
+    // Ready event with a tool list upgrades status and records tools.
+    let (state, _) = update(
+        state,
+        Msg::McpServerReady {
+            name: "context7".to_string(),
+            tools: vec![McpToolSpec {
+                name: "resolve-library-id".to_string(),
+                description: "Resolve a library name".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+        },
+    );
+    let entry = &state.mcp.servers["context7"];
+    assert_eq!(entry.status, McpServerStatus::Ready);
+    assert_eq!(entry.tools.len(), 1);
+    assert_eq!(entry.tools[0].name, "resolve-library-id");
 }
 
 #[test]

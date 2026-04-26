@@ -10,7 +10,8 @@ use ratatui::{
 use rustc_hash::FxHashMap;
 use unicode_width::UnicodeWidthStr;
 
-use crate::domain::{ActionDetails, ActionDisplay, ActionResult};
+use crate::domain::{ActionDetails, ActionDisplay, ActionResult, format_compact_count};
+use crate::models::ChatMessageKind;
 use crate::models::{ChatMessage, MessageRole};
 use crate::render::diff::{DiffLineKind, parse_diff_line};
 use crate::render::markdown::parse_markdown;
@@ -145,6 +146,14 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             // Skip Tool messages - they're internal to the agent loop and their
             // content is already displayed inline in the assistant's action blocks
             if matches!(msg.role, MessageRole::Tool) {
+                continue;
+            }
+
+            if matches!(msg.kind, ChatMessageKind::ContextCheckpoint) {
+                if let Some(event_lines) = render_context_checkpoint_event(msg, self.theme) {
+                    lines.extend(event_lines);
+                    lines.push(Line::from(""));
+                }
                 continue;
             }
 
@@ -357,6 +366,81 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
     }
 }
 
+fn render_context_checkpoint_event(msg: &ChatMessage, theme: &Theme) -> Option<Vec<Line<'static>>> {
+    if !matches!(msg.role, MessageRole::User) {
+        return None;
+    }
+
+    let metadata = msg.metadata.as_ref();
+    let trigger = metadata
+        .and_then(|value| value.get("trigger"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("manual");
+    let before_tokens = metadata.and_then(|value| metadata_usize(value, "before_tokens"));
+    let after_tokens = metadata.and_then(|value| metadata_usize(value, "after_tokens"));
+    let archived_messages =
+        metadata.and_then(|value| metadata_usize(value, "archived_message_count"));
+    let preserved_messages =
+        metadata.and_then(|value| metadata_usize(value, "preserved_message_count"));
+    let duration_secs = metadata
+        .and_then(|value| value.get("duration_secs"))
+        .and_then(|value| value.as_f64());
+
+    let action_color = theme.colors.info.to_color();
+    let mut result = match (before_tokens, after_tokens) {
+        (Some(before), Some(after)) => {
+            format!(
+                "Success, {} -> {} tokens",
+                format_compact_count(before),
+                format_compact_count(after)
+            )
+        },
+        _ => "Success".to_string(),
+    };
+
+    if let Some(count) = archived_messages {
+        result.push_str(&format!(
+            ", archived {} {}",
+            count,
+            if count == 1 { "message" } else { "messages" }
+        ));
+    }
+    if let Some(count) = preserved_messages {
+        result.push_str(&format!(
+            ", preserved {} {}",
+            count,
+            if count == 1 { "message" } else { "messages" }
+        ));
+    }
+    result = append_action_duration(result, duration_secs);
+
+    Some(vec![
+        Line::from(vec![
+            Span::styled("● ", Style::new().fg(action_color).bold()),
+            Span::styled("Compact(", Style::new().fg(action_color).bold()),
+            Span::styled(
+                trigger.to_string(),
+                Style::new().fg(theme.colors.text_secondary.to_color()),
+            ),
+            Span::styled(")", Style::new().fg(action_color).bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  ⎿ ", Style::new().fg(action_color)),
+            Span::styled(
+                result,
+                Style::new().fg(theme.colors.text_secondary.to_color()),
+            ),
+        ]),
+    ])
+}
+
+fn metadata_usize(value: &serde_json::Value, key: &str) -> Option<usize> {
+    value
+        .get(key)?
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+}
+
 /// Render actions in Claude Code style
 fn render_actions(
     actions: &[ActionDisplay],
@@ -393,13 +477,21 @@ fn render_actions(
                 // Result summary from details enum
                 let result_msg = match &action.details {
                     ActionDetails::FileContent { line_count, .. } => {
-                        format!("Wrote {} lines to {}", line_count, action.target)
+                        let base = format!(
+                            "Success, {} {} written",
+                            line_count,
+                            if *line_count == 1 { "line" } else { "lines" }
+                        );
+                        append_action_duration(base, action.duration_seconds)
                     },
                     ActionDetails::Diff { summary, .. } => summary.clone(),
                     ActionDetails::Preview { text, .. } => text.clone(),
                     ActionDetails::Simple => match action.action_type.as_str() {
-                        "Delete" => format!("Deleted {}", action.target),
-                        _ => "Success".to_string(),
+                        "Delete" => append_action_duration(
+                            format!("Success, deleted {}", action.target),
+                            action.duration_seconds,
+                        ),
+                        _ => append_action_duration("Success".to_string(), action.duration_seconds),
                     },
                 };
 
@@ -517,15 +609,32 @@ fn render_actions(
                 }
             },
             ActionResult::Error { error } => {
+                let error =
+                    append_action_duration(format!("Error: {}", error), action.duration_seconds);
                 lines.push(Line::from(vec![
                     Span::styled("  ⎿ ", Style::new().fg(theme.colors.error.to_color())),
-                    Span::styled(
-                        format!("Error: {}", error),
-                        Style::new().fg(theme.colors.error.to_color()),
-                    ),
+                    Span::styled(error, Style::new().fg(theme.colors.error.to_color())),
                 ]));
             },
         }
+    }
+}
+
+fn append_action_duration(mut text: String, duration_seconds: Option<f64>) -> String {
+    if let Some(seconds) = duration_seconds {
+        text.push_str(", took ");
+        text.push_str(&format_action_duration(seconds));
+    }
+    text
+}
+
+fn format_action_duration(seconds: f64) -> String {
+    if seconds < 1.0 {
+        format!("{}ms", (seconds * 1000.0).round().max(1.0) as u64)
+    } else if seconds < 10.0 {
+        format!("{:.1}s", seconds)
+    } else {
+        format!("{}s", seconds.round() as u64)
     }
 }
 
@@ -680,6 +789,38 @@ fn wrap_styled_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_checkpoint_renders_as_compact_event() {
+        let mut msg = ChatMessage::user("full checkpoint summary hidden from the chat log");
+        msg.kind = ChatMessageKind::ContextCheckpoint;
+        msg.metadata = Some(serde_json::json!({
+            "trigger": "manual",
+            "before_tokens": 43_800,
+            "after_tokens": 9_200,
+            "archived_message_count": 18,
+            "preserved_message_count": 4,
+            "duration_secs": 2.4,
+        }));
+
+        let lines = render_context_checkpoint_event(&msg, &Theme::dark()).expect("event lines");
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Compact(manual)"));
+        assert!(rendered.contains("43.8k -> 9.2k tokens"));
+        assert!(rendered.contains("archived 18 messages"));
+        assert!(rendered.contains("preserved 4 messages"));
+        assert!(!rendered.contains("full checkpoint summary"));
+    }
 
     /// CJK characters are 3 bytes but 2 display cells each. The
     /// byte-length version of `wrap_styled_line` would incorrectly

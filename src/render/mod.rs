@@ -44,6 +44,10 @@ pub struct RenderCache {
     pub chat: ChatState,
     pub markdown_cache: FxHashMap<u64, Vec<ratatui::text::Line<'static>>>,
     pub theme: theme::Theme,
+    /// F13: last `state.ui.mouse_scroll_accum` value we applied to
+    /// `chat.scroll_up/down`. Diffing lets the reducer stay pure —
+    /// it just publishes a counter; render owns the chat-state side.
+    last_mouse_scroll_accum: i32,
 }
 
 impl Default for RenderCache {
@@ -52,6 +56,7 @@ impl Default for RenderCache {
             chat: ChatState::new(),
             markdown_cache: FxHashMap::default(),
             theme: theme::Theme::dark(),
+            last_mouse_scroll_accum: 0,
         }
     }
 }
@@ -64,6 +69,18 @@ impl RenderCache {
 
 /// The entrypoint. Call once per render pass from the main loop.
 pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
+    // F13: consume any pending mouse-scroll accumulator. The reducer
+    // publishes a monotonic counter on `ui.mouse_scroll_accum`; we
+    // apply the delta to `ChatState` since the reducer isn't allowed
+    // to touch render-layer state directly.
+    let pending = state.ui.mouse_scroll_accum - rstate.last_mouse_scroll_accum;
+    if pending > 0 {
+        rstate.chat.scroll_up(pending as u16);
+    } else if pending < 0 {
+        rstate.chat.scroll_down((-pending) as u16);
+    }
+    rstate.last_mouse_scroll_accum = state.ui.mouse_scroll_accum;
+
     // Input height: content-aware, respecting CJK/emoji widths.
     let terminal_width = frame.area().width.saturating_sub(4) as usize;
     let input_lines = if state.ui.input_buffer.is_empty() {
@@ -97,6 +114,12 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         1
     };
 
+    // F9: one-row banner for `state.status`. Previously the reducer
+    // set state.status for slash commands, MCP errors, and model-pull
+    // progress but no widget painted it. Height is 1 when a status is
+    // present, 0 otherwise.
+    let status_banner_height: u16 = if state.status.is_some() { 1 } else { 0 };
+
     // Bottom region: one of three widgets based on UI mode.
     //   - ConversationList picker: 12-line pane.
     //   - Slash palette (input starts with `/`): 3–10 lines based on
@@ -125,7 +148,10 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         2
     };
 
-    // 5-zone vertical layout: chat / status line / attachments / input / bottom.
+    // 6-zone vertical layout: chat / status line / attachments /
+    // status banner / input / bottom. The banner sits directly above
+    // input so the eye finds "what just happened" right next to
+    // "what's next to type".
     use ratatui::layout::{Constraint, Direction, Layout};
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -133,6 +159,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             Constraint::Min(10),
             Constraint::Length(status_line_height),
             Constraint::Length(attachment_height),
+            Constraint::Length(status_banner_height),
             Constraint::Length(input_height),
             Constraint::Length(bottom_height),
         ])
@@ -188,6 +215,15 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         frame.render_widget(attachment_widget, chunks[2]);
     }
 
+    // F9 banner for state.status — above input, below attachments.
+    if let Some(ref status) = state.status {
+        let banner = widgets::StatusBannerWidget {
+            theme: &rstate.theme,
+            status,
+        };
+        frame.render_widget(banner, chunks[3]);
+    }
+
     // Input box.
     let input_widget = InputWidget {
         input: state.ui.input_buffer.as_str(),
@@ -198,11 +234,11 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     let mut input_widget_state = InputState {
         cursor_position: state.ui.input_cursor.min(state.ui.input_buffer.len()),
     };
-    frame.render_stateful_widget(input_widget, chunks[3], &mut input_widget_state);
+    frame.render_stateful_widget(input_widget, chunks[4], &mut input_widget_state);
 
     // Cursor visible unless focus is on attachments.
     if !state.ui.attachment_focused {
-        let input_area = chunks[3];
+        let input_area = chunks[4];
         let content_width = input_area.width.saturating_sub(2) as usize;
         let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
             &state.ui.input_buffer,
@@ -237,7 +273,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             candidates,
             cursor: *cursor,
         };
-        frame.render_widget(widget, chunks[4]);
+        frame.render_widget(widget, chunks[5]);
     } else if palette_open {
         let typed = state
             .ui
@@ -252,18 +288,20 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             commands,
             selected_index: state.ui.palette_cursor.unwrap_or(0),
         };
-        frame.render_widget(palette_widget, chunks[4]);
+        frame.render_widget(palette_widget, chunks[5]);
     } else {
         let cwd = state.cwd.display().to_string();
         let status_widget = StatusWidget {
             theme: &rstate.theme,
             working_dir: &cwd,
-            cumulative_tokens: state.session.cumulative_tokens,
+            context_usage: state.session.context_usage.as_ref(),
+            last_usage: state.session.last_token_usage,
+            session_usage: state.session.cumulative_token_usage,
             model_name: &state.session.model_id,
             reasoning_level: effective,
             requested_level,
         };
-        frame.render_widget(status_widget, chunks[4]);
+        frame.render_widget(status_widget, chunks[5]);
     }
 }
 
@@ -291,6 +329,8 @@ fn build_live_messages(
             role: crate::models::MessageRole::Assistant,
             content: partial_text.clone(),
             timestamp: chrono::Local::now(),
+            kind: crate::models::ChatMessageKind::Normal,
+            metadata: None,
             actions: Vec::new(),
             thinking,
             images: None,
@@ -393,6 +433,24 @@ mod tests {
         assert_eq!(
             GenerationStatus::from_turn(&TurnState::Idle),
             GenerationStatus::Idle
+        );
+    }
+
+    /// F9: `state.status` is painted as a banner above input. Before
+    /// this, the reducer would set `state.status` for slash-command
+    /// feedback and MCP errors but no widget displayed it.
+    #[test]
+    fn state_status_renders_as_banner() {
+        let mut s = mock_state();
+        s.status = Some(StatusLine {
+            text: "Reasoning: high".to_string(),
+            kind: StatusKind::Info,
+            shown_at: std::time::SystemTime::now(),
+        });
+        let frame = render_to_string(&s);
+        assert!(
+            frame.contains("Reasoning: high"),
+            "state.status must reach the screen"
         );
     }
 

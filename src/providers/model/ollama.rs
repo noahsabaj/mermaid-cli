@@ -26,18 +26,36 @@ use super::ModelProvider;
 pub struct OllamaProvider {
     adapter: OllamaAdapter,
     capabilities: Capabilities,
+    /// Shared app `Config` so `build_model_config` can read Ollama
+    /// hardware options (`num_ctx`, `num_gpu`, `num_thread`, `numa`) at
+    /// call time. Before F11 these were silently dropped because the
+    /// wrapper built `ModelConfig` only from `ChatRequest` fields.
+    config: Arc<crate::app::Config>,
 }
 
 impl OllamaProvider {
-    /// Construct from a model name + backend config, delegating to
-    /// the existing adapter's async constructor (which probes the
-    /// Ollama URL and builds a reusable HTTP client).
+    /// Backward-compatible constructor that uses a default app config.
+    /// Call `with_app_config` instead when you have one available so
+    /// Ollama hardware options actually reach the adapter.
     pub async fn new(model_name: &str, backend: Arc<BackendConfig>) -> Result<Self> {
+        Self::with_app_config(model_name, backend, Arc::new(crate::app::Config::default())).await
+    }
+
+    /// Construct with an explicit `app::Config` reference. Used by
+    /// `ProviderFactory::build_provider` so `config.ollama.{num_gpu,
+    /// num_ctx, num_thread, numa}` make it into the Ollama request's
+    /// `options` block.
+    pub async fn with_app_config(
+        model_name: &str,
+        backend: Arc<BackendConfig>,
+        config: Arc<crate::app::Config>,
+    ) -> Result<Self> {
         let adapter = OllamaAdapter::new(model_name, backend).await?;
         let capabilities = Capabilities::from_legacy(adapter.capabilities());
         Ok(Self {
             adapter,
             capabilities,
+            config,
         })
     }
 }
@@ -49,8 +67,13 @@ impl ModelProvider for OllamaProvider {
     }
 
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
-        let config = build_model_config(&request);
-        let callback = stream_callback_for(ctx.sink.clone());
+        let config = build_model_config(&request, &self.config);
+        // Ordered relay (F2): the adapter's sync callback pushes into an
+        // `UnboundedSender` (synchronous, FIFO). A single relay task drains
+        // into the bounded sink in order, avoiding the per-event `tokio::
+        // spawn` race that could deliver `Done` before prior tool calls.
+        let relay_tx = super::stream_bridge::ordered_relay(ctx.sink.clone());
+        let callback = stream_callback_for(relay_tx);
 
         // Race adapter.chat against the cancellation token. When
         // cancelled, the adapter's stream loop observes the sink
@@ -66,22 +89,20 @@ impl ModelProvider for OllamaProvider {
         let response = tokio::select! {
             biased;
             _ = ctx.token.cancelled() => {
-                // Synthesize a Done event so the reducer cleanly
-                // transitions out of Generating rather than hanging.
-                let _ = ctx.sink.send(StreamEvent::Done {
-                    usage: None,
-                    thinking_signature: None,
-                }).await;
-                return Err(ModelError::StreamError(
-                    "cancelled by user".to_string(),
-                ));
+                // Terminal event for a cancelled turn comes from the
+                // runner's `drop_scope` once the `TurnScope` drains, so
+                // we neither emit `StreamEvent::Done` here nor surface
+                // an `UpstreamError`. `ModelError::Cancelled` is the
+                // sentinel the runner swallows.
+                return Err(ModelError::Cancelled);
             },
             r = chat_fut => r?,
         };
 
-        // Emit a final typed Done event. The adapter's streaming
-        // callback emits `ModelStreamEvent::Done` for us, but if it
-        // fell through a non-streaming path we still owe one here.
+        // F3: the wrapper's `Done` is now the sole terminal event —
+        // the adapter no longer emits one from the callback. Carrying
+        // `thinking_signature` out of `ModelResponse` here is what
+        // lets multi-turn extended thinking round-trip.
         let usage = response.usage.clone();
         let thinking_signature = response.thinking_signature.clone();
         let _ = ctx
@@ -102,8 +123,8 @@ impl ModelProvider for OllamaProvider {
 
 // ─── helpers ────────────────────────────────────────────────────────
 
-fn build_model_config(request: &ChatRequest) -> ModelConfig {
-    ModelConfig {
+fn build_model_config(request: &ChatRequest, app_config: &crate::app::Config) -> ModelConfig {
+    let mut mc = ModelConfig {
         model: request.model_id.clone(),
         temperature: request.temperature,
         max_tokens: request.max_tokens,
@@ -112,18 +133,32 @@ fn build_model_config(request: &ChatRequest) -> ModelConfig {
         dynamic_system_suffix: request.instructions.clone(),
         tools: request.tools.iter().map(|t| t.to_openai_json()).collect(),
         ..Default::default()
+    };
+    // F11: forward Ollama hardware options from the user's app config.
+    // Previously these fields were configured + persisted but silently
+    // ignored because this wrapper built ModelConfig in isolation.
+    if let Some(v) = app_config.ollama.num_gpu {
+        mc.set_backend_option("ollama".into(), "num_gpu".into(), v.to_string());
     }
+    if let Some(v) = app_config.ollama.num_ctx {
+        mc.set_backend_option("ollama".into(), "num_ctx".into(), v.to_string());
+    }
+    if let Some(v) = app_config.ollama.num_thread {
+        mc.set_backend_option("ollama".into(), "num_thread".into(), v.to_string());
+    }
+    if let Some(v) = app_config.ollama.numa {
+        mc.set_backend_option("ollama".into(), "numa".into(), v.to_string());
+    }
+    mc
 }
 
-/// Build a `StreamCallback` that forwards `ModelStreamEvent`s from
-/// the adapter into the typed `StreamEvent` sink.
-fn stream_callback_for(sink: tokio::sync::mpsc::Sender<StreamEvent>) -> StreamCallback {
+/// Build a `StreamCallback` that forwards `ModelStreamEvent`s from the
+/// adapter into an `UnboundedSender<StreamEvent>` (ordered relay). The
+/// caller wires that sender to a bounded sink via
+/// `stream_bridge::ordered_relay`; this keeps event delivery FIFO even
+/// though the adapter calls us from a sync context.
+fn stream_callback_for(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) -> StreamCallback {
     Arc::new(move |event: ModelStreamEvent| {
-        let sink = sink.clone();
-        // Adapter callbacks are sync but short — fire-and-forget the
-        // send on a task. Using `blocking_send` on the mpsc would
-        // work too but risks the runtime not having a runtime
-        // handle in sync context.
         let mapped = match event {
             ModelStreamEvent::Text(s) => StreamEvent::Text(s),
             ModelStreamEvent::Reasoning(chunk) => StreamEvent::Reasoning(ReasoningChunk {
@@ -133,25 +168,16 @@ fn stream_callback_for(sink: tokio::sync::mpsc::Sender<StreamEvent>) -> StreamCa
             ModelStreamEvent::ToolCall(tc) => StreamEvent::ToolCall(tc),
             ModelStreamEvent::Done { tokens } => StreamEvent::Done {
                 usage: if tokens > 0 {
-                    Some(crate::models::TokenUsage {
-                        prompt_tokens: 0,
-                        completion_tokens: tokens,
-                        total_tokens: tokens,
-                    })
+                    Some(crate::models::TokenUsage::provider(0, tokens, tokens))
                 } else {
                     None
                 },
                 thinking_signature: None,
             },
         };
-        // `try_send` is non-blocking; if the channel is full, the
-        // adapter's TCP read loop will naturally backpressure on the
-        // *next* chunk (since we ignored this one). For now we do
-        // `spawn + send` so backpressure is cleaner — a bounded
-        // queue dropping events is worse than waiting for space.
-        tokio::spawn(async move {
-            let _ = sink.send(mapped).await;
-        });
+        // Synchronous send preserves ordering. Ignore errors — the
+        // receiver has closed means the turn is already gone.
+        let _ = sink.send(mapped);
     })
 }
 
@@ -171,7 +197,8 @@ mod tests {
             max_tokens: 2048,
             tools: vec![],
         };
-        let cfg = build_model_config(&req);
+        let app_cfg = crate::app::Config::default();
+        let cfg = build_model_config(&req, &app_cfg);
         assert_eq!(cfg.model, "ollama/test");
         assert_eq!(cfg.temperature, 0.3);
         assert_eq!(cfg.max_tokens, 2048);
@@ -183,9 +210,40 @@ mod tests {
         );
     }
 
+    /// F11 regression guard: Ollama hardware options in the user's
+    /// app config must land in the ModelConfig's backend_options so
+    /// the adapter's `build_request_body` emits them under `options`.
+    /// Before F11 these were configured + persisted but never reached
+    /// the wire — `num_ctx = 8192` in config.toml was a silent no-op.
+    #[test]
+    fn build_model_config_forwards_ollama_hardware_options() {
+        let req = ChatRequest {
+            model_id: "ollama/test".to_string(),
+            messages: vec![],
+            system_prompt: "sys".to_string(),
+            instructions: None,
+            reasoning: crate::models::ReasoningLevel::Medium,
+            temperature: 0.7,
+            max_tokens: 4096,
+            tools: vec![],
+        };
+        let mut app_cfg = crate::app::Config::default();
+        app_cfg.ollama.num_ctx = Some(8192);
+        app_cfg.ollama.num_gpu = Some(10);
+        app_cfg.ollama.num_thread = Some(8);
+        app_cfg.ollama.numa = Some(true);
+
+        let cfg = build_model_config(&req, &app_cfg);
+        let opts = cfg.ollama_options();
+        assert_eq!(opts.num_ctx, Some(8192));
+        assert_eq!(opts.num_gpu, Some(10));
+        assert_eq!(opts.num_thread, Some(8));
+        assert_eq!(opts.numa, Some(true));
+    }
+
     #[tokio::test]
     async fn stream_callback_forwards_text_event() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cb = stream_callback_for(tx);
         cb(ModelStreamEvent::Text("hello".to_string()));
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -200,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_callback_forwards_done_with_tokens() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cb = stream_callback_for(tx);
         cb(ModelStreamEvent::Done { tokens: 42 });
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -218,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_callback_done_zero_tokens_is_none_usage() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cb = stream_callback_for(tx);
         cb(ModelStreamEvent::Done { tokens: 0 });
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())

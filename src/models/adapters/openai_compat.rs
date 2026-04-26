@@ -222,6 +222,10 @@ impl OpenAICompatAdapter {
             "temperature": config.temperature,
         });
 
+        if stream {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
+
         if !tools.is_empty() {
             body["tools"] = json!(tools);
         }
@@ -309,11 +313,7 @@ impl OpenAICompatAdapter {
                 raw: None,
             })?;
 
-        let usage = json.usage.map(|u| TokenUsage {
-            prompt_tokens: u.prompt_tokens.unwrap_or(0),
-            completion_tokens: u.completion_tokens.unwrap_or(0),
-            total_tokens: u.total_tokens.unwrap_or(0),
-        });
+        let usage = json.usage.map(token_usage_from_wire);
 
         // Reasoning content: extract from the named field if the profile
         // points at one. For `InlineThinkTags`, leave it in `content`
@@ -374,6 +374,7 @@ impl OpenAICompatAdapter {
         let mut truncated = false;
         let mut prompt_tokens = 0usize;
         let mut completion_tokens = 0usize;
+        let mut total_tokens = None;
         // For providers that emit `<think>...</think>` inline in
         // `delta.content`, route the content channel through this state
         // machine so reasoning gets split out into its own
@@ -405,6 +406,9 @@ impl OpenAICompatAdapter {
                 if let Some(usage) = parsed.usage.as_ref() {
                     prompt_tokens = usage.prompt_tokens.unwrap_or(prompt_tokens);
                     completion_tokens = usage.completion_tokens.unwrap_or(completion_tokens);
+                    if let Some(total) = usage.total_tokens {
+                        total_tokens = Some(total);
+                    }
                 }
 
                 let Some(choice) = parsed.choices.into_iter().next() else {
@@ -526,10 +530,10 @@ impl OpenAICompatAdapter {
             }
         }
 
-        let total_tokens = prompt_tokens + completion_tokens;
-        callback(StreamEvent::Done {
-            tokens: total_tokens,
-        });
+        let total_tokens =
+            total_tokens.unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
+        // F3: wrapper emits the authoritative `Done` from the returned
+        // `ModelResponse`. See adapters/anthropic.rs for rationale.
 
         let thinking = if thinking_acc.is_empty() {
             None
@@ -544,11 +548,11 @@ impl OpenAICompatAdapter {
 
         Ok(ModelResponse {
             content: content_acc,
-            usage: Some(TokenUsage {
+            usage: Some(TokenUsage::provider(
                 prompt_tokens,
                 completion_tokens,
                 total_tokens,
-            }),
+            )),
             model_name: self.model_name.clone(),
             thinking,
             tool_calls,
@@ -732,6 +736,61 @@ struct UsageWire {
     completion_tokens: Option<usize>,
     #[serde(default)]
     total_tokens: Option<usize>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetailsWire>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetailsWire>,
+    #[serde(default)]
+    input_tokens_details: Option<PromptTokensDetailsWire>,
+    #[serde(default)]
+    output_tokens_details: Option<CompletionTokensDetailsWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptTokensDetailsWire {
+    #[serde(default)]
+    cached_tokens: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletionTokensDetailsWire {
+    #[serde(default)]
+    reasoning_tokens: Option<usize>,
+}
+
+fn token_usage_from_wire(usage: UsageWire) -> TokenUsage {
+    let prompt_tokens = usage.prompt_tokens.unwrap_or(0);
+    let completion_tokens = usage.completion_tokens.unwrap_or(0);
+    let total_tokens = usage
+        .total_tokens
+        .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
+
+    let cached_input_tokens = usage
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|d| d.cached_tokens)
+        .or_else(|| {
+            usage
+                .input_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+        })
+        .unwrap_or(0);
+    let reasoning_output_tokens = usage
+        .completion_tokens_details
+        .as_ref()
+        .and_then(|d| d.reasoning_tokens)
+        .or_else(|| {
+            usage
+                .output_tokens_details
+                .as_ref()
+                .and_then(|d| d.reasoning_tokens)
+        })
+        .unwrap_or(0);
+
+    TokenUsage::provider(prompt_tokens, completion_tokens, total_tokens)
+        .with_cached_input(cached_input_tokens)
+        .with_reasoning_output(reasoning_output_tokens)
 }
 
 /// Full tool call as returned in non-streaming responses.
@@ -991,6 +1050,61 @@ mod tests {
             HashMap::new(),
         )
         .expect("adapter constructs")
+    }
+
+    #[test]
+    fn token_usage_from_wire_preserves_authoritative_total() {
+        let usage = token_usage_from_wire(UsageWire {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(25),
+            total_tokens: Some(140),
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+            input_tokens_details: None,
+            output_tokens_details: None,
+        });
+
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 25);
+        assert_eq!(usage.total_tokens, 140);
+    }
+
+    #[test]
+    fn token_usage_from_wire_falls_back_to_prompt_plus_completion() {
+        let usage = token_usage_from_wire(UsageWire {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(25),
+            total_tokens: None,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+            input_tokens_details: None,
+            output_tokens_details: None,
+        });
+
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 25);
+        assert_eq!(usage.total_tokens, 125);
+    }
+
+    #[test]
+    fn token_usage_from_wire_preserves_cache_and_reasoning_details() {
+        let usage = token_usage_from_wire(UsageWire {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(25),
+            total_tokens: Some(125),
+            prompt_tokens_details: Some(PromptTokensDetailsWire {
+                cached_tokens: Some(40),
+            }),
+            completion_tokens_details: Some(CompletionTokensDetailsWire {
+                reasoning_tokens: Some(12),
+            }),
+            input_tokens_details: None,
+            output_tokens_details: None,
+        });
+
+        assert_eq!(usage.cached_input_tokens, 40);
+        assert_eq!(usage.reasoning_output_tokens, 12);
+        assert_eq!(usage.total_tokens, 125);
     }
 
     #[test]

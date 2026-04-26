@@ -26,6 +26,22 @@ pub fn resolve_api_key(default_env: &str, override_env: Option<&str>) -> Option<
     }
 }
 
+/// Resolve an API key with a legacy fallback env var.
+///
+/// If `override_env` is set, it remains authoritative and no fallback
+/// is attempted. Without an override, `default_env` is checked first
+/// and `fallback_env` is accepted only when the default is unset.
+pub fn resolve_api_key_with_fallback(
+    default_env: &str,
+    fallback_env: &str,
+    override_env: Option<&str>,
+) -> Option<String> {
+    if override_env.is_some() {
+        return resolve_api_key(default_env, override_env);
+    }
+    resolve_api_key(default_env, None).or_else(|| resolve_api_key(fallback_env, None))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +120,52 @@ mod tests {
             ],
             || {
                 let resolved = resolve_api_key(&default_var, Some(&override_var));
+                assert_eq!(resolved, None);
+            },
+        );
+    }
+
+    #[test]
+    fn fallback_env_used_only_when_default_is_unset() {
+        let default_var = unique_env("MERMAID_TEST_AUTH_FALLBACK_DEFAULT");
+        let fallback_var = unique_env("MERMAID_TEST_AUTH_FALLBACK_LEGACY");
+        temp_env::with_vars(
+            [
+                (default_var.as_str(), None),
+                (fallback_var.as_str(), Some("legacy-key")),
+            ],
+            || {
+                let resolved = resolve_api_key_with_fallback(&default_var, &fallback_var, None);
+                assert_eq!(resolved, Some("legacy-key".to_string()));
+            },
+        );
+
+        temp_env::with_vars(
+            [
+                (default_var.as_str(), Some("default-key")),
+                (fallback_var.as_str(), Some("legacy-key")),
+            ],
+            || {
+                let resolved = resolve_api_key_with_fallback(&default_var, &fallback_var, None);
+                assert_eq!(resolved, Some("default-key".to_string()));
+            },
+        );
+    }
+
+    #[test]
+    fn fallback_env_is_ignored_when_override_is_set() {
+        let default_var = unique_env("MERMAID_TEST_AUTH_OVERRIDE_DEFAULT3");
+        let fallback_var = unique_env("MERMAID_TEST_AUTH_OVERRIDE_FALLBACK3");
+        let override_var = unique_env("MERMAID_TEST_AUTH_OVERRIDE3");
+        temp_env::with_vars(
+            [
+                (default_var.as_str(), Some("default-key")),
+                (fallback_var.as_str(), Some("legacy-key")),
+                (override_var.as_str(), None),
+            ],
+            || {
+                let resolved =
+                    resolve_api_key_with_fallback(&default_var, &fallback_var, Some(&override_var));
                 assert_eq!(resolved, None);
             },
         );

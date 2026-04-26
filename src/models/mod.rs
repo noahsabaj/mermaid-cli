@@ -26,4 +26,6 @@ pub use stream::{StreamCallback, StreamEvent};
 pub use tool_call::{FunctionCall, ToolCall};
 
 pub use traits::Model;
-pub use types::{ChatMessage, MessageRole, ModelResponse, TokenUsage};
+pub use types::{
+    ChatMessage, ChatMessageKind, MessageRole, ModelResponse, TokenUsage, TokenUsageSource,
+};

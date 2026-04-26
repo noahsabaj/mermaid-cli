@@ -7,6 +7,14 @@ pub struct ChatMessage {
     pub role: MessageRole,
     pub content: String,
     pub timestamp: chrono::DateTime<chrono::Local>,
+    /// Mermaid-owned message classification. Provider adapters ignore
+    /// this; render/persistence use it to distinguish generated
+    /// checkpoints from normal user/assistant turns.
+    #[serde(default)]
+    pub kind: ChatMessageKind,
+    /// Optional Mermaid-owned structured metadata for UI/replay.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
     /// Actions performed during this message (for display purposes)
     #[serde(default)]
     pub actions: Vec<ActionDisplay>,
@@ -62,6 +70,8 @@ impl ChatMessage {
             role: MessageRole::Tool,
             content: content.into(),
             timestamp: chrono::Local::now(),
+            kind: ChatMessageKind::Normal,
+            metadata: None,
             actions: Vec::new(),
             thinking: None,
             images: None,
@@ -78,6 +88,8 @@ impl ChatMessage {
             role,
             content,
             timestamp: chrono::Local::now(),
+            kind: ChatMessageKind::Normal,
+            metadata: None,
             actions: Vec::new(),
             thinking: None,
             images: None,
@@ -150,6 +162,14 @@ pub enum MessageRole {
     Tool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatMessageKind {
+    #[default]
+    Normal,
+    ContextCheckpoint,
+}
+
 /// Response from a model
 #[derive(Debug, Clone)]
 pub struct ModelResponse {
@@ -172,12 +192,87 @@ pub struct ModelResponse {
     pub thinking_signature: Option<String>,
 }
 
-/// Token usage statistics
-#[derive(Debug, Clone)]
+/// Where a token count came from. Provider-reported counts are the
+/// billing/request truth; estimates are only for preflight context
+/// diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenUsageSource {
+    #[default]
+    Provider,
+    Estimate,
+}
+
+/// Token usage statistics normalized across providers.
+///
+/// `prompt_tokens`, `completion_tokens`, and `total_tokens` preserve
+/// the old public surface. Extra fields keep cache/reasoning detail so
+/// UI can stop flattening unlike provider concepts into one number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
+    #[serde(default)]
+    pub cached_input_tokens: usize,
+    #[serde(default)]
+    pub cache_creation_input_tokens: usize,
+    #[serde(default)]
+    pub reasoning_output_tokens: usize,
+    #[serde(default)]
+    pub source: TokenUsageSource,
+}
+
+impl TokenUsage {
+    pub fn provider(prompt_tokens: usize, completion_tokens: usize, total_tokens: usize) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            source: TokenUsageSource::Provider,
+        }
+    }
+
+    pub fn estimate(prompt_tokens: usize) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens: 0,
+            total_tokens: prompt_tokens,
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            source: TokenUsageSource::Estimate,
+        }
+    }
+
+    pub fn with_cached_input(mut self, cached_input_tokens: usize) -> Self {
+        self.cached_input_tokens = cached_input_tokens;
+        self
+    }
+
+    pub fn with_cache_creation(mut self, cache_creation_input_tokens: usize) -> Self {
+        self.cache_creation_input_tokens = cache_creation_input_tokens;
+        self
+    }
+
+    pub fn with_reasoning_output(mut self, reasoning_output_tokens: usize) -> Self {
+        self.reasoning_output_tokens = reasoning_output_tokens;
+        self
+    }
+
+    pub fn input_total_tokens(&self) -> usize {
+        self.prompt_tokens
+            .saturating_add(self.cached_input_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
+    }
+
+    pub fn output_total_tokens(&self) -> usize {
+        self.completion_tokens
+            .saturating_add(self.reasoning_output_tokens)
+    }
 }
 
 #[cfg(test)]
@@ -221,15 +316,16 @@ mod tests {
 
     #[test]
     fn test_token_usage_structure() {
-        let usage = TokenUsage {
-            prompt_tokens: 100,
-            completion_tokens: 50,
-            total_tokens: 150,
-        };
+        let usage = TokenUsage::provider(100, 50, 150)
+            .with_cached_input(25)
+            .with_reasoning_output(10);
 
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.completion_tokens, 50);
         assert_eq!(usage.total_tokens, 150);
+        assert_eq!(usage.cached_input_tokens, 25);
+        assert_eq!(usage.reasoning_output_tokens, 10);
+        assert_eq!(usage.source, TokenUsageSource::Provider);
     }
 
     // --- extract_thinking ---
@@ -288,11 +384,7 @@ mod tests {
 
     #[test]
     fn test_model_response_creation() {
-        let usage = TokenUsage {
-            prompt_tokens: 100,
-            completion_tokens: 50,
-            total_tokens: 150,
-        };
+        let usage = TokenUsage::provider(100, 50, 150);
 
         let response = ModelResponse {
             content: "Hello, world!".to_string(),

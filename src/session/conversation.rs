@@ -1,3 +1,4 @@
+use crate::domain::CompactionArchive;
 use crate::models::{ChatMessage, MessageRole};
 use anyhow::Result;
 use chrono::{DateTime, Local};
@@ -17,6 +18,9 @@ pub struct ConversationHistory {
     pub created_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,
     pub total_tokens: Option<usize>,
+    /// Metadata for context compactions performed in this conversation.
+    #[serde(default)]
+    pub compactions: Vec<crate::domain::CompactionRecord>,
     /// History of user input prompts for navigation (up/down arrows)
     #[serde(default)]
     pub input_history: VecDeque<String>,
@@ -37,6 +41,7 @@ impl ConversationHistory {
             created_at: now,
             updated_at: now,
             total_tokens: None,
+            compactions: Vec::new(),
             input_history: VecDeque::new(),
         }
     }
@@ -46,6 +51,20 @@ impl ConversationHistory {
         self.messages.extend_from_slice(messages);
         self.updated_at = Local::now();
         self.update_title();
+    }
+
+    /// Replace the model-visible message log without deriving a new title.
+    /// Used by context compaction: the original title still describes the
+    /// session better than the generated checkpoint.
+    pub fn replace_messages(&mut self, messages: Vec<ChatMessage>) {
+        self.messages = messages;
+        self.updated_at = Local::now();
+    }
+
+    /// Record a completed context compaction.
+    pub fn add_compaction(&mut self, record: crate::domain::CompactionRecord) {
+        self.compactions.push(record);
+        self.updated_at = Local::now();
     }
 
     /// Add input to history (with deduplication of consecutive identical inputs)
@@ -110,17 +129,24 @@ impl ConversationHistory {
 #[derive(Clone)]
 pub struct ConversationManager {
     conversations_dir: PathBuf,
+    compactions_dir: PathBuf,
 }
 
 impl ConversationManager {
     /// Create a new conversation manager for a project directory
     pub fn new(project_dir: impl AsRef<Path>) -> Result<Self> {
-        let conversations_dir = project_dir.as_ref().join(".mermaid").join("conversations");
+        let mermaid_dir = project_dir.as_ref().join(".mermaid");
+        let conversations_dir = mermaid_dir.join("conversations");
+        let compactions_dir = mermaid_dir.join("compactions");
 
         // Create conversations directory if it doesn't exist
         fs::create_dir_all(&conversations_dir)?;
+        fs::create_dir_all(&compactions_dir)?;
 
-        Ok(Self { conversations_dir })
+        Ok(Self {
+            conversations_dir,
+            compactions_dir,
+        })
     }
 
     /// Save a conversation to disk
@@ -132,6 +158,18 @@ impl ConversationManager {
         fs::write(path, json)?;
 
         Ok(())
+    }
+
+    /// Save the raw messages removed by a compaction. Archives live
+    /// outside the hot conversation JSON so `/load` and `/list` don't
+    /// parse old transcripts on every startup.
+    pub fn save_compaction_archive(&self, archive: &CompactionArchive) -> Result<PathBuf> {
+        let dir = self.compactions_dir.join(&archive.conversation_id);
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.json", archive.id));
+        let json = serde_json::to_string_pretty(archive)?;
+        fs::write(&path, json)?;
+        Ok(path)
     }
 
     /// Load a specific conversation by ID
@@ -211,6 +249,10 @@ impl ConversationManager {
     /// Get the conversations directory path
     pub fn conversations_dir(&self) -> &Path {
         &self.conversations_dir
+    }
+
+    pub fn compactions_dir(&self) -> &Path {
+        &self.compactions_dir
     }
 }
 

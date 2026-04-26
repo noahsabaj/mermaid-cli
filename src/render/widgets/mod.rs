@@ -10,6 +10,7 @@ mod conversation_list;
 mod input;
 mod slash_palette;
 mod status;
+mod status_banner;
 mod status_line;
 
 pub use attachment::AttachmentWidget;
@@ -18,6 +19,7 @@ pub use conversation_list::ConversationListWidget;
 pub use input::{InputState, InputWidget};
 pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
+pub use status_banner::StatusBannerWidget;
 pub use status_line::StatusLineWidget;
 
 /// Local-to-render-layer generation phase enum. The compose function
@@ -56,9 +58,9 @@ impl GenerationStatus {
                 GenPhase::Thinking => GenerationStatus::Thinking,
                 GenPhase::Streaming => GenerationStatus::Streaming,
             },
-            TurnState::ExecutingTools { .. } | TurnState::Cancelling { .. } => {
-                GenerationStatus::Streaming
-            },
+            TurnState::ExecutingTools { .. }
+            | TurnState::Compacting { .. }
+            | TurnState::Cancelling { .. } => GenerationStatus::Streaming,
         }
     }
 }

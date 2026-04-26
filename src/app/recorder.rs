@@ -9,12 +9,12 @@
 //! `{ts, kind, body}`:
 //!   - `ts`: RFC3339 timestamp (for debugging, not replay).
 //!   - `kind`: `MsgKind` variant tag (matches `Msg::kind().into()`).
-//!   - `body`: the `Msg` itself, serde-serialized.
+//!   - `body`: best-effort structured payload from `record_msg_body`.
 //!
 //! Not every `Msg` field is safely serializable today — raw image
-//! bytes in `Paste::Image`, for example. Unsupported variants are
-//! skipped on record (the reducer still sees them; they just don't
-//! land in the log). Replay is a best-effort reconstruction.
+//! bytes in `Paste::Image`, for example. Unsupported payloads are
+//! marked with `"recordable": false` and compact metadata. Replay is
+//! a best-effort reconstruction.
 //!
 //! For C6 this ships the on-disk shape + a `Recorder` type that
 //! writes; replay reading is available but opt-in (serialize
@@ -29,7 +29,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::Local;
 
-use crate::domain::{MsgKind, TurnId};
+use crate::domain::{KeyCode, Msg, MsgKind, Paste, SlashCmd, ToolOutcome, TurnId};
+use crate::providers::{ProgressEvent, SubagentPhase};
 
 /// Append-only recorder. Writes one JSONL line per `Msg` the main
 /// loop chooses to log.
@@ -85,6 +86,278 @@ impl Drop for Recorder {
     fn drop(&mut self) {
         let _ = self.writer.flush();
     }
+}
+
+/// Compact, best-effort JSON body for a reducer `Msg`.
+///
+/// This deliberately records useful payloads without claiming the full
+/// `Msg` graph can round-trip through serde today. Runtime-only or
+/// binary-heavy variants are marked explicitly so replay tooling can
+/// decide how to handle them.
+pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
+    match msg {
+        Msg::Key(key) => serde_json::json!({
+            "code": key_code_body(key.code),
+            "modifiers": {
+                "ctrl": key.modifiers.ctrl,
+                "alt": key.modifiers.alt,
+                "shift": key.modifiers.shift,
+            },
+        }),
+        Msg::Paste(Paste::Text(text)) => serde_json::json!({
+            "type": "text",
+            "text": text,
+        }),
+        Msg::Paste(Paste::Image { bytes, format }) => serde_json::json!({
+            "recordable": false,
+            "reason": "binary paste image omitted",
+            "type": "image",
+            "format": format,
+            "size_bytes": bytes.len(),
+        }),
+        Msg::SubmitPrompt {
+            text,
+            attachment_ids,
+        } => serde_json::json!({
+            "text": text,
+            "attachment_ids": attachment_ids,
+        }),
+        Msg::Slash(cmd) => slash_body(cmd),
+        Msg::CancelTurn => serde_json::json!({}),
+        Msg::ConfirmAccepted => serde_json::json!({"accepted": true}),
+        Msg::ConfirmDeclined => serde_json::json!({"accepted": false}),
+        Msg::Quit => serde_json::json!({}),
+        Msg::RuntimeSignal(signal) => serde_json::json!({
+            "signal": signal.as_str(),
+        }),
+        Msg::StreamText { chunk, .. } => serde_json::json!({"chunk": chunk}),
+        Msg::StreamReasoning { chunk, .. } => serde_json::json!({
+            "text": chunk.text,
+            "signature": chunk.signature,
+        }),
+        Msg::StreamToolCall { call, .. } => serde_json::to_value(call)
+            .unwrap_or_else(|_| unsupported("tool call was not serializable")),
+        Msg::ContextUsageEstimated { snapshot, .. } => serde_json::json!({
+            "used_tokens": snapshot.used_tokens,
+            "max_tokens": snapshot.max_tokens,
+            "remaining_tokens": snapshot.remaining_tokens,
+            "used_percent": snapshot.used_percent,
+            "source": format!("{:?}", snapshot.source),
+            "breakdown": snapshot.breakdown.as_ref().map(|b| serde_json::json!({
+                "system_tokens": b.system_tokens,
+                "instructions_tokens": b.instructions_tokens,
+                "message_tokens": b.message_tokens,
+                "tool_schema_tokens": b.tool_schema_tokens,
+                "image_count": b.image_count,
+                "message_count": b.message_count,
+                "tool_count": b.tool_count,
+            })),
+        }),
+        Msg::CompactionFinished { result, .. } => serde_json::json!({
+            "id": result.record.id,
+            "trigger": result.record.trigger.as_str(),
+            "before_tokens": result.record.before_tokens,
+            "after_tokens": result.record.after_tokens,
+            "archived_message_count": result.record.archived_message_count,
+            "preserved_message_count": result.record.preserved_message_count,
+            "duration_secs": result.record.duration_secs,
+        }),
+        Msg::CompactionFailed {
+            trigger,
+            message,
+            kind,
+            ..
+        } => serde_json::json!({
+            "trigger": trigger.as_str(),
+            "message": message,
+            "kind": format!("{:?}", kind),
+        }),
+        Msg::StreamDone {
+            usage,
+            thinking_signature,
+            ..
+        } => serde_json::json!({
+            "usage": usage.as_ref().map(|u| serde_json::json!({
+                "prompt_tokens": u.prompt_tokens,
+                "completion_tokens": u.completion_tokens,
+                "total_tokens": u.total_tokens,
+                "cached_input_tokens": u.cached_input_tokens,
+                "cache_creation_input_tokens": u.cache_creation_input_tokens,
+                "reasoning_output_tokens": u.reasoning_output_tokens,
+                "source": format!("{:?}", u.source),
+            })),
+            "thinking_signature": thinking_signature,
+        }),
+        Msg::UpstreamError { error, .. } => serde_json::to_value(error)
+            .unwrap_or_else(|_| unsupported("upstream error was not serializable")),
+        Msg::TurnCancelled(_) => serde_json::json!({}),
+        Msg::ToolStarted { call_id, .. } => serde_json::json!({"call_id": call_id.0}),
+        Msg::ToolProgress { call_id, event, .. } => serde_json::json!({
+            "call_id": call_id.0,
+            "event": progress_body(event),
+        }),
+        Msg::ToolFinished {
+            call_id, outcome, ..
+        } => serde_json::json!({
+            "call_id": call_id.0,
+            "outcome": outcome_body(outcome),
+        }),
+        Msg::McpServerReady { name, tools } => serde_json::json!({
+            "name": name,
+            "tools": tools.iter().map(|tool| serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            })).collect::<Vec<_>>(),
+        }),
+        Msg::McpServerErrored { name, reason } => serde_json::json!({
+            "name": name,
+            "reason": reason,
+        }),
+        Msg::McpServerStopped { name } => serde_json::json!({"name": name}),
+        Msg::InstructionsChanged(loaded) => match loaded {
+            Some(loaded) => serde_json::json!({
+                "path": loaded.path,
+                "byte_len": loaded.byte_len,
+                "truncated": loaded.truncated,
+            }),
+            None => serde_json::json!({"path": null}),
+        },
+        Msg::SessionSaved => serde_json::json!({}),
+        Msg::ConversationLoaded(history) => serde_json::json!({
+            "id": history.id,
+            "message_count": history.messages.len(),
+            "title": history.title,
+        }),
+        Msg::ConversationsListed(summaries) => serde_json::json!({
+            "count": summaries.len(),
+            "ids": summaries.iter().map(|summary| summary.id.as_str()).collect::<Vec<_>>(),
+        }),
+        Msg::ModelPullFinished { model } => serde_json::json!({"model": model}),
+        Msg::ModelPullProgress(line) => serde_json::json!({"line": line}),
+        Msg::Tick => serde_json::json!({}),
+        Msg::StatusDismiss => serde_json::json!({}),
+        Msg::Resize { width, height } => serde_json::json!({
+            "width": width,
+            "height": height,
+        }),
+        Msg::TransientStatus {
+            text,
+            kind,
+            dismiss_ms,
+        } => serde_json::json!({
+            "text": text,
+            "kind": format!("{:?}", kind),
+            "dismiss_ms": dismiss_ms,
+        }),
+        Msg::MouseScroll { delta } => serde_json::json!({"delta": delta}),
+        Msg::OpenImageAt {
+            message_index,
+            image_index,
+        } => serde_json::json!({
+            "message_index": message_index,
+            "image_index": image_index,
+        }),
+    }
+}
+
+fn key_code_body(code: KeyCode) -> serde_json::Value {
+    match code {
+        KeyCode::Char(c) => serde_json::json!({"char": c.to_string()}),
+        KeyCode::F(n) => serde_json::json!({"f": n}),
+        other => serde_json::json!(format!("{:?}", other)),
+    }
+}
+
+fn slash_body(cmd: &SlashCmd) -> serde_json::Value {
+    match cmd {
+        SlashCmd::Model(model) => serde_json::json!({"command": "model", "arg": model}),
+        SlashCmd::Reasoning(level) => serde_json::json!({
+            "command": "reasoning",
+            "arg": level.map(|level| level.as_str()),
+        }),
+        SlashCmd::Clear => serde_json::json!({"command": "clear"}),
+        SlashCmd::Save(name) => serde_json::json!({"command": "save", "arg": name}),
+        SlashCmd::Load(name) => serde_json::json!({"command": "load", "arg": name}),
+        SlashCmd::List => serde_json::json!({"command": "list"}),
+        SlashCmd::Usage => serde_json::json!({"command": "usage"}),
+        SlashCmd::Context => serde_json::json!({"command": "context"}),
+        SlashCmd::Compact(instructions) => {
+            serde_json::json!({"command": "compact", "arg": instructions})
+        },
+        SlashCmd::CloudSetup => serde_json::json!({"command": "cloud-setup"}),
+        SlashCmd::Help => serde_json::json!({"command": "help"}),
+        SlashCmd::Quit => serde_json::json!({"command": "quit"}),
+        SlashCmd::Unknown(name) => serde_json::json!({"command": "unknown", "name": name}),
+    }
+}
+
+fn progress_body(event: &ProgressEvent) -> serde_json::Value {
+    match event {
+        ProgressEvent::Output(text) => serde_json::json!({"type": "output", "text": text}),
+        ProgressEvent::Status(text) => serde_json::json!({"type": "status", "text": text}),
+        ProgressEvent::Bytes { done, total } => serde_json::json!({
+            "type": "bytes",
+            "done": done,
+            "total": total,
+        }),
+        ProgressEvent::Artifact {
+            mime,
+            data,
+            caption,
+        } => serde_json::json!({
+            "recordable": false,
+            "type": "artifact",
+            "mime": mime,
+            "caption": caption,
+            "size_bytes": data.len(),
+        }),
+        ProgressEvent::SubagentToolCall {
+            child_call_id,
+            tool_name,
+            phase,
+        } => serde_json::json!({
+            "type": "subagent_tool_call",
+            "child_call_id": child_call_id.0,
+            "tool_name": tool_name,
+            "phase": subagent_phase(*phase),
+        }),
+        ProgressEvent::SubagentText(text) => {
+            serde_json::json!({"type": "subagent_text", "text": text})
+        },
+    }
+}
+
+fn subagent_phase(phase: SubagentPhase) -> &'static str {
+    match phase {
+        SubagentPhase::Started => "started",
+        SubagentPhase::Finished => "finished",
+        SubagentPhase::Errored => "errored",
+    }
+}
+
+fn outcome_body(outcome: &ToolOutcome) -> serde_json::Value {
+    serde_json::json!({
+        "status": match outcome.status {
+            crate::domain::ToolStatus::Success => "success",
+            crate::domain::ToolStatus::Error => "error",
+            crate::domain::ToolStatus::Cancelled => "cancelled",
+        },
+        "summary": outcome.summary,
+        "model_content": outcome.model_content,
+        "error": outcome.error,
+        "image_count": outcome.images().map(|images| images.len()).unwrap_or(0),
+        "duration_secs": outcome.duration_secs,
+        "metadata": outcome.metadata,
+        "artifacts": outcome.artifacts,
+    })
+}
+
+fn unsupported(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "recordable": false,
+        "reason": reason,
+    })
 }
 
 /// Read a JSONL log back. Iterates one line at a time so a huge
@@ -217,5 +490,44 @@ mod tests {
         assert_eq!(entries[0].kind, "Tick");
         assert_eq!(entries[1].kind, "Quit");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_msg_body_submit_prompt_keeps_text_and_attachments() {
+        let body = record_msg_body(&crate::domain::Msg::SubmitPrompt {
+            text: "explain main.rs".to_string(),
+            attachment_ids: vec![3, 9],
+        });
+        assert_eq!(body["text"], "explain main.rs");
+        assert_eq!(body["attachment_ids"][0], 3);
+        assert_eq!(body["attachment_ids"][1], 9);
+    }
+
+    #[test]
+    fn record_msg_body_slash_model_keeps_command_and_arg() {
+        let body = record_msg_body(&crate::domain::Msg::Slash(crate::domain::SlashCmd::Model(
+            Some("anthropic/opus".to_string()),
+        )));
+        assert_eq!(body["command"], "model");
+        assert_eq!(body["arg"], "anthropic/opus");
+    }
+
+    #[test]
+    fn record_msg_body_runtime_signal_keeps_signal_name() {
+        let body = record_msg_body(&crate::domain::Msg::RuntimeSignal(
+            crate::domain::RuntimeSignal::Terminate,
+        ));
+        assert_eq!(body["signal"], "terminate");
+    }
+
+    #[test]
+    fn record_msg_body_marks_binary_paste_image_unrecordable() {
+        let body = record_msg_body(&crate::domain::Msg::Paste(crate::domain::Paste::Image {
+            bytes: vec![1, 2, 3],
+            format: "png".to_string(),
+        }));
+        assert_eq!(body["recordable"], false);
+        assert_eq!(body["type"], "image");
+        assert_eq!(body["size_bytes"], 3);
     }
 }

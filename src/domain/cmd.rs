@@ -27,6 +27,7 @@ use crate::models::ReasoningLevel;
 use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::session::ConversationHistory;
 
+use super::compaction::{CompactionArchive, CompactionRequest};
 use super::ids::{ToolCallId, TurnId};
 
 /// A single side-effect request. Most variants are one-shot; `CallModel`
@@ -38,13 +39,25 @@ pub enum Cmd {
     /// Dispatch the next chat request. Effect runner maps this onto
     /// `ModelProvider::chat` for the session's active provider.
     CallModel { turn: TurnId, request: ChatRequest },
+    /// Generate a compact context checkpoint without continuing into
+    /// a normal assistant turn.
+    CompactConversation {
+        turn: TurnId,
+        request: CompactionRequest,
+    },
     /// Run one tool in parallel with any other tools in the same turn.
     /// The runner wires `ExecContext::token` to the turn's scope so
     /// `Cmd::CancelScope` aborts them all at once.
+    ///
+    /// `model_id` is the active session's model id at the moment this
+    /// tool call was emitted. The runner passes it into `ExecContext`
+    /// so tools like `SubagentTool` can spawn children against the
+    /// same provider the parent is using.
     ExecuteTool {
         turn: TurnId,
         call_id: ToolCallId,
         source: ModelToolCall,
+        model_id: String,
     },
     /// Cancel every task in the given turn's `TurnScope`. After the
     /// scope drains, the runner emits a `Msg::StreamDone` (with a
@@ -57,6 +70,8 @@ pub enum Cmd {
     /// Save the current conversation to disk. No-op if unchanged since
     /// last save (effect-side idempotence).
     SaveConversation(ConversationHistory),
+    /// Persist the raw messages removed by a compaction.
+    SaveCompactionArchive(CompactionArchive),
     /// Persist the active model ID as `last_used_model`.
     PersistLastModel(String),
     /// Persist reasoning level tied to a specific model ID.
@@ -103,10 +118,18 @@ pub enum Cmd {
     /// via `OpenInSystem`. Emits no follow-up Msg on success; failure
     /// is a log-and-drop.
     WriteImageToTemp {
-        id: u64,
+        path: PathBuf,
         bytes: Vec<u8>,
         format: String,
     },
+
+    /// Read the system clipboard on a blocking task. The per-platform
+    /// dispatch (xclip / wl-paste / pngpaste / PowerShell) can block
+    /// for hundreds of ms on macOS via osascript, so it never runs on
+    /// the reducer thread. Emits `Msg::Paste(Paste::Image|Text)` on
+    /// success; `Msg::TransientStatus` when the clipboard is empty or
+    /// the read fails.
+    ReadClipboard,
 
     // ── Terminal lifecycle ──────────────────────────────────────────
     /// Exit the main loop. No reply message — the loop observes
@@ -171,9 +194,11 @@ impl Cmd {
     pub fn tag(&self) -> &'static str {
         match self {
             Cmd::CallModel { .. } => "call_model",
+            Cmd::CompactConversation { .. } => "compact_conversation",
             Cmd::ExecuteTool { .. } => "execute_tool",
             Cmd::CancelScope(_) => "cancel_scope",
             Cmd::SaveConversation(_) => "save_conversation",
+            Cmd::SaveCompactionArchive(_) => "save_compaction_archive",
             Cmd::PersistLastModel(_) => "persist_last_model",
             Cmd::PersistReasoningFor { .. } => "persist_reasoning_for",
             Cmd::RefreshInstructions => "refresh_instructions",
@@ -185,6 +210,7 @@ impl Cmd {
             Cmd::OpenInSystem(_) => "open_in_system",
             Cmd::DismissStatusAfter { .. } => "dismiss_status_after",
             Cmd::WriteImageToTemp { .. } => "write_image_to_temp",
+            Cmd::ReadClipboard => "read_clipboard",
             Cmd::Exit => "exit",
             Cmd::SetTerminalTitle(_) => "set_terminal_title",
         }
@@ -194,7 +220,10 @@ impl Cmd {
     /// can be cancelled by `Cmd::CancelScope`. The effect runner uses
     /// this to decide between "spawn into `JoinSet`" and "spawn detached".
     pub fn is_turn_scoped(&self) -> bool {
-        matches!(self, Cmd::CallModel { .. } | Cmd::ExecuteTool { .. })
+        matches!(
+            self,
+            Cmd::CallModel { .. } | Cmd::CompactConversation { .. } | Cmd::ExecuteTool { .. }
+        )
     }
 
     /// For traces + the `--record` file — some `Cmd` payloads are huge
@@ -208,16 +237,28 @@ impl Cmd {
                 request.model_id,
                 request.messages.len()
             ),
+            Cmd::CompactConversation { turn, request } => format!(
+                "compact_conversation(turn={}, model={}, trigger={}, msgs={})",
+                turn,
+                request.chat.model_id,
+                request.trigger.as_str(),
+                request.chat.messages.len()
+            ),
             Cmd::ExecuteTool {
                 turn,
                 call_id,
                 source,
+                model_id: _,
             } => format!(
                 "execute_tool(turn={}, call={}, fn={})",
                 turn, call_id, source.function.name
             ),
             Cmd::CancelScope(turn) => format!("cancel_scope(turn={})", turn),
             Cmd::SaveConversation(c) => format!("save_conversation(id={})", c.id),
+            Cmd::SaveCompactionArchive(a) => format!(
+                "save_compaction_archive(conversation={}, id={})",
+                a.conversation_id, a.id
+            ),
             Cmd::PersistLastModel(m) => format!("persist_last_model({})", m),
             Cmd::PersistReasoningFor { model_id, level } => {
                 format!("persist_reasoning_for({}, {:?})", model_id, level)
@@ -230,12 +271,17 @@ impl Cmd {
             Cmd::PullOllamaModel { model } => format!("pull_ollama_model({})", model),
             Cmd::OpenInSystem(p) => format!("open_in_system({})", p.display()),
             Cmd::DismissStatusAfter { ms } => format!("dismiss_status_after({}ms)", ms),
-            Cmd::WriteImageToTemp { id, format, bytes } => format!(
-                "write_image_to_temp(id={}, fmt={}, n={})",
-                id,
+            Cmd::WriteImageToTemp {
+                path,
+                format,
+                bytes,
+            } => format!(
+                "write_image_to_temp(path={}, fmt={}, n={})",
+                path.display(),
                 format,
                 bytes.len()
             ),
+            Cmd::ReadClipboard => "read_clipboard".to_string(),
             Cmd::Exit => "exit".to_string(),
             Cmd::SetTerminalTitle(t) => format!("set_terminal_title({})", t),
         }

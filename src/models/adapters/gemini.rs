@@ -551,14 +551,20 @@ impl GeminiAdapter {
             }
         }
 
-        let usage = TokenUsage {
-            prompt_tokens: json.usage_metadata.prompt_token_count.unwrap_or(0),
-            completion_tokens: json.usage_metadata.candidates_token_count.unwrap_or(0),
-            total_tokens: json.usage_metadata.total_token_count.unwrap_or_else(|| {
-                json.usage_metadata.prompt_token_count.unwrap_or(0)
-                    + json.usage_metadata.candidates_token_count.unwrap_or(0)
+        let prompt_tokens = json.usage_metadata.prompt_token_count.unwrap_or(0);
+        let completion_tokens = json.usage_metadata.candidates_token_count.unwrap_or(0);
+        let reasoning_tokens = json.usage_metadata.thoughts_token_count.unwrap_or(0);
+        let usage = TokenUsage::provider(
+            prompt_tokens,
+            completion_tokens,
+            json.usage_metadata.total_token_count.unwrap_or_else(|| {
+                prompt_tokens
+                    .saturating_add(completion_tokens)
+                    .saturating_add(reasoning_tokens)
             }),
-        };
+        )
+        .with_cached_input(json.usage_metadata.cached_content_token_count.unwrap_or(0))
+        .with_reasoning_output(reasoning_tokens);
 
         Ok(ModelResponse {
             content: text_acc,
@@ -613,19 +619,21 @@ impl GeminiAdapter {
         let total_tokens = if state.total_tokens > 0 {
             state.total_tokens
         } else {
-            state.prompt_tokens + state.completion_tokens
+            state
+                .prompt_tokens
+                .saturating_add(state.completion_tokens)
+                .saturating_add(state.reasoning_output_tokens)
         };
-        callback(StreamEvent::Done {
-            tokens: total_tokens,
-        });
+        // F3: wrapper emits the authoritative `Done`. See
+        // adapters/anthropic.rs for rationale.
 
         Ok(ModelResponse {
             content: state.text_acc,
-            usage: Some(TokenUsage {
-                prompt_tokens: state.prompt_tokens,
-                completion_tokens: state.completion_tokens,
-                total_tokens,
-            }),
+            usage: Some(
+                TokenUsage::provider(state.prompt_tokens, state.completion_tokens, total_tokens)
+                    .with_cached_input(state.cached_input_tokens)
+                    .with_reasoning_output(state.reasoning_output_tokens),
+            ),
             model_name: self.model_name.clone(),
             thinking: if state.thinking_acc.is_empty() {
                 None
@@ -653,6 +661,8 @@ struct StreamState {
     truncated: bool,
     prompt_tokens: usize,
     completion_tokens: usize,
+    cached_input_tokens: usize,
+    reasoning_output_tokens: usize,
     total_tokens: usize,
 }
 
@@ -697,6 +707,15 @@ fn process_chunk_payload(
         }
         if let Some(t) = usage.get("totalTokenCount").and_then(|v| v.as_u64()) {
             state.total_tokens = t as usize;
+        }
+        if let Some(cached) = usage
+            .get("cachedContentTokenCount")
+            .and_then(|v| v.as_u64())
+        {
+            state.cached_input_tokens = cached as usize;
+        }
+        if let Some(thoughts) = usage.get("thoughtsTokenCount").and_then(|v| v.as_u64()) {
+            state.reasoning_output_tokens = thoughts as usize;
         }
     }
 
@@ -859,6 +878,10 @@ struct UsageMetadata {
     prompt_token_count: Option<usize>,
     #[serde(default, rename = "candidatesTokenCount")]
     candidates_token_count: Option<usize>,
+    #[serde(default, rename = "cachedContentTokenCount")]
+    cached_content_token_count: Option<usize>,
+    #[serde(default, rename = "thoughtsTokenCount")]
+    thoughts_token_count: Option<usize>,
     #[serde(default, rename = "totalTokenCount")]
     total_token_count: Option<usize>,
 }

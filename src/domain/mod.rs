@@ -12,23 +12,37 @@
 
 pub mod action;
 pub mod cmd;
+pub mod compaction;
 pub mod ids;
 pub mod msg;
 pub mod reducer;
+pub mod runtime;
 pub mod slash_commands;
 pub mod state;
 pub mod transition;
 
 pub use action::{ActionDetails, ActionDisplay, ActionResult};
 pub use cmd::{ChatRequest, Cmd, ToolDefinition};
+pub use compaction::{
+    CompactionArchive, CompactionPolicy, CompactionRecord, CompactionRequest, CompactionResult,
+    CompactionTrigger, PreparedCompaction, build_replacement_messages, build_summary_request,
+    build_verification_request, combine_usage, compaction_receipt, context_exceeds_hard_limit,
+    format_compact_count, normalize_summary, prepare_compaction, should_auto_compact,
+};
 pub use ids::{IdAllocator, ToolCallId, TurnId};
 pub use msg::{Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig};
 pub use reducer::{build_chat_request, update};
+pub use runtime::{
+    ManagedProcess, ManagedProcessStatus, ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState,
+    RuntimeTimelineEvent, RuntimeTimelineKind, ToolArtifact, ToolMetadata, ToolRunMetadata,
+    ToolStatus,
+};
 pub use slash_commands::{COMMAND_REGISTRY, SlashCommand, filter_by_prefix};
 pub use state::{
-    Attachment, Confirmation, ConfirmationTarget, ConversationSummary, GenPhase, IdAllocatorBundle,
-    McpServerEntry, McpServerStatus, McpState, McpToolSpec, PendingToolCall, Session, State,
-    StatusKind, StatusLine, ToolOutcome, TurnState, UiMode, UiState,
+    Attachment, Confirmation, ConfirmationTarget, ContextUsageSnapshot, ConversationSummary,
+    GenPhase, IdAllocatorBundle, McpServerEntry, McpServerStatus, McpState, McpToolSpec,
+    PendingToolCall, PromptTokenBreakdown, Session, State, StatusKind, StatusLine,
+    TokenUsageTotals, ToolOutcome, TurnState, UiMode, UiState, estimate_context_usage_for_request,
 };
 pub use transition::{
     action_display_for, commit_assistant_message, fill_outcome, start_executing_tools,

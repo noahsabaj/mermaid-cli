@@ -10,6 +10,7 @@ pub mod anthropic;
 pub mod gemini;
 pub mod ollama;
 pub mod openai_compat;
+pub(crate) mod stream_bridge;
 
 use async_trait::async_trait;
 
