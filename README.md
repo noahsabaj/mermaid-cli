@@ -5,8 +5,8 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 ## Features
 
 - **Multi-Provider** — Ollama (local/cloud), Anthropic Claude, Google Gemini, OpenAI, Groq, OpenRouter, Cerebras, DeepInfra, Together, plus fully-custom OpenAI-compatible endpoints
-- **Native Tool Calling** — read, write, edit, execute commands, search the web, manage MCP servers
-- **Computer Use** — screenshot, click, type, scroll — full desktop control via vision models
+- **Native Tool Calling** — read, write, edit, delete, create directories, execute commands, search the web, spawn subagents, and call configured MCP tools
+- **Computer Use** — screenshot, click, type, press keys, scroll, move the mouse, and list windows on supported interactive desktop backends
 - **Subagents** — spawn parallel autonomous agents for independent tasks
 - **Agent Loop** — model calls tools autonomously, sees results, and continues until done
 - **Image Paste** — Ctrl+V to attach images for vision models (X11/Wayland/macOS/Windows)
@@ -39,20 +39,20 @@ Local inference requires [Ollama](https://ollama.com) (models auto-pull if not f
 
 ### Computer Use Dependencies (optional)
 
-For desktop control via screenshot/click/type tools:
+For full Linux desktop control via screenshot/click/type tools:
 
 ```bash
 # Linux / X11
-sudo apt install scrot xdotool
+sudo apt install scrot xdotool xclip
 
 # Linux / Wayland
-sudo apt install grim ydotool wtype
+sudo apt install grim ydotool wtype wl-clipboard
 
 # Screenshot downscaling (optional, for high-res displays)
 sudo apt install imagemagick
 ```
 
-macOS and Windows are supported through `screencapture`/`pngpaste` and PowerShell respectively. See `src/providers/tool/computer_use/` for the full platform matrix.
+Computer-use registration is backend-gated: Linux/X11 and Linux/Wayland are the current full-control backends. macOS currently supports screenshot capture through `screencapture` plus clipboard image paste through `pngpaste`/`osascript`; click/type/scroll are not yet ported there. Windows clipboard paste uses PowerShell, but the computer-use backend is not wired yet. See `src/providers/tool/computer_use/` for the implementation matrix.
 
 ## Usage
 
@@ -66,9 +66,12 @@ mermaid --model gemini/gemini-3.1-pro-preview   # Gemini (requires GOOGLE_API_KE
 mermaid --model openai/gpt-5                    # OpenAI (requires OPENAI_API_KEY)
 mermaid --model groq/qwen-qwq-32b               # Groq (requires GROQ_API_KEY)
 mermaid --reasoning high                        # Override default reasoning depth
+mermaid --path /path/to/project                  # Run against a specific project directory
+mermaid --record /tmp/session.jsonl              # Record reducer events for replay/debugging
 mermaid list                                    # List available models across providers
 mermaid status                                  # Check Ollama, MCP, and provider config
 mermaid init                                    # Create default config file
+mermaid cloud-setup                             # Configure Ollama Cloud API key
 mermaid run "fix the tests"                     # Non-interactive mode
 mermaid run "explain main.rs" -f json           # JSON output
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
@@ -83,15 +86,14 @@ mermaid mcp                                     # List configured MCP servers
 | Key | Action |
 |-----|--------|
 | Enter | Send message (or queue while the model is generating) |
-| Esc | Stop generation / clear input / dismiss command palette |
+| Esc | Stop generation / dismiss command palette or attachment focus |
 | Ctrl+C | Quit (auto-saves the session) |
 | Alt+T | Cycle reasoning level: `None → Low → Medium → High → Max → None` |
 | Ctrl+V | Paste image or text from clipboard |
 | Ctrl+Click | Open image from chat history |
 | `/` | Open slash-command palette (filter-as-you-type) |
 | Tab | In palette: complete highlighted command name |
-| Up/Down | Navigate input history; palette navigation; scroll chat |
-| Page Up/Down | Scroll chat |
+| Up/Down | Navigate input history; palette and conversation-list navigation |
 | Mouse Wheel | Scroll chat |
 
 ## Slash Commands
@@ -106,6 +108,9 @@ Type `/` to open the command palette (shows all commands with live filter); type
 | `/save [name]` | Save the current conversation |
 | `/load [id]` | Load a saved conversation by id |
 | `/list` | List saved conversations |
+| `/usage` | Show provider token usage and session totals |
+| `/context` | Show current context-window estimate and prompt budget |
+| `/compact [instructions]` | Compact conversation context with optional focus instructions |
 | `/cloud-setup` | Show Ollama Cloud API-key setup instructions |
 | `/help` (`/h`) | Show all commands |
 | `/quit` (`/q`) | Exit |
@@ -128,14 +133,14 @@ The model uses these autonomously via native tool calling:
 | `web_fetch` | Fetch URL content as markdown (Ollama Cloud) |
 | `agent` | Spawn autonomous sub-agent for parallel tasks |
 | `screenshot` | Capture the screen (fullscreen, focused window, monitor, region, or window by title) |
-| `list_windows` | List visible window titles (discovery for window-mode screenshots) |
+| `list_windows` | List visible window titles (X11-only discovery for window-mode screenshots) |
 | `click` | Click at screen coordinates (auto-screenshot after) |
 | `type_text` | Type text at cursor position (auto-screenshot after) |
 | `press_key` | Press key combos (ctrl+s, alt+tab, etc.) |
 | `scroll` | Scroll up or down |
 | `mouse_move` | Move mouse cursor without clicking |
 
-MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured.
+MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. Web tools are registered only when `OLLAMA_API_KEY` is set in the environment. Computer-use tools are advertised only in interactive TUI sessions when a usable desktop backend is detected.
 
 ## Project Instructions (MERMAID.md)
 
@@ -159,7 +164,7 @@ File size is capped at ~10k tokens; oversized content is truncated with a marker
 
 Config file: `~/.config/mermaid/config.toml` (Linux) or platform equivalent via `directories` crate.
 
-Run `mermaid init` to create a default config. Full surface:
+Run `mermaid init` to create a default config. Important fields in the current config schema:
 
 ```toml
 # Last model picked via `--model` — used by bare `mermaid` on next start
@@ -175,11 +180,17 @@ reasoning = "medium"  # none | minimal | low | medium | high | xhigh | max
 [ollama]
 host = "localhost"
 port = 11434
-# cloud_api_key = "your-key"  # for :cloud models + web_search/web_fetch
+# cloud_api_key = "your-key"  # for :cloud models
 # num_gpu = 10
+# num_thread = 8
 # num_ctx = 8192
+# numa = false
 
 [non_interactive]
+# Current v0.7 run behavior is controlled by CLI flags:
+#   mermaid run "prompt" --format json --max-tokens 4096 --no-execute
+# These fields remain in the schema for compatibility but are not the
+# source of truth for `mermaid run`.
 output_format = "text"
 max_tokens = 4096
 no_execute = false
@@ -198,6 +209,8 @@ no_execute = false
 
 [providers.groq]
 # api_key_env = "MY_GROQ_KEY"    # default: GROQ_API_KEY
+# base_url = "https://api.groq.com/openai/v1"
+# extra_headers = { "X-Custom-Header" = "value" }
 
 # Custom OpenAI-compatible provider (e.g., self-hosted vLLM)
 [providers.my-vllm]
@@ -228,7 +241,7 @@ Set the appropriate environment variable (or override via `[providers.<name>].ap
 | Together | `TOGETHER_API_KEY` | `together/deepseek-ai/DeepSeek-R1` |
 | Ollama Cloud | `OLLAMA_API_KEY` | `ollama/kimi-k2-thinking:cloud` |
 
-Web search and web fetch tools require an Ollama Cloud API key — set `OLLAMA_API_KEY` or `cloud_api_key` under `[ollama]`. Use `/cloud-setup` in the TUI for the full instructions.
+Ollama Cloud models use `OLLAMA_API_KEY` or `cloud_api_key` under `[ollama]`. Web search and web fetch tool registration currently requires `OLLAMA_API_KEY` in the environment. Use `mermaid cloud-setup` from your shell to save the config key for cloud models; `/cloud-setup` in the TUI points back to that shell command.
 
 ## License
 
