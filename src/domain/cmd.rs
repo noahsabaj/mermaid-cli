@@ -25,10 +25,12 @@ use crate::app::McpServerConfig;
 use crate::models::ChatMessage;
 use crate::models::ReasoningLevel;
 use crate::models::tool_call::ToolCall as ModelToolCall;
+use crate::runtime::TaskStatus;
 use crate::session::ConversationHistory;
 
-use super::compaction::{CompactionArchive, CompactionRequest};
+use super::compaction::{CompactionArchive, CompactionRecord, CompactionRequest};
 use super::ids::{ToolCallId, TurnId};
+use super::runtime::ManagedProcess;
 
 /// A single side-effect request. Most variants are one-shot; `CallModel`
 /// and `ExecuteTool` spawn long-running tasks inside a per-turn
@@ -71,7 +73,12 @@ pub enum Cmd {
     /// last save (effect-side idempotence).
     SaveConversation(ConversationHistory),
     /// Persist the raw messages removed by a compaction.
-    SaveCompactionArchive(CompactionArchive),
+    SaveCompactionArchive {
+        archive: CompactionArchive,
+        record: CompactionRecord,
+    },
+    /// Persist a daemon-visible background process record.
+    SaveProcess(ManagedProcess),
     /// Persist the active model ID as `last_used_model`.
     PersistLastModel(String),
     /// Persist reasoning level tied to a specific model ID.
@@ -91,6 +98,50 @@ pub enum Cmd {
     /// saved session (newest first). The reducer transitions to
     /// `UiMode::ConversationList` and the render shows the picker.
     ListConversations,
+    /// List durable daemon/runtime tasks.
+    ListRuntimeTasks { limit: usize },
+    /// Load one durable daemon/runtime task and its timeline.
+    LoadRuntimeTask { id: String },
+    /// List durable daemon/runtime background processes.
+    ListRuntimeProcesses { limit: usize },
+    /// Print one durable process log into the conversation.
+    ShowRuntimeProcessLogs { id: String },
+    /// Stop a durable process by pid.
+    StopRuntimeProcess { id: String },
+    /// Restart a durable process using its recorded command/cwd.
+    RestartRuntimeProcess { id: String },
+    /// Open a URL, path, or process target.
+    OpenRuntimeTarget { target: String },
+    /// Show listening ports.
+    ShowRuntimePorts,
+    /// List pending approval records.
+    ListRuntimeApprovals,
+    /// Mark one approval as approved or denied.
+    DecideRuntimeApproval { id: String, decision: String },
+    /// List restore checkpoints.
+    ListRuntimeCheckpoints { limit: usize },
+    /// List project/global memory.
+    ListRuntimeMemory,
+    /// List installed plugins.
+    ListRuntimePlugins,
+    /// Update one durable task's status.
+    UpdateRuntimeTaskStatus {
+        id: String,
+        status: TaskStatus,
+        final_report: Option<String>,
+    },
+    /// Create a shadow checkpoint for explicit paths.
+    CreateRuntimeCheckpoint { paths: Vec<PathBuf> },
+    /// Restore files from a shadow checkpoint.
+    RestoreRuntimeCheckpoint { id: String },
+    /// Persist a project memory entry from the TUI.
+    RememberRuntimeMemory { key: String, value: String },
+    /// Edit an existing memory entry from the TUI.
+    EditRuntimeMemory { id: String, value: String },
+    /// Soft-delete a memory entry from the TUI.
+    ForgetRuntimeMemory { id: String },
+    /// Show provider/model capability information.
+    ShowRuntimeModelInfo { model: String },
 
     // ── MCP lifecycle ───────────────────────────────────────────────
     /// Start every configured MCP server; each one emits
@@ -198,12 +249,33 @@ impl Cmd {
             Cmd::ExecuteTool { .. } => "execute_tool",
             Cmd::CancelScope(_) => "cancel_scope",
             Cmd::SaveConversation(_) => "save_conversation",
-            Cmd::SaveCompactionArchive(_) => "save_compaction_archive",
+            Cmd::SaveCompactionArchive { .. } => "save_compaction_archive",
+            Cmd::SaveProcess(_) => "save_process",
             Cmd::PersistLastModel(_) => "persist_last_model",
             Cmd::PersistReasoningFor { .. } => "persist_reasoning_for",
             Cmd::RefreshInstructions => "refresh_instructions",
             Cmd::LoadConversation(_) => "load_conversation",
             Cmd::ListConversations => "list_conversations",
+            Cmd::ListRuntimeTasks { .. } => "list_runtime_tasks",
+            Cmd::LoadRuntimeTask { .. } => "load_runtime_task",
+            Cmd::ListRuntimeProcesses { .. } => "list_runtime_processes",
+            Cmd::ShowRuntimeProcessLogs { .. } => "show_runtime_process_logs",
+            Cmd::StopRuntimeProcess { .. } => "stop_runtime_process",
+            Cmd::RestartRuntimeProcess { .. } => "restart_runtime_process",
+            Cmd::OpenRuntimeTarget { .. } => "open_runtime_target",
+            Cmd::ShowRuntimePorts => "show_runtime_ports",
+            Cmd::ListRuntimeApprovals => "list_runtime_approvals",
+            Cmd::DecideRuntimeApproval { .. } => "decide_runtime_approval",
+            Cmd::ListRuntimeCheckpoints { .. } => "list_runtime_checkpoints",
+            Cmd::ListRuntimeMemory => "list_runtime_memory",
+            Cmd::ListRuntimePlugins => "list_runtime_plugins",
+            Cmd::UpdateRuntimeTaskStatus { .. } => "update_runtime_task_status",
+            Cmd::CreateRuntimeCheckpoint { .. } => "create_runtime_checkpoint",
+            Cmd::RestoreRuntimeCheckpoint { .. } => "restore_runtime_checkpoint",
+            Cmd::RememberRuntimeMemory { .. } => "remember_runtime_memory",
+            Cmd::EditRuntimeMemory { .. } => "edit_runtime_memory",
+            Cmd::ForgetRuntimeMemory { .. } => "forget_runtime_memory",
+            Cmd::ShowRuntimeModelInfo { .. } => "show_runtime_model_info",
             Cmd::InitMcpServers(_) => "init_mcp_servers",
             Cmd::StopMcpServer { .. } => "stop_mcp_server",
             Cmd::PullOllamaModel { .. } => "pull_ollama_model",
@@ -255,10 +327,11 @@ impl Cmd {
             ),
             Cmd::CancelScope(turn) => format!("cancel_scope(turn={})", turn),
             Cmd::SaveConversation(c) => format!("save_conversation(id={})", c.id),
-            Cmd::SaveCompactionArchive(a) => format!(
+            Cmd::SaveCompactionArchive { archive, record } => format!(
                 "save_compaction_archive(conversation={}, id={})",
-                a.conversation_id, a.id
+                archive.conversation_id, record.id
             ),
+            Cmd::SaveProcess(p) => format!("save_process(id={}, pid={})", p.id, p.pid),
             Cmd::PersistLastModel(m) => format!("persist_last_model({})", m),
             Cmd::PersistReasoningFor { model_id, level } => {
                 format!("persist_reasoning_for({}, {:?})", model_id, level)
@@ -266,6 +339,38 @@ impl Cmd {
             Cmd::RefreshInstructions => "refresh_instructions".to_string(),
             Cmd::LoadConversation(id) => format!("load_conversation({})", id),
             Cmd::ListConversations => "list_conversations".to_string(),
+            Cmd::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={})", limit),
+            Cmd::LoadRuntimeTask { id } => format!("load_runtime_task({})", id),
+            Cmd::ListRuntimeProcesses { limit } => {
+                format!("list_runtime_processes(limit={})", limit)
+            },
+            Cmd::ShowRuntimeProcessLogs { id } => format!("show_runtime_process_logs({})", id),
+            Cmd::StopRuntimeProcess { id } => format!("stop_runtime_process({})", id),
+            Cmd::RestartRuntimeProcess { id } => format!("restart_runtime_process({})", id),
+            Cmd::OpenRuntimeTarget { target } => format!("open_runtime_target({})", target),
+            Cmd::ShowRuntimePorts => "show_runtime_ports".to_string(),
+            Cmd::ListRuntimeApprovals => "list_runtime_approvals".to_string(),
+            Cmd::DecideRuntimeApproval { id, decision } => {
+                format!("decide_runtime_approval({}, {})", id, decision)
+            },
+            Cmd::ListRuntimeCheckpoints { limit } => {
+                format!("list_runtime_checkpoints(limit={})", limit)
+            },
+            Cmd::ListRuntimeMemory => "list_runtime_memory".to_string(),
+            Cmd::ListRuntimePlugins => "list_runtime_plugins".to_string(),
+            Cmd::UpdateRuntimeTaskStatus { id, status, .. } => {
+                format!("update_runtime_task_status({}, {})", id, status)
+            },
+            Cmd::CreateRuntimeCheckpoint { paths } => {
+                format!("create_runtime_checkpoint(n={})", paths.len())
+            },
+            Cmd::RestoreRuntimeCheckpoint { id } => format!("restore_runtime_checkpoint({})", id),
+            Cmd::RememberRuntimeMemory { key, .. } => {
+                format!("remember_runtime_memory({})", key)
+            },
+            Cmd::EditRuntimeMemory { id, .. } => format!("edit_runtime_memory({})", id),
+            Cmd::ForgetRuntimeMemory { id } => format!("forget_runtime_memory({})", id),
+            Cmd::ShowRuntimeModelInfo { model } => format!("show_runtime_model_info({})", model),
             Cmd::InitMcpServers(m) => format!("init_mcp_servers(n={})", m.len()),
             Cmd::StopMcpServer { name } => format!("stop_mcp_server({})", name),
             Cmd::PullOllamaModel { model } => format!("pull_ollama_model({})", model),

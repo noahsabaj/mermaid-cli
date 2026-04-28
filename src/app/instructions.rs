@@ -1,11 +1,11 @@
-//! MERMAID.md project-instructions loader (Step 5h).
+//! Project-instructions loader (Step 5h).
 //!
 //! On session start, walk UP from the current working directory looking
-//! for `MERMAID.md`. Stop at the git root (any directory containing a
-//! `.git` entry) or at `$HOME`, whichever is reached first. Load the
-//! nearest file (single file wins — no merging up the tree); cap at
-//! `MAX_INSTRUCTIONS_BYTES`; pass the content to the model as a dynamic
-//! suffix on the system prompt.
+//! for repo instruction files. Stop at the git root (any directory
+//! containing a `.git` entry) or at `$HOME`, whichever is reached first.
+//! Load every supported file in the nearest matching directory; cap the
+//! combined body at `MAX_INSTRUCTIONS_BYTES`; pass the content to the
+//! model as a dynamic suffix on the system prompt.
 //!
 //! Auto-reload: before every model call, `refresh()` stats the loaded
 //! file's path and compares mtime. If the mtime moved, re-read; if the
@@ -13,24 +13,35 @@
 //! microseconds — no need for a filesystem watcher.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::constants::{INSTRUCTIONS_TRUNCATION_MARKER, MAX_INSTRUCTIONS_BYTES};
 
-/// Filename Mermaid looks for. Single canonical name in Step 5h —
-/// alternatives like `AGENTS.md` / `CLAUDE.md` deferred.
-const INSTRUCTIONS_FILENAME: &str = "MERMAID.md";
+/// Instruction files Mermaid understands. Mermaid-specific guidance is
+/// read first, then interoperable files used by other local agents.
+pub const INSTRUCTION_FILENAMES: &[&str] = &["MERMAID.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"];
 
 /// Hard cap on how many directory levels `find_mermaid_md` walks up
 /// before giving up. Guards against pathological symlink loops.
 const MAX_WALK_DEPTH: usize = 32;
 
-/// One-shot snapshot of the loaded MERMAID.md. Stored on `App` and
+/// One loaded instruction file inside a combined project-instructions
+/// snapshot.
+#[derive(Debug, Clone)]
+pub struct InstructionSource {
+    pub path: PathBuf,
+    pub mtime: SystemTime,
+    pub byte_len: usize,
+}
+
+/// One-shot snapshot of loaded project instructions. Stored on `App` and
 /// `NonInteractiveRunner` so the per-turn auto-reload check has
 /// something to compare against.
 #[derive(Debug, Clone)]
 pub struct LoadedInstructions {
-    /// Absolute path the content was read from.
+    /// Primary absolute path the content was read from. Kept for
+    /// compatibility with older renderer/status code; `sources`
+    /// carries the full set.
     pub path: PathBuf,
     /// File body, possibly truncated. The truncation marker is
     /// appended in-place so the model sees the elision.
@@ -43,6 +54,8 @@ pub struct LoadedInstructions {
     /// True when the file was larger than `MAX_INSTRUCTIONS_BYTES`
     /// and the content was clipped + marker appended.
     pub truncated: bool,
+    /// All files that contributed to `content`.
+    pub sources: Vec<InstructionSource>,
 }
 
 impl LoadedInstructions {
@@ -71,54 +84,96 @@ pub enum ReloadOutcome {
     Removed,
 }
 
-/// Walk UP from `start` looking for `MERMAID.md`. Stops at the first of:
+/// Walk UP from `start` looking for any supported instruction file.
+/// Stops at the first of:
 /// - a directory containing `.git` (the git root)
 /// - `$HOME` (don't search above the user's home)
 /// - filesystem root
 /// - `MAX_WALK_DEPTH` levels (symlink-loop guard)
 ///
-/// Returns the absolute path of the first MERMAID.md found, or `None`
-/// if no MERMAID.md exists in the bounded walk.
-pub fn find_mermaid_md(start: &Path) -> Option<PathBuf> {
+/// Returns all supported instruction files in the nearest matching
+/// directory, in precedence order, or an empty vec if none exist.
+pub fn find_instruction_files(start: &Path) -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut current = start.to_path_buf();
     for _ in 0..MAX_WALK_DEPTH {
-        // Check this directory for MERMAID.md.
-        let candidate = current.join(INSTRUCTIONS_FILENAME);
-        if candidate.is_file() {
-            return Some(candidate);
+        let found: Vec<PathBuf> = INSTRUCTION_FILENAMES
+            .iter()
+            .map(|name| current.join(name))
+            .filter(|candidate| candidate.is_file())
+            .chain(
+                [current.join(".mermaid").join("memory").join("memory.jsonl")]
+                    .into_iter()
+                    .filter(|candidate| candidate.is_file()),
+            )
+            .collect();
+        if !found.is_empty() {
+            return found;
         }
         // Stop at the git root (the .git entry itself ends the walk;
-        // most projects vendor a single MERMAID.md at the repo root).
+        // most projects vendor instruction files at the repo root).
         if current.join(".git").exists() {
-            return None;
+            return Vec::new();
         }
         // Stop at $HOME — don't search the user's home directory or
         // anything above it. Avoids accidentally picking up a
-        // long-forgotten MERMAID.md from a sibling project.
+        // long-forgotten instruction file from a sibling project.
         if let Some(ref h) = home
             && current == *h
         {
-            return None;
+            return Vec::new();
         }
         // Move up one level. If we're at the filesystem root, stop.
         match current.parent() {
             Some(parent) if parent != current => current = parent.to_path_buf(),
-            _ => return None,
+            _ => return Vec::new(),
         }
     }
-    None
+    Vec::new()
+}
+
+/// Backwards-compatible helper for callers that specifically want the
+/// nearest `MERMAID.md`.
+pub fn find_mermaid_md(start: &Path) -> Option<PathBuf> {
+    find_instruction_files(start)
+        .into_iter()
+        .find(|path| path.file_name().is_some_and(|name| name == "MERMAID.md"))
 }
 
 /// Read the file at `path`, truncate to `MAX_INSTRUCTIONS_BYTES` if
 /// oversized, and return a `LoadedInstructions`. Returns `None` if the
 /// file can't be read or doesn't exist.
 pub fn load_from_path(path: &Path) -> Option<LoadedInstructions> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let mtime = metadata.modified().ok()?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    let byte_len = raw.len();
-    let (content, truncated) = if byte_len > MAX_INSTRUCTIONS_BYTES {
+    load_from_paths(&[path.to_path_buf()])
+}
+
+/// Read and combine the instruction files at `paths`, truncating the
+/// combined body to `MAX_INSTRUCTIONS_BYTES` if needed.
+pub fn load_from_paths(paths: &[PathBuf]) -> Option<LoadedInstructions> {
+    let mut sources = Vec::new();
+    let mut bodies = Vec::new();
+    let mut total_byte_len = 0usize;
+    let mut latest_mtime = UNIX_EPOCH;
+
+    for path in paths {
+        let metadata = std::fs::metadata(path).ok()?;
+        let mtime = metadata.modified().ok()?;
+        let raw = std::fs::read_to_string(path).ok()?;
+        total_byte_len = total_byte_len.saturating_add(raw.len());
+        if mtime > latest_mtime {
+            latest_mtime = mtime;
+        }
+        sources.push(InstructionSource {
+            path: path.to_path_buf(),
+            mtime,
+            byte_len: raw.len(),
+        });
+        bodies.push((path.to_path_buf(), raw));
+    }
+    let primary = sources.first()?.path.clone();
+    let raw = combine_instruction_bodies(bodies);
+    let byte_len = total_byte_len;
+    let (content, truncated) = if raw.len() > MAX_INSTRUCTIONS_BYTES {
         // Char-boundary-safe truncation. `floor_char_boundary` stabilized
         // in Rust 1.91.0 — matches the crate MSRV pinned in `Cargo.toml`.
         let cut = raw.floor_char_boundary(MAX_INSTRUCTIONS_BYTES);
@@ -129,11 +184,12 @@ pub fn load_from_path(path: &Path) -> Option<LoadedInstructions> {
         (raw, false)
     };
     Some(LoadedInstructions {
-        path: path.to_path_buf(),
+        path: primary,
         content,
-        mtime,
+        mtime: latest_mtime,
         byte_len,
         truncated,
+        sources,
     })
 }
 
@@ -150,44 +206,54 @@ pub fn refresh(
     match current {
         Some(prior) => {
             // Stat the previously-loaded path to detect edits or removal.
-            let metadata = std::fs::metadata(&prior.path);
-            match metadata.and_then(|m| m.modified()) {
-                Ok(new_mtime) if new_mtime == prior.mtime => {
-                    // Hot path: no change.
-                    (Some(prior), ReloadOutcome::Unchanged)
-                },
-                Ok(_) => {
-                    // mtime changed — re-read.
-                    let old_tokens = prior.approx_tokens();
-                    let path = prior.path.clone();
-                    match load_from_path(&path) {
-                        Some(reloaded) => {
-                            let new_tokens = reloaded.approx_tokens();
-                            (
-                                Some(reloaded),
-                                ReloadOutcome::Reloaded {
-                                    old_tokens,
-                                    new_tokens,
-                                },
-                            )
+            let paths: Vec<PathBuf> = if prior.sources.is_empty() {
+                vec![prior.path.clone()]
+            } else {
+                prior
+                    .sources
+                    .iter()
+                    .map(|source| source.path.clone())
+                    .collect()
+            };
+            let changed = if prior.sources.is_empty() {
+                std::fs::metadata(&prior.path)
+                    .and_then(|m| m.modified())
+                    .map(|mtime| mtime != prior.mtime)
+                    .unwrap_or(true)
+            } else {
+                prior.sources.iter().any(|source| {
+                    std::fs::metadata(&source.path)
+                        .and_then(|m| m.modified())
+                        .map(|mtime| mtime != source.mtime)
+                        .unwrap_or(true)
+                })
+            };
+            if !changed {
+                return (Some(prior), ReloadOutcome::Unchanged);
+            }
+            let old_tokens = prior.approx_tokens();
+            match load_from_paths(&paths) {
+                Some(reloaded) => {
+                    let new_tokens = reloaded.approx_tokens();
+                    (
+                        Some(reloaded),
+                        ReloadOutcome::Reloaded {
+                            old_tokens,
+                            new_tokens,
                         },
-                        None => {
-                            // mtime moved but read failed (race or
-                            // permission) — treat as removed for safety.
-                            (None, ReloadOutcome::Removed)
-                        },
-                    }
+                    )
                 },
-                Err(_) => {
-                    // File is gone or no longer accessible.
+                None => {
+                    // mtime moved but read failed (race or permission)
+                    // — treat as removed for safety.
                     (None, ReloadOutcome::Removed)
                 },
             }
         },
         None => {
             // No prior load — re-walk in case the user created
-            // MERMAID.md after session start.
-            match find_mermaid_md(cwd).and_then(|p| load_from_path(&p)) {
+            // instruction files after session start.
+            match load_from_paths(&find_instruction_files(cwd)) {
                 Some(loaded) => {
                     let tokens = loaded.approx_tokens();
                     (Some(loaded), ReloadOutcome::LoadedFirst { tokens })
@@ -196,6 +262,27 @@ pub fn refresh(
             }
         },
     }
+}
+
+fn combine_instruction_bodies(bodies: Vec<(PathBuf, String)>) -> String {
+    if bodies.len() == 1 {
+        return bodies
+            .into_iter()
+            .next()
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+    }
+    bodies
+        .into_iter()
+        .map(|(path, body)| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("instructions");
+            format!("# Project Instructions: {}\n\n{}", name, body)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
 }
 
 #[cfg(test)]
@@ -222,6 +309,22 @@ mod tests {
         fs::write(dir.join("MERMAID.md"), "rules").unwrap();
         let found = find_mermaid_md(&dir).expect("should find");
         assert_eq!(found, dir.join("MERMAID.md"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_instruction_files_loads_interoperable_files() {
+        let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("agents");
+        fs::write(dir.join("AGENTS.md"), "agent rules").unwrap();
+        fs::write(dir.join("CLAUDE.md"), "claude rules").unwrap();
+        let found = find_instruction_files(&dir);
+        assert_eq!(found, vec![dir.join("AGENTS.md"), dir.join("CLAUDE.md")]);
+        let loaded = load_from_paths(&found).expect("load combined");
+        assert!(loaded.content.contains("# Project Instructions: AGENTS.md"));
+        assert!(loaded.content.contains("agent rules"));
+        assert!(loaded.content.contains("# Project Instructions: CLAUDE.md"));
+        assert_eq!(loaded.sources.len(), 2);
         let _ = fs::remove_dir_all(&dir);
     }
 

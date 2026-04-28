@@ -495,7 +495,7 @@ fn compaction_finished_replaces_history_and_archives_head() {
     );
     assert!(
         cmds.iter()
-            .any(|cmd| matches!(cmd, Cmd::SaveCompactionArchive(_)))
+            .any(|cmd| matches!(cmd, Cmd::SaveCompactionArchive { .. }))
     );
 }
 

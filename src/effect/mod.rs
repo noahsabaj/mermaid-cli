@@ -98,6 +98,8 @@ pub struct EffectRunner {
     /// Shared tool registry. See `providers` — same optionality
     /// rationale for unit tests.
     tools: Option<Arc<ToolRegistry>>,
+    /// Durable runtime task that owns work launched by this runner.
+    task_id: Option<String>,
 }
 
 impl EffectRunner {
@@ -110,7 +112,15 @@ impl EffectRunner {
             workdir,
             providers: None,
             tools: None,
+            task_id: None,
         }
+    }
+
+    /// Attach a durable runtime task id so tool runs, approvals,
+    /// checkpoints, compactions, and background processes can be linked.
+    pub fn with_task_id(mut self, task_id: Option<String>) -> Self {
+        self.task_id = task_id;
+        self
     }
 
     /// Attach provider + tool registries. Production wiring uses
@@ -157,6 +167,16 @@ impl EffectRunner {
     ) -> (Self, mpsc::Receiver<Msg>) {
         let (tx, rx) = mpsc::channel(MSG_CHANNEL_CAPACITY);
         (Self::new(tx, workdir).with_bindings(providers, tools), rx)
+    }
+
+    pub fn pair_from_with_task(
+        workdir: PathBuf,
+        providers: Arc<ProviderFactory>,
+        tools: Arc<ToolRegistry>,
+        task_id: Option<String>,
+    ) -> (Self, mpsc::Receiver<Msg>) {
+        let (runner, rx) = Self::pair_from(workdir, providers, tools);
+        (runner.with_task_id(task_id), rx)
     }
 
     /// Construct a runner that shares a pre-derived cancellation
@@ -255,6 +275,15 @@ impl EffectRunner {
                     enriched.append(&mut request.tools);
                     request.tools = enriched;
                 }
+                let _ = crate::runtime::run_plugin_hooks(
+                    "prompt_submit",
+                    &serde_json::json!({
+                        "turn_id": turn.0,
+                        "model_id": request.model_id.clone(),
+                        "message_count": request.messages.len(),
+                        "tool_count": request.tools.len(),
+                    }),
+                );
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
@@ -293,11 +322,12 @@ impl EffectRunner {
                     .as_ref()
                     .map(|p| Arc::new(p.config().clone()))
                     .unwrap_or_else(|| Arc::new(crate::app::Config::default()));
+                let task_id = self.task_id.clone();
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
                     dispatch_execute_tool(
-                        tx, tools, workdir, turn, call_id, source, token, config, model_id,
+                        tx, tools, workdir, turn, call_id, source, token, config, model_id, task_id,
                     )
                     .await;
                 });
@@ -318,13 +348,74 @@ impl EffectRunner {
                     }
                 });
             },
-            Cmd::SaveCompactionArchive(archive) => {
+            Cmd::SaveCompactionArchive { archive, record } => {
                 let workdir = self.workdir.clone();
+                let task_id = self.task_id.clone();
                 self.detached.spawn(async move {
                     if let Ok(manager) = crate::session::ConversationManager::new(&workdir)
-                        && let Err(err) = manager.save_compaction_archive(&archive)
                     {
-                        tracing::warn!(error = %err, "SaveCompactionArchive: failed to write archive");
+                        match manager.save_compaction_archive(&archive) {
+                            Ok(path) => {
+                                if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
+                                    let compaction_id = record.id.clone();
+                                    let conversation_id = archive.conversation_id.clone();
+                                    let _ =
+                                        store.compactions().create(crate::runtime::NewCompaction {
+                                            id: Some(record.id),
+                                            task_id: task_id.clone(),
+                                            session_id: Some(archive.conversation_id),
+                                            source_token_estimate: Some(record.before_tokens as i64),
+                                            summary_token_count: Some(record.summary_tokens as i64),
+                                            preserved_turns: Some(
+                                                record.preserved_message_count as i64,
+                                            ),
+                                            archive_path: Some(path.display().to_string()),
+                                            verification_status: Some("verified".to_string()),
+                                        });
+                                    let _ = crate::runtime::run_plugin_hooks(
+                                        "compaction",
+                                        &serde_json::json!({
+                                            "id": compaction_id,
+                                            "task_id": task_id.clone(),
+                                            "session_id": conversation_id,
+                                            "archive_path": path.display().to_string(),
+                                        }),
+                                    );
+                                }
+                            },
+                            Err(err) => {
+                                tracing::warn!(error = %err, "SaveCompactionArchive: failed to write archive");
+                            },
+                        }
+                    }
+                });
+            },
+            Cmd::SaveProcess(process) => {
+                let task_id = self.task_id.clone();
+                self.detached.spawn(async move {
+                    let status = match process.status {
+                        crate::domain::ManagedProcessStatus::Running => {
+                            crate::runtime::ProcessStatus::Running
+                        },
+                        crate::domain::ManagedProcessStatus::Exited => {
+                            crate::runtime::ProcessStatus::Exited
+                        },
+                        crate::domain::ManagedProcessStatus::Unknown => {
+                            crate::runtime::ProcessStatus::Unknown
+                        },
+                    };
+                    if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
+                        let _ = store.processes().upsert(crate::runtime::NewProcess {
+                            id: Some(process.id),
+                            task_id,
+                            pid: process.pid,
+                            command: process.command,
+                            cwd: process.cwd,
+                            log_path: Some(process.log_path),
+                            detected_url: process.detected_url,
+                            status,
+                            health: None,
+                        });
                     }
                 });
             },
@@ -384,6 +475,312 @@ impl EffectRunner {
                         Err(_) => Vec::new(),
                     };
                     let _ = tx.send(Msg::ConversationsListed(summaries)).await;
+                });
+            },
+            Cmd::ListRuntimeTasks { limit } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let tasks = crate::runtime::RuntimeClient::auto()
+                        .list_tasks(limit)
+                        .map(|read| read.value)
+                        .unwrap_or_default();
+                    let _ = tx.send(Msg::RuntimeTasksListed(tasks)).await;
+                });
+            },
+            Cmd::LoadRuntimeTask { id } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let (task, events) = crate::runtime::RuntimeClient::auto()
+                        .task_detail(&id)
+                        .map(|read| (Some(read.value.task), read.value.events))
+                        .unwrap_or((None, Vec::new()));
+                    let _ = tx.send(Msg::RuntimeTaskLoaded { task, events }).await;
+                });
+            },
+            Cmd::ListRuntimeProcesses { limit } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let processes = crate::runtime::RuntimeClient::auto()
+                        .list_processes(limit)
+                        .map(|read| read.value)
+                        .unwrap_or_default();
+                    let _ = tx.send(Msg::RuntimeProcessesListed(processes)).await;
+                });
+            },
+            Cmd::ShowRuntimeProcessLogs { id } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let text = crate::runtime::RuntimeClient::auto()
+                        .process_log(&id, None)
+                        .map(|log| format!("Process log {}\n\n{}", id, log.content))
+                        .unwrap_or_else(|err| format!("Process log error: {}", err));
+                    let _ = tx.send(Msg::RuntimeText(text)).await;
+                });
+            },
+            Cmd::StopRuntimeProcess { id } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let msg = match crate::runtime::RuntimeClient::auto().stop_process(&id) {
+                        Ok(response) => Msg::TransientStatus {
+                            text: format!("Stopped process {} (pid {})", id, response.item.pid),
+                            kind: crate::domain::StatusKind::Info,
+                            dismiss_ms: 3_000,
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Process stop failed: {}", err),
+                            kind: crate::domain::StatusKind::Warn,
+                            dismiss_ms: 5_000,
+                        },
+                    };
+                    let _ = tx.send(msg).await;
+                });
+            },
+            Cmd::RestartRuntimeProcess { id } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let msg = match crate::runtime::RuntimeClient::auto().restart_process(&id) {
+                        Ok(response) => Msg::TransientStatus {
+                            text: format!("Restarted process {} (pid {})", id, response.item.pid),
+                            kind: crate::domain::StatusKind::Info,
+                            dismiss_ms: 3_000,
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Process restart failed: {}", err),
+                            kind: crate::domain::StatusKind::Warn,
+                            dismiss_ms: 5_000,
+                        },
+                    };
+                    let _ = tx.send(msg).await;
+                });
+            },
+            Cmd::OpenRuntimeTarget { target } => {
+                self.detached.spawn(async move {
+                    let resolved = crate::runtime::RuntimeService::open_default()
+                        .and_then(|service| service.resolve_open_target(&target))
+                        .unwrap_or(target);
+                    crate::utils::open_file(resolved);
+                });
+            },
+            Cmd::ShowRuntimePorts => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let text = crate::runtime::RuntimeClient::auto()
+                        .ports()
+                        .map(|ports| format!("Listening TCP ports\n\n{}", ports.ports))
+                        .unwrap_or_else(|err| format!("Port inspection failed: {}", err));
+                    let _ = tx.send(Msg::RuntimeText(text)).await;
+                });
+            },
+            Cmd::ListRuntimeApprovals => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let approvals = crate::runtime::RuntimeClient::auto()
+                        .list_approvals()
+                        .map(|read| read.value)
+                        .unwrap_or_default();
+                    let _ = tx.send(Msg::RuntimeApprovalsListed(approvals)).await;
+                });
+            },
+            Cmd::DecideRuntimeApproval { id, decision } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let result = if decision == "approved" {
+                        crate::runtime::RuntimeClient::auto().approve(&id)
+                    } else {
+                        crate::runtime::RuntimeClient::auto().deny(&id)
+                    };
+                    let msg = match result {
+                        Ok(result) => Msg::TransientStatus {
+                            text: if result.replayed {
+                                format!("Approval {} {}: {}", id, decision, result.summary)
+                            } else {
+                                format!("Approval {} {}", id, decision)
+                            },
+                            kind: crate::domain::StatusKind::Info,
+                            dismiss_ms: 3_000,
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Approval update failed: {}", err),
+                            kind: crate::domain::StatusKind::Warn,
+                            dismiss_ms: 5_000,
+                        },
+                    };
+                    let _ = tx.send(msg).await;
+                });
+            },
+            Cmd::ListRuntimeCheckpoints { limit } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let checkpoints = crate::runtime::RuntimeClient::auto()
+                        .list_checkpoints(limit)
+                        .map(|read| read.value)
+                        .unwrap_or_default();
+                    let _ = tx.send(Msg::RuntimeCheckpointsListed(checkpoints)).await;
+                });
+            },
+            Cmd::ListRuntimeMemory => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let memory = crate::runtime::RuntimeClient::auto()
+                        .list_memory(None)
+                        .map(|read| read.value)
+                        .unwrap_or_default();
+                    let _ = tx.send(Msg::RuntimeMemoryListed(memory)).await;
+                });
+            },
+            Cmd::ListRuntimePlugins => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let plugins = crate::runtime::RuntimeClient::auto()
+                        .list_plugins()
+                        .map(|read| read.value)
+                        .unwrap_or_default();
+                    let _ = tx.send(Msg::RuntimePluginsListed(plugins)).await;
+                });
+            },
+            Cmd::UpdateRuntimeTaskStatus {
+                id,
+                status,
+                final_report,
+            } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let msg = match crate::runtime::RuntimeStore::open_default().and_then(|store| {
+                        store
+                            .tasks()
+                            .update_status(&id, status, final_report.as_deref())
+                    }) {
+                        Ok(()) => Msg::TransientStatus {
+                            text: format!("Task {} -> {}", id, status),
+                            kind: crate::domain::StatusKind::Info,
+                            dismiss_ms: 3_000,
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Task update failed: {}", err),
+                            kind: crate::domain::StatusKind::Warn,
+                            dismiss_ms: 4_000,
+                        },
+                    };
+                    let _ = tx.send(msg).await;
+                });
+            },
+            Cmd::CreateRuntimeCheckpoint { paths } => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    let pending_action = Some(serde_json::json!({
+                        "source": "tui",
+                        "command": "checkpoint",
+                    }));
+                    let msg =
+                        match crate::runtime::create_checkpoint(&workdir, &paths, pending_action) {
+                            Ok(manifest) => Msg::TransientStatus {
+                                text: format!(
+                                    "Checkpoint {} created for {} path(s)",
+                                    manifest.id,
+                                    manifest.files.len()
+                                ),
+                                kind: crate::domain::StatusKind::Info,
+                                dismiss_ms: 4_000,
+                            },
+                            Err(err) => Msg::TransientStatus {
+                                text: format!("Checkpoint failed: {}", err),
+                                kind: crate::domain::StatusKind::Warn,
+                                dismiss_ms: 5_000,
+                            },
+                        };
+                    let _ = tx.send(msg).await;
+                });
+            },
+            Cmd::RestoreRuntimeCheckpoint { id } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let msg = match crate::runtime::RuntimeClient::auto().restore_checkpoint(&id) {
+                        Ok(result) => Msg::TransientStatus {
+                            text: format!(
+                                "Restored checkpoint {} ({} file(s)){}",
+                                result.checkpoint.id,
+                                result.checkpoint.files.len(),
+                                if result.checkpoint.pending_action.is_some() {
+                                    "; pending action available in checkpoint manifest"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            kind: crate::domain::StatusKind::Info,
+                            dismiss_ms: 4_000,
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Restore failed: {}", err),
+                            kind: crate::domain::StatusKind::Warn,
+                            dismiss_ms: 5_000,
+                        },
+                    };
+                    let _ = tx.send(msg).await;
+                });
+            },
+            Cmd::RememberRuntimeMemory { key, value } => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    let msg = match remember_runtime_memory(&workdir, key, value) {
+                        Ok(id) => Msg::TransientStatus {
+                            text: format!("Memory written: {}", id),
+                            kind: crate::domain::StatusKind::Info,
+                            dismiss_ms: 3_000,
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Memory write failed: {}", err),
+                            kind: crate::domain::StatusKind::Warn,
+                            dismiss_ms: 4_000,
+                        },
+                    };
+                    let _ = tx.send(msg).await;
+                });
+            },
+            Cmd::EditRuntimeMemory { id, value } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let msg = match crate::runtime::RuntimeClient::auto()
+                        .edit_memory(&id, &value, "tui")
+                    {
+                        Ok(_) => Msg::TransientStatus {
+                            text: format!("Updated memory {}", id),
+                            kind: crate::domain::StatusKind::Info,
+                            dismiss_ms: 3_000,
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Memory update failed: {}", err),
+                            kind: crate::domain::StatusKind::Warn,
+                            dismiss_ms: 5_000,
+                        },
+                    };
+                    let _ = tx.send(msg).await;
+                });
+            },
+            Cmd::ForgetRuntimeMemory { id } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let msg = match crate::runtime::RuntimeClient::auto().forget_memory(&id) {
+                        Ok(()) => Msg::TransientStatus {
+                            text: format!("Forgot {}", id),
+                            kind: crate::domain::StatusKind::Info,
+                            dismiss_ms: 3_000,
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Forget failed: {}", err),
+                            kind: crate::domain::StatusKind::Warn,
+                            dismiss_ms: 4_000,
+                        },
+                    };
+                    let _ = tx.send(msg).await;
+                });
+            },
+            Cmd::ShowRuntimeModelInfo { model } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let text = runtime_model_info_text(&model);
+                    let _ = tx.send(Msg::RuntimeText(text)).await;
                 });
             },
             Cmd::InitMcpServers(configs) => {
@@ -548,6 +945,20 @@ async fn dispatch_call_model(
             return;
         },
     };
+    record_provider_capabilities(&request.model_id, provider.capabilities());
+    if !request.tools.is_empty() && !provider.capabilities().supports_tools {
+        let _ = msg_tx
+            .send(Msg::TransientStatus {
+                text: format!(
+                    "{} does not advertise tool support; Mermaid will send the turn without tools",
+                    request.model_id
+                ),
+                kind: crate::domain::StatusKind::Warn,
+                dismiss_ms: 6_000,
+            })
+            .await;
+        request.tools.clear();
+    }
 
     let max_context_tokens = provider.capabilities().max_context_tokens.or_else(|| {
         crate::domain::runtime::infer_static_context_window_for_model_id(&request.model_id)
@@ -697,6 +1108,7 @@ async fn dispatch_call_model(
                 }
             }
             let error = classify_error_for_ui(&e);
+            run_provider_error_hook(&request.model_id, &error);
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
         },
     }
@@ -736,15 +1148,30 @@ async fn dispatch_provider_stream(
         }
     });
 
+    let model_id = request.model_id.clone();
     match provider.chat(request, ctx).await {
         Ok(_) | Err(ModelError::Cancelled) => {},
         Err(e) => {
             let error = classify_error_for_ui(&e);
+            run_provider_error_hook(&model_id, &error);
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
         },
     }
 
     let _ = relay.await;
+}
+
+fn run_provider_error_hook(model_id: &str, error: &crate::models::UserFacingError) {
+    let _ = crate::runtime::run_plugin_hooks(
+        "provider_error",
+        &serde_json::json!({
+            "model_id": model_id,
+            "summary": &error.summary,
+            "message": &error.message,
+            "category": format!("{:?}", error.category),
+            "recoverable": error.recoverable,
+        }),
+    );
 }
 
 async fn dispatch_compact_conversation(
@@ -953,6 +1380,54 @@ async fn collect_compaction_text(
     }
 }
 
+fn record_provider_capabilities(
+    model_id: &str,
+    caps: &crate::providers::capabilities::Capabilities,
+) {
+    let (provider, model) = split_model_id(model_id);
+    if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
+        for (key, value) in [
+            ("tools_support", caps.supports_tools.to_string()),
+            ("vision_support", caps.supports_vision.to_string()),
+            (
+                "context_limit",
+                caps.max_context_tokens
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ),
+            (
+                "reasoning_parameter_shape",
+                format!("{:?}", caps.supports_reasoning),
+            ),
+            (
+                "streaming_usage_available",
+                "provider_dependent".to_string(),
+            ),
+            ("token_usage_field_shape", "normalized".to_string()),
+        ] {
+            let _ = store
+                .provider_probes()
+                .upsert(crate::runtime::NewProviderProbe {
+                    provider: provider.clone(),
+                    model_id: model.clone(),
+                    capability_key: key.to_string(),
+                    capability_value: value,
+                    confidence: "verified".to_string(),
+                    error: None,
+                });
+        }
+    }
+}
+
+fn split_model_id(model_id: &str) -> (String, String) {
+    match model_id.split_once('/') {
+        Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
+            (provider.to_ascii_lowercase(), model.to_string())
+        },
+        _ => ("ollama".to_string(), model_id.to_string()),
+    }
+}
+
 fn is_context_limit_error(error: &ModelError) -> bool {
     let text = error.to_string().to_lowercase();
     text.contains("context")
@@ -974,6 +1449,7 @@ async fn dispatch_execute_tool(
     token: tokio_util::sync::CancellationToken,
     config: Arc<crate::app::Config>,
     model_id: String,
+    task_id: Option<String>,
 ) {
     let _ = msg_tx.send(Msg::ToolStarted { turn, call_id }).await;
 
@@ -1024,16 +1500,16 @@ async fn dispatch_execute_tool(
             source.function.arguments.clone(),
         )
     };
+    let tool_run_id = start_runtime_tool_run(task_id.as_deref(), turn, call_id, tool_key, &args);
 
     let Some(tool) = registry.get(tool_key) else {
+        let outcome = crate::domain::ToolOutcome::error(format!("unknown tool: {}", tool_key), 0.0);
+        finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
         let _ = msg_tx
             .send(Msg::ToolFinished {
                 turn,
                 call_id,
-                outcome: crate::domain::ToolOutcome::error(
-                    format!("unknown tool: {}", tool_key),
-                    0.0,
-                ),
+                outcome,
             })
             .await;
         return;
@@ -1062,8 +1538,32 @@ async fn dispatch_execute_tool(
         }
     });
 
-    let ctx = ExecContext::new(token, progress_tx, call_id, turn, workdir, config, model_id);
+    let ctx = ExecContext::new(
+        token,
+        progress_tx,
+        call_id,
+        turn,
+        workdir,
+        config,
+        model_id,
+        task_id,
+    );
+    let before_payload = serde_json::json!({
+        "turn_id": turn.0,
+        "call_id": call_id.0,
+        "tool": tool_key,
+    });
+    let _ = crate::runtime::run_plugin_hooks("before_tool_use", &before_payload);
     let outcome = tool.execute(args, ctx).await;
+    let after_payload = serde_json::json!({
+        "turn_id": turn.0,
+        "call_id": call_id.0,
+        "tool": tool_key,
+        "status": tool_status_label(outcome.status),
+        "summary": &outcome.summary,
+    });
+    let _ = crate::runtime::run_plugin_hooks("after_tool_use", &after_payload);
+    finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
     let _ = progress_relay.await;
     let _ = msg_tx
         .send(Msg::ToolFinished {
@@ -1072,6 +1572,94 @@ async fn dispatch_execute_tool(
             outcome,
         })
         .await;
+}
+
+fn start_runtime_tool_run(
+    task_id: Option<&str>,
+    turn: TurnId,
+    call_id: crate::domain::ToolCallId,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<String> {
+    crate::runtime::RuntimeStore::open_default()
+        .and_then(|store| {
+            store.tool_runs().start(crate::runtime::NewToolRun {
+                id: None,
+                task_id: task_id.map(str::to_string),
+                turn_id: Some(turn.0.to_string()),
+                call_id: Some(call_id.0.to_string()),
+                tool_name: tool_name.to_string(),
+                args_json: serde_json::to_string(args).ok(),
+            })
+        })
+        .map(|record| record.id)
+        .ok()
+}
+
+fn finish_runtime_tool_run(tool_run_id: Option<&str>, outcome: &crate::domain::ToolOutcome) {
+    let Some(tool_run_id) = tool_run_id else {
+        return;
+    };
+    let output_json = serde_json::to_string(&serde_json::json!({
+        "status": tool_status_label(outcome.status),
+        "summary": &outcome.summary,
+        "model_content": &outcome.model_content,
+        "error": &outcome.error,
+        "metadata": &outcome.metadata,
+        "artifacts": &outcome.artifacts,
+        "duration_secs": outcome.duration_secs,
+    }))
+    .ok();
+    if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
+        let _ = store.tool_runs().finish(
+            tool_run_id,
+            tool_status_label(outcome.status),
+            output_json.as_deref(),
+        );
+    }
+}
+
+fn tool_status_label(status: crate::domain::ToolStatus) -> &'static str {
+    match status {
+        crate::domain::ToolStatus::Success => "success",
+        crate::domain::ToolStatus::Error => "error",
+        crate::domain::ToolStatus::Cancelled => "cancelled",
+    }
+}
+
+fn runtime_model_info_text(model: &str) -> String {
+    let snapshot = crate::domain::runtime::ProviderCapabilitySnapshot::from_model_id(model);
+    let mut lines = vec![
+        format!("Model info: {}", model),
+        format!("- provider: {}", snapshot.provider),
+        format!("- model: {}", snapshot.model),
+        format!("- supports tools: {}", snapshot.supports_tools),
+        format!("- supports vision: {}", snapshot.supports_vision),
+        format!("- reasoning: {}", snapshot.reasoning),
+        format!(
+            "- context limit: {}",
+            snapshot
+                .max_context_tokens
+                .map(|value: usize| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+    ];
+    if let Ok(store) = crate::runtime::RuntimeStore::open_default()
+        && let Ok(probes) = store
+            .provider_probes()
+            .list(Some(&snapshot.provider), Some(&snapshot.model))
+        && !probes.is_empty()
+    {
+        lines.push(String::new());
+        lines.push("Cached provider reality records:".to_string());
+        for probe in probes {
+            lines.push(format!(
+                "- {} = {} ({})",
+                probe.capability_key, probe.capability_value, probe.confidence
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 /// Spawn `ollama pull <model>` and stream its stdout lines as
@@ -1134,6 +1722,18 @@ async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
                 .await;
         },
     }
+}
+
+fn remember_runtime_memory(
+    workdir: &std::path::Path,
+    key: String,
+    value: String,
+) -> anyhow::Result<String> {
+    let project_path = workdir.display().to_string();
+    let entry = crate::runtime::RuntimeClient::auto()
+        .remember_memory(Some(project_path), &key, &value, "tui")?
+        .value;
+    Ok(entry.id)
 }
 
 fn mcp_startup_msg(name: &str, started: bool, tools: Vec<crate::domain::McpToolSpec>) -> Msg {

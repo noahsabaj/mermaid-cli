@@ -1,5 +1,6 @@
 use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERATURE};
 use crate::models::ReasoningLevel;
+use crate::runtime::{PolicyOverride, SafetyMode};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,44 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub reasoning_per_model: HashMap<String, ReasoningLevel>,
+
+    /// Named model profiles that agents/plugins can request without
+    /// hardcoding a concrete provider model. Values are full model IDs.
+    /// Example:
+    /// ```toml
+    /// [model_profiles]
+    /// fast = "ollama/qwen3-coder:14b"
+    /// large-context = "openai/gpt-5.2"
+    /// tool-strong = "anthropic/claude-sonnet-4-6"
+    /// vision = "gemini/gemini-2.5-pro"
+    /// cheap = "groq/llama-3.3-70b-versatile"
+    /// ```
+    #[serde(default)]
+    pub model_profiles: HashMap<String, String>,
+
+    /// Runtime safety policy. The current TUI defaults to full-access
+    /// compatibility, while the daemon/desktop surfaces can tighten this.
+    #[serde(default)]
+    pub safety: SafetyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SafetyConfig {
+    pub mode: SafetyMode,
+    pub checkpoint_on_mutation: bool,
+    #[serde(default)]
+    pub overrides: Vec<PolicyOverride>,
+}
+
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            mode: SafetyMode::FullAccess,
+            checkpoint_on_mutation: true,
+            overrides: Vec::new(),
+        }
+    }
 }
 
 /// User-supplied OpenAI-compatible provider configuration. All fields are
@@ -300,9 +339,15 @@ pub fn persist_reasoning_for_model(model_id: &str, level: ReasoningLevel) -> Res
 /// Resolve which model to use: CLI arg > last_used > default_model > any available
 pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyhow::Result<String> {
     if let Some(model) = cli_model {
+        if let Some(resolved) = resolve_model_profile_alias(model, config)? {
+            return Ok(resolved);
+        }
         return Ok(model.to_string());
     }
     if let Some(last_model) = &config.last_used_model {
+        if let Some(resolved) = resolve_model_profile_alias(last_model, config)? {
+            return Ok(resolved);
+        }
         return Ok(last_model.clone());
     }
     if !config.default_model.provider.is_empty() && !config.default_model.name.is_empty() {
@@ -319,6 +364,25 @@ pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyho
         .first()
         .ok_or_else(|| anyhow::anyhow!("require_any_model returned empty list"))?;
     Ok(format!("ollama/{}", first))
+}
+
+fn resolve_model_profile_alias(requested: &str, config: &Config) -> anyhow::Result<Option<String>> {
+    let profile = requested.strip_prefix("profile:").unwrap_or(requested);
+    if let Some(model) = config.model_profiles.get(profile) {
+        anyhow::ensure!(
+            !model.trim().is_empty(),
+            "model profile `{}` is configured with an empty model id",
+            profile
+        );
+        return Ok(Some(model.clone()));
+    }
+    if requested.starts_with("profile:") {
+        anyhow::bail!(
+            "model profile `{}` is not configured; add it under [model_profiles]",
+            profile
+        );
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -355,6 +419,32 @@ mod tests {
         let back: ModelSettings = toml::from_str(&toml_blob).expect("deserialize");
         assert_eq!(back.reasoning, ReasoningLevel::High);
         assert_eq!(back.name, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn configured_model_profile_resolves_explicit_alias() {
+        let mut config = Config::default();
+        config
+            .model_profiles
+            .insert("fast".to_string(), "ollama/qwen3-coder:14b".to_string());
+        assert_eq!(
+            resolve_model_profile_alias("fast", &config).unwrap(),
+            Some("ollama/qwen3-coder:14b".to_string())
+        );
+        assert_eq!(
+            resolve_model_profile_alias("profile:fast", &config).unwrap(),
+            Some("ollama/qwen3-coder:14b".to_string())
+        );
+    }
+
+    #[test]
+    fn profile_prefix_requires_configuration() {
+        let config = Config::default();
+        assert!(resolve_model_profile_alias("profile:vision", &config).is_err());
+        assert_eq!(
+            resolve_model_profile_alias("vision", &config).unwrap(),
+            None
+        );
     }
 
     /// `persist_default_reasoning` writes to the real config path, so

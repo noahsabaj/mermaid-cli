@@ -50,7 +50,9 @@ use crate::constants::MAX_RESPONSE_CHARS;
 use crate::models::ModelCapabilities;
 use crate::models::config::ModelConfig;
 use crate::models::error::{BackendError, ModelError, Result};
-use crate::models::providers::{ProviderProfile, ReasoningExtraction, ReasoningStrategy};
+use crate::models::providers::{
+    MaxTokensParam, ProviderProfile, ReasoningExtraction, ReasoningStrategy,
+};
 use crate::models::reasoning::{
     ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort,
 };
@@ -228,14 +230,24 @@ impl OpenAICompatAdapter {
 
         if !tools.is_empty() {
             body["tools"] = json!(tools);
+            if self
+                .profile
+                .disable_parallel_tool_calls_for
+                .contains(&self.model_name.as_str())
+            {
+                body["parallel_tool_calls"] = json!(false);
+            }
         }
 
-        // `max_tokens` field — OpenAI's parameter is `max_tokens` for
-        // Chat Completions (`max_completion_tokens` for the Responses
-        // API, which we don't target here). Some providers honor it,
-        // some clamp silently — passing it always is the correct default.
+        // Completion budget spelling is provider-specific even inside the
+        // OpenAI-compatible family.
         if config.max_tokens > 0 {
-            body["max_tokens"] = json!(config.max_tokens);
+            match self.profile.max_tokens_param {
+                MaxTokensParam::MaxTokens => body["max_tokens"] = json!(config.max_tokens),
+                MaxTokensParam::MaxCompletionTokens => {
+                    body["max_completion_tokens"] = json!(config.max_tokens);
+                },
+            }
         }
 
         // Reasoning depth: snap the requested level onto what the model
@@ -1219,6 +1231,54 @@ mod tests {
         assert!(body["tools"].is_array());
         assert_eq!(body["tools"].as_array().unwrap().len(), 5);
         assert_eq!(body["temperature"], config.temperature);
+    }
+
+    #[test]
+    fn cerebras_uses_supported_token_budget_field() {
+        let cerebras = lookup_provider("cerebras").unwrap();
+        let adapter = OpenAICompatAdapter::new(
+            cerebras,
+            cerebras.base_url.to_string(),
+            "k".to_string(),
+            "gpt-oss-120b".to_string(),
+            HashMap::new(),
+        )
+        .unwrap();
+        let messages = vec![ChatMessage::user("hi")];
+        let config = ModelConfig {
+            max_tokens: 1234,
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&messages, &config, true);
+        assert_eq!(body["max_completion_tokens"], 1234);
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn cerebras_gpt_oss_disables_parallel_tool_calls() {
+        let cerebras = lookup_provider("cerebras").unwrap();
+        let adapter = OpenAICompatAdapter::new(
+            cerebras,
+            cerebras.base_url.to_string(),
+            "k".to_string(),
+            "gpt-oss-120b".to_string(),
+            HashMap::new(),
+        )
+        .unwrap();
+        let messages = vec![ChatMessage::user("hi")];
+        let config = ModelConfig {
+            tools: vec![serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "read a file",
+                    "parameters": {"type": "object"}
+                }
+            })],
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&messages, &config, true);
+        assert_eq!(body["parallel_tool_calls"], false);
     }
 
     #[test]

@@ -11,7 +11,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Agent Loop** — model calls tools autonomously, sees results, and continues until done
 - **Image Paste** — Ctrl+V to attach images for vision models (X11/Wayland/macOS/Windows)
 - **Reasoning Levels** — seven tiers (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`); cycle with Alt+T or set via `/reasoning`; persisted per-model
-- **MERMAID.md** — auto-loaded project-level instructions; edits take effect on the next turn
+- **Project Instructions** — auto-loads `MERMAID.md`, `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`; edits take effect on the next turn
 - **MCP Servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers (`mermaid add <name>`)
 - **Session Persistence** — conversations auto-save and resume with `--continue`
 - **Message Queuing** — type while the model generates, messages send in order
@@ -74,6 +74,13 @@ mermaid init                                    # Create default config file
 mermaid cloud-setup                             # Configure Ollama Cloud API key
 mermaid run "fix the tests"                     # Non-interactive mode
 mermaid run "explain main.rs" -f json           # JSON output
+mermaidd                                        # Start daemon runtime
+mermaid daemon install --start                  # Install/start Linux user service
+mermaid daemon status                           # Inspect systemd service state
+mermaid daemon logs -f                          # Tail daemon journal logs
+mermaid tasks / approvals / checkpoints          # Inspect daemon state
+mermaid approve <id> / deny <id>                # Decide approval records
+mermaid tool-runs                               # Inspect persisted tool calls
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
 mermaid remove <name>                           # Remove a configured MCP server
 mermaid mcp                                     # List configured MCP servers
@@ -111,6 +118,15 @@ Type `/` to open the command palette (shows all commands with live filter); type
 | `/usage` | Show provider token usage and session totals |
 | `/context` | Show current context-window estimate and prompt budget |
 | `/compact [instructions]` | Compact conversation context with optional focus instructions |
+| `/tasks`, `/task <id>` | Inspect durable runtime tasks |
+| `/pause <id>`, `/resume <id>`, `/cancel [id]` | Control durable tasks or cancel the active turn |
+| `/handoff [id]`, `/report [id]` | Write a handoff/current-context report or inspect a task report |
+| `/processes`, `/logs <id>`, `/stop <id>`, `/restart <id>`, `/open <target>`, `/ports` | Inspect and control daemon-managed processes |
+| `/approvals`, `/approve <id>`, `/deny <id>` | Inspect and decide pending approval records |
+| `/checkpoint <path...>`, `/checkpoints`, `/restore <id>` | Create, inspect, and restore shadow checkpoints |
+| `/memory`, `/memory edit <id> <value>`, `/remember <key> <value>`, `/forget <id>` | Inspect and manage project/global memory |
+| `/plugins` | Inspect installed plugin bundles |
+| `/model-info <model>` | Inspect cached/static provider capability records |
 | `/cloud-setup` | Show Ollama Cloud API-key setup instructions |
 | `/help` (`/h`) | Show all commands |
 | `/quit` (`/q`) | Exit |
@@ -142,9 +158,9 @@ The model uses these autonomously via native tool calling:
 
 MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. Web tools are registered only when `OLLAMA_API_KEY` is set in the environment. Computer-use tools are advertised only in interactive TUI sessions when a usable desktop backend is detected.
 
-## Project Instructions (MERMAID.md)
+## Project Instructions
 
-Create a `MERMAID.md` at your project root with conventions, tool versions, naming patterns, and run commands — Mermaid loads it automatically at session start and auto-reloads when the file changes (one `stat` per turn, no filesystem watcher). The walk stops at the `.git` root or `$HOME`.
+Create a `MERMAID.md` at your project root with conventions, tool versions, naming patterns, and run commands. Mermaid also reads interoperable `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and `.mermaid/memory/memory.jsonl` from the same nearest matching directory, then auto-reloads when those files change (one `stat` per turn, no filesystem watcher). The walk stops at the `.git` root or `$HOME`.
 
 ```markdown
 # Project: foo-service
@@ -159,6 +175,18 @@ Create a `MERMAID.md` at your project root with conventions, tool versions, nami
 ```
 
 File size is capped at ~10k tokens; oversized content is truncated with a marker so the model knows context was elided.
+
+## Runtime, Daemon, And Desktop
+
+`mermaidd` owns durable runtime state in `~/.local/share/mermaid/runtime.sqlite3` and exposes a local Unix-socket JSONL control surface at `~/.local/share/mermaid/mermaidd.sock` plus localhost TCP on `127.0.0.1:39871` unless `MERMAID_DAEMON_DISABLE_TCP=1` is set. Mutating Unix-socket JSON commands require a pairing token; TCP clients require a token for every command except health checks. Create one with `mermaid pair --label <device>` and pass it as `MERMAID_DAEMON_TOKEN` or `auth.token`.
+
+The CLI can inspect and manage the same store with `mermaid tasks`, `mermaid task <id>`, `mermaid approvals`, `mermaid approve <id>`, `mermaid deny <id>`, `mermaid tool-runs`, `mermaid checkpoints`, `mermaid restore <id>`, `mermaid memory`, `mermaid remember`, `mermaid memory-edit <id> <value>`, `mermaid forget`, `mermaid plugin list`, `mermaid plugin install <path-or-github>`, `mermaid plugin audit <path>`, `mermaid models`, `mermaid model-info <model>`, `mermaid processes`, `mermaid logs <process>`, `mermaid stop <process>`, `mermaid restart <process>`, `mermaid open <target>`, `mermaid ports`, `mermaid pair`, and `mermaid daemon`.
+
+On Linux, install a per-user systemd unit with `mermaid daemon install --start`. The installer writes `~/.config/systemd/user/mermaidd.service`, points `ExecStart` at the discovered `mermaidd` binary, reloads the user daemon, and optionally enables/starts the service. Use `mermaid daemon status`, `mermaid daemon logs [-f]`, `mermaid daemon restart`, `mermaid daemon stop`, `mermaid daemon uninstall`, or `mermaid daemon print-unit` for day-to-day service management. Set `MERMAID_DAEMON_BIN=/absolute/path/to/mermaidd` before installing if the daemon binary is not next to `mermaid` or on `PATH`.
+
+Release builds keep the existing `.tar.gz`/`.zip` archives and add Linux `.deb`/`.rpm` artifacts for x86_64 and aarch64. The distro packages install `mermaid`, `mermaidd`, docs, and a reference systemd user unit at `/usr/lib/systemd/user/mermaidd.service`; they do not auto-enable or start the daemon.
+
+The Tauri desktop scaffold lives in `desktop/` and reads the same runtime store for task queue, live sessions/messages, approvals, tool runs, process logs/restart/open/stop, providers, memory edits, checkpoints, plugin audit/install/enable, feature-flagged voice controls, notifications, safety modes, and remote pairing.
 
 ## Configuration
 
@@ -199,6 +227,15 @@ no_execute = false
 [reasoning_per_model]
 "anthropic/claude-opus-4-7" = "high"
 "ollama/qwen3-coder:30b" = "low"
+
+# Optional agent/plugin model profiles. A request for `--model fast` or
+# `--model profile:fast` resolves through this table when present.
+[model_profiles]
+fast = "ollama/qwen3-coder:14b"
+large-context = "openai/gpt-5"
+tool-strong = "anthropic/claude-opus-4-7"
+vision = "gemini/gemini-3.1-pro-preview"
+cheap = "groq/qwen-qwq-32b"
 
 # Remote providers — override env-var name, base URL, or extra headers
 [providers.anthropic]

@@ -91,6 +91,9 @@ pub struct ExecContext {
     /// Parent session's active model id (e.g. `"anthropic/claude-opus-4-7"`).
     /// Subagents inherit this so they hit the same provider.
     pub model_id: String,
+    /// Durable daemon task that owns this tool call, when execution was
+    /// launched through the runtime task queue.
+    pub task_id: Option<String>,
 }
 
 impl ExecContext {
@@ -102,6 +105,7 @@ impl ExecContext {
         workdir: PathBuf,
         config: Arc<crate::app::Config>,
         model_id: String,
+        task_id: Option<String>,
     ) -> Self {
         Self {
             token,
@@ -111,6 +115,7 @@ impl ExecContext {
             workdir,
             config,
             model_id,
+            task_id,
         }
     }
 }
@@ -192,7 +197,16 @@ pub fn test_exec_context(
     let (tx, rx) = mpsc::channel(64);
     let config = Arc::new(crate::app::Config::default());
     (
-        ExecContext::new(token, tx, call_id, turn, workdir, config, String::new()),
+        ExecContext::new(
+            token,
+            tx,
+            call_id,
+            turn,
+            workdir,
+            config,
+            String::new(),
+            None,
+        ),
         rx,
     )
 }

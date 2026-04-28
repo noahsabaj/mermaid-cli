@@ -26,6 +26,7 @@
 use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE};
 use crate::models::{ChatMessage, MessageRole};
 use crate::prompts::get_system_prompt;
+use crate::runtime::TaskStatus;
 
 use super::COMMAND_REGISTRY;
 use super::cmd::{ChatRequest, Cmd};
@@ -298,6 +299,53 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             }
             // If the user already navigated away (Esc before the
             // list landed), the event silently drops.
+        },
+        Msg::RuntimeTasksListed(tasks) => {
+            state
+                .session
+                .append(ChatMessage::system(tasks_text(&tasks)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeTaskLoaded { task, events } => {
+            state.session.append(ChatMessage::system(task_detail_text(
+                task.as_ref(),
+                &events,
+            )));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeProcessesListed(processes) => {
+            state
+                .session
+                .append(ChatMessage::system(processes_text(&processes)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeText(text) => {
+            state.session.append(ChatMessage::system(text));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeApprovalsListed(approvals) => {
+            state
+                .session
+                .append(ChatMessage::system(approvals_text(&approvals)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeCheckpointsListed(checkpoints) => {
+            state
+                .session
+                .append(ChatMessage::system(checkpoints_text(&checkpoints)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeMemoryListed(memory) => {
+            state
+                .session
+                .append(ChatMessage::system(memory_text(&memory)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimePluginsListed(plugins) => {
+            state
+                .session
+                .append(ChatMessage::system(plugins_text(&plugins)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         Msg::ModelPullFinished { model } => {
             state.status = Some(StatusLine {
@@ -953,6 +1001,290 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::Compact(instructions) => {
             handle_manual_compact(state, cmds, instructions);
         },
+        SlashCmd::Tasks => {
+            cmds.push(Cmd::ListRuntimeTasks { limit: 10 });
+        },
+        SlashCmd::Task(Some(id)) => {
+            cmds.push(Cmd::LoadRuntimeTask { id });
+        },
+        SlashCmd::Task(None) => {
+            set_status(state, cmds, "Usage: /task <id>", StatusKind::Info, 3_000);
+        },
+        SlashCmd::Pause(Some(id)) => {
+            cmds.push(Cmd::UpdateRuntimeTaskStatus {
+                id,
+                status: TaskStatus::Blocked,
+                final_report: Some("Paused from TUI".to_string()),
+            });
+        },
+        SlashCmd::Pause(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /pause <task-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Resume(Some(id)) => {
+            cmds.push(Cmd::UpdateRuntimeTaskStatus {
+                id,
+                status: TaskStatus::Running,
+                final_report: None,
+            });
+        },
+        SlashCmd::Resume(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /resume <task-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Cancel(Some(id)) => {
+            cmds.push(Cmd::UpdateRuntimeTaskStatus {
+                id,
+                status: TaskStatus::Cancelled,
+                final_report: Some("Cancelled from TUI".to_string()),
+            });
+        },
+        SlashCmd::Cancel(None) => {
+            if matches!(state.turn, TurnState::Idle) {
+                set_status(
+                    state,
+                    cmds,
+                    "No active turn to cancel.",
+                    StatusKind::Info,
+                    2_500,
+                );
+            } else {
+                handle_cancel_turn(state, cmds);
+            }
+        },
+        SlashCmd::Handoff(Some(id)) | SlashCmd::Report(Some(id)) => {
+            cmds.push(Cmd::LoadRuntimeTask { id });
+        },
+        SlashCmd::Handoff(None) => {
+            let text = format!(
+                "Handoff report\n\n{}\n\n{}",
+                context_text(state),
+                usage_text(state)
+            );
+            state.session.append(ChatMessage::system(text));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        SlashCmd::Report(None) => {
+            let text = format!(
+                "Runtime report\n\n{}\n\n{}",
+                context_text(state),
+                usage_text(state)
+            );
+            state.session.append(ChatMessage::system(text));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        SlashCmd::Processes => {
+            cmds.push(Cmd::ListRuntimeProcesses { limit: 10 });
+        },
+        SlashCmd::Logs(Some(id)) => {
+            cmds.push(Cmd::ShowRuntimeProcessLogs { id });
+        },
+        SlashCmd::Logs(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /logs <process-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Stop(Some(id)) => {
+            cmds.push(Cmd::StopRuntimeProcess { id });
+        },
+        SlashCmd::Stop(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /stop <process-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Restart(Some(id)) => {
+            cmds.push(Cmd::RestartRuntimeProcess { id });
+        },
+        SlashCmd::Restart(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /restart <process-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Open(Some(target)) => {
+            cmds.push(Cmd::OpenRuntimeTarget { target });
+        },
+        SlashCmd::Open(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /open <url|path|process-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Ports => {
+            cmds.push(Cmd::ShowRuntimePorts);
+        },
+        SlashCmd::Approvals => {
+            cmds.push(Cmd::ListRuntimeApprovals);
+        },
+        SlashCmd::Approve(Some(id)) => {
+            cmds.push(Cmd::DecideRuntimeApproval {
+                id,
+                decision: "approved".to_string(),
+            });
+        },
+        SlashCmd::Approve(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /approve <approval-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Deny(Some(id)) => {
+            cmds.push(Cmd::DecideRuntimeApproval {
+                id,
+                decision: "denied".to_string(),
+            });
+        },
+        SlashCmd::Deny(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /deny <approval-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Checkpoint(Some(paths)) => {
+            let paths = paths
+                .split_whitespace()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>();
+            cmds.push(Cmd::CreateRuntimeCheckpoint { paths });
+        },
+        SlashCmd::Checkpoint(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /checkpoint <path...>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Checkpoints => {
+            cmds.push(Cmd::ListRuntimeCheckpoints { limit: 10 });
+        },
+        SlashCmd::Restore(Some(id)) => {
+            cmds.push(Cmd::RestoreRuntimeCheckpoint { id });
+        },
+        SlashCmd::Restore(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /restore <checkpoint-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Memory => {
+            cmds.push(Cmd::ListRuntimeMemory);
+        },
+        SlashCmd::MemoryEdit(Some(input)) => {
+            let mut parts = input.splitn(2, char::is_whitespace);
+            match (parts.next(), parts.next()) {
+                (Some(id), Some(value)) if !id.is_empty() && !value.trim().is_empty() => {
+                    cmds.push(Cmd::EditRuntimeMemory {
+                        id: id.to_string(),
+                        value: value.trim().to_string(),
+                    });
+                },
+                _ => set_status(
+                    state,
+                    cmds,
+                    "Usage: /memory edit <id> <value>",
+                    StatusKind::Info,
+                    3_000,
+                ),
+            }
+        },
+        SlashCmd::MemoryEdit(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /memory edit <id> <value>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Remember(Some(input)) => {
+            let mut parts = input.splitn(2, char::is_whitespace);
+            match (parts.next(), parts.next()) {
+                (Some(key), Some(value)) if !key.is_empty() && !value.trim().is_empty() => {
+                    cmds.push(Cmd::RememberRuntimeMemory {
+                        key: key.to_string(),
+                        value: value.trim().to_string(),
+                    });
+                },
+                _ => set_status(
+                    state,
+                    cmds,
+                    "Usage: /remember <key> <value>",
+                    StatusKind::Info,
+                    3_000,
+                ),
+            }
+        },
+        SlashCmd::Remember(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /remember <key> <value>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Forget(Some(id)) => {
+            cmds.push(Cmd::ForgetRuntimeMemory { id });
+        },
+        SlashCmd::Forget(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /forget <memory-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Plugins => {
+            cmds.push(Cmd::ListRuntimePlugins);
+        },
+        SlashCmd::ModelInfo(Some(model)) => {
+            cmds.push(Cmd::ShowRuntimeModelInfo { model });
+        },
+        SlashCmd::ModelInfo(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /model-info <model>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
         SlashCmd::CloudSetup => {
             // Cloud setup needs interactive stdin (rpassword) which
             // fights with ratatui's raw mode. The in-TUI command
@@ -982,6 +1314,21 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::DismissStatusAfter { ms: 2_500 });
         },
     }
+}
+
+fn set_status(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    text: impl Into<String>,
+    kind: StatusKind,
+    dismiss_ms: u64,
+) {
+    state.status = Some(StatusLine {
+        text: text.into(),
+        kind,
+        shown_at: std::time::SystemTime::now(),
+    });
+    cmds.push(Cmd::DismissStatusAfter { ms: dismiss_ms });
 }
 
 fn ollama_pull_target(model_id: &str) -> Option<String> {
@@ -1227,6 +1574,157 @@ fn context_text(state: &State) -> String {
     lines.join("\n")
 }
 
+fn tasks_text(tasks: &[crate::runtime::TaskRecord]) -> String {
+    let mut lines = vec!["Tasks".to_string()];
+    if tasks.is_empty() {
+        lines.push("No tasks recorded yet.".to_string());
+        return lines.join("\n");
+    }
+    for task in tasks {
+        lines.push(format!(
+            "- {} [{}] {} - {}",
+            task.id, task.status, task.priority, task.title
+        ));
+        lines.push(format!("  project: {}", task.project_path));
+        lines.push(format!("  updated: {}", task.updated_at));
+    }
+    lines.join("\n")
+}
+
+fn task_detail_text(
+    task: Option<&crate::runtime::TaskRecord>,
+    events: &[crate::runtime::TaskTimelineEvent],
+) -> String {
+    let Some(task) = task else {
+        return "Task not found.".to_string();
+    };
+    let mut lines = vec![
+        format!("Task {}", task.id),
+        format!("Title: {}", task.title),
+        format!("Status: {}", task.status),
+        format!("Priority: {}", task.priority),
+        format!("Project: {}", task.project_path),
+        format!("Model: {}", task.model_id),
+        format!("Created: {}", task.created_at),
+        format!("Updated: {}", task.updated_at),
+    ];
+    if let Some(report) = &task.final_report {
+        lines.push(String::new());
+        lines.push("Final report:".to_string());
+        lines.push(report.clone());
+    }
+    if !events.is_empty() {
+        lines.push(String::new());
+        lines.push("Timeline:".to_string());
+        for event in events {
+            lines.push(format!(
+                "- {} {}: {}",
+                event.created_at, event.kind, event.message
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn processes_text(processes: &[crate::runtime::ProcessRecord]) -> String {
+    let mut lines = vec!["Processes".to_string()];
+    if processes.is_empty() {
+        lines.push("No processes recorded yet.".to_string());
+        return lines.join("\n");
+    }
+    for process in processes {
+        lines.push(format!(
+            "- {} pid={} [{}] {}",
+            process.id,
+            process.pid,
+            process.status.as_str(),
+            process.command
+        ));
+        if let Some(task_id) = &process.task_id {
+            lines.push(format!("  task: {}", task_id));
+        }
+        if let Some(url) = &process.detected_url {
+            lines.push(format!("  url: {}", url));
+        }
+        if let Some(log_path) = &process.log_path {
+            lines.push(format!("  log: {}", log_path));
+        }
+    }
+    lines.join("\n")
+}
+
+fn approvals_text(approvals: &[crate::runtime::ApprovalRecord]) -> String {
+    let mut lines = vec!["Approvals".to_string()];
+    if approvals.is_empty() {
+        lines.push("No pending approvals.".to_string());
+        return lines.join("\n");
+    }
+    for approval in approvals {
+        lines.push(format!(
+            "- {} [{}] {}",
+            approval.id, approval.risk_classification, approval.proposed_action
+        ));
+        if let Some(checkpoint_id) = &approval.checkpoint_id {
+            lines.push(format!("  checkpoint: {}", checkpoint_id));
+        }
+        if approval.pending_action_json.is_some() {
+            lines.push("  pending action: recorded".to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+fn checkpoints_text(checkpoints: &[crate::runtime::CheckpointRecord]) -> String {
+    let mut lines = vec!["Checkpoints".to_string()];
+    if checkpoints.is_empty() {
+        lines.push("No checkpoints recorded yet.".to_string());
+        return lines.join("\n");
+    }
+    for checkpoint in checkpoints {
+        lines.push(format!(
+            "- {} {} {}",
+            checkpoint.id, checkpoint.created_at, checkpoint.project_path
+        ));
+    }
+    lines.join("\n")
+}
+
+fn memory_text(memory: &[crate::runtime::MemoryEntry]) -> String {
+    let mut lines = vec!["Memory".to_string()];
+    if memory.is_empty() {
+        lines.push("No memory entries.".to_string());
+        return lines.join("\n");
+    }
+    for entry in memory {
+        lines.push(format!(
+            "- {} [{}] {} = {}",
+            entry.id, entry.scope, entry.key, entry.value
+        ));
+    }
+    lines.join("\n")
+}
+
+fn plugins_text(plugins: &[crate::runtime::PluginInstallRecord]) -> String {
+    let mut lines = vec!["Plugins".to_string()];
+    if plugins.is_empty() {
+        lines.push("No plugins installed.".to_string());
+        return lines.join("\n");
+    }
+    for plugin in plugins {
+        lines.push(format!(
+            "- {} [{}] {}",
+            plugin.id,
+            if plugin.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            plugin.source
+        ));
+    }
+    lines.join("\n")
+}
+
 fn usage_totals_line(usage: TokenUsageTotals) -> String {
     let mut parts = vec![
         format!("total {}", format_compact_count(usage.total_tokens)),
@@ -1378,7 +1876,7 @@ fn handle_compaction_finished(
         kind: StatusKind::Info,
         shown_at: std::time::SystemTime::now(),
     });
-    cmds.push(Cmd::SaveCompactionArchive(archive));
+    cmds.push(Cmd::SaveCompactionArchive { archive, record });
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
     cmds.push(Cmd::DismissStatusAfter { ms: 5_000 });
 }
@@ -1760,6 +2258,7 @@ fn handle_tool_finished(
                     .as_ref()
                     .and_then(|metadata| metadata.process.clone())
                 {
+                    cmds.push(Cmd::SaveProcess(process.clone()));
                     state.runtime.register_process(process);
                 }
                 if let Some(last) = state.session.conversation.messages.last_mut()

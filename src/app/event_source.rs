@@ -131,6 +131,35 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("usage") => SlashCmd::Usage,
         Some("context") => SlashCmd::Context,
         Some("compact") => SlashCmd::Compact(arg),
+        Some("tasks") => SlashCmd::Tasks,
+        Some("task") => SlashCmd::Task(arg),
+        Some("pause") => SlashCmd::Pause(arg),
+        Some("resume") => SlashCmd::Resume(arg),
+        Some("cancel") => SlashCmd::Cancel(arg),
+        Some("handoff") => SlashCmd::Handoff(arg),
+        Some("report") => SlashCmd::Report(arg),
+        Some("processes") => SlashCmd::Processes,
+        Some("logs") => SlashCmd::Logs(arg),
+        Some("stop") => SlashCmd::Stop(arg),
+        Some("restart") => SlashCmd::Restart(arg),
+        Some("open") => SlashCmd::Open(arg),
+        Some("ports") => SlashCmd::Ports,
+        Some("approvals") => SlashCmd::Approvals,
+        Some("approve") => SlashCmd::Approve(arg),
+        Some("deny") => SlashCmd::Deny(arg),
+        Some("checkpoint") => SlashCmd::Checkpoint(arg),
+        Some("checkpoints") => SlashCmd::Checkpoints,
+        Some("restore") => SlashCmd::Restore(arg),
+        Some("memory") => match arg {
+            Some(input) if input.starts_with("edit ") => {
+                SlashCmd::MemoryEdit(Some(input["edit ".len()..].trim().to_string()))
+            },
+            Some(_) | None => SlashCmd::Memory,
+        },
+        Some("remember") => SlashCmd::Remember(arg),
+        Some("forget") => SlashCmd::Forget(arg),
+        Some("plugins") => SlashCmd::Plugins,
+        Some("model-info") => SlashCmd::ModelInfo(arg),
         Some("cloud-setup") => SlashCmd::CloudSetup,
         Some("help") => SlashCmd::Help,
         Some("quit") => SlashCmd::Quit,
@@ -253,6 +282,58 @@ mod tests {
         );
         assert_eq!(parse_slash_command("compress"), SlashCmd::Compact(None));
         assert_eq!(parse_slash_command("summarize"), SlashCmd::Compact(None));
+    }
+
+    #[test]
+    fn parse_runtime_task_commands() {
+        assert_eq!(parse_slash_command("tasks"), SlashCmd::Tasks);
+        assert_eq!(
+            parse_slash_command("task task-123"),
+            SlashCmd::Task(Some("task-123".to_string()))
+        );
+        assert_eq!(
+            parse_slash_command("pause task-123"),
+            SlashCmd::Pause(Some("task-123".to_string()))
+        );
+        assert_eq!(
+            parse_slash_command("resume task-123"),
+            SlashCmd::Resume(Some("task-123".to_string()))
+        );
+        assert_eq!(parse_slash_command("cancel"), SlashCmd::Cancel(None));
+        assert_eq!(
+            parse_slash_command("handoff task-123"),
+            SlashCmd::Handoff(Some("task-123".to_string()))
+        );
+        assert_eq!(parse_slash_command("report"), SlashCmd::Report(None));
+        assert_eq!(parse_slash_command("procs"), SlashCmd::Processes);
+        assert_eq!(parse_slash_command("approvals"), SlashCmd::Approvals);
+        assert_eq!(
+            parse_slash_command("approve approval-1"),
+            SlashCmd::Approve(Some("approval-1".to_string()))
+        );
+        assert_eq!(
+            parse_slash_command("deny approval-1"),
+            SlashCmd::Deny(Some("approval-1".to_string()))
+        );
+        assert_eq!(
+            parse_slash_command("checkpoint src/lib.rs"),
+            SlashCmd::Checkpoint(Some("src/lib.rs".to_string()))
+        );
+        assert_eq!(parse_slash_command("checkpoints"), SlashCmd::Checkpoints);
+        assert_eq!(
+            parse_slash_command("restore checkpoint-1"),
+            SlashCmd::Restore(Some("checkpoint-1".to_string()))
+        );
+        assert_eq!(parse_slash_command("memory"), SlashCmd::Memory);
+        assert_eq!(
+            parse_slash_command("remember decision use sqlite"),
+            SlashCmd::Remember(Some("decision use sqlite".to_string()))
+        );
+        assert_eq!(
+            parse_slash_command("forget memory-1"),
+            SlashCmd::Forget(Some("memory-1".to_string()))
+        );
+        assert_eq!(parse_slash_command("plugins"), SlashCmd::Plugins);
     }
 
     #[test]

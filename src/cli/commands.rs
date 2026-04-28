@@ -1,14 +1,16 @@
 use anyhow::Result;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
     app::{Config, get_config_dir, init_config, load_config},
     models::{BackendConfig, Model, PROVIDER_REGISTRY, lookup_provider},
     ollama::is_installed as is_ollama_installed,
+    runtime::{NewProviderProbe, RuntimeClient, RuntimeStore, TaskRecord},
     utils::{resolve_api_key, resolve_api_key_with_fallback},
 };
 
-use super::Commands;
+use super::{Commands, PluginCommand};
 
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
@@ -25,12 +27,108 @@ pub async fn handle_command(command: &Commands, config: &Config) -> Result<bool>
             list_models(config).await?;
             Ok(true)
         },
+        Commands::Models => {
+            show_models(config).await?;
+            Ok(true)
+        },
+        Commands::ModelInfo { model } => {
+            show_model_info(model)?;
+            Ok(true)
+        },
         Commands::Version => {
             show_version();
             Ok(true)
         },
         Commands::Status => {
             show_status(config).await?;
+            Ok(true)
+        },
+        Commands::Tasks { limit } => {
+            show_tasks(*limit)?;
+            Ok(true)
+        },
+        Commands::Task { id } => {
+            show_task(id)?;
+            Ok(true)
+        },
+        Commands::Processes { limit } => {
+            show_processes(*limit)?;
+            Ok(true)
+        },
+        Commands::Logs { id } => {
+            show_logs(id)?;
+            Ok(true)
+        },
+        Commands::Stop { id } => {
+            stop_process(id)?;
+            Ok(true)
+        },
+        Commands::Restart { id } => {
+            restart_process(id)?;
+            Ok(true)
+        },
+        Commands::Open { target } => {
+            open_target(target)?;
+            Ok(true)
+        },
+        Commands::Ports => {
+            show_ports()?;
+            Ok(true)
+        },
+        Commands::Approvals => {
+            show_approvals()?;
+            Ok(true)
+        },
+        Commands::Approve { id } => {
+            approve(id)?;
+            Ok(true)
+        },
+        Commands::Deny { id } => {
+            deny(id)?;
+            Ok(true)
+        },
+        Commands::ToolRuns { limit } => {
+            show_tool_runs(*limit)?;
+            Ok(true)
+        },
+        Commands::Checkpoints { limit } => {
+            show_checkpoints(*limit)?;
+            Ok(true)
+        },
+        Commands::Restore { id } => {
+            restore_checkpoint(id)?;
+            Ok(true)
+        },
+        Commands::Memory { project } => {
+            show_memory(project.as_deref())?;
+            Ok(true)
+        },
+        Commands::Remember {
+            key,
+            value,
+            project,
+        } => {
+            remember(key, value, project.as_deref())?;
+            Ok(true)
+        },
+        Commands::Forget { id } => {
+            forget(id)?;
+            Ok(true)
+        },
+        Commands::MemoryEdit { id, value } => {
+            memory_edit(id, value)?;
+            Ok(true)
+        },
+        Commands::Plugin { command } => {
+            handle_plugin(command)?;
+            Ok(true)
+        },
+        Commands::Daemon { command } => {
+            super::daemon::handle_daemon_command(command)?;
+            Ok(true)
+        },
+        Commands::Pair { label } => {
+            pair(label.as_deref())?;
             Ok(true)
         },
         Commands::Add { name } => {
@@ -55,6 +153,582 @@ pub async fn handle_command(command: &Commands, config: &Config) -> Result<bool>
         Commands::Chat => Ok(false),       // Continue to chat interface
         Commands::Run { .. } => Ok(false), // Handled by main.rs
     }
+}
+
+fn show_tasks(limit: usize) -> Result<()> {
+    let read = RuntimeClient::auto().list_tasks(limit)?;
+    let mut tasks = read.value;
+    tasks.truncate(limit);
+    println!("Mermaid runtime tasks");
+    println!("Source: {}", read.source.as_str());
+    println!();
+    if tasks.is_empty() {
+        println!("No tasks recorded yet.");
+        return Ok(());
+    }
+    for task in tasks {
+        println!(
+            "{}  [{}] {}  {}  {}",
+            task.id, task.status, task.priority, task.updated_at, task.title
+        );
+        println!("    project: {}", task.project_path);
+        println!("    model: {}", task.model_id);
+    }
+    Ok(())
+}
+
+fn show_task(id: &str) -> Result<()> {
+    let detail = RuntimeClient::auto().task_detail(id)?.value;
+    print_task_detail(&detail.task);
+    let events = detail.events;
+    if !events.is_empty() {
+        println!();
+        println!("Timeline:");
+        for event in events {
+            println!("  {}  {}  {}", event.created_at, event.kind, event.message);
+        }
+    }
+    Ok(())
+}
+
+fn print_task_detail(task: &TaskRecord) {
+    println!("Task: {}", task.id);
+    println!("Title: {}", task.title);
+    println!("Status: {}", task.status);
+    println!("Priority: {}", task.priority);
+    println!("Project: {}", task.project_path);
+    println!("Model: {}", task.model_id);
+    if let Some(conversation_id) = &task.conversation_id {
+        println!("Conversation: {}", conversation_id);
+    }
+    println!("Created: {}", task.created_at);
+    println!("Updated: {}", task.updated_at);
+    if let Some(report) = &task.final_report {
+        println!();
+        println!("Final report:");
+        println!("{}", report);
+    }
+}
+
+fn show_processes(limit: usize) -> Result<()> {
+    let read = RuntimeClient::auto().list_processes(limit)?;
+    let mut processes = read.value;
+    processes.truncate(limit);
+    println!("Mermaid runtime processes");
+    println!("Source: {}", read.source.as_str());
+    println!();
+    if processes.is_empty() {
+        println!("No processes recorded yet.");
+        return Ok(());
+    }
+    for process in processes {
+        println!(
+            "{}  pid={}  status={}  {}",
+            process.id,
+            process.pid,
+            process.status.as_str(),
+            process.command
+        );
+        if let Some(task_id) = process.task_id {
+            println!("    task: {}", task_id);
+        }
+        if let Some(cwd) = process.cwd {
+            println!("    cwd: {}", cwd);
+        }
+        if let Some(log_path) = process.log_path {
+            println!("    log: {}", log_path);
+        }
+        if let Some(url) = process.detected_url {
+            println!("    url: {}", url);
+        }
+    }
+    Ok(())
+}
+
+async fn show_models(config: &Config) -> Result<()> {
+    list_models(config).await?;
+    probe_configured_provider_models(config).await?;
+    let store = RuntimeStore::open_default()?;
+    let probes = store.provider_probes().list(None, None)?;
+    if !probes.is_empty() {
+        println!("\nCached capability probes:");
+        for probe in probes {
+            println!(
+                "  - {}/{} {}={} ({})",
+                probe.provider,
+                probe.model_id,
+                probe.capability_key,
+                probe.capability_value,
+                probe.confidence
+            );
+        }
+    }
+    Ok(())
+}
+
+fn show_model_info(model: &str) -> Result<()> {
+    let snapshot = crate::domain::ProviderCapabilitySnapshot::from_model_id(model);
+    let store = RuntimeStore::open_default()?;
+    let provider = snapshot.provider.clone();
+    for (key, value) in [
+        ("supports_tools", snapshot.supports_tools.to_string()),
+        ("supports_vision", snapshot.supports_vision.to_string()),
+        ("reasoning", snapshot.reasoning.clone()),
+        (
+            "max_context_tokens",
+            snapshot
+                .max_context_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        ),
+    ] {
+        let _ = store.provider_probes().upsert(NewProviderProbe {
+            provider: provider.clone(),
+            model_id: snapshot.model.clone(),
+            capability_key: key.to_string(),
+            capability_value: value,
+            confidence: "static".to_string(),
+            error: None,
+        });
+    }
+    println!("Model: {}", model);
+    println!("Provider: {}", snapshot.provider);
+    println!("Name: {}", snapshot.model);
+    println!("Supports tools: {}", snapshot.supports_tools);
+    println!("Supports vision: {}", snapshot.supports_vision);
+    println!("Reasoning: {}", snapshot.reasoning);
+    println!(
+        "Context: {}",
+        snapshot
+            .max_context_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    if let Some(profile) = lookup_provider(&snapshot.provider) {
+        for (key, value) in [
+            (
+                "max_output_tokens_param",
+                format!("{:?}", profile.max_tokens_param),
+            ),
+            (
+                "parallel_tool_calls",
+                (!profile
+                    .disable_parallel_tool_calls_for
+                    .iter()
+                    .any(|disabled| *disabled == snapshot.model))
+                .to_string(),
+            ),
+            (
+                "reasoning_parameter_shape",
+                format!("{:?}", profile.reasoning_strategy),
+            ),
+            (
+                "streaming_usage_available",
+                "provider_dependent".to_string(),
+            ),
+            ("token_usage_field_shape", "openai_compatible".to_string()),
+        ] {
+            let _ = store.provider_probes().upsert(NewProviderProbe {
+                provider: provider.clone(),
+                model_id: snapshot.model.clone(),
+                capability_key: key.to_string(),
+                capability_value: value,
+                confidence: "static".to_string(),
+                error: None,
+            });
+        }
+        println!("Token budget field: {:?}", profile.max_tokens_param);
+        println!(
+            "Single-tool-call models: {}",
+            if profile.disable_parallel_tool_calls_for.is_empty() {
+                "(none)".to_string()
+            } else {
+                profile.disable_parallel_tool_calls_for.join(", ")
+            }
+        );
+    }
+    Ok(())
+}
+
+async fn probe_configured_provider_models(config: &Config) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    for profile in PROVIDER_REGISTRY {
+        let user_cfg = config.providers.get(profile.name);
+        let env = user_cfg
+            .and_then(|c| c.api_key_env.as_deref())
+            .unwrap_or(profile.api_key_env);
+        let Some(api_key) = resolve_api_key(env, None) else {
+            continue;
+        };
+        let base_url = user_cfg
+            .and_then(|c| c.base_url.clone())
+            .unwrap_or_else(|| profile.base_url.to_string());
+        let url = format!("{}/models", base_url.trim_end_matches('/'));
+        let mut request = client.get(&url).bearer_auth(api_key);
+        for (name, value) in profile.extra_headers {
+            request = request.header(*name, *value);
+        }
+        if let Some(user_cfg) = user_cfg {
+            for (name, value) in &user_cfg.extra_headers {
+                request = request.header(name, value);
+            }
+        }
+
+        let result = request.send().await;
+        match result {
+            Ok(response) if response.status().is_success() => {
+                let status = response.status();
+                let body: serde_json::Value = response.json().await.unwrap_or_default();
+                let ids = body
+                    .get("data")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.get("id").and_then(|id| id.as_str()))
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                record_provider_probe(
+                    profile.name,
+                    "*",
+                    "models_availability",
+                    &format!("available:{}:{}", status.as_u16(), ids.len()),
+                    "probed",
+                    None,
+                );
+                for model_id in ids.into_iter().take(200) {
+                    record_provider_probe(
+                        profile.name,
+                        &model_id,
+                        "model_listed",
+                        "true",
+                        "listed",
+                        None,
+                    );
+                }
+            },
+            Ok(response) => {
+                record_provider_probe(
+                    profile.name,
+                    "*",
+                    "models_availability",
+                    "failed",
+                    "failed",
+                    Some(format!("HTTP {}", response.status().as_u16())),
+                );
+            },
+            Err(error) => {
+                record_provider_probe(
+                    profile.name,
+                    "*",
+                    "models_availability",
+                    "failed",
+                    "failed",
+                    Some(error.to_string()),
+                );
+            },
+        }
+    }
+    Ok(())
+}
+
+fn record_provider_probe(
+    provider: &str,
+    model_id: &str,
+    key: &str,
+    value: &str,
+    confidence: &str,
+    error: Option<String>,
+) {
+    if let Ok(store) = RuntimeStore::open_default() {
+        let _ = store.provider_probes().upsert(NewProviderProbe {
+            provider: provider.to_string(),
+            model_id: model_id.to_string(),
+            capability_key: key.to_string(),
+            capability_value: value.to_string(),
+            confidence: confidence.to_string(),
+            error,
+        });
+    }
+}
+
+fn show_approvals() -> Result<()> {
+    let approvals = RuntimeClient::auto().list_approvals()?.value;
+    if approvals.is_empty() {
+        println!("No pending approvals.");
+        return Ok(());
+    }
+    for approval in approvals {
+        println!(
+            "{} [{} -> {}] {}",
+            approval.id,
+            approval.risk_classification,
+            approval.policy_decision,
+            approval.proposed_action
+        );
+        if let Some(args) = approval.args_summary {
+            println!("    args: {}", args);
+        }
+        if let Some(checkpoint_id) = approval.checkpoint_id {
+            println!("    checkpoint: {}", checkpoint_id);
+        }
+        if approval.pending_action_json.is_some() {
+            println!("    pending action: recorded");
+        }
+    }
+    Ok(())
+}
+
+fn approve(id: &str) -> Result<()> {
+    let result = RuntimeClient::auto().approve(id)?;
+    println!("Approved {}", id);
+    if result.replayed {
+        println!("{}", result.summary);
+    }
+    Ok(())
+}
+
+fn deny(id: &str) -> Result<()> {
+    let _ = RuntimeClient::auto().deny(id)?;
+    println!("Denied {}", id);
+    Ok(())
+}
+
+fn show_tool_runs(limit: usize) -> Result<()> {
+    let mut runs = RuntimeClient::auto().list_tool_runs(limit)?.value;
+    runs.truncate(limit);
+    if runs.is_empty() {
+        println!("No tool runs recorded yet.");
+        return Ok(());
+    }
+    for run in runs {
+        println!(
+            "{} [{}] {} started {}",
+            run.id, run.status, run.tool_name, run.started_at
+        );
+        if let Some(turn_id) = run.turn_id {
+            println!("    turn: {}", turn_id);
+        }
+        if let Some(call_id) = run.call_id {
+            println!("    call: {}", call_id);
+        }
+        if let Some(finished_at) = run.finished_at {
+            println!("    finished: {}", finished_at);
+        }
+    }
+    Ok(())
+}
+
+fn show_checkpoints(limit: usize) -> Result<()> {
+    let mut checkpoints = RuntimeClient::auto().list_checkpoints(limit)?.value;
+    checkpoints.truncate(limit);
+    if checkpoints.is_empty() {
+        println!("No checkpoints recorded yet.");
+        return Ok(());
+    }
+    for checkpoint in checkpoints {
+        println!(
+            "{}  {}  {}",
+            checkpoint.id, checkpoint.created_at, checkpoint.project_path
+        );
+        println!("    snapshot: {}", checkpoint.snapshot_path);
+        println!("    files: {}", checkpoint.changed_files_json);
+        if let Some(approval_id) = checkpoint.approval_id {
+            println!("    approval: {}", approval_id);
+        }
+    }
+    Ok(())
+}
+
+fn restore_checkpoint(id: &str) -> Result<()> {
+    let manifest = RuntimeClient::auto().restore_checkpoint(id)?.checkpoint;
+    println!("Restored {} ({} files)", manifest.id, manifest.files.len());
+    if let Some(repo) = manifest.shadow_git_repo {
+        println!("Shadow repo: {}", repo);
+    }
+    if let Some(commit) = manifest.shadow_git_commit {
+        println!("Shadow commit: {}", commit);
+    }
+    if let Some(action) = manifest.pending_action {
+        println!("Pending action: {}", serde_json::to_string_pretty(&action)?);
+    }
+    Ok(())
+}
+
+fn show_memory(project: Option<&Path>) -> Result<()> {
+    let project_path = project.map(|p| p.display().to_string()).or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string())
+    });
+    let entries = RuntimeClient::auto()
+        .list_memory(project_path.as_deref())?
+        .value;
+    if entries.is_empty() {
+        println!("No memory entries.");
+        return Ok(());
+    }
+    for entry in entries {
+        println!(
+            "{} [{}] {} = {}",
+            entry.id, entry.scope, entry.key, entry.value
+        );
+    }
+    Ok(())
+}
+
+fn remember(key: &str, value: &str, project: Option<&Path>) -> Result<()> {
+    let project_path = project.map(|p| p.display().to_string()).or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string())
+    });
+    let entry = RuntimeClient::auto()
+        .remember_memory(project_path, key, value, "cli")?
+        .value;
+    println!("Remembered {} ({})", entry.key, entry.id);
+    Ok(())
+}
+
+fn forget(id: &str) -> Result<()> {
+    RuntimeClient::auto().forget_memory(id)?;
+    println!("Forgot {}", id);
+    Ok(())
+}
+
+fn memory_edit(id: &str, value: &str) -> Result<()> {
+    let entry = RuntimeClient::auto().edit_memory(id, value, "cli")?.value;
+    println!("Updated {} ({})", entry.key, entry.id);
+    Ok(())
+}
+
+fn handle_plugin(command: &PluginCommand) -> Result<()> {
+    match command {
+        PluginCommand::Install { path } => {
+            let preview = crate::runtime::plugin_permission_preview(path)?;
+            print_plugin_permission_preview(&preview);
+            let record = crate::runtime::install_plugin_from_path(path)?;
+            println!("Installed plugin {} ({})", record.name, record.id);
+        },
+        PluginCommand::List => {
+            let plugins = RuntimeClient::auto().list_plugins()?.value;
+            if plugins.is_empty() {
+                println!("No plugins installed.");
+            } else {
+                for plugin in plugins {
+                    println!(
+                        "{} [{}] {} ({})",
+                        plugin.id,
+                        if plugin.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        plugin.name,
+                        plugin.source
+                    );
+                }
+            }
+        },
+        PluginCommand::Enable { id } => {
+            RuntimeClient::auto().set_plugin_enabled(id, true)?;
+            println!("Enabled plugin {}", id);
+        },
+        PluginCommand::Disable { id } => {
+            RuntimeClient::auto().set_plugin_enabled(id, false)?;
+            println!("Disabled plugin {}", id);
+        },
+        PluginCommand::Audit { path } => {
+            let manifest_path = if path.is_dir() {
+                path.join("plugin.toml")
+            } else {
+                path.clone()
+            };
+            let raw = std::fs::read_to_string(&manifest_path)?;
+            let manifest: crate::runtime::PluginManifest = toml::from_str(&raw)?;
+            let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+            crate::runtime::validate_plugin_manifest(&manifest, root)?;
+            let preview = crate::runtime::plugin_permission_preview(path)?;
+            println!("Plugin manifest is valid: {}", manifest.name);
+            print_plugin_permission_preview(&preview);
+        },
+    }
+    Ok(())
+}
+
+fn print_plugin_permission_preview(preview: &crate::runtime::PluginPermissionPreview) {
+    println!("Permission preview for plugin {}", preview.name);
+    if preview.declared_permissions.is_empty() && preview.permissions_toml.is_none() {
+        println!("  permissions: (none declared)");
+    } else {
+        if !preview.declared_permissions.is_empty() {
+            println!("  declared: {}", preview.declared_permissions.join(", "));
+        }
+        if let Some(value) = &preview.permissions_toml {
+            println!(
+                "  permissions.toml: {}",
+                serde_json::to_string(value).unwrap_or_else(|_| "<unprintable>".to_string())
+            );
+        }
+    }
+    if !preview.hooks.is_empty() {
+        println!("  hooks: {}", preview.hooks.join(", "));
+    }
+    if !preview.mcp.is_empty() {
+        println!("  mcp: {}", preview.mcp.join(", "));
+    }
+    if !preview.bin.is_empty() {
+        println!("  bin: {}", preview.bin.join(", "));
+    }
+}
+
+fn pair(label: Option<&str>) -> Result<()> {
+    let (token, hash) = crate::runtime::generate_pairing_token()?;
+    let record = RuntimeStore::open_default()?
+        .pairing_tokens()
+        .create(&hash, label)?;
+    println!("Pairing token id: {}", record.id);
+    println!("Pairing token: {}", token);
+    println!(
+        "Use with daemon JSON by setting {}.",
+        crate::runtime::daemon::DAEMON_TOKEN_ENV
+    );
+    println!("Store this now; Mermaid will not print it again.");
+    Ok(())
+}
+
+fn show_logs(id: &str) -> Result<()> {
+    let content = RuntimeClient::auto().process_log(id, None)?.content;
+    print!("{}", content);
+    Ok(())
+}
+
+fn stop_process(id: &str) -> Result<()> {
+    let process = RuntimeClient::auto().stop_process(id)?.item;
+    println!("Stopped process {} (pid {})", id, process.pid);
+    Ok(())
+}
+
+fn restart_process(id: &str) -> Result<()> {
+    let process = RuntimeClient::auto().restart_process(id)?.item;
+    println!("Restarted process {} (pid {})", id, process.pid);
+    Ok(())
+}
+
+fn open_target(target: &str) -> Result<()> {
+    if RuntimeClient::auto().open_process(target).is_err() {
+        crate::utils::open_file(target);
+    }
+    Ok(())
+}
+
+fn show_ports() -> Result<()> {
+    print!("{}", RuntimeClient::auto().ports()?.ports);
+    Ok(())
 }
 
 /// List available models across all backends (honors user config).
@@ -220,14 +894,32 @@ async fn show_status(config: &Config) -> Result<()> {
     }
 
     // Project instructions (Step 5h). Walks UP from cwd to git root or
-    // $HOME to find the nearest MERMAID.md.
+    // $HOME to find the nearest supported instruction files.
     {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        match crate::app::instructions::find_mermaid_md(&cwd) {
-            Some(path) => match crate::app::instructions::load_from_path(&path) {
+        let paths = crate::app::instructions::find_instruction_files(&cwd);
+        if paths.is_empty() {
+            println!(
+                "  [INFO] Project instructions: not found (MERMAID.md, AGENTS.md, CLAUDE.md, GEMINI.md)"
+            );
+        } else {
+            match crate::app::instructions::load_from_paths(&paths) {
                 Some(loaded) => {
+                    let files = loaded
+                        .sources
+                        .iter()
+                        .map(|source| {
+                            source
+                                .path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("instructions")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     println!(
-                        "  [OK] MERMAID.md: {} ({} bytes{})",
+                        "  [OK] Project instructions: {} at {} ({} bytes{})",
+                        files,
                         loaded.path.display(),
                         loaded.byte_len,
                         if loaded.truncated { ", truncated" } else { "" }
@@ -235,16 +927,15 @@ async fn show_status(config: &Config) -> Result<()> {
                 },
                 None => {
                     println!(
-                        "  [WARNING] MERMAID.md: found at {} but unreadable",
-                        path.display()
+                        "  [WARNING] Project instructions: found but unreadable ({})",
+                        paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
                 },
-            },
-            None => {
-                println!(
-                    "  [INFO] MERMAID.md: not found (create one to add persistent project instructions)"
-                );
-            },
+            }
         }
     }
 

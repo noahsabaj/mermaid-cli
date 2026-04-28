@@ -80,6 +80,150 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         arg_hint: Some("[instructions]"),
     },
     SlashCommand {
+        name: "tasks",
+        aliases: &[],
+        description: "List durable runtime tasks",
+        arg_hint: None,
+    },
+    SlashCommand {
+        name: "task",
+        aliases: &[],
+        description: "Show a durable runtime task",
+        arg_hint: Some("<id>"),
+    },
+    SlashCommand {
+        name: "pause",
+        aliases: &[],
+        description: "Pause a durable task by marking it blocked",
+        arg_hint: Some("<task-id>"),
+    },
+    SlashCommand {
+        name: "resume",
+        aliases: &[],
+        description: "Resume a durable task by marking it running",
+        arg_hint: Some("<task-id>"),
+    },
+    SlashCommand {
+        name: "cancel",
+        aliases: &[],
+        description: "Cancel the active turn or a durable task",
+        arg_hint: Some("[task-id]"),
+    },
+    SlashCommand {
+        name: "handoff",
+        aliases: &[],
+        description: "Write a handoff report for the current or named task",
+        arg_hint: Some("[task-id]"),
+    },
+    SlashCommand {
+        name: "report",
+        aliases: &[],
+        description: "Show current context report or task report",
+        arg_hint: Some("[task-id]"),
+    },
+    SlashCommand {
+        name: "processes",
+        aliases: &["procs"],
+        description: "List durable runtime processes",
+        arg_hint: None,
+    },
+    SlashCommand {
+        name: "logs",
+        aliases: &[],
+        description: "Show a durable runtime process log",
+        arg_hint: Some("<process-id>"),
+    },
+    SlashCommand {
+        name: "stop",
+        aliases: &[],
+        description: "Stop a durable runtime process",
+        arg_hint: Some("<process-id>"),
+    },
+    SlashCommand {
+        name: "restart",
+        aliases: &[],
+        description: "Restart a durable runtime process",
+        arg_hint: Some("<process-id>"),
+    },
+    SlashCommand {
+        name: "open",
+        aliases: &[],
+        description: "Open a URL, file, or process target",
+        arg_hint: Some("<url|path|process-id>"),
+    },
+    SlashCommand {
+        name: "ports",
+        aliases: &[],
+        description: "Show listening TCP ports",
+        arg_hint: None,
+    },
+    SlashCommand {
+        name: "approvals",
+        aliases: &[],
+        description: "List pending approvals",
+        arg_hint: None,
+    },
+    SlashCommand {
+        name: "approve",
+        aliases: &[],
+        description: "Approve a pending action",
+        arg_hint: Some("<approval-id>"),
+    },
+    SlashCommand {
+        name: "deny",
+        aliases: &[],
+        description: "Deny a pending action",
+        arg_hint: Some("<approval-id>"),
+    },
+    SlashCommand {
+        name: "checkpoint",
+        aliases: &[],
+        description: "Create a restore checkpoint for one or more paths",
+        arg_hint: Some("<path...>"),
+    },
+    SlashCommand {
+        name: "checkpoints",
+        aliases: &[],
+        description: "List restore checkpoints",
+        arg_hint: None,
+    },
+    SlashCommand {
+        name: "restore",
+        aliases: &[],
+        description: "Restore a checkpoint",
+        arg_hint: Some("<id>"),
+    },
+    SlashCommand {
+        name: "memory",
+        aliases: &[],
+        description: "List project memory",
+        arg_hint: Some("[edit <id> <value>]"),
+    },
+    SlashCommand {
+        name: "remember",
+        aliases: &[],
+        description: "Write project memory",
+        arg_hint: Some("<key> <value>"),
+    },
+    SlashCommand {
+        name: "forget",
+        aliases: &[],
+        description: "Forget a memory entry",
+        arg_hint: Some("<id>"),
+    },
+    SlashCommand {
+        name: "plugins",
+        aliases: &[],
+        description: "List installed plugins",
+        arg_hint: None,
+    },
+    SlashCommand {
+        name: "model-info",
+        aliases: &[],
+        description: "Show provider/model capability information",
+        arg_hint: Some("<model>"),
+    },
+    SlashCommand {
         name: "cloud-setup",
         aliases: &[],
         description: "Configure Ollama Cloud API key",
@@ -111,7 +255,10 @@ pub fn filter_by_prefix(typed: &str) -> Vec<&'static SlashCommand> {
     COMMAND_REGISTRY
         .iter()
         .filter(|cmd| {
-            cmd.name.starts_with(&needle) || cmd.aliases.iter().any(|a| a.starts_with(&needle))
+            let name_matches = cmd.name == needle
+                || (!cmd.name.contains('-') || needle.contains('-'))
+                    && cmd.name.starts_with(&needle);
+            name_matches || cmd.aliases.iter().any(|a| a.starts_with(&needle))
         })
         .collect()
 }

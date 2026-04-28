@@ -251,6 +251,8 @@ fn user_profile_to_static(
         extra_headers: &[],
         reasoning_strategy: strategy,
         reasoning_extraction: ReasoningExtraction::None,
+        max_tokens_param: crate::models::MaxTokensParam::MaxTokens,
+        disable_parallel_tool_calls_for: &[],
     });
     Some(Box::leak(profile))
 }

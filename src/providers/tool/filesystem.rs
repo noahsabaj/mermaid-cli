@@ -182,6 +182,40 @@ impl ToolExecutor for EditFileTool {
             Ok(p) => p,
             Err(e) => return err(&format!("edit_file: {}", e), 0.0),
         };
+        let pending_action = serde_json::json!({
+            "tool": "edit_file",
+            "args": {
+                "path": raw_path,
+                "old_string": old_string,
+                "new_string": new_string,
+            },
+            "workdir": ctx.workdir.display().to_string(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "task_id": ctx.task_id.clone(),
+        });
+        if let Some(outcome) = mutation_policy_outcome(
+            &ctx,
+            "edit_file",
+            raw_path,
+            std::slice::from_ref(&abs),
+            pending_action,
+        ) {
+            return outcome;
+        }
+        if ctx.config.safety.checkpoint_on_mutation
+            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+                &ctx.workdir,
+                std::slice::from_ref(&abs),
+                Some(serde_json::json!({
+                    "tool": "edit_file",
+                    "path": raw_path,
+                })),
+                ctx.task_id.clone(),
+            )
+        {
+            return err(&format!("edit_file checkpoint failed: {}", e), 0.0);
+        }
         let old_owned = old_string.to_string();
         let new_owned = new_string.to_string();
         let abs_clone = abs.clone();
@@ -194,6 +228,7 @@ impl ToolExecutor for EditFileTool {
                 match result {
                     Ok(Ok(replacements)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
+                        after_file_mutation(&ctx, "edit_file", &display_path);
                         ToolOutcome::success(
                             format!("Edited {} ({} replacement{})",
                             display_path,
@@ -252,6 +287,36 @@ impl ToolExecutor for DeleteFileTool {
             Ok(p) => p,
             Err(e) => return err(&format!("delete_file: {}", e), 0.0),
         };
+        let pending_action = serde_json::json!({
+            "tool": "delete_file",
+            "args": { "path": raw_path },
+            "workdir": ctx.workdir.display().to_string(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "task_id": ctx.task_id.clone(),
+        });
+        if let Some(outcome) = mutation_policy_outcome(
+            &ctx,
+            "delete_file",
+            raw_path,
+            std::slice::from_ref(&abs),
+            pending_action,
+        ) {
+            return outcome;
+        }
+        if ctx.config.safety.checkpoint_on_mutation
+            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+                &ctx.workdir,
+                std::slice::from_ref(&abs),
+                Some(serde_json::json!({
+                    "tool": "delete_file",
+                    "path": raw_path,
+                })),
+                ctx.task_id.clone(),
+            )
+        {
+            return err(&format!("delete_file checkpoint failed: {}", e), 0.0);
+        }
         let display = raw_path.to_string();
 
         tokio::select! {
@@ -261,6 +326,7 @@ impl ToolExecutor for DeleteFileTool {
                 match result {
                     Ok(Ok(())) => {
                         let duration_secs = start.elapsed().as_secs_f64();
+                        after_file_mutation(&ctx, "delete_file", &display);
                         ToolOutcome::success(
                             format!("Deleted {}", display),
                             "file deleted",
@@ -311,6 +377,36 @@ impl ToolExecutor for CreateDirectoryTool {
             Ok(p) => p,
             Err(e) => return err(&format!("create_directory: {}", e), 0.0),
         };
+        let pending_action = serde_json::json!({
+            "tool": "create_directory",
+            "args": { "path": raw_path },
+            "workdir": ctx.workdir.display().to_string(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "task_id": ctx.task_id.clone(),
+        });
+        if let Some(outcome) = mutation_policy_outcome(
+            &ctx,
+            "create_directory",
+            raw_path,
+            std::slice::from_ref(&abs),
+            pending_action,
+        ) {
+            return outcome;
+        }
+        if ctx.config.safety.checkpoint_on_mutation
+            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+                &ctx.workdir,
+                std::slice::from_ref(&abs),
+                Some(serde_json::json!({
+                    "tool": "create_directory",
+                    "path": raw_path,
+                })),
+                ctx.task_id.clone(),
+            )
+        {
+            return err(&format!("create_directory checkpoint failed: {}", e), 0.0);
+        }
         let display = raw_path.to_string();
 
         tokio::select! {
@@ -320,6 +416,7 @@ impl ToolExecutor for CreateDirectoryTool {
                 match result {
                     Ok(Ok(())) => {
                         let duration_secs = start.elapsed().as_secs_f64();
+                        after_file_mutation(&ctx, "create_directory", &display);
                         ToolOutcome::success(
                             format!("Created directory {}", display),
                             "directory created",
@@ -377,6 +474,36 @@ impl ToolExecutor for WriteFileTool {
             Ok(p) => p,
             Err(e) => return ToolOutcome::error(format!("write_file: {}", e), 0.0),
         };
+        let pending_action = serde_json::json!({
+            "tool": "write_file",
+            "args": { "path": path, "content": content },
+            "workdir": ctx.workdir.display().to_string(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "task_id": ctx.task_id.clone(),
+        });
+        if let Some(outcome) = mutation_policy_outcome(
+            &ctx,
+            "write_file",
+            path,
+            std::slice::from_ref(&abs_path),
+            pending_action,
+        ) {
+            return outcome;
+        }
+        if ctx.config.safety.checkpoint_on_mutation
+            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+                &ctx.workdir,
+                std::slice::from_ref(&abs_path),
+                Some(serde_json::json!({
+                    "tool": "write_file",
+                    "path": path,
+                })),
+                ctx.task_id.clone(),
+            )
+        {
+            return ToolOutcome::error(format!("write_file checkpoint failed: {}", e), 0.0);
+        }
         let display_path = path.to_string();
         let line_count = content.lines().count();
         let byte_count = content.len();
@@ -390,6 +517,7 @@ impl ToolExecutor for WriteFileTool {
                 match result {
                     Ok(Ok(actual_line_count)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
+                        after_file_mutation(&ctx, "write_file", &display_path);
                         ToolOutcome::success(
                             format!("Wrote {} ({} lines)", display_path, actual_line_count),
                             format!("{} {} written", actual_line_count, plural(actual_line_count, "line", "lines")),
@@ -532,6 +660,120 @@ fn write_one_blocking(path: &Path, content: &str) -> std::io::Result<usize> {
     }
     std::fs::write(path, content)?;
     Ok(content.lines().count())
+}
+
+fn mutation_policy_outcome(
+    ctx: &ExecContext,
+    tool: &str,
+    path: &str,
+    checkpoint_paths: &[PathBuf],
+    pending_action: serde_json::Value,
+) -> Option<ToolOutcome> {
+    let mut request = crate::runtime::ActionRequest::new(
+        tool,
+        crate::runtime::ToolCategory::Edit,
+        format!("{} {}", tool, path),
+    );
+    request.path = Some(path.to_string());
+    match crate::runtime::PolicyEngine::new(ctx.config.safety.mode)
+        .with_overrides(ctx.config.safety.overrides.clone())
+        .decide(&request)
+    {
+        crate::runtime::PolicyDecision::Allow { .. } => {
+            let _ = crate::runtime::run_plugin_hooks(
+                "before_file_mutation",
+                &serde_json::json!({
+                    "task_id": ctx.task_id.clone(),
+                    "turn_id": ctx.turn.0,
+                    "call_id": ctx.call_id.0,
+                    "tool": tool,
+                    "path": path,
+                }),
+            );
+            None
+        },
+        crate::runtime::PolicyDecision::Ask { risk, checkpoint } => {
+            let checkpoint_id = if checkpoint && ctx.config.safety.checkpoint_on_mutation {
+                match crate::runtime::create_checkpoint_for_task(
+                    &ctx.workdir,
+                    checkpoint_paths,
+                    Some(pending_action.clone()),
+                    ctx.task_id.clone(),
+                ) {
+                    Ok(manifest) => Some(manifest.id),
+                    Err(error) => {
+                        return Some(ToolOutcome::error(
+                            format!(
+                                "{} checkpoint failed before approval: {}",
+                                request.summary, error
+                            ),
+                            0.0,
+                        ));
+                    },
+                }
+            } else {
+                None
+            };
+            let pending_action_json = serde_json::to_string(&pending_action).ok();
+            let approval_id = crate::runtime::RuntimeStore::open_default()
+                .and_then(|store| {
+                    let approval = store.approvals().create(crate::runtime::NewApproval {
+                        task_id: ctx.task_id.clone(),
+                        proposed_action: request.summary.clone(),
+                        risk_classification: risk.as_str().to_string(),
+                        policy_decision: "ask".to_string(),
+                        args_summary: Some(path.to_string()),
+                        checkpoint_id: checkpoint_id.clone(),
+                        pending_action_json,
+                    })?;
+                    if let Some(checkpoint_id) = checkpoint_id.as_deref() {
+                        let _ = store
+                            .checkpoints()
+                            .set_approval(checkpoint_id, &approval.id);
+                    }
+                    let _ = crate::runtime::run_plugin_hooks(
+                        "approval_requested",
+                        &serde_json::json!({
+                            "id": approval.id.clone(),
+                            "task_id": approval.task_id.clone(),
+                            "tool": tool,
+                            "risk": risk.as_str(),
+                            "checkpoint_id": checkpoint_id.clone(),
+                        }),
+                    );
+                    Ok(approval)
+                })
+                .map(|approval| approval.id)
+                .ok();
+            Some(ToolOutcome::error(
+                format!(
+                    "Approval required for {}{}",
+                    request.summary,
+                    approval_id
+                        .map(|id| format!(" (approval {})", id))
+                        .unwrap_or_default()
+                ),
+                0.0,
+            ))
+        },
+        crate::runtime::PolicyDecision::Deny { reason, .. } => Some(ToolOutcome::error(
+            format!("{} blocked by policy: {}", request.summary, reason),
+            0.0,
+        )),
+    }
+}
+
+fn after_file_mutation(ctx: &ExecContext, tool: &str, path: &str) {
+    let _ = crate::runtime::run_plugin_hooks(
+        "after_file_mutation",
+        &serde_json::json!({
+            "task_id": ctx.task_id.clone(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "tool": tool,
+            "path": path,
+        }),
+    );
 }
 
 fn edit_blocking(path: &Path, old_string: &str, new_string: &str) -> std::io::Result<usize> {
