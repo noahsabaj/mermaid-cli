@@ -19,6 +19,7 @@
 # Environment files
 .env
 .env.local
+.codex
 
 # Configuration files (contain user-specific settings)
 config.toml

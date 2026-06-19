@@ -102,7 +102,7 @@ impl ToolExecutor for ExecuteCommandTool {
                     },
                     "open_url": {
                         "type": "string",
-                        "description": "Background mode: URL to open with the desktop browser after startup."
+                        "description": "Background mode: URL to open with the default browser after startup."
                     }
                 },
                 "required": ["command"]
@@ -119,6 +119,104 @@ impl ToolExecutor for ExecuteCommandTool {
             return ToolOutcome::error(format!("Dangerous command blocked: {}", command), 0.0);
         }
 
+        let mut policy_request = crate::runtime::ActionRequest::new(
+            "execute_command",
+            crate::runtime::ToolCategory::Shell,
+            command.to_string(),
+        );
+        policy_request.command = Some(command.to_string());
+        let pending_action = serde_json::json!({
+            "tool": "execute_command",
+            "args": args.clone(),
+            "workdir": ctx.workdir.display().to_string(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "task_id": ctx.task_id.clone(),
+        });
+        match crate::runtime::PolicyEngine::new(ctx.config.safety.mode)
+            .with_overrides(ctx.config.safety.overrides.clone())
+            .decide(&policy_request)
+        {
+            crate::runtime::PolicyDecision::Allow { risk, .. } => {
+                if ctx.config.safety.checkpoint_on_mutation
+                    && risk != crate::runtime::RiskClass::ReadOnly
+                {
+                    let _ = crate::runtime::create_checkpoint_for_task(
+                        &ctx.workdir,
+                        &[],
+                        Some(pending_action.clone()),
+                        ctx.task_id.clone(),
+                    );
+                }
+            },
+            crate::runtime::PolicyDecision::Ask { risk, checkpoint } => {
+                let checkpoint_id = if checkpoint && ctx.config.safety.checkpoint_on_mutation {
+                    match crate::runtime::create_checkpoint_for_task(
+                        &ctx.workdir,
+                        &[],
+                        Some(pending_action.clone()),
+                        ctx.task_id.clone(),
+                    ) {
+                        Ok(manifest) => Some(manifest.id),
+                        Err(error) => {
+                            return ToolOutcome::error(
+                                format!(
+                                    "execute_command checkpoint failed before approval: {}",
+                                    error
+                                ),
+                                0.0,
+                            );
+                        },
+                    }
+                } else {
+                    None
+                };
+                let pending_action_json = serde_json::to_string(&pending_action).ok();
+                let approval_id = crate::runtime::RuntimeStore::open_default()
+                    .and_then(|store| {
+                        let approval = store.approvals().create(crate::runtime::NewApproval {
+                            task_id: ctx.task_id.clone(),
+                            proposed_action: command.to_string(),
+                            risk_classification: risk.as_str().to_string(),
+                            policy_decision: "ask".to_string(),
+                            args_summary: Some(command.to_string()),
+                            checkpoint_id: checkpoint_id.clone(),
+                            pending_action_json,
+                        })?;
+                        if let Some(checkpoint_id) = checkpoint_id.as_deref() {
+                            let _ = store
+                                .checkpoints()
+                                .set_approval(checkpoint_id, &approval.id);
+                        }
+                        let _ = crate::runtime::run_plugin_hooks(
+                            "approval_requested",
+                            &serde_json::json!({
+                                "id": approval.id.clone(),
+                                "task_id": approval.task_id.clone(),
+                                "tool": "execute_command",
+                                "risk": risk.as_str(),
+                                "checkpoint_id": checkpoint_id.clone(),
+                            }),
+                        );
+                        Ok(approval)
+                    })
+                    .map(|approval| approval.id)
+                    .ok();
+                return ToolOutcome::error(
+                    format!(
+                        "Approval required for command{}",
+                        approval_id
+                            .map(|id| format!(" (approval {})", id))
+                            .unwrap_or_default()
+                    ),
+                    0.0,
+                );
+            },
+            crate::runtime::PolicyDecision::Deny { reason, .. } => {
+                return ToolOutcome::error(format!("Command blocked by policy: {}", reason), 0.0);
+            },
+        }
+
         let mode = match CommandMode::parse(&args) {
             Ok(mode) => mode,
             Err(error) => return ToolOutcome::error(error, 0.0),
@@ -127,6 +225,14 @@ impl ToolExecutor for ExecuteCommandTool {
             .get("working_dir")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let shell_payload = serde_json::json!({
+            "task_id": ctx.task_id.clone(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "command": command,
+            "working_dir": working_dir.clone().unwrap_or_else(|| ctx.workdir.display().to_string()),
+        });
+        let _ = crate::runtime::run_plugin_hooks("before_shell", &shell_payload);
         if mode == CommandMode::Background {
             let startup_timeout_secs = args
                 .get("startup_timeout_secs")
@@ -143,7 +249,7 @@ impl ToolExecutor for ExecuteCommandTool {
                 .and_then(|v| v.as_str())
                 .filter(|v| !v.trim().is_empty())
                 .map(str::to_string);
-            return run_background_command(
+            let outcome = run_background_command(
                 command,
                 working_dir.as_deref(),
                 startup_timeout_secs,
@@ -152,6 +258,15 @@ impl ToolExecutor for ExecuteCommandTool {
                 ctx,
             )
             .await;
+            let _ = crate::runtime::run_plugin_hooks(
+                "after_shell",
+                &serde_json::json!({
+                    "command": command,
+                    "status": format!("{:?}", outcome.status),
+                    "summary": &outcome.summary,
+                }),
+            );
+            return outcome;
         }
 
         let timeout_secs = args
@@ -190,7 +305,7 @@ impl ToolExecutor for ExecuteCommandTool {
         let run_fut = run_command(cmd, progress);
         let timeout_fut = tokio::time::sleep(Duration::from_secs(timeout_secs));
 
-        tokio::select! {
+        let outcome = tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             _ = timeout_fut => {
@@ -257,7 +372,16 @@ impl ToolExecutor for ExecuteCommandTool {
                         ))
                 },
             },
-        }
+        };
+        let _ = crate::runtime::run_plugin_hooks(
+            "after_shell",
+            &serde_json::json!({
+                "command": command,
+                "status": format!("{:?}", outcome.status),
+                "summary": &outcome.summary,
+            }),
+        );
+        outcome
     }
 }
 

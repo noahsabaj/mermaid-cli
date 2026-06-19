@@ -176,22 +176,31 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         messages: &live_messages,
         theme: &rstate.theme,
         markdown_cache: &mut rstate.markdown_cache,
+        show_reasoning: state.ui.show_reasoning,
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut rstate.chat);
 
-    // Status line (only while generating).
-    if let TurnState::Generating {
-        started,
-        tokens,
-        partial_text,
-        ..
-    } = &state.turn
-    {
-        let elapsed_secs = started.elapsed().map(|d| d.as_secs()).unwrap_or(0);
-        let (tokens_display, tokens_estimated) = if *tokens == 0 && !partial_text.is_empty() {
-            (partial_text.len() / 4, true)
-        } else {
-            (*tokens, false)
+    // Status line for every active turn. Tool execution previously
+    // reserved the row but did not paint it, which made queued input
+    // look like it had disappeared.
+    if state.is_busy() {
+        let elapsed_secs = match &state.turn {
+            TurnState::Generating { started, .. } | TurnState::Compacting { started, .. } => {
+                started.elapsed().map(|d| d.as_secs()).unwrap_or(0)
+            },
+            TurnState::Cancelling { since, .. } => {
+                since.elapsed().map(|d| d.as_secs()).unwrap_or(0)
+            },
+            TurnState::ExecutingTools { .. } | TurnState::Idle => 0,
+        };
+        let (tokens_display, tokens_estimated) = match &state.turn {
+            TurnState::Generating {
+                tokens,
+                partial_text,
+                ..
+            } if *tokens == 0 && !partial_text.is_empty() => (partial_text.len() / 4, true),
+            TurnState::Generating { tokens, .. } => (*tokens, false),
+            _ => (0, false),
         };
         let status_line_widget = StatusLineWidget {
             status: GenerationStatus::from_turn(&state.turn),
@@ -401,12 +410,45 @@ mod tests {
         let mut s = mock_state();
         s.turn = crate::domain::transition::start_generating(crate::domain::TurnId(1));
         let frame = render_to_string(&s);
-        // Status widget only renders when generating — the bottom bar
-        // should have shifted to show the status line content.
         assert!(
             frame.contains("Sending") || frame.contains("Thinking") || frame.contains("Streaming"),
             "expected generation status in frame"
         );
+    }
+
+    #[test]
+    fn status_line_appears_during_tool_execution_and_shows_queue() {
+        let mut s = mock_state();
+        s.turn = TurnState::ExecutingTools {
+            id: crate::domain::TurnId(1),
+            calls: Vec::new(),
+            outcomes: Vec::new(),
+        };
+        s.ui.queued_messages
+            .push_back("please steer this".to_string());
+        let frame = render_to_string(&s);
+        assert!(frame.contains("Running tools"), "expected tool status");
+        assert!(
+            frame.contains("please steer this"),
+            "queued busy input must be visible"
+        );
+    }
+
+    #[test]
+    fn reasoning_blocks_are_collapsed_by_default() {
+        let mut s = mock_state();
+        let mut first_msg = crate::models::ChatMessage::assistant("first visible answer");
+        first_msg.thinking = Some("first private chain of thought".to_string());
+        s.session.append(first_msg);
+        let mut second_msg = crate::models::ChatMessage::assistant("second visible answer");
+        second_msg.thinking = Some("second private chain of thought".to_string());
+        s.session.append(second_msg);
+        let frame = render_to_string(&s);
+        assert_eq!(frame.matches("Reasoning hidden").count(), 1);
+        assert!(frame.contains("first visible answer"));
+        assert!(frame.contains("second visible answer"));
+        assert!(!frame.contains("first private chain of thought"));
+        assert!(!frame.contains("second private chain of thought"));
     }
 
     #[test]

@@ -42,6 +42,9 @@ impl<'a> Widget for StatusLineWidget<'a> {
         let (arrow, flow_direction) = match self.status {
             GenerationStatus::Sending | GenerationStatus::Thinking => ("↑ ", "upstream"),
             GenerationStatus::Streaming => ("↓ ", "downstream"),
+            GenerationStatus::RunningTools => ("• ", "tools"),
+            GenerationStatus::Compacting => ("• ", "compaction"),
+            GenerationStatus::Cancelling => ("• ", "cleanup"),
             GenerationStatus::Idle => ("", ""),
         };
 
@@ -58,6 +61,12 @@ impl<'a> Widget for StatusLineWidget<'a> {
                     self.elapsed_secs,
                     if flow_direction == "downstream" {
                         "↓"
+                    } else if flow_direction == "tools" {
+                        "tools"
+                    } else if flow_direction == "compaction" {
+                        "compact"
+                    } else if flow_direction == "cleanup" {
+                        "cleanup"
                     } else {
                         "↑"
                     },

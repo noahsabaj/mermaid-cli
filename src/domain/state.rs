@@ -697,6 +697,10 @@ pub struct UiState {
     /// pure — it doesn't touch render-layer state, it just publishes
     /// an intent. `i32` wraps at ~2 billion scrolls (never).
     pub mouse_scroll_accum: i32,
+    /// Whether committed reasoning/thinking blocks are expanded in
+    /// the chat transcript. Hidden by default to keep the TUI focused
+    /// on user-facing work while retaining provider-required history.
+    pub show_reasoning: bool,
 }
 
 /// Top-level UI mode. Like `TurnState` this is a sum type instead of a

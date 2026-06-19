@@ -62,7 +62,7 @@ pub const MARKDOWN_CACHE_MAX_ENTRIES: usize = 200;
 /// Maximum width for screenshots sent to models (pixels)
 pub const SCREENSHOT_MAX_WIDTH: u32 = 1280;
 
-// Computer-use timing — empirically tuned for typical desktop response.
+// Computer-use timing — empirically tuned for typical GUI response.
 // Slow systems (high-load WMs, remote X displays) may need higher values;
 // the right place to make these tunable later is via env vars on
 // `app::Config`, alongside the rest of the configurable surface.
@@ -97,13 +97,13 @@ pub const SCREENSHOT_REGISTRY_CAPACITY: usize = 16;
 /// the model knows what was dropped from context.
 pub const MAX_RETAINED_SCREENSHOTS: usize = 3;
 
-// MERMAID.md project instructions (Step 5h)
-/// Maximum bytes loaded from MERMAID.md before truncation. ~10k
+// Project instructions (Step 5h)
+/// Maximum bytes loaded from project instruction files before truncation. ~10k
 /// tokens at 4 chars/token. Files larger than this likely have
 /// repository-wide notes that don't all need to live in the system
 /// prompt; truncate with a marker so the user knows.
 pub const MAX_INSTRUCTIONS_BYTES: usize = 40_000;
-/// Marker appended to MERMAID.md content when the file exceeds the
+/// Marker appended to project-instruction content when it exceeds the
 /// byte cap. The model sees this so it knows context was elided.
 pub const INSTRUCTIONS_TRUNCATION_MARKER: &str =
-    "\n\n[MERMAID.md truncated — exceeds 10k token cap]";
+    "\n\n[Project instructions truncated - exceeds 10k token cap]";

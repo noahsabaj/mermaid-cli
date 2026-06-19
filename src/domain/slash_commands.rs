@@ -20,7 +20,38 @@ pub struct SlashCommand {
     /// Optional argument hint shown after the command name in the
     /// palette, e.g. `Some("[name]")` for `/model [name]`.
     pub arg_hint: Option<&'static str>,
+    /// UX grouping used by `/help`; the palette still preserves registry order.
+    pub group: SlashCommandGroup,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlashCommandGroup {
+    Everyday,
+    ModelContext,
+    SafetyRecovery,
+    Integrations,
+    AdvancedRuntime,
+}
+
+impl SlashCommandGroup {
+    pub fn title(self) -> &'static str {
+        match self {
+            SlashCommandGroup::Everyday => "Everyday",
+            SlashCommandGroup::ModelContext => "Model and context",
+            SlashCommandGroup::SafetyRecovery => "Safety and recovery",
+            SlashCommandGroup::Integrations => "Integrations",
+            SlashCommandGroup::AdvancedRuntime => "Advanced runtime",
+        }
+    }
+}
+
+pub const COMMAND_GROUPS: &[SlashCommandGroup] = &[
+    SlashCommandGroup::Everyday,
+    SlashCommandGroup::ModelContext,
+    SlashCommandGroup::SafetyRecovery,
+    SlashCommandGroup::Integrations,
+    SlashCommandGroup::AdvancedRuntime,
+];
 
 /// Authoritative registry of all slash commands. Order here is the
 /// order shown in the palette and `/help`.
@@ -30,72 +61,266 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Switch model (auto-pulls if needed) or show current",
         arg_hint: Some("[name]"),
+        group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
         name: "reasoning",
         aliases: &[],
         description: "Set reasoning depth (none, minimal, low, medium, high, max, xhigh)",
         arg_hint: Some("[level]"),
+        group: SlashCommandGroup::ModelContext,
+    },
+    SlashCommand {
+        name: "visible-reasoning",
+        aliases: &["visiblereasoning"],
+        description: "Show, hide, or toggle reasoning blocks in the transcript",
+        arg_hint: Some("[on|off|toggle]"),
+        group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
         name: "clear",
         aliases: &[],
         description: "Clear chat history",
         arg_hint: None,
+        group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
         name: "save",
         aliases: &[],
         description: "Save current conversation",
         arg_hint: Some("[name]"),
+        group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
         name: "load",
         aliases: &[],
         description: "Load a conversation",
         arg_hint: Some("[name]"),
+        group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
         name: "list",
         aliases: &[],
         description: "List saved conversations",
         arg_hint: None,
+        group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
         name: "usage",
         aliases: &[],
         description: "Show provider token usage and session totals",
         arg_hint: None,
+        group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
         name: "context",
         aliases: &[],
         description: "Show current context-window estimate and prompt budget",
         arg_hint: None,
+        group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
         name: "compact",
         aliases: &["compress", "summarize"],
         description: "Compact conversation context with optional focus instructions",
         arg_hint: Some("[instructions]"),
+        group: SlashCommandGroup::ModelContext,
+    },
+    SlashCommand {
+        name: "doctor",
+        aliases: &[],
+        description: "Show in-session readiness, model, safety, and instruction status",
+        arg_hint: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
+        name: "tasks",
+        aliases: &[],
+        description: "List durable runtime tasks",
+        arg_hint: None,
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
+        name: "task",
+        aliases: &[],
+        description: "Show a durable runtime task",
+        arg_hint: Some("<id>"),
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
+        name: "pause",
+        aliases: &[],
+        description: "Pause a durable task by marking it blocked",
+        arg_hint: Some("<task-id>"),
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
+        name: "resume",
+        aliases: &[],
+        description: "Resume a durable task by marking it running",
+        arg_hint: Some("<task-id>"),
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
+        name: "cancel",
+        aliases: &[],
+        description: "Cancel the active turn or a durable task",
+        arg_hint: Some("[task-id]"),
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
+        name: "handoff",
+        aliases: &[],
+        description: "Write a handoff report for the current or named task",
+        arg_hint: Some("[task-id]"),
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
+        name: "report",
+        aliases: &[],
+        description: "Show current context report or task report",
+        arg_hint: Some("[task-id]"),
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
+        name: "processes",
+        aliases: &["procs"],
+        description: "List durable runtime processes",
+        arg_hint: None,
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
+        name: "logs",
+        aliases: &[],
+        description: "Show a durable runtime process log",
+        arg_hint: Some("<process-id>"),
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
+        name: "stop",
+        aliases: &[],
+        description: "Stop a durable runtime process",
+        arg_hint: Some("<process-id>"),
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
+        name: "restart",
+        aliases: &[],
+        description: "Restart a durable runtime process",
+        arg_hint: Some("<process-id>"),
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
+        name: "open",
+        aliases: &[],
+        description: "Open a URL, file, or process target",
+        arg_hint: Some("<url|path|process-id>"),
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
+        name: "ports",
+        aliases: &[],
+        description: "Show listening TCP ports",
+        arg_hint: None,
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
+        name: "approvals",
+        aliases: &[],
+        description: "List pending approvals",
+        arg_hint: None,
+        group: SlashCommandGroup::SafetyRecovery,
+    },
+    SlashCommand {
+        name: "approve",
+        aliases: &[],
+        description: "Approve a pending action",
+        arg_hint: Some("<approval-id>"),
+        group: SlashCommandGroup::SafetyRecovery,
+    },
+    SlashCommand {
+        name: "deny",
+        aliases: &[],
+        description: "Deny a pending action",
+        arg_hint: Some("<approval-id>"),
+        group: SlashCommandGroup::SafetyRecovery,
+    },
+    SlashCommand {
+        name: "checkpoint",
+        aliases: &[],
+        description: "Create a restore checkpoint for one or more paths",
+        arg_hint: Some("<path...>"),
+        group: SlashCommandGroup::SafetyRecovery,
+    },
+    SlashCommand {
+        name: "checkpoints",
+        aliases: &[],
+        description: "List restore checkpoints",
+        arg_hint: None,
+        group: SlashCommandGroup::SafetyRecovery,
+    },
+    SlashCommand {
+        name: "restore",
+        aliases: &[],
+        description: "Restore a checkpoint",
+        arg_hint: Some("<id>"),
+        group: SlashCommandGroup::SafetyRecovery,
+    },
+    SlashCommand {
+        name: "memory",
+        aliases: &[],
+        description: "List project memory",
+        arg_hint: Some("[edit <id> <value>]"),
+        group: SlashCommandGroup::Integrations,
+    },
+    SlashCommand {
+        name: "remember",
+        aliases: &[],
+        description: "Write project memory",
+        arg_hint: Some("<key> <value>"),
+        group: SlashCommandGroup::Integrations,
+    },
+    SlashCommand {
+        name: "forget",
+        aliases: &[],
+        description: "Forget a memory entry",
+        arg_hint: Some("<id>"),
+        group: SlashCommandGroup::Integrations,
+    },
+    SlashCommand {
+        name: "plugins",
+        aliases: &[],
+        description: "List installed plugins",
+        arg_hint: None,
+        group: SlashCommandGroup::Integrations,
+    },
+    SlashCommand {
+        name: "model-info",
+        aliases: &[],
+        description: "Show provider/model capability information",
+        arg_hint: Some("<model>"),
+        group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
         name: "cloud-setup",
         aliases: &[],
         description: "Configure Ollama Cloud API key",
         arg_hint: None,
+        group: SlashCommandGroup::Integrations,
     },
     SlashCommand {
         name: "help",
         aliases: &["h"],
         description: "Show command help",
         arg_hint: None,
+        group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
         name: "quit",
         aliases: &["q"],
         description: "Quit the application",
         arg_hint: None,
+        group: SlashCommandGroup::Everyday,
     },
 ];
 
@@ -111,7 +336,10 @@ pub fn filter_by_prefix(typed: &str) -> Vec<&'static SlashCommand> {
     COMMAND_REGISTRY
         .iter()
         .filter(|cmd| {
-            cmd.name.starts_with(&needle) || cmd.aliases.iter().any(|a| a.starts_with(&needle))
+            let name_matches = cmd.name == needle
+                || (!cmd.name.contains('-') || needle.contains('-'))
+                    && cmd.name.starts_with(&needle);
+            name_matches || cmd.aliases.iter().any(|a| a.starts_with(&needle))
         })
         .collect()
 }

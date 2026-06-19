@@ -140,6 +140,13 @@ pub struct ToolRunMetadata {
     pub result_count: Option<usize>,
     pub duration_secs: Option<f64>,
     pub process: Option<ManagedProcess>,
+    /// User-facing display diff for file mutations. This is captured
+    /// at tool execution time so whole-file writes can compare against
+    /// the pre-write contents even after the file has been overwritten.
+    #[serde(default)]
+    pub display_diff: Option<String>,
+    #[serde(default)]
+    pub diff_truncated: bool,
     #[serde(default)]
     pub artifacts: Vec<ToolArtifact>,
 }

@@ -468,6 +468,8 @@ fn compaction_finished_replaces_history_and_archives_head() {
             preserved_message_count: 1,
             summary_tokens: 10,
             duration_secs: 0.5,
+            verified: true,
+            verification_error: None,
             focus: None,
             archive_path: None,
         },
@@ -495,7 +497,7 @@ fn compaction_finished_replaces_history_and_archives_head() {
     );
     assert!(
         cmds.iter()
-            .any(|cmd| matches!(cmd, Cmd::SaveCompactionArchive(_)))
+            .any(|cmd| matches!(cmd, Cmd::SaveCompactionArchive { .. }))
     );
 }
 

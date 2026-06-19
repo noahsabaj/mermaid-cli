@@ -18,8 +18,8 @@ pub use capabilities::ModelCapabilities;
 pub use config::{BackendConfig, ModelConfig, OllamaOptions};
 pub use error::{BackendError, ConfigError, ErrorCategory, ModelError, Result, UserFacingError};
 pub use providers::{
-    CompatStyle, ProviderProfile, REGISTRY as PROVIDER_REGISTRY, ReasoningExtraction,
-    ReasoningStrategy, lookup_provider,
+    CompatStyle, MaxTokensParam, ProviderProfile, REGISTRY as PROVIDER_REGISTRY,
+    ReasoningExtraction, ReasoningStrategy, lookup_provider,
 };
 pub use reasoning::{ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort};
 pub use stream::{StreamCallback, StreamEvent};

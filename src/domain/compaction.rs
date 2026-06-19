@@ -127,10 +127,18 @@ pub struct CompactionRecord {
     pub preserved_message_count: usize,
     pub summary_tokens: usize,
     pub duration_secs: f64,
+    #[serde(default = "default_verified")]
+    pub verified: bool,
+    #[serde(default)]
+    pub verification_error: Option<String>,
     #[serde(default)]
     pub focus: Option<String>,
     #[serde(default)]
     pub archive_path: Option<String>,
+}
+
+fn default_verified() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +342,8 @@ pub fn build_replacement_messages(
         "archived_message_count": record.archived_message_count,
         "preserved_message_count": record.preserved_message_count,
         "duration_secs": record.duration_secs,
+        "verified": record.verified,
+        "verification_error": record.verification_error,
     }));
 
     let mut assistant = ChatMessage::assistant(compaction_receipt(record));
@@ -348,13 +358,21 @@ pub fn build_replacement_messages(
 }
 
 pub fn compaction_receipt(record: &CompactionRecord) -> String {
+    let verification = if record.verified {
+        "Verified.".to_string()
+    } else if let Some(error) = &record.verification_error {
+        format!("Used draft summary because verification failed: {error}.")
+    } else {
+        "Used draft summary without verification.".to_string()
+    };
     format!(
-        "Context compacted: {} -> {} tokens, archived {} messages, preserved {} messages, took {:.1}s. I will continue from this checkpoint.",
+        "Context compacted: {} -> {} tokens, archived {} messages, preserved {} messages, took {:.1}s. {} I will continue from this checkpoint.",
         format_compact_count(record.before_tokens),
         format_compact_count(record.after_tokens),
         record.archived_message_count,
         record.preserved_message_count,
-        record.duration_secs
+        record.duration_secs,
+        verification
     )
 }
 
@@ -627,6 +645,8 @@ mod tests {
             preserved_message_count: 1,
             summary_tokens: 10,
             duration_secs: 1.0,
+            verified: true,
+            verification_error: None,
             focus: None,
             archive_path: None,
         };
@@ -634,5 +654,41 @@ mod tests {
         assert_eq!(messages[0].kind, ChatMessageKind::ContextCheckpoint);
         assert!(messages[0].content.contains(CHECKPOINT_MARKER));
         assert_eq!(messages[2].content, "new");
+    }
+
+    #[test]
+    fn replacement_metadata_records_verification_status() {
+        let prepared = PreparedCompaction {
+            archived_messages: vec![ChatMessage::user("old")],
+            preserved_messages: vec![ChatMessage::user("new")],
+            previous_summary: None,
+            history_excerpt: "old".to_string(),
+        };
+        let record = CompactionRecord {
+            id: "c1".to_string(),
+            trigger: CompactionTrigger::Manual,
+            created_at: Local::now(),
+            before_tokens: 100,
+            after_tokens: 25,
+            archived_message_count: 1,
+            preserved_message_count: 1,
+            summary_tokens: 10,
+            duration_secs: 1.0,
+            verified: false,
+            verification_error: Some("provider overloaded".to_string()),
+            focus: None,
+            archive_path: None,
+        };
+        let messages = build_replacement_messages("## Goal\n- continue", &prepared, &record);
+        let metadata = messages[0].metadata.as_ref().expect("metadata");
+        assert_eq!(
+            metadata.get("verified").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            metadata.get("verification_error").and_then(|v| v.as_str()),
+            Some("provider overloaded")
+        );
+        assert!(messages[1].content.contains("Used draft summary"));
     }
 }

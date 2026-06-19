@@ -130,6 +130,7 @@ pub struct ChatWidget<'a> {
     pub theme: &'a Theme,
     /// Shared markdown parse cache: content hash → parsed lines.
     pub markdown_cache: &'a mut FxHashMap<u64, Vec<Line<'static>>>,
+    pub show_reasoning: bool,
 }
 
 impl<'a> StatefulWidget for ChatWidget<'a> {
@@ -141,6 +142,8 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         // Clear click map for this render pass
         state.image_click_map.clear();
         state.last_chat_area = Some((area.x, area.y, area.width, area.height));
+
+        let mut hidden_reasoning_notice_shown = false;
 
         for (idx, msg) in self.messages.iter().enumerate() {
             // Skip Tool messages - they're internal to the agent loop and their
@@ -174,7 +177,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                         || thinking_trimmed == "none"
                     {
                         // Don't render empty/null thinking blocks
-                    } else {
+                    } else if self.show_reasoning {
                         // Add "Thinking..." header in italic and dimmed with grayed white dot
                         lines.push(Line::from(vec![
                             Span::styled("● ", Style::new().fg(ratatui::style::Color::DarkGray)),
@@ -206,6 +209,29 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
                         // Add blank line after thinking block
                         lines.push(Line::from(""));
+                    } else if !hidden_reasoning_notice_shown {
+                        hidden_reasoning_notice_shown = true;
+                        let marker = if msg.content.trim().is_empty() && msg.actions.is_empty() {
+                            "Reasoning-only response hidden (/visible-reasoning on to show)"
+                        } else {
+                            "Reasoning hidden (/visible-reasoning on to show)"
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled("● ", Style::new().fg(ratatui::style::Color::DarkGray)),
+                            Span::styled(
+                                marker,
+                                Style::new()
+                                    .fg(self.theme.colors.text_secondary.to_color())
+                                    .italic()
+                                    .dim(),
+                            ),
+                        ]));
+                        if msg.content.trim().is_empty() && msg.actions.is_empty() {
+                            lines.push(Line::from(""));
+                            continue;
+                        }
+                    } else if msg.content.trim().is_empty() && msg.actions.is_empty() {
+                        continue;
                     }
                 }
 
@@ -385,6 +411,12 @@ fn render_context_checkpoint_event(msg: &ChatMessage, theme: &Theme) -> Option<V
     let duration_secs = metadata
         .and_then(|value| value.get("duration_secs"))
         .and_then(|value| value.as_f64());
+    let verified = metadata
+        .and_then(|value| value.get("verified"))
+        .and_then(|value| value.as_bool());
+    let verification_error = metadata
+        .and_then(|value| value.get("verification_error"))
+        .and_then(|value| value.as_str());
 
     let action_color = theme.colors.info.to_color();
     let mut result = match (before_tokens, after_tokens) {
@@ -412,9 +444,16 @@ fn render_context_checkpoint_event(msg: &ChatMessage, theme: &Theme) -> Option<V
             if count == 1 { "message" } else { "messages" }
         ));
     }
+    if let Some(verified) = verified {
+        if verified {
+            result.push_str(", verified");
+        } else {
+            result.push_str(", draft fallback");
+        }
+    }
     result = append_action_duration(result, duration_secs);
 
-    Some(vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("● ", Style::new().fg(action_color).bold()),
             Span::styled("Compact(", Style::new().fg(action_color).bold()),
@@ -431,7 +470,19 @@ fn render_context_checkpoint_event(msg: &ChatMessage, theme: &Theme) -> Option<V
                 Style::new().fg(theme.colors.text_secondary.to_color()),
             ),
         ]),
-    ])
+    ];
+
+    if let Some(error) = verification_error.filter(|error| !error.trim().is_empty()) {
+        lines.push(Line::from(vec![
+            Span::styled("    ", Style::new().fg(action_color)),
+            Span::styled(
+                format!("verification: {}", compact_inline_error(error, 180)),
+                Style::new().fg(theme.colors.warning.to_color()),
+            ),
+        ]));
+    }
+
+    Some(lines)
 }
 
 fn metadata_usize(value: &serde_json::Value, key: &str) -> Option<usize> {
@@ -439,6 +490,17 @@ fn metadata_usize(value: &serde_json::Value, key: &str) -> Option<usize> {
         .get(key)?
         .as_u64()
         .and_then(|value| usize::try_from(value).ok())
+}
+
+fn compact_inline_error(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut out: String = text.chars().take(keep).collect();
+    out.push_str("...");
+    out
 }
 
 /// Render actions in Claude Code style
@@ -546,8 +608,7 @@ fn render_actions(
                 // Edit: color-coded diff
                 if let ActionDetails::Diff { diff, .. } = &action.details {
                     let diff_lines: Vec<&str> = diff.lines().collect();
-                    let display_lines: Vec<&str> =
-                        diff_lines.iter().skip(1).take(20).copied().collect();
+                    let display_lines: Vec<&str> = diff_lines.iter().take(80).copied().collect();
 
                     if !display_lines.is_empty() {
                         let removed_bg = ratatui::style::Color::Rgb(60, 20, 20);
@@ -593,7 +654,7 @@ fn render_actions(
                             }
                         }
 
-                        let remaining = diff_lines.len().saturating_sub(21);
+                        let remaining = diff_lines.len().saturating_sub(display_lines.len());
                         if remaining > 0 {
                             lines.push(Line::from(vec![
                                 Span::styled("    ", Style::new().fg(action_color)),
@@ -801,6 +862,7 @@ mod tests {
             "archived_message_count": 18,
             "preserved_message_count": 4,
             "duration_secs": 2.4,
+            "verified": true,
         }));
 
         let lines = render_context_checkpoint_event(&msg, &Theme::dark()).expect("event lines");
@@ -819,7 +881,40 @@ mod tests {
         assert!(rendered.contains("43.8k -> 9.2k tokens"));
         assert!(rendered.contains("archived 18 messages"));
         assert!(rendered.contains("preserved 4 messages"));
+        assert!(rendered.contains("verified"));
         assert!(!rendered.contains("full checkpoint summary"));
+    }
+
+    #[test]
+    fn context_checkpoint_renders_verification_fallback() {
+        let mut msg = ChatMessage::user("full checkpoint summary hidden from the chat log");
+        msg.kind = ChatMessageKind::ContextCheckpoint;
+        msg.metadata = Some(serde_json::json!({
+            "trigger": "auto_threshold",
+            "before_tokens": 43_800,
+            "after_tokens": 9_200,
+            "archived_message_count": 18,
+            "preserved_message_count": 4,
+            "duration_secs": 2.4,
+            "verified": false,
+            "verification_error": "provider overloaded",
+        }));
+
+        let lines = render_context_checkpoint_event(&msg, &Theme::dark()).expect("event lines");
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Compact(auto_threshold)"));
+        assert!(rendered.contains("draft fallback"));
+        assert!(rendered.contains("verification: provider overloaded"));
     }
 
     /// CJK characters are 3 bytes but 2 display cells each. The

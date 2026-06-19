@@ -26,11 +26,12 @@
 use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE};
 use crate::models::{ChatMessage, MessageRole};
 use crate::prompts::get_system_prompt;
+use crate::runtime::TaskStatus;
 
-use super::COMMAND_REGISTRY;
 use super::cmd::{ChatRequest, Cmd};
 use super::compaction::{
-    CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger, compaction_receipt,
+    CompactionArchive, CompactionPolicy, CompactionRequest, CompactionResult, CompactionTrigger,
+    compaction_receipt, context_exceeds_hard_limit, should_auto_compact,
 };
 use super::ids::TurnId;
 use super::msg::{KeyCode, KeyMods, Msg, Paste, SlashCmd};
@@ -42,6 +43,7 @@ use super::transition::{
     action_display_for, commit_assistant_message, fill_outcome, start_generating,
     tool_result_messages, try_complete_outcomes,
 };
+use super::{COMMAND_GROUPS, COMMAND_REGISTRY};
 
 /// Cap on how many queued follow-up messages get drained per
 /// external `update()` call. Arms typically enqueue zero or one
@@ -298,6 +300,53 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             }
             // If the user already navigated away (Esc before the
             // list landed), the event silently drops.
+        },
+        Msg::RuntimeTasksListed(tasks) => {
+            state
+                .session
+                .append(ChatMessage::system(tasks_text(&tasks)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeTaskLoaded { task, events } => {
+            state.session.append(ChatMessage::system(task_detail_text(
+                task.as_ref(),
+                &events,
+            )));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeProcessesListed(processes) => {
+            state
+                .session
+                .append(ChatMessage::system(processes_text(&processes)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeText(text) => {
+            state.session.append(ChatMessage::system(text));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeApprovalsListed(approvals) => {
+            state
+                .session
+                .append(ChatMessage::system(approvals_text(&approvals)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeCheckpointsListed(checkpoints) => {
+            state
+                .session
+                .append(ChatMessage::system(checkpoints_text(&checkpoints)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimeMemoryListed(memory) => {
+            state
+                .session
+                .append(ChatMessage::system(memory_text(&memory)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        Msg::RuntimePluginsListed(plugins) => {
+            state
+                .session
+                .append(ChatMessage::system(plugins_text(&plugins)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         Msg::ModelPullFinished { model } => {
             state.status = Some(StatusLine {
@@ -917,6 +966,27 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 level,
             });
         },
+        SlashCmd::VisibleReasoning(arg) => {
+            match visible_reasoning_value(arg.as_deref(), state.ui.show_reasoning) {
+                Ok(next) => {
+                    state.ui.show_reasoning = next;
+                    set_status(
+                        state,
+                        cmds,
+                        if next {
+                            "Visible reasoning: on"
+                        } else {
+                            "Visible reasoning: off"
+                        },
+                        StatusKind::Info,
+                        3_000,
+                    );
+                },
+                Err(usage) => {
+                    set_status(state, cmds, usage, StatusKind::Warn, 4_000);
+                },
+            }
+        },
         SlashCmd::Clear => {
             // Guard with a confirmation modal.
             state.confirm = Some(super::state::Confirmation {
@@ -953,6 +1023,296 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::Compact(instructions) => {
             handle_manual_compact(state, cmds, instructions);
         },
+        SlashCmd::Doctor => {
+            state
+                .session
+                .append(ChatMessage::system(doctor_text(state)));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        SlashCmd::Tasks => {
+            cmds.push(Cmd::ListRuntimeTasks { limit: 10 });
+        },
+        SlashCmd::Task(Some(id)) => {
+            cmds.push(Cmd::LoadRuntimeTask { id });
+        },
+        SlashCmd::Task(None) => {
+            set_status(state, cmds, "Usage: /task <id>", StatusKind::Info, 3_000);
+        },
+        SlashCmd::Pause(Some(id)) => {
+            cmds.push(Cmd::UpdateRuntimeTaskStatus {
+                id,
+                status: TaskStatus::Blocked,
+                final_report: Some("Paused from TUI".to_string()),
+            });
+        },
+        SlashCmd::Pause(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /pause <task-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Resume(Some(id)) => {
+            cmds.push(Cmd::UpdateRuntimeTaskStatus {
+                id,
+                status: TaskStatus::Running,
+                final_report: None,
+            });
+        },
+        SlashCmd::Resume(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /resume <task-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Cancel(Some(id)) => {
+            cmds.push(Cmd::UpdateRuntimeTaskStatus {
+                id,
+                status: TaskStatus::Cancelled,
+                final_report: Some("Cancelled from TUI".to_string()),
+            });
+        },
+        SlashCmd::Cancel(None) => {
+            if matches!(state.turn, TurnState::Idle) {
+                set_status(
+                    state,
+                    cmds,
+                    "No active turn to cancel.",
+                    StatusKind::Info,
+                    2_500,
+                );
+            } else {
+                handle_cancel_turn(state, cmds);
+            }
+        },
+        SlashCmd::Handoff(Some(id)) | SlashCmd::Report(Some(id)) => {
+            cmds.push(Cmd::LoadRuntimeTask { id });
+        },
+        SlashCmd::Handoff(None) => {
+            let text = format!(
+                "Handoff report\n\n{}\n\n{}",
+                context_text(state),
+                usage_text(state)
+            );
+            state.session.append(ChatMessage::system(text));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        SlashCmd::Report(None) => {
+            let text = format!(
+                "Runtime report\n\n{}\n\n{}",
+                context_text(state),
+                usage_text(state)
+            );
+            state.session.append(ChatMessage::system(text));
+            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        },
+        SlashCmd::Processes => {
+            cmds.push(Cmd::ListRuntimeProcesses { limit: 10 });
+        },
+        SlashCmd::Logs(Some(id)) => {
+            cmds.push(Cmd::ShowRuntimeProcessLogs { id });
+        },
+        SlashCmd::Logs(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /logs <process-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Stop(Some(id)) => {
+            cmds.push(Cmd::StopRuntimeProcess { id });
+        },
+        SlashCmd::Stop(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /stop <process-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Restart(Some(id)) => {
+            cmds.push(Cmd::RestartRuntimeProcess { id });
+        },
+        SlashCmd::Restart(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /restart <process-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Open(Some(target)) => {
+            cmds.push(Cmd::OpenRuntimeTarget { target });
+        },
+        SlashCmd::Open(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /open <url|path|process-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Ports => {
+            cmds.push(Cmd::ShowRuntimePorts);
+        },
+        SlashCmd::Approvals => {
+            cmds.push(Cmd::ListRuntimeApprovals);
+        },
+        SlashCmd::Approve(Some(id)) => {
+            cmds.push(Cmd::DecideRuntimeApproval {
+                id,
+                decision: "approved".to_string(),
+            });
+        },
+        SlashCmd::Approve(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /approve <approval-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Deny(Some(id)) => {
+            cmds.push(Cmd::DecideRuntimeApproval {
+                id,
+                decision: "denied".to_string(),
+            });
+        },
+        SlashCmd::Deny(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /deny <approval-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Checkpoint(Some(paths)) => {
+            let paths = paths
+                .split_whitespace()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>();
+            cmds.push(Cmd::CreateRuntimeCheckpoint { paths });
+        },
+        SlashCmd::Checkpoint(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /checkpoint <path...>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Checkpoints => {
+            cmds.push(Cmd::ListRuntimeCheckpoints { limit: 10 });
+        },
+        SlashCmd::Restore(Some(id)) => {
+            cmds.push(Cmd::RestoreRuntimeCheckpoint { id });
+        },
+        SlashCmd::Restore(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /restore <checkpoint-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Memory => {
+            cmds.push(Cmd::ListRuntimeMemory);
+        },
+        SlashCmd::MemoryEdit(Some(input)) => {
+            let mut parts = input.splitn(2, char::is_whitespace);
+            match (parts.next(), parts.next()) {
+                (Some(id), Some(value)) if !id.is_empty() && !value.trim().is_empty() => {
+                    cmds.push(Cmd::EditRuntimeMemory {
+                        id: id.to_string(),
+                        value: value.trim().to_string(),
+                    });
+                },
+                _ => set_status(
+                    state,
+                    cmds,
+                    "Usage: /memory edit <id> <value>",
+                    StatusKind::Info,
+                    3_000,
+                ),
+            }
+        },
+        SlashCmd::MemoryEdit(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /memory edit <id> <value>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Remember(Some(input)) => {
+            let mut parts = input.splitn(2, char::is_whitespace);
+            match (parts.next(), parts.next()) {
+                (Some(key), Some(value)) if !key.is_empty() && !value.trim().is_empty() => {
+                    cmds.push(Cmd::RememberRuntimeMemory {
+                        key: key.to_string(),
+                        value: value.trim().to_string(),
+                    });
+                },
+                _ => set_status(
+                    state,
+                    cmds,
+                    "Usage: /remember <key> <value>",
+                    StatusKind::Info,
+                    3_000,
+                ),
+            }
+        },
+        SlashCmd::Remember(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /remember <key> <value>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Forget(Some(id)) => {
+            cmds.push(Cmd::ForgetRuntimeMemory { id });
+        },
+        SlashCmd::Forget(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /forget <memory-id>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Plugins => {
+            cmds.push(Cmd::ListRuntimePlugins);
+        },
+        SlashCmd::ModelInfo(Some(model)) => {
+            cmds.push(Cmd::ShowRuntimeModelInfo { model });
+        },
+        SlashCmd::ModelInfo(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /model-info <model>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
         SlashCmd::CloudSetup => {
             // Cloud setup needs interactive stdin (rpassword) which
             // fights with ratatui's raw mode. The in-TUI command
@@ -982,6 +1342,30 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::DismissStatusAfter { ms: 2_500 });
         },
     }
+}
+
+fn visible_reasoning_value(arg: Option<&str>, current: bool) -> Result<bool, &'static str> {
+    match arg.map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("toggle") => Ok(!current),
+        Some("on") | Some("true") | Some("yes") | Some("show") => Ok(true),
+        Some("off") | Some("false") | Some("no") | Some("hide") => Ok(false),
+        Some(_) => Err("Usage: /visible-reasoning [on|off|toggle]"),
+    }
+}
+
+fn set_status(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    text: impl Into<String>,
+    kind: StatusKind,
+    dismiss_ms: u64,
+) {
+    state.status = Some(StatusLine {
+        text: text.into(),
+        kind,
+        shown_at: std::time::SystemTime::now(),
+    });
+    cmds.push(Cmd::DismissStatusAfter { ms: dismiss_ms });
 }
 
 fn ollama_pull_target(model_id: &str) -> Option<String> {
@@ -1047,26 +1431,113 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
 }
 
 fn help_text() -> String {
-    let mut lines = Vec::with_capacity(COMMAND_REGISTRY.len() + 1);
-    lines.push("Available commands:".to_string());
-    for command in COMMAND_REGISTRY {
-        let hint = command.arg_hint.unwrap_or("");
-        let aliases = if command.aliases.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", command.aliases.join(", "))
-        };
-        let suffix = if hint.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", hint)
-        };
-        lines.push(format!(
-            "/{}{}{} - {}",
-            command.name, suffix, aliases, command.description
-        ));
+    let mut lines = Vec::with_capacity(COMMAND_REGISTRY.len() + COMMAND_GROUPS.len() + 2);
+    lines.push("Mermaid commands".to_string());
+    lines.push(
+        "Everyday commands are first; daemon/task/process commands are advanced runtime."
+            .to_string(),
+    );
+    for group in COMMAND_GROUPS {
+        lines.push(String::new());
+        lines.push(format!("{}:", group.title()));
+        for command in COMMAND_REGISTRY
+            .iter()
+            .filter(|command| command.group == *group)
+        {
+            let hint = command.arg_hint.unwrap_or("");
+            let aliases = if command.aliases.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", command.aliases.join(", "))
+            };
+            let suffix = if hint.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", hint)
+            };
+            lines.push(format!(
+                "  /{}{}{} - {}",
+                command.name, suffix, aliases, command.description
+            ));
+        }
     }
     lines.join("\n")
+}
+
+fn doctor_text(state: &State) -> String {
+    let mut lines = Vec::new();
+    lines.push("Mermaid Doctor".to_string());
+    lines.push(format!("Project: {}", state.cwd.display()));
+    lines.push(format!("Active model: {}", state.session.model_id));
+    lines.push(format!("Reasoning: {}", state.session.reasoning.as_str()));
+    lines.push(format!(
+        "Provider: {} / {}",
+        state.runtime.provider_capabilities.provider, state.runtime.provider_capabilities.model
+    ));
+    lines.push(format!(
+        "Model capabilities: tools={}, vision={}, reasoning={}, context={}",
+        state.runtime.provider_capabilities.supports_tools,
+        state.runtime.provider_capabilities.supports_vision,
+        state.runtime.provider_capabilities.reasoning,
+        state
+            .runtime
+            .provider_capabilities
+            .max_context_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    ));
+    lines.push(format!(
+        "Safety: mode={}, checkpoint_on_mutation={}",
+        safety_mode_name(state.settings.safety.mode),
+        state.settings.safety.checkpoint_on_mutation
+    ));
+    lines.push(format!(
+        "Prompt: {}",
+        if state.settings.prompt.is_customized() {
+            "customized for this invocation"
+        } else {
+            "default"
+        }
+    ));
+    match &state.instructions {
+        Some(instructions) => lines.push(format!(
+            "Project instructions: {} bytes from {} source(s){}",
+            instructions.byte_len,
+            instructions.sources.len(),
+            if instructions.truncated {
+                " (truncated)"
+            } else {
+                ""
+            }
+        )),
+        None => lines.push(
+            "Project instructions: none loaded (MERMAID.md, AGENTS.md, CLAUDE.md, GEMINI.md)"
+                .to_string(),
+        ),
+    }
+    lines.push(format!(
+        "MCP servers: {} configured, {} ready",
+        state.mcp.servers.len(),
+        state
+            .mcp
+            .servers
+            .values()
+            .filter(|entry| matches!(entry.status, crate::domain::McpServerStatus::Ready))
+            .count()
+    ));
+    lines.push(
+        "Useful next commands: /help, /context, /model-info <model>, /compact [focus]".to_string(),
+    );
+    lines.join("\n")
+}
+
+fn safety_mode_name(mode: crate::runtime::SafetyMode) -> &'static str {
+    match mode {
+        crate::runtime::SafetyMode::ReadOnly => "read_only",
+        crate::runtime::SafetyMode::Ask => "ask",
+        crate::runtime::SafetyMode::AutoReview => "auto_review",
+        crate::runtime::SafetyMode::FullAccess => "full_access",
+    }
 }
 
 fn usage_text(state: &State) -> String {
@@ -1120,6 +1591,70 @@ fn context_text(state: &State) -> String {
     ));
     lines.push(String::new());
 
+    let request = build_chat_request(state);
+    let max_context = state
+        .session
+        .context_usage
+        .as_ref()
+        .and_then(|snapshot| snapshot.max_tokens)
+        .or(state.runtime.provider_capabilities.max_context_tokens);
+    let next_snapshot = super::state::estimate_context_usage_for_request(&request, max_context);
+    let policy = CompactionPolicy::default();
+    let response_reserve = policy.response_reserve(request.max_tokens);
+    let usage_summary = match (next_snapshot.used_percent, next_snapshot.max_tokens) {
+        (Some(percent), Some(_)) if percent >= policy.auto_threshold_percent => {
+            format!("high ({percent}% used)")
+        },
+        (Some(percent), Some(_)) if percent >= 70 => format!("getting full ({percent}% used)"),
+        (Some(percent), Some(_)) => format!("comfortable ({percent}% used)"),
+        _ => "unknown because provider context limit is unknown".to_string(),
+    };
+
+    lines.push(format!("Context fullness: {usage_summary}"));
+    lines.push(format!(
+        "Next request: {}{} (estimated)",
+        format_compact_count(next_snapshot.used_tokens),
+        next_snapshot
+            .max_tokens
+            .map(|max| format!(" / {}", format_compact_count(max)))
+            .unwrap_or_else(|| " / unknown".to_string())
+    ));
+    if let Some(remaining) = next_snapshot.remaining_tokens {
+        lines.push(format!(
+            "Remaining after request: {}",
+            format_compact_count(remaining)
+        ));
+    }
+    lines.push(format!(
+        "Response reserve: {}",
+        format_compact_count(response_reserve)
+    ));
+    lines.push(format!(
+        "Auto compact threshold: {}%",
+        policy.auto_threshold_percent
+    ));
+    let auto_status = match should_auto_compact(&next_snapshot, &request, policy) {
+        Ok(()) => "would run before the next model call".to_string(),
+        Err(reason) => format!("not needed ({reason})"),
+    };
+    lines.push(format!("Auto compact: {auto_status}"));
+    if auto_status.starts_with("would run") {
+        lines.push(
+            "Suggested action: continue normally; Mermaid will compact before the next model call."
+                .to_string(),
+        );
+    } else {
+        lines.push("Suggested action: no manual compaction needed unless you want a handoff checkpoint now.".to_string());
+    }
+    lines.push(format!(
+        "Hard limit risk: {}",
+        if context_exceeds_hard_limit(&next_snapshot, &request, policy) {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+
     if let Some(context) = &state.session.context_usage {
         let source = if context.is_estimate() {
             "estimated"
@@ -1127,7 +1662,7 @@ fn context_text(state: &State) -> String {
             "provider-reported"
         };
         lines.push(format!(
-            "Used: {}{} ({})",
+            "Last reported context: {}{} ({})",
             format_compact_count(context.used_tokens),
             context
                 .max_tokens
@@ -1135,71 +1670,36 @@ fn context_text(state: &State) -> String {
                 .unwrap_or_else(|| " / unknown".to_string()),
             source
         ));
-        if let Some(remaining) = context.remaining_tokens {
-            lines.push(format!("Remaining: {}", format_compact_count(remaining)));
-        }
-        if let Some(breakdown) = &context.breakdown {
-            lines.push(String::new());
-            lines.push("Prompt budget estimate:".to_string());
-            lines.push(format!(
-                "- system prompt: {}",
-                format_compact_count(breakdown.system_tokens)
-            ));
-            lines.push(format!(
-                "- MERMAID.md: {}",
-                format_compact_count(breakdown.instructions_tokens)
-            ));
-            lines.push(format!(
-                "- messages ({}): {}",
-                breakdown.message_count,
-                format_compact_count(breakdown.message_tokens)
-            ));
-            lines.push(format!(
-                "- tool schemas ({}): {}",
-                breakdown.tool_count,
-                format_compact_count(breakdown.tool_schema_tokens)
-            ));
-            if breakdown.image_count > 0 {
-                lines.push(format!("- images: {}", breakdown.image_count));
-            }
-        }
-    } else {
-        let request = build_chat_request(state);
-        let snapshot = super::state::estimate_context_usage_for_request(
-            &request,
-            state.runtime.provider_capabilities.max_context_tokens,
-        );
+    }
+
+    if let Some(breakdown) = &next_snapshot.breakdown {
+        lines.push(String::new());
+        lines.push("Prompt budget estimate:".to_string());
         lines.push(format!(
-            "Estimated current request: {}{}",
-            format_compact_count(snapshot.used_tokens),
-            snapshot
-                .max_tokens
-                .map(|max| format!(" / {}", format_compact_count(max)))
-                .unwrap_or_else(|| " / unknown".to_string())
+            "- system prompt: {}",
+            format_compact_count(breakdown.system_tokens)
         ));
-        if let Some(breakdown) = snapshot.breakdown {
-            lines.push(String::new());
-            lines.push("Prompt budget estimate:".to_string());
-            lines.push(format!(
-                "- system prompt: {}",
-                format_compact_count(breakdown.system_tokens)
-            ));
-            lines.push(format!(
-                "- MERMAID.md: {}",
-                format_compact_count(breakdown.instructions_tokens)
-            ));
-            lines.push(format!(
-                "- messages ({}): {}",
-                breakdown.message_count,
-                format_compact_count(breakdown.message_tokens)
-            ));
-            lines.push(format!(
-                "- MCP tool schemas ({}): {}",
-                breakdown.tool_count,
-                format_compact_count(breakdown.tool_schema_tokens)
-            ));
-            lines.push("Built-in tool schemas are measured on the next model call after dispatch enrichment.".to_string());
+        lines.push(format!(
+            "- instructions: {}",
+            format_compact_count(breakdown.instructions_tokens)
+        ));
+        lines.push(format!(
+            "- messages ({}): {}",
+            breakdown.message_count,
+            format_compact_count(breakdown.message_tokens)
+        ));
+        lines.push(format!(
+            "- MCP tool schemas ({}): {}",
+            breakdown.tool_count,
+            format_compact_count(breakdown.tool_schema_tokens)
+        ));
+        if breakdown.image_count > 0 {
+            lines.push(format!("- images: {}", breakdown.image_count));
         }
+        lines.push(
+            "Built-in tool schemas are measured on the next model call after dispatch enrichment."
+                .to_string(),
+        );
     }
 
     if let Some(last) = state.session.conversation.compactions.last() {
@@ -1219,11 +1719,177 @@ fn context_text(state: &State) -> String {
             "- preserved: {} messages",
             last.preserved_message_count
         ));
+        lines.push(format!(
+            "- verification: {}",
+            if last.verified {
+                "verified".to_string()
+            } else {
+                last.verification_error
+                    .as_ref()
+                    .map(|err| format!("draft fallback ({err})"))
+                    .unwrap_or_else(|| "draft fallback".to_string())
+            }
+        ));
         if let Some(path) = &last.archive_path {
             lines.push(format!("- archive: {}", path));
         }
+        lines.push("- inspect: use the archive path above to review the raw messages Mermaid removed from context.".to_string());
+    } else {
+        lines.push(String::new());
+        lines.push("Last compaction: none yet.".to_string());
     }
 
+    lines.join("\n")
+}
+
+fn tasks_text(tasks: &[crate::runtime::TaskRecord]) -> String {
+    let mut lines = vec!["Tasks".to_string()];
+    if tasks.is_empty() {
+        lines.push("No tasks recorded yet.".to_string());
+        return lines.join("\n");
+    }
+    for task in tasks {
+        lines.push(format!(
+            "- {} [{}] {} - {}",
+            task.id, task.status, task.priority, task.title
+        ));
+        lines.push(format!("  project: {}", task.project_path));
+        lines.push(format!("  updated: {}", task.updated_at));
+    }
+    lines.join("\n")
+}
+
+fn task_detail_text(
+    task: Option<&crate::runtime::TaskRecord>,
+    events: &[crate::runtime::TaskTimelineEvent],
+) -> String {
+    let Some(task) = task else {
+        return "Task not found.".to_string();
+    };
+    let mut lines = vec![
+        format!("Task {}", task.id),
+        format!("Title: {}", task.title),
+        format!("Status: {}", task.status),
+        format!("Priority: {}", task.priority),
+        format!("Project: {}", task.project_path),
+        format!("Model: {}", task.model_id),
+        format!("Created: {}", task.created_at),
+        format!("Updated: {}", task.updated_at),
+    ];
+    if let Some(report) = &task.final_report {
+        lines.push(String::new());
+        lines.push("Final report:".to_string());
+        lines.push(report.clone());
+    }
+    if !events.is_empty() {
+        lines.push(String::new());
+        lines.push("Timeline:".to_string());
+        for event in events {
+            lines.push(format!(
+                "- {} {}: {}",
+                event.created_at, event.kind, event.message
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn processes_text(processes: &[crate::runtime::ProcessRecord]) -> String {
+    let mut lines = vec!["Processes".to_string()];
+    if processes.is_empty() {
+        lines.push("No processes recorded yet.".to_string());
+        return lines.join("\n");
+    }
+    for process in processes {
+        lines.push(format!(
+            "- {} pid={} [{}] {}",
+            process.id,
+            process.pid,
+            process.status.as_str(),
+            process.command
+        ));
+        if let Some(task_id) = &process.task_id {
+            lines.push(format!("  task: {}", task_id));
+        }
+        if let Some(url) = &process.detected_url {
+            lines.push(format!("  url: {}", url));
+        }
+        if let Some(log_path) = &process.log_path {
+            lines.push(format!("  log: {}", log_path));
+        }
+    }
+    lines.join("\n")
+}
+
+fn approvals_text(approvals: &[crate::runtime::ApprovalRecord]) -> String {
+    let mut lines = vec!["Approvals".to_string()];
+    if approvals.is_empty() {
+        lines.push("No pending approvals.".to_string());
+        return lines.join("\n");
+    }
+    for approval in approvals {
+        lines.push(format!(
+            "- {} [{}] {}",
+            approval.id, approval.risk_classification, approval.proposed_action
+        ));
+        if let Some(checkpoint_id) = &approval.checkpoint_id {
+            lines.push(format!("  checkpoint: {}", checkpoint_id));
+        }
+        if approval.pending_action_json.is_some() {
+            lines.push("  pending action: recorded".to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+fn checkpoints_text(checkpoints: &[crate::runtime::CheckpointRecord]) -> String {
+    let mut lines = vec!["Checkpoints".to_string()];
+    if checkpoints.is_empty() {
+        lines.push("No checkpoints recorded yet.".to_string());
+        return lines.join("\n");
+    }
+    for checkpoint in checkpoints {
+        lines.push(format!(
+            "- {} {} {}",
+            checkpoint.id, checkpoint.created_at, checkpoint.project_path
+        ));
+    }
+    lines.join("\n")
+}
+
+fn memory_text(memory: &[crate::runtime::MemoryEntry]) -> String {
+    let mut lines = vec!["Memory".to_string()];
+    if memory.is_empty() {
+        lines.push("No memory entries.".to_string());
+        return lines.join("\n");
+    }
+    for entry in memory {
+        lines.push(format!(
+            "- {} [{}] {} = {}",
+            entry.id, entry.scope, entry.key, entry.value
+        ));
+    }
+    lines.join("\n")
+}
+
+fn plugins_text(plugins: &[crate::runtime::PluginInstallRecord]) -> String {
+    let mut lines = vec!["Plugins".to_string()];
+    if plugins.is_empty() {
+        lines.push("No plugins installed.".to_string());
+        return lines.join("\n");
+    }
+    for plugin in plugins {
+        lines.push(format!(
+            "- {} [{}] {}",
+            plugin.id,
+            if plugin.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            plugin.source
+        ));
+    }
     lines.join("\n")
 }
 
@@ -1378,7 +2044,7 @@ fn handle_compaction_finished(
         kind: StatusKind::Info,
         shown_at: std::time::SystemTime::now(),
     });
-    cmds.push(Cmd::SaveCompactionArchive(archive));
+    cmds.push(Cmd::SaveCompactionArchive { archive, record });
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
     cmds.push(Cmd::DismissStatusAfter { ms: 5_000 });
 }
@@ -1760,6 +2426,7 @@ fn handle_tool_finished(
                     .as_ref()
                     .and_then(|metadata| metadata.process.clone())
                 {
+                    cmds.push(Cmd::SaveProcess(process.clone()));
                     state.runtime.register_process(process);
                 }
                 if let Some(last) = state.session.conversation.messages.last_mut()
@@ -1850,9 +2517,13 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
 }
 
 fn system_prompt_for_state(state: &State) -> String {
+    let base = state
+        .settings
+        .prompt
+        .render_system_prompt(&get_system_prompt());
     format!(
         "{}\n\n## Current Session\nCurrent working directory: {}\nTreat this as the project root unless the user specifies a different path.",
-        get_system_prompt(),
+        base,
         state.cwd.display()
     )
 }
@@ -2353,6 +3024,34 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_turn_submits_oldest_queued_message() {
+        let mut state = fresh_state();
+        state.turn = TurnState::Cancelling {
+            id: TurnId(1),
+            since: std::time::SystemTime::now(),
+        };
+        state
+            .ui
+            .queued_messages
+            .push_back("first queued".to_string());
+        state
+            .ui
+            .queued_messages
+            .push_back("second queued".to_string());
+
+        let (state, cmds) = update(state, Msg::TurnCancelled(TurnId(1)));
+
+        assert!(matches!(state.turn, TurnState::Generating { .. }));
+        assert!(cmds.iter().any(|cmd| matches!(cmd, Cmd::CallModel { .. })));
+        assert_eq!(state.session.messages()[0].content, "first queued");
+        assert_eq!(state.ui.queued_messages.len(), 1);
+        assert_eq!(
+            state.ui.queued_messages.front().map(String::as_str),
+            Some("second queued")
+        );
+    }
+
+    #[test]
     fn submit_prompt_trims_empty_input() {
         let state = fresh_state();
         let msg = Msg::SubmitPrompt {
@@ -2537,6 +3236,21 @@ mod tests {
         assert_eq!(context.used_percent, Some(6));
     }
 
+    #[test]
+    fn context_text_explains_auto_compaction_policy() {
+        let mut state = fresh_state();
+        state.runtime.provider_capabilities.max_context_tokens = Some(8_000);
+        state.session.append(ChatMessage::user("hello"));
+
+        let text = context_text(&state);
+
+        assert!(text.contains("Next request:"));
+        assert!(text.contains("Response reserve:"));
+        assert!(text.contains("Auto compact threshold:"));
+        assert!(text.contains("Auto compact:"));
+        assert!(text.contains("Hard limit risk:"));
+    }
+
     /// F4 defense-in-depth: if a later refactor weakens the stale
     /// filter at the top of `update_step`, `handle_upstream_error`
     /// still refuses to mutate state when the error's turn id doesn't
@@ -2659,9 +3373,40 @@ mod tests {
         let (state, cmds) = update(state, Msg::Slash(SlashCmd::Help));
         let msg = state.session.messages().last().expect("help message");
         assert_eq!(msg.role, MessageRole::System);
+        assert!(msg.content.contains("Everyday:"));
+        assert!(msg.content.contains("Advanced runtime:"));
         assert!(msg.content.contains("/model"));
         assert!(msg.content.contains("/help"));
         assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    }
+
+    #[test]
+    fn slash_doctor_appends_session_readiness_report() {
+        let state = fresh_state();
+        let (state, cmds) = update(state, Msg::Slash(SlashCmd::Doctor));
+        let msg = state.session.messages().last().expect("doctor message");
+        assert_eq!(msg.role, MessageRole::System);
+        assert!(msg.content.contains("Mermaid Doctor"));
+        assert!(msg.content.contains("Active model:"));
+        assert!(msg.content.contains("Safety:"));
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    }
+
+    #[test]
+    fn chat_request_uses_runtime_prompt_customization() {
+        let mut state = fresh_state();
+        state.settings.prompt.system_prompt = Some("replacement prompt".to_string());
+        state
+            .settings
+            .prompt
+            .append_system_prompt
+            .push("extra runtime rule".to_string());
+
+        let request = build_chat_request(&state);
+        assert!(request.system_prompt.contains("replacement prompt"));
+        assert!(request.system_prompt.contains("extra runtime rule"));
+        assert!(!request.system_prompt.contains("Core Loop"));
+        assert!(request.system_prompt.contains("Current working directory"));
     }
 
     #[test]
@@ -2683,6 +3428,19 @@ mod tests {
             .expect("persist cmd emitted");
         assert_eq!(emitted.0, "ollama/test");
         assert_eq!(emitted.1, crate::models::ReasoningLevel::High);
+    }
+
+    #[test]
+    fn slash_visible_reasoning_toggles_runtime_ui_state() {
+        let state = fresh_state();
+        let (state, _) = update(state, Msg::Slash(SlashCmd::VisibleReasoning(None)));
+        assert!(state.ui.show_reasoning);
+
+        let (state, _) = update(
+            state,
+            Msg::Slash(SlashCmd::VisibleReasoning(Some("off".to_string()))),
+        );
+        assert!(!state.ui.show_reasoning);
     }
 
     #[test]

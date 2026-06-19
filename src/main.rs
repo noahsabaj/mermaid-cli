@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 use mermaid_cli::{
@@ -9,6 +9,7 @@ use mermaid_cli::{
     },
     cli::{Cli, Commands, OutputFormat},
     ollama::ensure_model as ensure_ollama_model,
+    runtime::{NewTask, RuntimeStore, TaskStatus},
     session::{ConversationManager, select_conversation},
     utils::init_logger,
 };
@@ -21,9 +22,11 @@ async fn main() -> Result<()> {
     // Handle stand-alone subcommands first (init, list, status, add,
     // remove, mcp, version). Returns Ok(true) when the subcommand
     // handled the invocation and we should exit.
-    let config = load_config().unwrap_or_default();
+    let mut config = load_config().unwrap_or_default();
+    apply_prompt_flags(&cli, &mut config)?;
+    let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
     if let Some(cmd) = &cli.command
-        && mermaid_cli::cli::handle_command(cmd, &config).await?
+        && mermaid_cli::cli::handle_command(cmd, &config, &cwd, cli.model.as_deref()).await?
     {
         return Ok(());
     }
@@ -48,6 +51,33 @@ async fn main() -> Result<()> {
     }
 
     dispatch_interactive(cli, config).await
+}
+
+fn apply_prompt_flags(cli: &Cli, config: &mut mermaid_cli::app::Config) -> Result<()> {
+    if let Some(prompt) = cli.system_prompt.as_ref() {
+        config.prompt.system_prompt = Some(prompt.clone());
+    }
+    if let Some(path) = cli.system_prompt_file.as_ref() {
+        config.prompt.system_prompt =
+            Some(std::fs::read_to_string(path).with_context(|| {
+                format!("failed to read --system-prompt-file {}", path.display())
+            })?);
+    }
+    if let Some(prompt) = cli.append_system_prompt.as_ref() {
+        config.prompt.append_system_prompt.push(prompt.clone());
+    }
+    if let Some(path) = cli.append_system_prompt_file.as_ref() {
+        config
+            .prompt
+            .append_system_prompt
+            .push(std::fs::read_to_string(path).with_context(|| {
+                format!(
+                    "failed to read --append-system-prompt-file {}",
+                    path.display()
+                )
+            })?);
+    }
+    Ok(())
 }
 
 async fn dispatch_interactive(cli: Cli, mut config: mermaid_cli::app::Config) -> Result<()> {
@@ -145,14 +175,112 @@ async fn dispatch_non_interactive(
     }
 
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
-    let result =
-        run_non_interactive_with(config, cwd, model_id, prompt, RunOptions { no_execute }).await?;
+    let runtime_task_id = create_run_task(&cwd, &model_id, &prompt, no_execute);
+    let run_result = run_non_interactive_with(
+        config,
+        cwd,
+        model_id,
+        prompt,
+        RunOptions {
+            no_execute,
+            task_id: runtime_task_id.clone(),
+        },
+    )
+    .await;
+    match &run_result {
+        Ok(result) if result.errors.is_empty() => {
+            finish_run_task(
+                runtime_task_id.as_deref(),
+                TaskStatus::Completed,
+                Some(&result.response),
+            );
+        },
+        Ok(result) => {
+            finish_run_task(
+                runtime_task_id.as_deref(),
+                TaskStatus::Failed,
+                Some(&result.errors.join("\n")),
+            );
+        },
+        Err(err) => {
+            finish_run_task(
+                runtime_task_id.as_deref(),
+                TaskStatus::Failed,
+                Some(&err.to_string()),
+            );
+        },
+    }
+    let result = run_result?;
     println!("{}", format_result(&result, format));
 
     if !result.errors.is_empty() {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn create_run_task(
+    cwd: &std::path::Path,
+    model_id: &str,
+    prompt: &str,
+    no_execute: bool,
+) -> Option<String> {
+    let store = RuntimeStore::open_default().ok()?;
+    let task = store
+        .tasks()
+        .create(NewTask::new(
+            task_title_from_prompt(prompt),
+            cwd.display().to_string(),
+            model_id.to_string(),
+        ))
+        .ok()?;
+    let _ = store
+        .tasks()
+        .update_status(&task.id, TaskStatus::Running, None);
+    if no_execute {
+        let _ = store
+            .tasks()
+            .add_event(&task.id, "run_option", "tools disabled by --no-execute");
+    }
+    let _ = mermaid_cli::runtime::run_plugin_hooks(
+        "task_start",
+        &serde_json::json!({
+            "id": task.id.clone(),
+            "title": task.title.clone(),
+            "project_path": task.project_path.clone(),
+            "model_id": task.model_id.clone(),
+        }),
+    );
+    Some(task.id)
+}
+
+fn finish_run_task(task_id: Option<&str>, status: TaskStatus, final_report: Option<&str>) {
+    let Some(task_id) = task_id else {
+        return;
+    };
+    if let Ok(store) = RuntimeStore::open_default() {
+        let _ = store.tasks().update_status(task_id, status, final_report);
+        let _ = mermaid_cli::runtime::run_plugin_hooks(
+            "task_stop",
+            &serde_json::json!({
+                "id": task_id,
+                "status": status.as_str(),
+                "final_report": final_report,
+            }),
+        );
+    }
+}
+
+fn task_title_from_prompt(prompt: &str) -> String {
+    let one_line = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        return "mermaid run".to_string();
+    }
+    if one_line.len() <= 80 {
+        return one_line;
+    }
+    let end = one_line.floor_char_boundary(80);
+    format!("{}...", &one_line[..end])
 }
 
 /// Bare model names default to Ollama; explicit `ollama/…` too.

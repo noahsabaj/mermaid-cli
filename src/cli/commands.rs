@@ -1,19 +1,32 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
     app::{Config, get_config_dir, init_config, load_config},
-    models::{BackendConfig, Model, PROVIDER_REGISTRY, lookup_provider},
+    domain::{
+        ChatRequest, Cmd, CompactionRecord, CompactionResult, CompactionTrigger, Msg, SlashCmd,
+        State, build_replacement_messages, estimate_context_usage_for_request, prepare_compaction,
+        update,
+    },
+    models::{BackendConfig, ChatMessage, Model, PROVIDER_REGISTRY, lookup_provider},
     ollama::is_installed as is_ollama_installed,
+    runtime::{NewProviderProbe, RuntimeClient, RuntimeStore, TaskRecord},
+    session::ConversationManager,
     utils::{resolve_api_key, resolve_api_key_with_fallback},
 };
 
-use super::Commands;
+use super::{Commands, OutputFormat, PluginCommand, QaCommand};
 
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
 /// Returns Ok(false) if we should continue to the main application
-pub async fn handle_command(command: &Commands, config: &Config) -> Result<bool> {
+pub async fn handle_command(
+    command: &Commands,
+    config: &Config,
+    cwd: &Path,
+    cli_model: Option<&str>,
+) -> Result<bool> {
     match command {
         Commands::Init => {
             println!("Initializing Mermaid configuration...");
@@ -25,12 +38,123 @@ pub async fn handle_command(command: &Commands, config: &Config) -> Result<bool>
             list_models(config).await?;
             Ok(true)
         },
+        Commands::Models => {
+            show_models(config).await?;
+            Ok(true)
+        },
+        Commands::ModelInfo { model } => {
+            show_model_info(model)?;
+            Ok(true)
+        },
         Commands::Version => {
             show_version();
             Ok(true)
         },
         Commands::Status => {
             show_status(config).await?;
+            Ok(true)
+        },
+        Commands::Doctor { format } => {
+            show_doctor(config, cwd, cli_model, *format).await?;
+            Ok(true)
+        },
+        Commands::SelfTest {
+            format,
+            keep_workspace,
+        } => {
+            run_self_test(config, *format, *keep_workspace)?;
+            Ok(true)
+        },
+        Commands::Tasks { limit } => {
+            show_tasks(*limit)?;
+            Ok(true)
+        },
+        Commands::Task { id } => {
+            show_task(id)?;
+            Ok(true)
+        },
+        Commands::Processes { limit } => {
+            show_processes(*limit)?;
+            Ok(true)
+        },
+        Commands::Logs { id } => {
+            show_logs(id)?;
+            Ok(true)
+        },
+        Commands::Stop { id } => {
+            stop_process(id)?;
+            Ok(true)
+        },
+        Commands::Restart { id } => {
+            restart_process(id)?;
+            Ok(true)
+        },
+        Commands::Open { target } => {
+            open_target(target)?;
+            Ok(true)
+        },
+        Commands::Ports => {
+            show_ports()?;
+            Ok(true)
+        },
+        Commands::Approvals => {
+            show_approvals()?;
+            Ok(true)
+        },
+        Commands::Approve { id } => {
+            approve(id)?;
+            Ok(true)
+        },
+        Commands::Deny { id } => {
+            deny(id)?;
+            Ok(true)
+        },
+        Commands::ToolRuns { limit } => {
+            show_tool_runs(*limit)?;
+            Ok(true)
+        },
+        Commands::Checkpoints { limit } => {
+            show_checkpoints(*limit)?;
+            Ok(true)
+        },
+        Commands::Restore { id } => {
+            restore_checkpoint(id)?;
+            Ok(true)
+        },
+        Commands::Memory { project } => {
+            show_memory(project.as_deref())?;
+            Ok(true)
+        },
+        Commands::Remember {
+            key,
+            value,
+            project,
+        } => {
+            remember(key, value, project.as_deref())?;
+            Ok(true)
+        },
+        Commands::Forget { id } => {
+            forget(id)?;
+            Ok(true)
+        },
+        Commands::MemoryEdit { id, value } => {
+            memory_edit(id, value)?;
+            Ok(true)
+        },
+        Commands::Plugin { command } => {
+            handle_plugin(command)?;
+            Ok(true)
+        },
+        Commands::Daemon { command } => {
+            super::daemon::handle_daemon_command(command)?;
+            Ok(true)
+        },
+        Commands::Pair { label } => {
+            pair(label.as_deref())?;
+            Ok(true)
+        },
+        Commands::Qa { command } => {
+            handle_qa(command, config, cwd)?;
             Ok(true)
         },
         Commands::Add { name } => {
@@ -55,6 +179,1297 @@ pub async fn handle_command(command: &Commands, config: &Config) -> Result<bool>
         Commands::Chat => Ok(false),       // Continue to chat interface
         Commands::Run { .. } => Ok(false), // Handled by main.rs
     }
+}
+
+fn handle_qa(command: &QaCommand, config: &Config, cwd: &Path) -> Result<()> {
+    match command {
+        QaCommand::CompactSmoke { turns, format } => {
+            let report = match run_qa_compact_smoke(config, cwd, *turns) {
+                Ok(report) => report,
+                Err(err) => QaCompactSmokeReport::failed(cwd, *turns, err.to_string()),
+            };
+            print_qa_compact_report(&report, *format)?;
+            anyhow::ensure!(report.ok, "qa compact smoke failed");
+            Ok(())
+        },
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DoctorReport {
+    ok: bool,
+    cwd: String,
+    active_model: Option<String>,
+    model_error: Option<String>,
+    model_capabilities: Option<DoctorModelCapabilities>,
+    safety_mode: String,
+    checkpoint_on_mutation: bool,
+    prompt_customized: bool,
+    ollama: DoctorCheck,
+    remote_providers: Vec<String>,
+    project_instructions: DoctorCheck,
+    tools: Vec<String>,
+    runtime: DoctorRuntime,
+    next_steps: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DoctorModelCapabilities {
+    provider: String,
+    name: String,
+    supports_tools: bool,
+    supports_vision: bool,
+    reasoning: String,
+    max_context_tokens: Option<usize>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DoctorCheck {
+    status: &'static str,
+    message: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DoctorRuntime {
+    daemon: DoctorCheck,
+    local_store: DoctorCheck,
+}
+
+async fn show_doctor(
+    config: &Config,
+    cwd: &Path,
+    cli_model: Option<&str>,
+    format: OutputFormat,
+) -> Result<()> {
+    let active_model_result = crate::app::resolve_model_id(cli_model, config).await;
+    let (active_model, model_error, model_capabilities) = match active_model_result {
+        Ok(model) => {
+            let snapshot = crate::domain::ProviderCapabilitySnapshot::from_model_id(&model);
+            (
+                Some(model),
+                None,
+                Some(DoctorModelCapabilities {
+                    provider: snapshot.provider,
+                    name: snapshot.model,
+                    supports_tools: snapshot.supports_tools,
+                    supports_vision: snapshot.supports_vision,
+                    reasoning: snapshot.reasoning,
+                    max_context_tokens: snapshot.max_context_tokens,
+                }),
+            )
+        },
+        Err(err) => (None, Some(err.to_string()), None),
+    };
+
+    let ollama_models = if is_ollama_installed() {
+        list_ollama_models(config).await
+    } else {
+        Vec::new()
+    };
+    let ollama = if !is_ollama_installed() {
+        DoctorCheck {
+            status: "warning",
+            message: "Ollama is not installed; remote providers can still work if configured."
+                .to_string(),
+        }
+    } else if ollama_models.is_empty() {
+        DoctorCheck {
+            status: "warning",
+            message: "Ollama is installed but no local/cloud models were listed.".to_string(),
+        }
+    } else {
+        DoctorCheck {
+            status: "ok",
+            message: format!("Ollama reachable with {} models.", ollama_models.len()),
+        }
+    };
+
+    let remote_providers = configured_remote_providers(config);
+    let instruction_paths = crate::app::instructions::find_instruction_files(cwd);
+    let project_instructions = if instruction_paths.is_empty() {
+        DoctorCheck {
+            status: "info",
+            message: "No MERMAID.md, AGENTS.md, CLAUDE.md, or GEMINI.md found.".to_string(),
+        }
+    } else if let Some(loaded) = crate::app::instructions::load_from_paths(&instruction_paths) {
+        DoctorCheck {
+            status: "ok",
+            message: format!(
+                "{} bytes loaded from {} source(s){}.",
+                loaded.byte_len,
+                loaded.sources.len(),
+                if loaded.truncated { " (truncated)" } else { "" }
+            ),
+        }
+    } else {
+        DoctorCheck {
+            status: "warning",
+            message: "Instruction files were found but could not be loaded.".to_string(),
+        }
+    };
+
+    let daemon = match RuntimeClient::daemon().health() {
+        Ok(read) => DoctorCheck {
+            status: "ok",
+            message: format!("daemon attached; database {}", read.value.database),
+        },
+        Err(err) => DoctorCheck {
+            status: "info",
+            message: format!("daemon not attached; CLI will use local runtime store ({err})"),
+        },
+    };
+    let local_store = match RuntimeClient::local().health() {
+        Ok(read) => DoctorCheck {
+            status: "ok",
+            message: format!("local runtime store ready at {}", read.value.database),
+        },
+        Err(err) => DoctorCheck {
+            status: "warning",
+            message: format!("local runtime store unavailable: {err}"),
+        },
+    };
+
+    let mut tools = vec![
+        "read/edit/write files".to_string(),
+        "run shell commands".to_string(),
+        "create checkpoints before risky mutations".to_string(),
+    ];
+    if std::env::var("OLLAMA_API_KEY").is_ok() {
+        tools.push("web search/fetch tools gated by OLLAMA_API_KEY".to_string());
+    }
+    if !config.mcp_servers.is_empty() {
+        tools.push(format!(
+            "{} configured MCP server(s)",
+            config.mcp_servers.len()
+        ));
+    }
+
+    let mut next_steps = Vec::new();
+    if active_model.is_none() {
+        next_steps.push(
+            "Pick a model with `mermaid --model <provider/model>` or run `mermaid list`."
+                .to_string(),
+        );
+    }
+    if remote_providers.is_empty() && ollama_models.is_empty() {
+        next_steps.push(
+            "Install or start Ollama, pull a model, or set a remote provider API key.".to_string(),
+        );
+    }
+    if instruction_paths.is_empty() {
+        next_steps.push("Optional: add MERMAID.md or AGENTS.md with project-specific run commands and conventions.".to_string());
+    }
+    if next_steps.is_empty() {
+        next_steps.push(
+            "Start Mermaid with `mermaid` or run one prompt with `mermaid run \"...\"`."
+                .to_string(),
+        );
+    }
+
+    let ok = active_model.is_some()
+        && local_store.status != "warning"
+        && (ollama.status == "ok" || !remote_providers.is_empty());
+    let report = DoctorReport {
+        ok,
+        cwd: cwd.display().to_string(),
+        active_model,
+        model_error,
+        model_capabilities,
+        safety_mode: safety_mode_name(config.safety.mode).to_string(),
+        checkpoint_on_mutation: config.safety.checkpoint_on_mutation,
+        prompt_customized: config.prompt.is_customized(),
+        ollama,
+        remote_providers,
+        project_instructions,
+        tools,
+        runtime: DoctorRuntime {
+            daemon,
+            local_store,
+        },
+        next_steps,
+    };
+    print_doctor_report(&report, format)
+}
+
+fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        OutputFormat::Markdown => {
+            println!("# Mermaid Doctor\n");
+            print_doctor_text(report);
+        },
+        OutputFormat::Text => print_doctor_text(report),
+    }
+    Ok(())
+}
+
+fn print_doctor_text(report: &DoctorReport) {
+    println!(
+        "Mermaid Doctor: {}",
+        if report.ok {
+            "ready"
+        } else {
+            "needs attention"
+        }
+    );
+    println!("Project: {}", report.cwd);
+    match (&report.active_model, &report.model_error) {
+        (Some(model), _) => println!("  [OK] Active model: {model}"),
+        (None, Some(error)) => println!("  [WARNING] Active model: {error}"),
+        _ => println!("  [WARNING] Active model: unresolved"),
+    }
+    if let Some(caps) = &report.model_capabilities {
+        println!(
+            "       provider={} tools={} vision={} reasoning={} context={}",
+            caps.provider,
+            caps.supports_tools,
+            caps.supports_vision,
+            caps.reasoning,
+            caps.max_context_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+    }
+    println!(
+        "  [{}] Ollama: {}",
+        label(report.ollama.status),
+        report.ollama.message
+    );
+    println!(
+        "  [INFO] Remote providers: {}",
+        if report.remote_providers.is_empty() {
+            "none configured".to_string()
+        } else {
+            report.remote_providers.join(", ")
+        }
+    );
+    println!(
+        "  [{}] Project instructions: {}",
+        label(report.project_instructions.status),
+        report.project_instructions.message
+    );
+    println!(
+        "  [INFO] Safety: mode={}, checkpoint_on_mutation={}",
+        report.safety_mode, report.checkpoint_on_mutation
+    );
+    println!(
+        "  [INFO] Prompt customization: {}",
+        if report.prompt_customized {
+            "active"
+        } else {
+            "default"
+        }
+    );
+    println!(
+        "  [{}] Runtime daemon: {}",
+        label(report.runtime.daemon.status),
+        report.runtime.daemon.message
+    );
+    println!(
+        "  [{}] Runtime store: {}",
+        label(report.runtime.local_store.status),
+        report.runtime.local_store.message
+    );
+    println!("  [OK] Tool surface:");
+    for tool in &report.tools {
+        println!("       - {tool}");
+    }
+    println!("\nNext steps:");
+    for step in &report.next_steps {
+        println!("  - {step}");
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SelfTestReport {
+    ok: bool,
+    workspace: String,
+    checks: Vec<String>,
+    compact_smoke: QaCompactSmokeReport,
+    runtime_store: DoctorCheck,
+    kept_workspace: bool,
+}
+
+fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) -> Result<()> {
+    let workspace = std::env::temp_dir().join(format!("mermaid-self-test-{}", fresh_qa_id()));
+    std::fs::create_dir_all(&workspace)
+        .with_context(|| format!("failed to create {}", workspace.display()))?;
+
+    let compact_smoke = match run_qa_compact_smoke(config, &workspace, 6) {
+        Ok(report) => report,
+        Err(err) => QaCompactSmokeReport::failed(&workspace, 6, err.to_string()),
+    };
+    let runtime_store = match RuntimeClient::local().health() {
+        Ok(read) => DoctorCheck {
+            status: "ok",
+            message: format!("local runtime store ready at {}", read.value.database),
+        },
+        Err(err) => DoctorCheck {
+            status: "warning",
+            message: err.to_string(),
+        },
+    };
+
+    let checks = vec![
+        "compact smoke exercises reducer compaction path".to_string(),
+        "compact smoke persists conversation and archive artifacts".to_string(),
+        "local runtime store opens without daemon".to_string(),
+    ];
+    let ok = compact_smoke.ok && runtime_store.status == "ok";
+    let report = SelfTestReport {
+        ok,
+        workspace: workspace.display().to_string(),
+        checks,
+        compact_smoke,
+        runtime_store,
+        kept_workspace: keep_workspace,
+    };
+
+    print_self_test_report(&report, format)?;
+    if !keep_workspace {
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+    anyhow::ensure!(report.ok, "mermaid self-test failed");
+    Ok(())
+}
+
+fn print_self_test_report(report: &SelfTestReport, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        OutputFormat::Markdown => {
+            println!("# Mermaid Self-Test\n");
+            print_self_test_text(report);
+        },
+        OutputFormat::Text => print_self_test_text(report),
+    }
+    Ok(())
+}
+
+fn print_self_test_text(report: &SelfTestReport) {
+    println!(
+        "Mermaid self-test: {}",
+        if report.ok { "ok" } else { "failed" }
+    );
+    println!("workspace: {}", report.workspace);
+    println!(
+        "compact smoke: {}",
+        if report.compact_smoke.ok {
+            "ok"
+        } else {
+            "failed"
+        }
+    );
+    println!("runtime store: {}", report.runtime_store.message);
+    println!("checks:");
+    for check in &report.checks {
+        println!("  - {check}");
+    }
+    if !report.ok
+        && let Some(failure) = &report.compact_smoke.failure
+    {
+        println!("failure: {failure}");
+    }
+}
+
+fn label(status: &str) -> &'static str {
+    match status {
+        "ok" => "OK",
+        "warning" => "WARNING",
+        "error" => "ERROR",
+        _ => "INFO",
+    }
+}
+
+fn safety_mode_name(mode: crate::runtime::SafetyMode) -> &'static str {
+    match mode {
+        crate::runtime::SafetyMode::ReadOnly => "read_only",
+        crate::runtime::SafetyMode::Ask => "ask",
+        crate::runtime::SafetyMode::AutoReview => "auto_review",
+        crate::runtime::SafetyMode::FullAccess => "full_access",
+    }
+}
+
+fn configured_remote_providers(config: &Config) -> Vec<String> {
+    let mut names = Vec::new();
+    for profile in PROVIDER_REGISTRY {
+        let env = config
+            .providers
+            .get(profile.name)
+            .and_then(|c| c.api_key_env.as_deref())
+            .unwrap_or(profile.api_key_env);
+        if resolve_api_key(env, None).is_some() {
+            names.push(profile.name.to_string());
+        }
+    }
+    for (name, provider) in &config.providers {
+        if names.iter().any(|existing| existing == name) {
+            continue;
+        }
+        if let Some(env) = provider.api_key_env.as_deref()
+            && resolve_api_key(env, None).is_some()
+        {
+            names.push(name.clone());
+        }
+    }
+    names.sort();
+    names
+}
+
+#[derive(Debug, serde::Serialize)]
+struct QaCompactSmokeReport {
+    ok: bool,
+    turns: usize,
+    archived_messages: usize,
+    preserved_messages: usize,
+    replacement_messages: usize,
+    conversation_path: Option<String>,
+    archive_path: Option<String>,
+    checks: Vec<String>,
+    failure: Option<String>,
+}
+
+impl QaCompactSmokeReport {
+    fn failed(cwd: &Path, turns: usize, failure: String) -> Self {
+        Self {
+            ok: false,
+            turns,
+            archived_messages: 0,
+            preserved_messages: 0,
+            replacement_messages: 0,
+            conversation_path: Some(
+                cwd.join(".mermaid")
+                    .join("conversations")
+                    .display()
+                    .to_string(),
+            ),
+            archive_path: None,
+            checks: Vec::new(),
+            failure: Some(failure),
+        }
+    }
+}
+
+fn run_qa_compact_smoke(
+    config: &Config,
+    cwd: &Path,
+    requested_turns: usize,
+) -> Result<QaCompactSmokeReport> {
+    let turns = requested_turns.max(3);
+    let mut state = State::new(config.clone(), cwd.to_path_buf(), qa_model_id(config));
+    for message in synthetic_compaction_messages(turns) {
+        state.session.append(message);
+    }
+
+    let (state_after_slash, compact_cmds) = update(
+        state,
+        Msg::Slash(SlashCmd::Compact(Some("qa compact smoke".to_string()))),
+    );
+    let turn = state_after_slash
+        .turn
+        .id()
+        .context("manual compaction did not enter a compaction turn")?;
+    let request = compact_cmds
+        .iter()
+        .find_map(|cmd| match cmd {
+            Cmd::CompactConversation { request, .. } => Some(request.clone()),
+            _ => None,
+        })
+        .context("manual compaction did not emit a CompactConversation command")?;
+
+    let before_snapshot = estimate_context_usage_for_request(&request.chat, Some(100_000));
+    let prepared = prepare_compaction(&request, Some(100_000))
+        .map_err(|reason| anyhow::anyhow!("prepare_compaction skipped: {reason}"))?;
+    anyhow::ensure!(
+        !prepared.archived_messages.is_empty(),
+        "compaction archived no messages"
+    );
+    anyhow::ensure!(
+        !prepared.preserved_messages.is_empty(),
+        "compaction preserved no messages"
+    );
+
+    let summary = deterministic_compaction_summary(&prepared, turns);
+    let mut record = CompactionRecord {
+        id: format!("qa_compact_{}", fresh_qa_id()),
+        trigger: CompactionTrigger::Manual,
+        created_at: chrono::Local::now(),
+        before_tokens: before_snapshot.used_tokens,
+        after_tokens: 0,
+        archived_message_count: prepared.archived_messages.len(),
+        preserved_message_count: prepared.preserved_messages.len(),
+        summary_tokens: summary.len().div_ceil(4),
+        duration_secs: 0.0,
+        verified: true,
+        verification_error: None,
+        focus: Some("qa compact smoke".to_string()),
+        archive_path: None,
+    };
+    let mut replacement = build_replacement_messages(&summary, &prepared, &record);
+    let mut after_chat: ChatRequest = request.chat.clone();
+    after_chat.messages = replacement.clone();
+    let mut after_snapshot = estimate_context_usage_for_request(&after_chat, Some(100_000));
+    record.after_tokens = after_snapshot.used_tokens;
+    replacement = build_replacement_messages(&summary, &prepared, &record);
+    after_chat.messages = replacement.clone();
+    after_snapshot = estimate_context_usage_for_request(&after_chat, Some(100_000));
+
+    let result = CompactionResult {
+        record,
+        replacement_messages: replacement,
+        archived_messages: prepared.archived_messages,
+        before_snapshot,
+        after_snapshot,
+        usage: None,
+    };
+    let (final_state, save_cmds) =
+        update(state_after_slash, Msg::CompactionFinished { turn, result });
+
+    let manager = ConversationManager::new(cwd)?;
+    let mut conversation_path = None;
+    let mut archive_path = None;
+    for cmd in save_cmds {
+        match cmd {
+            Cmd::SaveConversation(conversation) => {
+                manager.save_conversation(&conversation)?;
+                conversation_path = Some(
+                    manager
+                        .conversations_dir()
+                        .join(format!("{}.json", conversation.id))
+                        .display()
+                        .to_string(),
+                );
+            },
+            Cmd::SaveCompactionArchive { archive, .. } => {
+                archive_path = Some(
+                    manager
+                        .save_compaction_archive(&archive)?
+                        .display()
+                        .to_string(),
+                );
+            },
+            _ => {},
+        }
+    }
+
+    let conversation_path = conversation_path.context("compaction did not save conversation")?;
+    let archive_path = archive_path.context("compaction did not save archive")?;
+    let messages = final_state.session.messages();
+    let compactions = &final_state.session.conversation.compactions;
+
+    let mut checks = Vec::new();
+    anyhow::ensure!(
+        !compactions.is_empty(),
+        "conversation did not record compaction metadata"
+    );
+    checks.push("conversation records compaction metadata".to_string());
+    anyhow::ensure!(
+        messages
+            .first()
+            .is_some_and(|msg| msg.kind == crate::models::ChatMessageKind::ContextCheckpoint),
+        "replacement does not start with a context checkpoint"
+    );
+    checks.push("replacement starts with context checkpoint".to_string());
+    anyhow::ensure!(
+        std::path::Path::new(&conversation_path).exists(),
+        "conversation file missing after save"
+    );
+    checks.push("conversation file saved".to_string());
+    anyhow::ensure!(
+        std::path::Path::new(&archive_path).exists(),
+        "compaction archive file missing after save"
+    );
+    checks.push("archive file saved".to_string());
+    anyhow::ensure!(
+        compactions[0].archived_message_count > 0 && compactions[0].preserved_message_count > 0,
+        "compaction did not archive and preserve messages"
+    );
+    checks.push("archived and preserved message counts are non-zero".to_string());
+
+    Ok(QaCompactSmokeReport {
+        ok: true,
+        turns,
+        archived_messages: compactions[0].archived_message_count,
+        preserved_messages: compactions[0].preserved_message_count,
+        replacement_messages: messages.len(),
+        conversation_path: Some(conversation_path),
+        archive_path: Some(archive_path),
+        checks,
+        failure: None,
+    })
+}
+
+fn print_qa_compact_report(report: &QaCompactSmokeReport, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(report)?);
+        },
+        OutputFormat::Text => {
+            println!(
+                "qa compact smoke: {}",
+                if report.ok { "ok" } else { "failed" }
+            );
+            println!("turns: {}", report.turns);
+            println!("archived messages: {}", report.archived_messages);
+            println!("preserved messages: {}", report.preserved_messages);
+            println!("replacement messages: {}", report.replacement_messages);
+            if let Some(path) = &report.conversation_path {
+                println!("conversation: {path}");
+            }
+            if let Some(path) = &report.archive_path {
+                println!("archive: {path}");
+            }
+            if let Some(failure) = &report.failure {
+                println!("failure: {failure}");
+            }
+        },
+        OutputFormat::Markdown => {
+            println!(
+                "# QA Compact Smoke\n\n- Status: {}\n- Turns: {}\n- Archived messages: {}\n- Preserved messages: {}\n- Replacement messages: {}",
+                if report.ok { "ok" } else { "failed" },
+                report.turns,
+                report.archived_messages,
+                report.preserved_messages,
+                report.replacement_messages
+            );
+            if let Some(path) = &report.conversation_path {
+                println!("- Conversation: `{path}`");
+            }
+            if let Some(path) = &report.archive_path {
+                println!("- Archive: `{path}`");
+            }
+            if let Some(failure) = &report.failure {
+                println!("\nFailure: `{failure}`");
+            }
+        },
+    }
+    Ok(())
+}
+
+fn qa_model_id(config: &Config) -> String {
+    if let Some(model) = config
+        .last_used_model
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        return model.clone();
+    }
+    if !config.default_model.name.is_empty() {
+        if config.default_model.provider.is_empty() {
+            return config.default_model.name.clone();
+        }
+        return format!(
+            "{}/{}",
+            config.default_model.provider, config.default_model.name
+        );
+    }
+    "qa/deterministic".to_string()
+}
+
+fn synthetic_compaction_messages(turns: usize) -> Vec<ChatMessage> {
+    let mut messages = Vec::with_capacity(turns.saturating_mul(2));
+    for idx in 1..=turns {
+        messages.push(ChatMessage::user(format!(
+            "User turn {idx}: investigate Mermaid compaction behavior in src/domain/compaction.rs and keep exact file paths in the summary."
+        )));
+        messages.push(ChatMessage::assistant(format!(
+            "Assistant turn {idx}: inspected src/domain/compaction.rs, tests/reducer_flows.rs, and scripts/qa_mermaid.py; noted command `cargo test --all-targets` result placeholder {idx}."
+        )));
+    }
+    messages
+}
+
+fn deterministic_compaction_summary(
+    prepared: &crate::domain::PreparedCompaction,
+    turns: usize,
+) -> String {
+    format!(
+        "## Goal\n- Verify Mermaid can compact a multi-turn conversation through the reducer path.\n\n## User Preferences And Constraints\n- Headless QA must not require a human to open the TUI.\n\n## Project State\n- Synthetic QA conversation seeded with {turns} user/assistant turns.\n\n## Completed Work\n- Prepared compaction archived {} messages and preserved {} messages.\n\n## Current Work\n- Running deterministic compact smoke from the hidden QA command.\n\n## Key Decisions\n- Use deterministic summary text so fast QA does not call a real model.\n\n## Critical Files And Symbols\n- src/domain/compaction.rs: compaction preparation and replacement shape.\n- src/domain/reducer.rs: manual compaction completion handling.\n- scripts/qa_mermaid.py: headless QA harness.\n\n## Commands Tests And Results\n- mermaid qa compact-smoke --format json: running inside this smoke.\n\n## Open Questions Or Risks\n- Full TUI automation remains intentionally deferred.\n\n## Next Steps\n- Keep using the real-model QA tier for end-to-end dogfood checks.",
+        prepared.archived_messages.len(),
+        prepared.preserved_messages.len()
+    )
+}
+
+fn fresh_qa_id() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+}
+
+fn show_tasks(limit: usize) -> Result<()> {
+    let read = RuntimeClient::auto().list_tasks(limit)?;
+    let mut tasks = read.value;
+    tasks.truncate(limit);
+    println!("Mermaid runtime tasks");
+    println!("Source: {}", read.source.as_str());
+    println!();
+    if tasks.is_empty() {
+        println!("No tasks recorded yet.");
+        return Ok(());
+    }
+    for task in tasks {
+        println!(
+            "{}  [{}] {}  {}  {}",
+            task.id, task.status, task.priority, task.updated_at, task.title
+        );
+        println!("    project: {}", task.project_path);
+        println!("    model: {}", task.model_id);
+    }
+    Ok(())
+}
+
+fn show_task(id: &str) -> Result<()> {
+    let detail = RuntimeClient::auto().task_detail(id)?.value;
+    print_task_detail(&detail.task);
+    let events = detail.events;
+    if !events.is_empty() {
+        println!();
+        println!("Timeline:");
+        for event in events {
+            println!("  {}  {}  {}", event.created_at, event.kind, event.message);
+        }
+    }
+    Ok(())
+}
+
+fn print_task_detail(task: &TaskRecord) {
+    println!("Task: {}", task.id);
+    println!("Title: {}", task.title);
+    println!("Status: {}", task.status);
+    println!("Priority: {}", task.priority);
+    println!("Project: {}", task.project_path);
+    println!("Model: {}", task.model_id);
+    if let Some(conversation_id) = &task.conversation_id {
+        println!("Conversation: {}", conversation_id);
+    }
+    println!("Created: {}", task.created_at);
+    println!("Updated: {}", task.updated_at);
+    if let Some(report) = &task.final_report {
+        println!();
+        println!("Final report:");
+        println!("{}", report);
+    }
+}
+
+fn show_processes(limit: usize) -> Result<()> {
+    let read = RuntimeClient::auto().list_processes(limit)?;
+    let mut processes = read.value;
+    processes.truncate(limit);
+    println!("Mermaid runtime processes");
+    println!("Source: {}", read.source.as_str());
+    println!();
+    if processes.is_empty() {
+        println!("No processes recorded yet.");
+        return Ok(());
+    }
+    for process in processes {
+        println!(
+            "{}  pid={}  status={}  {}",
+            process.id,
+            process.pid,
+            process.status.as_str(),
+            process.command
+        );
+        if let Some(task_id) = process.task_id {
+            println!("    task: {}", task_id);
+        }
+        if let Some(cwd) = process.cwd {
+            println!("    cwd: {}", cwd);
+        }
+        if let Some(log_path) = process.log_path {
+            println!("    log: {}", log_path);
+        }
+        if let Some(url) = process.detected_url {
+            println!("    url: {}", url);
+        }
+    }
+    Ok(())
+}
+
+async fn show_models(config: &Config) -> Result<()> {
+    list_models(config).await?;
+    probe_configured_provider_models(config).await?;
+    let store = RuntimeStore::open_default()?;
+    let probes = store.provider_probes().list(None, None)?;
+    if !probes.is_empty() {
+        println!("\nCached capability probes:");
+        for probe in probes {
+            println!(
+                "  - {}/{} {}={} ({})",
+                probe.provider,
+                probe.model_id,
+                probe.capability_key,
+                probe.capability_value,
+                probe.confidence
+            );
+        }
+    }
+    Ok(())
+}
+
+fn show_model_info(model: &str) -> Result<()> {
+    let snapshot = crate::domain::ProviderCapabilitySnapshot::from_model_id(model);
+    let store = RuntimeStore::open_default()?;
+    let provider = snapshot.provider.clone();
+    for (key, value) in [
+        ("supports_tools", snapshot.supports_tools.to_string()),
+        ("supports_vision", snapshot.supports_vision.to_string()),
+        ("reasoning", snapshot.reasoning.clone()),
+        (
+            "max_context_tokens",
+            snapshot
+                .max_context_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        ),
+    ] {
+        let _ = store.provider_probes().upsert(NewProviderProbe {
+            provider: provider.clone(),
+            model_id: snapshot.model.clone(),
+            capability_key: key.to_string(),
+            capability_value: value,
+            confidence: "static".to_string(),
+            error: None,
+        });
+    }
+    println!("Model: {}", model);
+    println!("Provider: {}", snapshot.provider);
+    println!("Name: {}", snapshot.model);
+    println!("Supports tools: {}", snapshot.supports_tools);
+    println!("Supports vision: {}", snapshot.supports_vision);
+    println!("Reasoning: {}", snapshot.reasoning);
+    println!(
+        "Context: {}",
+        snapshot
+            .max_context_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    if let Some(profile) = lookup_provider(&snapshot.provider) {
+        for (key, value) in [
+            (
+                "max_output_tokens_param",
+                format!("{:?}", profile.max_tokens_param),
+            ),
+            (
+                "parallel_tool_calls",
+                (!profile
+                    .disable_parallel_tool_calls_for
+                    .iter()
+                    .any(|disabled| *disabled == snapshot.model))
+                .to_string(),
+            ),
+            (
+                "reasoning_parameter_shape",
+                format!("{:?}", profile.reasoning_strategy),
+            ),
+            (
+                "streaming_usage_available",
+                "provider_dependent".to_string(),
+            ),
+            ("token_usage_field_shape", "openai_compatible".to_string()),
+        ] {
+            let _ = store.provider_probes().upsert(NewProviderProbe {
+                provider: provider.clone(),
+                model_id: snapshot.model.clone(),
+                capability_key: key.to_string(),
+                capability_value: value,
+                confidence: "static".to_string(),
+                error: None,
+            });
+        }
+        println!("Token budget field: {:?}", profile.max_tokens_param);
+        println!(
+            "Single-tool-call models: {}",
+            if profile.disable_parallel_tool_calls_for.is_empty() {
+                "(none)".to_string()
+            } else {
+                profile.disable_parallel_tool_calls_for.join(", ")
+            }
+        );
+    }
+    Ok(())
+}
+
+async fn probe_configured_provider_models(config: &Config) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    for profile in PROVIDER_REGISTRY {
+        let user_cfg = config.providers.get(profile.name);
+        let env = user_cfg
+            .and_then(|c| c.api_key_env.as_deref())
+            .unwrap_or(profile.api_key_env);
+        let Some(api_key) = resolve_api_key(env, None) else {
+            continue;
+        };
+        let base_url = user_cfg
+            .and_then(|c| c.base_url.clone())
+            .unwrap_or_else(|| profile.base_url.to_string());
+        let url = format!("{}/models", base_url.trim_end_matches('/'));
+        let mut request = client.get(&url).bearer_auth(api_key);
+        for (name, value) in profile.extra_headers {
+            request = request.header(*name, *value);
+        }
+        if let Some(user_cfg) = user_cfg {
+            for (name, value) in &user_cfg.extra_headers {
+                request = request.header(name, value);
+            }
+        }
+
+        let result = request.send().await;
+        match result {
+            Ok(response) if response.status().is_success() => {
+                let status = response.status();
+                let body: serde_json::Value = response.json().await.unwrap_or_default();
+                let ids = body
+                    .get("data")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.get("id").and_then(|id| id.as_str()))
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                record_provider_probe(
+                    profile.name,
+                    "*",
+                    "models_availability",
+                    &format!("available:{}:{}", status.as_u16(), ids.len()),
+                    "probed",
+                    None,
+                );
+                for model_id in ids.into_iter().take(200) {
+                    record_provider_probe(
+                        profile.name,
+                        &model_id,
+                        "model_listed",
+                        "true",
+                        "listed",
+                        None,
+                    );
+                }
+            },
+            Ok(response) => {
+                record_provider_probe(
+                    profile.name,
+                    "*",
+                    "models_availability",
+                    "failed",
+                    "failed",
+                    Some(format!("HTTP {}", response.status().as_u16())),
+                );
+            },
+            Err(error) => {
+                record_provider_probe(
+                    profile.name,
+                    "*",
+                    "models_availability",
+                    "failed",
+                    "failed",
+                    Some(error.to_string()),
+                );
+            },
+        }
+    }
+    Ok(())
+}
+
+fn record_provider_probe(
+    provider: &str,
+    model_id: &str,
+    key: &str,
+    value: &str,
+    confidence: &str,
+    error: Option<String>,
+) {
+    if let Ok(store) = RuntimeStore::open_default() {
+        let _ = store.provider_probes().upsert(NewProviderProbe {
+            provider: provider.to_string(),
+            model_id: model_id.to_string(),
+            capability_key: key.to_string(),
+            capability_value: value.to_string(),
+            confidence: confidence.to_string(),
+            error,
+        });
+    }
+}
+
+fn show_approvals() -> Result<()> {
+    let approvals = RuntimeClient::auto().list_approvals()?.value;
+    if approvals.is_empty() {
+        println!("No pending approvals.");
+        return Ok(());
+    }
+    for approval in approvals {
+        println!(
+            "{} [{} -> {}] {}",
+            approval.id,
+            approval.risk_classification,
+            approval.policy_decision,
+            approval.proposed_action
+        );
+        if let Some(args) = approval.args_summary {
+            println!("    args: {}", args);
+        }
+        if let Some(checkpoint_id) = approval.checkpoint_id {
+            println!("    checkpoint: {}", checkpoint_id);
+        }
+        if approval.pending_action_json.is_some() {
+            println!("    pending action: recorded");
+        }
+    }
+    Ok(())
+}
+
+fn approve(id: &str) -> Result<()> {
+    let result = RuntimeClient::auto().approve(id)?;
+    println!("Approved {}", id);
+    if result.replayed {
+        println!("{}", result.summary);
+    }
+    Ok(())
+}
+
+fn deny(id: &str) -> Result<()> {
+    let _ = RuntimeClient::auto().deny(id)?;
+    println!("Denied {}", id);
+    Ok(())
+}
+
+fn show_tool_runs(limit: usize) -> Result<()> {
+    let mut runs = RuntimeClient::auto().list_tool_runs(limit)?.value;
+    runs.truncate(limit);
+    if runs.is_empty() {
+        println!("No tool runs recorded yet.");
+        return Ok(());
+    }
+    for run in runs {
+        println!(
+            "{} [{}] {} started {}",
+            run.id, run.status, run.tool_name, run.started_at
+        );
+        if let Some(turn_id) = run.turn_id {
+            println!("    turn: {}", turn_id);
+        }
+        if let Some(call_id) = run.call_id {
+            println!("    call: {}", call_id);
+        }
+        if let Some(finished_at) = run.finished_at {
+            println!("    finished: {}", finished_at);
+        }
+    }
+    Ok(())
+}
+
+fn show_checkpoints(limit: usize) -> Result<()> {
+    let mut checkpoints = RuntimeClient::auto().list_checkpoints(limit)?.value;
+    checkpoints.truncate(limit);
+    if checkpoints.is_empty() {
+        println!("No checkpoints recorded yet.");
+        return Ok(());
+    }
+    for checkpoint in checkpoints {
+        println!(
+            "{}  {}  {}",
+            checkpoint.id, checkpoint.created_at, checkpoint.project_path
+        );
+        println!("    snapshot: {}", checkpoint.snapshot_path);
+        println!("    files: {}", checkpoint.changed_files_json);
+        if let Some(approval_id) = checkpoint.approval_id {
+            println!("    approval: {}", approval_id);
+        }
+    }
+    Ok(())
+}
+
+fn restore_checkpoint(id: &str) -> Result<()> {
+    let manifest = RuntimeClient::auto().restore_checkpoint(id)?.checkpoint;
+    println!("Restored {} ({} files)", manifest.id, manifest.files.len());
+    if let Some(repo) = manifest.shadow_git_repo {
+        println!("Shadow repo: {}", repo);
+    }
+    if let Some(commit) = manifest.shadow_git_commit {
+        println!("Shadow commit: {}", commit);
+    }
+    if let Some(action) = manifest.pending_action {
+        println!("Pending action: {}", serde_json::to_string_pretty(&action)?);
+    }
+    Ok(())
+}
+
+fn show_memory(project: Option<&Path>) -> Result<()> {
+    let project_path = project.map(|p| p.display().to_string()).or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string())
+    });
+    let entries = RuntimeClient::auto()
+        .list_memory(project_path.as_deref())?
+        .value;
+    if entries.is_empty() {
+        println!("No memory entries.");
+        return Ok(());
+    }
+    for entry in entries {
+        println!(
+            "{} [{}] {} = {}",
+            entry.id, entry.scope, entry.key, entry.value
+        );
+    }
+    Ok(())
+}
+
+fn remember(key: &str, value: &str, project: Option<&Path>) -> Result<()> {
+    let project_path = project.map(|p| p.display().to_string()).or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string())
+    });
+    let entry = RuntimeClient::auto()
+        .remember_memory(project_path, key, value, "cli")?
+        .value;
+    println!("Remembered {} ({})", entry.key, entry.id);
+    Ok(())
+}
+
+fn forget(id: &str) -> Result<()> {
+    RuntimeClient::auto().forget_memory(id)?;
+    println!("Forgot {}", id);
+    Ok(())
+}
+
+fn memory_edit(id: &str, value: &str) -> Result<()> {
+    let entry = RuntimeClient::auto().edit_memory(id, value, "cli")?.value;
+    println!("Updated {} ({})", entry.key, entry.id);
+    Ok(())
+}
+
+fn handle_plugin(command: &PluginCommand) -> Result<()> {
+    match command {
+        PluginCommand::Install { path } => {
+            let preview = crate::runtime::plugin_permission_preview(path)?;
+            print_plugin_permission_preview(&preview);
+            let record = crate::runtime::install_plugin_from_path(path)?;
+            println!("Installed plugin {} ({})", record.name, record.id);
+        },
+        PluginCommand::List => {
+            let plugins = RuntimeClient::auto().list_plugins()?.value;
+            if plugins.is_empty() {
+                println!("No plugins installed.");
+            } else {
+                for plugin in plugins {
+                    println!(
+                        "{} [{}] {} ({})",
+                        plugin.id,
+                        if plugin.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        plugin.name,
+                        plugin.source
+                    );
+                }
+            }
+        },
+        PluginCommand::Enable { id } => {
+            RuntimeClient::auto().set_plugin_enabled(id, true)?;
+            println!("Enabled plugin {}", id);
+        },
+        PluginCommand::Disable { id } => {
+            RuntimeClient::auto().set_plugin_enabled(id, false)?;
+            println!("Disabled plugin {}", id);
+        },
+        PluginCommand::Audit { path } => {
+            let manifest_path = if path.is_dir() {
+                path.join("plugin.toml")
+            } else {
+                path.clone()
+            };
+            let raw = std::fs::read_to_string(&manifest_path)?;
+            let manifest: crate::runtime::PluginManifest = toml::from_str(&raw)?;
+            let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+            crate::runtime::validate_plugin_manifest(&manifest, root)?;
+            let preview = crate::runtime::plugin_permission_preview(path)?;
+            println!("Plugin manifest is valid: {}", manifest.name);
+            print_plugin_permission_preview(&preview);
+        },
+    }
+    Ok(())
+}
+
+fn print_plugin_permission_preview(preview: &crate::runtime::PluginPermissionPreview) {
+    println!("Permission preview for plugin {}", preview.name);
+    if preview.declared_permissions.is_empty() && preview.permissions_toml.is_none() {
+        println!("  permissions: (none declared)");
+    } else {
+        if !preview.declared_permissions.is_empty() {
+            println!("  declared: {}", preview.declared_permissions.join(", "));
+        }
+        if let Some(value) = &preview.permissions_toml {
+            println!(
+                "  permissions.toml: {}",
+                serde_json::to_string(value).unwrap_or_else(|_| "<unprintable>".to_string())
+            );
+        }
+    }
+    if !preview.hooks.is_empty() {
+        println!("  hooks: {}", preview.hooks.join(", "));
+    }
+    if !preview.mcp.is_empty() {
+        println!("  mcp: {}", preview.mcp.join(", "));
+    }
+    if !preview.bin.is_empty() {
+        println!("  bin: {}", preview.bin.join(", "));
+    }
+}
+
+fn pair(label: Option<&str>) -> Result<()> {
+    let (token, hash) = crate::runtime::generate_pairing_token()?;
+    let record = RuntimeStore::open_default()?
+        .pairing_tokens()
+        .create(&hash, label)?;
+    println!("Pairing token id: {}", record.id);
+    println!("Pairing token: {}", token);
+    println!(
+        "Use with daemon JSON by setting {}.",
+        crate::runtime::daemon::DAEMON_TOKEN_ENV
+    );
+    println!("Store this now; Mermaid will not print it again.");
+    Ok(())
+}
+
+fn show_logs(id: &str) -> Result<()> {
+    let content = RuntimeClient::auto().process_log(id, None)?.content;
+    print!("{}", content);
+    Ok(())
+}
+
+fn stop_process(id: &str) -> Result<()> {
+    let process = RuntimeClient::auto().stop_process(id)?.item;
+    println!("Stopped process {} (pid {})", id, process.pid);
+    Ok(())
+}
+
+fn restart_process(id: &str) -> Result<()> {
+    let process = RuntimeClient::auto().restart_process(id)?.item;
+    println!("Restarted process {} (pid {})", id, process.pid);
+    Ok(())
+}
+
+fn open_target(target: &str) -> Result<()> {
+    if RuntimeClient::auto().open_process(target).is_err() {
+        crate::utils::open_file(target);
+    }
+    Ok(())
+}
+
+fn show_ports() -> Result<()> {
+    print!("{}", RuntimeClient::auto().ports()?.ports);
+    Ok(())
 }
 
 /// List available models across all backends (honors user config).
@@ -220,14 +1635,32 @@ async fn show_status(config: &Config) -> Result<()> {
     }
 
     // Project instructions (Step 5h). Walks UP from cwd to git root or
-    // $HOME to find the nearest MERMAID.md.
+    // $HOME to find the nearest supported instruction files.
     {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        match crate::app::instructions::find_mermaid_md(&cwd) {
-            Some(path) => match crate::app::instructions::load_from_path(&path) {
+        let paths = crate::app::instructions::find_instruction_files(&cwd);
+        if paths.is_empty() {
+            println!(
+                "  [INFO] Project instructions: not found (MERMAID.md, AGENTS.md, CLAUDE.md, GEMINI.md)"
+            );
+        } else {
+            match crate::app::instructions::load_from_paths(&paths) {
                 Some(loaded) => {
+                    let files = loaded
+                        .sources
+                        .iter()
+                        .map(|source| {
+                            source
+                                .path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("instructions")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     println!(
-                        "  [OK] MERMAID.md: {} ({} bytes{})",
+                        "  [OK] Project instructions: {} at {} ({} bytes{})",
+                        files,
                         loaded.path.display(),
                         loaded.byte_len,
                         if loaded.truncated { ", truncated" } else { "" }
@@ -235,16 +1668,15 @@ async fn show_status(config: &Config) -> Result<()> {
                 },
                 None => {
                     println!(
-                        "  [WARNING] MERMAID.md: found at {} but unreadable",
-                        path.display()
+                        "  [WARNING] Project instructions: found but unreadable ({})",
+                        paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
                 },
-            },
-            None => {
-                println!(
-                    "  [INFO] MERMAID.md: not found (create one to add persistent project instructions)"
-                );
-            },
+            }
         }
     }
 
@@ -339,5 +1771,46 @@ fn show_provider_status(config: &Config) {
         for (name, url) in configured {
             println!("      - {} ({})", name, url);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qa_compact_smoke_persists_conversation_and_archive() {
+        let dir = unique_temp_dir("mermaid-qa-compact-smoke");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let report = run_qa_compact_smoke(&Config::default(), &dir, 6).unwrap();
+
+        assert!(report.ok);
+        assert!(report.archived_messages > 0);
+        assert!(report.preserved_messages > 0);
+        assert!(report.replacement_messages >= 3);
+        assert!(
+            std::path::Path::new(report.conversation_path.as_ref().unwrap()).exists(),
+            "conversation path should exist"
+        );
+        assert!(
+            std::path::Path::new(report.archive_path.as_ref().unwrap()).exists(),
+            "archive path should exist"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn qa_model_id_falls_back_to_deterministic() {
+        assert_eq!(qa_model_id(&Config::default()), "qa/deterministic");
+    }
+
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!("{name}-{nanos}"))
     }
 }

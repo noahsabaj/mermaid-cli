@@ -7,6 +7,7 @@ use crate::models::ReasoningLevel;
 #[command(name = "mermaid")]
 #[command(version)]
 #[command(about = "An open-source, model-agnostic AI pair programmer", long_about = None)]
+#[command(after_help = TOP_LEVEL_HELP_AFTER)]
 pub struct Cli {
     /// Model to use (e.g., qwen3-coder:30b, ollama/llama3)
     #[arg(short, long)]
@@ -39,9 +40,44 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub record: Option<PathBuf>,
 
+    /// Replace Mermaid's default system prompt for this invocation
+    #[arg(long, global = true, conflicts_with = "system_prompt_file")]
+    pub system_prompt: Option<String>,
+
+    /// Replace Mermaid's default system prompt with the contents of a file
+    #[arg(
+        long,
+        value_name = "FILE",
+        global = true,
+        conflicts_with = "system_prompt"
+    )]
+    pub system_prompt_file: Option<PathBuf>,
+
+    /// Append extra instructions after Mermaid's system prompt for this invocation
+    #[arg(long, global = true)]
+    pub append_system_prompt: Option<String>,
+
+    /// Append extra instructions from a file after Mermaid's system prompt
+    #[arg(long, value_name = "FILE", global = true)]
+    pub append_system_prompt_file: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
+
+const TOP_LEVEL_HELP_AFTER: &str = "\
+Common first run:
+  mermaid doctor                         Check model, tools, safety, and project readiness
+  mermaid                                Start the full-screen terminal coding agent
+  mermaid run \"inspect this repo\"        Run one prompt headlessly
+  mermaid self-test                      Run fast deterministic Mermaid self-tests
+
+Command groups:
+  Everyday: chat, run, doctor, status, list, self-test
+  Model/context: models, model-info, --model, --reasoning, --system-prompt*
+  Safety/recovery: approvals, approve, deny, checkpoints, restore
+  Integrations: add, remove, mcp, cloud-setup, plugin
+  Advanced runtime: daemon, tasks, task, processes, logs, stop, restart, ports, pair";
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
@@ -49,12 +85,152 @@ pub enum Commands {
     Init,
     /// List available models
     List,
+    /// List model/provider capability records
+    Models,
+    /// Show static and cached capability info for a model id
+    ModelInfo {
+        /// Model id, e.g. openai/gpt-5.2
+        model: String,
+    },
     /// Start a chat session (default)
     Chat,
     /// Show version information
     Version,
     /// Check status of dependencies and backends
     Status,
+    /// Check first-run readiness and explain what Mermaid can do now
+    Doctor {
+        /// Output format (text, json, markdown)
+        #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Run fast deterministic Mermaid self-tests
+    SelfTest {
+        /// Output format (text, json, markdown)
+        #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+        /// Keep the temporary self-test workspace after the run
+        #[arg(long)]
+        keep_workspace: bool,
+    },
+    /// List durable runtime tasks
+    Tasks {
+        /// Maximum number of tasks to show
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show one durable runtime task and its timeline
+    Task {
+        /// Task id
+        id: String,
+    },
+    /// List Mermaid-managed background processes
+    Processes {
+        /// Maximum number of processes to show
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Print a managed process log
+    Logs {
+        /// Process id from `mermaid processes`
+        id: String,
+    },
+    /// Stop a managed process
+    Stop {
+        /// Process id from `mermaid processes`
+        id: String,
+    },
+    /// Restart a managed process
+    Restart {
+        /// Process id from `mermaid processes`
+        id: String,
+    },
+    /// Open a URL, file, or managed process URL
+    Open {
+        /// URL, path, or process id
+        target: String,
+    },
+    /// Show listening TCP ports
+    Ports,
+    /// List pending approvals
+    Approvals,
+    /// Approve a pending approval record
+    Approve {
+        /// Approval id
+        id: String,
+    },
+    /// Deny a pending approval record
+    Deny {
+        /// Approval id
+        id: String,
+    },
+    /// List recent persisted tool runs
+    ToolRuns {
+        /// Maximum number of tool runs to show
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// List checkpoints
+    Checkpoints {
+        /// Maximum number of checkpoints to show
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Restore a checkpoint by id
+    Restore {
+        /// Checkpoint id
+        id: String,
+    },
+    /// List project memory entries
+    Memory {
+        /// Project path, defaults to current directory
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
+    /// Write a project memory entry
+    Remember {
+        /// Memory key
+        key: String,
+        /// Memory value
+        value: String,
+        /// Project path, defaults to current directory
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
+    /// Soft-delete a memory entry
+    Forget {
+        /// Memory entry id
+        id: String,
+    },
+    /// Edit an existing memory entry value
+    MemoryEdit {
+        /// Memory entry id
+        id: String,
+        /// New memory value
+        value: String,
+    },
+    /// Manage Mermaid plugin bundles
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
+    /// Manage Mermaid's Linux background service
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+    /// Create a remote pairing token
+    Pair {
+        /// Human label for the remote client
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Internal self-QA commands. Hidden from normal help output.
+    #[command(hide = true)]
+    Qa {
+        #[command(subcommand)]
+        command: QaCommand,
+    },
     /// Add an MCP server (e.g., mermaid add context7)
     Add {
         /// MCP server name (e.g., context7, github, filesystem)
@@ -87,6 +263,79 @@ pub enum Commands {
         /// Don't execute agent actions (dry run)
         #[arg(long)]
         no_execute: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PluginCommand {
+    /// Install a plugin from a local path
+    Install {
+        /// Path containing plugin.toml
+        path: PathBuf,
+    },
+    /// List installed plugins
+    List,
+    /// Enable an installed plugin
+    Enable {
+        /// Plugin id or name
+        id: String,
+    },
+    /// Disable an installed plugin
+    Disable {
+        /// Plugin id or name
+        id: String,
+    },
+    /// Validate a plugin manifest without installing
+    Audit {
+        /// Path containing plugin.toml
+        path: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DaemonCommand {
+    /// Install the systemd user service for this user
+    Install {
+        /// Start and enable the service after writing the unit
+        #[arg(long)]
+        start: bool,
+        /// Overwrite an existing Mermaid service unit
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove the systemd user service for this user
+    Uninstall,
+    /// Start the background user service
+    Start,
+    /// Stop the background user service
+    Stop,
+    /// Restart the background user service
+    Restart,
+    /// Show background service status
+    Status,
+    /// Show background service logs
+    Logs {
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of log lines to show before following/exiting
+        #[arg(short = 'n', long, default_value_t = 100)]
+        lines: usize,
+    },
+    /// Print the generated service unit without installing it
+    PrintUnit,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum QaCommand {
+    /// Deterministically exercise context compaction without a real model.
+    CompactSmoke {
+        /// Number of synthetic user/assistant turns to seed
+        #[arg(long, default_value_t = 6)]
+        turns: usize,
+        /// Output format
+        #[arg(short, long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
     },
 }
 

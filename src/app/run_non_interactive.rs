@@ -39,6 +39,9 @@ pub struct RunOptions {
     /// tools and can't take actions. Dry-run mode for
     /// `mermaid run --no-execute`.
     pub no_execute: bool,
+    /// Durable runtime task that owns this run, when launched through
+    /// `mermaidd` or `mermaid run` task creation.
+    pub task_id: Option<String>,
 }
 
 /// Drive one prompt to completion. Bounded by a generous 20-minute
@@ -73,7 +76,9 @@ pub async fn run_non_interactive_with(
             providers.clone(),
         )
     };
-    let (mut runner, mut msg_rx) = EffectRunner::pair_from(cwd.clone(), providers, tools);
+    let (mut runner, mut msg_rx) =
+        EffectRunner::pair_from_with_task(cwd.clone(), providers, tools, opts.task_id.clone());
+    runner = runner.without_terminal_title();
 
     let mut state = State::new(config.clone(), cwd, model_id);
     let mut lifecycle = RuntimeLifecycle::new();

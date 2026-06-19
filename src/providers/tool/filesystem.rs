@@ -18,6 +18,7 @@ use async_trait::async_trait;
 
 use crate::constants::MAX_RESPONSE_CHARS as MAX_FILE_READ_BYTES;
 use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use crate::render::diff::{DIFF_ADDED_MARKER, DIFF_REMOVED_MARKER};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
@@ -182,31 +183,69 @@ impl ToolExecutor for EditFileTool {
             Ok(p) => p,
             Err(e) => return err(&format!("edit_file: {}", e), 0.0),
         };
+        let pending_action = serde_json::json!({
+            "tool": "edit_file",
+            "args": {
+                "path": raw_path,
+                "old_string": old_string,
+                "new_string": new_string,
+            },
+            "workdir": ctx.workdir.display().to_string(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "task_id": ctx.task_id.clone(),
+        });
+        if let Some(outcome) = mutation_policy_outcome(
+            &ctx,
+            "edit_file",
+            raw_path,
+            std::slice::from_ref(&abs),
+            pending_action,
+        ) {
+            return outcome;
+        }
+        if ctx.config.safety.checkpoint_on_mutation
+            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+                &ctx.workdir,
+                std::slice::from_ref(&abs),
+                Some(serde_json::json!({
+                    "tool": "edit_file",
+                    "path": raw_path,
+                })),
+                ctx.task_id.clone(),
+            )
+        {
+            return err(&format!("edit_file checkpoint failed: {}", e), 0.0);
+        }
         let old_owned = old_string.to_string();
         let new_owned = new_string.to_string();
         let abs_clone = abs.clone();
         let display_path = raw_path.to_string();
+        let diff_path = display_path.clone();
 
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || edit_blocking(&abs_clone, &old_owned, &new_owned)) => {
+            result = tokio::task::spawn_blocking(move || edit_blocking(&abs_clone, &diff_path, &old_owned, &new_owned)) => {
                 match result {
-                    Ok(Ok(replacements)) => {
+                    Ok(Ok(edit)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
+                        after_file_mutation(&ctx, "edit_file", &display_path);
                         ToolOutcome::success(
                             format!("Edited {} ({} replacement{})",
                             display_path,
-                            replacements,
-                            if replacements == 1 { "" } else { "s" }),
-                            format!("{} replacement{}", replacements, if replacements == 1 { "" } else { "s" }),
+                            edit.replacements,
+                            if edit.replacements == 1 { "" } else { "s" }),
+                            diff_summary(edit.added, edit.removed, duration_secs),
                             duration_secs,
                         )
                         .with_metadata(ToolRunMetadata {
                             detail: ToolMetadata::EditFile {
                                 path: display_path,
-                                replacements,
+                                replacements: edit.replacements,
                             },
+                            display_diff: Some(edit.display_diff),
+                            diff_truncated: edit.truncated,
                             ..ToolRunMetadata::default()
                         })
                     },
@@ -252,6 +291,36 @@ impl ToolExecutor for DeleteFileTool {
             Ok(p) => p,
             Err(e) => return err(&format!("delete_file: {}", e), 0.0),
         };
+        let pending_action = serde_json::json!({
+            "tool": "delete_file",
+            "args": { "path": raw_path },
+            "workdir": ctx.workdir.display().to_string(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "task_id": ctx.task_id.clone(),
+        });
+        if let Some(outcome) = mutation_policy_outcome(
+            &ctx,
+            "delete_file",
+            raw_path,
+            std::slice::from_ref(&abs),
+            pending_action,
+        ) {
+            return outcome;
+        }
+        if ctx.config.safety.checkpoint_on_mutation
+            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+                &ctx.workdir,
+                std::slice::from_ref(&abs),
+                Some(serde_json::json!({
+                    "tool": "delete_file",
+                    "path": raw_path,
+                })),
+                ctx.task_id.clone(),
+            )
+        {
+            return err(&format!("delete_file checkpoint failed: {}", e), 0.0);
+        }
         let display = raw_path.to_string();
 
         tokio::select! {
@@ -261,6 +330,7 @@ impl ToolExecutor for DeleteFileTool {
                 match result {
                     Ok(Ok(())) => {
                         let duration_secs = start.elapsed().as_secs_f64();
+                        after_file_mutation(&ctx, "delete_file", &display);
                         ToolOutcome::success(
                             format!("Deleted {}", display),
                             "file deleted",
@@ -311,6 +381,36 @@ impl ToolExecutor for CreateDirectoryTool {
             Ok(p) => p,
             Err(e) => return err(&format!("create_directory: {}", e), 0.0),
         };
+        let pending_action = serde_json::json!({
+            "tool": "create_directory",
+            "args": { "path": raw_path },
+            "workdir": ctx.workdir.display().to_string(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "task_id": ctx.task_id.clone(),
+        });
+        if let Some(outcome) = mutation_policy_outcome(
+            &ctx,
+            "create_directory",
+            raw_path,
+            std::slice::from_ref(&abs),
+            pending_action,
+        ) {
+            return outcome;
+        }
+        if ctx.config.safety.checkpoint_on_mutation
+            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+                &ctx.workdir,
+                std::slice::from_ref(&abs),
+                Some(serde_json::json!({
+                    "tool": "create_directory",
+                    "path": raw_path,
+                })),
+                ctx.task_id.clone(),
+            )
+        {
+            return err(&format!("create_directory checkpoint failed: {}", e), 0.0);
+        }
         let display = raw_path.to_string();
 
         tokio::select! {
@@ -320,6 +420,7 @@ impl ToolExecutor for CreateDirectoryTool {
                 match result {
                     Ok(Ok(())) => {
                         let duration_secs = start.elapsed().as_secs_f64();
+                        after_file_mutation(&ctx, "create_directory", &display);
                         ToolOutcome::success(
                             format!("Created directory {}", display),
                             "directory created",
@@ -377,10 +478,47 @@ impl ToolExecutor for WriteFileTool {
             Ok(p) => p,
             Err(e) => return ToolOutcome::error(format!("write_file: {}", e), 0.0),
         };
+        let pending_action = serde_json::json!({
+            "tool": "write_file",
+            "args": { "path": path, "content": content },
+            "workdir": ctx.workdir.display().to_string(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "task_id": ctx.task_id.clone(),
+        });
+        if let Some(outcome) = mutation_policy_outcome(
+            &ctx,
+            "write_file",
+            path,
+            std::slice::from_ref(&abs_path),
+            pending_action,
+        ) {
+            return outcome;
+        }
+        if ctx.config.safety.checkpoint_on_mutation
+            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+                &ctx.workdir,
+                std::slice::from_ref(&abs_path),
+                Some(serde_json::json!({
+                    "tool": "write_file",
+                    "path": path,
+                })),
+                ctx.task_id.clone(),
+            )
+        {
+            return ToolOutcome::error(format!("write_file checkpoint failed: {}", e), 0.0);
+        }
         let display_path = path.to_string();
         let line_count = content.lines().count();
         let byte_count = content.len();
-        let created = Some(!abs_path.exists());
+        let old_content = std::fs::read_to_string(&abs_path).ok();
+        let created = Some(old_content.is_none());
+        let diff = generate_display_diff(
+            &display_path,
+            old_content.as_deref().unwrap_or(""),
+            content,
+            old_content.is_none(),
+        );
         let content = content.to_string();
 
         tokio::select! {
@@ -390,6 +528,7 @@ impl ToolExecutor for WriteFileTool {
                 match result {
                     Ok(Ok(actual_line_count)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
+                        after_file_mutation(&ctx, "write_file", &display_path);
                         ToolOutcome::success(
                             format!("Wrote {} ({} lines)", display_path, actual_line_count),
                             format!("{} {} written", actual_line_count, plural(actual_line_count, "line", "lines")),
@@ -404,6 +543,8 @@ impl ToolExecutor for WriteFileTool {
                             },
                             line_count: Some(line_count),
                             byte_count: Some(byte_count),
+                            display_diff: Some(diff.display_diff),
+                            diff_truncated: diff.truncated,
                             ..ToolRunMetadata::default()
                         })
                     },
@@ -534,7 +675,134 @@ fn write_one_blocking(path: &Path, content: &str) -> std::io::Result<usize> {
     Ok(content.lines().count())
 }
 
-fn edit_blocking(path: &Path, old_string: &str, new_string: &str) -> std::io::Result<usize> {
+fn mutation_policy_outcome(
+    ctx: &ExecContext,
+    tool: &str,
+    path: &str,
+    checkpoint_paths: &[PathBuf],
+    pending_action: serde_json::Value,
+) -> Option<ToolOutcome> {
+    let mut request = crate::runtime::ActionRequest::new(
+        tool,
+        crate::runtime::ToolCategory::Edit,
+        format!("{} {}", tool, path),
+    );
+    request.path = Some(path.to_string());
+    match crate::runtime::PolicyEngine::new(ctx.config.safety.mode)
+        .with_overrides(ctx.config.safety.overrides.clone())
+        .decide(&request)
+    {
+        crate::runtime::PolicyDecision::Allow { .. } => {
+            let _ = crate::runtime::run_plugin_hooks(
+                "before_file_mutation",
+                &serde_json::json!({
+                    "task_id": ctx.task_id.clone(),
+                    "turn_id": ctx.turn.0,
+                    "call_id": ctx.call_id.0,
+                    "tool": tool,
+                    "path": path,
+                }),
+            );
+            None
+        },
+        crate::runtime::PolicyDecision::Ask { risk, checkpoint } => {
+            let checkpoint_id = if checkpoint && ctx.config.safety.checkpoint_on_mutation {
+                match crate::runtime::create_checkpoint_for_task(
+                    &ctx.workdir,
+                    checkpoint_paths,
+                    Some(pending_action.clone()),
+                    ctx.task_id.clone(),
+                ) {
+                    Ok(manifest) => Some(manifest.id),
+                    Err(error) => {
+                        return Some(ToolOutcome::error(
+                            format!(
+                                "{} checkpoint failed before approval: {}",
+                                request.summary, error
+                            ),
+                            0.0,
+                        ));
+                    },
+                }
+            } else {
+                None
+            };
+            let pending_action_json = serde_json::to_string(&pending_action).ok();
+            let approval_id = crate::runtime::RuntimeStore::open_default()
+                .and_then(|store| {
+                    let approval = store.approvals().create(crate::runtime::NewApproval {
+                        task_id: ctx.task_id.clone(),
+                        proposed_action: request.summary.clone(),
+                        risk_classification: risk.as_str().to_string(),
+                        policy_decision: "ask".to_string(),
+                        args_summary: Some(path.to_string()),
+                        checkpoint_id: checkpoint_id.clone(),
+                        pending_action_json,
+                    })?;
+                    if let Some(checkpoint_id) = checkpoint_id.as_deref() {
+                        let _ = store
+                            .checkpoints()
+                            .set_approval(checkpoint_id, &approval.id);
+                    }
+                    let _ = crate::runtime::run_plugin_hooks(
+                        "approval_requested",
+                        &serde_json::json!({
+                            "id": approval.id.clone(),
+                            "task_id": approval.task_id.clone(),
+                            "tool": tool,
+                            "risk": risk.as_str(),
+                            "checkpoint_id": checkpoint_id.clone(),
+                        }),
+                    );
+                    Ok(approval)
+                })
+                .map(|approval| approval.id)
+                .ok();
+            Some(ToolOutcome::error(
+                format!(
+                    "Approval required for {}{}",
+                    request.summary,
+                    approval_id
+                        .map(|id| format!(" (approval {})", id))
+                        .unwrap_or_default()
+                ),
+                0.0,
+            ))
+        },
+        crate::runtime::PolicyDecision::Deny { reason, .. } => Some(ToolOutcome::error(
+            format!("{} blocked by policy: {}", request.summary, reason),
+            0.0,
+        )),
+    }
+}
+
+fn after_file_mutation(ctx: &ExecContext, tool: &str, path: &str) {
+    let _ = crate::runtime::run_plugin_hooks(
+        "after_file_mutation",
+        &serde_json::json!({
+            "task_id": ctx.task_id.clone(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "tool": tool,
+            "path": path,
+        }),
+    );
+}
+
+struct EditResult {
+    replacements: usize,
+    display_diff: String,
+    added: usize,
+    removed: usize,
+    truncated: bool,
+}
+
+fn edit_blocking(
+    path: &Path,
+    display_path: &str,
+    old_string: &str,
+    new_string: &str,
+) -> std::io::Result<EditResult> {
     let current = std::fs::read_to_string(path)?;
     let count = current.matches(old_string).count();
     if count == 0 {
@@ -549,8 +817,15 @@ fn edit_blocking(path: &Path, old_string: &str, new_string: &str) -> std::io::Re
         )));
     }
     let updated = current.replacen(old_string, new_string, 1);
+    let diff = generate_display_diff(display_path, &current, &updated, false);
     std::fs::write(path, updated)?;
-    Ok(1)
+    Ok(EditResult {
+        replacements: 1,
+        display_diff: diff.display_diff,
+        added: diff.added,
+        removed: diff.removed,
+        truncated: diff.truncated,
+    })
 }
 
 fn err(msg: &str, duration_secs: f64) -> ToolOutcome {
@@ -559,6 +834,129 @@ fn err(msg: &str, duration_secs: f64) -> ToolOutcome {
 
 fn plural(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
     if count == 1 { singular } else { plural }
+}
+
+#[derive(Debug, Clone)]
+struct DisplayDiff {
+    display_diff: String,
+    added: usize,
+    removed: usize,
+    truncated: bool,
+}
+
+const DIFF_CONTEXT_LINES: usize = 3;
+const MAX_DISPLAY_DIFF_LINES: usize = 220;
+
+fn generate_display_diff(path: &str, old: &str, new: &str, created: bool) -> DisplayDiff {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut prefix = 0usize;
+    let min_len = old_lines.len().min(new_lines.len());
+    while prefix < min_len && old_lines[prefix] == new_lines[prefix] {
+        prefix += 1;
+    }
+
+    let mut suffix = 0usize;
+    while suffix < min_len.saturating_sub(prefix)
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let old_changed_end = old_lines.len().saturating_sub(suffix);
+    let new_changed_end = new_lines.len().saturating_sub(suffix);
+    let old_changed = &old_lines[prefix..old_changed_end];
+    let new_changed = &new_lines[prefix..new_changed_end];
+    let added = new_changed.len();
+    let removed = old_changed.len();
+
+    let context_start = prefix.saturating_sub(DIFF_CONTEXT_LINES);
+    let context_end_old = (old_changed_end + DIFF_CONTEXT_LINES).min(old_lines.len());
+    let mut lines = Vec::new();
+    lines.push(format!("--- {}", if created { "/dev/null" } else { path }));
+    lines.push(format!("+++ {}", path));
+    lines.push(format!(
+        "@@ -{},{} +{},{} @@",
+        context_start + 1,
+        context_end_old.saturating_sub(context_start),
+        context_start + 1,
+        (new_changed_end + DIFF_CONTEXT_LINES)
+            .min(new_lines.len())
+            .saturating_sub(context_start)
+    ));
+
+    let mut truncated = false;
+    let push_line = |line: String, lines: &mut Vec<String>, truncated: &mut bool| {
+        if lines.len() < MAX_DISPLAY_DIFF_LINES {
+            lines.push(line);
+        } else {
+            *truncated = true;
+        }
+    };
+
+    for (idx, line) in old_lines[context_start..prefix].iter().enumerate() {
+        push_line(
+            format!("{:>4}   {}", context_start + idx + 1, line),
+            &mut lines,
+            &mut truncated,
+        );
+    }
+    for (idx, line) in old_changed.iter().enumerate() {
+        push_line(
+            format!("{:>4}{}{}", prefix + idx + 1, DIFF_REMOVED_MARKER, line),
+            &mut lines,
+            &mut truncated,
+        );
+    }
+    for (idx, line) in new_changed.iter().enumerate() {
+        push_line(
+            format!("{:>4}{}{}", prefix + idx + 1, DIFF_ADDED_MARKER, line),
+            &mut lines,
+            &mut truncated,
+        );
+    }
+    for (idx, line) in old_lines[old_changed_end..context_end_old]
+        .iter()
+        .enumerate()
+    {
+        push_line(
+            format!("{:>4}   {}", old_changed_end + idx + 1, line),
+            &mut lines,
+            &mut truncated,
+        );
+    }
+    if truncated {
+        lines.push(format!(
+            "... diff truncated after {} display lines",
+            MAX_DISPLAY_DIFF_LINES
+        ));
+    }
+
+    DisplayDiff {
+        display_diff: lines.join("\n"),
+        added,
+        removed,
+        truncated,
+    }
+}
+
+fn diff_summary(added: usize, removed: usize, duration_secs: f64) -> String {
+    format!(
+        "Success, +{} -{}, took {}",
+        added,
+        removed,
+        format_duration_for_diff(duration_secs)
+    )
+}
+
+fn format_duration_for_diff(seconds: f64) -> String {
+    if seconds < 1.0 {
+        format!("{}ms", (seconds * 1000.0).round().max(1.0) as u64)
+    } else if seconds < 10.0 {
+        format!("{:.1}s", seconds)
+    } else {
+        format!("{}s", seconds.round() as u64)
+    }
 }
 
 #[cfg(test)]
@@ -658,6 +1056,78 @@ mod tests {
         assert!(outcome.output().contains("3 lines"));
         let written = fs::read_to_string(dir.join("out.txt")).expect("read");
         assert!(written.contains("line1"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn write_file_new_file_records_added_display_diff() {
+        let dir = temp_root("write_new_diff");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = WriteFileTool
+            .execute(
+                serde_json::json!({"path": "out.txt", "content": "alpha\nbeta\n"}),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        let diff = outcome
+            .metadata
+            .display_diff
+            .as_deref()
+            .expect("display diff");
+        assert!(diff.contains("--- /dev/null"));
+        assert!(diff.contains("+++ out.txt"));
+        assert!(diff.contains("+ alpha"));
+        assert!(diff.contains("+ beta"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn write_file_existing_file_records_added_and_removed_display_diff() {
+        let dir = temp_root("write_existing_diff");
+        fs::write(dir.join("out.txt"), "alpha\nold\nomega\n").expect("write fixture");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = WriteFileTool
+            .execute(
+                serde_json::json!({"path": "out.txt", "content": "alpha\nnew\nomega\n"}),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        let diff = outcome
+            .metadata
+            .display_diff
+            .as_deref()
+            .expect("display diff");
+        assert!(diff.contains("- old"));
+        assert!(diff.contains("+ new"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn edit_file_records_display_diff() {
+        let dir = temp_root("edit_diff");
+        fs::write(dir.join("main.py"), "alpha\nold\nomega\n").expect("write fixture");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = EditFileTool
+            .execute(
+                serde_json::json!({
+                    "path": "main.py",
+                    "old_string": "old",
+                    "new_string": "new",
+                }),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        let diff = outcome
+            .metadata
+            .display_diff
+            .as_deref()
+            .expect("display diff");
+        assert!(diff.contains("--- main.py"));
+        assert!(diff.contains("- old"));
+        assert!(diff.contains("+ new"));
         let _ = fs::remove_dir_all(&dir);
     }
 

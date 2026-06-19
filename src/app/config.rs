@@ -1,5 +1,6 @@
 use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERATURE};
 use crate::models::ReasoningLevel;
+use crate::runtime::{PolicyOverride, SafetyMode};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,84 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub reasoning_per_model: HashMap<String, ReasoningLevel>,
+
+    /// Named model profiles that agents/plugins can request without
+    /// hardcoding a concrete provider model. Values are full model IDs.
+    /// Example:
+    /// ```toml
+    /// [model_profiles]
+    /// fast = "ollama/qwen3-coder:14b"
+    /// large-context = "openai/gpt-5.2"
+    /// tool-strong = "anthropic/claude-sonnet-4-6"
+    /// vision = "gemini/gemini-2.5-pro"
+    /// cheap = "groq/llama-3.3-70b-versatile"
+    /// ```
+    #[serde(default)]
+    pub model_profiles: HashMap<String, String>,
+
+    /// Runtime safety policy. The current TUI defaults to full-access
+    /// compatibility, while daemon-owned surfaces can tighten this.
+    #[serde(default)]
+    pub safety: SafetyConfig,
+
+    /// Runtime-only prompt customizations supplied by CLI flags. These are
+    /// deliberately skipped when saving config so one-off agent personas do
+    /// not pollute the user's persistent Mermaid settings.
+    #[serde(skip)]
+    pub prompt: PromptConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PromptConfig {
+    pub system_prompt: Option<String>,
+    pub append_system_prompt: Vec<String>,
+}
+
+impl PromptConfig {
+    pub fn render_system_prompt(&self, default_prompt: &str) -> String {
+        let mut rendered = self
+            .system_prompt
+            .as_deref()
+            .unwrap_or(default_prompt)
+            .trim_end()
+            .to_string();
+
+        for extra in &self.append_system_prompt {
+            let extra = extra.trim();
+            if extra.is_empty() {
+                continue;
+            }
+            if !rendered.is_empty() {
+                rendered.push_str("\n\n");
+            }
+            rendered.push_str(extra);
+        }
+
+        rendered
+    }
+
+    pub fn is_customized(&self) -> bool {
+        self.system_prompt.is_some() || !self.append_system_prompt.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SafetyConfig {
+    pub mode: SafetyMode,
+    pub checkpoint_on_mutation: bool,
+    #[serde(default)]
+    pub overrides: Vec<PolicyOverride>,
+}
+
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            mode: SafetyMode::FullAccess,
+            checkpoint_on_mutation: true,
+            overrides: Vec::new(),
+        }
+    }
 }
 
 /// User-supplied OpenAI-compatible provider configuration. All fields are
@@ -300,9 +379,15 @@ pub fn persist_reasoning_for_model(model_id: &str, level: ReasoningLevel) -> Res
 /// Resolve which model to use: CLI arg > last_used > default_model > any available
 pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyhow::Result<String> {
     if let Some(model) = cli_model {
+        if let Some(resolved) = resolve_model_profile_alias(model, config)? {
+            return Ok(resolved);
+        }
         return Ok(model.to_string());
     }
     if let Some(last_model) = &config.last_used_model {
+        if let Some(resolved) = resolve_model_profile_alias(last_model, config)? {
+            return Ok(resolved);
+        }
         return Ok(last_model.clone());
     }
     if !config.default_model.provider.is_empty() && !config.default_model.name.is_empty() {
@@ -319,6 +404,25 @@ pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyho
         .first()
         .ok_or_else(|| anyhow::anyhow!("require_any_model returned empty list"))?;
     Ok(format!("ollama/{}", first))
+}
+
+fn resolve_model_profile_alias(requested: &str, config: &Config) -> anyhow::Result<Option<String>> {
+    let profile = requested.strip_prefix("profile:").unwrap_or(requested);
+    if let Some(model) = config.model_profiles.get(profile) {
+        anyhow::ensure!(
+            !model.trim().is_empty(),
+            "model profile `{}` is configured with an empty model id",
+            profile
+        );
+        return Ok(Some(model.clone()));
+    }
+    if requested.starts_with("profile:") {
+        anyhow::bail!(
+            "model profile `{}` is not configured; add it under [model_profiles]",
+            profile
+        );
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -355,6 +459,32 @@ mod tests {
         let back: ModelSettings = toml::from_str(&toml_blob).expect("deserialize");
         assert_eq!(back.reasoning, ReasoningLevel::High);
         assert_eq!(back.name, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn configured_model_profile_resolves_explicit_alias() {
+        let mut config = Config::default();
+        config
+            .model_profiles
+            .insert("fast".to_string(), "ollama/qwen3-coder:14b".to_string());
+        assert_eq!(
+            resolve_model_profile_alias("fast", &config).unwrap(),
+            Some("ollama/qwen3-coder:14b".to_string())
+        );
+        assert_eq!(
+            resolve_model_profile_alias("profile:fast", &config).unwrap(),
+            Some("ollama/qwen3-coder:14b".to_string())
+        );
+    }
+
+    #[test]
+    fn profile_prefix_requires_configuration() {
+        let config = Config::default();
+        assert!(resolve_model_profile_alias("profile:vision", &config).is_err());
+        assert_eq!(
+            resolve_model_profile_alias("vision", &config).unwrap(),
+            None
+        );
     }
 
     /// `persist_default_reasoning` writes to the real config path, so
@@ -435,5 +565,25 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml_blob).expect("backward compat");
         assert!(cfg.reasoning_per_model.is_empty());
+        assert!(!cfg.prompt.is_customized());
+    }
+
+    #[test]
+    fn prompt_config_replaces_and_appends_without_persisting() {
+        let mut cfg = Config::default();
+        cfg.prompt.system_prompt = Some("base".to_string());
+        cfg.prompt
+            .append_system_prompt
+            .push("extra instructions".to_string());
+
+        assert_eq!(
+            cfg.prompt.render_system_prompt("default"),
+            "base\n\nextra instructions"
+        );
+
+        let blob = toml::to_string(&cfg).expect("serialize");
+        assert!(!blob.contains("extra instructions"));
+        let loaded: Config = toml::from_str(&blob).expect("deserialize");
+        assert!(!loaded.prompt.is_customized());
     }
 }

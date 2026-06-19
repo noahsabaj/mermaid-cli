@@ -10,6 +10,7 @@ pub mod ollama;
 pub mod prompts;
 pub mod providers;
 pub mod render;
+pub mod runtime;
 pub mod session;
 pub mod utils;
 

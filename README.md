@@ -1,17 +1,17 @@
 # Mermaid
 
-An open-source AI coding assistant with computer use for the terminal. Multi-provider — Ollama (local), Anthropic, Gemini, OpenAI, Groq, OpenRouter, and any OpenAI-compatible endpoint — with native tool calling, subagents, desktop control, and a clean TUI.
+An open-source AI coding assistant with computer use for the terminal. Multi-provider — Ollama (local), Anthropic, Gemini, OpenAI, Groq, OpenRouter, and any OpenAI-compatible endpoint — with native tool calling, subagents, computer-use tools, and a clean TUI.
 
 ## Features
 
 - **Multi-Provider** — Ollama (local/cloud), Anthropic Claude, Google Gemini, OpenAI, Groq, OpenRouter, Cerebras, DeepInfra, Together, plus fully-custom OpenAI-compatible endpoints
 - **Native Tool Calling** — read, write, edit, delete, create directories, execute commands, search the web, spawn subagents, and call configured MCP tools
-- **Computer Use** — screenshot, click, type, press keys, scroll, move the mouse, and list windows on supported interactive desktop backends
+- **Computer Use** — screenshot, click, type, press keys, scroll, move the mouse, and list windows on supported interactive GUI backends
 - **Subagents** — spawn parallel autonomous agents for independent tasks
 - **Agent Loop** — model calls tools autonomously, sees results, and continues until done
 - **Image Paste** — Ctrl+V to attach images for vision models (X11/Wayland/macOS/Windows)
 - **Reasoning Levels** — seven tiers (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`); cycle with Alt+T or set via `/reasoning`; persisted per-model
-- **MERMAID.md** — auto-loaded project-level instructions; edits take effect on the next turn
+- **Project Instructions** — auto-loads `MERMAID.md`, `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`; edits take effect on the next turn
 - **MCP Servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers (`mermaid add <name>`)
 - **Session Persistence** — conversations auto-save and resume with `--continue`
 - **Message Queuing** — type while the model generates, messages send in order
@@ -37,9 +37,25 @@ cargo install --path .
 
 Local inference requires [Ollama](https://ollama.com) (models auto-pull if not found locally). Cloud providers are optional — see [Remote Providers](#remote-providers) below.
 
+### First 10 Minutes
+
+```bash
+mermaid doctor                         # Check model, tools, safety, and project instructions
+mermaid                                # Start the full-screen terminal coding agent
+```
+
+Then ask Mermaid to do normal coding-agent work:
+
+- "read the repo and tell me where the test runner lives"
+- "find the bug in this failing test and fix it"
+- "add this small feature and run the relevant tests"
+- "review the current branch for regressions"
+
+Inside the TUI, use `/help` for grouped commands, `/doctor` for the current session readiness report, `/context` to inspect prompt budget and compaction status, `/compact [focus]` to create a handoff checkpoint, and Esc to interrupt the current agent loop.
+
 ### Computer Use Dependencies (optional)
 
-For full Linux desktop control via screenshot/click/type tools:
+For full Linux GUI control via screenshot/click/type tools:
 
 ```bash
 # Linux / X11
@@ -68,8 +84,12 @@ mermaid --model groq/qwen-qwq-32b               # Groq (requires GROQ_API_KEY)
 mermaid --reasoning high                        # Override default reasoning depth
 mermaid --path /path/to/project                  # Run against a specific project directory
 mermaid --record /tmp/session.jsonl              # Record reducer events for replay/debugging
+mermaid --append-system-prompt "Prefer small diffs" # Add one-off runtime instructions
+mermaid --system-prompt-file ./prompt.md         # Replace the default prompt for one run
 mermaid list                                    # List available models across providers
-mermaid status                                  # Check Ollama, MCP, and provider config
+mermaid doctor                                  # First-run readiness check
+mermaid status                                  # Lower-level Ollama, MCP, and provider config
+mermaid self-test                               # Fast deterministic Mermaid self-test
 mermaid init                                    # Create default config file
 mermaid cloud-setup                             # Configure Ollama Cloud API key
 mermaid run "fix the tests"                     # Non-interactive mode
@@ -98,22 +118,38 @@ mermaid mcp                                     # List configured MCP servers
 
 ## Slash Commands
 
-Type `/` to open the command palette (shows all commands with live filter); type `/<name>` to invoke directly.
+Type `/` to open the command palette (shows all commands with live filter); type `/<name>` to invoke directly. `/help` shows the same commands grouped in the TUI.
 
-| Command | Description |
-|---------|-------------|
-| `/model <name>` | Switch model; auto-pulls Ollama models if needed |
-| `/reasoning <level>` | Set reasoning: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
-| `/clear` | Clear chat history and model context for this session |
-| `/save [name]` | Save the current conversation |
-| `/load [id]` | Load a saved conversation by id |
-| `/list` | List saved conversations |
-| `/usage` | Show provider token usage and session totals |
-| `/context` | Show current context-window estimate and prompt budget |
-| `/compact [instructions]` | Compact conversation context with optional focus instructions |
-| `/cloud-setup` | Show Ollama Cloud API-key setup instructions |
-| `/help` (`/h`) | Show all commands |
-| `/quit` (`/q`) | Exit |
+Everyday:
+
+- `/doctor` — show current model, safety, prompt, instruction, and tool readiness
+- `/clear`, `/save [name]`, `/load [id]`, `/list` — manage the conversation
+- `/cancel [id]` — cancel the active turn or a durable task
+- `/handoff [id]`, `/report [id]` — write a current-context report or inspect a task report
+- `/help` (`/h`), `/quit` (`/q`)
+
+Model and context:
+
+- `/model <name>` — switch model; auto-pulls Ollama models if needed
+- `/reasoning <level>` — set reasoning: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
+- `/visible-reasoning [on|off|toggle]` — show or hide reasoning blocks in the transcript
+- `/usage`, `/context`, `/compact [instructions]`
+- `/model-info <model>`
+
+Safety and recovery:
+
+- `/approvals`, `/approve <id>`, `/deny <id>`
+- `/checkpoint <path...>`, `/checkpoints`, `/restore <id>`
+
+Integrations:
+
+- `/memory`, `/memory edit <id> <value>`, `/remember <key> <value>`, `/forget <id>`
+- `/plugins`, `/cloud-setup`
+
+Advanced runtime:
+
+- `/tasks`, `/task <id>`, `/pause <id>`, `/resume <id>`
+- `/processes`, `/logs <id>`, `/stop <id>`, `/restart <id>`, `/open <target>`, `/ports`
 
 Reasoning choices persist per-model: setting `/reasoning high` on Claude Opus 4.7 and `/reasoning low` on Ollama is remembered across sessions.
 
@@ -140,11 +176,11 @@ The model uses these autonomously via native tool calling:
 | `scroll` | Scroll up or down |
 | `mouse_move` | Move mouse cursor without clicking |
 
-MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. Web tools are registered only when `OLLAMA_API_KEY` is set in the environment. Computer-use tools are advertised only in interactive TUI sessions when a usable desktop backend is detected.
+MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. Web tools are registered only when `OLLAMA_API_KEY` is set in the environment. Computer-use tools are advertised only in interactive TUI sessions when a usable GUI backend is detected.
 
-## Project Instructions (MERMAID.md)
+## Project Instructions
 
-Create a `MERMAID.md` at your project root with conventions, tool versions, naming patterns, and run commands — Mermaid loads it automatically at session start and auto-reloads when the file changes (one `stat` per turn, no filesystem watcher). The walk stops at the `.git` root or `$HOME`.
+Create a `MERMAID.md` at your project root with conventions, tool versions, naming patterns, and run commands. Mermaid also reads interoperable `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and `.mermaid/memory/memory.jsonl` from the same nearest matching directory, then auto-reloads when those files change (one `stat` per turn, no filesystem watcher). The walk stops at the `.git` root or `$HOME`.
 
 ```markdown
 # Project: foo-service
@@ -159,6 +195,18 @@ Create a `MERMAID.md` at your project root with conventions, tool versions, nami
 ```
 
 File size is capped at ~10k tokens; oversized content is truncated with a marker so the model knows context was elided.
+
+## Runtime And Background Service
+
+The CLI/TUI is the primary Mermaid app. `mermaidd` is optional advanced infrastructure for durable runtime state, remote attach, and long-running process ownership; normal chat, `mermaid run`, and `mermaid self-test` work without the user service.
+
+`mermaidd` stores durable runtime state in `~/.local/share/mermaid/runtime.sqlite3` and exposes a local Unix-socket JSONL control surface at `~/.local/share/mermaid/mermaidd.sock` plus localhost TCP on `127.0.0.1:39871` unless `MERMAID_DAEMON_DISABLE_TCP=1` is set. Mutating Unix-socket JSON commands require a pairing token; TCP clients require a token for every command except health checks. Create one with `mermaid pair --label <device>` and pass it as `MERMAID_DAEMON_TOKEN` or `auth.token`.
+
+The CLI can inspect and manage the same store with `mermaid tasks`, `mermaid task <id>`, `mermaid approvals`, `mermaid approve <id>`, `mermaid deny <id>`, `mermaid tool-runs`, `mermaid checkpoints`, `mermaid restore <id>`, `mermaid memory`, `mermaid remember`, `mermaid memory-edit <id> <value>`, `mermaid forget`, `mermaid plugin list`, `mermaid plugin install <path-or-github>`, `mermaid plugin audit <path>`, `mermaid models`, `mermaid model-info <model>`, `mermaid processes`, `mermaid logs <process>`, `mermaid stop <process>`, `mermaid restart <process>`, `mermaid open <target>`, `mermaid ports`, `mermaid pair`, and `mermaid daemon`.
+
+On Linux, install a per-user systemd unit with `mermaid daemon install --start`. The installer writes `~/.config/systemd/user/mermaidd.service`, points `ExecStart` at the discovered `mermaidd` binary, reloads systemd's user manager, and optionally enables/starts the service. Use `mermaid daemon status`, `mermaid daemon logs [-f]`, `mermaid daemon restart`, `mermaid daemon stop`, `mermaid daemon uninstall`, or `mermaid daemon print-unit` for day-to-day service management. Set `MERMAID_DAEMON_BIN=/absolute/path/to/mermaidd` before installing if the background-service binary is not next to `mermaid` or on `PATH`.
+
+Release builds keep the existing `.tar.gz`/`.zip` archives and add Linux `.deb`/`.rpm` artifacts for x86_64 and aarch64. The distro packages install `mermaid`, `mermaidd`, docs, and a reference systemd user unit at `/usr/lib/systemd/user/mermaidd.service`; they do not auto-enable or start the daemon.
 
 ## Configuration
 
@@ -200,6 +248,15 @@ no_execute = false
 "anthropic/claude-opus-4-7" = "high"
 "ollama/qwen3-coder:30b" = "low"
 
+# Optional agent/plugin model profiles. A request for `--model fast` or
+# `--model profile:fast` resolves through this table when present.
+[model_profiles]
+fast = "ollama/qwen3-coder:14b"
+large-context = "openai/gpt-5"
+tool-strong = "anthropic/claude-opus-4-7"
+vision = "gemini/gemini-3.1-pro-preview"
+cheap = "groq/qwen-qwq-32b"
+
 # Remote providers — override env-var name, base URL, or extra headers
 [providers.anthropic]
 # api_key_env = "MY_ANTHROPIC_KEY"  # default: ANTHROPIC_API_KEY
@@ -223,6 +280,15 @@ compat = "openai-effort"   # openai | openai-effort | openrouter
 [mcp_servers.context7]
 command = "npx"
 args = ["-y", "@upstash/context7-mcp"]
+```
+
+System prompt customization is runtime-only and is not saved to config:
+
+```bash
+mermaid --append-system-prompt "Prefer minimal diffs"
+mermaid --append-system-prompt-file ./extra-instructions.md
+mermaid --system-prompt "You are a focused code reviewer."
+mermaid --system-prompt-file ./replacement-system-prompt.md
 ```
 
 ## Remote Providers

@@ -2,6 +2,7 @@
 name = "mermaid-cli"
 version = "0.7.1"
 edition = "2024"
+default-run = "mermaid"
 # `str::floor_char_boundary` (used in several places for UTF-8-safe slicing)
 # stabilized in Rust 1.91.0 — confirmed by clippy::incompatible_msrv.
 rust-version = "1.91"
@@ -15,9 +16,19 @@ license = "MIT OR Apache-2.0"
 keywords = ["ai", "coding-assistant", "ollama", "tui", "pair-programming"]
 categories = ["command-line-utilities", "development-tools"]
 
+[workspace]
+members = [
+    ".",
+    "crates/mermaid-runtime",
+]
+
 [[bin]]
 name = "mermaid"
 path = "src/main.rs"
+
+[[bin]]
+name = "mermaidd"
+path = "src/bin/mermaidd.rs"
 
 [dependencies]
 # Async runtime. 1.44 closes RUSTSEC-2025-0023 (broadcast channel unsoundness).
@@ -60,6 +71,10 @@ directories = "6.0"
 which = "8.0"  # Find executables
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 bytes = "1.11"
+rusqlite = { version = "0.39", features = ["bundled"] }
+getrandom = "0.3"
+sha2 = "0.10"
+mermaid-runtime = { path = "crates/mermaid-runtime" }
 
 # Additional utilities
 regex = "1.12"
@@ -81,3 +96,30 @@ lto = true
 codegen-units = 1
 strip = true
 opt-level = 3
+
+[package.metadata.deb]
+name = "mermaid-cli"
+maintainer = "Noah Sabaj <noahsabaj@gmail.com>"
+copyright = "2026, Noah Sabaj"
+license-file = ["LICENSE-MIT", "0"]
+extended-description = "Mermaid is a local-first, multi-provider AI coding assistant with a TUI client, daemon runtime, durable task state, and agentic tool calling."
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/mermaid", "usr/bin/", "755"],
+    ["target/release/mermaidd", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/mermaid-cli/README.md", "644"],
+    ["LICENSE-MIT", "usr/share/doc/mermaid-cli/LICENSE-MIT", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/mermaid-cli/LICENSE-APACHE", "644"],
+    ["packaging/systemd/mermaidd.service", "usr/lib/systemd/user/mermaidd.service", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/mermaid", dest = "/usr/bin/mermaid", mode = "755" },
+    { source = "target/release/mermaidd", dest = "/usr/bin/mermaidd", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/mermaid-cli/README.md", mode = "644", doc = true },
+    { source = "LICENSE-MIT", dest = "/usr/share/doc/mermaid-cli/LICENSE-MIT", mode = "644", doc = true },
+    { source = "LICENSE-APACHE", dest = "/usr/share/doc/mermaid-cli/LICENSE-APACHE", mode = "644", doc = true },
+    { source = "packaging/systemd/mermaidd.service", dest = "/usr/lib/systemd/user/mermaidd.service", mode = "644" },
+]

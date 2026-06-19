@@ -32,6 +32,9 @@ pub enum GenerationStatus {
     Sending,
     Thinking,
     Streaming,
+    RunningTools,
+    Compacting,
+    Cancelling,
 }
 
 impl GenerationStatus {
@@ -41,6 +44,9 @@ impl GenerationStatus {
             GenerationStatus::Sending => "Sending",
             GenerationStatus::Thinking => "Thinking",
             GenerationStatus::Streaming => "Streaming",
+            GenerationStatus::RunningTools => "Running tools",
+            GenerationStatus::Compacting => "Compacting",
+            GenerationStatus::Cancelling => "Cancelling",
         }
     }
 
@@ -58,9 +64,9 @@ impl GenerationStatus {
                 GenPhase::Thinking => GenerationStatus::Thinking,
                 GenPhase::Streaming => GenerationStatus::Streaming,
             },
-            TurnState::ExecutingTools { .. }
-            | TurnState::Compacting { .. }
-            | TurnState::Cancelling { .. } => GenerationStatus::Streaming,
+            TurnState::ExecutingTools { .. } => GenerationStatus::RunningTools,
+            TurnState::Compacting { .. } => GenerationStatus::Compacting,
+            TurnState::Cancelling { .. } => GenerationStatus::Cancelling,
         }
     }
 }

@@ -23,6 +23,10 @@ use crate::app::McpServerConfig;
 use crate::app::instructions::LoadedInstructions;
 use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError};
+use crate::runtime::{
+    ApprovalRecord, CheckpointRecord, MemoryEntry, PluginInstallRecord, ProcessRecord, TaskRecord,
+    TaskTimelineEvent,
+};
 
 use super::ids::{ToolCallId, TurnId};
 use super::runtime::RuntimeSignal;
@@ -36,6 +40,7 @@ use super::{CompactionResult, CompactionTrigger};
 /// consider it at compile time (the reducer's match is NOT
 /// `_ =>` — see `reducer.rs`).
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Msg {
     // ── User intent ─────────────────────────────────────────────────
     /// Raw key event from crossterm, after the event source has
@@ -177,6 +182,21 @@ pub enum Msg {
     /// Response to `Cmd::ListConversations`. Populates the `/load`
     /// picker's candidate list.
     ConversationsListed(Vec<ConversationSummary>),
+    /// Response to `/tasks`.
+    RuntimeTasksListed(Vec<TaskRecord>),
+    /// Response to `/task <id>`.
+    RuntimeTaskLoaded {
+        task: Option<TaskRecord>,
+        events: Vec<TaskTimelineEvent>,
+    },
+    /// Response to `/processes`.
+    RuntimeProcessesListed(Vec<ProcessRecord>),
+    /// Generic daemon/runtime text response.
+    RuntimeText(String),
+    RuntimeApprovalsListed(Vec<ApprovalRecord>),
+    RuntimeCheckpointsListed(Vec<CheckpointRecord>),
+    RuntimeMemoryListed(Vec<MemoryEntry>),
+    RuntimePluginsListed(Vec<PluginInstallRecord>),
 
     // ── Misc model operations ───────────────────────────────────────
     /// `/model <name>` finished pulling (Ollama only).
@@ -316,6 +336,7 @@ pub enum SlashCmd {
     /// No arg → show current; `Some` → switch (and pull if needed).
     Model(Option<String>),
     Reasoning(Option<ReasoningLevel>),
+    VisibleReasoning(Option<String>),
     Clear,
     Save(Option<String>),
     Load(Option<String>),
@@ -323,6 +344,32 @@ pub enum SlashCmd {
     Usage,
     Context,
     Compact(Option<String>),
+    Doctor,
+    Tasks,
+    Task(Option<String>),
+    Pause(Option<String>),
+    Resume(Option<String>),
+    Cancel(Option<String>),
+    Handoff(Option<String>),
+    Report(Option<String>),
+    Processes,
+    Logs(Option<String>),
+    Stop(Option<String>),
+    Restart(Option<String>),
+    Open(Option<String>),
+    Ports,
+    Approvals,
+    Approve(Option<String>),
+    Deny(Option<String>),
+    Checkpoint(Option<String>),
+    Checkpoints,
+    Restore(Option<String>),
+    Memory,
+    MemoryEdit(Option<String>),
+    Remember(Option<String>),
+    Forget(Option<String>),
+    ModelInfo(Option<String>),
+    Plugins,
     CloudSetup,
     Help,
     Quit,
@@ -385,6 +432,14 @@ impl Msg {
             Msg::SessionSaved => MsgKind::SessionSaved,
             Msg::ConversationLoaded(_) => MsgKind::ConversationLoaded,
             Msg::ConversationsListed(_) => MsgKind::ConversationsListed,
+            Msg::RuntimeTasksListed(_)
+            | Msg::RuntimeTaskLoaded { .. }
+            | Msg::RuntimeProcessesListed(_)
+            | Msg::RuntimeText(_)
+            | Msg::RuntimeApprovalsListed(_)
+            | Msg::RuntimeCheckpointsListed(_)
+            | Msg::RuntimeMemoryListed(_)
+            | Msg::RuntimePluginsListed(_) => MsgKind::RuntimeStore,
             Msg::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
             Msg::ModelPullProgress(_) => MsgKind::ModelPullProgress,
             Msg::Tick => MsgKind::Tick,
@@ -425,6 +480,7 @@ pub enum MsgKind {
     SessionSaved,
     ConversationLoaded,
     ConversationsListed,
+    RuntimeStore,
     ModelPullFinished,
     ModelPullProgress,
     Tick,

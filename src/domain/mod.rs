@@ -37,7 +37,7 @@ pub use runtime::{
     RuntimeTimelineEvent, RuntimeTimelineKind, ToolArtifact, ToolMetadata, ToolRunMetadata,
     ToolStatus,
 };
-pub use slash_commands::{COMMAND_REGISTRY, SlashCommand, filter_by_prefix};
+pub use slash_commands::{COMMAND_GROUPS, COMMAND_REGISTRY, SlashCommand, filter_by_prefix};
 pub use state::{
     Attachment, Confirmation, ConfirmationTarget, ContextUsageSnapshot, ConversationSummary,
     GenPhase, IdAllocatorBundle, McpServerEntry, McpServerStatus, McpState, McpToolSpec,

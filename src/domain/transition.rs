@@ -211,19 +211,31 @@ fn action_details_for(
             }
         },
         "write_file" => {
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
             let line_count = outcome
                 .metadata
                 .line_count
                 .or_else(|| metadata_line_count(&outcome.metadata.detail))
-                .unwrap_or_else(|| content.lines().count());
-            ActionDetails::FileContent {
-                line_count,
-                content,
+                .or_else(|| {
+                    args.get("content")
+                        .and_then(|v| v.as_str())
+                        .map(|content| content.lines().count())
+                })
+                .unwrap_or(0);
+            if let Some(diff) = outcome.metadata.display_diff.clone() {
+                ActionDetails::Diff {
+                    summary: diff_success_summary(&diff, duration),
+                    diff,
+                }
+            } else {
+                let content = args
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                ActionDetails::FileContent {
+                    line_count,
+                    content,
+                }
             }
         },
         "web_search" => {
@@ -266,12 +278,39 @@ fn action_details_for(
                 .or_else(|| metadata_line_count(&outcome.metadata.detail))
                 .or_else(|| Some(outcome.output().lines().count())),
         },
-        "edit_file" => ActionDetails::Preview {
-            text: success_summary(outcome.summary.clone(), duration),
-            line_count: None,
+        "edit_file" => {
+            if let Some(diff) = outcome.metadata.display_diff.clone() {
+                ActionDetails::Diff {
+                    summary: diff_success_summary(&diff, duration),
+                    diff,
+                }
+            } else {
+                ActionDetails::Preview {
+                    text: success_summary(outcome.summary.clone(), duration),
+                    line_count: None,
+                }
+            }
         },
         _ => ActionDetails::Simple,
     }
+}
+
+fn diff_success_summary(diff: &str, duration: Option<f64>) -> String {
+    let (added, removed) = diff_counts(diff);
+    success_summary(format!("+{} -{}", added, removed), duration)
+}
+
+fn diff_counts(diff: &str) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in diff.lines() {
+        match crate::render::diff::parse_diff_line(line) {
+            crate::render::diff::DiffLineKind::Added => added += 1,
+            crate::render::diff::DiffLineKind::Removed => removed += 1,
+            crate::render::diff::DiffLineKind::Context => {},
+        }
+    }
+    (added, removed)
 }
 
 fn metadata_line_count(metadata: &ToolMetadata) -> Option<usize> {
@@ -460,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn action_display_write_carries_file_content_preview_data() {
+    fn action_display_write_carries_display_diff_when_available() {
         let call = sample_call_args(
             1,
             "write_file",
@@ -468,18 +507,61 @@ mod tests {
         );
         let action = action_display_for(
             &call,
-            &ToolOutcome::success("Wrote petal/index.html (2 lines)", "2 lines written", 0.05),
+            &ToolOutcome::success("Wrote petal/index.html (2 lines)", "2 lines written", 0.05)
+                .with_metadata(ToolRunMetadata {
+                    detail: ToolMetadata::WriteFile {
+                        path: "petal/index.html".to_string(),
+                        line_count: 2,
+                        byte_count: 4,
+                        created: Some(true),
+                    },
+                    display_diff: Some(
+                        "--- /dev/null\n+++ petal/index.html\n   1 + a\n   2 + b".to_string(),
+                    ),
+                    ..ToolRunMetadata::default()
+                }),
         );
 
         match action.details {
-            ActionDetails::FileContent {
-                line_count,
-                content,
-            } => {
-                assert_eq!(line_count, 2);
-                assert_eq!(content, "a\nb\n");
+            ActionDetails::Diff { summary, diff } => {
+                assert!(summary.contains("+2 -0"));
+                assert!(diff.contains("+++ petal/index.html"));
+                assert!(diff.contains("+ a"));
             },
-            other => panic!("expected file content details, got {:?}", other),
+            other => panic!("expected diff details, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn action_display_edit_carries_display_diff_when_available() {
+        let call = sample_call_args(
+            1,
+            "edit_file",
+            serde_json::json!({"path": "src/main.rs", "old_string": "old", "new_string": "new"}),
+        );
+        let action = action_display_for(
+            &call,
+            &ToolOutcome::success("Edited src/main.rs", "+1 -1", 0.05).with_metadata(
+                ToolRunMetadata {
+                    detail: ToolMetadata::EditFile {
+                        path: "src/main.rs".to_string(),
+                        replacements: 1,
+                    },
+                    display_diff: Some(
+                        "--- src/main.rs\n+++ src/main.rs\n   1 - old\n   1 + new".to_string(),
+                    ),
+                    ..ToolRunMetadata::default()
+                },
+            ),
+        );
+
+        match action.details {
+            ActionDetails::Diff { summary, diff } => {
+                assert!(summary.contains("+1 -1"));
+                assert!(diff.contains("- old"));
+                assert!(diff.contains("+ new"));
+            },
+            other => panic!("expected diff details, got {:?}", other),
         }
     }
 

@@ -45,6 +45,21 @@ pub struct ProviderProfile {
     pub reasoning_strategy: ReasoningStrategy,
     /// Where reasoning content lives in the streaming response.
     pub reasoning_extraction: ReasoningExtraction,
+    /// Which completion-budget parameter this provider accepts in
+    /// `/chat/completions`.
+    pub max_tokens_param: MaxTokensParam,
+    /// Model IDs that support tools but must be forced to single tool-call
+    /// mode because the provider default enables unsupported parallel calls.
+    pub disable_parallel_tool_calls_for: &'static [&'static str],
+}
+
+/// Provider-specific spelling for the completion-token budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaxTokensParam {
+    /// OpenAI-compatible legacy spelling.
+    MaxTokens,
+    /// Newer OpenAI-compatible spelling used by Cerebras.
+    MaxCompletionTokens,
 }
 
 /// How to put `ReasoningLevel` onto the wire for a given provider.
@@ -192,6 +207,8 @@ pub const REGISTRY: &[ProviderProfile] = &[
         // (encrypted server-side); only the Responses API does. Step 2
         // targets Chat Completions, so None.
         reasoning_extraction: ReasoningExtraction::None,
+        max_tokens_param: MaxTokensParam::MaxTokens,
+        disable_parallel_tool_calls_for: &[],
     },
     ProviderProfile {
         name: "groq",
@@ -202,6 +219,8 @@ pub const REGISTRY: &[ProviderProfile] = &[
         // Default `reasoning_format=parsed` routes reasoning to its own
         // `delta.reasoning` field; we read it from there.
         reasoning_extraction: ReasoningExtraction::DeltaContentField("reasoning"),
+        max_tokens_param: MaxTokensParam::MaxTokens,
+        disable_parallel_tool_calls_for: &[],
     },
     ProviderProfile {
         name: "openrouter",
@@ -216,6 +235,8 @@ pub const REGISTRY: &[ProviderProfile] = &[
         ],
         reasoning_strategy: ReasoningStrategy::OpenRouterShape,
         reasoning_extraction: ReasoningExtraction::DeltaContentField("reasoning"),
+        max_tokens_param: MaxTokensParam::MaxTokens,
+        disable_parallel_tool_calls_for: &[],
     },
     ProviderProfile {
         name: "cerebras",
@@ -227,6 +248,8 @@ pub const REGISTRY: &[ProviderProfile] = &[
         // silently ignore — wire shape is the same.
         reasoning_strategy: ReasoningStrategy::Effort,
         reasoning_extraction: ReasoningExtraction::None,
+        max_tokens_param: MaxTokensParam::MaxCompletionTokens,
+        disable_parallel_tool_calls_for: &["gpt-oss-120b"],
     },
     ProviderProfile {
         name: "deepinfra",
@@ -237,6 +260,8 @@ pub const REGISTRY: &[ProviderProfile] = &[
         // models on DeepInfra emit `delta.reasoning_content`.
         reasoning_strategy: ReasoningStrategy::None,
         reasoning_extraction: ReasoningExtraction::DeltaContentField("reasoning_content"),
+        max_tokens_param: MaxTokensParam::MaxTokens,
+        disable_parallel_tool_calls_for: &[],
     },
     ProviderProfile {
         name: "together",
@@ -247,6 +272,8 @@ pub const REGISTRY: &[ProviderProfile] = &[
         // DeepSeek-R1 and friends on Together emit `<think>...</think>`
         // inside `delta.content`. Adapter strips and reroutes.
         reasoning_extraction: ReasoningExtraction::InlineThinkTags,
+        max_tokens_param: MaxTokensParam::MaxTokens,
+        disable_parallel_tool_calls_for: &[],
     },
 ];
 
