@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-21
+
+Security-hardening release: the full-codebase review's critical/high findings
+are fixed, dependency CVEs are patched, and the safety defaults are now
+safe-by-default. Also adds Git-host PR creation.
+
+### Added
+
+- **`mermaid pr create`.** Create a pull/merge request from the current
+  branch via the host's own CLI (`gh` for GitHub, `glab` for GitLab),
+  reusing its existing authentication. Auto-detects the host from the
+  `origin` remote (overridable with `--provider`), and supports `--title`,
+  `--body`, `--summary <file>` (attach a review summary), `--base`,
+  `--draft`, and `--web`. (#2)
+
+### Changed
+
+- **BREAKING: default safety mode is now `Ask` (was `FullAccess`).** A fresh
+  install prompts for approval on mutations / shell / network actions instead
+  of auto-running them. Set `[safety] mode = "full_access"` in config to
+  restore the old behavior.
+- **BREAKING: the daemon TCP control listener is off by default.** Opt in with
+  `MERMAID_DAEMON_ENABLE_TCP=1` (the old `MERMAID_DAEMON_DISABLE_TCP` toggle is
+  gone), and auth is now required for every TCP command including `health`.
+- **BREAKING: installing a plugin from a Git URL now requires
+  `MERMAID_ALLOW_PLUGIN_FETCH=1`** and no longer auto-expands a bare
+  `owner/repo` into a GitHub URL; the clone runs with repo hooks and external
+  transports disabled.
+- Shell-command risk classification was rewritten to tokenize the command:
+  unknown commands now require approval instead of being treated as read-only,
+  and network/interpreter commands (`curl`, `wget`, `ssh`, `python -c`, …) are
+  classified as network/process actions.
+
+### Security
+
+- The safety policy is now enforced for **every** dangerous tool. Previously
+  `web_*`, `mcp`, `subagent`, and the computer-use tools bypassed it entirely,
+  so `ReadOnly` silently failed to block them; a single gate now covers them.
+- Provider API keys and the daemon token are scrubbed from the environment of
+  commands spawned by `execute_command`, MCP servers, and plugin hooks.
+- Filesystem path containment now resolves through the canonical
+  nearest-existing ancestor (closes symlink-follow / TOCTOU and
+  symlinked-parent-on-create escapes) and fails closed.
+- Daemon control socket is created `0600` and the data dir `0700`; the
+  conversation `/load` id is validated against the generated format.
+- Bounded the previously-unbounded command output capture and the streamed
+  tool-call index (anti-OOM/DoS).
+- Session, compaction-archive, and checkpoint writes are now atomic
+  (temp + fsync + rename); SQLite opens with WAL + `busy_timeout`.
+- Patched **12 RUSTSEC advisories** via dependency updates: `aws-lc-sys`
+  0.37 → 0.41, `rustls-webpki` → 0.103.13, plus `bytes`, `quinn-proto`, `time`.
+
+### Fixed
+
+- Streaming `Done` no longer races ahead of buffered tool calls (the
+  intermittent "model forgot to call the tool" bug).
+- Token estimates now count assistant tool-call argument bytes, fixing
+  systematic under-compaction that could overflow the provider context.
+- Anthropic: drop assistant `thinking` blocks that lack a signature (they
+  caused a 400 on the next turn). Gemini: a safety/recitation-blocked response
+  is surfaced as a structured error instead of a misleading parse failure.
+- Compaction now persists the archive before overwriting the (message-stripped)
+  conversation, so a failed archive write can no longer lose messages.
+
 ## [0.7.1] - 2026-04-26
 
 Runtime hardening, typed tool output, token accounting, and context
