@@ -185,4 +185,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # Publish the workspace library first, then the binary crate that
+          # depends on it. Recent cargo waits for the dependency to appear on
+          # the index before publishing the dependent crate.
+          cargo publish -p mermaid-runtime
+          cargo publish -p mermaid-cli

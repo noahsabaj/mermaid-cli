@@ -5,7 +5,9 @@ edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 description = "Daemon-safe runtime core for Mermaid"
-publish = false
+repository = "https://github.com/noahsabaj/mermaid-cli"
+homepage = "https://github.com/noahsabaj/mermaid-cli"
+authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
 
 [dependencies]
 anyhow = "1.0"
