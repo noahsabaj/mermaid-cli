@@ -76,7 +76,7 @@ Command groups:
   Everyday: chat, run, doctor, status, list, self-test
   Model/context: models, model-info, --model, --reasoning, --system-prompt*
   Safety/recovery: approvals, approve, deny, checkpoints, restore
-  Integrations: add, remove, mcp, cloud-setup, plugin
+  Integrations: add, remove, mcp, cloud-setup, plugin, pr
   Advanced runtime: daemon, tasks, task, processes, logs, stop, restart, ports, pair";
 
 #[derive(Subcommand, Debug)]
@@ -243,6 +243,12 @@ pub enum Commands {
     },
     /// List configured MCP servers
     Mcp,
+    /// Create a pull/merge request from the current branch via the host CLI
+    /// (`gh` for GitHub, `glab` for GitLab)
+    Pr {
+        #[command(subcommand)]
+        command: PrCommand,
+    },
     /// Configure Ollama Cloud API key (interactive prompt). Run this
     /// from your shell before starting mermaid — it reads stdin and
     /// doesn't work from inside the TUI.
@@ -289,6 +295,44 @@ pub enum PluginCommand {
     Audit {
         /// Path containing plugin.toml
         path: PathBuf,
+    },
+}
+
+/// Which Git hosting provider's CLI to drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GitHost {
+    /// GitHub, via the `gh` CLI.
+    Github,
+    /// GitLab, via the `glab` CLI.
+    Gitlab,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PrCommand {
+    /// Create a PR/MR from the current branch. Wraps `gh pr create` /
+    /// `glab mr create`, reusing their existing authentication.
+    Create {
+        /// PR/MR title. Omitted → filled from the branch's commits.
+        #[arg(short, long)]
+        title: Option<String>,
+        /// PR/MR body text.
+        #[arg(short, long)]
+        body: Option<String>,
+        /// Read the body from a file (e.g. a saved review summary).
+        #[arg(long, value_name = "FILE", conflicts_with = "body")]
+        summary: Option<PathBuf>,
+        /// Base branch to merge into (defaults to the host's default branch).
+        #[arg(long)]
+        base: Option<String>,
+        /// Open as a draft.
+        #[arg(long)]
+        draft: bool,
+        /// Open the creation page in a browser instead of creating directly.
+        #[arg(long)]
+        web: bool,
+        /// Force a provider instead of auto-detecting from the `origin` remote.
+        #[arg(long, value_enum)]
+        provider: Option<GitHost>,
     },
 }
 

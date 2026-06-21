@@ -1,6 +1,6 @@
 [package]
 name = "mermaid-cli"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 default-run = "mermaid"
 # `str::floor_char_boundary` (used in several places for UTF-8-safe slicing)
