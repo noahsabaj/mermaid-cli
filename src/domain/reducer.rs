@@ -292,10 +292,10 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             emit_title_if_changed(&mut state, &mut cmds);
         },
         Msg::ConversationsListed(candidates) => {
-            if let UiMode::ConversationList { cursor, .. } = state.ui.mode {
+            if let UiMode::ConversationList { .. } = state.ui.mode {
                 state.ui.mode = UiMode::ConversationList {
                     candidates,
-                    cursor: cursor.min(0),
+                    cursor: 0,
                 };
             }
             // If the user already navigated away (Esc before the

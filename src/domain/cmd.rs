@@ -35,6 +35,11 @@ use super::runtime::ManagedProcess;
 /// A single side-effect request. Most variants are one-shot; `CallModel`
 /// and `ExecuteTool` spawn long-running tasks inside a per-turn
 /// `TurnScope`.
+// Several variants legitimately carry large payloads (a full
+// `ConversationHistory` / `ChatRequest`). Boxing them would churn ~20
+// construction + match sites for no real gain — `Cmd` values are short-lived
+// and moved, not stored in bulk.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Cmd {
     // ── Model + tool execution (the scope-spawning variants) ────────
