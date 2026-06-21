@@ -71,7 +71,7 @@ directories = "6.0"
 which = "8.0"  # Find executables
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 bytes = "1.11"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 getrandom = "0.3"
 sha2 = "0.10"
 mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.8.1" }
