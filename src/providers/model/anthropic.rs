@@ -52,8 +52,8 @@ impl ModelProvider for AnthropicProvider {
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
         let config = build_model_config(&request);
         // F2: ordered relay — see stream_bridge docs.
-        let relay_tx = super::stream_bridge::ordered_relay(ctx.sink.clone());
-        let callback = forward_callback(relay_tx);
+        let (relay_tx, relay_handle) = super::stream_bridge::ordered_relay(ctx.sink.clone());
+        let callback = forward_callback(relay_tx.clone());
         let chat_fut = self
             .adapter
             .chat(&request.messages, &config, Some(callback));
@@ -68,13 +68,13 @@ impl ModelProvider for AnthropicProvider {
 
         let usage = response.usage.clone();
         let thinking_signature = response.thinking_signature.clone();
-        let _ = ctx
-            .sink
-            .send(StreamEvent::Done {
-                usage: usage.clone(),
-                thinking_signature: thinking_signature.clone(),
-            })
-            .await;
+        // Terminal Done through the ordered relay, then drain (see stream_bridge).
+        let _ = relay_tx.send(StreamEvent::Done {
+            usage: usage.clone(),
+            thinking_signature: thinking_signature.clone(),
+        });
+        drop(relay_tx);
+        let _ = relay_handle.await;
 
         Ok(FinalResponse {
             usage,

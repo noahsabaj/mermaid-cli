@@ -419,6 +419,14 @@ impl RuntimeStore {
         let dir = data_dir()?;
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create Mermaid data dir {}", dir.display()))?;
+        // The data dir holds the daemon control socket, pairing tokens, and
+        // session/memory state. Restrict it to the owning user (0700) so no
+        // other local UID can reach the socket or read the DB.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         Self::open(dir.join("runtime.sqlite3"))
     }
 
@@ -431,6 +439,16 @@ impl RuntimeStore {
         }
         let conn = Connection::open(&path)
             .with_context(|| format!("failed to open runtime DB {}", path.display()))?;
+        // The daemon, CLI, and per-turn effect tasks each open their own
+        // connection (often in separate processes). Without WAL + a busy
+        // timeout, a writer holding the DB makes a concurrent write fail
+        // immediately with SQLITE_BUSY (lost task/tool/approval updates).
+        // WAL allows concurrent readers with a single writer; busy_timeout
+        // serializes writers gracefully.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .context("failed to set SQLite busy_timeout")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+            .context("failed to enable SQLite WAL mode")?;
         let store = Self { conn, path };
         store.init_schema()?;
         Ok(store)
@@ -1883,6 +1901,19 @@ fn fresh_id(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_enables_wal_and_busy_timeout() {
+        // H19: every connection must use WAL so daemon/CLI/effect writers
+        // don't hit a hard SQLITE_BUSY.
+        let path = temp_db("wal_check");
+        let store = RuntimeStore::open(&path).expect("open");
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .expect("journal_mode pragma");
+        assert_eq!(mode.to_lowercase(), "wal");
+    }
 
     fn temp_db(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mermaid_runtime_store_{}", name));

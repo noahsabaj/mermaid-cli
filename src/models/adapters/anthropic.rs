@@ -280,18 +280,26 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
             },
             MessageRole::Assistant => {
                 let mut content_blocks: Vec<Value> = Vec::new();
-                // Thinking block FIRST per Anthropic ordering rules.
-                if let Some(ref thinking) = msg.thinking
+                // Thinking block FIRST per Anthropic ordering rules — but ONLY
+                // when we also have its signature. The API rejects a
+                // signature-less thinking block in history with a 400
+                // invalid_request_error, which would break the agent loop. If
+                // the signature is missing (failed to persist, migrated row,
+                // etc.) drop the thinking trace: the text/tool_use blocks alone
+                // are a valid assistant turn.
+                if let (Some(thinking), Some(sig)) = (&msg.thinking, &msg.thinking_signature)
                     && !thinking.is_empty()
+                    && !sig.is_empty()
                 {
-                    let mut thinking_block = json!({
+                    content_blocks.push(json!({
                         "type": "thinking",
                         "thinking": thinking,
-                    });
-                    if let Some(ref sig) = msg.thinking_signature {
-                        thinking_block["signature"] = json!(sig);
-                    }
-                    content_blocks.push(thinking_block);
+                        "signature": sig,
+                    }));
+                } else if msg.thinking.as_deref().is_some_and(|t| !t.is_empty()) {
+                    tracing::debug!(
+                        "dropping assistant thinking block that lacks a signature (would 400)",
+                    );
                 }
                 if !msg.content.is_empty() {
                     content_blocks.push(json!({
@@ -1074,6 +1082,37 @@ async fn http_error_from_response(response: reqwest::Response) -> ModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn has_thinking_block(msgs: &[serde_json::Value]) -> bool {
+        msgs.iter().any(|msg| {
+            msg.get("content")
+                .and_then(|c| c.as_array())
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("thinking"))
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    #[test]
+    fn thinking_block_requires_signature() {
+        // H22: a thinking block without a signature 400s the next request, so
+        // it must be dropped; with a signature it must be emitted.
+        let mut unsigned = ChatMessage::assistant("answer");
+        unsigned.thinking = Some("private reasoning".to_string());
+        let (_sys, msgs) = convert_messages(&[unsigned]);
+        assert!(
+            !has_thinking_block(&msgs),
+            "unsigned thinking must be dropped"
+        );
+
+        let mut signed = ChatMessage::assistant("answer").with_thinking_signature("sig123");
+        signed.thinking = Some("private reasoning".to_string());
+        let (_sys, msgs) = convert_messages(&[signed]);
+        assert!(has_thinking_block(&msgs), "signed thinking must be present");
+    }
 
     fn test_adapter() -> AnthropicAdapter {
         AnthropicAdapter::new(

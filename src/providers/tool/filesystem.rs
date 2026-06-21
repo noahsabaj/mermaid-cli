@@ -599,24 +599,74 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
 ///   doesn't exist yet.
 fn resolve_path_safe(workdir: &Path, raw: &str) -> Result<PathBuf, String> {
     let p = PathBuf::from(raw);
-    let candidate = if p.is_absolute() { p } else { workdir.join(p) };
+    let candidate = if p.is_absolute() { p } else { workdir.join(&p) };
 
-    // Canonicalize the workdir once. If workdir itself can't canonicalize
-    // (shouldn't happen — `cwd` is the running process's cwd), fall back
-    // to the supplied path so the block still applies lexically.
-    let root = std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
+    // Canonical project root. If the workdir itself can't canonicalize we
+    // cannot make a sound containment decision — fail closed rather than
+    // falling back to a weaker lexical check.
+    let root = std::fs::canonicalize(workdir).map_err(|e| {
+        format!(
+            "cannot canonicalize project dir '{}': {}",
+            workdir.display(),
+            e
+        )
+    })?;
 
-    let canonical =
-        std::fs::canonicalize(&candidate).unwrap_or_else(|_| lexical_normalize(&candidate));
+    // Resolve the target THROUGH symlinks and return the resolved path (the
+    // callers operate on this, not the raw candidate). For an existing target
+    // `canonicalize` gives the real location; for a not-yet-existing target
+    // (write_file / create_directory) we canonicalize the nearest existing
+    // ancestor — which resolves any symlinked parent — and re-attach the
+    // remaining components. This closes both the symlink-follow/TOCTOU gap and
+    // the symlinked-parent-on-create gap.
+    let resolved = match std::fs::canonicalize(&candidate) {
+        Ok(real) => real,
+        Err(_) => resolve_via_existing_ancestor(&candidate)?,
+    };
 
-    if canonical.starts_with(&root) {
-        Ok(candidate)
+    if resolved.starts_with(&root) {
+        Ok(resolved)
     } else {
         Err(format!(
             "path '{}' is outside the project directory '{}'",
             raw,
             workdir.display()
         ))
+    }
+}
+
+/// Resolve a not-yet-existing target by canonicalizing its nearest existing
+/// ancestor (resolving any symlinked parent directory) and re-joining the
+/// remaining path components lexically. Rejects paths with no
+/// canonicalizable ancestor.
+fn resolve_via_existing_ancestor(candidate: &Path) -> Result<PathBuf, String> {
+    let normalized = lexical_normalize(candidate);
+    let mut ancestor = normalized.as_path();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(ancestor) {
+            let mut out = real;
+            for comp in tail.iter().rev() {
+                out.push(comp);
+            }
+            return Ok(out);
+        }
+        let Some(file) = ancestor.file_name() else {
+            return Err(format!(
+                "cannot resolve path '{}': no existing ancestor directory",
+                candidate.display()
+            ));
+        };
+        tail.push(file.to_os_string());
+        match ancestor.parent() {
+            Some(parent) => ancestor = parent,
+            None => {
+                return Err(format!(
+                    "cannot resolve path '{}': no existing ancestor directory",
+                    candidate.display()
+                ));
+            },
+        }
     }
 }
 
@@ -688,11 +738,11 @@ fn mutation_policy_outcome(
         format!("{} {}", tool, path),
     );
     request.path = Some(path.to_string());
-    match crate::runtime::PolicyEngine::new(ctx.config.safety.mode)
-        .with_overrides(ctx.config.safety.overrides.clone())
-        .decide(&request)
-    {
-        crate::runtime::PolicyDecision::Allow { .. } => {
+    // File mutations are replayable: an Ask decision checkpoints, records an
+    // approval, and blocks (handled inside the gate).
+    match super::policy_gate::gate(ctx, request, checkpoint_paths, pending_action, true) {
+        super::policy_gate::Gate::Block(outcome) => Some(outcome),
+        super::policy_gate::Gate::Proceed { .. } => {
             let _ = crate::runtime::run_plugin_hooks(
                 "before_file_mutation",
                 &serde_json::json!({
@@ -705,74 +755,6 @@ fn mutation_policy_outcome(
             );
             None
         },
-        crate::runtime::PolicyDecision::Ask { risk, checkpoint } => {
-            let checkpoint_id = if checkpoint && ctx.config.safety.checkpoint_on_mutation {
-                match crate::runtime::create_checkpoint_for_task(
-                    &ctx.workdir,
-                    checkpoint_paths,
-                    Some(pending_action.clone()),
-                    ctx.task_id.clone(),
-                ) {
-                    Ok(manifest) => Some(manifest.id),
-                    Err(error) => {
-                        return Some(ToolOutcome::error(
-                            format!(
-                                "{} checkpoint failed before approval: {}",
-                                request.summary, error
-                            ),
-                            0.0,
-                        ));
-                    },
-                }
-            } else {
-                None
-            };
-            let pending_action_json = serde_json::to_string(&pending_action).ok();
-            let approval_id = crate::runtime::RuntimeStore::open_default()
-                .and_then(|store| {
-                    let approval = store.approvals().create(crate::runtime::NewApproval {
-                        task_id: ctx.task_id.clone(),
-                        proposed_action: request.summary.clone(),
-                        risk_classification: risk.as_str().to_string(),
-                        policy_decision: "ask".to_string(),
-                        args_summary: Some(path.to_string()),
-                        checkpoint_id: checkpoint_id.clone(),
-                        pending_action_json,
-                    })?;
-                    if let Some(checkpoint_id) = checkpoint_id.as_deref() {
-                        let _ = store
-                            .checkpoints()
-                            .set_approval(checkpoint_id, &approval.id);
-                    }
-                    let _ = crate::runtime::run_plugin_hooks(
-                        "approval_requested",
-                        &serde_json::json!({
-                            "id": approval.id.clone(),
-                            "task_id": approval.task_id.clone(),
-                            "tool": tool,
-                            "risk": risk.as_str(),
-                            "checkpoint_id": checkpoint_id.clone(),
-                        }),
-                    );
-                    Ok(approval)
-                })
-                .map(|approval| approval.id)
-                .ok();
-            Some(ToolOutcome::error(
-                format!(
-                    "Approval required for {}{}",
-                    request.summary,
-                    approval_id
-                        .map(|id| format!(" (approval {})", id))
-                        .unwrap_or_default()
-                ),
-                0.0,
-            ))
-        },
-        crate::runtime::PolicyDecision::Deny { reason, .. } => Some(ToolOutcome::error(
-            format!("{} blocked by policy: {}", request.summary, reason),
-            0.0,
-        )),
     }
 }
 
@@ -965,6 +947,28 @@ mod tests {
     use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use std::fs;
+
+    #[test]
+    fn resolve_path_safe_contains_to_workdir() {
+        let root = std::env::temp_dir().join(format!("mermaid_rps_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sub")).unwrap();
+
+        // In-root existing + not-yet-existing targets resolve inside root.
+        assert!(resolve_path_safe(&root, "sub").is_ok());
+        assert!(resolve_path_safe(&root, "sub/new.txt").is_ok());
+        let resolved = resolve_path_safe(&root, "sub/new.txt").unwrap();
+        let canon_root = fs::canonicalize(&root).unwrap();
+        assert!(resolved.starts_with(&canon_root));
+
+        // `..` escape and absolute outside are rejected.
+        assert!(resolve_path_safe(&root, "../escape.txt").is_err());
+        assert!(resolve_path_safe(&root, "../../etc/passwd").is_err());
+        let outside = std::env::temp_dir().join("definitely_outside.txt");
+        assert!(resolve_path_safe(&root, &outside.display().to_string()).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn temp_root(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("mermaid_providers_fs_{}", name));

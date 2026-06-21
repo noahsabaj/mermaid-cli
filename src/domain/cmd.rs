@@ -35,6 +35,11 @@ use super::runtime::ManagedProcess;
 /// A single side-effect request. Most variants are one-shot; `CallModel`
 /// and `ExecuteTool` spawn long-running tasks inside a per-turn
 /// `TurnScope`.
+// Several variants legitimately carry large payloads (a full
+// `ConversationHistory` / `ChatRequest`). Boxing them would churn ~20
+// construction + match sites for no real gain — `Cmd` values are short-lived
+// and moved, not stored in bulk.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Cmd {
     // ── Model + tool execution (the scope-spawning variants) ────────
@@ -72,10 +77,15 @@ pub enum Cmd {
     /// Save the current conversation to disk. No-op if unchanged since
     /// last save (effect-side idempotence).
     SaveConversation(ConversationHistory),
-    /// Persist the raw messages removed by a compaction.
+    /// Persist the raw messages removed by a compaction, then the compacted
+    /// (message-stripped) conversation. Both are written by ONE effect task,
+    /// archive first — only overwriting the conversation if the archive
+    /// persisted — so a failed/lagging archive can never lose messages while
+    /// the stripped conversation is saved over the old one.
     SaveCompactionArchive {
         archive: CompactionArchive,
         record: CompactionRecord,
+        conversation: ConversationHistory,
     },
     /// Persist a daemon-visible background process record.
     SaveProcess(ManagedProcess),
@@ -327,7 +337,9 @@ impl Cmd {
             ),
             Cmd::CancelScope(turn) => format!("cancel_scope(turn={})", turn),
             Cmd::SaveConversation(c) => format!("save_conversation(id={})", c.id),
-            Cmd::SaveCompactionArchive { archive, record } => format!(
+            Cmd::SaveCompactionArchive {
+                archive, record, ..
+            } => format!(
                 "save_compaction_archive(conversation={}, id={})",
                 archive.conversation_id, record.id
             ),

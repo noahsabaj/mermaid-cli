@@ -44,8 +44,8 @@ impl ModelProvider for GeminiProvider {
 
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
         let config = build_model_config(&request);
-        let relay_tx = super::stream_bridge::ordered_relay(ctx.sink.clone());
-        let callback = forward_callback(relay_tx);
+        let (relay_tx, relay_handle) = super::stream_bridge::ordered_relay(ctx.sink.clone());
+        let callback = forward_callback(relay_tx.clone());
         let chat_fut = self
             .adapter
             .chat(&request.messages, &config, Some(callback));
@@ -59,13 +59,13 @@ impl ModelProvider for GeminiProvider {
         };
 
         let usage = response.usage.clone();
-        let _ = ctx
-            .sink
-            .send(StreamEvent::Done {
-                usage: usage.clone(),
-                thinking_signature: None,
-            })
-            .await;
+        // Terminal Done through the ordered relay, then drain (see openai_compat).
+        let _ = relay_tx.send(StreamEvent::Done {
+            usage: usage.clone(),
+            thinking_signature: None,
+        });
+        drop(relay_tx);
+        let _ = relay_handle.await;
 
         Ok(FinalResponse {
             usage,

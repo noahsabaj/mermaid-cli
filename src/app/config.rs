@@ -74,8 +74,9 @@ pub struct Config {
     #[serde(default)]
     pub model_profiles: HashMap<String, String>,
 
-    /// Runtime safety policy. The current TUI defaults to full-access
-    /// compatibility, while daemon-owned surfaces can tighten this.
+    /// Runtime safety policy. Defaults to `Ask` so mutations / shell /
+    /// network actions require approval out of the box; users opt into
+    /// `AutoReview` or `FullAccess` deliberately.
     #[serde(default)]
     pub safety: SafetyConfig,
 
@@ -132,7 +133,10 @@ pub struct SafetyConfig {
 impl Default for SafetyConfig {
     fn default() -> Self {
         Self {
-            mode: SafetyMode::FullAccess,
+            // Safe-by-default: the first run prompts for approval on
+            // mutations / shell / network rather than silently auto-allowing
+            // everything. FullAccess remains available via config.
+            mode: SafetyMode::Ask,
             checkpoint_on_mutation: true,
             overrides: Vec::new(),
         }

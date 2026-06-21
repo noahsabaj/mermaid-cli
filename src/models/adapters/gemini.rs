@@ -531,23 +531,40 @@ impl GeminiAdapter {
         let mut tool_calls: Vec<ToolCall> = Vec::new();
 
         if let Some(candidate) = json.candidates.into_iter().next() {
-            for part in candidate.content.parts {
-                if let Some(text) = part.text {
-                    if part.thought.unwrap_or(false) {
-                        thinking_acc.push_str(&text);
-                    } else {
-                        text_acc.push_str(&text);
+            match candidate.content {
+                Some(content) => {
+                    for part in content.parts {
+                        if let Some(text) = part.text {
+                            if part.thought.unwrap_or(false) {
+                                thinking_acc.push_str(&text);
+                            } else {
+                                text_acc.push_str(&text);
+                            }
+                        } else if let Some(fc) = part.function_call {
+                            let id = format!("call_{}", tool_calls.len());
+                            tool_calls.push(ToolCall {
+                                id: Some(id),
+                                function: FunctionCall {
+                                    name: fc.name,
+                                    arguments: fc.args,
+                                },
+                            });
+                        }
                     }
-                } else if let Some(fc) = part.function_call {
-                    let id = format!("call_{}", tool_calls.len());
-                    tool_calls.push(ToolCall {
-                        id: Some(id),
-                        function: FunctionCall {
-                            name: fc.name,
-                            arguments: fc.args,
-                        },
-                    });
-                }
+                },
+                None => {
+                    // No content: this is a block (safety/recitation/etc.), not
+                    // a parse failure. Surface a clear error keyed off the
+                    // finishReason rather than returning an empty success.
+                    let reason = candidate.finish_reason.as_deref().unwrap_or("unknown");
+                    if !matches!(reason, "STOP" | "MAX_TOKENS") {
+                        return Err(ModelError::Backend(BackendError::ProviderError {
+                            provider: "gemini".to_string(),
+                            code: Some(reason.to_string()),
+                            message: format!("Gemini returned no content (finishReason={reason})"),
+                        }));
+                    }
+                },
             }
         }
 
@@ -842,7 +859,14 @@ struct GeminiResponse {
 
 #[derive(Debug, Deserialize)]
 struct Candidate {
-    content: CandidateContent,
+    // Optional: a safety/recitation/other block returns a candidate with a
+    // `finishReason` and NO `content`. Making this required turned such a
+    // well-formed (blocked) response into a misleading whole-response parse
+    // failure.
+    #[serde(default)]
+    content: Option<CandidateContent>,
+    #[serde(default, rename = "finishReason")]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -929,6 +953,20 @@ async fn http_error_from_response(response: reqwest::Response) -> ModelError {
 mod tests {
     use super::*;
     use crate::models::tool_call::{FunctionCall, ToolCall};
+
+    #[test]
+    fn candidate_without_content_deserializes() {
+        // H23: a safety/recitation block returns a candidate with a
+        // finishReason and NO content — it must parse, not fail.
+        let json = serde_json::json!({
+            "candidates": [{ "finishReason": "SAFETY" }],
+            "usageMetadata": {}
+        });
+        let resp: GeminiResponse = serde_json::from_value(json).expect("blocked response parses");
+        assert_eq!(resp.candidates.len(), 1);
+        assert!(resp.candidates[0].content.is_none());
+        assert_eq!(resp.candidates[0].finish_reason.as_deref(), Some("SAFETY"));
+    }
 
     fn test_adapter() -> GeminiAdapter {
         GeminiAdapter::new(

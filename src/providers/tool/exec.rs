@@ -23,7 +23,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
@@ -133,11 +133,13 @@ impl ToolExecutor for ExecuteCommandTool {
             "call_id": ctx.call_id.0,
             "task_id": ctx.task_id.clone(),
         });
-        match crate::runtime::PolicyEngine::new(ctx.config.safety.mode)
-            .with_overrides(ctx.config.safety.overrides.clone())
-            .decide(&policy_request)
-        {
-            crate::runtime::PolicyDecision::Allow { risk, .. } => {
+        // Central safety gate. An Ask decision is handled inside the gate
+        // (checkpoint + approval row + blocking outcome). Allow returns the
+        // classified risk so we can take the pre-existing Allow-path
+        // checkpoint below.
+        match super::policy_gate::gate(&ctx, policy_request, &[], pending_action.clone(), true) {
+            super::policy_gate::Gate::Block(outcome) => return outcome,
+            super::policy_gate::Gate::Proceed { risk } => {
                 if ctx.config.safety.checkpoint_on_mutation
                     && risk != crate::runtime::RiskClass::ReadOnly
                 {
@@ -148,72 +150,6 @@ impl ToolExecutor for ExecuteCommandTool {
                         ctx.task_id.clone(),
                     );
                 }
-            },
-            crate::runtime::PolicyDecision::Ask { risk, checkpoint } => {
-                let checkpoint_id = if checkpoint && ctx.config.safety.checkpoint_on_mutation {
-                    match crate::runtime::create_checkpoint_for_task(
-                        &ctx.workdir,
-                        &[],
-                        Some(pending_action.clone()),
-                        ctx.task_id.clone(),
-                    ) {
-                        Ok(manifest) => Some(manifest.id),
-                        Err(error) => {
-                            return ToolOutcome::error(
-                                format!(
-                                    "execute_command checkpoint failed before approval: {}",
-                                    error
-                                ),
-                                0.0,
-                            );
-                        },
-                    }
-                } else {
-                    None
-                };
-                let pending_action_json = serde_json::to_string(&pending_action).ok();
-                let approval_id = crate::runtime::RuntimeStore::open_default()
-                    .and_then(|store| {
-                        let approval = store.approvals().create(crate::runtime::NewApproval {
-                            task_id: ctx.task_id.clone(),
-                            proposed_action: command.to_string(),
-                            risk_classification: risk.as_str().to_string(),
-                            policy_decision: "ask".to_string(),
-                            args_summary: Some(command.to_string()),
-                            checkpoint_id: checkpoint_id.clone(),
-                            pending_action_json,
-                        })?;
-                        if let Some(checkpoint_id) = checkpoint_id.as_deref() {
-                            let _ = store
-                                .checkpoints()
-                                .set_approval(checkpoint_id, &approval.id);
-                        }
-                        let _ = crate::runtime::run_plugin_hooks(
-                            "approval_requested",
-                            &serde_json::json!({
-                                "id": approval.id.clone(),
-                                "task_id": approval.task_id.clone(),
-                                "tool": "execute_command",
-                                "risk": risk.as_str(),
-                                "checkpoint_id": checkpoint_id.clone(),
-                            }),
-                        );
-                        Ok(approval)
-                    })
-                    .map(|approval| approval.id)
-                    .ok();
-                return ToolOutcome::error(
-                    format!(
-                        "Approval required for command{}",
-                        approval_id
-                            .map(|id| format!(" (approval {})", id))
-                            .unwrap_or_default()
-                    ),
-                    0.0,
-                );
-            },
-            crate::runtime::PolicyDecision::Deny { reason, .. } => {
-                return ToolOutcome::error(format!("Command blocked by policy: {}", reason), 0.0);
             },
         }
 
@@ -301,6 +237,7 @@ impl ToolExecutor for ExecuteCommandTool {
         } else {
             cmd.current_dir(&ctx.workdir);
         }
+        scrub_secret_env(&mut cmd);
 
         let run_fut = run_command(cmd, progress);
         let timeout_fut = tokio::time::sleep(Duration::from_secs(timeout_secs));
@@ -537,6 +474,7 @@ printf '%s\n' "$!""#,
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    scrub_secret_env(&mut launcher);
 
     let output = launcher
         .output()
@@ -773,6 +711,92 @@ struct CommandRunOutput {
     stderr_lines: usize,
 }
 
+/// Names that must never be inherited by a spawned command. Provider API
+/// keys + the daemon token live in the parent's environment; a model-driven
+/// shell command could otherwise read them via `env`/`printenv` and
+/// exfiltrate them. We strip these by exact name in addition to the
+/// pattern match in [`scrub_secret_env`].
+const SECRET_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OLLAMA_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "OPENROUTER_API_KEY",
+    "XAI_API_KEY",
+    "TOGETHER_API_KEY",
+    "MERMAID_DAEMON_TOKEN",
+];
+
+/// Remove secret-bearing environment variables from a child command. Uses a
+/// denylist (known provider keys + name patterns) rather than an allowlist so
+/// ordinary build/run commands keep `PATH`, `CARGO_HOME`, language toolchain
+/// vars, `XAUTHORITY`, etc. and still work.
+fn scrub_secret_env(cmd: &mut Command) {
+    for (name, _) in std::env::vars() {
+        let upper = name.to_ascii_uppercase();
+        let looks_secret = SECRET_ENV_VARS.contains(&upper.as_str())
+            || upper.contains("API_KEY")
+            || upper.contains("APIKEY")
+            || upper.contains("ACCESS_KEY")
+            || upper.contains("SECRET")
+            || upper.contains("PASSWORD")
+            || upper.contains("PASSWD")
+            || upper.contains("CREDENTIAL")
+            || upper.contains("TOKEN");
+        if looks_secret {
+            cmd.env_remove(&name);
+        }
+    }
+}
+
+/// Drain a child stream, capping the captured bytes at `cap` so a chatty or
+/// newline-less command can't exhaust memory. Bytes are accumulated raw and
+/// decoded once at the end (lossy) so a multibyte char split across reads is
+/// not corrupted by the cap. Returns `(text, truncated)`.
+async fn read_capped<R: AsyncRead + Unpin>(
+    mut reader: R,
+    cap: usize,
+    progress: Option<tokio::sync::mpsc::Sender<ProgressEvent>>,
+) -> (String, bool) {
+    let mut buf = [0u8; 8192];
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Some(tx) = &progress {
+                    let chunk = String::from_utf8_lossy(&buf[..n]);
+                    for line in chunk.split('\n') {
+                        if !line.is_empty() {
+                            let _ = tx.send(ProgressEvent::Output(line.to_string())).await;
+                        }
+                    }
+                }
+                if bytes.len() < cap {
+                    let take = (cap - bytes.len()).min(n);
+                    bytes.extend_from_slice(&buf[..take]);
+                    if take < n {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+            },
+            Err(_) => break,
+        }
+    }
+    let mut out = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        out.push_str(&format!("\n…[output truncated at {} bytes]…", cap));
+    }
+    (out, truncated)
+}
+
 async fn run_command(
     mut cmd: Command,
     progress: tokio::sync::mpsc::Sender<ProgressEvent>,
@@ -788,32 +812,12 @@ async fn run_command(
         .take()
         .ok_or_else(|| std::io::Error::other("child stderr unavailable"))?;
 
-    let progress_clone = progress.clone();
-    let stdout_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout).lines();
-        let mut output = String::new();
-        while let Ok(Some(line)) = reader.next_line().await {
-            let _ = progress_clone
-                .send(ProgressEvent::Output(line.clone()))
-                .await;
-            output.push_str(&line);
-            output.push('\n');
-        }
-        output
-    });
+    let cap = crate::constants::MAX_TOOL_OUTPUT_BYTES;
+    let stdout_task = tokio::spawn(read_capped(stdout, cap, Some(progress.clone())));
+    let stderr_task = tokio::spawn(read_capped(stderr, cap, None));
 
-    let stderr_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr).lines();
-        let mut errors = String::new();
-        while let Ok(Some(line)) = reader.next_line().await {
-            errors.push_str(&line);
-            errors.push('\n');
-        }
-        errors
-    });
-
-    let output = stdout_task.await.unwrap_or_default();
-    let errors = stderr_task.await.unwrap_or_default();
+    let (output, _) = stdout_task.await.unwrap_or_default();
+    let (errors, _) = stderr_task.await.unwrap_or_default();
     let status = child.wait().await?;
     let stdout_lines = output.lines().count();
     let stderr_lines = errors.lines().count();

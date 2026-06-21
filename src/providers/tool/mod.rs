@@ -19,6 +19,7 @@ pub mod computer_use;
 pub mod exec;
 pub mod filesystem;
 pub mod mcp;
+pub mod policy_gate;
 pub mod subagent;
 pub mod web;
 pub mod web_client;

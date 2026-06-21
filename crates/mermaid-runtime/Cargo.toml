@@ -17,4 +17,9 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+# POSIX-shell tokenizer for the safety classifier — splits a command into
+# argv so risk classification keys on the leading binary + normalized flags
+# instead of bypassable raw-substring matching.
+shell-words = "1.1"
 toml = "1.1"
+tracing = "0.1"

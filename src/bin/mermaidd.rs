@@ -21,6 +21,12 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::UnixListener::bind(&socket_path)
         .with_context(|| format!("failed to bind {}", socket_path.display()))?;
+    // Restrict the control socket to the owning user (0600). Combined with the
+    // 0700 data dir, no other local UID can reach the agent control plane.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
+    }
     println!("mermaidd listening on {}", socket_path.display());
 
     maybe_spawn_tcp_listener().await;
@@ -37,7 +43,10 @@ async fn main() -> Result<()> {
 
 #[cfg(unix)]
 async fn maybe_spawn_tcp_listener() {
-    if std::env::var("MERMAID_DAEMON_DISABLE_TCP")
+    // TCP control is OFF by default — it exposes the agent control plane to
+    // every local UID and anything that can reach loopback. Opt in with
+    // MERMAID_DAEMON_ENABLE_TCP=1.
+    if !std::env::var("MERMAID_DAEMON_ENABLE_TCP")
         .is_ok_and(|value| value == "1" || value == "true")
     {
         return;
@@ -48,7 +57,14 @@ async fn maybe_spawn_tcp_listener() {
         Ok(listener) => {
             if let Ok(local_addr) = listener.local_addr() {
                 if let Ok(dir) = mermaid_cli::runtime::data_dir() {
-                    let _ = std::fs::write(dir.join("mermaidd.tcp"), local_addr.to_string());
+                    let tcp_file = dir.join("mermaidd.tcp");
+                    if std::fs::write(&tcp_file, local_addr.to_string()).is_ok() {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(
+                            &tcp_file,
+                            std::fs::Permissions::from_mode(0o600),
+                        );
+                    }
                 }
                 println!("mermaidd tcp listening on {}", local_addr);
             }
@@ -115,7 +131,10 @@ async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json:
         return handle_json_command(&body, require_auth).await;
     }
 
-    if require_auth && !matches!(command, "" | "health") {
+    // TCP control requires JSON-with-token for EVERY command including health,
+    // so a bare connection can't even fingerprint the daemon / DB path.
+    // Plaintext commands are honored only on the (0600) local socket.
+    if require_auth {
         return Ok(serde_json::json!({
             "ok": false,
             "error": "unauthorized: TCP control requires JSON auth.token or MERMAID_DAEMON_TOKEN",
@@ -186,18 +205,20 @@ async fn handle_json_command(
         .get("command")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
+    if (require_remote_auth || command_requires_auth(command)) && !authorize(body)? {
+        return Ok(serde_json::json!({
+            "ok": false,
+            "error": "unauthorized: set MERMAID_DAEMON_TOKEN or include auth.token",
+        }));
+    }
+    // health surfaces the DB path — gated above on TCP (require_remote_auth),
+    // free on the local 0600 socket.
     if command == "health" {
         let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
         return Ok(serde_json::json!({
             "ok": true,
             "service": "mermaidd",
             "database": store.path().display().to_string(),
-        }));
-    }
-    if (require_remote_auth || command_requires_auth(command)) && !authorize(body)? {
-        return Ok(serde_json::json!({
-            "ok": false,
-            "error": "unauthorized: set MERMAID_DAEMON_TOKEN or include auth.token",
         }));
     }
     match command {

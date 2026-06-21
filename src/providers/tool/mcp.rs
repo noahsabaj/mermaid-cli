@@ -68,6 +68,18 @@ impl ToolExecutor for McpToolProxy {
             .cloned()
             .unwrap_or(serde_json::json!({}));
 
+        // Safety gate: MCP servers are untrusted external processes.
+        // ReadOnly (or a Deny override) blocks them; other modes proceed.
+        if let Some(blocked) = super::policy_gate::gate_external(
+            &ctx,
+            "mcp_proxy",
+            crate::runtime::ToolCategory::Mcp,
+            format!("mcp {}__{}", server_name, tool_name),
+            &args,
+        ) {
+            return blocked;
+        }
+
         // If init is still racing, park briefly — the model might
         // have sprinted ahead on its very first message. If it never
         // finishes within a reasonable bound we still fall through
