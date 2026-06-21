@@ -74,7 +74,7 @@ bytes = "1.11"
 rusqlite = { version = "0.39", features = ["bundled"] }
 getrandom = "0.3"
 sha2 = "0.10"
-mermaid-runtime = { path = "crates/mermaid-runtime" }
+mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.8.0" }
 
 # Additional utilities
 regex = "1.12"

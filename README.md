@@ -25,15 +25,22 @@ Read [`docs/architecture.md`](docs/architecture.md) for the full tour. The [addi
 
 ## Quick Start
 
-```bash
-# Install from crates.io
-cargo install mermaid-cli
+Prebuilt binaries for Linux, macOS, and Windows (plus `.deb`/`.rpm`) are attached to every [GitHub Release](https://github.com/noahsabaj/mermaid-cli/releases).
 
-# Or from source
+```bash
+# Build and install the latest release from git
+cargo install --git https://github.com/noahsabaj/mermaid-cli
+
+# Or from a local clone
 git clone https://github.com/noahsabaj/mermaid-cli.git
 cd mermaid-cli
 cargo install --path .
+
+# From crates.io
+cargo install mermaid-cli
 ```
+
+> The crates.io release can lag the newest tag. For the latest version, use the GitHub Release binaries or the `--git` install above.
 
 Local inference requires [Ollama](https://ollama.com) (models auto-pull if not found locally). Cloud providers are optional — see [Remote Providers](#remote-providers) below.
 
@@ -97,6 +104,7 @@ mermaid run "explain main.rs" -f json           # JSON output
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
 mermaid remove <name>                           # Remove a configured MCP server
 mermaid mcp                                     # List configured MCP servers
+mermaid pr create                               # Open a PR/MR from the current branch (wraps gh/glab)
 ```
 
 `mermaid add <name>` resolves the name through a built-in registry of 16 popular MCP servers (context7, playwright, memory, git, fetch, time, filesystem, notion, slack, postgres, brave-search, supabase, perplexity, docker, sequential-thinking, everything), prompts for any required env vars, validates by spawning the server, and saves it to `~/.config/mermaid/config.toml`.
@@ -108,7 +116,7 @@ mermaid mcp                                     # List configured MCP servers
 | Enter | Send message (or queue while the model is generating) |
 | Esc | Stop generation / dismiss command palette or attachment focus |
 | Ctrl+C | Quit (auto-saves the session) |
-| Alt+T | Cycle reasoning level: `None → Low → Medium → High → Max → None` |
+| Alt+T | Cycle reasoning level: `None → Minimal → Low → Medium → High → XHigh → Max → None` |
 | Ctrl+V | Paste image or text from clipboard |
 | Ctrl+Click | Open image from chat history |
 | `/` | Open slash-command palette (filter-as-you-type) |
@@ -200,9 +208,9 @@ File size is capped at ~10k tokens; oversized content is truncated with a marker
 
 The CLI/TUI is the primary Mermaid app. `mermaidd` is optional advanced infrastructure for durable runtime state, remote attach, and long-running process ownership; normal chat, `mermaid run`, and `mermaid self-test` work without the user service.
 
-`mermaidd` stores durable runtime state in `~/.local/share/mermaid/runtime.sqlite3` and exposes a local Unix-socket JSONL control surface at `~/.local/share/mermaid/mermaidd.sock` plus localhost TCP on `127.0.0.1:39871` unless `MERMAID_DAEMON_DISABLE_TCP=1` is set. Mutating Unix-socket JSON commands require a pairing token; TCP clients require a token for every command except health checks. Create one with `mermaid pair --label <device>` and pass it as `MERMAID_DAEMON_TOKEN` or `auth.token`.
+`mermaidd` stores durable runtime state in `~/.local/share/mermaid/runtime.sqlite3` and exposes a local Unix-socket JSONL control surface at `~/.local/share/mermaid/mermaidd.sock`. The socket is created mode `0600` and the data dir `0700`, so only your user can reach it. A localhost TCP listener on `127.0.0.1:39871` is **off by default** — enable it with `MERMAID_DAEMON_ENABLE_TCP=1`. Mutating Unix-socket JSON commands require a pairing token; when TCP is enabled, every command (including health) requires a token. Create one with `mermaid pair --label <device>` and pass it as `MERMAID_DAEMON_TOKEN` or `auth.token`.
 
-The CLI can inspect and manage the same store with `mermaid tasks`, `mermaid task <id>`, `mermaid approvals`, `mermaid approve <id>`, `mermaid deny <id>`, `mermaid tool-runs`, `mermaid checkpoints`, `mermaid restore <id>`, `mermaid memory`, `mermaid remember`, `mermaid memory-edit <id> <value>`, `mermaid forget`, `mermaid plugin list`, `mermaid plugin install <path-or-github>`, `mermaid plugin audit <path>`, `mermaid models`, `mermaid model-info <model>`, `mermaid processes`, `mermaid logs <process>`, `mermaid stop <process>`, `mermaid restart <process>`, `mermaid open <target>`, `mermaid ports`, `mermaid pair`, and `mermaid daemon`.
+The CLI can inspect and manage the same store with `mermaid tasks`, `mermaid task <id>`, `mermaid approvals`, `mermaid approve <id>`, `mermaid deny <id>`, `mermaid tool-runs`, `mermaid checkpoints`, `mermaid restore <id>`, `mermaid memory`, `mermaid remember`, `mermaid memory-edit <id> <value>`, `mermaid forget`, `mermaid plugin list`, `mermaid plugin install <path-or-github>`, `mermaid plugin audit <path>`, `mermaid models`, `mermaid model-info <model>`, `mermaid processes`, `mermaid logs <process>`, `mermaid stop <process>`, `mermaid restart <process>`, `mermaid open <target>`, `mermaid ports`, `mermaid pair`, and `mermaid daemon`. Installing a plugin from a Git URL (rather than a local path) requires an explicit full URL and `MERMAID_ALLOW_PLUGIN_FETCH=1`, since fetching and later running remote plugin code is a privileged operation.
 
 On Linux, install a per-user systemd unit with `mermaid daemon install --start`. The installer writes `~/.config/systemd/user/mermaidd.service`, points `ExecStart` at the discovered `mermaidd` binary, reloads systemd's user manager, and optionally enables/starts the service. Use `mermaid daemon status`, `mermaid daemon logs [-f]`, `mermaid daemon restart`, `mermaid daemon stop`, `mermaid daemon uninstall`, or `mermaid daemon print-unit` for day-to-day service management. Set `MERMAID_DAEMON_BIN=/absolute/path/to/mermaidd` before installing if the background-service binary is not next to `mermaid` or on `PATH`.
 
@@ -234,8 +242,15 @@ port = 11434
 # num_ctx = 8192
 # numa = false
 
+[safety]
+# Approval policy. Default is "ask": prompt before mutations / shell / network
+# actions. Set "full_access" to auto-run everything (the pre-0.8 default),
+# "auto_review" to auto-allow low-risk and ask for the rest, or "read_only".
+mode = "ask"
+checkpoint_on_mutation = true
+
 [non_interactive]
-# Current v0.7 run behavior is controlled by CLI flags:
+# Current v0.8 run behavior is controlled by CLI flags:
 #   mermaid run "prompt" --format json --max-tokens 4096 --no-execute
 # These fields remain in the schema for compatibility but are not the
 # source of truth for `mermaid run`.
