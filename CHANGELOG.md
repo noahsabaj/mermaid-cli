@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-21
+
+Documentation, release-pipeline, and supply-chain fixes on top of 0.8.0. This
+is the first 0.8.x release published to crates.io (the workspace split had
+broken crates.io publishing after 0.7.1).
+
+### Changed
+
+- **README** corrected against the code: repointed the install instructions
+  (GitHub Release binaries / `cargo install --git`, since crates.io can lag),
+  fixed the Alt+T reasoning cycle (all seven levels) and the daemon defaults
+  (TCP off by default via `MERMAID_DAEMON_ENABLE_TCP`, socket `0600` / data dir
+  `0700`), documented `mermaid pr create`, the `MERMAID_ALLOW_PLUGIN_FETCH`
+  plugin opt-in, and the `[safety]` config section.
+
+### Fixed
+
+- **Restored crates.io publishing.** `mermaid-runtime` is now publishable and
+  the release workflow publishes it before the `mermaid-cli` binary crate
+  (the path dependency now carries a version requirement).
+
+### Security
+
+- Pinned every GitHub Action to a commit SHA and added a Dependabot config to
+  keep them current; the release workflow now attaches a `SHA256SUMS` file to
+  each GitHub Release so downloaded binaries can be verified.
+
 ## [0.8.0] - 2026-06-21
 
 Security-hardening release: the full-codebase review's critical/high findings
