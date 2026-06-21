@@ -72,8 +72,8 @@ impl ModelProvider for OllamaProvider {
         // `UnboundedSender` (synchronous, FIFO). A single relay task drains
         // into the bounded sink in order, avoiding the per-event `tokio::
         // spawn` race that could deliver `Done` before prior tool calls.
-        let relay_tx = super::stream_bridge::ordered_relay(ctx.sink.clone());
-        let callback = stream_callback_for(relay_tx);
+        let (relay_tx, relay_handle) = super::stream_bridge::ordered_relay(ctx.sink.clone());
+        let callback = stream_callback_for(relay_tx.clone());
 
         // Race adapter.chat against the cancellation token. When
         // cancelled, the adapter's stream loop observes the sink
@@ -105,13 +105,13 @@ impl ModelProvider for OllamaProvider {
         // lets multi-turn extended thinking round-trip.
         let usage = response.usage.clone();
         let thinking_signature = response.thinking_signature.clone();
-        let _ = ctx
-            .sink
-            .send(StreamEvent::Done {
-                usage: usage.clone(),
-                thinking_signature: thinking_signature.clone(),
-            })
-            .await;
+        // Terminal Done through the ordered relay, then drain (see stream_bridge).
+        let _ = relay_tx.send(StreamEvent::Done {
+            usage: usage.clone(),
+            thinking_signature: thinking_signature.clone(),
+        });
+        drop(relay_tx);
+        let _ = relay_handle.await;
 
         Ok(FinalResponse {
             usage,

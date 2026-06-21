@@ -2044,8 +2044,11 @@ fn handle_compaction_finished(
         kind: StatusKind::Info,
         shown_at: std::time::SystemTime::now(),
     });
-    cmds.push(Cmd::SaveCompactionArchive { archive, record });
-    cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+    cmds.push(Cmd::SaveCompactionArchive {
+        archive,
+        record,
+        conversation: state.session.conversation.clone(),
+    });
     cmds.push(Cmd::DismissStatusAfter { ms: 5_000 });
 }
 

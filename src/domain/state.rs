@@ -323,12 +323,31 @@ pub fn estimate_context_usage_for_request(
                 .as_ref()
                 .map(|imgs| imgs.iter().map(|img| img.len()).sum::<usize>())
                 .unwrap_or(0);
-            approx_tokens(&msg.content).saturating_add(approx_tokens(&format!(
-                "{:?}{}{}",
-                msg.role,
-                msg.tool_name.as_deref().unwrap_or(""),
-                msg.tool_call_id.as_deref().unwrap_or("")
-            ))) + image_chars.div_ceil(4)
+            // Include assistant tool-call name + arguments JSON, which the
+            // estimate previously ignored (see estimate_message_tokens).
+            let tool_call_chars = msg
+                .tool_calls
+                .as_ref()
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .map(|tc| {
+                            tc.function.name.len()
+                                + tc.function.arguments.to_string().len()
+                                + tc.id.as_deref().map(str::len).unwrap_or(0)
+                        })
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
+            approx_tokens(&msg.content)
+                .saturating_add(approx_tokens(&format!(
+                    "{:?}{}{}",
+                    msg.role,
+                    msg.tool_name.as_deref().unwrap_or(""),
+                    msg.tool_call_id.as_deref().unwrap_or("")
+                )))
+                .saturating_add(image_chars.div_ceil(4))
+                .saturating_add(tool_call_chars.div_ceil(4))
         })
         .sum();
     let tool_schema: Vec<_> = request

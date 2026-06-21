@@ -7,6 +7,22 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Reject a conversation id that doesn't match the generated shape
+/// (`%Y%m%d_%H%M%S_%3f` => `YYYYMMDD_HHMMSS_mmm`). Without this, a
+/// user-typed `/load <id>` (or `delete`) joins arbitrary text into a
+/// filesystem path — `../../secret` would read/delete files outside the
+/// project. Digits-and-underscores can't contain `/`, `\`, `..`, or a drive
+/// prefix, so the format check alone closes the traversal.
+fn validate_conversation_id(id: &str) -> Result<()> {
+    let valid = id.len() == 19
+        && id.as_bytes().iter().enumerate().all(|(i, b)| match i {
+            8 | 15 => *b == b'_',
+            _ => b.is_ascii_digit(),
+        });
+    anyhow::ensure!(valid, "invalid conversation id: {id:?}");
+    Ok(())
+}
+
 /// A complete conversation history
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationHistory {
@@ -155,7 +171,9 @@ impl ConversationManager {
         let path = self.conversations_dir.join(filename);
 
         let json = serde_json::to_string_pretty(conversation)?;
-        fs::write(path, json)?;
+        // Atomic write: a crash mid-save must not empty/corrupt the session
+        // file (this is the hot path, rewritten after nearly every message).
+        crate::utils::write_atomic(&path, json.as_bytes())?;
 
         Ok(())
     }
@@ -168,12 +186,15 @@ impl ConversationManager {
         fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", archive.id));
         let json = serde_json::to_string_pretty(archive)?;
-        fs::write(&path, json)?;
+        // Atomic write: the archive is the ONLY durable copy of messages
+        // dropped by a compaction — a partial write would lose them.
+        crate::utils::write_atomic(&path, json.as_bytes())?;
         Ok(path)
     }
 
     /// Load a specific conversation by ID
     pub fn load_conversation(&self, id: &str) -> Result<ConversationHistory> {
+        validate_conversation_id(id)?;
         let filename = format!("{}.json", id);
         let path = self.conversations_dir.join(filename);
 
@@ -236,6 +257,7 @@ impl ConversationManager {
 
     /// Delete a conversation
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
+        validate_conversation_id(id)?;
         let filename = format!("{}.json", id);
         let path = self.conversations_dir.join(filename);
 
@@ -259,6 +281,16 @@ impl ConversationManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_conversation_id_rejects_traversal() {
+        assert!(validate_conversation_id("20260101_120000_001").is_ok());
+        assert!(validate_conversation_id("../secret").is_err());
+        assert!(validate_conversation_id("..\\secret").is_err());
+        assert!(validate_conversation_id("/etc/passwd").is_err());
+        assert!(validate_conversation_id("20260101_120000").is_err()); // too short
+        assert!(validate_conversation_id("abcdefgh_120000_001").is_err()); // non-digits
+    }
 
     #[test]
     fn test_new_conversation_has_session_title() {

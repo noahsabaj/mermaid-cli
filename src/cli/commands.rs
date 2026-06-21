@@ -739,10 +739,25 @@ fn run_qa_compact_smoke(
                         .to_string(),
                 );
             },
-            Cmd::SaveCompactionArchive { archive, .. } => {
+            Cmd::SaveCompactionArchive {
+                archive,
+                conversation,
+                ..
+            } => {
+                // Archive first, then the stripped conversation (same order
+                // as the live effect path), with `?` so a failed archive
+                // aborts before the conversation is overwritten.
                 archive_path = Some(
                     manager
                         .save_compaction_archive(&archive)?
+                        .display()
+                        .to_string(),
+                );
+                manager.save_conversation(&conversation)?;
+                conversation_path = Some(
+                    manager
+                        .conversations_dir()
+                        .join(format!("{}.json", conversation.id))
                         .display()
                         .to_string(),
                 );

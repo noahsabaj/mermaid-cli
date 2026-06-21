@@ -56,6 +56,15 @@ impl ToolExecutor for ScrollTool {
         if let Err(error) = self.driver.ensure_alive() {
             return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
+        if let Some(blocked) = super::super::policy_gate::gate_external(
+            &ctx,
+            "scroll",
+            crate::runtime::ToolCategory::ComputerUse,
+            "computer-use: scroll".to_string(),
+            &args,
+        ) {
+            return blocked;
+        }
 
         let direction = args
             .get("direction")

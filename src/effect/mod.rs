@@ -359,45 +359,62 @@ impl EffectRunner {
                     }
                 });
             },
-            Cmd::SaveCompactionArchive { archive, record } => {
+            Cmd::SaveCompactionArchive {
+                archive,
+                record,
+                conversation,
+            } => {
+                let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
                 let task_id = self.task_id.clone();
                 self.detached.spawn(async move {
-                    if let Ok(manager) = crate::session::ConversationManager::new(&workdir)
-                    {
-                        match manager.save_compaction_archive(&archive) {
-                            Ok(path) => {
-                                if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
-                                    let compaction_id = record.id.clone();
-                                    let conversation_id = archive.conversation_id.clone();
-                                    let _ =
-                                        store.compactions().create(crate::runtime::NewCompaction {
-                                            id: Some(record.id),
-                                            task_id: task_id.clone(),
-                                            session_id: Some(archive.conversation_id),
-                                            source_token_estimate: Some(record.before_tokens as i64),
-                                            summary_token_count: Some(record.summary_tokens as i64),
-                                            preserved_turns: Some(
-                                                record.preserved_message_count as i64,
-                                            ),
-                                            archive_path: Some(path.display().to_string()),
-                                            verification_status: Some("verified".to_string()),
-                                        });
-                                    let _ = crate::runtime::run_plugin_hooks(
-                                        "compaction",
-                                        &serde_json::json!({
-                                            "id": compaction_id,
-                                            "task_id": task_id.clone(),
-                                            "session_id": conversation_id,
-                                            "archive_path": path.display().to_string(),
-                                        }),
-                                    );
-                                }
-                            },
-                            Err(err) => {
-                                tracing::warn!(error = %err, "SaveCompactionArchive: failed to write archive");
-                            },
-                        }
+                    let Ok(manager) = crate::session::ConversationManager::new(&workdir) else {
+                        return;
+                    };
+                    // Archive FIRST — it is the only durable copy of the
+                    // dropped messages. Only overwrite the (stripped)
+                    // conversation once the archive has persisted, so a
+                    // failed archive can never lose messages.
+                    match manager.save_compaction_archive(&archive) {
+                        Ok(path) => {
+                            if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
+                                let compaction_id = record.id.clone();
+                                let conversation_id = archive.conversation_id.clone();
+                                let _ =
+                                    store.compactions().create(crate::runtime::NewCompaction {
+                                        id: Some(record.id),
+                                        task_id: task_id.clone(),
+                                        session_id: Some(archive.conversation_id),
+                                        source_token_estimate: Some(record.before_tokens as i64),
+                                        summary_token_count: Some(record.summary_tokens as i64),
+                                        preserved_turns: Some(record.preserved_message_count as i64),
+                                        archive_path: Some(path.display().to_string()),
+                                        verification_status: Some("verified".to_string()),
+                                    });
+                                let _ = crate::runtime::run_plugin_hooks(
+                                    "compaction",
+                                    &serde_json::json!({
+                                        "id": compaction_id,
+                                        "task_id": task_id.clone(),
+                                        "session_id": conversation_id,
+                                        "archive_path": path.display().to_string(),
+                                    }),
+                                );
+                            }
+                            if manager.save_conversation(&conversation).is_ok() {
+                                let _ = tx.send(Msg::SessionSaved).await;
+                            } else {
+                                tracing::warn!(
+                                    "SaveCompactionArchive: archive persisted but conversation save failed"
+                                );
+                            }
+                        },
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "SaveCompactionArchive: archive write failed; NOT overwriting conversation",
+                            );
+                        },
                     }
                 });
             },

@@ -54,6 +54,18 @@ pub const WEB_SEARCH_AGGREGATE_MAX_CHARS: usize = 30_000;
 /// Prevents unbounded memory growth from runaway model responses.
 pub const MAX_RESPONSE_CHARS: usize = 400_000;
 
+// Tool execution limits
+/// Maximum bytes of combined stdout/stderr captured from a single
+/// `execute_command` invocation. Past this the capture stops and a
+/// truncation marker is appended — prevents a chatty or newline-less
+/// command (`cat /dev/urandom`, `yes`) from exhausting memory.
+pub const MAX_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
+/// Upper bound on the number of parallel tool calls a single streaming model
+/// response may accumulate. A delta whose `index` exceeds this is dropped
+/// rather than used to grow an allocation proportional to an untrusted
+/// integer (guards against a crafted stream OOM-ing the daemon).
+pub const MAX_TOOL_CALLS: usize = 256;
+
 // UI Cache
 /// Maximum entries in the markdown parse cache before eviction
 pub const MARKDOWN_CACHE_MAX_ENTRIES: usize = 200;

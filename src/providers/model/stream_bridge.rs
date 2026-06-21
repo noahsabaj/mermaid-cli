@@ -30,9 +30,12 @@ use super::super::ctx::StreamEvent;
 /// task exits cleanly.
 pub fn ordered_relay(
     bounded_sink: mpsc::Sender<StreamEvent>,
-) -> mpsc::UnboundedSender<StreamEvent> {
+) -> (
+    mpsc::UnboundedSender<StreamEvent>,
+    tokio::task::JoinHandle<()>,
+) {
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             if bounded_sink.send(event).await.is_err() {
                 // Downstream closed — the reducer cancelled or the
@@ -42,7 +45,11 @@ pub fn ordered_relay(
             }
         }
     });
-    tx
+    // The handle lets the caller route the terminal `Done` through this
+    // relay and then await full drain, so `Done` can never overtake a
+    // still-buffered `ToolCall`/`Text` event (which would make the agent
+    // "forget" to run a tool the model requested).
+    (tx, handle)
 }
 
 #[cfg(test)]
@@ -56,7 +63,7 @@ mod tests {
     #[tokio::test]
     async fn events_arrive_in_order() {
         let (sink_tx, mut sink_rx) = mpsc::channel::<StreamEvent>(16);
-        let relay = ordered_relay(sink_tx);
+        let (relay, _handle) = ordered_relay(sink_tx);
 
         // Emit several events from a sync context (simulating the
         // adapter callback). Use mixed variants so variant identity

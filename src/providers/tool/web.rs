@@ -71,6 +71,15 @@ impl ToolExecutor for WebSearchTool {
         if queries.is_empty() {
             return ToolOutcome::error("web_search requires at least one query", 0.0);
         }
+        if let Some(blocked) = super::policy_gate::gate_external(
+            &ctx,
+            "web_search",
+            crate::runtime::ToolCategory::Web,
+            format!("web_search ({} queries)", queries.len()),
+            &args,
+        ) {
+            return blocked;
+        }
 
         let start = std::time::Instant::now();
         let mut combined = String::new();
@@ -180,6 +189,15 @@ impl ToolExecutor for WebFetchTool {
         let Some(url) = args.get("url").and_then(|v| v.as_str()) else {
             return ToolOutcome::error("web_fetch requires 'url' (string)", 0.0);
         };
+        if let Some(blocked) = super::policy_gate::gate_external(
+            &ctx,
+            "web_fetch",
+            crate::runtime::ToolCategory::Web,
+            format!("web_fetch {}", url),
+            &args,
+        ) {
+            return blocked;
+        }
         let start = std::time::Instant::now();
         let fetch = self.client.fetch_url(url);
 

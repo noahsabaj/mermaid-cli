@@ -185,10 +185,11 @@ pub fn test_stream_context(turn: TurnId) -> (StreamContext, mpsc::Receiver<Strea
     (StreamContext::new(token, tx, turn), rx)
 }
 
-/// Builder counterpart for `ExecContext`. Uses a default `Config` and
-/// empty `model_id` — tests that specifically exercise subagent model
-/// inheritance should construct `ExecContext::new` directly with their
-/// chosen values.
+/// Builder counterpart for `ExecContext`. Uses a `Config` pinned to
+/// `SafetyMode::FullAccess` (the production default is now `Ask`) so tool
+/// unit tests exercise the tool's own behavior rather than the approval
+/// gate. Tests that specifically exercise policy gating should construct
+/// `ExecContext::new` directly with their chosen safety mode.
 pub fn test_exec_context(
     turn: TurnId,
     call_id: ToolCallId,
@@ -196,7 +197,9 @@ pub fn test_exec_context(
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
     let token = CancellationToken::new();
     let (tx, rx) = mpsc::channel(64);
-    let config = Arc::new(crate::app::Config::default());
+    let mut config = crate::app::Config::default();
+    config.safety.mode = crate::runtime::SafetyMode::FullAccess;
+    let config = Arc::new(config);
     (
         ExecContext::new(
             token,

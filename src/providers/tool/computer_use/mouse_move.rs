@@ -54,6 +54,15 @@ impl ToolExecutor for MouseMoveTool {
         if let Err(error) = self.driver.ensure_alive() {
             return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
+        if let Some(blocked) = super::super::policy_gate::gate_external(
+            &ctx,
+            "mouse_move",
+            crate::runtime::ToolCategory::ComputerUse,
+            "computer-use: mouse_move".to_string(),
+            &args,
+        ) {
+            return blocked;
+        }
 
         let x = args.get("x").and_then(|v| v.as_i64()).map(|n| n as i32);
         let y = args.get("y").and_then(|v| v.as_i64()).map(|n| n as i32);

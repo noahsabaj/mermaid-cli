@@ -542,6 +542,17 @@ fn estimate_message_tokens(msg: &ChatMessage) -> usize {
     if let Some(images) = &msg.images {
         chars = chars.saturating_add(images.iter().map(String::len).sum::<usize>());
     }
+    // Assistant tool calls carry the function name + a JSON arguments payload
+    // (often kilobytes for a file write or shell script). Omitting these made
+    // the estimate run systematically low for this tool-heavy agent, causing
+    // under-compaction and provider-side context overflows.
+    if let Some(tool_calls) = &msg.tool_calls {
+        for tc in tool_calls {
+            chars = chars.saturating_add(tc.function.name.len());
+            chars = chars.saturating_add(tc.function.arguments.to_string().len());
+            chars = chars.saturating_add(tc.id.as_deref().map(str::len).unwrap_or(0));
+        }
+    }
     chars.div_ceil(4)
 }
 

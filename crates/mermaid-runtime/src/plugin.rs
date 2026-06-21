@@ -103,40 +103,63 @@ pub fn write_plugin_lockfile() -> Result<PathBuf> {
 
 pub fn run_plugin_hooks(event: &str, payload: &serde_json::Value) -> Result<()> {
     let store = RuntimeStore::open_default()?;
+    let payload_bytes = serde_json::to_string(payload)?.into_bytes();
     for plugin in store.plugins().list()? {
         if !plugin.enabled {
             continue;
         }
-        let manifest: PluginManifest = serde_json::from_str(&plugin.manifest_json)?;
-        let root = PathBuf::from(&plugin.source);
+        let Ok(manifest) = serde_json::from_str::<PluginManifest>(&plugin.manifest_json) else {
+            tracing::warn!(plugin = %plugin.name, "skipping plugin with unparseable manifest");
+            continue;
+        };
+        // Canonicalize the root so a symlink inside it can't be used to escape.
+        let Ok(root) = std::fs::canonicalize(&plugin.source) else {
+            tracing::warn!(plugin = %plugin.name, "plugin source missing; skipping hooks");
+            continue;
+        };
         for hook in manifest.hooks {
-            let hook_path = root.join(&hook);
-            anyhow::ensure!(
-                hook_path.starts_with(&root),
-                "plugin hook escapes root: {}",
-                hook
-            );
-            if !hook_path.exists() {
+            // Resolve the hook through symlinks and verify containment on the
+            // CANONICAL path (the old lexical `starts_with` could be escaped
+            // by a symlink inside the root pointing outside it).
+            let Ok(canonical_hook) = std::fs::canonicalize(root.join(&hook)) else {
+                continue; // missing hook: nothing to run
+            };
+            if !canonical_hook.starts_with(&root) {
+                tracing::warn!(plugin = %plugin.name, hook = %hook, "plugin hook escapes root; skipping");
                 continue;
             }
-            let mut child = Command::new(&hook_path)
+            // Execute with a SCRUBBED environment (clear + minimal allowlist)
+            // so provider API keys and MERMAID_DAEMON_TOKEN never leak into
+            // plugin-provided code.
+            let spawn = Command::new(&canonical_hook)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("HOME", std::env::var_os("HOME").unwrap_or_default())
                 .env("MERMAID_HOOK_EVENT", event)
                 .env("MERMAID_PLUGIN_NAME", &plugin.name)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .spawn()
-                .with_context(|| format!("failed to run plugin hook {}", hook_path.display()))?;
+                .spawn();
+            let mut child = match spawn {
+                Ok(child) => child,
+                Err(err) => {
+                    tracing::warn!(plugin = %plugin.name, error = %err, "failed to spawn plugin hook");
+                    continue; // isolate: one bad hook must not abort the rest
+                },
+            };
             if let Some(stdin) = child.stdin.as_mut() {
-                stdin.write_all(serde_json::to_string(payload)?.as_bytes())?;
+                let _ = stdin.write_all(&payload_bytes);
             }
-            let status = child.wait()?;
-            anyhow::ensure!(
-                status.success(),
-                "plugin hook {} failed with {}",
-                hook_path.display(),
-                status
-            );
+            match child.wait() {
+                Ok(status) if !status.success() => {
+                    tracing::warn!(plugin = %plugin.name, hook = %hook, %status, "plugin hook failed");
+                },
+                Err(err) => {
+                    tracing::warn!(plugin = %plugin.name, error = %err, "plugin hook wait failed");
+                },
+                _ => {},
+            }
         }
     }
     Ok(())
@@ -165,37 +188,56 @@ fn resolve_plugin_source(path: &Path) -> Result<PathBuf> {
         return Ok(path.to_path_buf());
     }
     let source = path.to_string_lossy();
-    let git_source = if source.starts_with("https://github.com/")
-        || source.starts_with("git@github.com:")
-        || source.ends_with(".git")
-    {
-        Some(source.to_string())
-    } else if source.matches('/').count() == 1 && !source.starts_with('/') {
-        Some(format!("https://github.com/{}.git", source))
-    } else {
-        None
-    };
-    let Some(git_source) = git_source else {
+    // Only an EXPLICIT git URL is treated as a remote source. The old bare
+    // `owner/repo` → github.com expansion turned any short string into a
+    // network fetch of attacker-named code; require the full URL instead.
+    let is_git_url = source.starts_with("https://")
+        || source.starts_with("git@")
+        || source.starts_with("ssh://")
+        || source.ends_with(".git");
+    if !is_git_url {
         return Ok(path.to_path_buf());
-    };
+    }
 
+    // Fetching remote plugin code is a privileged operation — gate it behind
+    // an explicit opt-in so it can't be triggered silently (e.g. via the
+    // daemon's local fallback). Operators who want it set the env var.
+    anyhow::ensure!(
+        std::env::var("MERMAID_ALLOW_PLUGIN_FETCH").is_ok_and(|v| v == "1" || v == "true"),
+        "refusing to fetch remote plugin source {source:?}: set MERMAID_ALLOW_PLUGIN_FETCH=1 to allow, \
+         or clone it yourself and install from the local path",
+    );
+
+    let git_source = source.to_string();
     let dest = data_dir()?
         .join("plugins")
         .join("sources")
         .join(hex_lower(&Sha256::digest(git_source.as_bytes())));
+    // Harden git: no credential prompts, no repo-provided hooks, no external
+    // transports (`ext::` RCE), so materializing the source can't itself run
+    // attacker code.
+    const HARDENING: [&str; 4] = [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "protocol.ext.allow=never",
+    ];
     if dest.exists() {
         let _ = Command::new("git")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(HARDENING)
             .arg("-C")
             .arg(&dest)
-            .arg("pull")
-            .arg("--ff-only")
+            .args(["pull", "--ff-only"])
             .status();
     } else {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let status = Command::new("git")
-            .arg("clone")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(HARDENING)
+            .args(["clone", "--depth", "1"])
             .arg(&git_source)
             .arg(&dest)
             .status()

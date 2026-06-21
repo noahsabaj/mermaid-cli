@@ -149,6 +149,19 @@ impl ToolExecutor for SubagentTool {
             .unwrap_or("subagent")
             .to_string();
 
+        // Safety gate: spawning a subagent is a Process-class action.
+        // ReadOnly (or a Deny override) blocks it; the child's own tool
+        // calls are independently gated by the same policy.
+        if let Some(blocked) = super::policy_gate::gate_external(
+            &ctx,
+            "agent",
+            crate::runtime::ToolCategory::Subagent,
+            format!("subagent: {}", description),
+            &args,
+        ) {
+            return blocked;
+        }
+
         // Acquire a breadth permit. Respects parent cancellation so
         // a fan-out that lands 30 calls doesn't hold the parent's
         // Ctrl+C response hostage.

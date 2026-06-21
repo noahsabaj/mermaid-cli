@@ -53,6 +53,15 @@ impl ToolExecutor for TypeTextTool {
         if let Err(error) = self.driver.ensure_alive() {
             return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
+        if let Some(blocked) = super::super::policy_gate::gate_external(
+            &ctx,
+            "type_text",
+            crate::runtime::ToolCategory::ComputerUse,
+            "computer-use: type_text".to_string(),
+            &args,
+        ) {
+            return blocked;
+        }
         let text = match args.get("text").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
             None => {

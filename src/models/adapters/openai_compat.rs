@@ -884,6 +884,17 @@ impl PartialToolCall {
 }
 
 fn accumulate_tool_call(partials: &mut Vec<PartialToolCall>, delta: ToolCallDeltaWire) {
+    // Bound the stream-controlled index before it drives an allocation. A
+    // crafted or buggy upstream could send `index: usize::MAX`, which would
+    // otherwise try to grow `partials` by billions of entries and OOM the
+    // (long-lived) daemon. No real response has this many parallel calls.
+    if delta.index >= crate::constants::MAX_TOOL_CALLS {
+        tracing::warn!(
+            index = delta.index,
+            "dropping tool-call delta with implausible index",
+        );
+        return;
+    }
     while partials.len() <= delta.index {
         partials.push(PartialToolCall::default());
     }
@@ -1048,6 +1059,23 @@ impl ThinkTagState {
 mod tests {
     use super::*;
     use crate::models::providers::lookup_provider;
+
+    #[test]
+    fn accumulate_tool_call_drops_implausible_index() {
+        // H9: a stream-controlled huge index must not grow the Vec.
+        let mut partials: Vec<PartialToolCall> = Vec::new();
+        let delta: ToolCallDeltaWire =
+            serde_json::from_value(serde_json::json!({"index": 1_000_000})).unwrap();
+        accumulate_tool_call(&mut partials, delta);
+        assert!(partials.is_empty(), "huge index must be dropped");
+
+        // A normal index still accumulates.
+        let ok: ToolCallDeltaWire =
+            serde_json::from_value(serde_json::json!({"index": 0, "function": {"name": "x"}}))
+                .unwrap();
+        accumulate_tool_call(&mut partials, ok);
+        assert_eq!(partials.len(), 1);
+    }
 
     fn test_profile() -> &'static ProviderProfile {
         lookup_provider("openai").expect("openai is in the registry")

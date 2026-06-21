@@ -65,6 +65,15 @@ impl ToolExecutor for ScreenshotTool {
         if let Err(error) = self.driver.ensure_alive() {
             return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
+        if let Some(blocked) = super::super::policy_gate::gate_external(
+            &ctx,
+            "screenshot",
+            crate::runtime::ToolCategory::ComputerUse,
+            "computer-use: screenshot".to_string(),
+            &args,
+        ) {
+            return blocked;
+        }
 
         let spec = match parse_spec(&args) {
             Ok(s) => s,
