@@ -295,13 +295,14 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         use widgets::ApprovalModalWidget;
         let widget = ApprovalModalWidget {
             theme: &rstate.theme,
-            title: format!("⚠ Approval required — {}  [{}]", item.tool, item.risk),
+            title: format!("Approval required — {}  [{}]", item.tool, item.risk),
             body: item.prompt.as_str(),
             options: vec![
                 "1. Yes".to_string(),
                 format!("2. Yes, and don't ask again for `{}`", item.allowlist_scope),
                 "3. No  (Esc)".to_string(),
             ],
+            selected_index: Some(item.selected_option),
             accent: rstate.theme.colors.warning.to_color(),
         };
         frame.render_widget(widget, chunks[5]);
@@ -312,6 +313,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             title: "Confirm".to_string(),
             body: confirm.prompt.as_str(),
             options: vec!["y. Yes".to_string(), "n. No  (Esc)".to_string()],
+            selected_index: None,
             accent: rstate.theme.colors.warning.to_color(),
         };
         frame.render_widget(widget, chunks[5]);
