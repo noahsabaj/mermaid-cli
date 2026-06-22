@@ -7,8 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-22
+
+Headline: **durable, agent-managed memory** — Mermaid now remembers facts across
+sessions in plain Markdown files it reads and maintains itself. Alongside it, a
+batch of TUI upgrades (richer markdown, drag-select + copy, a chat scrollbar,
+inline approval prompts with an arrow-key picker, the version in the footer) and
+a round of paste/safety/diff polish.
+
 ### Added
 
+- **Durable agent memory.** Mermaid keeps long-term semantic memory as plain
+  Markdown files — one atomic fact per file — across three scopes: global,
+  project-private (the default; machine-local, not committed), and
+  project-shared (opt-in, committed to `.mermaid/memory/`). An auto-derived
+  index is always in context; the agent reads a fact on demand via `read_file`
+  and maintains memory itself through a `memory` tool (`remember` / `update` /
+  `forget`), ungated in every safety mode except read-only. Manual controls:
+  `/memory` lists, `/remember <fact>` saves, `/forget <name>` deletes, and
+  `/consolidate-memory` runs a model-assisted, checkpoint-reversible **prune**
+  of duplicate/stale facts (prune-only by design — stored facts are never
+  rewritten, which avoids semantic drift). Secrets, tokens, and PII are never
+  stored. The index is generated from the files, so it can't drift from them;
+  no database, vectors, or embeddings.
+- **Version in the status footer.** The footer's second line now reads
+  `mermaid vX.Y.Z · safety: <mode> · reasoning: <level>` — the version tracks
+  the crate version automatically.
 - **Chat scrollbar.** The transcript now shows a scrollbar (ratatui 0.30's
   `Scrollbar`) in a reserved right-hand gutter whenever it overflows the
   viewport, so you can see scroll position at a glance. Dropped the unused
@@ -41,10 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode just returned an "Approval required" error and the model flailed; the
   only approval path was the out-of-band `/approve <id>` flow (still used in
   headless `mermaid run`). The prompt also covers the previously-unguarded
-  non-replayable tools (web / MCP / subagent / computer-use) under `ask`.
+  non-replayable tools (web / MCP / subagent / computer-use) under `ask`. The
+  picker is keyboard-navigable — `↑`/`↓` move a highlighted option and `Enter`
+  selects it, or press the number directly.
 
 ### Changed
 
+- **BREAKING: memory is greenfield-replaced.** The old SQLite/JSONL key-value
+  memory store is gone, along with its CLI subcommands; `/memory`, `/remember`,
+  and `/forget` are now backed by the new Markdown file store (and `/memory-edit`
+  is removed). There is no migration — saved entries from the old store are not
+  carried over.
 - **System prompt — interaction & editing norms.** Added a focused set of
   cross-model norms: no time estimates; make the smallest change that does the
   task (no speculative abstractions/options, no cleanup of untouched code, no
@@ -79,6 +110,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **System prompt** refreshed: it now documents the safety/permission modes
   (and how to behave when an action is gated — explain, don't spam retries),
   the tool set, and the in-session controls.
+- **Pasted text scrambled on Windows.** A paste whose burst split into coalesced
+  `Paste` chunks plus stray `Char` key events (uppercase letters) came out
+  reordered — e.g. `Review … Define … Report …` became `RDReview … efine …
+  eport …`. Paste now inserts at the cursor and advances it, exactly like
+  typing, so the result stays in order however the burst splits.
+- **The model couldn't see the live safety mode.** After switching modes
+  mid-session (e.g. `read_only` → `full_access`), the agent kept refusing
+  actions based on a stale gate error. The current mode is now surfaced in the
+  prompt each turn (the same field the policy gate enforces), so it stops
+  guessing from old errors.
+- **Slash palette hid hyphenated commands.** Typing a command's first word
+  (e.g. `/consolidate`) matched nothing until the hyphen was typed; plain
+  prefix matching now surfaces `consolidate-memory`, `cloud-setup`, etc.
+- **Duplicate `/compact` indicator.** Removed the redundant gray "Compacting
+  context…" status line; the live blue indicator and the completion receipt
+  remain.
+- **Diff header clutter.** File diffs no longer print the `---`/`+++`/`@@`
+  unified-diff headers above the change — just the success line and the colored
+  body.
+
+### Security
+
+- Bumped `quinn-proto` 0.11.14 → 0.11.15 for RUSTSEC-2026-0185 (a remote
+  memory-exhaustion DoS in out-of-order QUIC stream reassembly).
 
 ## [0.9.0] - 2026-06-21
 
@@ -746,7 +801,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.7.1...v0.8.0
