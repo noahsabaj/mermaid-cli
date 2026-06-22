@@ -528,6 +528,79 @@ impl EffectRunner {
                     let _ = tx.send(Msg::MemoryChanged(loaded)).await;
                 });
             },
+            Cmd::ListMemory => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    let cfg = crate::app::load_config().unwrap_or_default().memory;
+                    let text = match crate::app::memory::load(&workdir, &cfg) {
+                        Some(mem) => mem.index,
+                        None => "No memories saved yet. Durable facts (yours or mine) show up here — use `/remember <fact>` or just ask me to remember something.".to_string(),
+                    };
+                    let _ = tx.send(Msg::RuntimeText(text)).await;
+                });
+            },
+            Cmd::RememberMemory { text } => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    let cfg = crate::app::load_config().unwrap_or_default().memory;
+                    let name = memory_title_from_text(&text);
+                    let (status, kind) = match crate::app::memory::write_memory(
+                        &workdir,
+                        crate::app::memory::MemoryScope::ProjectPrivate,
+                        &name,
+                        &text,
+                        &[],
+                        &text,
+                    ) {
+                        Ok(_) => (
+                            format!("Remembered: {name}"),
+                            crate::domain::StatusKind::Info,
+                        ),
+                        Err(e) => (
+                            format!("Couldn't save memory: {e}"),
+                            crate::domain::StatusKind::Error,
+                        ),
+                    };
+                    let (loaded, _) = crate::app::memory::refresh(None, &workdir, &cfg);
+                    let _ = tx.send(Msg::MemoryChanged(loaded)).await;
+                    let _ = tx
+                        .send(Msg::TransientStatus {
+                            text: status,
+                            kind,
+                            dismiss_ms: 3_000,
+                        })
+                        .await;
+                });
+            },
+            Cmd::ForgetMemory { id } => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    let cfg = crate::app::load_config().unwrap_or_default().memory;
+                    let (status, kind) = match crate::app::memory::delete_memory(&workdir, &id) {
+                        Ok(Some(_)) => (format!("Forgot: {id}"), crate::domain::StatusKind::Info),
+                        Ok(None) => (
+                            format!("No memory named '{id}'"),
+                            crate::domain::StatusKind::Info,
+                        ),
+                        Err(e) => (
+                            format!("Couldn't forget memory: {e}"),
+                            crate::domain::StatusKind::Error,
+                        ),
+                    };
+                    let (loaded, _) = crate::app::memory::refresh(None, &workdir, &cfg);
+                    let _ = tx.send(Msg::MemoryChanged(loaded)).await;
+                    let _ = tx
+                        .send(Msg::TransientStatus {
+                            text: status,
+                            kind,
+                            dismiss_ms: 3_000,
+                        })
+                        .await;
+                });
+            },
             Cmd::LoadConversation(id) => {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
@@ -1205,6 +1278,30 @@ fn run_provider_error_hook(model_id: &str, error: &crate::models::UserFacingErro
             "recoverable": error.recoverable,
         }),
     );
+}
+
+/// Derive a short title for a `/remember` memory from free-text input: the
+/// first non-empty line, capped to ~8 words / 60 chars. `write_memory`
+/// slugifies it into the filename.
+fn memory_title_from_text(text: &str) -> String {
+    let first = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("memory")
+        .trim();
+    let title: String = first
+        .split_whitespace()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(60)
+        .collect();
+    if title.trim().is_empty() {
+        "memory".to_string()
+    } else {
+        title
+    }
 }
 
 async fn dispatch_compact_conversation(

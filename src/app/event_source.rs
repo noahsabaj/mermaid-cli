@@ -221,6 +221,9 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("usage") => SlashCmd::Usage,
         Some("context") => SlashCmd::Context,
         Some("compact") => SlashCmd::Compact(arg),
+        Some("memory") => SlashCmd::Memory,
+        Some("remember") => SlashCmd::Remember(arg),
+        Some("forget") => SlashCmd::Forget(arg),
         Some("doctor") => SlashCmd::Doctor,
         Some("tasks") => SlashCmd::Tasks,
         Some("task") => SlashCmd::Task(arg),
@@ -484,6 +487,22 @@ mod tests {
         );
         assert_eq!(parse_slash_command("compress"), SlashCmd::Compact(None));
         assert_eq!(parse_slash_command("summarize"), SlashCmd::Compact(None));
+    }
+
+    #[test]
+    fn parse_memory_commands() {
+        assert_eq!(parse_slash_command("memory"), SlashCmd::Memory);
+        assert_eq!(parse_slash_command("memories"), SlashCmd::Memory); // alias
+        assert_eq!(
+            parse_slash_command("remember prefer ripgrep"),
+            SlashCmd::Remember(Some("prefer ripgrep".to_string()))
+        );
+        assert_eq!(parse_slash_command("remember"), SlashCmd::Remember(None));
+        assert_eq!(
+            parse_slash_command("forget prefer-ripgrep"),
+            SlashCmd::Forget(Some("prefer-ripgrep".to_string()))
+        );
+        assert_eq!(parse_slash_command("forget"), SlashCmd::Forget(None));
     }
 
     #[test]

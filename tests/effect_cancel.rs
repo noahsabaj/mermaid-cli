@@ -82,13 +82,13 @@ async fn execute_command_timeout_honored() {
     assert!(output.contains("timed out"), "got: {}", output);
     assert!(output.contains("was killed"), "got: {}", output);
     // The 1s timeout must fire (>=900ms, so it didn't abort instantly) and the
-    // 10s sleep must be killed early (<5s — a generous ceiling). The previous
-    // 1500ms ceiling measured CI scheduling/teardown overhead more than the
-    // timeout itself and flaked on loaded runners (observed 1.6–1.8s); the wide
-    // margin still catches a real "timeout didn't work" regression (which would
-    // run the full 10s).
+    // 10s sleep must be killed early (<8s). The ceiling measures process-kill +
+    // task teardown overhead on top of the 1s timeout, not the timeout itself,
+    // so it's deliberately generous: a 5s ceiling still flaked on loaded
+    // windows runners (observed >5s). 8s stays comfortably below the 10s full
+    // sleep, so it still catches a real "timeout never fired" regression.
     assert!(
-        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(5),
+        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(8),
         "timeout duration off: {:?}",
         elapsed
     );

@@ -127,6 +127,27 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
+        name: "memory",
+        aliases: &["memories"],
+        description: "List durable memories saved across sessions",
+        arg_hint: None,
+        group: SlashCommandGroup::ModelContext,
+    },
+    SlashCommand {
+        name: "remember",
+        aliases: &[],
+        description: "Save a fact to private durable memory",
+        arg_hint: Some("<fact>"),
+        group: SlashCommandGroup::ModelContext,
+    },
+    SlashCommand {
+        name: "forget",
+        aliases: &[],
+        description: "Delete a saved memory by name",
+        arg_hint: Some("<name>"),
+        group: SlashCommandGroup::ModelContext,
+    },
+    SlashCommand {
         name: "doctor",
         aliases: &[],
         description: "Show in-session readiness, model, safety, and instruction status",

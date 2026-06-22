@@ -1140,6 +1140,33 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::Compact(instructions) => {
             handle_manual_compact(state, cmds, instructions);
         },
+        SlashCmd::Memory => {
+            cmds.push(Cmd::ListMemory);
+        },
+        SlashCmd::Remember(Some(text)) => {
+            cmds.push(Cmd::RememberMemory { text });
+        },
+        SlashCmd::Remember(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /remember <fact to remember>",
+                StatusKind::Info,
+                3_000,
+            );
+        },
+        SlashCmd::Forget(Some(id)) => {
+            cmds.push(Cmd::ForgetMemory { id });
+        },
+        SlashCmd::Forget(None) => {
+            set_status(
+                state,
+                cmds,
+                "Usage: /forget <memory name> (see /memory for names)",
+                StatusKind::Info,
+                3_000,
+            );
+        },
         SlashCmd::Doctor => {
             state
                 .session
@@ -3486,6 +3513,36 @@ mod tests {
         assert!(msg.content.contains("Active model:"));
         assert!(msg.content.contains("Safety:"));
         assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    }
+
+    #[test]
+    fn slash_memory_commands_dispatch_effects() {
+        // /memory lists; /remember <text> and /forget <id> route to effects.
+        let (_s, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::Memory));
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::ListMemory)));
+
+        let (_s, cmds) = update(
+            fresh_state(),
+            Msg::Slash(SlashCmd::Remember(Some("prefer ripgrep".to_string()))),
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::RememberMemory { text } if text == "prefer ripgrep"))
+        );
+
+        let (_s, cmds) = update(
+            fresh_state(),
+            Msg::Slash(SlashCmd::Forget(Some("prefer-rg".to_string()))),
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ForgetMemory { id } if id == "prefer-rg"))
+        );
+
+        // No-arg /remember explains usage instead of dispatching.
+        let (state, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::Remember(None)));
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::RememberMemory { .. })));
+        assert!(state.status.is_some());
     }
 
     #[test]

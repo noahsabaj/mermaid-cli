@@ -119,6 +119,12 @@ pub enum Cmd {
     RefreshInstructions,
     /// Re-scan the memory directories (cheap); emits `Msg::MemoryChanged`.
     RefreshMemory,
+    /// List saved memories; emits `Msg::RuntimeText` with the rendered list.
+    ListMemory,
+    /// Save free-text to private memory; emits `Msg::MemoryChanged` + status.
+    RememberMemory { text: String },
+    /// Delete a memory by name/id; emits `Msg::MemoryChanged` + status.
+    ForgetMemory { id: String },
     /// Load a specific conversation by ID and emit
     /// `Msg::ConversationLoaded`. Reducer consumes that event to
     /// replace the current session.
@@ -283,6 +289,9 @@ impl Cmd {
             Cmd::PersistReasoningFor { .. } => "persist_reasoning_for",
             Cmd::RefreshInstructions => "refresh_instructions",
             Cmd::RefreshMemory => "refresh_memory",
+            Cmd::ListMemory => "list_memory",
+            Cmd::RememberMemory { .. } => "remember_memory",
+            Cmd::ForgetMemory { .. } => "forget_memory",
             Cmd::LoadConversation(_) => "load_conversation",
             Cmd::ListConversations => "list_conversations",
             Cmd::ListRuntimeTasks { .. } => "list_runtime_tasks",
@@ -369,6 +378,9 @@ impl Cmd {
             },
             Cmd::RefreshInstructions => "refresh_instructions".to_string(),
             Cmd::RefreshMemory => "refresh_memory".to_string(),
+            Cmd::ListMemory => "list_memory".to_string(),
+            Cmd::RememberMemory { .. } => "remember_memory".to_string(),
+            Cmd::ForgetMemory { .. } => "forget_memory".to_string(),
             Cmd::LoadConversation(id) => format!("load_conversation({})", id),
             Cmd::ListConversations => "list_conversations".to_string(),
             Cmd::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={})", limit),
