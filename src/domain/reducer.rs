@@ -966,7 +966,22 @@ fn cycle_safety(current: crate::runtime::SafetyMode) -> crate::runtime::SafetyMo
 
 fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
     match paste {
-        Paste::Text(t) => state.ui.input_buffer.push_str(&t),
+        Paste::Text(t) => {
+            // Insert at the cursor and advance it, exactly like typing. Pasted
+            // text and individual key presses MUST agree on position: on the
+            // Windows console a paste arrives as a mix of coalesced `Paste`
+            // chunks and stray `Char` key events, so appending to the end here
+            // while keys insert at the cursor scrambled the result (uppercase
+            // letters piled at the front).
+            state.ui.input_history_cursor = None;
+            state.ui.history_draft.clear();
+            let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
+            state.ui.input_buffer.insert_str(pos, &t);
+            state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + t.len());
+            if state.ui.input_buffer.starts_with('/') {
+                state.ui.palette_cursor = Some(0);
+            }
+        },
         Paste::Image { bytes, format } => {
             let id = state.ids.tool_call.next();
             let temp_path = std::env::temp_dir().join(format!("mermaid-img-{}.{}", id, format));
@@ -3701,6 +3716,43 @@ mod tests {
             code,
             modifiers: KeyMods::NONE,
         })
+    }
+
+    #[test]
+    fn paste_interleaved_with_keys_preserves_order() {
+        // Reproduces the Windows paste scramble: a paste burst splits into
+        // stray Char keys + coalesced Paste chunks. Both must insert at the
+        // cursor and advance it, so the result stays in order regardless of
+        // the split. (Before the fix, Paste appended to the end while keys
+        // inserted at a never-advanced cursor, yielding "RDeview the Docs".)
+        let mut state = fresh_state();
+        for msg in [
+            key(KeyCode::Char('R')),
+            Msg::Paste(Paste::Text("eview the ".to_string())),
+            key(KeyCode::Char('D')),
+            Msg::Paste(Paste::Text("ocs".to_string())),
+        ] {
+            let (next, _) = update(state, msg);
+            state = next;
+        }
+        assert_eq!(state.ui.input_buffer, "Review the Docs");
+        assert_eq!(state.ui.input_cursor, state.ui.input_buffer.len());
+    }
+
+    #[test]
+    fn paste_inserts_at_cursor_not_end() {
+        // Type "ac", move left one, paste "b" → "abc" (not "acb").
+        let mut state = fresh_state();
+        for msg in [
+            key(KeyCode::Char('a')),
+            key(KeyCode::Char('c')),
+            key(KeyCode::Left),
+            Msg::Paste(Paste::Text("b".to_string())),
+        ] {
+            let (next, _) = update(state, msg);
+            state = next;
+        }
+        assert_eq!(state.ui.input_buffer, "abc");
     }
 
     #[test]
