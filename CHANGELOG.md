@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Richer markdown rendering.** Assistant markdown is now theme-aware
+  (headings, lists, blockquotes, links, tables all use the active theme's
+  palette instead of hardcoded ANSI colors), fenced code blocks get **in-house
+  syntax highlighting** (keywords / strings / line-comments via a small
+  language-agnostic lexer, no new dependency) on the theme's code background,
+  code-block **indentation is preserved** (code lines are no longer word-wrapped
+  into a collapsed paragraph), inline `code` is tightened (no stray padding),
+  and `---` thematic breaks render as a horizontal rule.
 - **Drag to select & copy.** A plain left-mouse drag now selects chat text
   (reverse-video highlight) and copies it to the system clipboard on release,
   with a "Copied N chars" status. Mouse-wheel scroll and Ctrl+Click-to-open-

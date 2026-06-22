@@ -280,6 +280,17 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
+        // Code-block lines are tagged with this background; computed once so
+        // the per-message render loop and the markdown cache key can use it.
+        let code_bg = self.theme.colors.code_background.to_color();
+        let theme_seed = {
+            let mut h = rustc_hash::FxHasher::default();
+            self.theme.colors.foreground.to_color().hash(&mut h);
+            code_bg.hash(&mut h);
+            self.theme.colors.header.to_color().hash(&mut h);
+            h.finish()
+        };
+
         // Clear click map for this render pass
         state.image_click_map.clear();
         state.last_chat_area = Some((area.x, area.y, area.width, area.height));
@@ -383,14 +394,17 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 }
 
                 // With tool calling, message content is just text (no embedded action blocks)
-                // Use cached parsed markdown when available (avoids re-parsing every frame)
+                // Use cached parsed markdown when available (avoids re-parsing
+                // every frame). The theme is folded into the key so a theme
+                // switch can't serve stale-colored cached lines.
                 let mut hasher = rustc_hash::FxHasher::default();
                 msg.content.hash(&mut hasher);
+                theme_seed.hash(&mut hasher);
                 let cache_key = hasher.finish();
                 let parsed_lines = if let Some(cached) = self.markdown_cache.get(&cache_key) {
                     cached.clone()
                 } else {
-                    let parsed = parse_markdown(&msg.content);
+                    let parsed = parse_markdown(&msg.content, self.theme);
                     self.markdown_cache.insert(cache_key, parsed.clone());
                     if self.markdown_cache.len() > crate::constants::MARKDOWN_CACHE_MAX_ENTRIES {
                         self.markdown_cache.clear();
@@ -399,26 +413,31 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     parsed
                 };
 
-                for (line_idx, mut parsed_line) in parsed_lines.into_iter().enumerate() {
-                    // Add role indicator to first line or 2-space margin to others
-                    if line_idx == 0 {
-                        // First line: prepend role indicator
-                        let mut spans = vec![Span::styled(
+                for (line_idx, parsed_line) in parsed_lines.into_iter().enumerate() {
+                    // Code-block lines are tagged with the code background on
+                    // their base style (see markdown::parse_markdown). They're
+                    // pre-formatted: don't word-wrap (that collapses
+                    // indentation) — let the Paragraph clip overflow instead.
+                    let preformatted = parsed_line.style.bg == Some(code_bg);
+                    let base_style = parsed_line.style;
+
+                    // Add role indicator to first line or 2-space margin to others.
+                    let mut spans = if line_idx == 0 {
+                        vec![Span::styled(
                             format!("{} ", role_prefix),
                             Style::new().fg(role_color).bold(),
-                        )];
-                        spans.extend(parsed_line.spans);
-                        parsed_line = Line::from(spans);
+                        )]
                     } else {
-                        // Other lines: prepend 2-space margin
-                        let mut spans = vec![Span::raw("  ")];
-                        spans.extend(parsed_line.spans);
-                        parsed_line = Line::from(spans);
-                    }
+                        vec![Span::raw("  ")]
+                    };
+                    spans.extend(parsed_line.spans);
+                    let new_line = Line::from(spans).style(base_style);
 
-                    // Wrap the styled line if needed (continuation indent = 2)
-                    let wrapped = wrap_styled_line(parsed_line, area.width as usize, 2);
-                    lines.extend(wrapped);
+                    if preformatted {
+                        lines.push(new_line);
+                    } else {
+                        lines.extend(wrap_styled_line(new_line, area.width as usize, 2));
+                    }
                 }
 
                 // Render all actions at the end of the message
@@ -756,7 +775,8 @@ fn render_actions(
                         )]));
 
                         let preview_content = preview_lines.join("\n");
-                        let mut parsed = parse_markdown(&format!("```\n{}\n```", preview_content));
+                        let mut parsed =
+                            parse_markdown(&format!("```\n{}\n```", preview_content), theme);
                         for parsed_line in parsed.iter_mut() {
                             let mut new_spans =
                                 vec![Span::styled("    ", Style::new().fg(action_color))];
