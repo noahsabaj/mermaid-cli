@@ -94,9 +94,10 @@ impl<'a> Widget for StatusWidget<'a> {
             ),
             None => format!("reasoning: {}", self.reasoning_level.as_str()),
         };
-        // Prefix the live safety mode so the active permission level is always
-        // visible (Shift+Tab / `/safety` change it live).
-        let left_text = format!("safety: {} · {}", self.safety_mode.as_str(), reasoning_text);
+        // Prefix the app version (the one inoffensive, always-visible place we
+        // surface it) and the live safety mode (Shift+Tab / `/safety` change it
+        // live) ahead of the reasoning level.
+        let left_text = status_line2_left(self.safety_mode.as_str(), &reasoning_text);
         let model_display = self.model_name;
 
         // Calculate padding between reasoning text and model name (display-cell widths).
@@ -190,9 +191,32 @@ fn format_scaled(value: usize, divisor: usize, suffix: &str) -> String {
     }
 }
 
+/// Left segment of status line 2: the app version (compile-time, so it tracks
+/// the crate version automatically), then the live safety mode and reasoning
+/// level. This footer is the single place the version is surfaced in the TUI.
+fn status_line2_left(safety: &str, reasoning_text: &str) -> String {
+    format!(
+        "mermaid v{} · safety: {} · {}",
+        env!("CARGO_PKG_VERSION"),
+        safety,
+        reasoning_text
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_line2_left_shows_version_safety_and_reasoning() {
+        let s = status_line2_left("ask", "reasoning: high");
+        assert!(
+            s.contains(&format!("mermaid v{}", env!("CARGO_PKG_VERSION"))),
+            "status line must show the app version — got {s:?}"
+        );
+        assert!(s.contains("safety: ask"));
+        assert!(s.contains("reasoning: high"));
+    }
 
     #[test]
     fn token_status_labels_last_and_session_usage() {
