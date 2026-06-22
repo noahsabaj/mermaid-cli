@@ -46,6 +46,6 @@ pub use state::{
     UiState, estimate_context_usage_for_request,
 };
 pub use transition::{
-    action_display_for, commit_assistant_message, fill_outcome, start_executing_tools,
-    start_generating, tool_result_messages, try_complete_outcomes,
+    action_display_for, commit_assistant_message, display_info_for, fill_outcome,
+    start_executing_tools, start_generating, tool_result_messages, try_complete_outcomes,
 };

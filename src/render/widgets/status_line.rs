@@ -20,6 +20,9 @@ pub struct StatusLineWidget<'a> {
     pub theme: &'a Theme,
     /// Queued messages waiting to be processed
     pub queued_messages: &'a VecDeque<String>,
+    /// The in-flight tool's label while running tools (e.g. `Bash npm run dev`),
+    /// so the status line names what it's waiting on. `None` for other phases.
+    pub active_tool: Option<String>,
 }
 
 impl<'a> Widget for StatusLineWidget<'a> {
@@ -34,7 +37,14 @@ impl<'a> Widget for StatusLineWidget<'a> {
             return;
         }
 
-        let status_text = self.status.display_text();
+        // While running tools, append the in-flight tool so the user can see
+        // what's executing (a long `npm run dev` etc. no longer looks opaque).
+        let status_text = match (&self.status, &self.active_tool) {
+            (GenerationStatus::RunningTools, Some(tool)) => {
+                format!("{}: {}", self.status.display_text(), tool)
+            },
+            _ => self.status.display_text().to_string(),
+        };
 
         let info_color = self.theme.colors.info.to_color();
 

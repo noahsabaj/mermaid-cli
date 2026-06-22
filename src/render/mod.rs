@@ -207,7 +207,37 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             TurnState::Cancelling { since, .. } => {
                 since.elapsed().map(|d| d.as_secs()).unwrap_or(0)
             },
-            TurnState::ExecutingTools { .. } | TurnState::Idle => 0,
+            TurnState::ExecutingTools { started, .. } => {
+                started.elapsed().map(|d| d.as_secs()).unwrap_or(0)
+            },
+            TurnState::Idle => 0,
+        };
+        // While tools run, name the in-flight one(s) so the status line isn't an
+        // opaque "Running tools…". In-flight = the call slots without an outcome.
+        let active_tool = match &state.turn {
+            TurnState::ExecutingTools {
+                calls, outcomes, ..
+            } => {
+                let pending = outcomes.iter().filter(|o| o.is_none()).count();
+                calls
+                    .iter()
+                    .zip(outcomes)
+                    .find(|(_, o)| o.is_none())
+                    .map(|(call, _)| {
+                        let (action, target) = crate::domain::display_info_for(call);
+                        let label = if target.is_empty() {
+                            action
+                        } else {
+                            format!("{action} {target}")
+                        };
+                        if pending > 1 {
+                            format!("{label} (+{} more)", pending - 1)
+                        } else {
+                            label
+                        }
+                    })
+            },
+            _ => None,
         };
         let (tokens_display, tokens_estimated) = match &state.turn {
             TurnState::Generating {
@@ -225,6 +255,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             tokens_estimated,
             theme: &rstate.theme,
             queued_messages: &state.ui.queued_messages,
+            active_tool,
         };
         frame.render_widget(status_line_widget, chunks[1]);
     }
@@ -460,10 +491,40 @@ mod tests {
     }
 
     #[test]
+    fn status_line_names_the_in_flight_tool() {
+        use crate::domain::PendingToolCall;
+        use crate::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
+        let mut s = mock_state();
+        let call = PendingToolCall {
+            call_id: crate::domain::ToolCallId(1),
+            source: ModelToolCall {
+                id: Some("c1".to_string()),
+                function: FunctionCall {
+                    name: "execute_command".to_string(),
+                    arguments: serde_json::json!({"command": "npm run dev"}),
+                },
+            },
+        };
+        s.turn = TurnState::ExecutingTools {
+            id: crate::domain::TurnId(1),
+            started: std::time::SystemTime::now(),
+            calls: vec![call],
+            outcomes: vec![None],
+        };
+        let frame = render_to_string(&s);
+        assert!(frame.contains("Running tools"), "got: {frame}");
+        assert!(
+            frame.contains("npm run dev"),
+            "status line must name the in-flight command; got: {frame}"
+        );
+    }
+
+    #[test]
     fn status_line_appears_during_tool_execution_and_shows_queue() {
         let mut s = mock_state();
         s.turn = TurnState::ExecutingTools {
             id: crate::domain::TurnId(1),
+            started: std::time::SystemTime::now(),
             calls: Vec::new(),
             outcomes: Vec::new(),
         };
