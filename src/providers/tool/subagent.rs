@@ -278,8 +278,9 @@ async fn drive_child(
         )))
         .await;
 
-    // MERMAID.md instructions — same as the root interactive path.
+    // Project instructions + memory — same as the root interactive path.
     runner.dispatch(crate::domain::Cmd::RefreshInstructions);
+    runner.dispatch(crate::domain::Cmd::RefreshMemory);
 
     // Seed the child turn.
     let seed = Msg::SubmitPrompt {

@@ -117,6 +117,8 @@ pub enum Cmd {
     /// Re-stat `MERMAID.md` (cheap); emits `Msg::InstructionsChanged`
     /// only when the mtime moved or the file appeared/disappeared.
     RefreshInstructions,
+    /// Re-scan the memory directories (cheap); emits `Msg::MemoryChanged`.
+    RefreshMemory,
     /// Load a specific conversation by ID and emit
     /// `Msg::ConversationLoaded`. Reducer consumes that event to
     /// replace the current session.
@@ -280,6 +282,7 @@ impl Cmd {
             Cmd::PersistLastModel(_) => "persist_last_model",
             Cmd::PersistReasoningFor { .. } => "persist_reasoning_for",
             Cmd::RefreshInstructions => "refresh_instructions",
+            Cmd::RefreshMemory => "refresh_memory",
             Cmd::LoadConversation(_) => "load_conversation",
             Cmd::ListConversations => "list_conversations",
             Cmd::ListRuntimeTasks { .. } => "list_runtime_tasks",
@@ -365,6 +368,7 @@ impl Cmd {
                 format!("persist_reasoning_for({}, {:?})", model_id, level)
             },
             Cmd::RefreshInstructions => "refresh_instructions".to_string(),
+            Cmd::RefreshMemory => "refresh_memory".to_string(),
             Cmd::LoadConversation(id) => format!("load_conversation({})", id),
             Cmd::ListConversations => "list_conversations".to_string(),
             Cmd::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={})", limit),

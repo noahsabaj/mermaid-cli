@@ -306,6 +306,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::InstructionsChanged(loaded) => {
             state.instructions = loaded;
         },
+        Msg::MemoryChanged(loaded) => {
+            state.memory = loaded;
+        },
         Msg::SessionSaved => {
             // Silent. Reducer already committed; save is just durability.
         },
@@ -1007,6 +1010,9 @@ fn handle_submit_prompt(
     let (refreshed, _outcome) =
         crate::app::instructions::refresh(state.instructions.take(), &state.cwd);
     state.instructions = refreshed;
+    let (refreshed_memory, _) =
+        crate::app::memory::refresh(state.memory.take(), &state.cwd, &state.settings.memory);
+    state.memory = refreshed_memory;
 
     let turn = state.ids.fresh_turn();
     state.turn = start_generating(turn);
@@ -1454,6 +1460,9 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
     let (refreshed, _outcome) =
         crate::app::instructions::refresh(state.instructions.take(), &state.cwd);
     state.instructions = refreshed;
+    let (refreshed_memory, _) =
+        crate::app::memory::refresh(state.memory.take(), &state.cwd, &state.settings.memory);
+    state.memory = refreshed_memory;
 
     let turn = state.ids.fresh_turn();
     state.turn = TurnState::Compacting {
@@ -2515,7 +2524,19 @@ fn handle_tool_finished(
 /// current message log + the active `MERMAID.md` suffix + the
 /// reasoning choice + the tools surface.
 pub fn build_chat_request(state: &State) -> ChatRequest {
-    let instructions = state.instructions.as_ref().map(|i| i.content.clone());
+    // Project instructions + the always-loaded memory index compose into the
+    // single dynamic suffix. The memory block carries its own `# Memory`
+    // header, so it stays clearly separated from AGENTS.md/MERMAID.md and the
+    // model adapters need no changes.
+    let instructions = match (
+        state.instructions.as_ref().map(|i| i.content.clone()),
+        state.memory.as_ref().map(|m| m.index.clone()),
+    ) {
+        (Some(i), Some(m)) => Some(format!("{i}\n\n{m}")),
+        (Some(i), None) => Some(i),
+        (None, Some(m)) => Some(m),
+        (None, None) => None,
+    };
 
     // Pass user-configured values verbatim. `ModelSettings::default()`
     // already supplies `DEFAULT_TEMPERATURE` / `DEFAULT_MAX_TOKENS`,
@@ -2966,6 +2987,30 @@ mod tests {
         assert_eq!(state.runtime.provider_capabilities.provider, "anthropic");
         assert!(state.runtime.provider_capabilities.supports_vision);
         assert!(cmds.iter().any(|c| matches!(c, Cmd::PersistLastModel(_))));
+    }
+
+    #[test]
+    fn build_chat_request_injects_memory_index() {
+        let mut state = fresh_state();
+        // No memory loaded → no memory block in the dynamic suffix.
+        assert!(
+            !build_chat_request(&state)
+                .instructions
+                .map(|i| i.contains("# Memory"))
+                .unwrap_or(false)
+        );
+        // With memory → the auto-derived index is composed into the suffix.
+        state.memory = Some(crate::app::memory::LoadedMemory {
+            entries: Vec::new(),
+            index: "# Memory\n\n## Global (all projects)\n- [pnpm] use pnpm — /m/pnpm.md\n"
+                .to_string(),
+            truncated: false,
+        });
+        let instr = build_chat_request(&state)
+            .instructions
+            .expect("memory index should populate the instructions suffix");
+        assert!(instr.contains("# Memory"));
+        assert!(instr.contains("[pnpm] use pnpm"));
     }
 
     #[test]
