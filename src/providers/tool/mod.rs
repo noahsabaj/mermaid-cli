@@ -19,6 +19,7 @@ pub mod computer_use;
 pub mod exec;
 pub mod filesystem;
 pub mod mcp;
+pub mod memory;
 pub mod policy_gate;
 pub mod subagent;
 pub mod web;
@@ -120,6 +121,7 @@ impl Default for ToolRegistry {
         r.register(Arc::new(filesystem::DeleteFileTool));
         r.register(Arc::new(filesystem::CreateDirectoryTool));
         r.register(Arc::new(exec::ExecuteCommandTool));
+        r.register(Arc::new(memory::MemoryTool));
         // MCP proxy is the dispatcher for every mcp__server__tool
         // call; it's internal (not advertised) but MUST be registered
         // so runtime lookups succeed.
@@ -168,6 +170,7 @@ impl ToolRegistry {
         r.register(Arc::new(filesystem::DeleteFileTool));
         r.register(Arc::new(filesystem::CreateDirectoryTool));
         r.register(Arc::new(exec::ExecuteCommandTool));
+        r.register(Arc::new(memory::MemoryTool));
         r.register(Arc::new(mcp::McpToolProxy));
 
         if let Some(key) = crate::utils::resolve_api_key("OLLAMA_API_KEY", None) {
@@ -218,6 +221,7 @@ mod tests {
             "delete_file",
             "create_directory",
             "execute_command",
+            "memory",
         ] {
             assert!(r.get(name).is_some(), "missing: {}", name);
         }

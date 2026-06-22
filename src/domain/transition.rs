@@ -443,6 +443,31 @@ fn display_info_for(call: &PendingToolCall) -> (String, String) {
             "Web Fetch".to_string(),
             string_arg("url").unwrap_or_default(),
         ),
+        "memory" => {
+            let action = string_arg("action").unwrap_or_default();
+            let target = string_arg("id")
+                .or_else(|| string_arg("name"))
+                .unwrap_or_default();
+            let scope = if args
+                .get("global")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                " [global]"
+            } else if args
+                .get("shared")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                " [shared]"
+            } else {
+                ""
+            };
+            (
+                "Memory".to_string(),
+                format!("{action} {target}{scope}").trim().to_string(),
+            )
+        },
         "agent" => (
             "Agent".to_string(),
             string_arg("description").unwrap_or_default(),

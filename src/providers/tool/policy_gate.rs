@@ -232,8 +232,9 @@ fn approval_kind(category: crate::runtime::ToolCategory) -> ApprovalKind {
         C::Mcp => ApprovalKind::Mcp,
         C::Subagent => ApprovalKind::Subagent,
         C::ComputerUse => ApprovalKind::ComputerUse,
-        // Read ⇒ Allow, so this never reaches approval; keep the match total.
-        C::Read => ApprovalKind::Shell,
+        // Read and Memory ⇒ Allow/Deny in `decide`, so neither reaches
+        // approval; keep the match total.
+        C::Read | C::Memory => ApprovalKind::Shell,
     }
 }
 
@@ -406,6 +407,7 @@ mod tests {
             ("mcp_proxy", ToolCategory::Mcp),
             ("agent", ToolCategory::Subagent),
             ("click", ToolCategory::ComputerUse),
+            ("memory", ToolCategory::Memory),
         ] {
             assert!(
                 gate_external(&ctx, tool, cat, tool.to_string(), &serde_json::json!({}))
@@ -414,6 +416,41 @@ mod tests {
                 "ReadOnly must block {tool}",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn memory_writes_ungated_except_readonly() {
+        // The load-bearing "no modal" guarantee: memory is Allowed in ask /
+        // auto / full, so gate_external returns None (proceed) and the
+        // approval broker is never consulted. Only read-only blocks it.
+        for mode in [SafetyMode::Ask, SafetyMode::Auto, SafetyMode::FullAccess] {
+            let ctx = ctx(mode);
+            assert!(
+                gate_external(
+                    &ctx,
+                    "memory",
+                    ToolCategory::Memory,
+                    "memory remember".to_string(),
+                    &serde_json::json!({"action": "remember"}),
+                )
+                .await
+                .is_none(),
+                "memory must proceed without approval in {mode:?}",
+            );
+        }
+        let ctx = ctx(SafetyMode::ReadOnly);
+        assert!(
+            gate_external(
+                &ctx,
+                "memory",
+                ToolCategory::Memory,
+                "memory remember".to_string(),
+                &serde_json::json!({"action": "remember"}),
+            )
+            .await
+            .is_some(),
+            "read-only must block memory writes",
+        );
     }
 
     #[tokio::test]
