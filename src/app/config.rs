@@ -80,6 +80,10 @@ pub struct Config {
     #[serde(default)]
     pub safety: SafetyConfig,
 
+    /// Durable semantic memory settings.
+    #[serde(default)]
+    pub memory: MemoryConfig,
+
     /// Runtime-only prompt customizations supplied by CLI flags. These are
     /// deliberately skipped when saving config so one-off agent personas do
     /// not pollute the user's persistent Mermaid settings.
@@ -145,6 +149,26 @@ impl Default for SafetyConfig {
             checkpoint_on_mutation: true,
             overrides: Vec::new(),
             auto_classifier_model: None,
+        }
+    }
+}
+
+/// Durable semantic memory settings (v0.10.0).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Master switch for agent memory (the tool, the always-loaded index, and
+    /// the slash commands). On by default.
+    pub enabled: bool,
+    /// Byte cap on the always-loaded memory index before it's truncated.
+    pub index_cap_bytes: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            index_cap_bytes: crate::constants::MAX_MEMORY_INDEX_BYTES,
         }
     }
 }
