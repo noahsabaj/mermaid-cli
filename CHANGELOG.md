@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-06-22
+
+### Fixed
+
+- **"Running tools…" looked frozen.** The tool-execution status line was stuck
+  at `0s` and didn't say what was running, so a slow tool call (e.g. an agent
+  running `npm run dev` as a smoke test — a dev server that blocks until
+  `execute_command`'s 30s timeout) looked hung. `TurnState::ExecutingTools` was
+  the only active turn state without a `started` timestamp, so the elapsed clock
+  was hard-coded to 0 (Generating/Compacting tick normally). It now carries a
+  start time and counts up, and the status line **names the in-flight tool**
+  (e.g. `Running tools: Bash npm run dev`, with `+N more` when several run in
+  parallel). Not a hang — `Esc` always aborted it.
+
 ## [0.10.0] - 2026-06-22
 
 Headline: **durable, agent-managed memory** — Mermaid now remembers facts across
@@ -801,7 +815,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.8.0...v0.8.1
