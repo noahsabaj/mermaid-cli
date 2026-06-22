@@ -192,11 +192,10 @@ pub async fn run_interactive_with(
                                 None
                             },
                             MEK::Up(MouseButton::Left) => {
-                                if let Some(text) = rstate.chat.selected_text()
-                                    && !text.is_empty()
-                                {
-                                    runner.dispatch(Cmd::CopyToClipboard(text));
-                                }
+                                // A drag only *selects* (the highlight persists);
+                                // copying is an explicit action (Ctrl+Shift+C).
+                                // Auto-copying on release would silently clobber
+                                // the user's clipboard.
                                 None
                             },
                             MEK::ScrollUp => Some(Msg::MouseScroll {
@@ -208,18 +207,37 @@ pub async fn run_interactive_with(
                             _ => None,
                         }
                     } else {
-                        // Coalesce a paste burst (crossterm 0.29 doesn't
-                        // deliver Event::Paste on the Windows console — a
-                        // paste arrives as a flood of Char/Enter key events).
-                        // The drain pulls every immediately-available event
-                        // so the whole block lands as one atomic Msg::Paste.
-                        let (primary, trailing) = coalesce_key_burst(evt, || {
-                            events.next().now_or_never().flatten().and_then(|r| r.ok())
-                        });
-                        for queued in trailing {
-                            pending_msgs.push_back(queued);
+                        // Non-mouse event. Ctrl+Shift+C copies the current chat
+                        // selection — the explicit copy step after a drag-select.
+                        // Because the app holds the mouse, the terminal has no
+                        // selection of its own and passes the shortcut through.
+                        if let crossterm::event::Event::Key(k) = &evt
+                            && k.kind == crossterm::event::KeyEventKind::Press
+                            && k.modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL)
+                            && k.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
+                            && matches!(k.code, crossterm::event::KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
+                        {
+                            if let Some(text) = rstate.chat.selected_text()
+                                && !text.is_empty()
+                            {
+                                runner.dispatch(Cmd::CopyToClipboard(text));
+                            }
+                            None
+                        } else {
+                            // Coalesce a paste burst (crossterm 0.29 doesn't
+                            // deliver Event::Paste on the Windows console — a
+                            // paste arrives as a flood of Char/Enter key events).
+                            // The drain pulls every immediately-available event
+                            // so the whole block lands as one atomic Msg::Paste.
+                            let (primary, trailing) = coalesce_key_burst(evt, || {
+                                events.next().now_or_never().flatten().and_then(|r| r.ok())
+                            });
+                            for queued in trailing {
+                                pending_msgs.push_back(queued);
+                            }
+                            primary
                         }
-                        primary
                     }
                 },
                 Sel::Term(Some(Err(error))) => {

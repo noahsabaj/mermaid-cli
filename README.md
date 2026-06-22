@@ -122,7 +122,8 @@ mermaid pr create                               # Open a PR/MR from the current 
 | Shift+Tab | Cycle safety mode: `read_only → ask → auto → full_access → read_only` (session-scoped) |
 | Ctrl+V | Paste image or text from clipboard |
 | Ctrl+Click | Open image from chat history |
-| Drag | Select chat text and copy it to the clipboard on release |
+| Drag | Select chat text (highlights; does not copy) |
+| Ctrl+Shift+C | Copy the selected chat text to the clipboard |
 | Shift+Drag | Native terminal selection (bypasses Mermaid's mouse capture — useful for selecting across the whole window, including the input box and status bar) |
 | `/` | Open slash-command palette (filter-as-you-type) |
 | Tab | In palette: complete highlighted command name |
