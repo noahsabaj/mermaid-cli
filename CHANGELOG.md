@@ -18,10 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headless `mermaid run`). The prompt also covers the previously-unguarded
   non-replayable tools (web / MCP / subagent / computer-use) under `ask`.
 
+### Changed
+
+- **Project instruction files are now exactly `AGENTS.md` + `MERMAID.md`.**
+  `CLAUDE.md` and `GEMINI.md` are no longer auto-loaded. `AGENTS.md` (the
+  cross-tool open standard) loads first; `MERMAID.md` (mermaid-specific) loads
+  last and overrides it on conflict. **BREAKING** for anyone relying on
+  CLAUDE.md/GEMINI.md auto-loading. (The `find_mermaid_md` back-compat helper
+  was removed.)
+
 ### Fixed
 
 - The `/clear` (and other) confirmation modal was inert — nothing rendered it
   and no key handler read it. It now shows and accepts `y`/`n`.
+- **Chat spacing:** a turn that thought and then immediately called a tool
+  (hidden reasoning + empty text + actions) rendered the "Reasoning hidden"
+  placeholder flush against the first tool block. It now gets the same single
+  blank-line gap every other block has.
 - **System prompt** refreshed: it now documents the safety/permission modes
   (and how to behave when an action is gated — explain, don't spam retries),
   the tool set, and the in-session controls.
