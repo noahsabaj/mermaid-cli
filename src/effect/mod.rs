@@ -104,6 +104,10 @@ pub struct EffectRunner {
     /// Headless `mermaid run` must suppress them so stdout stays
     /// machine-readable for JSON/markdown/text output modes.
     terminal_title_enabled: bool,
+    /// Inline-approval broker. `Some` only for interactive TUI runs (set via
+    /// `with_interactive_approvals`); headless + child runners leave it `None`,
+    /// so the gate falls back to the out-of-band DB-approval flow.
+    approval: Option<crate::providers::ApprovalBroker>,
 }
 
 impl EffectRunner {
@@ -118,7 +122,16 @@ impl EffectRunner {
             tools: None,
             task_id: None,
             terminal_title_enabled: true,
+            approval: None,
         }
+    }
+
+    /// Enable inline approval prompts (interactive TUI only). The gate then
+    /// pauses gated tools and routes the user's decision through the
+    /// `ApprovalBroker` instead of writing an out-of-band DB approval row.
+    pub fn with_interactive_approvals(mut self) -> Self {
+        self.approval = Some(crate::providers::ApprovalBroker::new(self.msg_tx.clone()));
+        self
     }
 
     /// Attach a durable runtime task id so tool runs, approvals,
@@ -354,6 +367,7 @@ impl EffectRunner {
                         None
                     };
                 let task_id = self.task_id.clone();
+                let approval = self.approval.clone();
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
@@ -371,9 +385,17 @@ impl EffectRunner {
                         safety_mode,
                         intent,
                         classifier,
+                        approval,
                     )
                     .await;
                 });
+            },
+            Cmd::ResolveApproval { call_id, decision } => {
+                // Deliver the user's inline decision to the parked tool task.
+                // Not turn-scoped — fire-and-forget to the broker.
+                if let Some(broker) = &self.approval {
+                    broker.resolve(call_id, decision.into());
+                }
             },
             Cmd::CancelScope(turn) => {
                 self.drop_scope(turn);
@@ -1504,6 +1526,7 @@ async fn dispatch_execute_tool(
     safety_mode: crate::runtime::SafetyMode,
     intent: Option<String>,
     classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
+    approval: Option<crate::providers::ApprovalBroker>,
 ) {
     let _ = msg_tx.send(Msg::ToolStarted { turn, call_id }).await;
 
@@ -1604,6 +1627,7 @@ async fn dispatch_execute_tool(
         safety_mode,
         intent,
         classifier,
+        approval,
     );
     let before_payload = serde_json::json!({
         "turn_id": turn.0,

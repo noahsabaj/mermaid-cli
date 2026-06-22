@@ -222,6 +222,30 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         } => {
             handle_tool_finished(&mut state, &mut cmds, turn, call_id, outcome);
         },
+        Msg::ApprovalRequested {
+            turn,
+            call_id,
+            tool,
+            risk,
+            kind,
+            prompt,
+            allowlist_scope,
+        } => {
+            // Enqueue a modal; the parked tool task waits until the user
+            // answers (key handler → Cmd::ResolveApproval). FIFO so multiple
+            // gated tools in one turn are shown one at a time.
+            state
+                .pending_approval
+                .push_back(super::state::PendingApproval {
+                    turn,
+                    call_id,
+                    tool,
+                    risk,
+                    kind,
+                    prompt,
+                    allowlist_scope,
+                });
+        },
 
         // ── MCP ─────────────────────────────────────────────────────
         // F5: upsert semantics. State::new seeds entries for configured
@@ -434,6 +458,50 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // provider/tool scope before returning the terminal.
     if mods.ctrl && code == KeyCode::Char('c') {
         request_exit(state, cmds);
+        return;
+    }
+
+    // Inline approval modal: while a tool awaits approval the prompt is
+    // exclusive. 1/y/Enter approve · 2/a approve + don't-ask-again · 3/n/Esc
+    // deny. Sits ABOVE the Esc-cancel guard so Esc denies just this tool
+    // (keeping the turn alive) rather than cancelling the whole turn. Any
+    // other key is swallowed. Resolving emits `Cmd::ResolveApproval`, which
+    // unblocks the parked tool task via the broker.
+    if let Some(item) = state.pending_approval.front() {
+        use crate::domain::ApprovalChoice;
+        let choice = match code {
+            KeyCode::Char('1') | KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                Some(ApprovalChoice::Approve)
+            },
+            KeyCode::Char('2') | KeyCode::Char('a') | KeyCode::Char('A') => {
+                Some(ApprovalChoice::ApproveAlways)
+            },
+            KeyCode::Char('3') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Escape => {
+                Some(ApprovalChoice::Deny)
+            },
+            _ => None,
+        };
+        if let Some(decision) = choice {
+            let call_id = item.call_id;
+            state.pending_approval.pop_front();
+            cmds.push(Cmd::ResolveApproval { call_id, decision });
+        }
+        return;
+    }
+
+    // Pending confirmation modal (e.g. `/clear`): y/Enter accepts, n/Esc
+    // declines. (This handler — and the render side — were missing, so the
+    // confirmation was previously inert.)
+    if state.confirm.is_some() {
+        match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                handle_confirm_accepted(state, cmds);
+            },
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Escape => {
+                state.confirm = None;
+            },
+            _ => {},
+        }
         return;
     }
 
@@ -2016,6 +2084,9 @@ fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
         return;
     }
     cmds.push(Cmd::CancelScope(id));
+    // The cancelled turn's tool tasks are aborted; their parked approval
+    // requests can never be answered, so drop any queued prompts.
+    state.pending_approval.clear();
     state.turn = TurnState::Cancelling {
         id,
         since: std::time::SystemTime::now(),
@@ -2031,6 +2102,7 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     }
     state.should_exit = true;
     state.ui.pending_msgs.clear();
+    state.pending_approval.clear();
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
     cmds.push(Cmd::Exit);
 }
@@ -3546,6 +3618,125 @@ mod tests {
             Msg::Slash(SlashCmd::Safety(Some(crate::runtime::SafetyMode::Auto))),
         );
         assert_eq!(state.session.safety_mode, crate::runtime::SafetyMode::Auto);
+    }
+
+    /// State with one queued approval (turn must accept the message, so put
+    /// the reducer in a live turn first).
+    fn pending_approval_state() -> State {
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(1));
+        let (state, _) = update(
+            state,
+            Msg::ApprovalRequested {
+                turn: TurnId(1),
+                call_id: super::super::ids::ToolCallId(5),
+                tool: "execute_command".to_string(),
+                risk: "shell_mutation".to_string(),
+                kind: crate::domain::ApprovalKind::Shell,
+                prompt: "$ npm test".to_string(),
+                allowlist_scope: "execute_command:npm".to_string(),
+            },
+        );
+        state
+    }
+
+    fn key(code: KeyCode) -> Msg {
+        Msg::Key(Key {
+            code,
+            modifiers: KeyMods::NONE,
+        })
+    }
+
+    #[test]
+    fn approval_requested_enqueues_modal() {
+        let state = pending_approval_state();
+        assert_eq!(state.pending_approval.len(), 1);
+        assert_eq!(
+            state.pending_approval.front().unwrap().tool,
+            "execute_command"
+        );
+    }
+
+    #[test]
+    fn approval_keys_emit_the_right_decision() {
+        use crate::domain::ApprovalChoice as A;
+        for (code, expected) in [
+            (KeyCode::Char('1'), A::Approve),
+            (KeyCode::Char('y'), A::Approve),
+            (KeyCode::Enter, A::Approve),
+            (KeyCode::Char('2'), A::ApproveAlways),
+            (KeyCode::Char('a'), A::ApproveAlways),
+            (KeyCode::Char('3'), A::Deny),
+            (KeyCode::Char('n'), A::Deny),
+            (KeyCode::Escape, A::Deny),
+        ] {
+            let (state, cmds) = update(pending_approval_state(), key(code));
+            assert!(
+                state.pending_approval.is_empty(),
+                "{code:?} should pop the modal"
+            );
+            assert!(
+                cmds.iter().any(
+                    |c| matches!(c, Cmd::ResolveApproval { decision, .. } if *decision == expected)
+                ),
+                "{code:?} should resolve {expected:?}; got {cmds:?}",
+            );
+            // Esc on an approval denies the tool — it must NOT cancel the turn.
+            if code == KeyCode::Escape {
+                assert!(
+                    !cmds.iter().any(|c| matches!(c, Cmd::CancelScope(_))),
+                    "Esc on an approval must deny, not cancel the turn",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn approval_modal_swallows_unrelated_keys() {
+        let (state, cmds) = update(pending_approval_state(), key(KeyCode::Char('x')));
+        assert_eq!(
+            state.pending_approval.len(),
+            1,
+            "unrelated key must not pop the modal"
+        );
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn approval_fifo_shows_one_at_a_time() {
+        let state = pending_approval_state();
+        let (state, _) = update(
+            state,
+            Msg::ApprovalRequested {
+                turn: TurnId(1),
+                call_id: super::super::ids::ToolCallId(6),
+                tool: "write_file".to_string(),
+                risk: "file_mutation".to_string(),
+                kind: crate::domain::ApprovalKind::FileMutation,
+                prompt: "src/x.rs".to_string(),
+                allowlist_scope: "write_file".to_string(),
+            },
+        );
+        assert_eq!(state.pending_approval.len(), 2);
+        let (state, _) = update(state, key(KeyCode::Char('1')));
+        assert_eq!(state.pending_approval.len(), 1);
+        assert_eq!(state.pending_approval.front().unwrap().tool, "write_file");
+    }
+
+    #[test]
+    fn clear_confirm_now_accepts_via_keypress() {
+        // Regression: the /clear confirmation was inert (never rendered, never
+        // key-handled). It now resolves on a keypress.
+        let mut state = fresh_state();
+        state.confirm = Some(super::super::state::Confirmation {
+            prompt: "Clear conversation history?".to_string(),
+            accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
+        });
+        let (state, _) = update(state, key(KeyCode::Char('y')));
+        assert!(
+            state.confirm.is_none(),
+            "y should accept and clear the confirm modal"
+        );
     }
 
     #[test]

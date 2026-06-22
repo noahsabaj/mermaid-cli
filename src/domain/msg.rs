@@ -32,7 +32,7 @@ use super::ids::{ToolCallId, TurnId};
 use super::runtime::RuntimeSignal;
 use super::state::ContextUsageSnapshot;
 use super::state::StatusKind;
-use super::state::{ConversationSummary, McpToolSpec, ToolOutcome};
+use super::state::{ApprovalKind, ConversationSummary, McpToolSpec, ToolOutcome};
 use super::{CompactionResult, CompactionTrigger};
 
 /// Single reducer input. Non-exhaustive is intentional: adding a new
@@ -155,6 +155,20 @@ pub enum Msg {
         turn: TurnId,
         call_id: ToolCallId,
         outcome: ToolOutcome,
+    },
+    /// A gated tool is awaiting the user's inline approval (interactive
+    /// `ask` mode / Auto-mode escalation). The reducer enqueues a modal; the
+    /// answer flows back as `Cmd::ResolveApproval`. The tool task is parked
+    /// until then, so the turn naturally pauses (its outcome slot stays
+    /// `None`).
+    ApprovalRequested {
+        turn: TurnId,
+        call_id: ToolCallId,
+        tool: String,
+        risk: String,
+        kind: ApprovalKind,
+        prompt: String,
+        allowlist_scope: String,
     },
 
     // ── MCP (from effect::mcp) ──────────────────────────────────────
@@ -398,7 +412,8 @@ impl Msg {
             | Msg::UpstreamError { turn, .. }
             | Msg::ToolStarted { turn, .. }
             | Msg::ToolProgress { turn, .. }
-            | Msg::ToolFinished { turn, .. } => Some(*turn),
+            | Msg::ToolFinished { turn, .. }
+            | Msg::ApprovalRequested { turn, .. } => Some(*turn),
             Msg::TurnCancelled(turn) => Some(*turn),
             _ => None,
         }
@@ -427,6 +442,7 @@ impl Msg {
             Msg::ToolStarted { .. } => MsgKind::ToolStarted,
             Msg::ToolProgress { .. } => MsgKind::ToolProgress,
             Msg::ToolFinished { .. } => MsgKind::ToolFinished,
+            Msg::ApprovalRequested { .. } => MsgKind::ApprovalRequested,
             Msg::TurnCancelled(_) => MsgKind::TurnCancelled,
             Msg::McpServerReady { .. }
             | Msg::McpServerErrored { .. }
@@ -477,6 +493,7 @@ pub enum MsgKind {
     ToolStarted,
     ToolProgress,
     ToolFinished,
+    ApprovalRequested,
     TurnCancelled,
     Mcp,
     InstructionsChanged,

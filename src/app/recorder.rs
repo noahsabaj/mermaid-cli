@@ -202,6 +202,16 @@ pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
             "call_id": call_id.0,
             "outcome": outcome_body(outcome),
         }),
+        Msg::ApprovalRequested {
+            call_id,
+            tool,
+            risk,
+            ..
+        } => serde_json::json!({
+            "call_id": call_id.0,
+            "tool": tool,
+            "risk": risk,
+        }),
         Msg::McpServerReady { name, tools } => serde_json::json!({
             "name": name,
             "tools": tools.iter().map(|tool| serde_json::json!({

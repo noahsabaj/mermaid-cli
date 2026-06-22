@@ -94,7 +94,10 @@ pub async fn run_interactive_with(
         crate::providers::TuiMode::Interactive,
         providers.clone(),
     );
-    let (mut runner, mut msg_rx) = EffectRunner::pair_from(cwd.clone(), providers, tools);
+    let (runner, mut msg_rx) = EffectRunner::pair_from(cwd.clone(), providers, tools);
+    // Interactive TUI: enable inline approval prompts so `ask` mode (and Auto
+    // escalations) pause and prompt instead of erroring out.
+    let mut runner = runner.with_interactive_approvals();
     let mut terminal = Some(TerminalGuard::setup()?);
     let mut rstate = RenderCache::new();
     let mut events = EventStream::new();

@@ -12,6 +12,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Image Paste** — Ctrl+V to attach images for vision models (X11/Wayland/macOS/Windows)
 - **Reasoning Levels** — seven tiers (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`); cycle with Alt+T or set via `/reasoning`; persisted per-model
 - **Safety Modes** — `read_only`/`ask`/`auto`/`full_access`; `auto` is classifier-backed (an LLM vets each borderline action against your intent, auto-running aligned ones and escalating risky ones); cycle live with Shift+Tab or `/safety`
+- **Inline approvals** — in `ask` mode (and `auto` escalations) a gated action pauses and prompts inline (`1` Yes · `2` Yes, don't ask again · `3`/Esc No); the agent waits for your answer instead of erroring out
 - **Project Instructions** — auto-loads `MERMAID.md`, `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`; edits take effect on the next turn
 - **MCP Servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers (`mermaid add <name>`)
 - **Session Persistence** — conversations auto-save and resume with `--continue`

@@ -39,10 +39,11 @@ pub use runtime::{
 };
 pub use slash_commands::{COMMAND_GROUPS, COMMAND_REGISTRY, SlashCommand, filter_by_prefix};
 pub use state::{
-    Attachment, Confirmation, ConfirmationTarget, ContextUsageSnapshot, ConversationSummary,
-    GenPhase, IdAllocatorBundle, McpServerEntry, McpServerStatus, McpState, McpToolSpec,
-    PendingToolCall, PromptTokenBreakdown, Session, State, StatusKind, StatusLine,
-    TokenUsageTotals, ToolOutcome, TurnState, UiMode, UiState, estimate_context_usage_for_request,
+    ApprovalChoice, ApprovalKind, Attachment, Confirmation, ConfirmationTarget,
+    ContextUsageSnapshot, ConversationSummary, GenPhase, IdAllocatorBundle, McpServerEntry,
+    McpServerStatus, McpState, McpToolSpec, PendingApproval, PendingToolCall, PromptTokenBreakdown,
+    Session, State, StatusKind, StatusLine, TokenUsageTotals, ToolOutcome, TurnState, UiMode,
+    UiState, estimate_context_usage_for_request,
 };
 pub use transition::{
     action_display_for, commit_assistant_message, fill_outcome, start_executing_tools,

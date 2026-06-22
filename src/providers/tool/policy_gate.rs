@@ -28,7 +28,8 @@
 
 use std::path::PathBuf;
 
-use crate::domain::ToolOutcome;
+use crate::domain::{ApprovalKind, ToolOutcome};
+use crate::providers::{ApprovalBroker, ApprovalDecision, allowlist_key};
 use crate::runtime::{
     ActionRequest, NewApproval, PolicyDecision, PolicyEngine, RiskClass, RuntimeStore,
     create_checkpoint_for_task, run_plugin_hooks,
@@ -84,25 +85,32 @@ pub async fn gate(
     match decision {
         PolicyDecision::Allow { risk, .. } => Gate::Proceed { risk },
         PolicyDecision::Ask { risk, checkpoint } => {
-            if !replayable {
-                // No checkpoint/replay path exists for this tool, so an Ask
-                // can't be satisfied out-of-band. ReadOnly already Denied
-                // (handled below); for Ask we proceed.
+            if let Some(broker) = &ctx.approval {
+                // Interactive: prompt the user inline. This works for
+                // replayable AND non-replayable tools — approval runs the
+                // action now, so no out-of-band replay is needed (fixes the
+                // old non-replayable bypass).
+                inline_decision(ctx, broker, &request, risk, None).await
+            } else if !replayable {
+                // Headless non-replayable: no checkpoint/replay path, so an Ask
+                // can't be satisfied out-of-band — proceed (only ReadOnly/Deny
+                // blocks these).
                 tracing::debug!(
                     tool = %request.tool,
-                    "policy Ask on non-replayable tool; proceeding (only ReadOnly/Deny blocks it)",
+                    "policy Ask on non-replayable tool with no approval UI; proceeding",
                 );
-                return Gate::Proceed { risk };
+                Gate::Proceed { risk }
+            } else {
+                block_for_approval(
+                    ctx,
+                    &request,
+                    checkpoint,
+                    checkpoint_paths,
+                    pending_action,
+                    risk,
+                    None,
+                )
             }
-            block_for_approval(
-                ctx,
-                &request,
-                checkpoint,
-                checkpoint_paths,
-                pending_action,
-                risk,
-                None,
-            )
         },
         PolicyDecision::Classify { risk, checkpoint } => {
             // Auto mode: an LLM vets the borderline action against the user's
@@ -125,8 +133,11 @@ pub async fn gate(
             };
             if verdict.allow {
                 Gate::Proceed { risk }
+            } else if let Some(broker) = &ctx.approval {
+                // Interactive: escalate to an inline prompt carrying the reason.
+                inline_decision(ctx, broker, &request, risk, Some(verdict.reason)).await
             } else if replayable {
-                // Escalate to a human approval the user can approve + replay.
+                // Headless: escalate to a human approval the user can replay.
                 block_for_approval(
                     ctx,
                     &request,
@@ -137,8 +148,7 @@ pub async fn gate(
                     Some(verdict.reason),
                 )
             } else {
-                // Non-replayable: an approval can't be satisfied out-of-band,
-                // so block with the classifier's reason for the model to see.
+                // Non-replayable + headless: block with the reason for the model.
                 Gate::Block(ToolOutcome::error(
                     format!(
                         "{} blocked by Auto-mode safety review: {}",
@@ -152,6 +162,78 @@ pub async fn gate(
             format!("{} blocked by policy: {}", request.summary, reason),
             0.0,
         )),
+    }
+}
+
+/// Interactive approval: check the session "don't ask again" allowlist, else
+/// prompt the user (parking the tool task) and map their answer to a `Gate`.
+/// Approval runs the action inline, so the tool's own Proceed-path checkpoint
+/// covers restorability — no DB approval row / replay needed.
+async fn inline_decision(
+    ctx: &ExecContext,
+    broker: &ApprovalBroker,
+    request: &ActionRequest,
+    risk: RiskClass,
+    classifier_reason: Option<String>,
+) -> Gate {
+    let key = allowlist_key(&request.tool, request.command.as_deref());
+    if broker.is_allowlisted(&key) {
+        return Gate::Proceed { risk };
+    }
+    let kind = if classifier_reason.is_some() {
+        ApprovalKind::Classify
+    } else {
+        approval_kind(request.category)
+    };
+    let prompt = format_approval_body(request, classifier_reason.as_deref());
+    let decision = broker
+        .request(
+            &ctx.token,
+            ctx.turn,
+            ctx.call_id,
+            request.tool.clone(),
+            risk.as_str().to_string(),
+            kind,
+            prompt,
+            key,
+        )
+        .await;
+    match decision {
+        ApprovalDecision::Approve | ApprovalDecision::ApproveAlways => Gate::Proceed { risk },
+        ApprovalDecision::Deny => Gate::Block(ToolOutcome::error(
+            format!("{} — denied by you", request.summary),
+            0.0,
+        )),
+    }
+}
+
+/// Build the modal body: the concrete command/path being run, plus any
+/// Auto-review reason. Kept here so the render layer stays dumb.
+fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>) -> String {
+    let mut body = if let Some(cmd) = &request.command {
+        format!("$ {}", cmd)
+    } else if let Some(path) = &request.path {
+        format!("{}  ({})", path, request.summary)
+    } else {
+        request.summary.clone()
+    };
+    if let Some(reason) = classifier_reason {
+        body.push_str(&format!("\n\nAuto-review flagged this: {}", reason));
+    }
+    body
+}
+
+fn approval_kind(category: crate::runtime::ToolCategory) -> ApprovalKind {
+    use crate::runtime::ToolCategory as C;
+    match category {
+        C::Edit => ApprovalKind::FileMutation,
+        C::Shell | C::Git | C::Process => ApprovalKind::Shell,
+        C::Web | C::Network | C::ExternalDirectory => ApprovalKind::Web,
+        C::Mcp => ApprovalKind::Mcp,
+        C::Subagent => ApprovalKind::Subagent,
+        C::ComputerUse => ApprovalKind::ComputerUse,
+        // Read ⇒ Allow, so this never reaches approval; keep the match total.
+        C::Read => ApprovalKind::Shell,
     }
 }
 
@@ -274,6 +356,7 @@ mod tests {
             mode,
             None,
             None,
+            None,
         )
     }
 
@@ -310,6 +393,7 @@ mod tests {
             SafetyMode::Auto,
             Some("fetch the changelog".to_string()),
             classifier,
+            None,
         )
     }
 
@@ -401,5 +485,120 @@ mod tests {
             .is_some(),
             "missing classifier must fail safe (block), not allow",
         );
+    }
+
+    /// Build an `Ask`-mode ctx with an inline-approval broker bound.
+    fn ctx_with_broker(broker: crate::providers::ApprovalBroker) -> ExecContext {
+        let mut config = crate::app::Config::default();
+        config.safety.mode = SafetyMode::Ask;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(4);
+        ExecContext::new(
+            tokio_util::sync::CancellationToken::new(),
+            tx,
+            ToolCallId(7),
+            TurnId(1),
+            PathBuf::from("."),
+            Arc::new(config),
+            String::new(),
+            None,
+            SafetyMode::Ask,
+            None,
+            None,
+            Some(broker),
+        )
+    }
+
+    fn shell_request(cmd: &str) -> ActionRequest {
+        let mut req = ActionRequest::new("execute_command", ToolCategory::Shell, cmd);
+        req.command = Some(cmd.to_string());
+        req
+    }
+
+    #[tokio::test]
+    async fn inline_ask_approve_proceeds() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::domain::Msg>(8);
+        let broker = crate::providers::ApprovalBroker::new(tx);
+        let ctx = ctx_with_broker(broker.clone());
+        let handle = tokio::spawn(async move {
+            gate(
+                &ctx,
+                shell_request("npm test"),
+                &[],
+                serde_json::json!({}),
+                true,
+            )
+            .await
+        });
+        // Observe the prompt, then approve it.
+        let call_id = match rx.recv().await.expect("approval requested") {
+            crate::domain::Msg::ApprovalRequested { call_id, .. } => call_id,
+            other => panic!("expected ApprovalRequested, got {other:?}"),
+        };
+        broker.resolve(call_id, crate::providers::ApprovalDecision::Approve);
+        assert!(matches!(handle.await.unwrap(), Gate::Proceed { .. }));
+    }
+
+    #[tokio::test]
+    async fn inline_ask_deny_blocks() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::domain::Msg>(8);
+        let broker = crate::providers::ApprovalBroker::new(tx);
+        let ctx = ctx_with_broker(broker.clone());
+        let handle = tokio::spawn(async move {
+            gate(
+                &ctx,
+                shell_request("rm -rf node_modules"),
+                &[],
+                serde_json::json!({}),
+                true,
+            )
+            .await
+        });
+        let call_id = match rx.recv().await.expect("approval requested") {
+            crate::domain::Msg::ApprovalRequested { call_id, .. } => call_id,
+            other => panic!("expected ApprovalRequested, got {other:?}"),
+        };
+        broker.resolve(call_id, crate::providers::ApprovalDecision::Deny);
+        assert!(matches!(handle.await.unwrap(), Gate::Block(_)));
+    }
+
+    #[tokio::test]
+    async fn inline_allowlisted_skips_prompt() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::domain::Msg>(8);
+        let broker = crate::providers::ApprovalBroker::new(tx);
+        // Approve-always once so the key is allowlisted, then a second call
+        // must proceed WITHOUT emitting another prompt.
+        let ctx1 = ctx_with_broker(broker.clone());
+        let b1 = broker.clone();
+        let h1 = tokio::spawn(async move {
+            gate(
+                &ctx1,
+                shell_request("npm run build"),
+                &[],
+                serde_json::json!({}),
+                true,
+            )
+            .await
+        });
+        let id = match rx.recv().await.expect("first prompt") {
+            crate::domain::Msg::ApprovalRequested { call_id, .. } => call_id,
+            other => panic!("got {other:?}"),
+        };
+        b1.resolve(id, crate::providers::ApprovalDecision::ApproveAlways);
+        assert!(matches!(h1.await.unwrap(), Gate::Proceed { .. }));
+
+        let ctx2 = ctx_with_broker(broker.clone());
+        let g2 = gate(
+            &ctx2,
+            shell_request("npm test"),
+            &[],
+            serde_json::json!({}),
+            true,
+        )
+        .await;
+        assert!(
+            matches!(g2, Gate::Proceed { .. }),
+            "allowlisted key should skip the prompt"
+        );
+        assert!(rx.try_recv().is_err(), "no second prompt should be sent");
     }
 }
