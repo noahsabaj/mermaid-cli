@@ -17,6 +17,9 @@ pub struct ApprovalModalWidget<'a> {
     pub body: &'a str,
     /// The numbered option lines, e.g. `"1. Yes"`.
     pub options: Vec<String>,
+    /// Highlighted option for arrow-key navigation, if the modal supports it
+    /// (`None` for plain confirmations that only take y/n).
+    pub selected_index: Option<usize>,
     /// Border + title accent.
     pub accent: Color,
 }
@@ -37,13 +40,18 @@ impl<'a> Widget for ApprovalModalWidget<'a> {
             )));
         }
         lines.push(Line::from(""));
-        for opt in &self.options {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", opt),
+        for (idx, opt) in self.options.iter().enumerate() {
+            let style = if self.selected_index == Some(idx) {
+                // Highlighted row — mirrors the slash palette's selection style.
+                Style::default()
+                    .fg(self.theme.colors.text_highlight.to_color())
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
                 Style::default()
                     .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )));
+                    .add_modifier(Modifier::BOLD)
+            };
+            lines.push(Line::from(Span::styled(format!("  {}", opt), style)));
         }
         Paragraph::new(lines).block(block).render(area, buf);
     }

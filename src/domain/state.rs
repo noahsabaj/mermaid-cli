@@ -855,6 +855,9 @@ pub struct PendingApproval {
     pub prompt: String,
     /// What "don't ask again" (option 2) will allowlist, shown in the prompt.
     pub allowlist_scope: String,
+    /// Highlighted option for arrow-key navigation: 0 = Yes, 1 = Yes-always,
+    /// 2 = No. Number keys (1/2/3) still resolve directly regardless of this.
+    pub selected_option: usize,
 }
 
 /// The user's answer to an approval prompt.

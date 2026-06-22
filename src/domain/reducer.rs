@@ -244,6 +244,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     kind,
                     prompt,
                     allowlist_scope,
+                    selected_option: 0,
                 });
         },
 
@@ -459,15 +460,30 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     }
 
     // Inline approval modal: while a tool awaits approval the prompt is
-    // exclusive. 1/y/Enter approve · 2/a approve + don't-ask-again · 3/n/Esc
-    // deny. Sits ABOVE the Esc-cancel guard so Esc denies just this tool
-    // (keeping the turn alive) rather than cancelling the whole turn. Any
-    // other key is swallowed. Resolving emits `Cmd::ResolveApproval`, which
-    // unblocks the parked tool task via the broker.
-    if let Some(item) = state.pending_approval.front() {
+    // exclusive. Direct keys resolve immediately — 1/y approve · 2/a approve +
+    // don't-ask-again · 3/n/Esc deny. Or move the highlight with ↑/↓ and press
+    // Enter on it. Sits ABOVE the Esc-cancel guard so Esc denies just this tool
+    // (keeping the turn alive) rather than cancelling the whole turn. Any other
+    // key is swallowed. Resolving emits `Cmd::ResolveApproval`, which unblocks
+    // the parked tool task via the broker.
+    if !state.pending_approval.is_empty() {
         use crate::domain::ApprovalChoice;
+        // 0 = Yes, 1 = Yes-always, 2 = No.
+        const APPROVAL_OPTIONS: usize = 3;
+        let choice_for = |idx: usize| match idx {
+            0 => ApprovalChoice::Approve,
+            1 => ApprovalChoice::ApproveAlways,
+            _ => ApprovalChoice::Deny,
+        };
+        // Copy the current highlight out so the ↑/↓ arms can take a fresh
+        // mutable borrow without conflicting.
+        let selected = state
+            .pending_approval
+            .front()
+            .map(|i| i.selected_option)
+            .unwrap_or(0);
         let choice = match code {
-            KeyCode::Char('1') | KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            KeyCode::Char('1') | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 Some(ApprovalChoice::Approve)
             },
             KeyCode::Char('2') | KeyCode::Char('a') | KeyCode::Char('A') => {
@@ -476,10 +492,24 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             KeyCode::Char('3') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Escape => {
                 Some(ApprovalChoice::Deny)
             },
+            KeyCode::Enter => Some(choice_for(selected)),
+            KeyCode::Up => {
+                if let Some(front) = state.pending_approval.front_mut() {
+                    front.selected_option = selected.saturating_sub(1);
+                }
+                None
+            },
+            KeyCode::Down => {
+                if let Some(front) = state.pending_approval.front_mut() {
+                    front.selected_option = (selected + 1).min(APPROVAL_OPTIONS - 1);
+                }
+                None
+            },
             _ => None,
         };
-        if let Some(decision) = choice {
-            let call_id = item.call_id;
+        if let Some(decision) = choice
+            && let Some(call_id) = state.pending_approval.front().map(|i| i.call_id)
+        {
             state.pending_approval.pop_front();
             cmds.push(Cmd::ResolveApproval { call_id, decision });
         }
@@ -3726,6 +3756,41 @@ mod tests {
             "unrelated key must not pop the modal"
         );
         assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn approval_arrows_move_highlight_without_resolving() {
+        // ↓ moves the highlight and clamps at the last option; ↑ moves back.
+        // Neither resolves the modal.
+        let (state, cmds) = update(pending_approval_state(), key(KeyCode::Down));
+        assert_eq!(state.pending_approval.front().unwrap().selected_option, 1);
+        assert!(cmds.is_empty() && state.pending_approval.len() == 1);
+
+        let (state, _) = update(state, key(KeyCode::Down));
+        assert_eq!(state.pending_approval.front().unwrap().selected_option, 2);
+        let (state, _) = update(state, key(KeyCode::Down)); // clamps at 2
+        assert_eq!(state.pending_approval.front().unwrap().selected_option, 2);
+        let (state, _) = update(state, key(KeyCode::Up));
+        assert_eq!(state.pending_approval.front().unwrap().selected_option, 1);
+    }
+
+    #[test]
+    fn approval_enter_resolves_the_highlighted_option() {
+        use crate::domain::ApprovalChoice as A;
+        // Highlight option 3 (No) with two ↓, then Enter → Deny.
+        let (state, _) = update(pending_approval_state(), key(KeyCode::Down));
+        let (state, _) = update(state, key(KeyCode::Down));
+        let (state, cmds) = update(state, key(KeyCode::Enter));
+        assert!(
+            state.pending_approval.is_empty(),
+            "Enter should pop the modal"
+        );
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, Cmd::ResolveApproval { decision, .. } if *decision == A::Deny)
+            ),
+            "Enter on the highlighted 'No' must deny; got {cmds:?}"
+        );
     }
 
     #[test]
