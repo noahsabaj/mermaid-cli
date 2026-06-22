@@ -347,13 +347,15 @@ pub fn filter_by_prefix(typed: &str) -> Vec<&'static SlashCommand> {
     if needle.is_empty() {
         return COMMAND_REGISTRY.iter().collect();
     }
+    // Plain prefix match against the canonical name and aliases. Typing the
+    // first word of a hyphenated command (`consolidate`) must reveal it
+    // (`consolidate-memory`) — an earlier carve-out that hid hyphenated names
+    // from hyphenless prefixes broke that for commands without a hyphenless
+    // alias.
     COMMAND_REGISTRY
         .iter()
         .filter(|cmd| {
-            let name_matches = cmd.name == needle
-                || (!cmd.name.contains('-') || needle.contains('-'))
-                    && cmd.name.starts_with(&needle);
-            name_matches || cmd.aliases.iter().any(|a| a.starts_with(&needle))
+            cmd.name.starts_with(&needle) || cmd.aliases.iter().any(|a| a.starts_with(&needle))
         })
         .collect()
 }
@@ -371,17 +373,42 @@ mod tests {
     }
 
     #[test]
-    fn filter_by_prefix_exact_match() {
+    fn filter_by_prefix_includes_exact_name_first() {
+        // Prefix match surfaces `model` (and any longer `model-*`); the exact
+        // name stays first by registry order.
         let result = filter_by_prefix("model");
-        assert_eq!(result.len(), 1);
+        assert!(result.iter().any(|c| c.name == "model"));
         assert_eq!(result[0].name, "model");
     }
 
     #[test]
-    fn filter_by_prefix_partial_prefix_matches_one() {
+    fn filter_by_prefix_partial_prefix_includes_model() {
         let result = filter_by_prefix("mod");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "model");
+        assert!(result.iter().any(|c| c.name == "model"));
+    }
+
+    #[test]
+    fn filter_by_prefix_matches_hyphenated_command_by_first_word() {
+        // Regression: typing the first word of a hyphenated command must
+        // reveal it, even before the hyphen — and at shorter prefixes too.
+        // Previously `/consolidate` showed nothing until `/consolidate-`.
+        assert!(
+            filter_by_prefix("consolidate")
+                .iter()
+                .any(|c| c.name == "consolidate-memory"),
+            "/consolidate must surface /consolidate-memory"
+        );
+        assert!(
+            filter_by_prefix("conso")
+                .iter()
+                .any(|c| c.name == "consolidate-memory")
+        );
+        // Other hyphenated commands too.
+        assert!(
+            filter_by_prefix("cloud")
+                .iter()
+                .any(|c| c.name == "cloud-setup")
+        );
     }
 
     #[test]
@@ -405,7 +432,7 @@ mod tests {
     fn filter_by_prefix_is_case_insensitive() {
         // User shouldn't have to type lowercase /Q or /MODEL.
         let upper = filter_by_prefix("MODEL");
-        assert_eq!(upper.len(), 1);
+        assert!(upper.iter().any(|c| c.name == "model"));
         assert_eq!(upper[0].name, "model");
     }
 
