@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chat scrollbar.** The transcript now shows a scrollbar (ratatui 0.30's
+  `Scrollbar`) in a reserved right-hand gutter whenever it overflows the
+  viewport, so you can see scroll position at a glance. Dropped the unused
+  `palette` and `macros` ratatui features for a leaner build; kept
+  `scrolling-regions`.
 - **Richer markdown rendering.** Assistant markdown is now theme-aware
   (headings, lists, blockquotes, links, tables all use the active theme's
   palette instead of hardcoded ANSI colors), fenced code blocks get **in-house

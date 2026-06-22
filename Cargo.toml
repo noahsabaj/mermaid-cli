@@ -43,7 +43,7 @@ tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 futures = "0.3"
 
 # TUI
-ratatui = { version = "0.30", features = ["scrolling-regions", "palette", "macros"] }
+ratatui = { version = "0.30", features = ["scrolling-regions"] }
 # `event-stream` flips crossterm's event reader into a `Stream` so the
 # v0.7 main loop can drive crossterm events + effect results off one
 # `tokio::select!`. No more dual event loops.

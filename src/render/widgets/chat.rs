@@ -5,7 +5,9 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, StatefulWidget, Widget},
+    widgets::{
+        Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget,
+    },
 };
 use rustc_hash::FxHashMap;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -291,6 +293,15 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             h.finish()
         };
 
+        // Reserve the rightmost column as a scrollbar gutter so the bar never
+        // paints over text. All content wrapping/rendering uses `content_area`.
+        let gutter: u16 = if area.width > 4 { 1 } else { 0 };
+        let content_width = area.width.saturating_sub(gutter);
+        let content_area = Rect {
+            width: content_width,
+            ..area
+        };
+
         // Clear click map for this render pass
         state.image_click_map.clear();
         state.last_chat_area = Some((area.x, area.y, area.width, area.height));
@@ -345,7 +356,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                         // Render thinking content with proper wrapping (2-space hanging indent)
                         let wrapped = wrap_text_with_indent(
                             thinking,
-                            area.width as usize,
+                            content_width as usize,
                             2, // first line indent (2 spaces)
                             2, // continuation indent (2 spaces)
                         );
@@ -436,7 +447,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     if preformatted {
                         lines.push(new_line);
                     } else {
-                        lines.extend(wrap_styled_line(new_line, area.width as usize, 2));
+                        lines.extend(wrap_styled_line(new_line, content_width as usize, 2));
                     }
                 }
 
@@ -446,7 +457,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     if !msg.content.trim().is_empty() {
                         lines.push(Line::from(""));
                     }
-                    render_actions(&msg.actions, &mut lines, self.theme, area.width as usize);
+                    render_actions(&msg.actions, &mut lines, self.theme, content_width as usize);
                 }
             } else {
                 // For User messages: format timestamp and display on right edge
@@ -465,7 +476,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 // Manually wrap the user message with hanging indent (2 spaces)
                 let wrapped = wrap_text_with_indent(
                     cleaned_content,
-                    area.width as usize,
+                    content_width as usize,
                     first_line_reserved, // reserve space for prefix + gap + timestamp on first line
                     2,                   // continuation indent
                 );
@@ -484,10 +495,11 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                             Span::raw(text_content.to_string()),
                         ];
 
-                        // Always add at least min_gap spaces, plus any extra from word-boundary slack
-                        let content_width = role_prefix_width + text_len;
-                        let total_used = content_width + min_gap + timestamp_len;
-                        let extra_padding = (area.width as usize).saturating_sub(total_used);
+                        // Always add at least min_gap spaces, plus any extra from word-boundary slack.
+                        // Align the timestamp to the content right edge (before the scrollbar gutter).
+                        let used_width = role_prefix_width + text_len;
+                        let total_used = used_width + min_gap + timestamp_len;
+                        let extra_padding = (content_width as usize).saturating_sub(total_used);
                         spans.push(Span::raw(" ".repeat(min_gap + extra_padding)));
                         spans.push(Span::styled(
                             formatted_timestamp.clone(),
@@ -581,7 +593,21 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             .block(Block::default())
             .scroll((scroll_pos, 0));
 
-        paragraph.render(area, buf);
+        paragraph.render(content_area, buf);
+
+        // Scrollbar in the reserved gutter — only when the transcript actually
+        // overflows the viewport. Uses ratatui's 0.30 Scrollbar widget.
+        if gutter == 1 && content_height > viewport_height {
+            let mut sb_state = ScrollbarState::new(content_height as usize)
+                .viewport_content_length(viewport_height as usize)
+                .position(scroll_pos as usize);
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::new().fg(self.theme.colors.border.to_color()))
+                .track_style(Style::new().fg(self.theme.colors.text_disabled.to_color()))
+                .render(area, buf, &mut sb_state);
+        }
     }
 }
 
