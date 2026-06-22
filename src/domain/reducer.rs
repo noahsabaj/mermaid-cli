@@ -1627,10 +1627,7 @@ fn doctor_text(state: &State) -> String {
                 ""
             }
         )),
-        None => lines.push(
-            "Project instructions: none loaded (MERMAID.md, AGENTS.md, CLAUDE.md, GEMINI.md)"
-                .to_string(),
-        ),
+        None => lines.push("Project instructions: none loaded (AGENTS.md, MERMAID.md)".to_string()),
     }
     lines.push(format!(
         "MCP servers: {} configured, {} ready",

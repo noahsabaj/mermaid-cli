@@ -13,7 +13,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Reasoning Levels** — seven tiers (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`); cycle with Alt+T or set via `/reasoning`; persisted per-model
 - **Safety Modes** — `read_only`/`ask`/`auto`/`full_access`; `auto` is classifier-backed (an LLM vets each borderline action against your intent, auto-running aligned ones and escalating risky ones); cycle live with Shift+Tab or `/safety`
 - **Inline approvals** — in `ask` mode (and `auto` escalations) a gated action pauses and prompts inline (`1` Yes · `2` Yes, don't ask again · `3`/Esc No); the agent waits for your answer instead of erroring out
-- **Project Instructions** — auto-loads `MERMAID.md`, `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`; edits take effect on the next turn
+- **Project Instructions** — auto-loads `AGENTS.md` and `MERMAID.md` (MERMAID.md wins on conflict); edits take effect on the next turn
 - **MCP Servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers (`mermaid add <name>`)
 - **Session Persistence** — conversations auto-save and resume with `--continue`
 - **Message Queuing** — type while the model generates, messages send in order
@@ -192,7 +192,7 @@ MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix
 
 ## Project Instructions
 
-Create a `MERMAID.md` at your project root with conventions, tool versions, naming patterns, and run commands. Mermaid also reads interoperable `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and `.mermaid/memory/memory.jsonl` from the same nearest matching directory, then auto-reloads when those files change (one `stat` per turn, no filesystem watcher). The walk stops at the `.git` root or `$HOME`.
+Create an `AGENTS.md` (the cross-tool open standard) and/or a `MERMAID.md` (mermaid-specific) at your project root with conventions, tool versions, naming patterns, and run commands. Both are loaded from the nearest matching directory — `AGENTS.md` first, then `MERMAID.md`, so MERMAID.md overrides on conflict — and Mermaid also reads `.mermaid/memory/memory.jsonl` from that directory. They auto-reload when the files change (one `stat` per turn, no filesystem watcher). The walk stops at the `.git` root or `$HOME`.
 
 ```markdown
 # Project: foo-service

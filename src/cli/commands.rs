@@ -293,7 +293,7 @@ async fn show_doctor(
     let project_instructions = if instruction_paths.is_empty() {
         DoctorCheck {
             status: "info",
-            message: "No MERMAID.md, AGENTS.md, CLAUDE.md, or GEMINI.md found.".to_string(),
+            message: "No AGENTS.md or MERMAID.md found.".to_string(),
         }
     } else if let Some(loaded) = crate::app::instructions::load_from_paths(&instruction_paths) {
         DoctorCheck {
@@ -1654,9 +1654,7 @@ async fn show_status(config: &Config) -> Result<()> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let paths = crate::app::instructions::find_instruction_files(&cwd);
         if paths.is_empty() {
-            println!(
-                "  [INFO] Project instructions: not found (MERMAID.md, AGENTS.md, CLAUDE.md, GEMINI.md)"
-            );
+            println!("  [INFO] Project instructions: not found (AGENTS.md, MERMAID.md)");
         } else {
             match crate::app::instructions::load_from_paths(&paths) {
                 Some(loaded) => {

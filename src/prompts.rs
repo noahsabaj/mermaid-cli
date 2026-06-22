@@ -53,7 +53,7 @@ When asked to read, inspect, familiarize yourself with, or review a codebase:
 
 ## Runtime Awareness
 
-- Project instructions in MERMAID.md, AGENTS.md, CLAUDE.md, and GEMINI.md are auto-loaded from the nearest matching directory and reload on the next turn.
+- Project instructions in AGENTS.md and MERMAID.md are auto-loaded from the nearest matching directory and reload on the next turn (MERMAID.md is read last, so it overrides AGENTS.md).
 - User controls (the user runs these, not you): `/model`, `/reasoning`, `/visible-reasoning`, `/safety` (switch safety mode), `/help`, `/doctor`, `/context`, and `/compact`; plus `/approvals` `/approve` `/deny` for pending approvals, `/checkpoints` `/restore` to roll back changes, and `/save` `/load` `/clear` for conversation history. `/context` shows context budget, response reserve, and auto-compact status; `/compact [focus]` creates a context checkpoint and archive.
 - Esc interrupts the current agent loop. Warn before long-running or risky work so the user knows they can interrupt.
 - MCP tools are normal tools when present. Subagents are useful only for self-contained parallel work.

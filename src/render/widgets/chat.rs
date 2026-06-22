@@ -226,8 +226,14 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                                     .dim(),
                             ),
                         ]));
+                        // Always separate the placeholder from whatever follows
+                        // (tool actions or the visible answer) with one blank
+                        // line — the same gap every other block gets. Without
+                        // this, a "thought, then called a tool" turn (empty
+                        // content + actions) rendered the placeholder flush
+                        // against the first "● Bash(…)" line.
+                        lines.push(Line::from(""));
                         if msg.content.trim().is_empty() && msg.actions.is_empty() {
-                            lines.push(Line::from(""));
                             continue;
                         }
                     } else if msg.content.trim().is_empty() && msg.actions.is_empty() {

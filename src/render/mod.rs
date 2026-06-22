@@ -492,6 +492,45 @@ mod tests {
         assert!(!frame.contains("second private chain of thought"));
     }
 
+    /// Regression: a "thought, then immediately called a tool" turn (hidden
+    /// reasoning + empty text + actions) must still put one blank line
+    /// between the "Reasoning hidden" placeholder and the first action —
+    /// the same gap every other block pair gets. Previously the placeholder
+    /// rendered flush against the first "● Bash(…)" line.
+    #[test]
+    fn reasoning_placeholder_is_gapped_from_following_action() {
+        let mut s = mock_state();
+        let mut msg = crate::models::ChatMessage::assistant("");
+        msg.thinking = Some("private chain of thought".to_string());
+        msg.actions.push(crate::domain::ActionDisplay {
+            action_type: "Bash".to_string(),
+            target: "dir".to_string(),
+            result: crate::domain::ActionResult::Success {
+                output: "ok".to_string(),
+                images: None,
+            },
+            details: crate::domain::ActionDetails::Simple,
+            duration_seconds: Some(0.015),
+            metadata: None,
+        });
+        s.session.append(msg);
+        let frame = render_to_string(&s);
+        let lines: Vec<&str> = frame.lines().collect();
+        let idx = lines
+            .iter()
+            .position(|l| l.contains("Reasoning hidden"))
+            .expect("placeholder must render");
+        assert!(
+            lines[idx + 1].trim().is_empty(),
+            "a blank line must separate the placeholder from the action; got {:?}",
+            &lines[idx..=(idx + 2).min(lines.len() - 1)]
+        );
+        assert!(
+            lines[idx..].iter().any(|l| l.contains("Bash")),
+            "the action must still render after the placeholder"
+        );
+    }
+
     #[test]
     fn committed_message_appears_in_chat_pane() {
         let mut s = mock_state();

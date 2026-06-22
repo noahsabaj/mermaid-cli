@@ -17,11 +17,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::constants::{INSTRUCTIONS_TRUNCATION_MARKER, MAX_INSTRUCTIONS_BYTES};
 
-/// Instruction files Mermaid understands. Mermaid-specific guidance is
-/// read first, then interoperable files used by other local agents.
-pub const INSTRUCTION_FILENAMES: &[&str] = &["MERMAID.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"];
+/// Instruction files Mermaid understands, in load order. `AGENTS.md` (the
+/// cross-tool open standard) is read first; `MERMAID.md` (mermaid-specific) is
+/// read last so its guidance overrides `AGENTS.md` on conflict. These are the
+/// only two recognized — there is intentionally no CLAUDE.md/GEMINI.md support.
+pub const INSTRUCTION_FILENAMES: &[&str] = &["AGENTS.md", "MERMAID.md"];
 
-/// Hard cap on how many directory levels `find_mermaid_md` walks up
+/// Hard cap on how many directory levels `find_instruction_files` walks up
 /// before giving up. Guards against pathological symlink loops.
 const MAX_WALK_DEPTH: usize = 32;
 
@@ -130,14 +132,6 @@ pub fn find_instruction_files(start: &Path) -> Vec<PathBuf> {
         }
     }
     Vec::new()
-}
-
-/// Backwards-compatible helper for callers that specifically want the
-/// nearest `MERMAID.md`.
-pub fn find_mermaid_md(start: &Path) -> Option<PathBuf> {
-    find_instruction_files(start)
-        .into_iter()
-        .find(|path| path.file_name().is_some_and(|name| name == "MERMAID.md"))
 }
 
 /// Read the file at `path`, truncate to `MAX_INSTRUCTIONS_BYTES` if
@@ -303,46 +297,57 @@ mod tests {
     }
 
     #[test]
-    fn find_mermaid_md_finds_in_cwd() {
+    fn find_instruction_files_finds_in_cwd() {
         let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir("cwd");
         fs::write(dir.join("MERMAID.md"), "rules").unwrap();
-        let found = find_mermaid_md(&dir).expect("should find");
-        assert_eq!(found, dir.join("MERMAID.md"));
+        let found = find_instruction_files(&dir);
+        assert_eq!(found, vec![dir.join("MERMAID.md")]);
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn find_instruction_files_loads_interoperable_files() {
+    fn find_instruction_files_loads_both_in_precedence_order() {
         let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = temp_dir("agents");
+        let dir = temp_dir("both");
         fs::write(dir.join("AGENTS.md"), "agent rules").unwrap();
-        fs::write(dir.join("CLAUDE.md"), "claude rules").unwrap();
+        fs::write(dir.join("MERMAID.md"), "mermaid rules").unwrap();
         let found = find_instruction_files(&dir);
-        assert_eq!(found, vec![dir.join("AGENTS.md"), dir.join("CLAUDE.md")]);
+        // AGENTS.md first, MERMAID.md last (last wins on conflict).
+        assert_eq!(found, vec![dir.join("AGENTS.md"), dir.join("MERMAID.md")]);
         let loaded = load_from_paths(&found).expect("load combined");
         assert!(loaded.content.contains("# Project Instructions: AGENTS.md"));
         assert!(loaded.content.contains("agent rules"));
-        assert!(loaded.content.contains("# Project Instructions: CLAUDE.md"));
+        assert!(
+            loaded
+                .content
+                .contains("# Project Instructions: MERMAID.md")
+        );
+        assert!(loaded.content.contains("mermaid rules"));
+        // MERMAID.md body must appear AFTER AGENTS.md so it overrides.
+        assert!(
+            loaded.content.find("mermaid rules") > loaded.content.find("agent rules"),
+            "MERMAID.md must come last so its guidance overrides AGENTS.md"
+        );
         assert_eq!(loaded.sources.len(), 2);
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn find_mermaid_md_walks_up_to_git_root() {
+    fn find_instruction_files_walks_up_to_git_root() {
         let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = temp_dir("walkup");
         fs::create_dir(root.join(".git")).unwrap();
         fs::write(root.join("MERMAID.md"), "root rules").unwrap();
         let sub = root.join("subdir/deeper");
         fs::create_dir_all(&sub).unwrap();
-        let found = find_mermaid_md(&sub).expect("should walk up");
-        assert_eq!(found, root.join("MERMAID.md"));
+        let found = find_instruction_files(&sub);
+        assert_eq!(found, vec![root.join("MERMAID.md")]);
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn find_mermaid_md_stops_at_git_root_without_file() {
+    fn find_instruction_files_stops_at_git_root_without_file() {
         let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = temp_dir("git_no_md");
         fs::create_dir(root.join(".git")).unwrap();
@@ -353,23 +358,21 @@ mod tests {
         fs::write(&above_md, "outside").unwrap();
         let sub = root.join("subdir");
         fs::create_dir_all(&sub).unwrap();
-        let found = find_mermaid_md(&sub);
-        assert!(found.is_none(), "walk must stop at .git boundary");
+        let found = find_instruction_files(&sub);
+        assert!(found.is_empty(), "walk must stop at .git boundary");
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_file(&above_md);
     }
 
     #[test]
-    fn find_mermaid_md_returns_none_if_absent() {
+    fn find_instruction_files_returns_empty_if_absent() {
         let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir("absent");
-        // No MERMAID.md anywhere — but also no .git, so the walk
-        // continues all the way up. As long as nothing UP the tree
-        // happens to have MERMAID.md, this returns None. To make the
-        // test deterministic, plant a .git so the walk stops here.
+        // No instruction file anywhere. Plant a .git so the walk stops
+        // here deterministically rather than climbing the real tree.
         fs::create_dir(dir.join(".git")).unwrap();
-        let found = find_mermaid_md(&dir);
-        assert!(found.is_none());
+        let found = find_instruction_files(&dir);
+        assert!(found.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
