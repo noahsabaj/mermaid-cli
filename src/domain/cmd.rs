@@ -25,7 +25,7 @@ use crate::app::McpServerConfig;
 use crate::models::ChatMessage;
 use crate::models::ReasoningLevel;
 use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::runtime::TaskStatus;
+use crate::runtime::{SafetyMode, TaskStatus};
 use crate::session::ConversationHistory;
 
 use super::compaction::{CompactionArchive, CompactionRecord, CompactionRequest};
@@ -65,6 +65,13 @@ pub enum Cmd {
         call_id: ToolCallId,
         source: ModelToolCall,
         model_id: String,
+        /// Effective live safety mode (from `state.session.safety_mode`) at
+        /// the moment this call was emitted. The runner builds the policy
+        /// gate / Auto classifier from this rather than the static config.
+        safety_mode: SafetyMode,
+        /// The user's stated intent for the turn (latest user message),
+        /// passed to the Auto-mode classifier as alignment context.
+        intent: Option<String>,
     },
     /// Cancel every task in the given turn's `TurnScope`. After the
     /// scope drains, the runner emits a `Msg::StreamDone` (with a
@@ -330,7 +337,7 @@ impl Cmd {
                 turn,
                 call_id,
                 source,
-                model_id: _,
+                ..
             } => format!(
                 "execute_tool(turn={}, call={}, fn={})",
                 turn, call_id, source.function.name

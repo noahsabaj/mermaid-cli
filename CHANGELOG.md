@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Auto safety mode** — a classifier-backed permission mode (as in Claude Code
+  and Codex). Under `[safety] mode = "auto"`, borderline actions (shell /
+  network / external tools) are vetted by an LLM against your stated intent:
+  aligned actions run automatically, risky or off-task ones escalate to an
+  approval prompt. Reads and file edits still auto-run (with checkpoints), and
+  destructive patterns stay hard-denied by the rule engine. The classifier
+  defaults to the session model, overridable via `[safety] auto_classifier_model`;
+  any classifier error or timeout fails safe (escalate), never silently allows.
+- **In-session safety switching** — `Shift+Tab` cycles `read_only → ask → auto →
+  full_access`, and `/safety [mode]` (alias `/permission`) shows or sets it.
+  Both are session-scoped (the `[safety] mode` config value remains the
+  persistent default), and the status footer now always shows the active mode.
+
+### Changed
+
+- **BREAKING:** the `AutoReview` safety mode is renamed to `Auto`, and its
+  behavior changed from rule-based ("ask for everything risky") to
+  classifier-backed. Config files with `[safety] mode = "auto_review"` must
+  change the value to `"auto"` — the old string is no longer accepted.
+
 ## [0.8.1] - 2026-06-21
 
 Documentation, release-pipeline, and supply-chain fixes on top of 0.8.0. This

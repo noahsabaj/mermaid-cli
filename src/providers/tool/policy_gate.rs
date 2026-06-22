@@ -10,16 +10,21 @@
 //!
 //! `replayable` distinguishes the two enforcement shapes:
 //!
-//! - **Replayable tools** (`execute_command`, file mutators): an `Ask`
-//!   decision creates a checkpoint + an approval row and BLOCKS, returning an
-//!   "approval required" outcome. The action is later re-run out-of-band by
-//!   [`crate::runtime::approve_and_replay`].
+//! - **Replayable tools** (`execute_command`, file mutators): an `Ask` (or an
+//!   escalated Auto-mode `Classify`) decision creates a checkpoint + an
+//!   approval row and BLOCKS, returning an "approval required" outcome. The
+//!   action is later re-run out-of-band by [`crate::runtime::approve_and_replay`].
 //! - **Non-replayable tools** (`web_*`, `mcp`, `subagent`, computer-use):
-//!   there is no checkpoint/replay path for these, so an `Ask` cannot be
-//!   satisfied out-of-band. They are gated on **`Deny` only** — `ReadOnly`
-//!   (and any `Deny` override) blocks them, which is exactly the hole the
-//!   review flagged; `Ask`/`AutoReview`/`FullAccess` proceed. The meaningful
-//!   safety knob for these tools is `ReadOnly`.
+//!   there is no checkpoint/replay path, so an `Ask` can't be satisfied
+//!   out-of-band — they proceed on `Ask` and are blocked only by `ReadOnly`
+//!   (or a `Deny` override). The meaningful safety knob for these tools is
+//!   `ReadOnly`.
+//!
+//! `Auto` mode resolves a `PolicyDecision::Classify` here by awaiting the
+//! injected `AutoClassifier` (in `ctx.classifier`): aligned ⇒ proceed,
+//! otherwise escalate — a replayable tool to a human approval, a non-replayable
+//! tool to a block (it can't be replayed). A missing classifier or any vet
+//! failure fails safe to escalate. This is why `gate` is `async`.
 
 use std::path::PathBuf;
 
@@ -46,7 +51,7 @@ pub enum Gate {
 /// action is blocked (e.g. `ReadOnly`/`Deny` override), or `None` to proceed.
 /// These tools have no checkpoint/replay path, so `Ask` proceeds — only
 /// `Deny` blocks them. Call this at the very top of `execute()`.
-pub fn gate_external(
+pub async fn gate_external(
     ctx: &ExecContext,
     tool: &'static str,
     category: crate::runtime::ToolCategory,
@@ -55,7 +60,7 @@ pub fn gate_external(
 ) -> Option<ToolOutcome> {
     let request = ActionRequest::new(tool, category, summary);
     let pending = serde_json::json!({ "tool": tool, "args": args });
-    match gate(ctx, request, &[], pending, false) {
+    match gate(ctx, request, &[], pending, false).await {
         Gate::Block(outcome) => Some(outcome),
         Gate::Proceed { .. } => None,
     }
@@ -63,14 +68,16 @@ pub fn gate_external(
 
 /// Consult the safety policy for `request`. See the module docs for the
 /// `replayable` semantics.
-pub fn gate(
+pub async fn gate(
     ctx: &ExecContext,
     request: ActionRequest,
     checkpoint_paths: &[PathBuf],
     pending_action: serde_json::Value,
     replayable: bool,
 ) -> Gate {
-    let decision = PolicyEngine::new(ctx.config.safety.mode)
+    // Build from the LIVE session mode (Shift+Tab / `/safety` take effect
+    // immediately), not the static config snapshot.
+    let decision = PolicyEngine::new(ctx.safety_mode)
         .with_overrides(ctx.config.safety.overrides.clone())
         .decide(&request);
 
@@ -80,7 +87,7 @@ pub fn gate(
             if !replayable {
                 // No checkpoint/replay path exists for this tool, so an Ask
                 // can't be satisfied out-of-band. ReadOnly already Denied
-                // (handled below); for Ask/AutoReview we proceed.
+                // (handled below); for Ask we proceed.
                 tracing::debug!(
                     tool = %request.tool,
                     "policy Ask on non-replayable tool; proceeding (only ReadOnly/Deny blocks it)",
@@ -94,7 +101,52 @@ pub fn gate(
                 checkpoint_paths,
                 pending_action,
                 risk,
+                None,
             )
+        },
+        PolicyDecision::Classify { risk, checkpoint } => {
+            // Auto mode: an LLM vets the borderline action against the user's
+            // intent. Aligned ⇒ proceed; otherwise escalate (fail-safe).
+            let verdict = match &ctx.classifier {
+                Some(classifier) => {
+                    let vreq = crate::providers::VetRequest {
+                        tool: request.tool.clone(),
+                        summary: request.summary.clone(),
+                        command: request.command.clone(),
+                        path: request.path.clone(),
+                        intent: ctx.intent.clone(),
+                        workdir: ctx.workdir.display().to_string(),
+                        turn: ctx.turn,
+                        token: ctx.token.clone(),
+                    };
+                    classifier.vet(&vreq).await
+                },
+                None => crate::providers::VetVerdict::escalate("no Auto-mode classifier available"),
+            };
+            if verdict.allow {
+                Gate::Proceed { risk }
+            } else if replayable {
+                // Escalate to a human approval the user can approve + replay.
+                block_for_approval(
+                    ctx,
+                    &request,
+                    checkpoint,
+                    checkpoint_paths,
+                    pending_action,
+                    risk,
+                    Some(verdict.reason),
+                )
+            } else {
+                // Non-replayable: an approval can't be satisfied out-of-band,
+                // so block with the classifier's reason for the model to see.
+                Gate::Block(ToolOutcome::error(
+                    format!(
+                        "{} blocked by Auto-mode safety review: {}",
+                        request.summary, verdict.reason
+                    ),
+                    0.0,
+                ))
+            }
         },
         PolicyDecision::Deny { reason, .. } => Gate::Block(ToolOutcome::error(
             format!("{} blocked by policy: {}", request.summary, reason),
@@ -106,6 +158,7 @@ pub fn gate(
 /// Take a checkpoint (when configured), record an approval row, and return a
 /// blocking "approval required" outcome. Mirrors the pre-existing inline logic
 /// from `exec.rs`/`filesystem.rs` so behavior is unchanged for those tools.
+#[allow(clippy::too_many_arguments)]
 fn block_for_approval(
     ctx: &ExecContext,
     request: &ActionRequest,
@@ -113,6 +166,9 @@ fn block_for_approval(
     checkpoint_paths: &[PathBuf],
     pending_action: serde_json::Value,
     risk: RiskClass,
+    // When the escalation came from the Auto-mode classifier, its reason —
+    // recorded on the approval so the user sees *why* it was flagged.
+    classifier_reason: Option<String>,
 ) -> Gate {
     let checkpoint_id = if checkpoint && ctx.config.safety.checkpoint_on_mutation {
         match create_checkpoint_for_task(
@@ -145,11 +201,16 @@ fn block_for_approval(
     let tool = request.tool.clone();
     let risk_str = risk.as_str().to_string();
 
+    let proposed_action = match &classifier_reason {
+        Some(reason) => format!("{} [auto-review: {}]", request.summary, reason),
+        None => request.summary.clone(),
+    };
+
     let approval_id = RuntimeStore::open_default()
         .and_then(|store| {
             let approval = store.approvals().create(NewApproval {
                 task_id: ctx.task_id.clone(),
-                proposed_action: request.summary.clone(),
+                proposed_action: proposed_action.clone(),
                 risk_classification: risk_str.clone(),
                 policy_decision: "ask".to_string(),
                 args_summary: Some(args_summary),
@@ -210,11 +271,50 @@ mod tests {
             Arc::new(config),
             String::new(),
             None,
+            mode,
+            None,
+            None,
         )
     }
 
-    #[test]
-    fn readonly_blocks_external_tools() {
+    /// Stub classifier with a fixed verdict — drives the `Classify` path
+    /// without a real model call.
+    struct StubClassifier {
+        allow: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::providers::AutoClassifier for StubClassifier {
+        async fn vet(&self, _req: &crate::providers::VetRequest) -> crate::providers::VetVerdict {
+            if self.allow {
+                crate::providers::VetVerdict::allow()
+            } else {
+                crate::providers::VetVerdict::escalate("stub: misaligned")
+            }
+        }
+    }
+
+    fn ctx_auto(classifier: Option<Arc<dyn crate::providers::AutoClassifier>>) -> ExecContext {
+        let mut config = crate::app::Config::default();
+        config.safety.mode = SafetyMode::Auto;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(4);
+        ExecContext::new(
+            tokio_util::sync::CancellationToken::new(),
+            tx,
+            ToolCallId(1),
+            TurnId(1),
+            PathBuf::from("."),
+            Arc::new(config),
+            String::new(),
+            None,
+            SafetyMode::Auto,
+            Some("fetch the changelog".to_string()),
+            classifier,
+        )
+    }
+
+    #[tokio::test]
+    async fn readonly_blocks_external_tools() {
         // C1/H1/H2: the previously-bypassing tools must be denied in ReadOnly.
         let ctx = ctx(SafetyMode::ReadOnly);
         for (tool, cat) in [
@@ -224,14 +324,16 @@ mod tests {
             ("click", ToolCategory::ComputerUse),
         ] {
             assert!(
-                gate_external(&ctx, tool, cat, tool.to_string(), &serde_json::json!({})).is_some(),
+                gate_external(&ctx, tool, cat, tool.to_string(), &serde_json::json!({}))
+                    .await
+                    .is_some(),
                 "ReadOnly must block {tool}",
             );
         }
     }
 
-    #[test]
-    fn full_access_allows_external_tools() {
+    #[tokio::test]
+    async fn full_access_allows_external_tools() {
         let ctx = ctx(SafetyMode::FullAccess);
         assert!(
             gate_external(
@@ -241,7 +343,63 @@ mod tests {
                 "web_fetch".to_string(),
                 &serde_json::json!({}),
             )
+            .await
             .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_classifier_allow_proceeds() {
+        // Auto + classifier says ALLOW ⇒ a borderline external tool proceeds.
+        let ctx = ctx_auto(Some(Arc::new(StubClassifier { allow: true })));
+        assert!(
+            gate_external(
+                &ctx,
+                "web_fetch",
+                ToolCategory::Web,
+                "web_fetch".to_string(),
+                &serde_json::json!({}),
+            )
+            .await
+            .is_none(),
+            "ALLOW verdict should let the action proceed",
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_classifier_escalate_blocks() {
+        // Auto + classifier says ESCALATE ⇒ a non-replayable tool is blocked.
+        let ctx = ctx_auto(Some(Arc::new(StubClassifier { allow: false })));
+        assert!(
+            gate_external(
+                &ctx,
+                "web_fetch",
+                ToolCategory::Web,
+                "web_fetch".to_string(),
+                &serde_json::json!({}),
+            )
+            .await
+            .is_some(),
+            "ESCALATE verdict should block a non-replayable tool",
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_without_classifier_fails_safe() {
+        // Auto but no classifier bound ⇒ fail safe (escalate ⇒ block), never
+        // silently allow.
+        let ctx = ctx_auto(None);
+        assert!(
+            gate_external(
+                &ctx,
+                "web_fetch",
+                ToolCategory::Web,
+                "web_fetch".to_string(),
+                &serde_json::json!({}),
+            )
+            .await
+            .is_some(),
+            "missing classifier must fail safe (block), not allow",
         );
     }
 }

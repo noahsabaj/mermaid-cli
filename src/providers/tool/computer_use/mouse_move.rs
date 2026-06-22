@@ -60,7 +60,9 @@ impl ToolExecutor for MouseMoveTool {
             crate::runtime::ToolCategory::ComputerUse,
             "computer-use: mouse_move".to_string(),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
 

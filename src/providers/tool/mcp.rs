@@ -76,7 +76,9 @@ impl ToolExecutor for McpToolProxy {
             crate::runtime::ToolCategory::Mcp,
             format!("mcp {}__{}", server_name, tool_name),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
 

@@ -53,7 +53,9 @@ impl ToolExecutor for ListWindowsTool {
             crate::runtime::ToolCategory::ComputerUse,
             "computer-use: list_windows".to_string(),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
 

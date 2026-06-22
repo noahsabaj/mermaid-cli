@@ -76,7 +76,7 @@ pub struct Config {
 
     /// Runtime safety policy. Defaults to `Ask` so mutations / shell /
     /// network actions require approval out of the box; users opt into
-    /// `AutoReview` or `FullAccess` deliberately.
+    /// `Auto` (LLM-vetted) or `FullAccess` deliberately.
     #[serde(default)]
     pub safety: SafetyConfig,
 
@@ -128,6 +128,11 @@ pub struct SafetyConfig {
     pub checkpoint_on_mutation: bool,
     #[serde(default)]
     pub overrides: Vec<PolicyOverride>,
+    /// Model id the `Auto`-mode safety classifier uses to vet borderline
+    /// actions. `None` ⇒ vet with the session's active model. Set this to
+    /// point the vet at a cheaper/faster model than the one driving the work.
+    #[serde(default)]
+    pub auto_classifier_model: Option<String>,
 }
 
 impl Default for SafetyConfig {
@@ -139,6 +144,7 @@ impl Default for SafetyConfig {
             mode: SafetyMode::Ask,
             checkpoint_on_mutation: true,
             overrides: Vec::new(),
+            auto_classifier_model: None,
         }
     }
 }

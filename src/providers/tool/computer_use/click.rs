@@ -65,7 +65,9 @@ impl ToolExecutor for ClickTool {
             crate::runtime::ToolCategory::ComputerUse,
             "computer-use: click".to_string(),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
 

@@ -62,7 +62,9 @@ impl ToolExecutor for ScrollTool {
             crate::runtime::ToolCategory::ComputerUse,
             "computer-use: scroll".to_string(),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
 

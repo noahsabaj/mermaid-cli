@@ -27,6 +27,9 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::{ToolCallId, TurnId};
 use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ChatMessage, ReasoningChunk, TokenUsage};
+use crate::runtime::SafetyMode;
+
+use super::auto_classifier::AutoClassifier;
 
 /// What a `ModelProvider::chat()` receives.
 #[derive(Debug)]
@@ -75,7 +78,6 @@ pub struct FinalResponse {
 }
 
 /// What a `ToolExecutor::execute()` receives.
-#[derive(Debug)]
 pub struct ExecContext {
     pub token: CancellationToken,
     pub progress: mpsc::Sender<ProgressEvent>,
@@ -94,6 +96,35 @@ pub struct ExecContext {
     /// Durable daemon task that owns this tool call, when execution was
     /// launched through the runtime task queue.
     pub task_id: Option<String>,
+    /// Effective live safety mode for this call (from the session, not the
+    /// static config). The policy gate builds its `PolicyEngine` from this.
+    pub safety_mode: SafetyMode,
+    /// The user's stated intent for the turn (latest user message), passed to
+    /// the Auto-mode classifier so it can judge whether an action is aligned.
+    pub intent: Option<String>,
+    /// LLM classifier for `SafetyMode::Auto`. `Some` only when the effective
+    /// mode is `Auto` and a provider is bound; the gate awaits it to resolve a
+    /// `PolicyDecision::Classify`. `None` ⇒ the gate fails safe (escalate).
+    pub classifier: Option<Arc<dyn AutoClassifier>>,
+}
+
+impl std::fmt::Debug for ExecContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `classifier` is a trait object (no `Debug`); render its presence.
+        f.debug_struct("ExecContext")
+            .field("call_id", &self.call_id)
+            .field("turn", &self.turn)
+            .field("workdir", &self.workdir)
+            .field("model_id", &self.model_id)
+            .field("task_id", &self.task_id)
+            .field("safety_mode", &self.safety_mode)
+            .field("intent", &self.intent)
+            .field(
+                "classifier",
+                &self.classifier.as_ref().map(|_| "<dyn AutoClassifier>"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl ExecContext {
@@ -107,6 +138,9 @@ impl ExecContext {
         config: Arc<crate::app::Config>,
         model_id: String,
         task_id: Option<String>,
+        safety_mode: SafetyMode,
+        intent: Option<String>,
+        classifier: Option<Arc<dyn AutoClassifier>>,
     ) -> Self {
         Self {
             token,
@@ -117,6 +151,9 @@ impl ExecContext {
             config,
             model_id,
             task_id,
+            safety_mode,
+            intent,
+            classifier,
         }
     }
 }
@@ -209,6 +246,9 @@ pub fn test_exec_context(
             workdir,
             config,
             String::new(),
+            None,
+            crate::runtime::SafetyMode::FullAccess,
+            None,
             None,
         ),
         rx,

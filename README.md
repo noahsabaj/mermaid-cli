@@ -11,6 +11,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Agent Loop** — model calls tools autonomously, sees results, and continues until done
 - **Image Paste** — Ctrl+V to attach images for vision models (X11/Wayland/macOS/Windows)
 - **Reasoning Levels** — seven tiers (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`); cycle with Alt+T or set via `/reasoning`; persisted per-model
+- **Safety Modes** — `read_only`/`ask`/`auto`/`full_access`; `auto` is classifier-backed (an LLM vets each borderline action against your intent, auto-running aligned ones and escalating risky ones); cycle live with Shift+Tab or `/safety`
 - **Project Instructions** — auto-loads `MERMAID.md`, `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`; edits take effect on the next turn
 - **MCP Servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers (`mermaid add <name>`)
 - **Session Persistence** — conversations auto-save and resume with `--continue`
@@ -117,6 +118,7 @@ mermaid pr create                               # Open a PR/MR from the current 
 | Esc | Stop generation / dismiss command palette or attachment focus |
 | Ctrl+C | Quit (auto-saves the session) |
 | Alt+T | Cycle reasoning level: `None → Minimal → Low → Medium → High → XHigh → Max → None` |
+| Shift+Tab | Cycle safety mode: `read_only → ask → auto → full_access → read_only` (session-scoped) |
 | Ctrl+V | Paste image or text from clipboard |
 | Ctrl+Click | Open image from chat history |
 | `/` | Open slash-command palette (filter-as-you-type) |
@@ -146,6 +148,7 @@ Model and context:
 
 Safety and recovery:
 
+- `/safety [read_only|ask|auto|full_access]` (alias `/permission`) — show or set the session safety mode; Shift+Tab cycles it
 - `/approvals`, `/approve <id>`, `/deny <id>`
 - `/checkpoint <path...>`, `/checkpoints`, `/restore <id>`
 
@@ -244,10 +247,17 @@ port = 11434
 
 [safety]
 # Approval policy. Default is "ask": prompt before mutations / shell / network
-# actions. Set "full_access" to auto-run everything (the pre-0.8 default),
-# "auto_review" to auto-allow low-risk and ask for the rest, or "read_only".
+# actions. "auto" runs an LLM classifier that vets each borderline action
+# against your stated intent — aligned actions run automatically, risky ones
+# escalate to an approval prompt. "full_access" auto-runs everything (the
+# pre-0.8 default); "read_only" blocks all mutations. Change it live with
+# Shift+Tab or `/safety <mode>` (session-scoped; this value is the persistent
+# default each session starts from).
 mode = "ask"
 checkpoint_on_mutation = true
+# Model the "auto" classifier uses to vet actions. Omit to vet with the
+# session's active model; set a smaller/faster model to cut latency and cost.
+# auto_classifier_model = "anthropic/claude-haiku-4-5"
 
 [non_interactive]
 # Current v0.8 run behavior is controlled by CLI flags:

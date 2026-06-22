@@ -125,6 +125,11 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
             },
         },
         Some("visible-reasoning") => SlashCmd::VisibleReasoning(arg),
+        Some("safety") => match arg.as_deref() {
+            None => SlashCmd::Safety(None),
+            // Invalid value ⇒ `None` ⇒ the reducer shows current + options.
+            Some(mode) => SlashCmd::Safety(crate::runtime::SafetyMode::parse(&mode.to_lowercase())),
+        },
         Some("clear") => SlashCmd::Clear,
         Some("save") => SlashCmd::Save(arg),
         Some("load") => SlashCmd::Load(arg),
@@ -367,6 +372,22 @@ mod tests {
             parse_slash_command("reasoning bogus"),
             SlashCmd::Reasoning(None),
         );
+    }
+
+    #[test]
+    fn parse_safety_command() {
+        assert_eq!(
+            parse_slash_command("safety auto"),
+            SlashCmd::Safety(Some(crate::runtime::SafetyMode::Auto)),
+        );
+        // `/permission` is an alias that routes to the same command.
+        assert_eq!(
+            parse_slash_command("permission read_only"),
+            SlashCmd::Safety(Some(crate::runtime::SafetyMode::ReadOnly)),
+        );
+        // No arg → show current; bogus value → None (show current + options).
+        assert_eq!(parse_slash_command("safety"), SlashCmd::Safety(None));
+        assert_eq!(parse_slash_command("safety bogus"), SlashCmd::Safety(None));
     }
 
     #[test]

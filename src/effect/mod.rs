@@ -320,6 +320,8 @@ impl EffectRunner {
                 call_id,
                 source,
                 model_id,
+                safety_mode,
+                intent,
             } => {
                 let tx = self.msg_tx.clone();
                 let tools = self.tools.clone();
@@ -333,12 +335,42 @@ impl EffectRunner {
                     .as_ref()
                     .map(|p| Arc::new(p.config().clone()))
                     .unwrap_or_else(|| Arc::new(crate::app::Config::default()));
+                // Auto mode: build an LLM classifier to vet borderline
+                // actions. Only when a provider is bound (real wiring); the
+                // gate fails safe to "escalate" when it's `None`. The vet
+                // uses the configured classifier model, else the session model.
+                let classifier: Option<Arc<dyn crate::providers::AutoClassifier>> =
+                    if safety_mode == crate::runtime::SafetyMode::Auto {
+                        self.providers.as_ref().map(|p| {
+                            let model = config
+                                .safety
+                                .auto_classifier_model
+                                .clone()
+                                .unwrap_or_else(|| model_id.clone());
+                            Arc::new(crate::providers::ModelAutoClassifier::new(p.clone(), model))
+                                as Arc<dyn crate::providers::AutoClassifier>
+                        })
+                    } else {
+                        None
+                    };
                 let task_id = self.task_id.clone();
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
                     dispatch_execute_tool(
-                        tx, tools, workdir, turn, call_id, source, token, config, model_id, task_id,
+                        tx,
+                        tools,
+                        workdir,
+                        turn,
+                        call_id,
+                        source,
+                        token,
+                        config,
+                        model_id,
+                        task_id,
+                        safety_mode,
+                        intent,
+                        classifier,
                     )
                     .await;
                 });
@@ -1394,33 +1426,9 @@ async fn collect_compaction_text(
     request: crate::domain::ChatRequest,
     token: tokio_util::sync::CancellationToken,
 ) -> Result<(String, Option<TokenUsage>), ModelError> {
-    let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(128);
-    let ctx = StreamContext::new(token, stream_tx, turn);
-    let collector = tokio::spawn(async move {
-        let mut text = String::new();
-        let mut usage = None;
-        while let Some(event) = stream_rx.recv().await {
-            match event {
-                StreamEvent::Text(chunk) => text.push_str(&chunk),
-                StreamEvent::Done {
-                    usage: done_usage, ..
-                } => usage = done_usage,
-                StreamEvent::Reasoning(_)
-                | StreamEvent::ToolCall(_)
-                | StreamEvent::ThinkingSignature(_) => {},
-            }
-        }
-        (text, usage)
-    });
-
-    let response = provider.chat(request, ctx).await;
-    let (text, stream_usage) = collector
-        .await
-        .map_err(|err| ModelError::StreamError(format!("compaction collector failed: {}", err)))?;
-    match response {
-        Ok(final_response) => Ok((text, final_response.usage.or(stream_usage))),
-        Err(err) => Err(err),
-    }
+    // Shared with the Auto-mode safety classifier — see
+    // `crate::providers::model::collect_text`.
+    crate::providers::model::collect_text(provider, turn, request, token).await
 }
 
 fn record_provider_capabilities(
@@ -1493,6 +1501,9 @@ async fn dispatch_execute_tool(
     config: Arc<crate::app::Config>,
     model_id: String,
     task_id: Option<String>,
+    safety_mode: crate::runtime::SafetyMode,
+    intent: Option<String>,
+    classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
 ) {
     let _ = msg_tx.send(Msg::ToolStarted { turn, call_id }).await;
 
@@ -1590,6 +1601,9 @@ async fn dispatch_execute_tool(
         config,
         model_id,
         task_id,
+        safety_mode,
+        intent,
+        classifier,
     );
     let before_payload = serde_json::json!({
         "turn_id": turn.0,
@@ -2053,6 +2067,8 @@ mod tests {
             call_id,
             source,
             model_id: "ollama/test".to_string(),
+            safety_mode: crate::runtime::SafetyMode::Ask,
+            intent: None,
         });
         let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await

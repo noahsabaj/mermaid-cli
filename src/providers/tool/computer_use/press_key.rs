@@ -60,7 +60,9 @@ impl ToolExecutor for PressKeyTool {
             crate::runtime::ToolCategory::ComputerUse,
             "computer-use: press_key".to_string(),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
         let key = match args.get("key").and_then(|v| v.as_str()) {

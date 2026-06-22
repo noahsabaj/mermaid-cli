@@ -488,6 +488,22 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Shift+Tab cycles the safety mode (read-only → ask → auto → full-access).
+    // Session-scoped: the `[safety]` config value stays the persistent default,
+    // so a session never silently inherits a more-permissive mode from a
+    // previous run. Mirrors the Alt+T reasoning cycle above.
+    if code == KeyCode::BackTab {
+        let next = cycle_safety(state.session.safety_mode);
+        state.session.safety_mode = next;
+        state.status = Some(StatusLine {
+            text: format!("Safety: {}", next.as_str()),
+            kind: StatusKind::Info,
+            shown_at: std::time::SystemTime::now(),
+        });
+        cmds.push(Cmd::DismissStatusAfter { ms: 2_000 });
+        return;
+    }
+
     // Conversation-list picker (UiMode::ConversationList): ↑/↓
     // navigate, Enter loads the highlighted session, Esc dismisses.
     if matches!(state.ui.mode, UiMode::ConversationList { .. }) {
@@ -841,6 +857,18 @@ fn cycle_reasoning(current: crate::models::ReasoningLevel) -> crate::models::Rea
     }
 }
 
+/// Cycle SafetyMode by increasing permissiveness, wrapping around. Used by
+/// Shift+Tab: ReadOnly → Ask → Auto → FullAccess → ReadOnly.
+fn cycle_safety(current: crate::runtime::SafetyMode) -> crate::runtime::SafetyMode {
+    use crate::runtime::SafetyMode as S;
+    match current {
+        S::ReadOnly => S::Ask,
+        S::Ask => S::Auto,
+        S::Auto => S::FullAccess,
+        S::FullAccess => S::ReadOnly,
+    }
+}
+
 fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
     match paste {
         Paste::Text(t) => state.ui.input_buffer.push_str(&t),
@@ -965,6 +993,27 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 model_id: state.session.model_id.clone(),
                 level,
             });
+        },
+        SlashCmd::Safety(None) => {
+            state.status = Some(StatusLine {
+                text: format!(
+                    "Safety: {} — options: read_only, ask, auto, full_access (Shift+Tab cycles)",
+                    state.session.safety_mode.as_str()
+                ),
+                kind: StatusKind::Info,
+                shown_at: std::time::SystemTime::now(),
+            });
+            cmds.push(Cmd::DismissStatusAfter { ms: 4_000 });
+        },
+        SlashCmd::Safety(Some(mode)) => {
+            // Session-scoped (mirrors Shift+Tab) — not written to the config.
+            state.session.safety_mode = mode;
+            state.status = Some(StatusLine {
+                text: format!("Safety: {}", mode.as_str()),
+                kind: StatusKind::Info,
+                shown_at: std::time::SystemTime::now(),
+            });
+            cmds.push(Cmd::DismissStatusAfter { ms: 2_000 });
         },
         SlashCmd::VisibleReasoning(arg) => {
             match visible_reasoning_value(arg.as_deref(), state.ui.show_reasoning) {
@@ -1532,12 +1581,27 @@ fn doctor_text(state: &State) -> String {
 }
 
 fn safety_mode_name(mode: crate::runtime::SafetyMode) -> &'static str {
-    match mode {
-        crate::runtime::SafetyMode::ReadOnly => "read_only",
-        crate::runtime::SafetyMode::Ask => "ask",
-        crate::runtime::SafetyMode::AutoReview => "auto_review",
-        crate::runtime::SafetyMode::FullAccess => "full_access",
-    }
+    mode.as_str()
+}
+
+/// The most recent user message, trimmed and length-capped — used as the
+/// Auto-mode classifier's "what is the user trying to do" context. `None`
+/// when the session has no user message yet.
+fn latest_user_intent(session: &super::state::Session) -> Option<String> {
+    const MAX: usize = 2000;
+    session
+        .messages()
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, crate::models::MessageRole::User))
+        .map(|m| {
+            let c = m.content.trim();
+            if c.len() > MAX {
+                format!("{}…", &c[..c.floor_char_boundary(MAX)])
+            } else {
+                c.to_string()
+            }
+        })
 }
 
 fn usage_text(state: &State) -> String {
@@ -2182,6 +2246,9 @@ fn handle_stream_done(
                 source,
             })
             .collect();
+        // Captured once for the whole batch: the live safety mode + the
+        // turn's intent (for the Auto-mode classifier).
+        let intent = latest_user_intent(&state.session);
         for call in &pending {
             cmds.push(Cmd::ExecuteTool {
                 turn,
@@ -2190,6 +2257,8 @@ fn handle_stream_done(
                 // F7: pass the session's current model id so subagent
                 // tools can spawn children against the same provider.
                 model_id: state.session.model_id.clone(),
+                safety_mode: state.session.safety_mode,
+                intent: intent.clone(),
             });
         }
         state.turn = super::transition::start_executing_tools(turn, pending);
@@ -3444,6 +3513,39 @@ mod tests {
             Msg::Slash(SlashCmd::VisibleReasoning(Some("off".to_string()))),
         );
         assert!(!state.ui.show_reasoning);
+    }
+
+    #[test]
+    fn cycle_safety_walks_by_permissiveness() {
+        use crate::runtime::SafetyMode as S;
+        assert_eq!(cycle_safety(S::ReadOnly), S::Ask);
+        assert_eq!(cycle_safety(S::Ask), S::Auto);
+        assert_eq!(cycle_safety(S::Auto), S::FullAccess);
+        assert_eq!(cycle_safety(S::FullAccess), S::ReadOnly);
+    }
+
+    #[test]
+    fn shift_tab_cycles_safety_mode() {
+        let state = fresh_state();
+        let start = state.session.safety_mode;
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::BackTab,
+                modifiers: KeyMods::NONE,
+            }),
+        );
+        assert_eq!(state.session.safety_mode, cycle_safety(start));
+    }
+
+    #[test]
+    fn slash_safety_sets_session_mode() {
+        let state = fresh_state();
+        let (state, _) = update(
+            state,
+            Msg::Slash(SlashCmd::Safety(Some(crate::runtime::SafetyMode::Auto))),
+        );
+        assert_eq!(state.session.safety_mode, crate::runtime::SafetyMode::Auto);
     }
 
     #[test]

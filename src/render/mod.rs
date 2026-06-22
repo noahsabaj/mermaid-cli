@@ -309,6 +309,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             model_name: &state.session.model_id,
             reasoning_level: effective,
             requested_level,
+            safety_mode: state.session.safety_mode,
         };
         frame.render_widget(status_widget, chunks[5]);
     }

@@ -1113,13 +1113,8 @@ impl RuntimeService {
 
     pub fn set_safety_mode(&self, mode: &str) -> Result<crate::app::SafetyConfig> {
         let mut config = crate::app::load_config().unwrap_or_default();
-        config.safety.mode = match mode {
-            "read_only" | "read-only" => super::SafetyMode::ReadOnly,
-            "ask" => super::SafetyMode::Ask,
-            "auto_review" | "auto-review" => super::SafetyMode::AutoReview,
-            "full_access" | "full-access" => super::SafetyMode::FullAccess,
-            other => anyhow::bail!("unknown safety mode: {}", other),
-        };
+        config.safety.mode = super::SafetyMode::parse(mode)
+            .ok_or_else(|| anyhow::anyhow!("unknown safety mode: {}", mode))?;
         crate::app::save_config(&config, None)?;
         Ok(config.safety)
     }
