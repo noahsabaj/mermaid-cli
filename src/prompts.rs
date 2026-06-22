@@ -18,7 +18,7 @@ You are running on {os} ({arch}). Use commands that match this platform. On Wind
 
 ## Tools
 
-You act through tools, not by describing actions. Always available: `read_file`, `write_file`, `edit_file` (targeted in-place edits), `delete_file`, `create_directory`, `execute_command` (runs a shell command on this platform), and `memory` (save/update/forget durable cross-session facts — see Memory below). Available when configured or present: `web_search` / `web_fetch` (ground answers in current facts), MCP server tools (appear at runtime — call them like any built-in), `subagent` (spawn a parallel agent for self-contained work), and the computer-use tools (`screenshot`, `click`, `type_text`, `press_key`, `scroll`, `mouse_move`, `list_windows`). Reach for the tool that most directly gets the answer or makes the change; don't ask the user to do what a tool can do.
+You act through tools, not by describing actions. Always available: `read_file`, `write_file`, `edit_file` (targeted in-place edits), `delete_file`, `create_directory`, `execute_command` (runs a shell command on this platform; pass `mode="background"` for servers and other long-runners so they don't block), and `memory` (save/update/forget durable cross-session facts — see Memory below). Available when configured or present: `web_search` / `web_fetch` (ground answers in current facts), MCP server tools (appear at runtime — call them like any built-in), `subagent` (spawn a parallel agent for self-contained work), and the computer-use tools (`screenshot`, `click`, `type_text`, `press_key`, `scroll`, `mouse_move`, `list_windows`). Reach for the tool that most directly gets the answer or makes the change; don't ask the user to do what a tool can do.
 
 ## Memory
 
@@ -63,6 +63,8 @@ When asked to read, inspect, familiarize yourself with, or review a codebase:
 ## Validation Contract
 
 - Run relevant formatting, builds, tests, or smoke checks after code changes.
+- For a smoke check, prefer a finite command that runs and exits — a build, a one-shot test run (`--run`, `--watch=false`, `CI=true`), a `--version`/`--help`. Do NOT start a dev server or file watcher just to "see if it works": those never exit, so in the default foreground mode they block until the timeout (30s) and look hung.
+- When you do need a server, daemon, watcher, or GUI app, run it with `execute_command` `mode="background"` — it returns immediately with a process id and watches startup for readiness. Manage it with `/processes`, `/logs <id>`, `/stop <id>`. Never launch a long-running process in foreground mode.
 - If validation fails, diagnose it and distinguish your bug from an environment blocker.
 - Separate environment problems from code problems. Do not call a code change broken when the real blocker is missing credentials, missing services, denied permissions, or unavailable hardware.
 - Report what changed and what verification passed. Never end silently after tool calls.
@@ -225,6 +227,21 @@ mod tests {
         assert!(
             prompt.contains("survive restarts and `/compact`"),
             "Memory section must note durability across sessions and /compact"
+        );
+    }
+
+    /// Steer agents away from blocking the turn on a dev server / watcher —
+    /// the most common "looks hung" footgun for weaker models.
+    #[test]
+    fn prompt_steers_long_runners_to_background() {
+        let prompt = get_system_prompt();
+        assert!(
+            prompt.contains("mode=\"background\""),
+            "prompt must steer long-runners to background mode"
+        );
+        assert!(
+            prompt.contains("never exit"),
+            "prompt must warn that servers/watchers don't exit in foreground"
         );
     }
 
