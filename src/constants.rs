@@ -119,3 +119,12 @@ pub const MAX_INSTRUCTIONS_BYTES: usize = 40_000;
 /// byte cap. The model sees this so it knows context was elided.
 pub const INSTRUCTIONS_TRUNCATION_MARKER: &str =
     "\n\n[Project instructions truncated - exceeds 10k token cap]";
+
+// Durable semantic memory (v0.10.0)
+/// Max bytes of the always-loaded memory INDEX (name + description + path per
+/// fact, all scopes). ~2k tokens at 4 chars/token. The index is terse; if it
+/// overflows, that's a signal to run `/consolidate-memory`.
+pub const MAX_MEMORY_INDEX_BYTES: usize = 8_000;
+/// Marker appended to the memory index when it exceeds the byte cap.
+pub const MEMORY_INDEX_TRUNCATION_MARKER: &str =
+    "\n\n[Memory index truncated - too many entries; run /consolidate-memory]";
