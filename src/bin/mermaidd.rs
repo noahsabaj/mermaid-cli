@@ -172,10 +172,6 @@ async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json:
             "ok": true,
             "checkpoints": store.checkpoints().list(50)?,
         })),
-        "memory" => Ok(serde_json::json!({
-            "ok": true,
-            "memory": store.memory().list(None, None)?,
-        })),
         "plugins" => Ok(serde_json::json!({
             "ok": true,
             "plugins": store.plugins().list()?,
@@ -190,8 +186,8 @@ async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json:
         other => Ok(serde_json::json!({
             "ok": false,
             "error": format!("unknown command: {}", other),
-            "commands": ["health", "sessions", "tasks", "processes", "approvals", "tool_runs", "checkpoints", "memory", "plugins", "pairings", "snapshot"],
-            "json_commands": ["create_task", "run", "update_task", "session_messages", "runtime_snapshot", "runtime_dashboard", "runtime_diagnostics", "runtime_hygiene_preview", "runtime_hygiene_archive", "runtime_task_detail", "runtime_approval_detail", "runtime_checkpoint_detail", "runtime_tasks", "runtime_processes", "runtime_approvals", "runtime_tool_runs", "runtime_checkpoints", "runtime_memory", "runtime_plugins", "logs", "stop_process", "restart_process", "open_process", "ports", "remember", "memory_edit", "forget", "restore_checkpoint", "approve", "deny", "plugin_preview", "plugin_install", "set_plugin_enabled", "model_info", "set_safety_mode", "pair"],
+            "commands": ["health", "sessions", "tasks", "processes", "approvals", "tool_runs", "checkpoints", "plugins", "pairings", "snapshot"],
+            "json_commands": ["create_task", "run", "update_task", "session_messages", "runtime_snapshot", "runtime_dashboard", "runtime_diagnostics", "runtime_hygiene_preview", "runtime_hygiene_archive", "runtime_task_detail", "runtime_approval_detail", "runtime_checkpoint_detail", "runtime_tasks", "runtime_processes", "runtime_approvals", "runtime_tool_runs", "runtime_checkpoints", "runtime_plugins", "logs", "stop_process", "restart_process", "open_process", "ports", "restore_checkpoint", "approve", "deny", "plugin_preview", "plugin_install", "set_plugin_enabled", "model_info", "set_safety_mode", "pair"],
         })),
     }
 }
@@ -304,13 +300,6 @@ async fn handle_json_command(
             let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
             let service = mermaid_cli::runtime::RuntimeService::open_default()?;
             Ok(serde_json::json!({"ok": true, "items": service.list_checkpoints(limit)?}))
-        },
-        "runtime_memory" => {
-            let service = mermaid_cli::runtime::RuntimeService::open_default()?;
-            Ok(serde_json::json!({
-                "ok": true,
-                "items": service.list_memory(body.get("project_path").and_then(|v| v.as_str()))?,
-            }))
         },
         "runtime_plugins" => {
             let service = mermaid_cli::runtime::RuntimeService::open_default()?;
@@ -431,37 +420,6 @@ async fn handle_json_command(
             store.tasks().update_status(id, status, report)?;
             Ok(serde_json::json!({"ok": true}))
         },
-        "remember" => {
-            let service = mermaid_cli::runtime::RuntimeService::open_default()?;
-            let source = body
-                .get("source")
-                .and_then(|v| v.as_str())
-                .unwrap_or("daemon");
-            let entry = service.remember_memory(
-                body.get("project_path")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                str_field(body, "key")?,
-                str_field(body, "value")?,
-                source,
-            )?;
-            Ok(serde_json::json!({"ok": true, "item": entry, "memory": entry}))
-        },
-        "memory_edit" => {
-            let service = mermaid_cli::runtime::RuntimeService::open_default()?;
-            let source = body
-                .get("source")
-                .and_then(|v| v.as_str())
-                .unwrap_or("daemon");
-            let entry =
-                service.edit_memory(str_field(body, "id")?, str_field(body, "value")?, source)?;
-            Ok(serde_json::json!({"ok": true, "item": entry, "memory": entry}))
-        },
-        "forget" => {
-            let service = mermaid_cli::runtime::RuntimeService::open_default()?;
-            service.forget_memory(str_field(body, "id")?)?;
-            Ok(serde_json::json!({"ok": true}))
-        },
         "logs" => {
             let service = mermaid_cli::runtime::RuntimeService::open_default()?;
             Ok(serde_json::to_value(service.process_log(
@@ -562,9 +520,6 @@ fn command_requires_auth(command: &str) -> bool {
         "create_task"
             | "run"
             | "update_task"
-            | "remember"
-            | "memory_edit"
-            | "forget"
             | "restore_checkpoint"
             | "approve"
             | "deny"
@@ -641,9 +596,6 @@ mod tests {
             "create_task",
             "run",
             "update_task",
-            "remember",
-            "memory_edit",
-            "forget",
             "restore_checkpoint",
             "approve",
             "deny",
@@ -672,7 +624,6 @@ mod tests {
             "runtime_approvals",
             "runtime_tool_runs",
             "runtime_checkpoints",
-            "runtime_memory",
             "runtime_plugins",
             "logs",
             "ports",

@@ -360,12 +360,6 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 .append(ChatMessage::system(checkpoints_text(&checkpoints)));
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
-        Msg::RuntimeMemoryListed(memory) => {
-            state
-                .session
-                .append(ChatMessage::system(memory_text(&memory)));
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
-        },
         Msg::RuntimePluginsListed(plugins) => {
             state
                 .session
@@ -1346,75 +1340,6 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 3_000,
             );
         },
-        SlashCmd::Memory => {
-            cmds.push(Cmd::ListRuntimeMemory);
-        },
-        SlashCmd::MemoryEdit(Some(input)) => {
-            let mut parts = input.splitn(2, char::is_whitespace);
-            match (parts.next(), parts.next()) {
-                (Some(id), Some(value)) if !id.is_empty() && !value.trim().is_empty() => {
-                    cmds.push(Cmd::EditRuntimeMemory {
-                        id: id.to_string(),
-                        value: value.trim().to_string(),
-                    });
-                },
-                _ => set_status(
-                    state,
-                    cmds,
-                    "Usage: /memory edit <id> <value>",
-                    StatusKind::Info,
-                    3_000,
-                ),
-            }
-        },
-        SlashCmd::MemoryEdit(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /memory edit <id> <value>",
-                StatusKind::Info,
-                3_000,
-            );
-        },
-        SlashCmd::Remember(Some(input)) => {
-            let mut parts = input.splitn(2, char::is_whitespace);
-            match (parts.next(), parts.next()) {
-                (Some(key), Some(value)) if !key.is_empty() && !value.trim().is_empty() => {
-                    cmds.push(Cmd::RememberRuntimeMemory {
-                        key: key.to_string(),
-                        value: value.trim().to_string(),
-                    });
-                },
-                _ => set_status(
-                    state,
-                    cmds,
-                    "Usage: /remember <key> <value>",
-                    StatusKind::Info,
-                    3_000,
-                ),
-            }
-        },
-        SlashCmd::Remember(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /remember <key> <value>",
-                StatusKind::Info,
-                3_000,
-            );
-        },
-        SlashCmd::Forget(Some(id)) => {
-            cmds.push(Cmd::ForgetRuntimeMemory { id });
-        },
-        SlashCmd::Forget(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /forget <memory-id>",
-                StatusKind::Info,
-                3_000,
-            );
-        },
         SlashCmd::Plugins => {
             cmds.push(Cmd::ListRuntimePlugins);
         },
@@ -1981,21 +1906,6 @@ fn checkpoints_text(checkpoints: &[crate::runtime::CheckpointRecord]) -> String 
         lines.push(format!(
             "- {} {} {}",
             checkpoint.id, checkpoint.created_at, checkpoint.project_path
-        ));
-    }
-    lines.join("\n")
-}
-
-fn memory_text(memory: &[crate::runtime::MemoryEntry]) -> String {
-    let mut lines = vec!["Memory".to_string()];
-    if memory.is_empty() {
-        lines.push("No memory entries.".to_string());
-        return lines.join("\n");
-    }
-    for entry in memory {
-        lines.push(format!(
-            "- {} [{}] {} = {}",
-            entry.id, entry.scope, entry.key, entry.value
         ));
     }
     lines.join("\n")

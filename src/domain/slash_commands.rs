@@ -274,27 +274,6 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::SafetyRecovery,
     },
     SlashCommand {
-        name: "memory",
-        aliases: &[],
-        description: "List project memory",
-        arg_hint: Some("[edit <id> <value>]"),
-        group: SlashCommandGroup::Integrations,
-    },
-    SlashCommand {
-        name: "remember",
-        aliases: &[],
-        description: "Write project memory",
-        arg_hint: Some("<key> <value>"),
-        group: SlashCommandGroup::Integrations,
-    },
-    SlashCommand {
-        name: "forget",
-        aliases: &[],
-        description: "Forget a memory entry",
-        arg_hint: Some("<id>"),
-        group: SlashCommandGroup::Integrations,
-    },
-    SlashCommand {
         name: "plugins",
         aliases: &[],
         description: "List installed plugins",

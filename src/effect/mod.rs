@@ -700,16 +700,6 @@ impl EffectRunner {
                     let _ = tx.send(Msg::RuntimeCheckpointsListed(checkpoints)).await;
                 });
             },
-            Cmd::ListRuntimeMemory => {
-                let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
-                    let memory = crate::runtime::RuntimeClient::auto()
-                        .list_memory(None)
-                        .map(|read| read.value)
-                        .unwrap_or_default();
-                    let _ = tx.send(Msg::RuntimeMemoryListed(memory)).await;
-                });
-            },
             Cmd::ListRuntimePlugins => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn(async move {
@@ -796,63 +786,6 @@ impl EffectRunner {
                             text: format!("Restore failed: {}", err),
                             kind: crate::domain::StatusKind::Warn,
                             dismiss_ms: 5_000,
-                        },
-                    };
-                    let _ = tx.send(msg).await;
-                });
-            },
-            Cmd::RememberRuntimeMemory { key, value } => {
-                let tx = self.msg_tx.clone();
-                let workdir = self.workdir.clone();
-                self.detached.spawn(async move {
-                    let msg = match remember_runtime_memory(&workdir, key, value) {
-                        Ok(id) => Msg::TransientStatus {
-                            text: format!("Memory written: {}", id),
-                            kind: crate::domain::StatusKind::Info,
-                            dismiss_ms: 3_000,
-                        },
-                        Err(err) => Msg::TransientStatus {
-                            text: format!("Memory write failed: {}", err),
-                            kind: crate::domain::StatusKind::Warn,
-                            dismiss_ms: 4_000,
-                        },
-                    };
-                    let _ = tx.send(msg).await;
-                });
-            },
-            Cmd::EditRuntimeMemory { id, value } => {
-                let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
-                    let msg = match crate::runtime::RuntimeClient::auto()
-                        .edit_memory(&id, &value, "tui")
-                    {
-                        Ok(_) => Msg::TransientStatus {
-                            text: format!("Updated memory {}", id),
-                            kind: crate::domain::StatusKind::Info,
-                            dismiss_ms: 3_000,
-                        },
-                        Err(err) => Msg::TransientStatus {
-                            text: format!("Memory update failed: {}", err),
-                            kind: crate::domain::StatusKind::Warn,
-                            dismiss_ms: 5_000,
-                        },
-                    };
-                    let _ = tx.send(msg).await;
-                });
-            },
-            Cmd::ForgetRuntimeMemory { id } => {
-                let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
-                    let msg = match crate::runtime::RuntimeClient::auto().forget_memory(&id) {
-                        Ok(()) => Msg::TransientStatus {
-                            text: format!("Forgot {}", id),
-                            kind: crate::domain::StatusKind::Info,
-                            dismiss_ms: 3_000,
-                        },
-                        Err(err) => Msg::TransientStatus {
-                            text: format!("Forget failed: {}", err),
-                            kind: crate::domain::StatusKind::Warn,
-                            dismiss_ms: 4_000,
                         },
                     };
                     let _ = tx.send(msg).await;
@@ -1809,18 +1742,6 @@ async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
                 .await;
         },
     }
-}
-
-fn remember_runtime_memory(
-    workdir: &std::path::Path,
-    key: String,
-    value: String,
-) -> anyhow::Result<String> {
-    let project_path = workdir.display().to_string();
-    let entry = crate::runtime::RuntimeClient::auto()
-        .remember_memory(Some(project_path), &key, &value, "tui")?
-        .value;
-    Ok(entry.id)
 }
 
 fn mcp_startup_msg(name: &str, started: bool, tools: Vec<crate::domain::McpToolSpec>) -> Msg {
