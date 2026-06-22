@@ -1167,6 +1167,11 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 3_000,
             );
         },
+        SlashCmd::ConsolidateMemory => {
+            cmds.push(Cmd::ConsolidateMemory {
+                model_id: state.session.model_id.clone(),
+            });
+        },
         SlashCmd::Doctor => {
             state
                 .session
@@ -3543,6 +3548,13 @@ mod tests {
         let (state, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::Remember(None)));
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::RememberMemory { .. })));
         assert!(state.status.is_some());
+
+        // /consolidate-memory routes to the model-assisted prune effect.
+        let (_s, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::ConsolidateMemory));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ConsolidateMemory { .. }))
+        );
     }
 
     #[test]

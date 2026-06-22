@@ -458,6 +458,20 @@ pub fn delete_memory(cwd: &Path, id_or_name: &str) -> std::io::Result<Option<Pat
     }
 }
 
+/// Load every memory's index entry paired with its full body text, across all
+/// scopes. Consolidation needs the bodies to judge duplicates/staleness.
+pub fn entries_with_bodies(cwd: &Path) -> Vec<(MemoryEntry, String)> {
+    let mut out = Vec::new();
+    for (dir, scope) in memory_roots(cwd) {
+        for entry in load_root(&dir, scope) {
+            let raw = std::fs::read_to_string(&entry.path).unwrap_or_default();
+            let (_, body) = parse_frontmatter(&raw);
+            out.push((entry, body));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

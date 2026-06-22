@@ -601,6 +601,14 @@ impl EffectRunner {
                         .await;
                 });
             },
+            Cmd::ConsolidateMemory { model_id } => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                let providers = self.providers.clone();
+                self.detached.spawn(async move {
+                    consolidate_memory(tx, providers, workdir, model_id).await;
+                });
+            },
             Cmd::LoadConversation(id) => {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
@@ -1304,6 +1312,189 @@ fn memory_title_from_text(text: &str) -> String {
     }
 }
 
+const CONSOLIDATE_SYSTEM_PROMPT: &str = "You maintain a coding agent's durable memory: a set of atomic facts. Your only job is to find facts that are EXACT DUPLICATES or CLEARLY OBSOLETE/SUPERSEDED by another fact, and list their ids for pruning. Never prune facts that are merely related or similar but carry distinct information. Never rewrite or merge facts. When in doubt, keep. Reply with ONLY a JSON object: {\"prune\": [\"id1\", \"id2\"], \"reason\": \"one short sentence\"}. If nothing should be pruned, return an empty prune list.";
+
+#[derive(Debug)]
+struct PrunePlan {
+    prune: Vec<String>,
+    reason: String,
+}
+
+/// Extract a `{prune:[...], reason:""}` plan from a model response, tolerating
+/// prose or code fences around the JSON object.
+fn parse_prune_plan(text: &str) -> Option<PrunePlan> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(&text[start..=end]).ok()?;
+    let prune = json
+        .get("prune")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let reason = json
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some(PrunePlan { prune, reason })
+}
+
+/// `/consolidate-memory`: a one-shot model pass that names duplicate/obsolete
+/// facts to prune (never rewrites — that's the anti-drift rule). The pruned
+/// files are snapshotted into a checkpoint first, so the prune is reversible.
+async fn consolidate_memory(
+    tx: MsgSender,
+    providers: Option<Arc<ProviderFactory>>,
+    workdir: std::path::PathBuf,
+    model_id: String,
+) {
+    let items = crate::app::memory::entries_with_bodies(&workdir);
+    if items.len() < 2 {
+        let _ = tx
+            .send(Msg::RuntimeText(format!(
+                "Nothing to consolidate — {} memor{} saved.",
+                items.len(),
+                if items.len() == 1 { "y" } else { "ies" }
+            )))
+            .await;
+        return;
+    }
+    let Some(factory) = providers else {
+        let _ = tx
+            .send(Msg::RuntimeText(
+                "Memory consolidation needs a model provider, which isn't bound in this session."
+                    .to_string(),
+            ))
+            .await;
+        return;
+    };
+
+    let mut listing = String::new();
+    for (entry, body) in &items {
+        let id = entry
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(entry.name.as_str());
+        listing.push_str(&format!(
+            "- id: {id}\n  scope: {}\n  description: {}\n  body: {}\n",
+            entry.scope.as_str(),
+            entry.description,
+            body.replace('\n', " ").trim(),
+        ));
+    }
+    let user = format!(
+        "Here are {} durable memory facts. Identify exact duplicates and clearly obsolete or superseded facts to prune.\n\n{}",
+        items.len(),
+        listing
+    );
+    let request = crate::domain::ChatRequest {
+        model_id: model_id.clone(),
+        messages: vec![crate::models::ChatMessage::user(user)],
+        system_prompt: CONSOLIDATE_SYSTEM_PROMPT.to_string(),
+        instructions: None,
+        reasoning: crate::models::ReasoningLevel::None,
+        temperature: 0.0,
+        max_tokens: 1024,
+        tools: Vec::new(),
+    };
+
+    let provider = match factory.resolve(&model_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = tx
+                .send(Msg::RuntimeText(format!(
+                    "Memory consolidation failed: {e}"
+                )))
+                .await;
+            return;
+        },
+    };
+    let token = tokio_util::sync::CancellationToken::new();
+    let text =
+        match crate::providers::model::collect_text(provider, TurnId(0), request, token).await {
+            Ok((t, _)) => t,
+            Err(e) => {
+                let _ = tx
+                    .send(Msg::RuntimeText(format!(
+                        "Memory consolidation failed: {e}"
+                    )))
+                    .await;
+                return;
+            },
+        };
+
+    let Some(plan) = parse_prune_plan(&text) else {
+        let _ = tx
+            .send(Msg::RuntimeText(
+                "Memory consolidation: couldn't parse the model's plan; nothing changed."
+                    .to_string(),
+            ))
+            .await;
+        return;
+    };
+    if plan.prune.is_empty() {
+        let reason = if plan.reason.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", plan.reason)
+        };
+        let _ = tx
+            .send(Msg::RuntimeText(format!(
+                "Memory consolidation: nothing to prune.{reason}"
+            )))
+            .await;
+        return;
+    }
+
+    // Snapshot the to-be-pruned files first so the prune is reversible.
+    let paths: Vec<std::path::PathBuf> = plan
+        .prune
+        .iter()
+        .filter_map(|id| crate::app::memory::find(&workdir, id).map(|e| e.path))
+        .collect();
+    if !paths.is_empty() {
+        let _ = crate::runtime::create_checkpoint(
+            &workdir,
+            &paths,
+            Some(serde_json::json!({ "tool": "consolidate_memory", "reason": plan.reason })),
+        );
+    }
+
+    let mut pruned = Vec::new();
+    for id in &plan.prune {
+        if let Ok(Some(_)) = crate::app::memory::delete_memory(&workdir, id) {
+            pruned.push(id.clone());
+        }
+    }
+
+    let cfg = crate::app::load_config().unwrap_or_default().memory;
+    let (loaded, _) = crate::app::memory::refresh(None, &workdir, &cfg);
+    let _ = tx.send(Msg::MemoryChanged(loaded)).await;
+
+    let report = if pruned.is_empty() {
+        "Memory consolidation: the model named facts to prune, but none matched existing memories."
+            .to_string()
+    } else {
+        format!(
+            "Consolidated memory — pruned {} fact{}: {}.{} Recoverable from the latest checkpoint (/checkpoints, /restore).",
+            pruned.len(),
+            if pruned.len() == 1 { "" } else { "s" },
+            pruned.join(", "),
+            if plan.reason.is_empty() {
+                String::new()
+            } else {
+                format!(" Reason: {}.", plan.reason)
+            },
+        )
+    };
+    let _ = tx.send(Msg::RuntimeText(report)).await;
+}
+
 async fn dispatch_compact_conversation(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
@@ -1991,6 +2182,35 @@ mod tests {
 
     fn runner() -> (EffectRunner, mpsc::Receiver<Msg>) {
         EffectRunner::pair(PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn parse_prune_plan_extracts_json_amid_prose() {
+        let plan = parse_prune_plan(
+            "Sure, here's the plan:\n```json\n{\"prune\": [\"a\", \"b\"], \"reason\": \"dupes\"}\n```\nDone.",
+        )
+        .expect("should parse");
+        assert_eq!(plan.prune, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(plan.reason, "dupes");
+    }
+
+    #[test]
+    fn parse_prune_plan_handles_empty_and_garbage() {
+        let empty = parse_prune_plan("{\"prune\": [], \"reason\": \"all distinct\"}")
+            .expect("empty plan parses");
+        assert!(empty.prune.is_empty());
+        assert!(parse_prune_plan("no json here").is_none());
+    }
+
+    #[test]
+    fn memory_title_from_text_is_short_and_nonempty() {
+        assert_eq!(
+            memory_title_from_text("prefer ripgrep over grep"),
+            "prefer ripgrep over grep"
+        );
+        assert_eq!(memory_title_from_text("   "), "memory");
+        let long = memory_title_from_text("one two three four five six seven eight nine ten");
+        assert!(long.split_whitespace().count() <= 8);
     }
 
     #[tokio::test]
