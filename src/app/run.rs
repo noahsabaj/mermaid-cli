@@ -16,15 +16,16 @@
 //! select!, one reducer call per message, effects dispatched into
 //! structured concurrency per turn.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use crossterm::event::EventStream;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio::time::{Duration, interval};
 
 use crate::app::Config;
-use crate::app::event_source::event_to_msg;
+use crate::app::event_source::coalesce_key_burst;
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::app::recorder::{Recorder, record_msg_body};
 use crate::app::terminal::TerminalGuard;
@@ -112,6 +113,23 @@ pub async fn run_interactive_with(
         runner.dispatch(cmd);
     }
 
+    // Which `select!` arm fired. Terminal events are handled *after* the
+    // select! returns so the paste-coalescing drain can borrow `events`
+    // again without tripping the borrow checker.
+    //
+    // `Msg` is the large variant, but this enum lives on the stack for one
+    // loop iteration and `Msg` is passed by value everywhere already —
+    // boxing it would add a per-event heap alloc on the hot input path.
+    #[allow(clippy::large_enum_variant)]
+    enum Sel {
+        Msg(Option<Msg>),
+        Term(Option<Result<crossterm::event::Event, std::io::Error>>),
+    }
+
+    // Msgs produced ahead of time — e.g. a non-paste event drained while
+    // coalescing a key burst. Processed before pulling the next event.
+    let mut pending_msgs: VecDeque<Msg> = VecDeque::new();
+
     // Main loop.
     loop {
         // Render the current state. ratatui's draw closure captures
@@ -122,24 +140,40 @@ pub async fn run_interactive_with(
             .inner_mut()
             .draw(|f| render(&state, &mut rstate, f))?;
 
-        let msg = tokio::select! {
-            biased;
-            // 1. Effect results first. Streaming chunks are hot; we
-            //    want render latency low when the model is producing
-            //    tokens.
-            m = msg_rx.recv() => m,
-            // 2. Crossterm events.
-            e = events.next() => match e {
-                Some(Ok(evt)) => {
-                    // F13: Ctrl+Click on a chat image tile opens the
-                    // image via the system viewer. Mapping from screen
-                    // coords to (message_index, image_index) lives in
-                    // ChatState (the render layer) — the event source
-                    // can't do it alone. Synthesize `OpenImageAt` here
-                    // when the click hits a tracked image.
+        // Drain any msgs queued by a prior burst-coalesce before blocking
+        // on the next event.
+        let msg = if let Some(queued) = pending_msgs.pop_front() {
+            Some(queued)
+        } else {
+            let selected = tokio::select! {
+                biased;
+                // 1. Effect results first. Streaming chunks are hot; we
+                //    want render latency low when the model is producing
+                //    tokens.
+                m = msg_rx.recv() => Sel::Msg(m),
+                // 2. Crossterm events. Handled below, outside the select!,
+                //    so coalescing can re-borrow `events`.
+                e = events.next() => Sel::Term(e),
+                // 3. OS lifecycle signals. A typed Ctrl+C in raw mode is
+                //    handled by the crossterm branch above; this covers
+                //    SIGINT/SIGTERM/SIGHUP delivered externally.
+                s = lifecycle.next_msg() => Sel::Msg(s),
+                // 4. Tick — drives elapsed-time displays + self-dismissing
+                //    status lines without busy-waiting.
+                _ = tick.tick() => Sel::Msg(Some(Msg::Tick)),
+            };
+
+            match selected {
+                Sel::Msg(m) => m,
+                Sel::Term(Some(Ok(evt))) => {
+                    // F13: Ctrl+Click on a chat image tile opens the image
+                    // via the system viewer. Mapping from screen coords to
+                    // (message_index, image_index) lives in ChatState (the
+                    // render layer), so synthesize `OpenImageAt` here.
                     if let crossterm::event::Event::Mouse(m) = &evt
                         && matches!(m.kind, crossterm::event::MouseEventKind::Down(_))
-                        && m.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                        && m.modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
                         && let Some(target) = rstate.chat.find_image_at_screen_pos(m.row)
                     {
                         Some(Msg::OpenImageAt {
@@ -147,22 +181,26 @@ pub async fn run_interactive_with(
                             image_index: target.image_index,
                         })
                     } else {
-                        event_to_msg(evt)
+                        // Coalesce a paste burst (crossterm 0.29 doesn't
+                        // deliver Event::Paste on the Windows console — a
+                        // paste arrives as a flood of Char/Enter key events).
+                        // The drain pulls every immediately-available event
+                        // so the whole block lands as one atomic Msg::Paste.
+                        let (primary, trailing) = coalesce_key_burst(evt, || {
+                            events.next().now_or_never().flatten().and_then(|r| r.ok())
+                        });
+                        for queued in trailing {
+                            pending_msgs.push_back(queued);
+                        }
+                        primary
                     }
                 },
-                Some(Err(error)) => {
+                Sel::Term(Some(Err(error))) => {
                     tracing::warn!(error = %error, "terminal event stream failed");
                     None
                 },
-                None => Some(Msg::RuntimeSignal(RuntimeSignal::Hangup)),
-            },
-            // 3. OS lifecycle signals. A typed Ctrl+C in raw mode is
-            //    handled by the crossterm branch above; this covers
-            //    SIGINT/SIGTERM/SIGHUP delivered externally.
-            s = lifecycle.next_msg() => s,
-            // 4. Tick — drives elapsed-time displays + self-dismissing
-            //    status lines without busy-waiting.
-            _ = tick.tick() => Some(Msg::Tick),
+                Sel::Term(None) => Some(Msg::RuntimeSignal(RuntimeSignal::Hangup)),
+            }
         };
 
         let Some(msg) = msg else { continue };
