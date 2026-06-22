@@ -191,12 +191,80 @@ impl ChatState {
             } else {
                 usize::MAX
             };
-            out.push_str(slice_by_cells(row, c0, c1).trim_end());
+            let mut piece = slice_by_cells(row, c0, c1).to_string();
+            // Drop the rendered left margin (the "● "/"  " role/continuation
+            // prefix — up to SELECT_MARGIN_CELLS cells of spaces) so copied
+            // text is clean. Only spaces inside the margin zone [c0, MARGIN)
+            // are removed, so a code line's own indentation is preserved.
+            let mut margin = SELECT_MARGIN_CELLS.saturating_sub(c0);
+            while margin > 0 && piece.starts_with(' ') {
+                piece.remove(0);
+                margin -= 1;
+            }
+            out.push_str(piece.trim_end());
             if line != end_line {
                 out.push('\n');
             }
         }
         if out.is_empty() { None } else { Some(out) }
+    }
+}
+
+/// Display-cell width of the role/continuation left margin ("● " or "  ")
+/// that the renderer prepends to chat content lines. Stripped from copied
+/// selections so the clipboard gets clean text.
+const SELECT_MARGIN_CELLS: usize = 2;
+
+/// Hard-wrap a pre-formatted (code) line at `width` display cells, preserving
+/// every glyph (including whitespace) and each span's style. Continuation rows
+/// get a `indent`-space hanging indent. Unlike `wrap_styled_line` this never
+/// collapses runs of spaces, so code indentation and alignment survive.
+fn wrap_preformatted(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![line];
+    }
+    let total: usize = line.spans.iter().map(|s| s.content.width()).sum();
+    if total <= width {
+        return vec![line];
+    }
+
+    let base = line.style;
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut cur: Vec<Span<'static>> = Vec::new();
+    let mut cur_w = 0usize;
+    let mut on_first = true;
+
+    for span in line.spans {
+        let style = span.style;
+        let mut buf = String::new();
+        for ch in span.content.chars() {
+            let cw = ch.width().unwrap_or(0);
+            // Break before this char if it would overflow and the current row
+            // already holds real content (beyond the continuation indent).
+            let floor = if on_first { 0 } else { indent };
+            if cur_w + cw > width && cur_w > floor {
+                if !buf.is_empty() {
+                    cur.push(Span::styled(std::mem::take(&mut buf), style));
+                }
+                out.push(Line::from(std::mem::take(&mut cur)).style(base));
+                on_first = false;
+                cur.push(Span::styled(" ".repeat(indent), base));
+                cur_w = indent;
+            }
+            buf.push(ch);
+            cur_w += cw;
+        }
+        if !buf.is_empty() {
+            cur.push(Span::styled(buf, style));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(Line::from(cur).style(base));
+    }
+    if out.is_empty() {
+        vec![Line::from("").style(base)]
+    } else {
+        out
     }
 }
 
@@ -445,7 +513,9 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     let new_line = Line::from(spans).style(base_style);
 
                     if preformatted {
-                        lines.push(new_line);
+                        // Code: hard-wrap preserving indentation (don't
+                        // word-collapse) so wide lines stay readable.
+                        lines.extend(wrap_preformatted(new_line, content_width as usize, 2));
                     } else {
                         lines.extend(wrap_styled_line(new_line, content_width as usize, 2));
                     }
@@ -1090,6 +1160,46 @@ mod tests {
         assert_eq!(slice_by_cells("你好world", 2, 7), "好wor");
     }
 
+    #[test]
+    fn wrap_preformatted_hard_wraps_preserving_spaces() {
+        // 18 cells, wraps at 10. Spaces are preserved (not collapsed) and the
+        // leading indentation survives on the first row.
+        let line = Line::from(vec![Span::raw("    aaaa bbbb cccc")]);
+        let wrapped = wrap_preformatted(line, 10, 2);
+        assert!(wrapped.len() >= 2, "wide line should wrap to multiple rows");
+        let first: String = wrapped[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            first.starts_with("    aaaa"),
+            "indentation must be preserved, got {first:?}"
+        );
+        let second: String = wrapped[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            second.starts_with("  "),
+            "continuation should get the hanging indent, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_preformatted_short_line_unchanged() {
+        let line = Line::from(vec![Span::raw("    short")]);
+        let wrapped = wrap_preformatted(line, 40, 2);
+        assert_eq!(wrapped.len(), 1);
+        let text: String = wrapped[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(text, "    short");
+    }
+
     /// Build a ChatState whose last frame rendered `rows`, with a selection
     /// already mapped to content coords, so `selected_text` can be tested
     /// without a real terminal.
@@ -1109,10 +1219,23 @@ mod tests {
     #[test]
     fn selected_text_spans_multiple_rows() {
         let st = state_with_rows(&["> first line", "  second line"], ((0, 2), (1, 8)));
-        // Copy-what-you-see: the start row is sliced from the click column,
-        // and fully-covered continuation rows include their on-screen "  "
-        // prefix (v1 behavior — the highlight matches exactly what's copied).
-        assert_eq!(st.selected_text().as_deref(), Some("first line\n  second"));
+        // The continuation row's "  " margin is stripped so copied text is
+        // clean (the start row was sliced from the click column past "> ").
+        assert_eq!(st.selected_text().as_deref(), Some("first line\nsecond"));
+    }
+
+    #[test]
+    fn selected_text_strips_margin_but_keeps_code_indentation() {
+        // Rendered rows: 2-cell margin + the code's own indentation. Selecting
+        // from column 0 must drop only the 2-cell margin, not the code indent.
+        let st = state_with_rows(
+            &["  fn main() {", "      let x = 1;", "  }"],
+            ((0, 0), (2, 3)),
+        );
+        assert_eq!(
+            st.selected_text().as_deref(),
+            Some("fn main() {\n    let x = 1;\n}")
+        );
     }
 
     #[test]

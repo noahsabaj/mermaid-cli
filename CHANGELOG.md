@@ -20,15 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   syntax highlighting** (keywords / strings / line-comments via a small
   language-agnostic lexer, no new dependency) on the theme's code background,
   code-block **indentation is preserved** (code lines are no longer word-wrapped
-  into a collapsed paragraph), inline `code` is tightened (no stray padding),
-  and `---` thematic breaks render as a horizontal rule.
+  into a collapsed paragraph; lines wider than the viewport soft-wrap with a
+  hanging indent rather than being clipped), inline `code` is tightened (no
+  stray padding), link destinations are shown dimmed after the text, and `---`
+  thematic breaks render as a horizontal rule.
 - **Drag to select & copy.** A plain left-mouse drag now selects chat text
   (reverse-video highlight) and copies it to the system clipboard on release,
   with a "Copied N chars" status. Mouse-wheel scroll and Ctrl+Click-to-open-
-  image are unaffected. Selection is display-cell accurate (CJK-safe) and
-  clears on scroll. `Shift+Drag` still bypasses to native terminal selection
-  (now documented). Copy shells out to the platform tool (`clip`/PowerShell,
-  `pbcopy`, `wl-copy`/`xclip`) — no new dependency.
+  image are unaffected. Selection is display-cell accurate (CJK-safe), drops
+  the rendered left margin so multi-line and code copies are clean (the code's
+  own indentation is kept), and clears on scroll. `Shift+Drag` still bypasses
+  to native terminal selection (now documented). Copy shells out to the
+  platform tool (`clip`/PowerShell, `pbcopy`, `wl-copy`/`xclip`) — no new
+  dependency.
 - **Inline approval prompts.** In interactive `ask` mode (and `auto`-mode
   escalations), a gated tool action now **pauses and prompts inline** —
   `1` Yes · `2` Yes, don't ask again (per-tool; `execute_command` keyed on the
@@ -59,9 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as its own message and rendered character-by-character. crossterm 0.29
   doesn't emit `Event::Paste` on the Windows console — a paste arrives as a
   burst of individual key events, so every newline hit the Enter→submit path.
-  The main loop now coalesces a rapid key burst into a single atomic paste
-  (a lone Enter still submits; Shift+Enter still inserts a newline), and the
-  input box renders embedded newlines as real rows.
+  The main loop now coalesces a rapid key burst (characters, newlines, and
+  tabs) into a single atomic paste (a lone Enter still submits, a lone Tab is
+  still a Tab; Shift+Enter still inserts a newline), and the input box renders
+  embedded newlines as real rows.
 - **System prompt** refreshed: it now documents the safety/permission modes
   (and how to behave when an action is gated — explain, don't spam retries),
   the tool set, and the in-session controls.
