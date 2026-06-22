@@ -1502,11 +1502,9 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
         started: std::time::SystemTime::now(),
         trigger: CompactionTrigger::Manual,
     };
-    state.status = Some(StatusLine {
-        text: "Compacting context...".to_string(),
-        kind: StatusKind::Persistent,
-        shown_at: std::time::SystemTime::now(),
-    });
+    // The live "Compacting…" status comes from the TurnState::Compacting status
+    // line (the blue indicator); no separate gray status message — it was a
+    // redundant duplicate. The completion receipt is set on CompactionFinished.
     cmds.push(Cmd::CompactConversation {
         turn,
         request: CompactionRequest::manual(build_chat_request(state), instructions),
@@ -2626,9 +2624,10 @@ fn system_prompt_for_state(state: &State) -> String {
         .prompt
         .render_system_prompt(&get_system_prompt());
     format!(
-        "{}\n\n## Current Session\nCurrent working directory: {}\nTreat this as the project root unless the user specifies a different path.",
+        "{}\n\n## Current Session\nCurrent working directory: {}\nSafety mode: {} (live — the user can switch it anytime with Shift+Tab or /safety; trust this over any earlier tool error, and attempt gated actions rather than assuming they will fail).\nTreat this as the project root unless the user specifies a different path.",
         base,
-        state.cwd.display()
+        state.cwd.display(),
+        state.session.safety_mode.as_str()
     )
 }
 
@@ -3059,6 +3058,12 @@ mod tests {
             request
                 .system_prompt
                 .contains("Treat this as the project root")
+        );
+        // The live safety mode must be surfaced so the model knows the current
+        // policy instead of inferring it from a stale tool error.
+        assert!(
+            request.system_prompt.contains("Safety mode: "),
+            "system prompt must surface the live safety mode"
         );
     }
 

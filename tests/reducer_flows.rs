@@ -402,8 +402,9 @@ fn slash_compact_emits_compaction_command() {
         Msg::Slash(SlashCmd::Compact(Some("focus on tests".to_string()))),
     );
 
+    // The live "Compacting…" indicator is driven by TurnState::Compacting (the
+    // blue status line); there is no separate gray status message anymore.
     assert!(matches!(state.turn, TurnState::Compacting { .. }));
-    assert!(state.status.as_ref().unwrap().text.contains("Compacting"));
     assert!(cmds.iter().any(|cmd| {
         matches!(
             cmd,
