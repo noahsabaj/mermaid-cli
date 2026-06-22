@@ -24,15 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hanging indent rather than being clipped), inline `code` is tightened (no
   stray padding), link destinations are shown dimmed after the text, and `---`
   thematic breaks render as a horizontal rule.
-- **Drag to select & copy.** A plain left-mouse drag now selects chat text
-  (reverse-video highlight) and copies it to the system clipboard on release,
-  with a "Copied N chars" status. Mouse-wheel scroll and Ctrl+Click-to-open-
-  image are unaffected. Selection is display-cell accurate (CJK-safe), drops
-  the rendered left margin so multi-line and code copies are clean (the code's
-  own indentation is kept), and clears on scroll. `Shift+Drag` still bypasses
-  to native terminal selection (now documented). Copy shells out to the
-  platform tool (`clip`/PowerShell, `pbcopy`, `wl-copy`/`xclip`) — no new
-  dependency.
+- **Drag to select, Ctrl+Shift+C to copy.** A plain left-mouse drag selects
+  chat text (reverse-video highlight); **`Ctrl+Shift+C` copies** the selection
+  to the system clipboard (with a "Copied N chars" status). Selecting and
+  copying are distinct — a drag never auto-copies, so it can't clobber your
+  clipboard. Mouse-wheel scroll and Ctrl+Click-to-open-image are unaffected.
+  Selection is display-cell accurate (CJK-safe), drops the rendered left
+  margin so multi-line and code copies are clean (the code's own indentation
+  is kept), and clears on scroll. `Shift+Drag` still bypasses to native
+  terminal selection. Copy shells out to the platform tool (`clip`/PowerShell,
+  `pbcopy`, `wl-copy`/`xclip`) — no new dependency.
 - **Inline approval prompts.** In interactive `ask` mode (and `auto`-mode
   escalations), a gated tool action now **pauses and prompts inline** —
   `1` Yes · `2` Yes, don't ask again (per-tool; `execute_command` keyed on the
