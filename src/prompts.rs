@@ -18,7 +18,15 @@ You are running on {os} ({arch}). Use commands that match this platform. On Wind
 
 ## Tools
 
-You act through tools, not by describing actions. Always available: `read_file`, `write_file`, `edit_file` (targeted in-place edits), `delete_file`, `create_directory`, and `execute_command` (runs a shell command on this platform). Available when configured or present: `web_search` / `web_fetch` (ground answers in current facts), MCP server tools (appear at runtime — call them like any built-in), `subagent` (spawn a parallel agent for self-contained work), and the computer-use tools (`screenshot`, `click`, `type_text`, `press_key`, `scroll`, `mouse_move`, `list_windows`). Reach for the tool that most directly gets the answer or makes the change; don't ask the user to do what a tool can do.
+You act through tools, not by describing actions. Always available: `read_file`, `write_file`, `edit_file` (targeted in-place edits), `delete_file`, `create_directory`, `execute_command` (runs a shell command on this platform), and `memory` (save/update/forget durable cross-session facts — see Memory below). Available when configured or present: `web_search` / `web_fetch` (ground answers in current facts), MCP server tools (appear at runtime — call them like any built-in), `subagent` (spawn a parallel agent for self-contained work), and the computer-use tools (`screenshot`, `click`, `type_text`, `press_key`, `scroll`, `mouse_move`, `list_windows`). Reach for the tool that most directly gets the answer or makes the change; don't ask the user to do what a tool can do.
+
+## Memory
+
+You have durable, cross-session memory: atomic facts in Markdown files that survive restarts and `/compact`. An index of every saved fact (name, one-line description, path) is always in your context under a `# Memory` heading. When a description looks relevant to the task, `read_file` its path for the full fact. Change memory with the `memory` tool — `remember` to save a new fact, `update` to replace one fact's body, `forget` to delete one.
+
+Maintain memory proactively: the moment you notice a saved fact is wrong or obsolete, `update` or `forget` it — don't wait to be asked. Save durable knowledge worth recalling in a later session — user preferences, project conventions, decisions and their rationale, hard-won gotchas. Do NOT save transient task state, anything already captured in the repo or AGENTS.md/MERMAID.md, or — ever — secrets, tokens, API keys, or personal data.
+
+Keep each fact atomic (one idea per memory) and `update`/`forget` whole facts; never merge or re-summarize the corpus — rewriting stored facts drifts them from the truth. Scope defaults to project-private (machine-local, not committed); pass `shared: true` for team facts committed to the repo, or `global: true` for facts that hold across every project.
 
 ## Safety And Approvals
 
@@ -138,6 +146,85 @@ mod tests {
         assert!(
             prompt.contains("next turn"),
             "MERMAID.md note must mention auto-reload semantics (next turn)"
+        );
+    }
+
+    // ── Memory section regression guards (v0.10.0) ──────────────────
+
+    /// The Memory section must exist and teach the always-loaded index +
+    /// on-demand read pattern, or the model won't use its own memory.
+    #[test]
+    fn prompt_has_memory_section() {
+        let prompt = get_system_prompt();
+        assert!(
+            prompt.contains("## Memory"),
+            "prompt must have a Memory section"
+        );
+        assert!(
+            prompt.contains("always in your context") && prompt.contains("read_file"),
+            "Memory section must teach the always-loaded index + on-demand read"
+        );
+    }
+
+    /// The `memory` tool must be advertised in the Tools list.
+    #[test]
+    fn prompt_lists_memory_tool() {
+        let prompt = get_system_prompt();
+        assert!(
+            prompt.contains("`memory`"),
+            "Tools list must advertise the memory tool"
+        );
+    }
+
+    /// The anti-drift rule: facts stay atomic and are replaced whole, never
+    /// re-summarized. This is the core lesson from the research.
+    #[test]
+    fn prompt_memory_forbids_resummarizing() {
+        let prompt = get_system_prompt();
+        assert!(
+            prompt.contains("atomic"),
+            "Memory section must require atomic facts"
+        );
+        assert!(
+            prompt.contains("never merge or re-summarize the corpus"),
+            "Memory section must forbid re-summarizing stored facts"
+        );
+    }
+
+    /// Hard rule: memory must never hold secrets/credentials/PII.
+    #[test]
+    fn prompt_memory_forbids_secrets() {
+        let prompt = get_system_prompt();
+        assert!(
+            prompt.contains("secrets, tokens, API keys, or personal data"),
+            "Memory section must forbid storing secrets/PII"
+        );
+    }
+
+    /// The three scopes (private default, shared, global) must be taught so
+    /// the model knows team facts get committed and private stays local.
+    #[test]
+    fn prompt_memory_explains_scopes() {
+        let prompt = get_system_prompt();
+        assert!(
+            prompt.contains("project-private")
+                && prompt.contains("shared: true")
+                && prompt.contains("global: true"),
+            "Memory section must explain the private/shared/global scopes"
+        );
+    }
+
+    /// Proactive maintenance: stale facts get fixed/forgotten on sight.
+    #[test]
+    fn prompt_memory_requires_proactive_maintenance() {
+        let prompt = get_system_prompt();
+        assert!(
+            prompt.contains("Maintain memory proactively"),
+            "Memory section must require proactive maintenance"
+        );
+        assert!(
+            prompt.contains("survive restarts and `/compact`"),
+            "Memory section must note durability across sessions and /compact"
         );
     }
 
