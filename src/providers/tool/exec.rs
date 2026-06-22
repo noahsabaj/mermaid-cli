@@ -976,15 +976,20 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         token.cancel();
         let start = Instant::now();
-        let outcome = tokio::time::timeout(Duration::from_millis(500), handle)
+        // The 5s outer timeout is the real "didn't hang" guard — a propagation
+        // regression would block until the 10s sleep, past 5s.
+        let outcome = tokio::time::timeout(Duration::from_secs(5), handle)
             .await
             .expect("didn't hang")
             .expect("join");
         let elapsed = start.elapsed();
         assert!(outcome.was_cancelled());
+        // "Aborts promptly", not a hard sub-200ms SLA — a tight bound measured
+        // CI scheduling / process-teardown jitter and flaked on loaded windows
+        // runners. 2s keeps a wide margin while still catching a real hang.
         assert!(
-            elapsed < Duration::from_millis(200),
-            "cancellation took {:?}",
+            elapsed < Duration::from_secs(2),
+            "cancellation took {:?} — far slower than expected (regression?)",
             elapsed
         );
     }

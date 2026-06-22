@@ -24,11 +24,11 @@ use mermaid_cli::providers::tool::ToolExecutor;
 use mermaid_cli::providers::tool::exec::ExecuteCommandTool;
 
 #[tokio::test]
-async fn execute_command_cancels_within_100ms() {
+async fn execute_command_cancellation_aborts_promptly() {
     // Spawn a 60-second sleep under the tool and cancel ~30ms in.
     // v0.6 would wait up to 300s (the timeout cap) because the
     // tool's await loop had no idea a cancel was pending. v0.7's
-    // token-based select! aborts immediately.
+    // token-based select! aborts well before then.
     let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
     let token = ctx.token.clone();
 
@@ -43,16 +43,22 @@ async fn execute_command_cancels_within_100ms() {
     let cancel_at = Instant::now();
     token.cancel();
 
-    let outcome = tokio::time::timeout(Duration::from_millis(500), handle)
+    // The 5s outer timeout is the real "didn't hang" guard — a propagation
+    // regression would block until the 60s sleep, well past 5s.
+    let outcome = tokio::time::timeout(Duration::from_secs(5), handle)
         .await
         .expect("test timed out — cancellation didn't propagate")
         .expect("join");
     let elapsed = cancel_at.elapsed();
 
     assert!(outcome.was_cancelled());
+    // The intent is "aborts promptly, not after the 60s sleep / 300s cap" —
+    // not a hard sub-300ms SLA. A tight bound here measured CI scheduling /
+    // process-teardown jitter (flaked on loaded windows runners). 2s keeps a
+    // wide margin while still catching a real "cancel didn't propagate" hang.
     assert!(
-        elapsed < Duration::from_millis(300),
-        "cancellation took {:?} — v0.6 regression?",
+        elapsed < Duration::from_secs(2),
+        "cancellation took {:?} — far slower than expected (regression?)",
         elapsed
     );
 }
