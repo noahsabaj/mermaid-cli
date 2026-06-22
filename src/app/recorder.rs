@@ -233,6 +233,13 @@ pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
             }),
             None => serde_json::json!({"path": null}),
         },
+        Msg::MemoryChanged(loaded) => match loaded {
+            Some(loaded) => serde_json::json!({
+                "entries": loaded.entries.len(),
+                "truncated": loaded.truncated,
+            }),
+            None => serde_json::json!({"entries": 0}),
+        },
         Msg::SessionSaved => serde_json::json!({}),
         Msg::ConversationLoaded(history) => serde_json::json!({
             "id": history.id,

@@ -46,6 +46,10 @@ pub struct State {
     pub mcp: McpState,
     pub settings: Config,
     pub instructions: Option<LoadedInstructions>,
+    /// Durable semantic memory snapshot (auto-derived index + entries),
+    /// refreshed per turn like `instructions`. Its index is injected into the
+    /// model prompt alongside project instructions.
+    pub memory: Option<crate::app::memory::LoadedMemory>,
     /// Current working directory. Captured once at startup; tools
     /// receive it via `ExecContext::workdir` and spawned subprocesses
     /// inherit it. Centralized here so tests can inject a fake cwd.
@@ -128,6 +132,7 @@ impl State {
             mcp,
             settings,
             instructions: None,
+            memory: None,
             cwd,
             ids: IdAllocatorBundle::default(),
             confirm: None,

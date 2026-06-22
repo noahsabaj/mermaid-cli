@@ -189,6 +189,8 @@ pub enum Msg {
     // ── Persistence (from effect::persistence) ──────────────────────
     /// `MERMAID.md` loaded / changed / removed since last check.
     InstructionsChanged(Option<LoadedInstructions>),
+    /// Memory files loaded / changed / removed since last check.
+    MemoryChanged(Option<crate::app::memory::LoadedMemory>),
     /// `save_conversation` finished.
     SessionSaved,
     /// `/load <id>` — a saved conversation has been read off disk.
@@ -443,6 +445,7 @@ impl Msg {
             | Msg::McpServerErrored { .. }
             | Msg::McpServerStopped { .. } => MsgKind::Mcp,
             Msg::InstructionsChanged(_) => MsgKind::InstructionsChanged,
+            Msg::MemoryChanged(_) => MsgKind::MemoryChanged,
             Msg::SessionSaved => MsgKind::SessionSaved,
             Msg::ConversationLoaded(_) => MsgKind::ConversationLoaded,
             Msg::ConversationsListed(_) => MsgKind::ConversationsListed,
@@ -491,6 +494,7 @@ pub enum MsgKind {
     TurnCancelled,
     Mcp,
     InstructionsChanged,
+    MemoryChanged,
     SessionSaved,
     ConversationLoaded,
     ConversationsListed,

@@ -519,6 +519,15 @@ impl EffectRunner {
                     let _ = tx.send(Msg::InstructionsChanged(loaded)).await;
                 });
             },
+            Cmd::RefreshMemory => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    let cfg = crate::app::load_config().unwrap_or_default().memory;
+                    let (loaded, _) = crate::app::memory::refresh(None, &workdir, &cfg);
+                    let _ = tx.send(Msg::MemoryChanged(loaded)).await;
+                });
+            },
             Cmd::LoadConversation(id) => {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();

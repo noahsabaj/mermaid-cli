@@ -287,7 +287,7 @@ pub async fn run_interactive_with(
 /// loop. Fires MCP init (if configured) + an initial instructions
 /// sweep so MERMAID.md content lands before the first prompt.
 fn bootstrap_cmds(config: &Config) -> Vec<Cmd> {
-    let mut cmds = vec![Cmd::RefreshInstructions];
+    let mut cmds = vec![Cmd::RefreshInstructions, Cmd::RefreshMemory];
     if !config.mcp_servers.is_empty() {
         cmds.push(Cmd::InitMcpServers(config.mcp_servers.clone()));
     }
@@ -302,6 +302,12 @@ mod tests {
     fn bootstrap_includes_refresh_instructions() {
         let cmds = bootstrap_cmds(&Config::default());
         assert!(cmds.iter().any(|c| matches!(c, Cmd::RefreshInstructions)));
+    }
+
+    #[test]
+    fn bootstrap_includes_refresh_memory() {
+        let cmds = bootstrap_cmds(&Config::default());
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::RefreshMemory)));
     }
 
     #[test]
