@@ -362,6 +362,12 @@ pub enum SlashCmd {
     Usage,
     Context,
     Compact(Option<String>),
+    /// List saved durable memories.
+    Memory,
+    /// Save free-text as a private memory.
+    Remember(Option<String>),
+    /// Delete a memory by name/id.
+    Forget(Option<String>),
     Doctor,
     Tasks,
     Task(Option<String>),
