@@ -210,6 +210,11 @@ pub enum Cmd {
     /// the read fails.
     ReadClipboard,
 
+    /// Write text to the system clipboard on a blocking task (mirrors
+    /// `ReadClipboard`'s per-platform dispatch). Used by in-app drag-select
+    /// copy. Emits a `Msg::TransientStatus` ("Copied N chars" / failure).
+    CopyToClipboard(String),
+
     // ── Terminal lifecycle ──────────────────────────────────────────
     /// Exit the main loop. No reply message — the loop observes
     /// `state.should_exit` after the reducer returns and breaks out.
@@ -312,6 +317,7 @@ impl Cmd {
             Cmd::DismissStatusAfter { .. } => "dismiss_status_after",
             Cmd::WriteImageToTemp { .. } => "write_image_to_temp",
             Cmd::ReadClipboard => "read_clipboard",
+            Cmd::CopyToClipboard(_) => "copy_to_clipboard",
             Cmd::Exit => "exit",
             Cmd::SetTerminalTitle(_) => "set_terminal_title",
         }
@@ -421,6 +427,7 @@ impl Cmd {
                 bytes.len()
             ),
             Cmd::ReadClipboard => "read_clipboard".to_string(),
+            Cmd::CopyToClipboard(t) => format!("copy_to_clipboard(n={})", t.chars().count()),
             Cmd::Exit => "exit".to_string(),
             Cmd::SetTerminalTitle(t) => format!("set_terminal_title({})", t),
         }
