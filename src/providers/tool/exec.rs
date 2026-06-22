@@ -137,7 +137,9 @@ impl ToolExecutor for ExecuteCommandTool {
         // (checkpoint + approval row + blocking outcome). Allow returns the
         // classified risk so we can take the pre-existing Allow-path
         // checkpoint below.
-        match super::policy_gate::gate(&ctx, policy_request, &[], pending_action.clone(), true) {
+        match super::policy_gate::gate(&ctx, policy_request, &[], pending_action.clone(), true)
+            .await
+        {
             super::policy_gate::Gate::Block(outcome) => return outcome,
             super::policy_gate::Gate::Proceed { risk } => {
                 if ctx.config.safety.checkpoint_on_mutation

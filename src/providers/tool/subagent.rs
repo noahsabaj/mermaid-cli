@@ -158,7 +158,9 @@ impl ToolExecutor for SubagentTool {
             crate::runtime::ToolCategory::Subagent,
             format!("subagent: {}", description),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
 

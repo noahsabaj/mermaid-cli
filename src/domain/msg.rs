@@ -24,8 +24,8 @@ use crate::app::instructions::LoadedInstructions;
 use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError};
 use crate::runtime::{
-    ApprovalRecord, CheckpointRecord, MemoryEntry, PluginInstallRecord, ProcessRecord, TaskRecord,
-    TaskTimelineEvent,
+    ApprovalRecord, CheckpointRecord, MemoryEntry, PluginInstallRecord, ProcessRecord, SafetyMode,
+    TaskRecord, TaskTimelineEvent,
 };
 
 use super::ids::{ToolCallId, TurnId};
@@ -337,6 +337,9 @@ pub enum SlashCmd {
     Model(Option<String>),
     Reasoning(Option<ReasoningLevel>),
     VisibleReasoning(Option<String>),
+    /// No arg → show current safety mode; `Some` → switch it for this
+    /// session (`Shift+Tab` cycles the same field). Session-scoped.
+    Safety(Option<SafetyMode>),
     Clear,
     Save(Option<String>),
     Load(Option<String>),

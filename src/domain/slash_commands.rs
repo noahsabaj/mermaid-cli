@@ -225,6 +225,13 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
+        name: "safety",
+        aliases: &["permission"],
+        description: "Show or set the session safety mode (Shift+Tab also cycles)",
+        arg_hint: Some("[read_only|ask|auto|full_access]"),
+        group: SlashCommandGroup::SafetyRecovery,
+    },
+    SlashCommand {
         name: "approvals",
         aliases: &[],
         description: "List pending approvals",

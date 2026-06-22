@@ -309,6 +309,10 @@ fn slash_body(cmd: &SlashCmd) -> serde_json::Value {
         SlashCmd::VisibleReasoning(arg) => {
             serde_json::json!({"command": "visible-reasoning", "arg": arg})
         },
+        SlashCmd::Safety(mode) => serde_json::json!({
+            "command": "safety",
+            "arg": mode.map(|m| m.as_str()),
+        }),
         SlashCmd::Clear => serde_json::json!({"command": "clear"}),
         SlashCmd::Save(name) => serde_json::json!({"command": "save", "arg": name}),
         SlashCmd::Load(name) => serde_json::json!({"command": "load", "arg": name}),

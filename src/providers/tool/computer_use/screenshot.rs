@@ -71,7 +71,9 @@ impl ToolExecutor for ScreenshotTool {
             crate::runtime::ToolCategory::ComputerUse,
             "computer-use: screenshot".to_string(),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
 

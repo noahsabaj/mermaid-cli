@@ -77,7 +77,9 @@ impl ToolExecutor for WebSearchTool {
             crate::runtime::ToolCategory::Web,
             format!("web_search ({} queries)", queries.len()),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
 
@@ -195,7 +197,9 @@ impl ToolExecutor for WebFetchTool {
             crate::runtime::ToolCategory::Web,
             format!("web_fetch {}", url),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
         let start = std::time::Instant::now();

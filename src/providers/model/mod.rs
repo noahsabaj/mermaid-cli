@@ -12,13 +12,15 @@ pub mod ollama;
 pub mod openai_compat;
 pub(crate) mod stream_bridge;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
-use crate::domain::ChatRequest;
-use crate::models::Result;
+use crate::domain::{ChatRequest, TurnId};
+use crate::models::{ModelError, Result, TokenUsage};
 
 use super::capabilities::Capabilities;
-use super::ctx::{FinalResponse, StreamContext};
+use super::ctx::{FinalResponse, StreamContext, StreamEvent};
 
 /// Provider-facing interface. A `ModelProvider` impl owns whatever
 /// HTTP client / state it needs and exposes `chat()` — that's the
@@ -40,6 +42,47 @@ pub trait ModelProvider: Send + Sync {
     /// a few hundred ms. This is the contract that replaces the old
     /// `check_interrupt` polling pattern.
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse>;
+}
+
+/// Run a one-shot, non-interactive model call and collect its streamed text
+/// into a `String`. For internal calls whose output is NOT shown to the user
+/// as it streams — context compaction and the Auto-mode safety classifier.
+/// Drains a private event channel (ignoring reasoning / tool-call events) and
+/// returns the collected text plus final token usage. The `token` lets the
+/// caller cancel the call (e.g. on Ctrl+C) like any other turn work.
+pub(crate) async fn collect_text(
+    provider: Arc<dyn ModelProvider>,
+    turn: TurnId,
+    request: ChatRequest,
+    token: tokio_util::sync::CancellationToken,
+) -> Result<(String, Option<TokenUsage>)> {
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<StreamEvent>(128);
+    let ctx = StreamContext::new(token, stream_tx, turn);
+    let collector = tokio::task::spawn(async move {
+        let mut text = String::new();
+        let mut usage = None;
+        while let Some(event) = stream_rx.recv().await {
+            match event {
+                StreamEvent::Text(chunk) => text.push_str(&chunk),
+                StreamEvent::Done {
+                    usage: done_usage, ..
+                } => usage = done_usage,
+                StreamEvent::Reasoning(_)
+                | StreamEvent::ToolCall(_)
+                | StreamEvent::ThinkingSignature(_) => {},
+            }
+        }
+        (text, usage)
+    });
+
+    let response = provider.chat(request, ctx).await;
+    let (text, stream_usage) = collector.await.map_err(|err| {
+        ModelError::StreamError(format!("collect_text collector failed: {}", err))
+    })?;
+    match response {
+        Ok(final_response) => Ok((text, final_response.usage.or(stream_usage))),
+        Err(err) => Err(err),
+    }
 }
 
 pub use anthropic::AnthropicProvider;

@@ -59,7 +59,9 @@ impl ToolExecutor for TypeTextTool {
             crate::runtime::ToolCategory::ComputerUse,
             "computer-use: type_text".to_string(),
             &args,
-        ) {
+        )
+        .await
+        {
             return blocked;
         }
         let text = match args.get("text").and_then(|v| v.as_str()) {

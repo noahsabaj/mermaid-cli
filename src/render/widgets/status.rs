@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::domain::{ContextUsageSnapshot, TokenUsageTotals};
 use crate::models::{ReasoningLevel, TokenUsageSource};
 use crate::render::theme::Theme;
+use crate::runtime::SafetyMode;
 
 /// Props for StatusWidget (stateless widget)
 pub struct StatusWidget<'a> {
@@ -27,6 +28,9 @@ pub struct StatusWidget<'a> {
     /// snap case). `Some(requested)` shows `reasoning: high (max
     /// requested)`; `None` shows just `reasoning: high`.
     pub requested_level: Option<ReasoningLevel>,
+    /// Live session safety mode. Rendered on line 2 left so the active
+    /// permission level is always visible (Shift+Tab / `/safety` change it).
+    pub safety_mode: SafetyMode,
 }
 
 impl<'a> Widget for StatusWidget<'a> {
@@ -90,10 +94,13 @@ impl<'a> Widget for StatusWidget<'a> {
             ),
             None => format!("reasoning: {}", self.reasoning_level.as_str()),
         };
+        // Prefix the live safety mode so the active permission level is always
+        // visible (Shift+Tab / `/safety` change it live).
+        let left_text = format!("safety: {} · {}", self.safety_mode.as_str(), reasoning_text);
         let model_display = self.model_name;
 
         // Calculate padding between reasoning text and model name (display-cell widths).
-        let left_content_width = reasoning_text.width();
+        let left_content_width = left_text.width();
         let right_content_width = model_display.width();
         let padding_width_line2 = if available_width > left_content_width + right_content_width {
             available_width - left_content_width - right_content_width
@@ -102,9 +109,9 @@ impl<'a> Widget for StatusWidget<'a> {
         };
 
         let line2_spans = vec![
-            // "reasoning: <level>" text (left, gray, always rendered)
+            // "safety: <mode> · reasoning: <level>" (left, gray, always rendered)
             Span::styled(
-                reasoning_text,
+                left_text,
                 Style::new().fg(self.theme.colors.text_disabled.to_color()),
             ),
             // Padding to right-align model name

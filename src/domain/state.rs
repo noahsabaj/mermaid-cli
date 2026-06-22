@@ -24,6 +24,7 @@ use crate::app::{Config, McpServerConfig};
 use crate::models::ChatMessage;
 use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ReasoningLevel, TokenUsage, TokenUsageSource};
+use crate::runtime::SafetyMode;
 use crate::session::ConversationHistory;
 
 use super::cmd::ChatRequest;
@@ -107,6 +108,7 @@ impl State {
                 conversation,
                 model_id,
                 reasoning,
+                safety_mode: settings.safety.mode,
                 cumulative_tokens: 0,
                 last_token_usage: None,
                 cumulative_token_usage: TokenUsageTotals::default(),
@@ -392,6 +394,12 @@ pub struct Session {
     pub conversation: ConversationHistory,
     pub model_id: String,
     pub reasoning: ReasoningLevel,
+    /// Live safety mode for this session. Initialized from
+    /// `config.safety.mode`, then mutated in-session by `Shift+Tab` /
+    /// `/safety` (session-scoped — never written back to the config file).
+    /// The reducer threads this into `Cmd::ExecuteTool` so the policy gate
+    /// enforces the *current* mode, not the startup snapshot.
+    pub safety_mode: SafetyMode,
     /// Running total of tokens consumed across every API request in
     /// this session. Kept for CLI JSON compatibility; the richer
     /// prompt/completion breakdown lives in `cumulative_token_usage`.

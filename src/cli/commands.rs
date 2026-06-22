@@ -585,12 +585,7 @@ fn label(status: &str) -> &'static str {
 }
 
 fn safety_mode_name(mode: crate::runtime::SafetyMode) -> &'static str {
-    match mode {
-        crate::runtime::SafetyMode::ReadOnly => "read_only",
-        crate::runtime::SafetyMode::Ask => "ask",
-        crate::runtime::SafetyMode::AutoReview => "auto_review",
-        crate::runtime::SafetyMode::FullAccess => "full_access",
-    }
+    mode.as_str()
 }
 
 fn configured_remote_providers(config: &Config) -> Vec<String> {

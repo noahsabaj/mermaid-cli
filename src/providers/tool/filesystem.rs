@@ -201,7 +201,9 @@ impl ToolExecutor for EditFileTool {
             raw_path,
             std::slice::from_ref(&abs),
             pending_action,
-        ) {
+        )
+        .await
+        {
             return outcome;
         }
         if ctx.config.safety.checkpoint_on_mutation
@@ -305,7 +307,9 @@ impl ToolExecutor for DeleteFileTool {
             raw_path,
             std::slice::from_ref(&abs),
             pending_action,
-        ) {
+        )
+        .await
+        {
             return outcome;
         }
         if ctx.config.safety.checkpoint_on_mutation
@@ -395,7 +399,9 @@ impl ToolExecutor for CreateDirectoryTool {
             raw_path,
             std::slice::from_ref(&abs),
             pending_action,
-        ) {
+        )
+        .await
+        {
             return outcome;
         }
         if ctx.config.safety.checkpoint_on_mutation
@@ -492,7 +498,9 @@ impl ToolExecutor for WriteFileTool {
             path,
             std::slice::from_ref(&abs_path),
             pending_action,
-        ) {
+        )
+        .await
+        {
             return outcome;
         }
         if ctx.config.safety.checkpoint_on_mutation
@@ -725,7 +733,7 @@ fn write_one_blocking(path: &Path, content: &str) -> std::io::Result<usize> {
     Ok(content.lines().count())
 }
 
-fn mutation_policy_outcome(
+async fn mutation_policy_outcome(
     ctx: &ExecContext,
     tool: &str,
     path: &str,
@@ -740,7 +748,7 @@ fn mutation_policy_outcome(
     request.path = Some(path.to_string());
     // File mutations are replayable: an Ask decision checkpoints, records an
     // approval, and blocks (handled inside the gate).
-    match super::policy_gate::gate(ctx, request, checkpoint_paths, pending_action, true) {
+    match super::policy_gate::gate(ctx, request, checkpoint_paths, pending_action, true).await {
         super::policy_gate::Gate::Block(outcome) => Some(outcome),
         super::policy_gate::Gate::Proceed { .. } => {
             let _ = crate::runtime::run_plugin_hooks(
