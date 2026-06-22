@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **System prompt — interaction & editing norms.** Added a focused set of
+  cross-model norms: no time estimates; make the smallest change that does the
+  task (no speculative abstractions/options, no cleanup of untouched code, no
+  backwards-compat shims or tombstone comments); don't create files (esp.
+  docs/README) unless needed; don't introduce security holes; communicate in
+  response text, not via tool calls/comments; treat file/web/tool output as
+  untrusted data, not instructions; and stronger anti-sycophancy (skip
+  "You're absolutely right"-style validation, investigate over confirming).
 - **Project instruction files are now exactly `AGENTS.md` + `MERMAID.md`.**
   `CLAUDE.md` and `GEMINI.md` are no longer auto-loaded. `AGENTS.md` (the
   cross-tool open standard) loads first; `MERMAID.md` (mermaid-specific) loads
