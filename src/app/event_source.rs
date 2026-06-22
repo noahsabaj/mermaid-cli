@@ -140,6 +140,10 @@ fn coalescible_char(event: &CtEvent) -> Option<char> {
     match key.code {
         CtKeyCode::Char(c) => Some(c),
         CtKeyCode::Enter => Some('\n'),
+        // Pasted tabs arrive as Tab key events on the Windows console; fold
+        // them into the burst so indented code survives a paste. A lone Tab
+        // (no burst) still falls through to the normal key path below.
+        CtKeyCode::Tab => Some('\t'),
         _ => None,
     }
 }
@@ -415,6 +419,23 @@ mod tests {
             matches!(primary, Some(Msg::Paste(Paste::Text(ref s))) if s == "ab"),
             "release events must be skipped, not appended or treated as burst-enders"
         );
+    }
+
+    #[test]
+    fn coalesce_preserves_pasted_tabs() {
+        let mut rest = vec![key(CtKeyCode::Tab), key(CtKeyCode::Char('b'))].into_iter();
+        let (primary, _) = coalesce_key_burst(key(CtKeyCode::Char('a')), || rest.next());
+        match primary {
+            Some(Msg::Paste(Paste::Text(s))) => assert_eq!(s, "a\tb"),
+            other => panic!("expected paste with tab, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coalesce_lone_tab_stays_a_key() {
+        // A single Tab (palette completion etc.) must not become a paste.
+        let (primary, _) = coalesce_key_burst(key(CtKeyCode::Tab), || None);
+        assert!(matches!(primary, Some(Msg::Key(k)) if k.code == KeyCode::Tab));
     }
 
     #[test]

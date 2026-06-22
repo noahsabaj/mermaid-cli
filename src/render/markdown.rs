@@ -47,6 +47,7 @@ pub fn parse_markdown(input: &str, theme: &Theme) -> Vec<Line<'static>> {
     let mut in_code_block = false;
     let mut code_block_content = String::new();
     let mut code_block_lang = String::new();
+    let mut current_link_url: Option<String> = None;
     let mut list_stack: Vec<ListState> = Vec::new();
 
     // Table state
@@ -142,10 +143,11 @@ pub fn parse_markdown(input: &str, theme: &Theme) -> Vec<Line<'static>> {
                         current_cell.clear();
                         style_stack.last().copied().unwrap_or_default()
                     },
-                    Tag::Link { .. } => {
-                        // Render the link text underlined in the accent color.
-                        // (No raw URL — terminals can't follow it without OSC-8,
-                        // and inlining it adds noise.)
+                    Tag::Link { dest_url, .. } => {
+                        // Render the link text underlined in the accent color;
+                        // the destination URL is appended dimmed on the End tag
+                        // (terminals can't follow it without OSC-8).
+                        current_link_url = Some(dest_url.to_string());
                         link_style
                     },
                     Tag::BlockQuote(_) => {
@@ -206,7 +208,22 @@ pub fn parse_markdown(input: &str, theme: &Theme) -> Vec<Line<'static>> {
                         render_table(&mut lines, &table_rows, table_header_len, theme);
                         table_rows.clear();
                     },
-                    TagEnd::Link => {},
+                    TagEnd::Link => {
+                        // Append the destination as dimmed " (url)" unless it's
+                        // identical to the visible text (autolinks) or empty.
+                        if let Some(url) = current_link_url.take() {
+                            let text: String = current_line_spans
+                                .iter()
+                                .map(|s| s.content.as_ref())
+                                .collect();
+                            if !url.is_empty() && !text.ends_with(&url) {
+                                current_line_spans.push(Span::styled(
+                                    format!(" ({})", url),
+                                    Style::new().fg(c.text_disabled.to_color()),
+                                ));
+                            }
+                        }
+                    },
                     TagEnd::BlockQuote(_) => {
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
@@ -668,10 +685,20 @@ mod tests {
     }
 
     #[test]
-    fn test_link_shows_text() {
+    fn test_link_shows_text_and_url() {
         let lines = md("[click here](https://example.com)");
         let text = lines_to_text(&lines);
         assert!(text.contains("click here"));
+        // The destination is appended (dimmed) so the user can see where it goes.
+        assert!(text.contains("https://example.com"));
+    }
+
+    #[test]
+    fn test_autolink_does_not_duplicate_url() {
+        // When the visible text already is the URL, don't append it twice.
+        let lines = md("<https://example.com>");
+        let text = lines_to_text(&lines);
+        assert_eq!(text.matches("https://example.com").count(), 1);
     }
 
     #[test]
