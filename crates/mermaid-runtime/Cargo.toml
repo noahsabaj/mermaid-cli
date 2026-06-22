@@ -15,10 +15,10 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 getrandom = "0.4"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
+sha2 = "0.11"
 # POSIX-shell tokenizer for the safety classifier — splits a command into
 # argv so risk classification keys on the leading binary + normalized flags
 # instead of bypassable raw-substring matching.
