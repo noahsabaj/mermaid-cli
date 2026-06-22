@@ -28,6 +28,8 @@ use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::runtime::{SafetyMode, TaskStatus};
 use crate::session::ConversationHistory;
 
+use super::state::ApprovalChoice;
+
 use super::compaction::{CompactionArchive, CompactionRecord, CompactionRequest};
 use super::ids::{ToolCallId, TurnId};
 use super::runtime::ManagedProcess;
@@ -79,6 +81,15 @@ pub enum Cmd {
     /// `ToolFinished { outcome: Cancelled }` for tools already running)
     /// so the reducer can transition back to `Idle`.
     CancelScope(TurnId),
+
+    /// Resolve an inline approval prompt: deliver the user's decision to the
+    /// parked tool task via the `ApprovalBroker`. NOT turn-scoped — it's a
+    /// fire-and-forget to the broker (the tool task it unblocks is the
+    /// turn-scoped work).
+    ResolveApproval {
+        call_id: ToolCallId,
+        decision: ApprovalChoice,
+    },
 
     // ── Persistence ─────────────────────────────────────────────────
     /// Save the current conversation to disk. No-op if unchanged since
@@ -265,6 +276,7 @@ impl Cmd {
             Cmd::CompactConversation { .. } => "compact_conversation",
             Cmd::ExecuteTool { .. } => "execute_tool",
             Cmd::CancelScope(_) => "cancel_scope",
+            Cmd::ResolveApproval { .. } => "resolve_approval",
             Cmd::SaveConversation(_) => "save_conversation",
             Cmd::SaveCompactionArchive { .. } => "save_compaction_archive",
             Cmd::SaveProcess(_) => "save_process",
@@ -343,6 +355,9 @@ impl Cmd {
                 turn, call_id, source.function.name
             ),
             Cmd::CancelScope(turn) => format!("cancel_scope(turn={})", turn),
+            Cmd::ResolveApproval { call_id, decision } => {
+                format!("resolve_approval(call={}, {:?})", call_id, decision)
+            },
             Cmd::SaveConversation(c) => format!("save_conversation(id={})", c.id),
             Cmd::SaveCompactionArchive {
                 archive, record, ..

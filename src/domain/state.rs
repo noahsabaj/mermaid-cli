@@ -55,6 +55,12 @@ pub struct State {
     /// (e.g. "are you sure you want to /clear?"). Cleared by the
     /// reducer when the user answers.
     pub confirm: Option<Confirmation>,
+    /// FIFO queue of tool actions awaiting the user's inline approval
+    /// (interactive `ask` mode + Auto-mode escalations). The front item is
+    /// rendered as a modal; answering it pops the item and emits
+    /// `Cmd::ResolveApproval`, which unblocks the parked tool task. Empty in
+    /// headless mode (no broker → the out-of-band `/approve` flow instead).
+    pub pending_approval: VecDeque<PendingApproval>,
     /// Transient status line under the input box. One-shot — cleared by
     /// `Msg::StatusConsumed` or by the next rendered frame depending on
     /// `StatusKind`.
@@ -125,6 +131,7 @@ impl State {
             cwd,
             ids: IdAllocatorBundle::default(),
             confirm: None,
+            pending_approval: VecDeque::new(),
             status: None,
             runtime,
             should_exit: false,
@@ -825,6 +832,46 @@ pub struct Confirmation {
 #[derive(Debug, Clone)]
 pub enum ConfirmationTarget {
     ClearConversation,
+}
+
+/// One tool action awaiting inline approval. Built by the policy gate and
+/// delivered via `Msg::ApprovalRequested`; rendered as a modal. The `prompt`
+/// body is pre-formatted by the gate (command / path / summary, plus any
+/// Auto-review reason) so the render layer stays dumb.
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    pub turn: TurnId,
+    pub call_id: ToolCallId,
+    pub tool: String,
+    /// `RiskClass::as_str()` — shown on the title line.
+    pub risk: String,
+    pub kind: ApprovalKind,
+    /// Pre-formatted body (the command/path being run + any classifier reason).
+    pub prompt: String,
+    /// What "don't ask again" (option 2) will allowlist, shown in the prompt.
+    pub allowlist_scope: String,
+}
+
+/// The user's answer to an approval prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalChoice {
+    Approve,
+    ApproveAlways,
+    Deny,
+}
+
+/// Category of the gated action — drives the prompt's label. Mirrors the
+/// runtime `ToolCategory` but lives in `domain` so the pure reducer needn't
+/// depend on `providers`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalKind {
+    Shell,
+    FileMutation,
+    Web,
+    Mcp,
+    Subagent,
+    ComputerUse,
+    Classify,
 }
 
 /// Transient status line shown under the input box. Self-clears after

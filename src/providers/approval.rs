@@ -1,0 +1,237 @@
+//! Inline approval broker for interactive `ask` mode + Auto-mode escalations.
+//!
+//! When a tool is gated and a human decision is needed, the policy gate calls
+//! [`ApprovalBroker::request`] (the broker is injected into [`ExecContext`]).
+//! That sends a `Msg::ApprovalRequested` to the reducer — which renders a modal
+//! — and parks the tool task on a oneshot until the user answers. The reducer
+//! (pure) emits `Cmd::ResolveApproval`; the `EffectRunner` calls
+//! [`ApprovalBroker::resolve`]; the parked task wakes and the tool proceeds or
+//! is denied. The turn pauses for free: while parked, the task hasn't sent
+//! `Msg::ToolFinished`, so its outcome slot stays `None` and no follow-up model
+//! call fires.
+//!
+//! Lock discipline: `pending`/`allowlist` use [`std::sync::Mutex`] (whose guard
+//! is `!Send`) so a guard accidentally held across an `.await` fails to
+//! compile. Every critical section here is tiny and fully synchronous.
+//!
+//! [`ExecContext`]: crate::providers::ctx::ExecContext
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
+
+use crate::domain::{ApprovalChoice, ApprovalKind, Msg, ToolCallId, TurnId};
+
+/// The user's decision, broker-side. `Cmd::ResolveApproval` carries the pure
+/// `domain::ApprovalChoice`; the `EffectRunner` maps it to this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    Approve,
+    ApproveAlways,
+    Deny,
+}
+
+impl From<ApprovalChoice> for ApprovalDecision {
+    fn from(choice: ApprovalChoice) -> Self {
+        match choice {
+            ApprovalChoice::Approve => ApprovalDecision::Approve,
+            ApprovalChoice::ApproveAlways => ApprovalDecision::ApproveAlways,
+            ApprovalChoice::Deny => ApprovalDecision::Deny,
+        }
+    }
+}
+
+struct PendingEntry {
+    tx: oneshot::Sender<ApprovalDecision>,
+    allowlist_key: String,
+}
+
+/// Owned by the interactive `EffectRunner`, cloned into each `ExecContext`.
+/// Absent (`None`) in headless runs — the gate then falls back to the
+/// out-of-band DB-approval flow.
+#[derive(Clone)]
+pub struct ApprovalBroker {
+    pending: Arc<Mutex<HashMap<ToolCallId, PendingEntry>>>,
+    allowlist: Arc<Mutex<HashSet<String>>>,
+    msg_tx: mpsc::Sender<Msg>,
+}
+
+impl ApprovalBroker {
+    pub fn new(msg_tx: mpsc::Sender<Msg>) -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            allowlist: Arc::new(Mutex::new(HashSet::new())),
+            msg_tx,
+        }
+    }
+
+    /// True if the user already chose "don't ask again" for this key.
+    pub fn is_allowlisted(&self, key: &str) -> bool {
+        self.allowlist.lock().unwrap().contains(key)
+    }
+
+    /// Prompt the user and block until they answer (or the turn is cancelled).
+    /// Fail-safe: a dropped sender, a gone reducer, or a cancel all resolve to
+    /// `Deny`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn request(
+        &self,
+        token: &CancellationToken,
+        turn: TurnId,
+        call_id: ToolCallId,
+        tool: String,
+        risk: String,
+        kind: ApprovalKind,
+        prompt: String,
+        allowlist_key: String,
+    ) -> ApprovalDecision {
+        let (tx, rx) = oneshot::channel();
+        // Register the sender. The guard drops at the end of this statement —
+        // never held across the awaits below.
+        self.pending.lock().unwrap().insert(
+            call_id,
+            PendingEntry {
+                tx,
+                allowlist_key: allowlist_key.clone(),
+            },
+        );
+
+        let sent = self
+            .msg_tx
+            .send(Msg::ApprovalRequested {
+                turn,
+                call_id,
+                tool,
+                risk,
+                kind,
+                prompt,
+                allowlist_scope: allowlist_key,
+            })
+            .await;
+        if sent.is_err() {
+            // Reducer is gone — clean up and deny.
+            self.pending.lock().unwrap().remove(&call_id);
+            return ApprovalDecision::Deny;
+        }
+
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => {
+                self.pending.lock().unwrap().remove(&call_id);
+                ApprovalDecision::Deny
+            }
+            decision = rx => decision.unwrap_or(ApprovalDecision::Deny),
+        }
+    }
+
+    /// Deliver the user's decision to the parked task. On `ApproveAlways`,
+    /// remember the key so future matching actions skip the prompt this session.
+    pub fn resolve(&self, call_id: ToolCallId, decision: ApprovalDecision) {
+        let entry = self.pending.lock().unwrap().remove(&call_id);
+        if let Some(entry) = entry {
+            if decision == ApprovalDecision::ApproveAlways {
+                self.allowlist.lock().unwrap().insert(entry.allowlist_key);
+            }
+            let _ = entry.tx.send(decision);
+        }
+    }
+}
+
+/// Compute the session "don't ask again" allowlist key. Per-tool, except
+/// `execute_command`, which keys on argv0 (basename) so approving `npm test`
+/// also clears `npm run build` but still prompts on `rm`.
+pub fn allowlist_key(tool: &str, command: Option<&str>) -> String {
+    if tool == "execute_command"
+        && let Some(cmd) = command
+        && let Some(argv0) = cmd.split_whitespace().next()
+        && !argv0.is_empty()
+    {
+        let base = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
+        return format!("execute_command:{}", base);
+    }
+    tool.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_key_is_per_tool_with_shell_argv0() {
+        assert_eq!(allowlist_key("write_file", None), "write_file");
+        assert_eq!(
+            allowlist_key("execute_command", Some("npm test")),
+            "execute_command:npm"
+        );
+        assert_eq!(
+            allowlist_key("execute_command", Some("/usr/bin/git status")),
+            "execute_command:git"
+        );
+        // No command falls back to the bare tool key.
+        assert_eq!(allowlist_key("execute_command", None), "execute_command");
+    }
+
+    #[tokio::test]
+    async fn resolve_delivers_decision_and_approve_always_allowlists() {
+        let (tx, _rx) = mpsc::channel::<Msg>(8);
+        let broker = ApprovalBroker::new(tx);
+        let token = CancellationToken::new();
+
+        // Spawn a request; resolve it from "the reducer side".
+        let b2 = broker.clone();
+        let handle = tokio::spawn(async move {
+            b2.request(
+                &CancellationToken::new(),
+                TurnId(1),
+                ToolCallId(1),
+                "execute_command".to_string(),
+                "shell_mutation".to_string(),
+                ApprovalKind::Shell,
+                "$ npm test".to_string(),
+                "execute_command:npm".to_string(),
+            )
+            .await
+        });
+        // Give the task a beat to register, then resolve.
+        tokio::task::yield_now().await;
+        // Poll until registered (the send + insert happen before the await).
+        for _ in 0..100 {
+            broker.resolve(ToolCallId(1), ApprovalDecision::ApproveAlways);
+            if broker.is_allowlisted("execute_command:npm") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let decision = handle.await.unwrap();
+        assert_eq!(decision, ApprovalDecision::ApproveAlways);
+        assert!(broker.is_allowlisted("execute_command:npm"));
+        let _ = token; // silence unused in this path
+    }
+
+    #[tokio::test]
+    async fn cancel_token_denies() {
+        let (tx, _rx) = mpsc::channel::<Msg>(8);
+        let broker = ApprovalBroker::new(tx);
+        let token = CancellationToken::new();
+        let token2 = token.clone();
+        let handle = tokio::spawn(async move {
+            broker
+                .request(
+                    &token2,
+                    TurnId(1),
+                    ToolCallId(2),
+                    "web_fetch".to_string(),
+                    "network".to_string(),
+                    ApprovalKind::Web,
+                    "web_fetch https://x".to_string(),
+                    "web_fetch".to_string(),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        token.cancel();
+        assert_eq!(handle.await.unwrap(), ApprovalDecision::Deny);
+    }
+}

@@ -4,6 +4,7 @@
 //! `render::mod` pulls those props from `State` per frame. No widget
 //! holds a reference to any god-object.
 
+mod approval;
 mod attachment;
 mod chat;
 mod conversation_list;
@@ -13,6 +14,7 @@ mod status;
 mod status_banner;
 mod status_line;
 
+pub use approval::ApprovalModalWidget;
 pub use attachment::AttachmentWidget;
 pub use chat::{ChatState, ChatWidget, ImageClickTarget};
 pub use conversation_list::ConversationListWidget;

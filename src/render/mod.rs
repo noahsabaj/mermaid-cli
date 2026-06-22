@@ -125,12 +125,28 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     //   - Slash palette (input starts with `/`): 3–10 lines based on
     //     filter match count.
     //   - Otherwise: 2-line status bar.
-    let conv_list_open = matches!(
-        state.ui.mode,
-        crate::domain::UiMode::ConversationList { .. }
-    );
-    let palette_open = !conv_list_open && state.ui.input_buffer.starts_with('/');
-    let bottom_height = if conv_list_open {
+    // Precedence: approval modal > confirm modal > ConversationList picker >
+    // slash palette > status bar. Approvals/confirms are interrupts that
+    // overlay regardless of input mode.
+    let approval_item = state.pending_approval.front();
+    let confirm_open = approval_item.is_none() && state.confirm.is_some();
+    let conv_list_open = approval_item.is_none()
+        && !confirm_open
+        && matches!(
+            state.ui.mode,
+            crate::domain::UiMode::ConversationList { .. }
+        );
+    let palette_open = approval_item.is_none()
+        && !confirm_open
+        && !conv_list_open
+        && state.ui.input_buffer.starts_with('/');
+    let bottom_height = if let Some(item) = approval_item {
+        // border(2) + body lines + blank(1) + 3 option lines
+        let body_lines = item.prompt.lines().count().clamp(1, 6) as u16;
+        2 + body_lines + 1 + 3
+    } else if confirm_open {
+        6
+    } else if conv_list_open {
         12
     } else if palette_open {
         let typed = state
@@ -275,7 +291,31 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
 
     // Bottom: conversation-list picker, slash-palette overlay, or
     // persistent status bar — whichever the UI mode dictates.
-    if let crate::domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
+    if let Some(item) = state.pending_approval.front() {
+        use widgets::ApprovalModalWidget;
+        let widget = ApprovalModalWidget {
+            theme: &rstate.theme,
+            title: format!("⚠ Approval required — {}  [{}]", item.tool, item.risk),
+            body: item.prompt.as_str(),
+            options: vec![
+                "1. Yes".to_string(),
+                format!("2. Yes, and don't ask again for `{}`", item.allowlist_scope),
+                "3. No  (Esc)".to_string(),
+            ],
+            accent: rstate.theme.colors.warning.to_color(),
+        };
+        frame.render_widget(widget, chunks[5]);
+    } else if let Some(confirm) = &state.confirm {
+        use widgets::ApprovalModalWidget;
+        let widget = ApprovalModalWidget {
+            theme: &rstate.theme,
+            title: "Confirm".to_string(),
+            body: confirm.prompt.as_str(),
+            options: vec!["y. Yes".to_string(), "n. No  (Esc)".to_string()],
+            accent: rstate.theme.colors.warning.to_color(),
+        };
+        frame.render_widget(widget, chunks[5]);
+    } else if let crate::domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
         use widgets::ConversationListWidget;
         let widget = ConversationListWidget {
             theme: &rstate.theme,

@@ -29,6 +29,7 @@ use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ChatMessage, ReasoningChunk, TokenUsage};
 use crate::runtime::SafetyMode;
 
+use super::approval::ApprovalBroker;
 use super::auto_classifier::AutoClassifier;
 
 /// What a `ModelProvider::chat()` receives.
@@ -106,6 +107,10 @@ pub struct ExecContext {
     /// mode is `Auto` and a provider is bound; the gate awaits it to resolve a
     /// `PolicyDecision::Classify`. `None` ⇒ the gate fails safe (escalate).
     pub classifier: Option<Arc<dyn AutoClassifier>>,
+    /// Inline-approval back-channel (interactive runs only). `Some` lets the
+    /// gate prompt the user and park until they answer; `None` (headless) falls
+    /// back to the out-of-band DB-approval flow.
+    pub approval: Option<ApprovalBroker>,
 }
 
 impl std::fmt::Debug for ExecContext {
@@ -122,6 +127,10 @@ impl std::fmt::Debug for ExecContext {
             .field(
                 "classifier",
                 &self.classifier.as_ref().map(|_| "<dyn AutoClassifier>"),
+            )
+            .field(
+                "approval",
+                &self.approval.as_ref().map(|_| "<ApprovalBroker>"),
             )
             .finish_non_exhaustive()
     }
@@ -141,6 +150,7 @@ impl ExecContext {
         safety_mode: SafetyMode,
         intent: Option<String>,
         classifier: Option<Arc<dyn AutoClassifier>>,
+        approval: Option<ApprovalBroker>,
     ) -> Self {
         Self {
             token,
@@ -154,6 +164,7 @@ impl ExecContext {
             safety_mode,
             intent,
             classifier,
+            approval,
         }
     }
 }
@@ -248,6 +259,7 @@ pub fn test_exec_context(
             String::new(),
             None,
             crate::runtime::SafetyMode::FullAccess,
+            None,
             None,
             None,
         ),

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Inline approval prompts.** In interactive `ask` mode (and `auto`-mode
+  escalations), a gated tool action now **pauses and prompts inline** —
+  `1` Yes · `2` Yes, don't ask again (per-tool; `execute_command` keyed on the
+  program) · `3`/Esc No — and the agent waits for the answer. Previously `ask`
+  mode just returned an "Approval required" error and the model flailed; the
+  only approval path was the out-of-band `/approve <id>` flow (still used in
+  headless `mermaid run`). The prompt also covers the previously-unguarded
+  non-replayable tools (web / MCP / subagent / computer-use) under `ask`.
+
+### Fixed
+
+- The `/clear` (and other) confirmation modal was inert — nothing rendered it
+  and no key handler read it. It now shows and accepts `y`/`n`.
+- **System prompt** refreshed: it now documents the safety/permission modes
+  (and how to behave when an action is gated — explain, don't spam retries),
+  the tool set, and the in-session controls.
+
 ## [0.9.0] - 2026-06-21
 
 Headline: a **classifier-backed Auto safety mode** (as in Claude Code / Codex)

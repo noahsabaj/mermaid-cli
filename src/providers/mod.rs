@@ -10,6 +10,7 @@
 //! specific retry logic. The traits carry the full surface; the
 //! effect runner just looks up an impl and calls it.
 
+pub mod approval;
 pub mod auto_classifier;
 pub mod capabilities;
 pub mod ctx;
@@ -17,6 +18,7 @@ pub mod factory;
 pub mod model;
 pub mod tool;
 
+pub use approval::{ApprovalBroker, ApprovalDecision, allowlist_key};
 pub use auto_classifier::{AutoClassifier, ModelAutoClassifier, VetRequest, VetVerdict};
 pub use capabilities::Capabilities;
 pub use ctx::{
