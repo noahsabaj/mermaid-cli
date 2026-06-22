@@ -2548,6 +2548,7 @@ fn handle_tool_finished(
             id,
             calls,
             outcomes,
+            ..
         } if *id == turn => {
             if !fill_outcome(calls, outcomes, call_id, outcome.clone()) {
                 return;

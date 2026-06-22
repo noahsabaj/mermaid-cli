@@ -477,6 +477,10 @@ pub enum TurnState {
     },
     ExecutingTools {
         id: TurnId,
+        /// When tool execution started, so the status line can show elapsed
+        /// time (a long-running command — `npm run dev`, a slow build — would
+        /// otherwise look frozen at 0s).
+        started: SystemTime,
         calls: Vec<PendingToolCall>,
         outcomes: Vec<Option<ToolOutcome>>,
     },

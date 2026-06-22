@@ -86,6 +86,7 @@ pub fn start_executing_tools(id: TurnId, calls: Vec<PendingToolCall>) -> TurnSta
     let outcomes = vec![None; calls.len()];
     TurnState::ExecutingTools {
         id,
+        started: SystemTime::now(),
         calls,
         outcomes,
     }
@@ -390,7 +391,7 @@ fn count_search_results(output: &str) -> usize {
 /// display ("Read src/main.rs", "Bash cargo test", etc). Matches on
 /// the wire-format tool name + arguments; unknown tools fall through
 /// to the raw function name.
-fn display_info_for(call: &PendingToolCall) -> (String, String) {
+pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
     let name = call.source.function.name.as_str();
     let args = &call.source.function.arguments;
     let string_arg =
