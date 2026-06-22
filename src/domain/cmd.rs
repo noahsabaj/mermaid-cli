@@ -125,6 +125,9 @@ pub enum Cmd {
     RememberMemory { text: String },
     /// Delete a memory by name/id; emits `Msg::MemoryChanged` + status.
     ForgetMemory { id: String },
+    /// Model-assisted prune of duplicate/obsolete memories, reversible via a
+    /// checkpoint. Emits `Msg::RuntimeText` (the report) + `Msg::MemoryChanged`.
+    ConsolidateMemory { model_id: String },
     /// Load a specific conversation by ID and emit
     /// `Msg::ConversationLoaded`. Reducer consumes that event to
     /// replace the current session.
@@ -292,6 +295,7 @@ impl Cmd {
             Cmd::ListMemory => "list_memory",
             Cmd::RememberMemory { .. } => "remember_memory",
             Cmd::ForgetMemory { .. } => "forget_memory",
+            Cmd::ConsolidateMemory { .. } => "consolidate_memory",
             Cmd::LoadConversation(_) => "load_conversation",
             Cmd::ListConversations => "list_conversations",
             Cmd::ListRuntimeTasks { .. } => "list_runtime_tasks",
@@ -381,6 +385,7 @@ impl Cmd {
             Cmd::ListMemory => "list_memory".to_string(),
             Cmd::RememberMemory { .. } => "remember_memory".to_string(),
             Cmd::ForgetMemory { .. } => "forget_memory".to_string(),
+            Cmd::ConsolidateMemory { .. } => "consolidate_memory".to_string(),
             Cmd::LoadConversation(id) => format!("load_conversation({})", id),
             Cmd::ListConversations => "list_conversations".to_string(),
             Cmd::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={})", limit),

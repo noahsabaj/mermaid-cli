@@ -338,6 +338,7 @@ fn slash_body(cmd: &SlashCmd) -> serde_json::Value {
         SlashCmd::Memory => serde_json::json!({"command": "memory"}),
         SlashCmd::Remember(text) => serde_json::json!({"command": "remember", "arg": text}),
         SlashCmd::Forget(id) => serde_json::json!({"command": "forget", "arg": id}),
+        SlashCmd::ConsolidateMemory => serde_json::json!({"command": "consolidate-memory"}),
         SlashCmd::Doctor => serde_json::json!({"command": "doctor"}),
         SlashCmd::Tasks => serde_json::json!({"command": "tasks"}),
         SlashCmd::Task(id) => serde_json::json!({"command": "task", "arg": id}),

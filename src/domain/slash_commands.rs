@@ -148,6 +148,13 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
+        name: "consolidate-memory",
+        aliases: &["memory-consolidate", "prune-memory"],
+        description: "Prune duplicate or obsolete memories (model-assisted, reversible)",
+        arg_hint: None,
+        group: SlashCommandGroup::ModelContext,
+    },
+    SlashCommand {
         name: "doctor",
         aliases: &[],
         description: "Show in-session readiness, model, safety, and instruction status",

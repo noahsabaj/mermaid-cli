@@ -368,6 +368,8 @@ pub enum SlashCmd {
     Remember(Option<String>),
     /// Delete a memory by name/id.
     Forget(Option<String>),
+    /// Prune duplicate/obsolete memories via a one-shot model pass.
+    ConsolidateMemory,
     Doctor,
     Tasks,
     Task(Option<String>),

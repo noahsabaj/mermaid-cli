@@ -224,6 +224,7 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("memory") => SlashCmd::Memory,
         Some("remember") => SlashCmd::Remember(arg),
         Some("forget") => SlashCmd::Forget(arg),
+        Some("consolidate-memory") => SlashCmd::ConsolidateMemory,
         Some("doctor") => SlashCmd::Doctor,
         Some("tasks") => SlashCmd::Tasks,
         Some("task") => SlashCmd::Task(arg),
@@ -503,6 +504,14 @@ mod tests {
             SlashCmd::Forget(Some("prefer-ripgrep".to_string()))
         );
         assert_eq!(parse_slash_command("forget"), SlashCmd::Forget(None));
+        assert_eq!(
+            parse_slash_command("consolidate-memory"),
+            SlashCmd::ConsolidateMemory
+        );
+        assert_eq!(
+            parse_slash_command("prune-memory"),
+            SlashCmd::ConsolidateMemory
+        ); // alias
     }
 
     #[test]
