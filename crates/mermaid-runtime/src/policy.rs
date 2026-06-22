@@ -48,12 +48,17 @@ pub enum ToolCategory {
     Network,
     Git,
     Process,
+    /// Agent-owned durable memory writes. Ungated in every mode except
+    /// read-only (see `decide`); transparency comes from the surfaced
+    /// transcript action, the plain editable files, and git for shared.
+    Memory,
 }
 
 impl ToolCategory {
     pub fn as_str(self) -> &'static str {
         match self {
             ToolCategory::Read => "read",
+            ToolCategory::Memory => "memory",
             ToolCategory::Edit => "edit",
             ToolCategory::Shell => "shell",
             ToolCategory::Web => "web",
@@ -227,6 +232,25 @@ impl PolicyEngine {
             };
         }
 
+        // Durable memory is agent-owned and ungated in every mode except
+        // read-only. This sits ahead of the mode match so an `Ask`-mode write
+        // never pops the inline approval modal — the design wants memory to
+        // feel automatic, with transparency coming from the surfaced action +
+        // editable files (and git review for shared). Read-only still blocks
+        // it, like any other mutation.
+        if request.category == ToolCategory::Memory {
+            return match self.mode {
+                SafetyMode::ReadOnly => PolicyDecision::Deny {
+                    risk,
+                    reason: "read-only safety mode blocks memory writes".to_string(),
+                },
+                _ => PolicyDecision::Allow {
+                    risk,
+                    checkpoint: false,
+                },
+            };
+        }
+
         if let Some(decision) = self
             .overrides
             .iter()
@@ -346,6 +370,9 @@ fn classify(request: &ActionRequest) -> RiskClass {
         },
         ToolCategory::Subagent => RiskClass::Process,
         ToolCategory::Process => RiskClass::Process,
+        // Short-circuited in `decide` before this risk is used for a decision;
+        // classified low for completeness/telemetry.
+        ToolCategory::Memory => RiskClass::LowMutation,
     }
 }
 
@@ -663,6 +690,30 @@ mod tests {
         let request = ActionRequest::new("write_file", ToolCategory::Edit, "write src/lib.rs");
         let decision = PolicyEngine::new(SafetyMode::ReadOnly).decide(&request);
         assert!(matches!(decision, PolicyDecision::Deny { .. }));
+    }
+
+    #[test]
+    fn memory_is_allowed_except_read_only() {
+        let req = || ActionRequest::new("memory", ToolCategory::Memory, "memory remember");
+        // Allowed without a checkpoint in ask / auto / full — so the gate never
+        // pops an approval modal.
+        for mode in [SafetyMode::Ask, SafetyMode::Auto, SafetyMode::FullAccess] {
+            assert!(
+                matches!(
+                    PolicyEngine::new(mode).decide(&req()),
+                    PolicyDecision::Allow {
+                        checkpoint: false,
+                        ..
+                    }
+                ),
+                "memory should be Allow(no checkpoint) in {mode:?}",
+            );
+        }
+        // Read-only blocks it like any other mutation.
+        assert!(matches!(
+            PolicyEngine::new(SafetyMode::ReadOnly).decide(&req()),
+            PolicyDecision::Deny { .. }
+        ));
     }
 
     #[test]
