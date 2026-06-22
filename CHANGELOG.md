@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-21
+
+Headline: a **classifier-backed Auto safety mode** (as in Claude Code / Codex)
+plus in-session mode switching. The minor bump reflects the breaking rename of
+the `AutoReview` mode.
+
 ### Added
 
 - **Auto safety mode** — a classifier-backed permission mode (as in Claude Code
@@ -28,6 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior changed from rule-based ("ask for everything risky") to
   classifier-backed. Config files with `[safety] mode = "auto_review"` must
   change the value to `"auto"` — the old string is no longer accepted.
+- Bumped dependencies: `rusqlite` 0.39 → 0.40, `sha2` 0.10 → 0.11, `getrandom`
+  0.3 → 0.4.
+
+### Fixed
+
+- Loosened a flaky timing assertion in the cancellation/timeout integration
+  test (`execute_command_timeout_honored`) that intermittently failed on loaded
+  CI runners; it now measures the real timeout behavior with a generous ceiling.
+
+### CI
+
+- Bumped pinned GitHub Actions: `actions/checkout` → v7, `actions/download-artifact`
+  → v8, `actions/upload-artifact` → v7, `softprops/action-gh-release` → v3.
 
 ## [0.8.1] - 2026-06-21
 
@@ -654,7 +673,10 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.5.1...v0.6.0
