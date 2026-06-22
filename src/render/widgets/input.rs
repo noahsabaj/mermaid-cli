@@ -28,9 +28,9 @@ impl InputState {
     /// position` is cell-based, not byte-based. CJK / emoji input previously
     /// mispositioned the cursor because the column was returned in bytes.
     ///
-    /// Uses `find_line_break` so the wrapping decisions match
-    /// `wrap_input_with_prompt` exactly — keep them consistent by routing
-    /// any future line-break logic through that shared helper.
+    /// Uses the shared `layout_rows` helper so the wrapping decisions match
+    /// `wrap_input_with_prompt` exactly (the two would silently drift
+    /// otherwise — `cursor_and_wrap_agree_on_line_structure` guards this).
     pub fn calculate_cursor_position(
         input: &str,
         cursor_pos: usize,
@@ -48,36 +48,24 @@ impl InputState {
             return (0, 0);
         }
 
-        let mut current_line: usize = 0;
-        let mut consumed: usize = 0; // byte offset into `input`
+        let rows = layout_rows(input, line_width);
+        for (idx, row) in rows.iter().enumerate() {
+            let content_end = row.start + row.len;
+            let gap_end = content_end + row.gap;
+            let is_last = idx + 1 == rows.len();
 
-        let mut chars_remaining = input;
-        loop {
-            let break_point = find_line_break(chars_remaining, line_width);
-
-            // Calculate whitespace gap between this line and the next
-            let after = &chars_remaining[break_point..];
-            let next_content = after.trim_start();
-            let ws_gap = after.len() - next_content.len();
-            let is_last_line = next_content.is_empty();
-
-            // Cursor belongs to this line if it falls within the line chars,
-            // or within the whitespace gap (trimmed between lines), or if
-            // this is the last line (cursor must be here).
-            if cursor_pos < consumed + break_point + ws_gap || is_last_line {
-                // Cap at break_point so trailing / gap whitespace doesn't
+            // Cursor belongs to this row if it falls within the row chars or
+            // the whitespace/newline gap after it, or if this is the last row.
+            if cursor_pos < gap_end || is_last {
+                // Cap at the row's content so trailing/gap whitespace doesn't
                 // overflow past the visible line.
-                let cursor_byte_in_line = cursor_pos.saturating_sub(consumed).min(break_point);
-                // Convert the byte offset to display cells by summing widths.
-                let line_text = &chars_remaining[..break_point];
+                let cursor_byte_in_line = cursor_pos.saturating_sub(row.start).min(row.len);
+                let line_text = &input[row.start..content_end];
                 let col_cells = line_text[..cursor_byte_in_line.min(line_text.len())].width();
-                return (current_line as u16, col_cells as u16);
+                return (idx as u16, col_cells as u16);
             }
-
-            consumed += break_point + ws_gap;
-            chars_remaining = next_content;
-            current_line += 1;
         }
+        (0, 0)
     }
 }
 
@@ -204,51 +192,104 @@ fn find_line_break(remaining: &str, line_width: usize) -> usize {
         .unwrap_or(hard_break)
 }
 
-/// Wrap input text with "> " prefix on first line and "  " on continuation lines (Claude Code style)
-/// Always returns at least "> " even when input is empty
+/// One rendered row's span within the original input, in bytes.
+///
+/// `start..start+len` is the row's visible text. `gap` is the
+/// whitespace/newline consumed after it before the next row begins (trimmed
+/// inter-word whitespace from a soft wrap, plus the `\n` byte of a hard
+/// break). Shared by `wrap_input_with_prompt` and `calculate_cursor_position`
+/// so they never disagree on line structure.
+struct RowSpan {
+    start: usize,
+    len: usize,
+    gap: usize,
+}
+
+/// Lay `input` out into rendered rows at `line_width` (display cells).
+/// Explicit `\n` forces a new row (so pasted/Shift+Enter newlines render as
+/// real lines); each resulting segment is then soft-wrapped on width via
+/// `find_line_break`. A trailing newline yields a final empty row.
+fn layout_rows(input: &str, line_width: usize) -> Vec<RowSpan> {
+    let mut rows: Vec<RowSpan> = Vec::new();
+    if input.is_empty() {
+        return rows;
+    }
+    let total = input.len();
+    let mut seg_start = 0usize;
+    loop {
+        let seg_end = match input[seg_start..].find('\n') {
+            Some(rel) => seg_start + rel,
+            None => total,
+        };
+        let segment = &input[seg_start..seg_end];
+
+        // Soft-wrap this newline-free segment into >=1 rows.
+        let mut local = 0usize;
+        loop {
+            let rem = &segment[local..];
+            let bp = find_line_break(rem, line_width);
+            let after = &rem[bp..];
+            let ws_gap = after.len() - after.trim_start().len();
+            rows.push(RowSpan {
+                start: seg_start + local,
+                len: bp,
+                gap: ws_gap,
+            });
+            local += bp + ws_gap;
+            if local >= segment.len() {
+                break;
+            }
+        }
+
+        if seg_end >= total {
+            break;
+        }
+        // A '\n' follows: count it in the last row's gap so cursor math lands
+        // the caret on the correct side of the break.
+        if let Some(last) = rows.last_mut() {
+            last.gap += 1;
+        }
+        seg_start = seg_end + 1;
+        if seg_start == total {
+            // Trailing newline → a final empty row.
+            rows.push(RowSpan {
+                start: seg_start,
+                len: 0,
+                gap: 0,
+            });
+            break;
+        }
+    }
+    rows
+}
+
+/// Wrap input text with "> " prefix on the first line and "  " on
+/// continuation lines (Claude Code style). Always returns at least "> ",
+/// even when input is empty. Embedded newlines render as real rows.
 fn wrap_input_with_prompt(input: &str, width: usize) -> String {
     if width < 3 {
         // Not enough space for "> " prefix
         return input.to_string();
     }
-
-    // Always start with "> " prompt
-    let mut result = String::from("> ");
-
-    // If input is empty, just return the prompt
     if input.is_empty() {
-        return result;
+        return String::from("> ");
     }
 
     // First line and continuation lines both reserve 2 chars for their
     // respective prefix ("> " or "  "), so they share the same line width.
     let line_width = width.saturating_sub(2);
 
-    let mut chars_remaining = input;
-    let mut is_first_line = true;
-
-    while !chars_remaining.is_empty() {
-        let break_point = find_line_break(chars_remaining, line_width);
-
-        // Extract this line's text
-        let line_text = &chars_remaining[..break_point];
-
-        // Add line text (prefix already added for first line, or add it for continuation)
-        if is_first_line {
-            // First line: "> " already in result, just add the text
-            result.push_str(line_text.trim_end());
+    let mut result = String::new();
+    for (idx, row) in layout_rows(input, line_width).iter().enumerate() {
+        let text = input[row.start..row.start + row.len].trim_end();
+        if idx == 0 {
+            result.push_str("> ");
         } else {
-            // Continuation line: add newline + "  " prefix + text
             result.push('\n');
             result.push_str("  ");
-            result.push_str(line_text.trim_end());
         }
-
-        // Move to next line
-        chars_remaining = chars_remaining[break_point..].trim_start();
-        is_first_line = false;
+        result.push_str(text);
     }
-
     result
 }
 
@@ -274,6 +315,11 @@ mod tests {
             "你好世界",
             "你好 world 世界",
             "abc你好def世界ghi",
+            // Embedded newlines (pasted / Shift+Enter): hard line breaks.
+            "first line\nsecond line",
+            "para one\n\npara two",
+            "trailing newline\n",
+            "\nleading newline",
         ];
         let content_width = 20usize;
         for input in inputs {
@@ -350,5 +396,25 @@ mod tests {
         // Double-width char on a 1-cell viewport: must still consume the
         // char (return offset 3) so the wrap loop can't spin forever.
         assert_eq!(find_line_break("你hello", 1), 3);
+    }
+
+    #[test]
+    fn wrap_renders_embedded_newlines_as_rows() {
+        // A pasted multi-line block must show as multiple rows, not a single
+        // space-joined paragraph.
+        assert_eq!(wrap_input_with_prompt("a\nb", 20), "> a\n  b");
+        // Consecutive newlines keep the blank line.
+        assert_eq!(wrap_input_with_prompt("a\n\nb", 20), "> a\n  \n  b");
+        // A trailing newline yields an empty continuation row.
+        assert_eq!(wrap_input_with_prompt("a\n", 20), "> a\n  ");
+    }
+
+    #[test]
+    fn cursor_tracks_rows_across_newlines() {
+        // "a\nb": byte 0=before a, 1=after a (on \n), 2=before b, 3=after b.
+        assert_eq!(InputState::calculate_cursor_position("a\nb", 0, 20), (0, 0));
+        assert_eq!(InputState::calculate_cursor_position("a\nb", 1, 20), (0, 1));
+        assert_eq!(InputState::calculate_cursor_position("a\nb", 2, 20), (1, 0));
+        assert_eq!(InputState::calculate_cursor_position("a\nb", 3, 20), (1, 1));
     }
 }

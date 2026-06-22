@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (hidden reasoning + empty text + actions) rendered the "Reasoning hidden"
   placeholder flush against the first tool block. It now gets the same single
   blank-line gap every other block has.
+- **Multi-line paste (Windows).** Pasting multi-line text submitted each line
+  as its own message and rendered character-by-character. crossterm 0.29
+  doesn't emit `Event::Paste` on the Windows console — a paste arrives as a
+  burst of individual key events, so every newline hit the Enter→submit path.
+  The main loop now coalesces a rapid key burst into a single atomic paste
+  (a lone Enter still submits; Shift+Enter still inserts a newline), and the
+  input box renders embedded newlines as real rows.
 - **System prompt** refreshed: it now documents the safety/permission modes
   (and how to behave when an action is gated — explain, don't spam retries),
   the tool set, and the in-session controls.

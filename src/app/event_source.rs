@@ -64,6 +64,86 @@ pub fn event_to_msg(event: CtEvent) -> Option<Msg> {
     }
 }
 
+/// Coalesce a burst of character/Enter key presses into a single paste.
+///
+/// crossterm 0.29 does not emit `Event::Paste` on the Windows console backend
+/// (it only parses the bracketed-paste wrapper on Unix). There, a clipboard
+/// paste arrives as a flood of individual `Char`/`Enter` key events; fed
+/// one-by-one through the reducer that renders char-by-char and submits on
+/// every embedded newline. This collapses such a burst into one `Msg::Paste`
+/// so the text lands atomically with no spurious per-line submits — on every
+/// platform.
+///
+/// `first` is the event the main loop already pulled. `drain` yields each
+/// further *immediately-available* event and `None` once the input queue is
+/// momentarily empty (the burst is over). Returns the primary `Msg` plus any
+/// trailing events that were drained but aren't part of the burst and must be
+/// processed separately.
+///
+/// A lone keystroke (no burst) returns a normal `Msg::Key`, so Enter still
+/// submits and Shift+Enter still inserts a literal newline.
+pub fn coalesce_key_burst(
+    first: CtEvent,
+    mut drain: impl FnMut() -> Option<CtEvent>,
+) -> (Option<Msg>, Vec<Msg>) {
+    // Only an unmodified character/Enter press can start a paste burst.
+    // Anything else (arrows, Ctrl/Alt combos, mouse, resize) passes straight
+    // through with no draining.
+    let Some(first_char) = coalescible_char(&first) else {
+        return (event_to_msg(first), Vec::new());
+    };
+
+    let mut buf = String::new();
+    buf.push(first_char);
+    let mut trailing = Vec::new();
+
+    while let Some(evt) = drain() {
+        // Skip key release/repeat without ending the burst.
+        if let CtEvent::Key(k) = &evt
+            && k.kind != KeyEventKind::Press
+        {
+            continue;
+        }
+        match coalescible_char(&evt) {
+            Some(c) => buf.push(c),
+            None => {
+                // Not part of the paste — process it on its own next tick.
+                if let Some(m) = event_to_msg(evt) {
+                    trailing.push(m);
+                }
+                break;
+            },
+        }
+    }
+
+    if buf.chars().count() <= 1 {
+        // Single keystroke, not a paste: keep normal key semantics.
+        (event_to_msg(first), trailing)
+    } else {
+        (Some(Msg::Paste(Paste::Text(buf))), trailing)
+    }
+}
+
+/// The character a key press contributes to a coalesced paste, or `None` when
+/// the event isn't part of a paste burst. Only unmodified (no Ctrl/Alt)
+/// `Char` and `Enter` presses qualify; Enter maps to a newline.
+fn coalescible_char(event: &CtEvent) -> Option<char> {
+    let CtEvent::Key(key) = event else {
+        return None;
+    };
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    if key.modifiers.intersects(CtMods::CONTROL | CtMods::ALT) {
+        return None;
+    }
+    match key.code {
+        CtKeyCode::Char(c) => Some(c),
+        CtKeyCode::Enter => Some('\n'),
+        _ => None,
+    }
+}
+
 fn translate_key_code(code: CtKeyCode) -> Option<KeyCode> {
     Some(match code {
         CtKeyCode::Char(c) => KeyCode::Char(c),
@@ -254,6 +334,107 @@ mod tests {
             Msg::Paste(Paste::Text(s)) => assert_eq!(s, "hello"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    fn key(code: CtKeyCode) -> CtEvent {
+        CtEvent::Key(crossterm::event::KeyEvent {
+            code,
+            modifiers: CtMods::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    fn key_with(code: CtKeyCode, modifiers: CtMods, kind: KeyEventKind) -> CtEvent {
+        CtEvent::Key(crossterm::event::KeyEvent {
+            code,
+            modifiers,
+            kind,
+            state: crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    #[test]
+    fn coalesce_single_char_stays_a_key() {
+        let (primary, trailing) = coalesce_key_burst(key(CtKeyCode::Char('a')), || None);
+        assert!(matches!(primary, Some(Msg::Key(k)) if k.code == KeyCode::Char('a')));
+        assert!(trailing.is_empty());
+    }
+
+    #[test]
+    fn coalesce_lone_enter_still_submits_as_key() {
+        // A deliberate Enter (send) must NOT be turned into a paste.
+        let (primary, _) = coalesce_key_burst(key(CtKeyCode::Enter), || None);
+        assert!(
+            matches!(primary, Some(Msg::Key(k)) if k.code == KeyCode::Enter),
+            "a lone Enter must remain a key, not become a paste"
+        );
+    }
+
+    #[test]
+    fn coalesce_burst_of_chars_becomes_one_paste() {
+        let mut rest = vec![key(CtKeyCode::Char('e')), key(CtKeyCode::Char('y'))].into_iter();
+        let (primary, trailing) = coalesce_key_burst(key(CtKeyCode::Char('h')), || rest.next());
+        match primary {
+            Some(Msg::Paste(Paste::Text(s))) => assert_eq!(s, "hey"),
+            other => panic!("expected paste, got {other:?}"),
+        }
+        assert!(trailing.is_empty());
+    }
+
+    #[test]
+    fn coalesce_preserves_pasted_newlines_without_submitting() {
+        // The reported bug: each Enter in a paste submitted a line. The
+        // burst must collapse to one multi-line paste instead.
+        let mut rest = vec![key(CtKeyCode::Enter), key(CtKeyCode::Char('b'))].into_iter();
+        let (primary, _) = coalesce_key_burst(key(CtKeyCode::Char('a')), || rest.next());
+        match primary {
+            Some(Msg::Paste(Paste::Text(s))) => assert_eq!(s, "a\nb"),
+            other => panic!("expected multi-line paste, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coalesce_stops_at_non_char_and_enqueues_it() {
+        let mut rest = vec![key(CtKeyCode::Char('b')), key(CtKeyCode::Esc)].into_iter();
+        let (primary, trailing) = coalesce_key_burst(key(CtKeyCode::Char('a')), || rest.next());
+        assert!(matches!(primary, Some(Msg::Paste(Paste::Text(ref s))) if s == "ab"));
+        assert_eq!(trailing.len(), 1);
+        assert!(matches!(trailing[0], Msg::Key(k) if k.code == KeyCode::Escape));
+    }
+
+    #[test]
+    fn coalesce_skips_release_events_mid_burst() {
+        let mut rest = vec![
+            key_with(CtKeyCode::Char('x'), CtMods::NONE, KeyEventKind::Release),
+            key(CtKeyCode::Char('b')),
+        ]
+        .into_iter();
+        let (primary, _) = coalesce_key_burst(key(CtKeyCode::Char('a')), || rest.next());
+        assert!(
+            matches!(primary, Some(Msg::Paste(Paste::Text(ref s))) if s == "ab"),
+            "release events must be skipped, not appended or treated as burst-enders"
+        );
+    }
+
+    #[test]
+    fn coalesce_ctrl_combo_passes_through_without_draining() {
+        let drained = std::cell::Cell::new(false);
+        let (primary, trailing) = coalesce_key_burst(
+            key_with(CtKeyCode::Char('c'), CtMods::CONTROL, KeyEventKind::Press),
+            || {
+                drained.set(true);
+                None
+            },
+        );
+        assert!(
+            !drained.get(),
+            "a non-coalescible first event must not drain the queue"
+        );
+        assert!(
+            matches!(primary, Some(Msg::Key(k)) if k.code == KeyCode::Char('c') && k.modifiers.ctrl)
+        );
+        assert!(trailing.is_empty());
     }
 
     #[test]
