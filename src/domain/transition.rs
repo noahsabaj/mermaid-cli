@@ -540,9 +540,7 @@ mod tests {
                         byte_count: 4,
                         created: Some(true),
                     },
-                    display_diff: Some(
-                        "--- /dev/null\n+++ petal/index.html\n   1 + a\n   2 + b".to_string(),
-                    ),
+                    display_diff: Some("   1 + a\n   2 + b".to_string()),
                     ..ToolRunMetadata::default()
                 }),
         );
@@ -550,8 +548,8 @@ mod tests {
         match action.details {
             ActionDetails::Diff { summary, diff } => {
                 assert!(summary.contains("+2 -0"));
-                assert!(diff.contains("+++ petal/index.html"));
                 assert!(diff.contains("+ a"));
+                assert!(!diff.contains("+++"), "no diff header clutter");
             },
             other => panic!("expected diff details, got {:?}", other),
         }
@@ -572,9 +570,7 @@ mod tests {
                         path: "src/main.rs".to_string(),
                         replacements: 1,
                     },
-                    display_diff: Some(
-                        "--- src/main.rs\n+++ src/main.rs\n   1 - old\n   1 + new".to_string(),
-                    ),
+                    display_diff: Some("   1 - old\n   1 + new".to_string()),
                     ..ToolRunMetadata::default()
                 },
             ),

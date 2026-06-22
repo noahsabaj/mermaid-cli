@@ -223,12 +223,11 @@ impl ToolExecutor for EditFileTool {
         let new_owned = new_string.to_string();
         let abs_clone = abs.clone();
         let display_path = raw_path.to_string();
-        let diff_path = display_path.clone();
 
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || edit_blocking(&abs_clone, &diff_path, &old_owned, &new_owned)) => {
+            result = tokio::task::spawn_blocking(move || edit_blocking(&abs_clone, &old_owned, &new_owned)) => {
                 match result {
                     Ok(Ok(edit)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -521,12 +520,7 @@ impl ToolExecutor for WriteFileTool {
         let byte_count = content.len();
         let old_content = std::fs::read_to_string(&abs_path).ok();
         let created = Some(old_content.is_none());
-        let diff = generate_display_diff(
-            &display_path,
-            old_content.as_deref().unwrap_or(""),
-            content,
-            old_content.is_none(),
-        );
+        let diff = generate_display_diff(old_content.as_deref().unwrap_or(""), content);
         let content = content.to_string();
 
         tokio::select! {
@@ -787,12 +781,7 @@ struct EditResult {
     truncated: bool,
 }
 
-fn edit_blocking(
-    path: &Path,
-    display_path: &str,
-    old_string: &str,
-    new_string: &str,
-) -> std::io::Result<EditResult> {
+fn edit_blocking(path: &Path, old_string: &str, new_string: &str) -> std::io::Result<EditResult> {
     let current = std::fs::read_to_string(path)?;
     let count = current.matches(old_string).count();
     if count == 0 {
@@ -807,7 +796,7 @@ fn edit_blocking(
         )));
     }
     let updated = current.replacen(old_string, new_string, 1);
-    let diff = generate_display_diff(display_path, &current, &updated, false);
+    let diff = generate_display_diff(&current, &updated);
     std::fs::write(path, updated)?;
     Ok(EditResult {
         replacements: 1,
@@ -837,7 +826,7 @@ struct DisplayDiff {
 const DIFF_CONTEXT_LINES: usize = 3;
 const MAX_DISPLAY_DIFF_LINES: usize = 220;
 
-fn generate_display_diff(path: &str, old: &str, new: &str, created: bool) -> DisplayDiff {
+fn generate_display_diff(old: &str, new: &str) -> DisplayDiff {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     let mut prefix = 0usize;
@@ -862,18 +851,10 @@ fn generate_display_diff(path: &str, old: &str, new: &str, created: bool) -> Dis
 
     let context_start = prefix.saturating_sub(DIFF_CONTEXT_LINES);
     let context_end_old = (old_changed_end + DIFF_CONTEXT_LINES).min(old_lines.len());
+    // No unified-diff header lines (`---`/`+++`/`@@`) — they're visual clutter
+    // in the transcript. Each body line already carries its own line number +
+    // marker, which is all the renderer needs.
     let mut lines = Vec::new();
-    lines.push(format!("--- {}", if created { "/dev/null" } else { path }));
-    lines.push(format!("+++ {}", path));
-    lines.push(format!(
-        "@@ -{},{} +{},{} @@",
-        context_start + 1,
-        context_end_old.saturating_sub(context_start),
-        context_start + 1,
-        (new_changed_end + DIFF_CONTEXT_LINES)
-            .min(new_lines.len())
-            .saturating_sub(context_start)
-    ));
 
     let mut truncated = false;
     let push_line = |line: String, lines: &mut Vec<String>, truncated: &mut bool| {
@@ -1087,10 +1068,14 @@ mod tests {
             .display_diff
             .as_deref()
             .expect("display diff");
-        assert!(diff.contains("--- /dev/null"));
-        assert!(diff.contains("+++ out.txt"));
         assert!(diff.contains("+ alpha"));
         assert!(diff.contains("+ beta"));
+        // No unified-diff header clutter (`---`/`+++`/`@@`).
+        assert!(
+            !diff.contains("@@"),
+            "diff should not carry hunk headers: {diff}"
+        );
+        assert!(!diff.contains("/dev/null"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1137,9 +1122,12 @@ mod tests {
             .display_diff
             .as_deref()
             .expect("display diff");
-        assert!(diff.contains("--- main.py"));
         assert!(diff.contains("- old"));
         assert!(diff.contains("+ new"));
+        assert!(
+            !diff.contains("@@"),
+            "diff should not carry hunk headers: {diff}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
