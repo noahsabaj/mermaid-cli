@@ -24,8 +24,8 @@ use crate::app::instructions::LoadedInstructions;
 use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError};
 use crate::runtime::{
-    ApprovalRecord, CheckpointRecord, MemoryEntry, PluginInstallRecord, ProcessRecord, SafetyMode,
-    TaskRecord, TaskTimelineEvent,
+    ApprovalRecord, CheckpointRecord, PluginInstallRecord, ProcessRecord, SafetyMode, TaskRecord,
+    TaskTimelineEvent,
 };
 
 use super::ids::{ToolCallId, TurnId};
@@ -209,7 +209,6 @@ pub enum Msg {
     RuntimeText(String),
     RuntimeApprovalsListed(Vec<ApprovalRecord>),
     RuntimeCheckpointsListed(Vec<CheckpointRecord>),
-    RuntimeMemoryListed(Vec<MemoryEntry>),
     RuntimePluginsListed(Vec<PluginInstallRecord>),
 
     // ── Misc model operations ───────────────────────────────────────
@@ -381,10 +380,6 @@ pub enum SlashCmd {
     Checkpoint(Option<String>),
     Checkpoints,
     Restore(Option<String>),
-    Memory,
-    MemoryEdit(Option<String>),
-    Remember(Option<String>),
-    Forget(Option<String>),
     ModelInfo(Option<String>),
     Plugins,
     CloudSetup,
@@ -457,7 +452,6 @@ impl Msg {
             | Msg::RuntimeText(_)
             | Msg::RuntimeApprovalsListed(_)
             | Msg::RuntimeCheckpointsListed(_)
-            | Msg::RuntimeMemoryListed(_)
             | Msg::RuntimePluginsListed(_) => MsgKind::RuntimeStore,
             Msg::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
             Msg::ModelPullProgress(_) => MsgKind::ModelPullProgress,

@@ -148,8 +148,6 @@ pub enum Cmd {
     DecideRuntimeApproval { id: String, decision: String },
     /// List restore checkpoints.
     ListRuntimeCheckpoints { limit: usize },
-    /// List project/global memory.
-    ListRuntimeMemory,
     /// List installed plugins.
     ListRuntimePlugins,
     /// Update one durable task's status.
@@ -162,12 +160,6 @@ pub enum Cmd {
     CreateRuntimeCheckpoint { paths: Vec<PathBuf> },
     /// Restore files from a shadow checkpoint.
     RestoreRuntimeCheckpoint { id: String },
-    /// Persist a project memory entry from the TUI.
-    RememberRuntimeMemory { key: String, value: String },
-    /// Edit an existing memory entry from the TUI.
-    EditRuntimeMemory { id: String, value: String },
-    /// Soft-delete a memory entry from the TUI.
-    ForgetRuntimeMemory { id: String },
     /// Show provider/model capability information.
     ShowRuntimeModelInfo { model: String },
 
@@ -301,14 +293,10 @@ impl Cmd {
             Cmd::ListRuntimeApprovals => "list_runtime_approvals",
             Cmd::DecideRuntimeApproval { .. } => "decide_runtime_approval",
             Cmd::ListRuntimeCheckpoints { .. } => "list_runtime_checkpoints",
-            Cmd::ListRuntimeMemory => "list_runtime_memory",
             Cmd::ListRuntimePlugins => "list_runtime_plugins",
             Cmd::UpdateRuntimeTaskStatus { .. } => "update_runtime_task_status",
             Cmd::CreateRuntimeCheckpoint { .. } => "create_runtime_checkpoint",
             Cmd::RestoreRuntimeCheckpoint { .. } => "restore_runtime_checkpoint",
-            Cmd::RememberRuntimeMemory { .. } => "remember_runtime_memory",
-            Cmd::EditRuntimeMemory { .. } => "edit_runtime_memory",
-            Cmd::ForgetRuntimeMemory { .. } => "forget_runtime_memory",
             Cmd::ShowRuntimeModelInfo { .. } => "show_runtime_model_info",
             Cmd::InitMcpServers(_) => "init_mcp_servers",
             Cmd::StopMcpServer { .. } => "stop_mcp_server",
@@ -396,7 +384,6 @@ impl Cmd {
             Cmd::ListRuntimeCheckpoints { limit } => {
                 format!("list_runtime_checkpoints(limit={})", limit)
             },
-            Cmd::ListRuntimeMemory => "list_runtime_memory".to_string(),
             Cmd::ListRuntimePlugins => "list_runtime_plugins".to_string(),
             Cmd::UpdateRuntimeTaskStatus { id, status, .. } => {
                 format!("update_runtime_task_status({}, {})", id, status)
@@ -405,11 +392,6 @@ impl Cmd {
                 format!("create_runtime_checkpoint(n={})", paths.len())
             },
             Cmd::RestoreRuntimeCheckpoint { id } => format!("restore_runtime_checkpoint({})", id),
-            Cmd::RememberRuntimeMemory { key, .. } => {
-                format!("remember_runtime_memory({})", key)
-            },
-            Cmd::EditRuntimeMemory { id, .. } => format!("edit_runtime_memory({})", id),
-            Cmd::ForgetRuntimeMemory { id } => format!("forget_runtime_memory({})", id),
             Cmd::ShowRuntimeModelInfo { model } => format!("show_runtime_model_info({})", model),
             Cmd::InitMcpServers(m) => format!("init_mcp_servers(n={})", m.len()),
             Cmd::StopMcpServer { name } => format!("stop_mcp_server({})", name),

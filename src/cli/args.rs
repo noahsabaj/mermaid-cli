@@ -181,34 +181,6 @@ pub enum Commands {
         /// Checkpoint id
         id: String,
     },
-    /// List project memory entries
-    Memory {
-        /// Project path, defaults to current directory
-        #[arg(long)]
-        project: Option<PathBuf>,
-    },
-    /// Write a project memory entry
-    Remember {
-        /// Memory key
-        key: String,
-        /// Memory value
-        value: String,
-        /// Project path, defaults to current directory
-        #[arg(long)]
-        project: Option<PathBuf>,
-    },
-    /// Soft-delete a memory entry
-    Forget {
-        /// Memory entry id
-        id: String,
-    },
-    /// Edit an existing memory entry value
-    MemoryEdit {
-        /// Memory entry id
-        id: String,
-        /// New memory value
-        value: String,
-    },
     /// Manage Mermaid plugin bundles
     Plugin {
         #[command(subcommand)]

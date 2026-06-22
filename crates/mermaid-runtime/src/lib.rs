@@ -31,11 +31,10 @@ pub use policy::{
 };
 pub use storage::{
     ApprovalRecord, ApprovalsRepo, CheckpointRecord, CheckpointsRepo, CompactionRecord,
-    CompactionsRepo, MemoryEntry, MemoryRepo, MessageRecord, MessagesRepo, NewApproval,
-    NewCheckpoint, NewCompaction, NewMemoryEntry, NewMessage, NewPluginInstall, NewProcess,
-    NewProviderProbe, NewSession, NewTask, NewToolRun, PairingTokenRecord, PairingTokensRepo,
-    PluginInstallRecord, PluginsRepo, ProcessRecord, ProcessStatus, ProcessesRepo,
-    ProviderProbeRecord, ProviderProbesRepo, RuntimeStore, SessionRecord, SessionsRepo,
-    TaskPriority, TaskRecord, TaskStatus, TaskTimelineEvent, TasksRepo, ToolRunRecord,
-    ToolRunsRepo, data_dir,
+    CompactionsRepo, MessageRecord, MessagesRepo, NewApproval, NewCheckpoint, NewCompaction,
+    NewMessage, NewPluginInstall, NewProcess, NewProviderProbe, NewSession, NewTask, NewToolRun,
+    PairingTokenRecord, PairingTokensRepo, PluginInstallRecord, PluginsRepo, ProcessRecord,
+    ProcessStatus, ProcessesRepo, ProviderProbeRecord, ProviderProbesRepo, RuntimeStore,
+    SessionRecord, SessionsRepo, TaskPriority, TaskRecord, TaskStatus, TaskTimelineEvent,
+    TasksRepo, ToolRunRecord, ToolRunsRepo, data_dir,
 };

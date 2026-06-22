@@ -241,14 +241,6 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("checkpoint") => SlashCmd::Checkpoint(arg),
         Some("checkpoints") => SlashCmd::Checkpoints,
         Some("restore") => SlashCmd::Restore(arg),
-        Some("memory") => match arg {
-            Some(input) if input.starts_with("edit ") => {
-                SlashCmd::MemoryEdit(Some(input["edit ".len()..].trim().to_string()))
-            },
-            Some(_) | None => SlashCmd::Memory,
-        },
-        Some("remember") => SlashCmd::Remember(arg),
-        Some("forget") => SlashCmd::Forget(arg),
         Some("plugins") => SlashCmd::Plugins,
         Some("model-info") => SlashCmd::ModelInfo(arg),
         Some("cloud-setup") => SlashCmd::CloudSetup,
@@ -533,15 +525,6 @@ mod tests {
         assert_eq!(
             parse_slash_command("restore checkpoint-1"),
             SlashCmd::Restore(Some("checkpoint-1".to_string()))
-        );
-        assert_eq!(parse_slash_command("memory"), SlashCmd::Memory);
-        assert_eq!(
-            parse_slash_command("remember decision use sqlite"),
-            SlashCmd::Remember(Some("decision use sqlite".to_string()))
-        );
-        assert_eq!(
-            parse_slash_command("forget memory-1"),
-            SlashCmd::Forget(Some("memory-1".to_string()))
         );
         assert_eq!(parse_slash_command("plugins"), SlashCmd::Plugins);
     }

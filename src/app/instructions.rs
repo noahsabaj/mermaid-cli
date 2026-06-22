@@ -103,11 +103,6 @@ pub fn find_instruction_files(start: &Path) -> Vec<PathBuf> {
             .iter()
             .map(|name| current.join(name))
             .filter(|candidate| candidate.is_file())
-            .chain(
-                [current.join(".mermaid").join("memory").join("memory.jsonl")]
-                    .into_iter()
-                    .filter(|candidate| candidate.is_file()),
-            )
             .collect();
         if !found.is_empty() {
             return found;

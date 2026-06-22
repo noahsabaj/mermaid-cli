@@ -334,28 +334,6 @@ pub struct NewCompaction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemoryEntry {
-    pub id: String,
-    pub project_path: Option<String>,
-    pub scope: String,
-    pub key: String,
-    pub value: String,
-    pub source: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub deleted_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewMemoryEntry {
-    pub project_path: Option<String>,
-    pub scope: String,
-    pub key: String,
-    pub value: String,
-    pub source: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginInstallRecord {
     pub id: String,
     pub name: String,
@@ -488,10 +466,6 @@ impl RuntimeStore {
 
     pub fn compactions(&self) -> CompactionsRepo<'_> {
         CompactionsRepo { conn: &self.conn }
-    }
-
-    pub fn memory(&self) -> MemoryRepo<'_> {
-        MemoryRepo { conn: &self.conn }
     }
 
     pub fn plugins(&self) -> PluginsRepo<'_> {
@@ -649,20 +623,6 @@ impl RuntimeStore {
                 installed_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-
-            CREATE TABLE IF NOT EXISTS memory_entries (
-                id TEXT PRIMARY KEY,
-                project_path TEXT,
-                scope TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                source TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                deleted_at TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_memory_project_scope
-                ON memory_entries(project_path, scope, deleted_at);
 
             CREATE TABLE IF NOT EXISTS pairing_tokens (
                 id TEXT PRIMARY KEY,
@@ -1344,107 +1304,6 @@ impl CompactionsRepo<'_> {
     }
 }
 
-pub struct MemoryRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl MemoryRepo<'_> {
-    pub fn remember(&self, new: NewMemoryEntry) -> Result<MemoryEntry> {
-        let now = now_rfc3339();
-        let existing_id = self
-            .conn
-            .query_row(
-                "SELECT id FROM memory_entries
-                 WHERE project_path IS ?1 AND scope = ?2 AND key = ?3 AND deleted_at IS NULL
-                 ORDER BY updated_at DESC LIMIT 1",
-                params![new.project_path, new.scope, new.key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        let id = existing_id.unwrap_or_else(|| fresh_id("memory"));
-        self.conn.execute(
-            "INSERT INTO memory_entries
-             (id, project_path, scope, key, value, source, created_at, updated_at, deleted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)
-             ON CONFLICT(id) DO UPDATE SET
-                value = excluded.value,
-                source = excluded.source,
-                updated_at = excluded.updated_at,
-                deleted_at = NULL",
-            params![
-                id,
-                new.project_path,
-                new.scope,
-                new.key,
-                new.value,
-                new.source,
-                now,
-                now,
-            ],
-        )?;
-        self.get(&id)?
-            .context("memory entry was inserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<MemoryEntry>> {
-        self.conn
-            .query_row(
-                "SELECT id, project_path, scope, key, value, source, created_at, updated_at, deleted_at
-                 FROM memory_entries WHERE id = ?1",
-                [id],
-                memory_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn list(
-        &self,
-        project_path: Option<&str>,
-        scope: Option<&str>,
-    ) -> Result<Vec<MemoryEntry>> {
-        let mut entries = Vec::new();
-        let mut stmt = self.conn.prepare(
-            "SELECT id, project_path, scope, key, value, source, created_at, updated_at, deleted_at
-             FROM memory_entries
-             WHERE deleted_at IS NULL
-             ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt.query_map([], memory_from_row)?;
-        for row in rows {
-            let entry = row?;
-            if project_path.is_some_and(|p| entry.project_path.as_deref() != Some(p)) {
-                continue;
-            }
-            if scope.is_some_and(|s| entry.scope != s) {
-                continue;
-            }
-            entries.push(entry);
-        }
-        Ok(entries)
-    }
-
-    pub fn forget(&self, id: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE memory_entries SET deleted_at = ?2, updated_at = ?2 WHERE id = ?1",
-            params![id, now_rfc3339()],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_value(&self, id: &str, value: &str, source: &str) -> Result<MemoryEntry> {
-        let changed = self.conn.execute(
-            "UPDATE memory_entries
-             SET value = ?2, source = ?3, updated_at = ?4, deleted_at = NULL
-             WHERE id = ?1",
-            params![id, value, source, now_rfc3339()],
-        )?;
-        anyhow::ensure!(changed > 0, "memory entry not found: {}", id);
-        self.get(id)?
-            .context("memory entry was updated but could not be reloaded")
-    }
-}
-
 pub struct PluginsRepo<'a> {
     conn: &'a Connection,
 }
@@ -1794,20 +1653,6 @@ fn compaction_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompactionRe
     })
 }
 
-fn memory_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryEntry> {
-    Ok(MemoryEntry {
-        id: row.get("id")?,
-        project_path: row.get("project_path")?,
-        scope: row.get("scope")?,
-        key: row.get("key")?,
-        value: row.get("value")?,
-        source: row.get("source")?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-        deleted_at: row.get("deleted_at")?,
-    })
-}
-
 fn plugin_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginInstallRecord> {
     let enabled: i64 = row.get("enabled")?;
     Ok(PluginInstallRecord {
@@ -2133,7 +1978,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_memory_plugin_probe_and_pairing_round_trip() {
+    fn checkpoint_compaction_plugin_probe_and_pairing_round_trip() {
         let path = temp_db("everything_else");
         let store = RuntimeStore::open(&path).expect("open store");
 
@@ -2167,28 +2012,6 @@ mod tests {
             .expect("create compaction");
         assert_eq!(compaction.summary_token_count, Some(800));
         assert_eq!(store.compactions().list(10).unwrap().len(), 1);
-
-        let memory = store
-            .memory()
-            .remember(NewMemoryEntry {
-                project_path: Some("/repo".to_string()),
-                scope: "project".to_string(),
-                key: "test_command".to_string(),
-                value: "cargo test --lib".to_string(),
-                source: "test".to_string(),
-            })
-            .expect("remember");
-        assert_eq!(memory.key, "test_command");
-        assert_eq!(
-            store
-                .memory()
-                .list(Some("/repo"), Some("project"))
-                .unwrap()
-                .len(),
-            1
-        );
-        store.memory().forget(&memory.id).unwrap();
-        assert!(store.memory().list(Some("/repo"), None).unwrap().is_empty());
 
         let plugin = store
             .plugins()

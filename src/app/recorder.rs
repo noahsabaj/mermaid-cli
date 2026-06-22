@@ -265,10 +265,6 @@ pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
             "count": checkpoints.len(),
             "ids": checkpoints.iter().map(|checkpoint| checkpoint.id.as_str()).collect::<Vec<_>>(),
         }),
-        Msg::RuntimeMemoryListed(memory) => serde_json::json!({
-            "count": memory.len(),
-            "ids": memory.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(),
-        }),
         Msg::RuntimePluginsListed(plugins) => serde_json::json!({
             "count": plugins.len(),
             "ids": plugins.iter().map(|plugin| plugin.id.as_str()).collect::<Vec<_>>(),
@@ -352,10 +348,6 @@ fn slash_body(cmd: &SlashCmd) -> serde_json::Value {
         SlashCmd::Checkpoint(paths) => serde_json::json!({"command": "checkpoint", "arg": paths}),
         SlashCmd::Checkpoints => serde_json::json!({"command": "checkpoints"}),
         SlashCmd::Restore(id) => serde_json::json!({"command": "restore", "arg": id}),
-        SlashCmd::Memory => serde_json::json!({"command": "memory"}),
-        SlashCmd::MemoryEdit(input) => serde_json::json!({"command": "memory edit", "arg": input}),
-        SlashCmd::Remember(entry) => serde_json::json!({"command": "remember", "arg": entry}),
-        SlashCmd::Forget(id) => serde_json::json!({"command": "forget", "arg": id}),
         SlashCmd::ModelInfo(model) => serde_json::json!({"command": "model-info", "arg": model}),
         SlashCmd::Plugins => serde_json::json!({"command": "plugins"}),
         SlashCmd::CloudSetup => serde_json::json!({"command": "cloud-setup"}),

@@ -121,26 +121,6 @@ pub async fn handle_command(
             restore_checkpoint(id)?;
             Ok(true)
         },
-        Commands::Memory { project } => {
-            show_memory(project.as_deref())?;
-            Ok(true)
-        },
-        Commands::Remember {
-            key,
-            value,
-            project,
-        } => {
-            remember(key, value, project.as_deref())?;
-            Ok(true)
-        },
-        Commands::Forget { id } => {
-            forget(id)?;
-            Ok(true)
-        },
-        Commands::MemoryEdit { id, value } => {
-            memory_edit(id, value)?;
-            Ok(true)
-        },
         Commands::Plugin { command } => {
             handle_plugin(command)?;
             Ok(true)
@@ -1311,53 +1291,6 @@ fn restore_checkpoint(id: &str) -> Result<()> {
     if let Some(action) = manifest.pending_action {
         println!("Pending action: {}", serde_json::to_string_pretty(&action)?);
     }
-    Ok(())
-}
-
-fn show_memory(project: Option<&Path>) -> Result<()> {
-    let project_path = project.map(|p| p.display().to_string()).or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .map(|p| p.display().to_string())
-    });
-    let entries = RuntimeClient::auto()
-        .list_memory(project_path.as_deref())?
-        .value;
-    if entries.is_empty() {
-        println!("No memory entries.");
-        return Ok(());
-    }
-    for entry in entries {
-        println!(
-            "{} [{}] {} = {}",
-            entry.id, entry.scope, entry.key, entry.value
-        );
-    }
-    Ok(())
-}
-
-fn remember(key: &str, value: &str, project: Option<&Path>) -> Result<()> {
-    let project_path = project.map(|p| p.display().to_string()).or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .map(|p| p.display().to_string())
-    });
-    let entry = RuntimeClient::auto()
-        .remember_memory(project_path, key, value, "cli")?
-        .value;
-    println!("Remembered {} ({})", entry.key, entry.id);
-    Ok(())
-}
-
-fn forget(id: &str) -> Result<()> {
-    RuntimeClient::auto().forget_memory(id)?;
-    println!("Forgot {}", id);
-    Ok(())
-}
-
-fn memory_edit(id: &str, value: &str) -> Result<()> {
-    let entry = RuntimeClient::auto().edit_memory(id, value, "cli")?.value;
-    println!("Updated {} ({})", entry.key, entry.id);
     Ok(())
 }
 

@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -8,10 +7,10 @@ use serde_json::{Value, json};
 
 use super::{
     ApprovalRecord, ApprovalReplayResult, CheckpointManifest, CheckpointRecord, CompactionRecord,
-    MemoryEntry, MessageRecord, NewMemoryEntry, NewProcess, NewProviderProbe, PairingTokenRecord,
-    PluginInstallRecord, ProcessRecord, ProcessStatus, ProviderProbeRecord, RuntimeStore,
-    SessionRecord, TaskRecord, TaskStatus, TaskTimelineEvent, ToolRunRecord, approve_and_replay,
-    deny_approval, request_daemon_json, restore_checkpoint,
+    MessageRecord, NewProcess, NewProviderProbe, PairingTokenRecord, PluginInstallRecord,
+    ProcessRecord, ProcessStatus, ProviderProbeRecord, RuntimeStore, SessionRecord, TaskRecord,
+    TaskStatus, TaskTimelineEvent, ToolRunRecord, approve_and_replay, deny_approval,
+    request_daemon_json, restore_checkpoint,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +66,6 @@ pub struct RuntimeSnapshot {
     pub approvals: Vec<ApprovalRecord>,
     pub checkpoints: Vec<CheckpointRecord>,
     pub compactions: Vec<CompactionRecord>,
-    pub memory: Vec<MemoryEntry>,
     pub plugins: Vec<PluginInstallRecord>,
     pub provider_probes: Vec<ProviderProbeRecord>,
     pub pairings: Vec<PairingTokenRecord>,
@@ -83,7 +81,6 @@ pub struct RuntimeDashboardCounts {
     pub ready_processes: usize,
     pub recent_checkpoints: usize,
     pub installed_plugins: usize,
-    pub memory_entries: usize,
     pub archived_approvals: usize,
     pub archived_checkpoints: usize,
 }
@@ -101,7 +98,6 @@ pub struct RuntimeDashboard {
     pub approvals: Vec<ApprovalRecord>,
     pub checkpoints: Vec<CheckpointRecord>,
     pub compactions: Vec<CompactionRecord>,
-    pub memory: Vec<MemoryEntry>,
     pub plugins: Vec<PluginInstallRecord>,
     pub provider_probes: Vec<ProviderProbeRecord>,
     pub pairings: Vec<PairingTokenRecord>,
@@ -363,13 +359,6 @@ impl RuntimeClient {
         )
     }
 
-    pub fn list_memory(&self, project_path: Option<&str>) -> Result<RuntimeRead<Vec<MemoryEntry>>> {
-        self.list(
-            json!({"command": "runtime_memory", "project_path": project_path}),
-            |service| service.list_memory(project_path),
-        )
-    }
-
     pub fn list_plugins(&self) -> Result<RuntimeRead<Vec<PluginInstallRecord>>> {
         self.list(json!({"command": "runtime_plugins"}), |service| {
             service.list_plugins()
@@ -437,52 +426,6 @@ impl RuntimeClient {
         )
     }
 
-    pub fn remember_memory(
-        &self,
-        project_path: Option<String>,
-        key: &str,
-        value: &str,
-        source: &str,
-    ) -> Result<RuntimeRead<MemoryEntry>> {
-        let body = json!({
-            "command": "remember",
-            "project_path": project_path.as_deref(),
-            "scope": "project",
-            "key": key,
-            "value": value,
-            "source": source,
-        });
-        self.one_or_local(body, true, |service| {
-            service.remember_memory(project_path.clone(), key, value, source)
-        })
-    }
-
-    pub fn edit_memory(
-        &self,
-        id: &str,
-        value: &str,
-        source: &str,
-    ) -> Result<RuntimeRead<MemoryEntry>> {
-        self.one_or_local(
-            json!({
-                "command": "memory_edit",
-                "id": id,
-                "value": value,
-                "source": source,
-            }),
-            true,
-            |service| service.edit_memory(id, value, source),
-        )
-    }
-
-    pub fn forget_memory(&self, id: &str) -> Result<()> {
-        self.action_authed::<Value, _>(json!({"command": "forget", "id": id}), |service| {
-            service.forget_memory(id)?;
-            Ok(json!({"ok": true}))
-        })?;
-        Ok(())
-    }
-
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         self.action_authed::<Value, _>(
             json!({"command": "set_plugin_enabled", "id": id, "enabled": enabled}),
@@ -523,41 +466,6 @@ impl RuntimeClient {
             source: read.source,
             value: read.value.items,
         })
-    }
-
-    fn one_or_local<T, F>(&self, body: Value, authed: bool, local: F) -> Result<RuntimeRead<T>>
-    where
-        T: DeserializeOwned,
-        F: FnOnce(&RuntimeService) -> Result<T>,
-    {
-        match self.mode {
-            RuntimeClientMode::LocalOnly => RuntimeService::open_default()
-                .and_then(|service| local(&service))
-                .map(|value| RuntimeRead {
-                    source: RuntimeClientSource::Local,
-                    value,
-                }),
-            RuntimeClientMode::DaemonOnly => self
-                .request_daemon::<RuntimeOne<T>>(body, authed)
-                .map(|response| RuntimeRead {
-                    source: RuntimeClientSource::Daemon,
-                    value: response.item,
-                }),
-            RuntimeClientMode::PreferDaemon => {
-                match self.request_daemon::<RuntimeOne<T>>(body, authed) {
-                    Ok(response) => Ok(RuntimeRead {
-                        source: RuntimeClientSource::Daemon,
-                        value: response.item,
-                    }),
-                    Err(_) => RuntimeService::open_default()
-                        .and_then(|service| local(&service))
-                        .map(|value| RuntimeRead {
-                            source: RuntimeClientSource::Local,
-                            value,
-                        }),
-                }
-            },
-        }
     }
 
     fn read<T, F>(&self, body: Value, local: F) -> Result<RuntimeRead<T>>
@@ -673,7 +581,6 @@ impl RuntimeService {
             approvals: self.store.approvals().list_all(100)?,
             checkpoints: self.store.checkpoints().list_all(100)?,
             compactions: self.store.compactions().list(100)?,
-            memory: self.store.memory().list(None, None)?,
             plugins: self.store.plugins().list()?,
             provider_probes: self.store.provider_probes().list(None, None)?,
             pairings: self.store.pairing_tokens().list()?,
@@ -689,7 +596,6 @@ impl RuntimeService {
         let approvals = self.store.approvals().list_pending()?;
         let checkpoints = self.store.checkpoints().list(100)?;
         let compactions = self.store.compactions().list(100)?;
-        let memory = self.store.memory().list(None, None)?;
         let plugins = self.store.plugins().list()?;
         let provider_probes = self.store.provider_probes().list(None, None)?;
         let pairings = self.store.pairing_tokens().list()?;
@@ -723,7 +629,6 @@ impl RuntimeService {
                 ready_processes,
                 recent_checkpoints: checkpoints.len(),
                 installed_plugins: plugins.len(),
-                memory_entries: memory.len(),
                 archived_approvals: self.store.approvals().count_archived()?,
                 archived_checkpoints: self.store.checkpoints().count_archived()?,
             },
@@ -734,7 +639,6 @@ impl RuntimeService {
             approvals,
             checkpoints,
             compactions,
-            memory,
             plugins,
             provider_probes,
             pairings,
@@ -956,10 +860,6 @@ impl RuntimeService {
         self.store.checkpoints().list(limit)
     }
 
-    pub fn list_memory(&self, project_path: Option<&str>) -> Result<Vec<MemoryEntry>> {
-        self.store.memory().list(project_path, None)
-    }
-
     pub fn list_plugins(&self) -> Result<Vec<PluginInstallRecord>> {
         self.store.plugins().list()
     }
@@ -1075,34 +975,6 @@ impl RuntimeService {
             ok: true,
             ports: String::from_utf8_lossy(&output.stdout).into_owned(),
         })
-    }
-
-    pub fn remember_memory(
-        &self,
-        project_path: Option<String>,
-        key: &str,
-        value: &str,
-        source: &str,
-    ) -> Result<MemoryEntry> {
-        let entry = self.store.memory().remember(NewMemoryEntry {
-            project_path: project_path.clone(),
-            scope: "project".to_string(),
-            key: key.to_string(),
-            value: value.to_string(),
-            source: source.to_string(),
-        })?;
-        if let Some(project_path) = project_path {
-            append_project_memory(Path::new(&project_path), &entry)?;
-        }
-        Ok(entry)
-    }
-
-    pub fn edit_memory(&self, id: &str, value: &str, source: &str) -> Result<MemoryEntry> {
-        self.store.memory().update_value(id, value, source)
-    }
-
-    pub fn forget_memory(&self, id: &str) -> Result<()> {
-        self.store.memory().forget(id)
     }
 
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<()> {
@@ -1327,19 +1199,6 @@ fn is_runtime_hygiene_approval(
         Some(checkpoint_id) => test_checkpoint_ids.contains(checkpoint_id),
         None => true,
     }
-}
-
-fn append_project_memory(project_path: &Path, entry: &MemoryEntry) -> Result<()> {
-    let memory_dir = project_path.join(".mermaid").join("memory");
-    std::fs::create_dir_all(&memory_dir)?;
-    let line = serde_json::to_string(entry)?;
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(memory_dir.join("memory.jsonl"))?;
-    writeln!(file, "{}", line)?;
-    Ok(())
 }
 
 fn kill_pid(pid: u32) -> Result<()> {
