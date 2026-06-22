@@ -166,20 +166,47 @@ pub async fn run_interactive_with(
             match selected {
                 Sel::Msg(m) => m,
                 Sel::Term(Some(Ok(evt))) => {
-                    // F13: Ctrl+Click on a chat image tile opens the image
-                    // via the system viewer. Mapping from screen coords to
-                    // (message_index, image_index) lives in ChatState (the
-                    // render layer), so synthesize `OpenImageAt` here.
-                    if let crossterm::event::Event::Mouse(m) = &evt
-                        && matches!(m.kind, crossterm::event::MouseEventKind::Down(_))
-                        && m.modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL)
-                        && let Some(target) = rstate.chat.find_image_at_screen_pos(m.row)
-                    {
-                        Some(Msg::OpenImageAt {
-                            message_index: target.message_index,
-                            image_index: target.image_index,
-                        })
+                    if let crossterm::event::Event::Mouse(m) = &evt {
+                        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind as MEK};
+                        let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
+                        match m.kind {
+                            // F13: Ctrl+Click a chat image tile opens it via
+                            // the system viewer. The screen→image mapping
+                            // lives in ChatState (the render layer).
+                            MEK::Down(MouseButton::Left) if ctrl => rstate
+                                .chat
+                                .find_image_at_screen_pos(m.row)
+                                .map(|target| Msg::OpenImageAt {
+                                    message_index: target.message_index,
+                                    image_index: target.image_index,
+                                }),
+                            // Plain (no-modifier) left drag selects chat text.
+                            // Handled render-side so wheel-scroll + Ctrl+Click
+                            // keep working; on release we copy the selection.
+                            MEK::Down(MouseButton::Left) => {
+                                rstate.chat.begin_selection(m.row, m.column);
+                                None
+                            },
+                            MEK::Drag(MouseButton::Left) => {
+                                rstate.chat.update_selection(m.row, m.column);
+                                None
+                            },
+                            MEK::Up(MouseButton::Left) => {
+                                if let Some(text) = rstate.chat.selected_text()
+                                    && !text.is_empty()
+                                {
+                                    runner.dispatch(Cmd::CopyToClipboard(text));
+                                }
+                                None
+                            },
+                            MEK::ScrollUp => Some(Msg::MouseScroll {
+                                delta: crate::constants::UI_MOUSE_SCROLL_LINES as i16,
+                            }),
+                            MEK::ScrollDown => Some(Msg::MouseScroll {
+                                delta: -(crate::constants::UI_MOUSE_SCROLL_LINES as i16),
+                            }),
+                            _ => None,
+                        }
                     } else {
                         // Coalesce a paste burst (crossterm 0.29 doesn't
                         // deliver Event::Paste on the Windows console — a

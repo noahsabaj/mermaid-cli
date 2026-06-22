@@ -237,6 +237,55 @@ pub fn read_text() -> Result<String> {
     }
 }
 
+/// Write `text` to the system clipboard. Mirrors `read_text`'s backend
+/// detection and shells out to the platform tool (no extra dependency):
+/// `wl-copy` / `xclip` / `pbcopy` / PowerShell `Set-Clipboard`. Used by the
+/// in-app drag-select copy path.
+pub fn write_text(text: &str) -> Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let backend =
+        detect_backend().context("No clipboard backend detected (need xclip/wl-copy/pbcopy)")?;
+
+    let mut child = match backend {
+        ClipboardBackend::Wayland => Command::new("wl-copy").stdin(Stdio::piped()).spawn(),
+        ClipboardBackend::X11 => Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(Stdio::piped())
+            .spawn(),
+        ClipboardBackend::MacOS => Command::new("pbcopy").stdin(Stdio::piped()).spawn(),
+        // Read all of stdin as UTF-8 and set the clipboard, so non-ASCII
+        // survives (plain `clip.exe` reinterprets via the console codepage).
+        ClipboardBackend::Windows => Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "[Console]::InputEncoding=[System.Text.Encoding]::UTF8; \
+                 Set-Clipboard -Value ([Console]::In.ReadToEnd())",
+            ])
+            .stdin(Stdio::piped())
+            .spawn(),
+    }
+    .context("Failed to spawn clipboard write command")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .context("Failed to write to clipboard command stdin")?;
+        // Drop `stdin` here to close the pipe so the child sees EOF.
+    }
+
+    let status = child
+        .wait()
+        .context("clipboard write command failed to run")?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("clipboard write command exited with {status}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,12 +3,12 @@ use std::hash::{Hash, Hasher};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph, StatefulWidget, Widget},
 };
 use rustc_hash::FxHashMap;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::domain::{ActionDetails, ActionDisplay, ActionResult, format_compact_count};
 use crate::models::ChatMessageKind;
@@ -40,6 +40,13 @@ pub struct ChatState {
     pub last_scroll_position: u16,
     /// Chat area rect from last render
     pub last_chat_area: Option<(u16, u16, u16, u16)>, // (x, y, width, height)
+    /// Active drag-selection in CONTENT coordinates: `(anchor, cursor)` where
+    /// each is `(content_line, col_cells)`. Highlight + copy derive from it.
+    selection: Option<((usize, usize), (usize, usize))>,
+    /// Plain text of each rendered content row, captured every frame so the
+    /// selection can be extracted by display-cell range. Indexed by content
+    /// line (the same index the selection uses).
+    last_rendered_rows: Vec<String>,
 }
 
 impl ChatState {
@@ -51,6 +58,8 @@ impl ChatState {
             image_click_map: Vec::new(),
             last_scroll_position: 0,
             last_chat_area: None,
+            selection: None,
+            last_rendered_rows: Vec::new(),
         }
     }
 
@@ -73,6 +82,9 @@ impl ChatState {
     pub fn scroll_up(&mut self, amount: u16) {
         self.is_user_scrolling = true;
         self.scroll_offset = self.scroll_offset.saturating_add(amount);
+        // A selection's content-line anchors don't track scrolling; drop it
+        // rather than leave a highlight stranded on the wrong rows.
+        self.selection = None;
     }
 
     /// Scroll viewport down (shows newer messages closer to bottom)
@@ -83,6 +95,7 @@ impl ChatState {
             // Reached bottom — resume auto-follow mode
             self.is_user_scrolling = false;
         }
+        self.selection = None;
     }
 
     /// Force resume auto-scroll mode (jump to bottom)
@@ -116,6 +129,134 @@ impl ChatState {
             .find(|(line, _)| *line == content_line)
             .map(|(_, target)| target)
     }
+
+    /// Map a screen `(row, col)` to content `(line, col_cells)`, or `None`
+    /// when the point is outside the chat area. `col` is clamped to the chat
+    /// area's left edge so a drag past the gutter still maps to column 0.
+    fn screen_to_content(&self, screen_row: u16, screen_col: u16) -> Option<(usize, usize)> {
+        let (area_x, area_y, _, area_height) = self.last_chat_area?;
+        if screen_row < area_y || screen_row >= area_y + area_height {
+            return None;
+        }
+        let content_line = (screen_row - area_y) as usize + self.last_scroll_position as usize;
+        let col = screen_col.saturating_sub(area_x) as usize;
+        Some((content_line, col))
+    }
+
+    /// Begin a drag selection at the given screen position (mouse-down).
+    /// Anchors and cursor both start here; a plain click with no drag selects
+    /// nothing.
+    pub fn begin_selection(&mut self, screen_row: u16, screen_col: u16) {
+        self.selection = self
+            .screen_to_content(screen_row, screen_col)
+            .map(|p| (p, p));
+    }
+
+    /// Extend the in-progress selection to the given screen position (drag).
+    pub fn update_selection(&mut self, screen_row: u16, screen_col: u16) {
+        if let Some((anchor, _)) = self.selection
+            && let Some(cursor) = self.screen_to_content(screen_row, screen_col)
+        {
+            self.selection = Some((anchor, cursor));
+        }
+    }
+
+    /// Drop any active selection (and its highlight).
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    /// Extract the currently-selected text from the last rendered frame, or
+    /// `None` if there's no selection or it's empty (e.g. a plain click).
+    /// Walks the retained per-row text and slices each row by display cells so
+    /// CJK / wide glyphs are never split mid-cell.
+    pub fn selected_text(&self) -> Option<String> {
+        let (a, b) = self.selection?;
+        let (start, end) = if a <= b { (a, b) } else { (b, a) };
+        if self.last_rendered_rows.is_empty() {
+            return None;
+        }
+        let last = self.last_rendered_rows.len() - 1;
+        let (start_line, start_col) = (start.0.min(last), start.1);
+        let (end_line, end_col) = (end.0.min(last), end.1);
+
+        let mut out = String::new();
+        for line in start_line..=end_line {
+            let row = &self.last_rendered_rows[line];
+            let c0 = if line == start_line { start_col } else { 0 };
+            let c1 = if line == end_line {
+                end_col
+            } else {
+                usize::MAX
+            };
+            out.push_str(slice_by_cells(row, c0, c1).trim_end());
+            if line != end_line {
+                out.push('\n');
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
+}
+
+/// Byte offset in `s` at the start of display-cell `target` (clamped to
+/// `s.len()`). A wide glyph straddling `target` is kept whole on the right
+/// side, so slicing never lands mid-character.
+fn byte_at_cell(s: &str, target: usize) -> usize {
+    if target == 0 {
+        return 0;
+    }
+    let mut width = 0usize;
+    for (idx, ch) in s.char_indices() {
+        if width >= target {
+            return idx;
+        }
+        width += ch.width().unwrap_or(0);
+    }
+    s.len()
+}
+
+/// Slice `s` to the display-cell range `[c0, c1)`.
+fn slice_by_cells(s: &str, c0: usize, c1: usize) -> &str {
+    let start = byte_at_cell(s, c0);
+    let end = byte_at_cell(s, c1).max(start);
+    &s[start..end]
+}
+
+/// The plain text of a rendered line (spans concatenated, styles dropped).
+fn line_plain_text(line: &Line) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// Apply `hl` (merged onto each span's existing style) to display cells
+/// `[c0, c1)` of `line`, splitting spans at the selection boundaries so the
+/// highlight lands on exactly the selected glyphs.
+fn highlight_line_cells(line: &mut Line<'static>, c0: usize, c1: usize, hl: Style) {
+    let mut new_spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+    let mut width = 0usize;
+    for span in line.spans.drain(..) {
+        let span_w = span.content.width();
+        let (span_start, span_end) = (width, width + span_w);
+        width = span_end;
+
+        let ov0 = c0.max(span_start);
+        let ov1 = c1.min(span_end);
+        if ov1 <= ov0 {
+            new_spans.push(span); // no overlap with the selection
+            continue;
+        }
+
+        let s = span.content.as_ref();
+        let b0 = byte_at_cell(s, ov0 - span_start);
+        let b1 = byte_at_cell(s, ov1 - span_start);
+        if b0 > 0 {
+            new_spans.push(Span::styled(s[..b0].to_string(), span.style));
+        }
+        new_spans.push(Span::styled(s[b0..b1].to_string(), span.style.patch(hl)));
+        if b1 < s.len() {
+            new_spans.push(Span::styled(s[b1..].to_string(), span.style));
+        }
+    }
+    line.spans = new_spans;
 }
 
 impl Default for ChatState {
@@ -137,7 +278,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
     type State = ChatState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let mut lines = Vec::new();
+        let mut lines: Vec<Line<'static>> = Vec::new();
 
         // Clear click map for this render pass
         state.image_click_map.clear();
@@ -381,6 +522,33 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         // appears instantly instead of streaming character-by-character.
         //
         // The status line shows progress: "↑ Sending..." → "↓ Streaming..." with timer
+
+        // Capture the plain text of each rendered row for selection
+        // extraction. Done before the highlight pass, which only changes
+        // styling, not text.
+        state.last_rendered_rows = lines.iter().map(line_plain_text).collect();
+
+        // Paint the active drag selection (reverse video over the selected
+        // cells). Selection lines are content indices, matching `lines`.
+        if let Some((a, b)) = state.selection
+            && !lines.is_empty()
+        {
+            let (start, end) = if a <= b { (a, b) } else { (b, a) };
+            let sel_style = Style::new().add_modifier(Modifier::REVERSED);
+            let last_line = lines.len() - 1;
+            for (line_idx, line) in lines
+                .iter_mut()
+                .enumerate()
+                .take(end.0.min(last_line) + 1)
+                .skip(start.0)
+            {
+                let c0 = if line_idx == start.0 { start.1 } else { 0 };
+                let c1 = if line_idx == end.0 { end.1 } else { usize::MAX };
+                if c1 > c0 {
+                    highlight_line_cells(line, c0, c1, sel_style);
+                }
+            }
+        }
 
         // NOTE: Wrapping is disabled because we handle it manually with hanging indents
         // Calculate content height and viewport for proper scroll clamping
@@ -856,6 +1024,90 @@ fn wrap_styled_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_at_cell_clamps_and_respects_cjk() {
+        assert_eq!(byte_at_cell("hello", 0), 0);
+        assert_eq!(byte_at_cell("hello", 3), 3);
+        assert_eq!(byte_at_cell("hello", 99), 5); // clamp past end
+        // "你好" = 2 chars, 3 bytes each, 2 cells each.
+        assert_eq!(byte_at_cell("你好", 0), 0);
+        assert_eq!(byte_at_cell("你好", 2), 3); // after first wide char
+        // A cell index that lands mid-glyph keeps the glyph whole (rounds up).
+        assert_eq!(byte_at_cell("你好", 1), 3);
+    }
+
+    #[test]
+    fn slice_by_cells_extracts_display_range() {
+        assert_eq!(slice_by_cells("hello world", 0, 5), "hello");
+        assert_eq!(slice_by_cells("hello world", 6, 11), "world");
+        assert_eq!(slice_by_cells("你好world", 2, 7), "好wor");
+    }
+
+    /// Build a ChatState whose last frame rendered `rows`, with a selection
+    /// already mapped to content coords, so `selected_text` can be tested
+    /// without a real terminal.
+    fn state_with_rows(rows: &[&str], sel: ((usize, usize), (usize, usize))) -> ChatState {
+        let mut st = ChatState::new();
+        st.last_rendered_rows = rows.iter().map(|r| r.to_string()).collect();
+        st.selection = Some(sel);
+        st
+    }
+
+    #[test]
+    fn selected_text_single_line() {
+        let st = state_with_rows(&["> hello world"], ((0, 2), (0, 7)));
+        assert_eq!(st.selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn selected_text_spans_multiple_rows() {
+        let st = state_with_rows(&["> first line", "  second line"], ((0, 2), (1, 8)));
+        // Copy-what-you-see: the start row is sliced from the click column,
+        // and fully-covered continuation rows include their on-screen "  "
+        // prefix (v1 behavior — the highlight matches exactly what's copied).
+        assert_eq!(st.selected_text().as_deref(), Some("first line\n  second"));
+    }
+
+    #[test]
+    fn selected_text_normalizes_reversed_drag() {
+        // Dragging bottom-up / right-to-left yields the same text.
+        let st = state_with_rows(&["> hello world"], ((0, 7), (0, 2)));
+        assert_eq!(st.selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn selected_text_empty_selection_is_none() {
+        // A plain click (anchor == cursor) selects nothing.
+        let st = state_with_rows(&["> hello"], ((0, 3), (0, 3)));
+        assert_eq!(st.selected_text(), None);
+    }
+
+    #[test]
+    fn highlight_line_cells_splits_spans_on_selection() {
+        let mut line = Line::from(vec![Span::raw("abcdef")]);
+        highlight_line_cells(
+            &mut line,
+            2,
+            4,
+            Style::new().add_modifier(Modifier::REVERSED),
+        );
+        // Split into "ab" | "cd"(reversed) | "ef".
+        let texts: Vec<String> = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(texts, vec!["ab", "cd", "ef"]);
+        assert!(
+            line.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(
+            !line.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
 
     #[test]
     fn context_checkpoint_renders_as_compact_event() {

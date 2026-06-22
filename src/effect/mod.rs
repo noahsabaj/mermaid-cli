@@ -939,6 +939,12 @@ impl EffectRunner {
                     dispatch_read_clipboard(tx).await;
                 });
             },
+            Cmd::CopyToClipboard(text) => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    dispatch_copy_to_clipboard(text, tx).await;
+                });
+            },
             Cmd::Exit => {
                 // The main loop observes `state.should_exit` after
                 // the reducer returns; the runner doesn't need to
@@ -1877,6 +1883,31 @@ async fn dispatch_read_clipboard(tx: MsgSender) {
         },
         Outcome::Error(text) => Msg::TransientStatus {
             text,
+            kind: StatusKind::Warn,
+            dismiss_ms: 4_000,
+        },
+    };
+    let _ = tx.send(msg).await;
+}
+
+/// Write text to the system clipboard on a blocking thread (the platform
+/// tools shell out and block), then report the result via a transient status.
+async fn dispatch_copy_to_clipboard(text: String, tx: MsgSender) {
+    use crate::domain::StatusKind;
+
+    let char_count = text.chars().count();
+    let result = tokio::task::spawn_blocking(move || crate::clipboard::write_text(&text))
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("clipboard spawn_blocking: {e}")));
+
+    let msg = match result {
+        Ok(()) => Msg::TransientStatus {
+            text: format!("Copied {char_count} chars to clipboard"),
+            kind: StatusKind::Info,
+            dismiss_ms: 2_000,
+        },
+        Err(e) => Msg::TransientStatus {
+            text: format!("Copy failed: {e}"),
             kind: StatusKind::Warn,
             dismiss_ms: 4_000,
         },

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Drag to select & copy.** A plain left-mouse drag now selects chat text
+  (reverse-video highlight) and copies it to the system clipboard on release,
+  with a "Copied N chars" status. Mouse-wheel scroll and Ctrl+Click-to-open-
+  image are unaffected. Selection is display-cell accurate (CJK-safe) and
+  clears on scroll. `Shift+Drag` still bypasses to native terminal selection
+  (now documented). Copy shells out to the platform tool (`clip`/PowerShell,
+  `pbcopy`, `wl-copy`/`xclip`) — no new dependency.
 - **Inline approval prompts.** In interactive `ask` mode (and `auto`-mode
   escalations), a gated tool action now **pauses and prompts inline** —
   `1` Yes · `2` Yes, don't ask again (per-tool; `execute_command` keyed on the
