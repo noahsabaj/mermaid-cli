@@ -8,6 +8,10 @@ use crate::render::theme::Theme;
 #[derive(Debug, Clone)]
 struct ListState {
     next_number: Option<u64>,
+    /// Leading whitespace that aligns a continuation block (a 2nd+ paragraph in
+    /// a loose list item) under the current item's text — set when the item's
+    /// marker is emitted.
+    cont_indent: String,
 }
 
 /// Parse markdown and convert to theme-styled ratatui Lines.
@@ -104,7 +108,10 @@ pub fn parse_markdown(input: &str, theme: &Theme) -> Vec<Line<'static>> {
                         Style::default().fg(code_fg)
                     },
                     Tag::List(start) => {
-                        list_stack.push(ListState { next_number: start });
+                        list_stack.push(ListState {
+                            next_number: start,
+                            cont_indent: String::new(),
+                        });
                         if !current_line_spans.is_empty() {
                             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
                         }
@@ -122,8 +129,27 @@ pub fn parse_markdown(input: &str, theme: &Theme) -> Vec<Line<'static>> {
                         } else {
                             "• ".to_string()
                         };
+                        // Body paragraphs of this item hang-indent to align under
+                        // the text that follows the marker.
+                        let cont_indent =
+                            format!("{}{}", indent, " ".repeat(marker.as_str().width()));
+                        if let Some(state) = list_stack.last_mut() {
+                            state.cont_indent = cont_indent;
+                        }
                         current_line_spans.push(Span::raw(indent));
                         current_line_spans.push(Span::styled(marker, marker_style));
+                        style_stack.last().copied().unwrap_or_default()
+                    },
+                    Tag::Paragraph => {
+                        // First paragraph of an item still carries the marker
+                        // spans (non-empty); a continuation paragraph starts
+                        // empty, so re-indent it to align under the item text.
+                        if current_line_spans.is_empty()
+                            && let Some(state) = list_stack.last()
+                            && !state.cont_indent.is_empty()
+                        {
+                            current_line_spans.push(Span::raw(state.cont_indent.clone()));
+                        }
                         style_stack.last().copied().unwrap_or_default()
                     },
                     Tag::Table(_alignments) => {
@@ -666,6 +692,33 @@ mod tests {
         assert!(text.contains("1. First"));
         assert!(text.contains("2. Second"));
         assert!(!text.contains("• First"));
+    }
+
+    #[test]
+    fn loose_list_item_body_hangs_under_item_text() {
+        // A 2nd+ paragraph inside a list item must align under the item's text
+        // (hanging indent), not fall back flush to column 0.
+        let lines = md("- **Finding** — verified\n\n  Body paragraph explaining the finding.");
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.starts_with("  • ") && l.contains("Finding")),
+            "marker line should carry the bullet + indent"
+        );
+        let body = rendered
+            .iter()
+            .find(|l| l.contains("Body paragraph"))
+            .expect("body line present");
+        // 4 cols of hanging indent: 2 (depth) + 2 ("• " marker width), aligning
+        // the body under the item text rather than flush at column 0.
+        assert_eq!(
+            body, "    Body paragraph explaining the finding.",
+            "continuation paragraph must hang-indent under the item text"
+        );
     }
 
     #[test]
