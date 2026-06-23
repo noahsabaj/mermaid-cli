@@ -352,3 +352,45 @@ jobs:
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               commit -am "mermaid ${VERSION}"
           git push
+
+  # Bump the WinGet package (NoahSabaj.Mermaid) by opening a PR to
+  # microsoft/winget-pkgs. No-op until WINGET_TOKEN is set — a *classic* PAT
+  # with `public_repo` scope, owned by the account that holds the fork of
+  # microsoft/winget-pkgs (fine-grained PATs are NOT supported by the action).
+  # The action only *bumps* an existing package; the first version of
+  # NoahSabaj.Mermaid is seeded manually once.
+  publish-winget:
+    name: Publish to WinGet
+    needs: [publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for WINGET_TOKEN
+        id: gate
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -n "$WINGET_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "WINGET_TOKEN not set — skipping WinGet submission."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve version
+        if: steps.gate.outputs.enabled == 'true'
+        id: ver
+        run: |
+          TAG="${{ github.event.inputs.version || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Submit to WinGet
+        if: steps.gate.outputs.enabled == 'true'
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: NoahSabaj.Mermaid
+          version: ${{ steps.ver.outputs.version }}
+          installers-regex: 'mermaid-windows-x86_64\.zip$'
+          release-tag: ${{ steps.ver.outputs.tag }}
+          fork-user: noahsabaj
+          token: ${{ secrets.WINGET_TOKEN }}
