@@ -2462,85 +2462,35 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
     state.session.append(msg);
 }
 
-/// Route a typed `ProgressEvent` to the right state surface.
+/// Route a typed `ProgressEvent`.
 ///
-/// - `Output` / `Status` / `Bytes` → transient status line (same as
-///   the old String-chunk behavior, with `Bytes` formatted).
-/// - `Artifact` with `image/*` mime → append base64 to the in-flight
-///   assistant message's `images` for immediate display in chat.
-///   Non-image artifacts surface as a status-line label.
-/// - `SubagentToolCall` / `SubagentText` → status line with an
-///   indented "subagent:" prefix so nested activity is visible
-///   without the parent reducer needing to understand child Msgs.
+/// Tool stdout / status / byte-progress and subagent chatter are intentionally
+/// dropped: surfacing each line to the status banner flickered a fresh line
+/// above the input every few milliseconds (build output, pids, streamed file
+/// contents) which read as noise. The status *line* already names the in-flight
+/// tool, and a tool's full output lands in the chat transcript when it
+/// finishes. Only image artifacts are handled here — they attach to the
+/// in-flight assistant message for inline display.
 fn handle_tool_progress(
     state: &mut State,
-    cmds: &mut Vec<Cmd>,
+    _cmds: &mut Vec<Cmd>,
     _turn: TurnId,
     event: crate::providers::ProgressEvent,
 ) {
-    use crate::providers::{ProgressEvent, SubagentPhase};
+    use crate::providers::ProgressEvent;
     use base64::{Engine as _, engine::general_purpose};
 
-    /// How long a tool-progress banner sticks after the last update.
-    /// Every update pushes a fresh dismiss, so the timer effectively
-    /// resets while output keeps flowing; once output stops (including
-    /// at tool-finish), the banner clears after this delay. Fixes the
-    /// "last ls line stuck above input" bug the user hit after F9.
-    const PROGRESS_DISMISS_MS: u64 = 2_000;
-
-    let set_status = |state: &mut State, text: String, cmds: &mut Vec<Cmd>| {
-        if !text.trim().is_empty() {
-            state.status = Some(StatusLine {
-                text,
-                kind: StatusKind::Info,
-                shown_at: std::time::SystemTime::now(),
-            });
-            cmds.push(Cmd::DismissStatusAfter {
-                ms: PROGRESS_DISMISS_MS,
-            });
-        }
-    };
-
-    match event {
-        ProgressEvent::Output(s) | ProgressEvent::Status(s) | ProgressEvent::SubagentText(s) => {
-            set_status(state, s, cmds);
-        },
-        ProgressEvent::Bytes { done, total } => {
-            let text = match total {
-                Some(t) => format!("{} / {} bytes", done, t),
-                None => format!("{} bytes", done),
-            };
-            set_status(state, text, cmds);
-        },
-        ProgressEvent::Artifact {
-            mime,
-            data,
-            caption,
-        } => {
-            if mime.starts_with("image/")
-                && matches!(
-                    state.turn,
-                    TurnState::ExecutingTools { .. } | TurnState::Generating { .. }
-                )
-                && let Some(last) = state.session.conversation.messages.last_mut()
-                && last.role == MessageRole::Assistant
-            {
-                let encoded = general_purpose::STANDARD.encode(&data);
-                last.images.get_or_insert_with(Vec::new).push(encoded);
-            }
-            let label = caption.unwrap_or_else(|| format!("{} ({}b)", mime, data.len()));
-            set_status(state, label, cmds);
-        },
-        ProgressEvent::SubagentToolCall {
-            tool_name, phase, ..
-        } => {
-            let text = match phase {
-                SubagentPhase::Started => format!("  ⎿ subagent: {} …", tool_name),
-                SubagentPhase::Finished => format!("  ⎿ subagent: {} ✓", tool_name),
-                SubagentPhase::Errored => format!("  ⎿ subagent: {} ✗", tool_name),
-            };
-            set_status(state, text, cmds);
-        },
+    if let ProgressEvent::Artifact { mime, data, .. } = event
+        && mime.starts_with("image/")
+        && matches!(
+            state.turn,
+            TurnState::ExecutingTools { .. } | TurnState::Generating { .. }
+        )
+        && let Some(last) = state.session.conversation.messages.last_mut()
+        && last.role == MessageRole::Assistant
+    {
+        let encoded = general_purpose::STANDARD.encode(&data);
+        last.images.get_or_insert_with(Vec::new).push(encoded);
     }
 }
 
@@ -2861,20 +2811,19 @@ mod tests {
         assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
     }
 
-    /// F15: every tool-progress status push must schedule a
-    /// dismiss so the last progress line doesn't stick on the banner
-    /// forever after the tool finishes. Reported by the user: after
-    /// `execute_command ls -la`, the last directory entry sat above
-    /// the input indefinitely because F9 surfaced `state.status` but
-    /// tool progress never cleared it.
+    /// Tool stdout must NOT reach the status banner. Surfacing every
+    /// progress line there flickered noise above the input (build output,
+    /// pids, streamed file contents) that appeared for a fraction of a second
+    /// and vanished. The status line names the running tool and the full
+    /// output lands in chat; the banner is reserved for discrete messages.
     #[test]
-    fn tool_progress_schedules_dismiss_on_banner_update() {
+    fn tool_progress_output_does_not_touch_status_banner() {
         use crate::providers::ProgressEvent;
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(1));
         let turn = state.current_turn_id().unwrap();
 
-        let (state, cmds) = update(
+        let (state, _cmds) = update(
             state,
             Msg::ToolProgress {
                 turn,
@@ -2884,11 +2833,9 @@ mod tests {
                 ),
             },
         );
-        assert!(state.status.is_some(), "status should be set from output");
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, Cmd::DismissStatusAfter { .. })),
-            "tool progress must schedule a dismiss so the banner clears"
+            state.status.is_none(),
+            "tool stdout must not appear in the status banner"
         );
     }
 
