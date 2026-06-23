@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-06-22
+
+### Added
+
+- **Background processes on Windows.** `execute_command` `mode="background"`
+  previously errored with "not supported on Windows yet"; it now works — the
+  command is spawned detached (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`)
+  with output redirected to a log file, and `/processes`, `/logs <id>`, and
+  `/stop <id>` function (process liveness via `tasklist`, stop via
+  `taskkill /T /F` tree-kill).
+- **Ctrl+B sends a running foreground command to the background.** While an
+  `execute_command` runs in the foreground, press `Ctrl+B` to detach it — it
+  keeps running as a `/processes` entry, tail-able via `/logs`, instead of
+  blocking the turn (the "oops, I ran the dev server in foreground" rescue, as
+  in Claude Code). Its output is teed to a log file so it stays viewable. The
+  status line advertises the shortcut while tools run. A backgrounded process is
+  session-scoped (it stops when Mermaid exits).
+
+### Changed
+
+- **System prompt steers agents off blocking commands.** For smoke checks,
+  prefer a finite command (a build, a one-shot test run, `--version`) over a
+  dev server or watcher (which never exit and block until the 30s foreground
+  timeout); use `mode="background"` for servers/daemons/watchers.
+
 ## [0.10.1] - 2026-06-22
 
 ### Fixed
@@ -815,7 +840,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.8.1...v0.9.0
