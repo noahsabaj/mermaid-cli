@@ -793,6 +793,35 @@ fn compact_inline_error(text: &str, max_chars: usize) -> String {
 }
 
 /// Render actions in Claude Code style
+/// Expand tab characters to spaces on 4-column tab stops.
+///
+/// Tabs paint as zero cells in the terminal buffer, so a line containing them
+/// has a char count larger than its painted width. Any width math done by char
+/// count (e.g. padding a diff line so its background bar spans the row) would
+/// then come up short by one column per tab. Expanding here keeps indentation
+/// visible and makes char count match painted width.
+fn expand_tabs(s: &str) -> String {
+    const TAB_WIDTH: usize = 4;
+    if !s.contains('\t') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + TAB_WIDTH);
+    let mut col = 0usize;
+    for ch in s.chars() {
+        if ch == '\t' {
+            let n = TAB_WIDTH - (col % TAB_WIDTH);
+            for _ in 0..n {
+                out.push(' ');
+            }
+            col += n;
+        } else {
+            out.push(ch);
+            col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    out
+}
+
 fn render_actions(
     actions: &[ActionDisplay],
     lines: &mut Vec<Line>,
@@ -905,11 +934,18 @@ fn render_actions(
                         let added_bg = ratatui::style::Color::Rgb(20, 50, 20);
 
                         for diff_line in &display_lines {
+                            // Expand tabs first: the TUI paints a tab as zero
+                            // cells, so a tab-bearing line's char count exceeds
+                            // its painted width and the char-count pad below
+                            // would leave the background bar short — a ragged
+                            // "staircase" down the right edge. Expanding also
+                            // makes tab indentation actually visible.
+                            let diff_line = expand_tabs(diff_line);
                             // Delegate the producer-format awareness to
                             // `parse_diff_line`, which lives next to the
                             // marker constants and stays in lockstep with
                             // any future format change.
-                            match parse_diff_line(diff_line) {
+                            match parse_diff_line(&diff_line) {
                                 DiffLineKind::Removed => {
                                     let text = format!("    {}", diff_line);
                                     let padded =
@@ -936,7 +972,7 @@ fn render_actions(
                                     lines.push(Line::from(vec![
                                         Span::styled("    ", Style::new().fg(action_color)),
                                         Span::styled(
-                                            diff_line.to_string(),
+                                            diff_line,
                                             Style::new().fg(theme.colors.text_secondary.to_color()),
                                         ),
                                     ]));
@@ -1140,6 +1176,70 @@ fn wrap_styled_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_background_fills_full_width_with_tabs() {
+        // Regression: tab characters paint as zero cells, so char-count padding
+        // left the red/green diff bar short by one column per tab — a ragged
+        // "staircase" down the right edge. After expand_tabs, every column of a
+        // diff row must carry the background.
+        use crate::render::diff::{DIFF_ADDED_MARKER, DIFF_REMOVED_MARKER};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let theme = Theme::dark();
+        let added_bg = ratatui::style::Color::Rgb(20, 50, 20);
+        let removed_bg = ratatui::style::Color::Rgb(60, 20, 20);
+        // Lines at increasing tab depth — the exact shape that staircased.
+        let diff = format!(
+            "  62{m}\tconst out = [];\n  63{p}\t\tlet fixed = false;\n  64{p}\t\t\tdeeplyNested();",
+            m = DIFF_REMOVED_MARKER,
+            p = DIFF_ADDED_MARKER
+        );
+        let action = ActionDisplay {
+            action_type: "Edit".to_string(),
+            target: "engine.ts".to_string(),
+            result: ActionResult::Success {
+                output: String::new(),
+                images: None,
+            },
+            details: ActionDetails::Diff {
+                summary: "ok".to_string(),
+                diff,
+            },
+            duration_seconds: Some(0.3),
+            metadata: None,
+        };
+
+        let width: u16 = 60;
+        let mut lines: Vec<Line> = Vec::new();
+        render_actions(&[action], &mut lines, &theme, width as usize);
+        let h = lines.len() as u16;
+        let backend = TestBackend::new(width, h);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            Paragraph::new(lines).render(Rect::new(0, 0, width, h), f.buffer_mut());
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+
+        for y in 0..h {
+            let is_diff_row = (0..width).any(|x| {
+                let bg = buf[(x, y)].bg;
+                bg == added_bg || bg == removed_bg
+            });
+            if !is_diff_row {
+                continue;
+            }
+            for x in 0..width {
+                let bg = buf[(x, y)].bg;
+                assert!(
+                    bg == added_bg || bg == removed_bg,
+                    "diff background must fill the whole row, but column {x} of row {y} is unfilled (staircase)"
+                );
+            }
+        }
+    }
 
     #[test]
     fn byte_at_cell_clamps_and_respects_cjk() {
