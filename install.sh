@@ -107,5 +107,17 @@ case ":$PATH:" in
     ;;
 esac
 
+# --- shadow warning --------------------------------------------------------
+# A different mermaid earlier on PATH (e.g. a stale `cargo install`) would run
+# instead of this one.
+if command -v mermaid >/dev/null 2>&1; then
+  found=$(command -v mermaid)
+  if [ "$found" != "$dir/mermaid" ]; then
+    say ""
+    say "Note: '$found' is earlier on your PATH and will shadow this install."
+    say "Remove it (e.g. 'cargo uninstall mermaid-cli'), or put $dir first."
+  fi
+fi
+
 say ""
 say "Done. Run 'mermaid' to start, or 'mermaid update' to upgrade later."

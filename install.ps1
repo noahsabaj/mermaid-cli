@@ -75,13 +75,29 @@ try {
     Write-Host "Installed mermaid + mermaidd to $dir"
 
     if (-not $env:MERMAID_NO_MODIFY_PATH) {
+        # Prepend our dir to the *user* PATH so this install wins over any older
+        # mermaid earlier on PATH (e.g. a stale `cargo install` in ~\.cargo\bin).
+        # Drop any existing entry for our dir first to keep it at the front and
+        # avoid duplicates.
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-        if (($userPath -split ';') -notcontains $dir) {
-            $newPath = if ([string]::IsNullOrEmpty($userPath)) { $dir } else { "$userPath;$dir" }
-            [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-            $env:Path = "$env:Path;$dir"
-            Write-Host "Added $dir to your user PATH (open a new terminal to pick it up)."
+        $parts = @()
+        if (-not [string]::IsNullOrEmpty($userPath)) {
+            $parts = @($userPath -split ';' | Where-Object { $_ -and $_ -ne $dir })
         }
+        [Environment]::SetEnvironmentVariable('Path', ((@($dir) + $parts) -join ';'), 'User')
+        # Take effect in the current session too, at the front.
+        $env:Path = "$dir;" + (($env:Path -split ';' | Where-Object { $_ -and $_ -ne $dir }) -join ';')
+        Write-Host "Added $dir to the front of your user PATH."
+    }
+
+    # Warn if another mermaid elsewhere on PATH could shadow this install.
+    $others = @(Get-Command mermaid.exe -All -ErrorAction SilentlyContinue |
+        Where-Object { $_.Source -and (Split-Path $_.Source) -ne $dir })
+    if ($others.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Note: another 'mermaid' is also on your PATH and may shadow this one:"
+        $others | ForEach-Object { Write-Host "  $($_.Source)" }
+        Write-Host "If 'mermaid' keeps running an old version, remove that copy (e.g. 'cargo uninstall mermaid-cli')."
     }
 
     try { & (Join-Path $dir 'mermaid.exe') --version } catch {}
