@@ -1,125 +1,279 @@
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Style,
-    text::{Line, Span},
-    widgets::{Paragraph, Widget},
-};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use std::collections::VecDeque;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::GenerationStatus;
 use crate::render::theme::Theme;
 
-/// Props for StatusLineWidget (stateless widget showing generation progress)
-pub struct StatusLineWidget<'a> {
-    pub status: GenerationStatus,
-    pub elapsed_secs: u64,
-    pub tokens_received: usize,
-    /// Whether tokens_received is an estimate (show ~ prefix)
-    pub tokens_estimated: bool,
-    pub theme: &'a Theme,
-    /// Queued messages waiting to be processed
-    pub queued_messages: &'a VecDeque<String>,
-    /// The in-flight tool's label while running tools (e.g. `Bash npm run dev`),
-    /// so the status line names what it's waiting on. `None` for other phases.
-    pub active_tool: Option<String>,
+/// How many queued-message rows to show under the spinner before stopping.
+const MAX_QUEUED_ROWS: usize = 5;
+
+/// Truncate `s` to `width` display cells, appending `…` when it doesn't fit.
+/// Cell-accurate (CJK/emoji safe) so the result never exceeds `width`.
+fn truncate_to_cells(s: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= width {
+        return s.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let budget = width - 1; // leave a cell for the ellipsis
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
 }
 
-impl<'a> Widget for StatusLineWidget<'a> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        // Don't render if area is too small
-        if area.height == 0 || area.width < 10 {
-            return;
-        }
+/// Build the status-line rows: a generation/tool spinner followed by one row
+/// per queued message.
+///
+/// When the spinner fits in `width` it stays on one row. When it doesn't (a
+/// long `Running tools: <cmd>`), it splits into exactly two rows — the status
+/// text on row 1, the `(esc to interrupt …)` metadata on row 2 (indented under
+/// the status text) — and each row is *truncated* to `width` so nothing ever
+/// bleeds off the right edge, including unbreakable file paths. The fixed
+/// 1-or-2-row shape keeps the reserved height stable as the timer/token counter
+/// tick (no per-frame reflow).
+#[allow(clippy::too_many_arguments)]
+pub fn build_status_lines(
+    status: GenerationStatus,
+    elapsed_secs: u64,
+    tokens_received: usize,
+    tokens_estimated: bool,
+    active_tool: Option<&str>,
+    queued_messages: &VecDeque<String>,
+    theme: &Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
+    if status == GenerationStatus::Idle || width < 10 {
+        return Vec::new();
+    }
+    let width = width as usize;
 
-        // Only render if status is not Idle
-        if self.status == GenerationStatus::Idle {
-            return;
-        }
+    // While running tools, append the in-flight tool so the user sees what's
+    // executing (a long `npm run dev` etc. no longer looks opaque).
+    let status_text = match (status, active_tool) {
+        (GenerationStatus::RunningTools, Some(tool)) => {
+            format!("{}: {}", status.display_text(), tool)
+        },
+        _ => status.display_text().to_string(),
+    };
 
-        // While running tools, append the in-flight tool so the user can see
-        // what's executing (a long `npm run dev` etc. no longer looks opaque).
-        let status_text = match (&self.status, &self.active_tool) {
-            (GenerationStatus::RunningTools, Some(tool)) => {
-                format!("{}: {}", self.status.display_text(), tool)
-            },
-            _ => self.status.display_text().to_string(),
-        };
+    let info_style = Style::new().fg(theme.colors.info.to_color());
+    let meta_style = Style::new()
+        .fg(theme.colors.text_secondary.to_color())
+        .dim();
 
-        let info_color = self.theme.colors.info.to_color();
+    // Arrow indicates message direction; the parenthetical names the flow.
+    let (arrow, flow_direction) = match status {
+        GenerationStatus::Sending | GenerationStatus::Thinking => ("↑ ", "upstream"),
+        GenerationStatus::Streaming => ("↓ ", "downstream"),
+        GenerationStatus::RunningTools => ("• ", "tools"),
+        GenerationStatus::Compacting => ("• ", "compaction"),
+        GenerationStatus::Cancelling => ("• ", "cleanup"),
+        GenerationStatus::Idle => ("", ""),
+    };
 
-        // Determine arrow direction based on state
-        let (arrow, flow_direction) = match self.status {
-            GenerationStatus::Sending | GenerationStatus::Thinking => ("↑ ", "upstream"),
-            GenerationStatus::Streaming => ("↓ ", "downstream"),
-            GenerationStatus::RunningTools => ("• ", "tools"),
-            GenerationStatus::Compacting => ("• ", "compaction"),
-            GenerationStatus::Cancelling => ("• ", "cleanup"),
-            GenerationStatus::Idle => ("", ""),
-        };
+    // While tools run, advertise Ctrl+B (send a running command to the
+    // background). Harmless no-op for non-detachable tools.
+    let bg_hint = if status == GenerationStatus::RunningTools {
+        " • ctrl+b to background"
+    } else {
+        ""
+    };
 
-        // While tools run, advertise Ctrl+B (send a running command to the
-        // background). Harmless no-op for non-detachable tools.
-        let bg_hint = if self.status == GenerationStatus::RunningTools {
-            " • ctrl+b to background"
-        } else {
-            ""
-        };
+    let head = format!("{}... ", status_text);
+    let meta = format!(
+        "(esc to interrupt{bg_hint} • {}s • {} {}{} tokens)",
+        elapsed_secs,
+        match flow_direction {
+            "downstream" => "↓",
+            "tools" => "tools",
+            "compaction" => "compact",
+            "cleanup" => "cleanup",
+            _ => "↑",
+        },
+        if tokens_estimated { "~" } else { "" },
+        tokens_received
+    );
 
-        let spans = vec![
-            // Arrow indicator showing message direction (cyan)
-            Span::styled(arrow, Style::new().fg(info_color)),
-            // Status text with ellipsis (cyan)
-            Span::styled(format!("{}... ", status_text), Style::new().fg(info_color)),
-            // Metadata in parentheses (dimmed)
-            // Show ~ prefix when tokens are estimated (during streaming)
+    let arrow_w = arrow.width();
+    let single_w = arrow_w + head.width() + meta.width();
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if single_w <= width {
+        // Fits on one row — keep it compact (the common case).
+        lines.push(Line::from(vec![
+            Span::styled(arrow, info_style),
+            Span::styled(head, info_style),
+            Span::styled(meta, meta_style),
+        ]));
+    } else {
+        // Too wide: status text on row 1, metadata on row 2 (indented under the
+        // text). Truncate each so a long command or path can't bleed off-screen.
+        let head_budget = width.saturating_sub(arrow_w);
+        lines.push(Line::from(vec![
+            Span::styled(arrow, info_style),
+            Span::styled(truncate_to_cells(head.trim_end(), head_budget), info_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
             Span::styled(
-                format!(
-                    "(esc to interrupt{bg_hint} • {}s • {} {}{} tokens)",
-                    self.elapsed_secs,
-                    if flow_direction == "downstream" {
-                        "↓"
-                    } else if flow_direction == "tools" {
-                        "tools"
-                    } else if flow_direction == "compaction" {
-                        "compact"
-                    } else if flow_direction == "cleanup" {
-                        "cleanup"
-                    } else {
-                        "↑"
-                    },
-                    if self.tokens_estimated { "~" } else { "" },
-                    self.tokens_received
-                ),
-                Style::new()
-                    .fg(self.theme.colors.text_secondary.to_color())
-                    .dim(),
+                truncate_to_cells(&meta, width.saturating_sub(2)),
+                meta_style,
             ),
-        ];
+        ]));
+    }
 
-        let mut lines = vec![Line::from(spans)];
+    // Queued messages: one truncated, highlighted row each (bounded count).
+    let body_budget = width.saturating_sub(2); // "> " prefix
+    for queued in queued_messages.iter().take(MAX_QUEUED_ROWS) {
+        lines.push(Line::from(vec![Span::styled(
+            format!("> {}", truncate_to_cells(queued, body_budget)),
+            Style::new()
+                .fg(theme.colors.text_primary.to_color())
+                .bg(ratatui::style::Color::Rgb(60, 60, 80)), // Subtle purple highlight
+        )]));
+    }
 
-        // Show all queued messages below the status line with highlight
-        let max_len = area.width.saturating_sub(4) as usize;
-        for queued in self.queued_messages.iter() {
-            // Truncate long messages to fit in the area
-            let display_msg = if queued.len() > max_len {
-                let end = queued.floor_char_boundary(max_len.saturating_sub(3));
-                format!("> {}...", &queued[..end])
-            } else {
-                format!("> {}", queued)
-            };
+    lines
+}
 
-            lines.push(Line::from(vec![Span::styled(
-                display_msg,
-                Style::new()
-                    .fg(self.theme.colors.text_primary.to_color())
-                    .bg(ratatui::style::Color::Rgb(60, 60, 80)), // Subtle purple highlight
-            )]));
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::theme::Theme;
+
+    fn row_width(line: &Line<'_>) -> usize {
+        line.spans.iter().map(|s| s.content.as_ref().width()).sum()
+    }
+
+    #[test]
+    fn long_running_tool_status_splits_and_fits_width() {
+        let theme = Theme::dark();
+        let queued = VecDeque::new();
+        let lines = build_status_lines(
+            GenerationStatus::RunningTools,
+            3,
+            0,
+            false,
+            Some(
+                "Bash cd /d D:/Code/TestEnv/wordle && npm run dev -- --host 127.0.0.1 --port 5173",
+            ),
+            &queued,
+            &theme,
+            80,
+        );
+        // Splits into status row + metadata row, neither exceeding the width.
+        assert_eq!(lines.len(), 2, "a too-wide status splits onto two rows");
+        for l in &lines {
+            assert!(
+                row_width(l) <= 80,
+                "row exceeds width: {} > 80",
+                row_width(l)
+            );
         }
+    }
 
-        let paragraph = Paragraph::new(lines);
+    #[test]
+    fn unbreakable_long_path_is_truncated_not_overflowed() {
+        // Regression (review finding): a long whitespace-free path used to be
+        // pushed whole onto a row and still bleed off the right edge.
+        let theme = Theme::dark();
+        let queued = VecDeque::new();
+        let lines = build_status_lines(
+            GenerationStatus::RunningTools,
+            1,
+            0,
+            false,
+            Some("Edit D:/Code/AI/some/very/deeply/nested/directory/structure/longfilename.rs"),
+            &queued,
+            &theme,
+            40,
+        );
+        for l in &lines {
+            assert!(
+                row_width(l) <= 40,
+                "no row may exceed width even for an unbreakable path: {} > 40",
+                row_width(l)
+            );
+        }
+    }
 
-        paragraph.render(area, buf);
+    #[test]
+    fn short_status_stays_one_row() {
+        let theme = Theme::dark();
+        let queued = VecDeque::new();
+        let lines = build_status_lines(
+            GenerationStatus::Sending,
+            0,
+            0,
+            false,
+            None,
+            &queued,
+            &theme,
+            120,
+        );
+        assert_eq!(lines.len(), 1, "a short status stays on one row");
+    }
+
+    #[test]
+    fn height_is_stable_as_metadata_ticks() {
+        // The 1-or-2-row shape must not flip as elapsed/token counters grow, so
+        // the chat transcript doesn't reflow every second.
+        let theme = Theme::dark();
+        let queued = VecDeque::new();
+        let tool = Some("Bash npm run dev -- --host 127.0.0.1 --port 5173 --strictPort");
+        let n0 = build_status_lines(
+            GenerationStatus::RunningTools,
+            9,
+            99,
+            false,
+            tool,
+            &queued,
+            &theme,
+            100,
+        )
+        .len();
+        for (elapsed, tokens) in [(10, 100), (999, 100000), (3600, 999999)] {
+            let n = build_status_lines(
+                GenerationStatus::RunningTools,
+                elapsed,
+                tokens,
+                false,
+                tool,
+                &queued,
+                &theme,
+                100,
+            )
+            .len();
+            assert_eq!(n, n0, "row count must not change as counters tick");
+        }
+    }
+
+    #[test]
+    fn idle_status_is_empty() {
+        let theme = Theme::dark();
+        let queued = VecDeque::new();
+        let lines = build_status_lines(
+            GenerationStatus::Idle,
+            0,
+            0,
+            false,
+            None,
+            &queued,
+            &theme,
+            80,
+        );
+        assert!(lines.is_empty(), "idle has no status row");
     }
 }

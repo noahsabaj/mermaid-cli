@@ -22,7 +22,7 @@ pub use input::{InputState, InputWidget};
 pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
 pub use status_banner::StatusBannerWidget;
-pub use status_line::StatusLineWidget;
+pub use status_line::build_status_lines;
 
 /// Local-to-render-layer generation phase enum. The compose function
 /// converts from `domain::TurnState` + `domain::GenPhase` into one of
