@@ -1,0 +1,61 @@
+name: Pages
+
+# Publishes the install scripts (install.sh / install.ps1) to GitHub Pages so
+# users can `curl ... | sh` / `irm ... | iex` without cloning the repo. The
+# scripts stay canonical at the repo root; this only serves them at a pretty
+# URL (https://noahsabaj.github.io/mermaid-cli/install.{sh,ps1}).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - install.sh
+      - install.ps1
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp install.sh install.ps1 _site/
+          cat > _site/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>Install Mermaid</title>
+            <meta http-equiv="refresh" content="0; url=https://github.com/noahsabaj/mermaid-cli">
+          </head>
+          <body>
+            <p>Install Mermaid (no cargo required):</p>
+            <pre>curl -fsSL https://noahsabaj.github.io/mermaid-cli/install.sh | sh</pre>
+            <pre>irm https://noahsabaj.github.io/mermaid-cli/install.ps1 | iex</pre>
+            <p>See <a href="https://github.com/noahsabaj/mermaid-cli">the repository</a>.</p>
+          </body>
+          </html>
+          HTML
+
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
