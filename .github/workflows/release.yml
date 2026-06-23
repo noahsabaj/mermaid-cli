@@ -205,3 +205,150 @@ jobs:
           # the index before publishing the dependent crate.
           cargo publish -p mermaid-runtime
           cargo publish -p mermaid-cli
+
+  # Bump the Homebrew tap + Scoop bucket to the new release. This is a no-op
+  # until TAP_TOKEN is set — a PAT (Contents: read/write) on
+  # noahsabaj/homebrew-mermaid and noahsabaj/scoop-mermaid. No other setup.
+  publish-packages:
+    name: Publish package managers
+    needs: [publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for TAP_TOKEN
+        id: gate
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -n "$TAP_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "TAP_TOKEN not set — skipping Homebrew/Scoop bump."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve version + checksums
+        if: steps.gate.outputs.enabled == 'true'
+        id: rel
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.version || github.ref_name }}"
+          VERSION="${TAG#v}"
+          curl -fsSL -o SHA256SUMS \
+            "https://github.com/noahsabaj/mermaid-cli/releases/download/${TAG}/SHA256SUMS"
+          h() { grep " mermaid-$1$" SHA256SUMS | awk '{print $1}'; }
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "mac_arm=$(h macos-aarch64.tar.gz)"
+            echo "mac_x86=$(h macos-x86_64.tar.gz)"
+            echo "lin_arm=$(h linux-aarch64.tar.gz)"
+            echo "lin_x86=$(h linux-x86_64.tar.gz)"
+            echo "win_x86=$(h windows-x86_64.zip)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew tap
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          VERSION: ${{ steps.rel.outputs.version }}
+          MAC_ARM: ${{ steps.rel.outputs.mac_arm }}
+          MAC_X86: ${{ steps.rel.outputs.mac_x86 }}
+          LIN_ARM: ${{ steps.rel.outputs.lin_arm }}
+          LIN_X86: ${{ steps.rel.outputs.lin_x86 }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/noahsabaj/homebrew-mermaid.git" tap
+          cat > tap/Formula/mermaid.rb <<RUBY
+          class Mermaid < Formula
+            desc "Open-source, model-agnostic AI pair programmer for the terminal"
+            homepage "https://github.com/noahsabaj/mermaid-cli"
+            version "${VERSION}"
+            license any_of: ["MIT", "Apache-2.0"]
+
+            on_macos do
+              on_arm do
+                url "https://github.com/noahsabaj/mermaid-cli/releases/download/${TAG}/mermaid-macos-aarch64.tar.gz"
+                sha256 "${MAC_ARM}"
+              end
+              on_intel do
+                url "https://github.com/noahsabaj/mermaid-cli/releases/download/${TAG}/mermaid-macos-x86_64.tar.gz"
+                sha256 "${MAC_X86}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/noahsabaj/mermaid-cli/releases/download/${TAG}/mermaid-linux-aarch64.tar.gz"
+                sha256 "${LIN_ARM}"
+              end
+              on_intel do
+                url "https://github.com/noahsabaj/mermaid-cli/releases/download/${TAG}/mermaid-linux-x86_64.tar.gz"
+                sha256 "${LIN_X86}"
+              end
+            end
+
+            def install
+              bin.install "mermaid"
+              bin.install "mermaidd"
+            end
+
+            test do
+              assert_match "Mermaid v#{version}", shell_output("#{bin}/mermaid version")
+            end
+          end
+          RUBY
+          cd tap
+          if git diff --quiet; then echo "Homebrew tap already current"; exit 0; fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -am "mermaid ${VERSION}"
+          git push
+
+      - name: Update Scoop bucket
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          VERSION: ${{ steps.rel.outputs.version }}
+          WIN_X86: ${{ steps.rel.outputs.win_x86 }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/noahsabaj/scoop-mermaid.git" bucket
+          cat > bucket/bucket/mermaid.json <<JSON
+          {
+              "version": "${VERSION}",
+              "description": "Open-source, model-agnostic AI pair programmer for the terminal.",
+              "homepage": "https://github.com/noahsabaj/mermaid-cli",
+              "license": "MIT OR Apache-2.0",
+              "architecture": {
+                  "64bit": {
+                      "url": "https://github.com/noahsabaj/mermaid-cli/releases/download/${TAG}/mermaid-windows-x86_64.zip",
+                      "hash": "${WIN_X86}"
+                  }
+              },
+              "bin": [
+                  "mermaid.exe",
+                  "mermaidd.exe"
+              ],
+              "checkver": {
+                  "github": "https://github.com/noahsabaj/mermaid-cli"
+              },
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": {
+                          "url": "https://github.com/noahsabaj/mermaid-cli/releases/download/v\$version/mermaid-windows-x86_64.zip"
+                      }
+                  },
+                  "hash": {
+                      "url": "https://github.com/noahsabaj/mermaid-cli/releases/download/v\$version/SHA256SUMS"
+                  }
+              }
+          }
+          JSON
+          cd bucket
+          if git diff --quiet; then echo "Scoop bucket already current"; exit 0; fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -am "mermaid ${VERSION}"
+          git push
