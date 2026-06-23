@@ -1,0 +1,8 @@
+# Shell installers MUST stay LF — a CRLF `#!/bin/sh` line breaks the script on
+# Linux/macOS ("bad interpreter"). These are served verbatim over GitHub Pages.
+install.sh text eol=lf
+*.sh text eol=lf
+
+# PowerShell scripts: CRLF is the Windows norm and PowerShell reads either.
+install.ps1 text eol=crlf
+*.ps1 text eol=crlf
