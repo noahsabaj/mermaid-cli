@@ -341,23 +341,6 @@ async fn run_background_command(
 ) -> ToolOutcome {
     let start = Instant::now();
 
-    #[cfg(target_os = "windows")]
-    {
-        let _ = (
-            command,
-            working_dir,
-            startup_timeout_secs,
-            ready_pattern,
-            open_url,
-            ctx,
-        );
-        return ToolOutcome::error(
-            "execute_command background mode is not supported on Windows yet",
-            start.elapsed().as_secs_f64(),
-        );
-    }
-
-    #[cfg(not(target_os = "windows"))]
     {
         let workdir = working_dir
             .map(PathBuf::from)
@@ -497,14 +480,54 @@ printf '%s\n' "$!""#,
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Windows: spawn the command detached (no console, own process group) with
+/// output redirected to the log file, and return its PID. tokio's `Child`
+/// defaults to `kill_on_drop(false)`, so dropping the handle leaves the
+/// process running — the OS owns its lifetime from here.
+#[cfg(target_os = "windows")]
+async fn launch_background_process(
+    command: &str,
+    workdir: &Path,
+    log_path: &Path,
+) -> Result<u32, String> {
+    // DETACHED_PROCESS: no inherited console. CREATE_NEW_PROCESS_GROUP: not
+    // killed when the parent gets Ctrl+C. Together: `cmd /C <command>` keeps
+    // running after the tool returns.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let log = std::fs::File::create(log_path).map_err(|e| {
+        format!(
+            "failed to create background log {}: {e}",
+            log_path.display()
+        )
+    })?;
+    let log_err = log
+        .try_clone()
+        .map_err(|e| format!("failed to clone background log handle: {e}"))?;
+    let mut launcher = Command::new("cmd");
+    launcher
+        .arg("/C")
+        .arg(command)
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    scrub_secret_env(&mut launcher);
+    let child = launcher
+        .spawn()
+        .map_err(|e| format!("failed to launch background command: {e}"))?;
+    child
+        .id()
+        .ok_or_else(|| "background command produced no pid".to_string())
+}
+
 #[derive(Debug)]
 enum BackgroundWaitError {
     Cancelled,
     ExitedEarly(String),
 }
 
-#[cfg(not(target_os = "windows"))]
 async fn wait_for_background_startup(
     pid: u32,
     log_path: &Path,
@@ -571,7 +594,6 @@ async fn wait_for_background_startup(
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 async fn read_log_lossy(path: &Path) -> String {
     tokio::fs::read_to_string(path).await.unwrap_or_default()
 }
@@ -590,10 +612,39 @@ async fn process_running(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// Windows: `tasklist` filtered by PID prints the process row only when it
+/// exists (otherwise an "INFO: No tasks…" line that doesn't contain the PID).
+#[cfg(target_os = "windows")]
+async fn process_running(pid: u32) -> bool {
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
+}
+
 #[cfg(not(target_os = "windows"))]
 async fn kill_background_process(pid: u32) -> std::io::Result<()> {
     let _ = Command::new("kill")
         .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await?;
+    Ok(())
+}
+
+/// Windows: `taskkill /T` kills the whole tree (a `cmd /C` wrapper spawns the
+/// real child), `/F` forces it.
+#[cfg(target_os = "windows")]
+async fn kill_background_process(pid: u32) -> std::io::Result<()> {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1037,6 +1088,43 @@ mod tests {
 
         if let Some(pid) = parse_pid(&output) {
             let _ = Command::new("kill").arg(pid.to_string()).status().await;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn background_mode_returns_pid_and_log_on_windows() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), std::env::temp_dir());
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": "echo ready & ping -n 30 127.0.0.1",
+                    "mode": "background",
+                    "startup_timeout_secs": 3,
+                    "ready_pattern": "ready"
+                }),
+                ctx,
+            )
+            .await;
+
+        assert!(
+            outcome.is_success(),
+            "expected background success on Windows: {:?}",
+            outcome
+        );
+        let output = outcome.output().to_string();
+        assert!(output.contains("Background command started"));
+        assert!(output.contains("PID:"));
+        assert!(output.contains("Ready: matched pattern"));
+        // The ManagedProcess must be attached so /processes lists it.
+        assert!(
+            outcome.metadata.process.is_some(),
+            "background outcome must carry a ManagedProcess"
+        );
+
+        // Clean up the detached process (and its child ping) via the tree kill.
+        if let Some(pid) = parse_pid(&output) {
+            let _ = kill_background_process(pid).await;
         }
     }
 
