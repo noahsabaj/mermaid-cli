@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-22
+
+### Added
+
+- **Install without cargo.** One-line installers download a prebuilt binary for
+  your platform from the latest GitHub Release, verify it against `SHA256SUMS`,
+  and put `mermaid` + `mermaidd` on your PATH — no Rust toolchain needed:
+  - macOS/Linux: `curl -fsSL https://noahsabaj.github.io/mermaid-cli/install.sh | sh`
+  - Windows: `irm https://noahsabaj.github.io/mermaid-cli/install.ps1 | iex`
+
+  Honor `MERMAID_VERSION` (pin a release), `MERMAID_INSTALL_DIR`, and
+  `MERMAID_NO_MODIFY_PATH`. The scripts are served from GitHub Pages and stay
+  canonical in the repo.
+- **`mermaid update`.** Checks GitHub Releases for a newer version and updates
+  in place by re-running the platform install script (`--check` to only report,
+  `--force` to reinstall). Reuses the existing HTTP client — no new
+  dependencies. On Windows the installer renames the running `mermaid.exe` aside
+  so an in-place update succeeds.
+
 ## [0.10.2] - 2026-06-22
 
 ### Added
@@ -840,7 +859,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.9.0...v0.10.0
