@@ -34,6 +34,17 @@ pub async fn ensure_model(model_name: &str, config: &Config) -> Result<()> {
     // Get the model name without provider prefix (all models route through Ollama)
     let model = model_name.strip_prefix("ollama/").unwrap_or(model_name);
 
+    // Cloud models (`:cloud`) are proxied to ollama.com by the Ollama daemon at
+    // request time — they can't be `ollama pull`ed ("pull model manifest: file
+    // does not exist") and don't appear in `ollama list` unless separately
+    // registered. Skip the local existence/pull check and let the chat request
+    // reach the daemon, which serves the cloud model directly. (The runtime
+    // `:model` switch already skips the pull the same way — see
+    // reducer::ollama_pull_target.)
+    if crate::ollama::is_cloud_model(model) {
+        return Ok(());
+    }
+
     // Check available models via HTTP (honors user's host/port)
     let models = list_installed_models(config).await;
 
@@ -98,4 +109,29 @@ pub async fn require_any_model(config: &Config) -> Result<Vec<String>> {
     }
 
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    /// `ensure_model` must skip the local existence/pull check for `:cloud`
+    /// models (which can't be pulled), with or without the `ollama/` prefix,
+    /// while still pulling ordinary local models.
+    #[test]
+    fn cloud_models_skip_pull_local_models_do_not() {
+        let skips = |name: &str| {
+            let model = name.strip_prefix("ollama/").unwrap_or(name);
+            crate::ollama::is_cloud_model(model)
+        };
+        for cloud in [
+            "nemotron-3-ultra:cloud",
+            "ollama/nemotron-3-ultra:cloud",
+            "minimax-m3:cloud",
+            "ollama/gpt-oss:cloud",
+        ] {
+            assert!(skips(cloud), "{cloud} is a cloud model — must skip pull");
+        }
+        for local in ["qwen3:8b", "ollama/llama3.2", "phi3:latest", "mistral"] {
+            assert!(!skips(local), "{local} is a local model — must still pull");
+        }
+    }
 }
