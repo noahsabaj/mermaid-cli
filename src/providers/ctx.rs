@@ -81,6 +81,10 @@ pub struct FinalResponse {
 /// What a `ToolExecutor::execute()` receives.
 pub struct ExecContext {
     pub token: CancellationToken,
+    /// Ctrl+B "background this" signal, parallel to `token`. Tools that can
+    /// detach a running child (execute_command) select on it; the live path
+    /// sets it from the turn scope, tests leave it never-fired.
+    pub background: CancellationToken,
     pub progress: mpsc::Sender<ProgressEvent>,
     pub call_id: ToolCallId,
     pub turn: TurnId,
@@ -154,6 +158,10 @@ impl ExecContext {
     ) -> Self {
         Self {
             token,
+            // Defaults to a fresh, never-fired token ("no background
+            // requested"); the live execute path overwrites it with the turn
+            // scope's background token.
+            background: CancellationToken::new(),
             progress,
             call_id,
             turn,

@@ -34,6 +34,10 @@ use crate::domain::TurnId;
 pub struct TurnScope {
     id: TurnId,
     token: CancellationToken,
+    /// A second signal, parallel to `token`, meaning "background the running
+    /// work, don't kill it" (Ctrl+B). Tools that can detach (execute_command)
+    /// `select!` on it; everyone else ignores it.
+    background: CancellationToken,
     joins: JoinSet<()>,
 }
 
@@ -42,6 +46,7 @@ impl TurnScope {
         Self {
             id,
             token: CancellationToken::new(),
+            background: CancellationToken::new(),
             joins: JoinSet::new(),
         }
     }
@@ -54,6 +59,17 @@ impl TurnScope {
     /// participate in cooperative cancellation.
     pub fn token(&self) -> CancellationToken {
         self.token.clone()
+    }
+
+    /// Clone the scope's background-request token (Ctrl+B). Tools that can
+    /// detach a running child select on this instead of killing it.
+    pub fn background_token(&self) -> CancellationToken {
+        self.background.clone()
+    }
+
+    /// Signal "background the running work" to every child task that listens.
+    pub fn background(&self) {
+        self.background.cancel();
     }
 
     /// Spawn a child task under this scope. The returned handle is
