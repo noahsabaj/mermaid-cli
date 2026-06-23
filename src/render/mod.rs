@@ -29,7 +29,7 @@ use crate::models::{ReasoningCapability, ReasoningLevel, nearest_effort};
 
 use widgets::{
     AttachmentWidget, ChatState, ChatWidget, GenerationStatus, InputState, InputWidget,
-    SlashPaletteWidget, StatusLineWidget, StatusWidget,
+    SlashPaletteWidget, StatusWidget, build_status_lines,
 };
 
 /// Transient render-layer state that lives across frames but isn't
@@ -101,11 +101,72 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     };
     let input_height = (input_lines + 2) as u16;
 
-    let queued_count = state.ui.queued_messages.len();
-    let status_line_height = if state.is_busy() {
-        (1 + queued_count).min(6) as u16
+    // Build the status-line rows up front (wrapped to the terminal width) so
+    // the layout reserves exactly the height they need — a long
+    // `Running tools: <cmd>` plus the trailing `(esc to interrupt …)` fold onto
+    // continuation rows instead of bleeding off the right edge.
+    let status_lines = if state.is_busy() {
+        let elapsed_secs = match &state.turn {
+            TurnState::Generating { started, .. } | TurnState::Compacting { started, .. } => {
+                started.elapsed().map(|d| d.as_secs()).unwrap_or(0)
+            },
+            TurnState::Cancelling { since, .. } => {
+                since.elapsed().map(|d| d.as_secs()).unwrap_or(0)
+            },
+            TurnState::ExecutingTools { started, .. } => {
+                started.elapsed().map(|d| d.as_secs()).unwrap_or(0)
+            },
+            TurnState::Idle => 0,
+        };
+        // While tools run, name the in-flight one(s) so the status line isn't an
+        // opaque "Running tools…". In-flight = the call slots without an outcome.
+        let active_tool = match &state.turn {
+            TurnState::ExecutingTools {
+                calls, outcomes, ..
+            } => {
+                let pending = outcomes.iter().filter(|o| o.is_none()).count();
+                calls
+                    .iter()
+                    .zip(outcomes)
+                    .find(|(_, o)| o.is_none())
+                    .map(|(call, _)| {
+                        let (action, target) = crate::domain::display_info_for(call);
+                        let label = if target.is_empty() {
+                            action
+                        } else {
+                            format!("{action} {target}")
+                        };
+                        if pending > 1 {
+                            format!("{label} (+{} more)", pending - 1)
+                        } else {
+                            label
+                        }
+                    })
+            },
+            _ => None,
+        };
+        let (tokens_display, tokens_estimated) = match &state.turn {
+            TurnState::Generating {
+                tokens,
+                partial_text,
+                ..
+            } if *tokens == 0 && !partial_text.is_empty() => (partial_text.len() / 4, true),
+            TurnState::Generating { tokens, .. } => (*tokens, false),
+            _ => (0, false),
+        };
+        build_status_lines(
+            GenerationStatus::from_turn(&state.turn),
+            elapsed_secs,
+            tokens_display,
+            tokens_estimated,
+            active_tool.as_deref(),
+            &state.ui.queued_messages,
+            &rstate.theme,
+            // Match the 1-cell horizontal pad the status zone is rendered with.
+            frame.area().width.saturating_sub(2),
+        )
     } else {
-        0
+        Vec::new()
     };
 
     let attachment_height = if state.ui.attachments.is_empty() {
@@ -119,6 +180,16 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // progress but no widget painted it. Height is 1 when a status is
     // present, 0 otherwise.
     let status_banner_height: u16 = if state.status.is_some() { 1 } else { 0 };
+
+    // Reserve the status zone's height to match its row count, but never so much
+    // that the input box or bottom bar get evicted on a short terminal: keep room
+    // for the chat floor (Min 10), the input box, the bottom bar (≥2), and the
+    // banner/attachment rows. (The trailing Length zones would otherwise starve
+    // before the Min(10) chat zone does.)
+    let status_reserve = 10 + input_height + 2 + status_banner_height + attachment_height;
+    let status_line_height = (status_lines.len() as u16)
+        .min(6)
+        .min(frame.area().height.saturating_sub(status_reserve));
 
     // Bottom region: one of three widgets based on UI mode.
     //   - ConversationList picker: 12-line pane.
@@ -196,68 +267,14 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut rstate.chat);
 
-    // Status line for every active turn. Tool execution previously
-    // reserved the row but did not paint it, which made queued input
-    // look like it had disappeared.
-    if state.is_busy() {
-        let elapsed_secs = match &state.turn {
-            TurnState::Generating { started, .. } | TurnState::Compacting { started, .. } => {
-                started.elapsed().map(|d| d.as_secs()).unwrap_or(0)
-            },
-            TurnState::Cancelling { since, .. } => {
-                since.elapsed().map(|d| d.as_secs()).unwrap_or(0)
-            },
-            TurnState::ExecutingTools { started, .. } => {
-                started.elapsed().map(|d| d.as_secs()).unwrap_or(0)
-            },
-            TurnState::Idle => 0,
-        };
-        // While tools run, name the in-flight one(s) so the status line isn't an
-        // opaque "Running tools…". In-flight = the call slots without an outcome.
-        let active_tool = match &state.turn {
-            TurnState::ExecutingTools {
-                calls, outcomes, ..
-            } => {
-                let pending = outcomes.iter().filter(|o| o.is_none()).count();
-                calls
-                    .iter()
-                    .zip(outcomes)
-                    .find(|(_, o)| o.is_none())
-                    .map(|(call, _)| {
-                        let (action, target) = crate::domain::display_info_for(call);
-                        let label = if target.is_empty() {
-                            action
-                        } else {
-                            format!("{action} {target}")
-                        };
-                        if pending > 1 {
-                            format!("{label} (+{} more)", pending - 1)
-                        } else {
-                            label
-                        }
-                    })
-            },
-            _ => None,
-        };
-        let (tokens_display, tokens_estimated) = match &state.turn {
-            TurnState::Generating {
-                tokens,
-                partial_text,
-                ..
-            } if *tokens == 0 && !partial_text.is_empty() => (partial_text.len() / 4, true),
-            TurnState::Generating { tokens, .. } => (*tokens, false),
-            _ => (0, false),
-        };
-        let status_line_widget = StatusLineWidget {
-            status: GenerationStatus::from_turn(&state.turn),
-            elapsed_secs,
-            tokens_received: tokens_display,
-            tokens_estimated,
-            theme: &rstate.theme,
-            queued_messages: &state.ui.queued_messages,
-            active_tool,
-        };
-        frame.render_widget(status_line_widget, chunks[1]);
+    // Status line for every active turn (built above, already fit to width).
+    // Indented 1 cell to align with the chat column's 1-cell pad.
+    if !status_lines.is_empty() {
+        let status_area = chunks[1].inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        });
+        frame.render_widget(ratatui::widgets::Paragraph::new(status_lines), status_area);
     }
 
     // Attachment bar.

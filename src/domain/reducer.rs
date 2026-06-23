@@ -542,12 +542,15 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
-    // Esc interrupts active work. When idle it falls through to the
-    // palette/input/focus handlers below.
+    // Esc interrupts active work by cancelling the current turn. It must NEVER
+    // exit mermaid — only Ctrl+C (or `/quit`) does that. A second Esc while the
+    // turn is already cancelling is a no-op: the cancellation is underway, and
+    // Ctrl+C is the escalation path if it ever wedges. (Previously a second Esc
+    // mid-cancel force-exited, which booted users out unexpectedly and could
+    // leave a backgrounded process holding the terminal.) When idle, Esc falls
+    // through to the palette/input/focus handlers below.
     if mods.is_empty() && code == KeyCode::Escape && state.is_busy() {
-        if matches!(state.turn, TurnState::Cancelling { .. }) {
-            request_exit(state, cmds);
-        } else {
+        if !matches!(state.turn, TurnState::Cancelling { .. }) {
             handle_cancel_turn(state, cmds);
         }
         return;
@@ -3090,7 +3093,11 @@ mod tests {
     }
 
     #[test]
-    fn esc_while_already_cancelling_forces_exit() {
+    fn esc_while_already_cancelling_does_not_exit() {
+        // Esc must NEVER quit mermaid — a second Esc mid-cancel is a no-op,
+        // not a force-exit. (Regression: it used to call request_exit, which
+        // booted the user out and could leave a background process holding the
+        // terminal. Only Ctrl+C / `/quit` exit.)
         let mut state = fresh_state();
         state.turn = TurnState::Cancelling {
             id: TurnId(5),
@@ -3101,12 +3108,15 @@ mod tests {
             modifiers: KeyMods::default(),
         });
         let (state, cmds) = update(state, msg);
-        assert!(state.should_exit);
+        assert!(!state.should_exit, "Esc must not exit mermaid");
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, Cmd::CancelScope(TurnId(5))))
+            !cmds.iter().any(|c| matches!(c, Cmd::Exit)),
+            "Esc must not emit Cmd::Exit"
         );
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
+        assert!(
+            matches!(state.turn, TurnState::Cancelling { id: TurnId(5), .. }),
+            "a second Esc mid-cancel leaves the turn cancelling, unchanged"
+        );
     }
 
     #[test]
