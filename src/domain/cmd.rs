@@ -81,6 +81,11 @@ pub enum Cmd {
     /// `ToolFinished { outcome: Cancelled }` for tools already running)
     /// so the reducer can transition back to `Idle`.
     CancelScope(TurnId),
+    /// Ctrl+B: signal the turn's scope to BACKGROUND (not cancel) its running
+    /// work. The scope's background token fires; detachable tools (execute_
+    /// command) move their child to a background process and return. The scope
+    /// is left intact (unlike `CancelScope`).
+    BackgroundScope(TurnId),
 
     /// Resolve an inline approval prompt: deliver the user's decision to the
     /// parked tool task via the `ApprovalBroker`. NOT turn-scoped — it's a
@@ -284,6 +289,7 @@ impl Cmd {
             Cmd::CompactConversation { .. } => "compact_conversation",
             Cmd::ExecuteTool { .. } => "execute_tool",
             Cmd::CancelScope(_) => "cancel_scope",
+            Cmd::BackgroundScope(_) => "background_scope",
             Cmd::ResolveApproval { .. } => "resolve_approval",
             Cmd::SaveConversation(_) => "save_conversation",
             Cmd::SaveCompactionArchive { .. } => "save_compaction_archive",
@@ -365,6 +371,7 @@ impl Cmd {
                 turn, call_id, source.function.name
             ),
             Cmd::CancelScope(turn) => format!("cancel_scope(turn={})", turn),
+            Cmd::BackgroundScope(turn) => format!("background_scope(turn={})", turn),
             Cmd::ResolveApproval { call_id, decision } => {
                 format!("resolve_approval(call={}, {:?})", call_id, decision)
             },

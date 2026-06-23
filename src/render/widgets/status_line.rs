@@ -58,6 +58,14 @@ impl<'a> Widget for StatusLineWidget<'a> {
             GenerationStatus::Idle => ("", ""),
         };
 
+        // While tools run, advertise Ctrl+B (send a running command to the
+        // background). Harmless no-op for non-detachable tools.
+        let bg_hint = if self.status == GenerationStatus::RunningTools {
+            " • ctrl+b to background"
+        } else {
+            ""
+        };
+
         let spans = vec![
             // Arrow indicator showing message direction (cyan)
             Span::styled(arrow, Style::new().fg(info_color)),
@@ -67,7 +75,7 @@ impl<'a> Widget for StatusLineWidget<'a> {
             // Show ~ prefix when tokens are estimated (during streaming)
             Span::styled(
                 format!(
-                    "(esc to interrupt • {}s • {} {}{} tokens)",
+                    "(esc to interrupt{bg_hint} • {}s • {} {}{} tokens)",
                     self.elapsed_secs,
                     if flow_direction == "downstream" {
                         "↓"

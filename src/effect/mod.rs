@@ -370,6 +370,7 @@ impl EffectRunner {
                 let approval = self.approval.clone();
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
+                let background = scope.background_token();
                 scope.spawn(async move {
                     dispatch_execute_tool(
                         tx,
@@ -379,6 +380,7 @@ impl EffectRunner {
                         call_id,
                         source,
                         token,
+                        background,
                         config,
                         model_id,
                         task_id,
@@ -399,6 +401,12 @@ impl EffectRunner {
             },
             Cmd::CancelScope(turn) => {
                 self.drop_scope(turn);
+            },
+            Cmd::BackgroundScope(turn) => {
+                // Fire the scope's background token (don't drop the scope):
+                // detachable tools move their child to a background process and
+                // return a normal outcome, so the turn finishes naturally.
+                self.scope_mut(turn).background();
             },
             Cmd::SaveConversation(history) => {
                 let tx = self.msg_tx.clone();
@@ -1756,6 +1764,7 @@ async fn dispatch_execute_tool(
     call_id: crate::domain::ToolCallId,
     source: crate::models::tool_call::ToolCall,
     token: tokio_util::sync::CancellationToken,
+    background: tokio_util::sync::CancellationToken,
     config: Arc<crate::app::Config>,
     model_id: String,
     task_id: Option<String>,
@@ -1851,7 +1860,7 @@ async fn dispatch_execute_tool(
         }
     });
 
-    let ctx = ExecContext::new(
+    let mut ctx = ExecContext::new(
         token,
         progress_tx,
         call_id,
@@ -1865,6 +1874,7 @@ async fn dispatch_execute_tool(
         classifier,
         approval,
     );
+    ctx.background = background;
     let before_payload = serde_json::json!({
         "turn_id": turn.0,
         "call_id": call_id.0,

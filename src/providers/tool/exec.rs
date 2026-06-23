@@ -23,7 +23,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
@@ -241,7 +241,7 @@ impl ToolExecutor for ExecuteCommandTool {
         }
         scrub_secret_env(&mut cmd);
 
-        let run_fut = run_command(cmd, progress);
+        let run_fut = run_command(cmd, progress, ctx.background.clone());
         let timeout_fut = tokio::time::sleep(Duration::from_secs(timeout_secs));
 
         let outcome = tokio::select! {
@@ -271,7 +271,7 @@ impl ToolExecutor for ExecuteCommandTool {
                 ))
             },
             result = run_fut => match result {
-                Ok(run) => {
+                Ok(CommandRunResult::Completed(run)) => {
                     let duration_secs = start.elapsed().as_secs_f64();
                     let output_len = run.output.len();
                     ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
@@ -290,6 +290,43 @@ impl ToolExecutor for ExecuteCommandTool {
                                 byte_count: Some(output_len),
                             },
                         ))
+                },
+                Ok(CommandRunResult::Detached { pid, log_path }) => {
+                    // Ctrl+B moved this command to the background.
+                    let duration_secs = start.elapsed().as_secs_f64();
+                    let log_path_str = log_path.display().to_string();
+                    let output = format!(
+                        "Moved to background.\nPID: {pid}\nLog: {log_path_str}\nManage it with /processes, /logs {pid}, /stop {pid}."
+                    );
+                    let process = ManagedProcess {
+                        id: format!("bg-{pid}"),
+                        pid,
+                        command: command.to_string(),
+                        cwd: Some(
+                            working_dir
+                                .clone()
+                                .unwrap_or_else(|| ctx.workdir.display().to_string()),
+                        ),
+                        log_path: log_path_str.clone(),
+                        detected_url: None,
+                        status: ManagedProcessStatus::Running,
+                    };
+                    let mut metadata = command_metadata(CommandMetadataInput {
+                        command: command.to_string(),
+                        working_dir: working_dir.clone(),
+                        exit_code: None,
+                        timed_out: false,
+                        background: true,
+                        stdout_lines: 0,
+                        stderr_lines: 0,
+                        detected_urls: Vec::new(),
+                        pid: Some(pid),
+                        log_path: Some(log_path_str),
+                        byte_count: Some(output.len()),
+                    });
+                    metadata.process = Some(process);
+                    ToolOutcome::success(output, "moved to background", duration_secs)
+                        .with_metadata(metadata)
                 },
                 Err(e) => {
                     let duration_secs = start.elapsed().as_secs_f64();
@@ -764,6 +801,13 @@ struct CommandRunOutput {
     stderr_lines: usize,
 }
 
+/// Result of driving a foreground command: it either ran to completion, or the
+/// user pressed Ctrl+B and it was detached to keep running in the background.
+enum CommandRunResult {
+    Completed(CommandRunOutput),
+    Detached { pid: u32, log_path: PathBuf },
+}
+
 /// Names that must never be inherited by a spawned command. Provider API
 /// keys + the daemon token live in the parent's environment; a model-driven
 /// shell command could otherwise read them via `env`/`printenv` and
@@ -814,6 +858,7 @@ async fn read_capped<R: AsyncRead + Unpin>(
     mut reader: R,
     cap: usize,
     progress: Option<tokio::sync::mpsc::Sender<ProgressEvent>>,
+    log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 ) -> (String, bool) {
     let mut buf = [0u8; 8192];
     let mut bytes: Vec<u8> = Vec::new();
@@ -822,6 +867,13 @@ async fn read_capped<R: AsyncRead + Unpin>(
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
+                // Tee raw bytes to the shared log file so a backgrounded
+                // (Ctrl+B) process stays tail-able via /logs.
+                if let Some(file) = &log {
+                    let mut f = file.lock().await;
+                    let _ = f.write_all(&buf[..n]).await;
+                    let _ = f.flush().await;
+                }
                 if let Some(tx) = &progress {
                     let chunk = String::from_utf8_lossy(&buf[..n]);
                     for line in chunk.split('\n') {
@@ -853,8 +905,10 @@ async fn read_capped<R: AsyncRead + Unpin>(
 async fn run_command(
     mut cmd: Command,
     progress: tokio::sync::mpsc::Sender<ProgressEvent>,
-) -> std::io::Result<CommandRunOutput> {
+    background: tokio_util::sync::CancellationToken,
+) -> std::io::Result<CommandRunResult> {
     let mut child = cmd.spawn()?;
+    let pid = child.id();
 
     let stdout = child
         .stdout
@@ -865,33 +919,71 @@ async fn run_command(
         .take()
         .ok_or_else(|| std::io::Error::other("child stderr unavailable"))?;
 
+    // Tee combined output to a log file so that, if the user backgrounds the
+    // command (Ctrl+B), it stays tail-able via /logs. Removed on normal exit.
+    let log_path = background_log_path();
+    let log = tokio::fs::File::create(&log_path)
+        .await
+        .ok()
+        .map(|f| std::sync::Arc::new(tokio::sync::Mutex::new(f)));
+
     let cap = crate::constants::MAX_TOOL_OUTPUT_BYTES;
-    let stdout_task = tokio::spawn(read_capped(stdout, cap, Some(progress.clone())));
-    let stderr_task = tokio::spawn(read_capped(stderr, cap, None));
+    let stdout_task = tokio::spawn(read_capped(
+        stdout,
+        cap,
+        Some(progress.clone()),
+        log.clone(),
+    ));
+    let stderr_task = tokio::spawn(read_capped(stderr, cap, None, log.clone()));
 
-    let (output, _) = stdout_task.await.unwrap_or_default();
-    let (errors, _) = stderr_task.await.unwrap_or_default();
-    let status = child.wait().await?;
-    let stdout_lines = output.lines().count();
-    let stderr_lines = errors.lines().count();
+    // A driver task owns the child + drain tasks and runs to completion no
+    // matter what. On normal exit it ships the result back. If we detach, we
+    // just stop listening — the driver (and its child) keep running, the log
+    // keeps filling — until the child exits or Mermaid quits.
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let driver = tokio::spawn(async move {
+        let (output, _) = stdout_task.await.unwrap_or_default();
+        let (errors, _) = stderr_task.await.unwrap_or_default();
+        let status = child.wait().await;
+        let _ = done_tx.send((output, errors, status));
+    });
 
-    let mut full_output = output;
-    if !errors.is_empty() {
-        full_output.push_str("\n--- stderr ---\n");
-        full_output.push_str(&errors);
+    tokio::select! {
+        biased;
+        _ = background.cancelled() => {
+            // Ctrl+B: detach. Dropping `driver`'s JoinHandle does NOT abort the
+            // task — it runs on, keeping the child alive and the log filling.
+            drop(driver);
+            Ok(CommandRunResult::Detached { pid: pid.unwrap_or(0), log_path })
+        }
+        res = done_rx => {
+            // Normal completion — drop the tee log.
+            drop(log);
+            let _ = tokio::fs::remove_file(&log_path).await;
+            let (output, errors, status) = res
+                .map_err(|_| std::io::Error::other("command driver dropped before completing"))?;
+            let status = status?;
+            let stdout_lines = output.lines().count();
+            let stderr_lines = errors.lines().count();
+            let mut full_output = output;
+            if !errors.is_empty() {
+                full_output.push_str("\n--- stderr ---\n");
+                full_output.push_str(&errors);
+            }
+            if !status.success() {
+                full_output.push_str(&format!(
+                    "\n--- Command exited with status: {} ---",
+                    status.code().unwrap_or(-1)
+                ));
+            }
+            Ok(CommandRunResult::Completed(CommandRunOutput {
+                output: full_output,
+                exit_code: status.code(),
+                stdout_lines,
+                stderr_lines,
+            }))
+        }
     }
-    if !status.success() {
-        full_output.push_str(&format!(
-            "\n--- Command exited with status: {} ---",
-            status.code().unwrap_or(-1)
-        ));
-    }
-    Ok(CommandRunOutput {
-        output: full_output,
-        exit_code: status.code(),
-        stdout_lines,
-        stderr_lines,
-    })
 }
 
 /// Defense-in-depth check for obviously destructive commands. Same
@@ -1125,6 +1217,50 @@ mod tests {
         // Clean up the detached process (and its child ping) via the tree kill.
         if let Some(pid) = parse_pid(&output) {
             let _ = kill_background_process(pid).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn ctrl_b_backgrounds_a_running_foreground_command() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), std::env::temp_dir());
+        let background = ctx.background.clone();
+        // A command that keeps running so it's still live when we background it.
+        let command = if cfg!(target_os = "windows") {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+
+        // Press "Ctrl+B" shortly after the command starts.
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            background.cancel();
+        });
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({ "command": command, "timeout": 60 }),
+                ctx,
+            )
+            .await;
+        let _ = canceller.await;
+
+        assert!(
+            outcome.is_success(),
+            "backgrounding should yield success: {:?}",
+            outcome
+        );
+        let output = outcome.output().to_string();
+        assert!(output.contains("Moved to background"), "got: {output}");
+        // It must register as a managed process so /processes lists it.
+        let process = outcome.metadata.process.clone();
+        assert!(
+            process.is_some(),
+            "background outcome must carry a ManagedProcess"
+        );
+
+        // Clean up the still-running detached process (tree kill).
+        if let Some(p) = process {
+            let _ = kill_background_process(p.pid).await;
         }
     }
 

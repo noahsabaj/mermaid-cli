@@ -459,6 +459,16 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Ctrl+B: send a running foreground command to the background (it keeps
+    // running as a `/processes` entry) instead of waiting on it. Only
+    // meaningful while tools are executing; a swallowed no-op otherwise.
+    if mods.ctrl && code == KeyCode::Char('b') {
+        if let TurnState::ExecutingTools { id, .. } = &state.turn {
+            cmds.push(Cmd::BackgroundScope(*id));
+        }
+        return;
+    }
+
     // Inline approval modal: while a tool awaits approval the prompt is
     // exclusive. Direct keys resolve immediately — 1/y approve · 2/a approve +
     // don't-ask-again · 3/n/Esc deny. Or move the highlight with ↑/↓ and press
@@ -3717,6 +3727,29 @@ mod tests {
             code,
             modifiers: KeyMods::NONE,
         })
+    }
+
+    #[test]
+    fn ctrl_b_backgrounds_running_tool() {
+        let ctrl_b = Msg::Key(Key {
+            code: KeyCode::Char('b'),
+            modifiers: KeyMods {
+                ctrl: true,
+                ..KeyMods::NONE
+            },
+        });
+        // While tools are executing → emit BackgroundScope(turn).
+        let mut state = fresh_state();
+        state.turn = start_executing_tools(TurnId(9), Vec::new());
+        let (_s, cmds) = update(state, ctrl_b.clone());
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::BackgroundScope(t) if *t == TurnId(9))),
+            "Ctrl+B during tool execution should background the scope"
+        );
+        // Idle → swallowed, no BackgroundScope.
+        let (_s, cmds) = update(fresh_state(), ctrl_b);
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::BackgroundScope(_))));
     }
 
     #[test]
