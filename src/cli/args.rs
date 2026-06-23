@@ -96,6 +96,15 @@ pub enum Commands {
     Chat,
     /// Show version information
     Version,
+    /// Update Mermaid to the latest release
+    Update {
+        /// Only report whether an update is available; don't install it
+        #[arg(long)]
+        check: bool,
+        /// Reinstall even if already on the latest version
+        #[arg(long)]
+        force: bool,
+    },
     /// Check status of dependencies and backends
     Status,
     /// Check first-run readiness and explain what Mermaid can do now

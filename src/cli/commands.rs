@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -48,6 +48,10 @@ pub async fn handle_command(
         },
         Commands::Version => {
             show_version();
+            Ok(true)
+        },
+        Commands::Update { check, force } => {
+            run_update(*check, *force).await?;
             Ok(true)
         },
         Commands::Status => {
@@ -1473,6 +1477,136 @@ pub fn show_version() {
     println!("   An open-source, model-agnostic AI pair programmer");
 }
 
+const RELEASE_LATEST_API: &str =
+    "https://api.github.com/repos/noahsabaj/mermaid-cli/releases/latest";
+const INSTALL_SH_URL: &str = "https://noahsabaj.github.io/mermaid-cli/install.sh";
+const INSTALL_PS1_URL: &str = "https://noahsabaj.github.io/mermaid-cli/install.ps1";
+
+/// `mermaid update` — check GitHub Releases for a newer version and, unless
+/// `--check`, re-run the platform install script to replace this binary in
+/// place. The install script is the single source of truth for the
+/// download + checksum + replace (incl. the running-exe rename on Windows), so
+/// there's no archive-handling logic (or extra dependency) here.
+async fn run_update(check: bool, force: bool) -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("Installed: v{current}");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let resp = client
+        .get(RELEASE_LATEST_API)
+        .header("User-Agent", "mermaid-cli")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| anyhow!("could not reach GitHub Releases: {e}"))?;
+    if !resp.status().is_success() {
+        bail!("GitHub Releases API returned HTTP {}", resp.status());
+    }
+    let release: serde_json::Value = resp.json().await?;
+    let tag = release
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("release response had no tag_name"))?;
+    println!("Latest:    {tag}");
+
+    let up_to_date = version_at_least(current, tag.trim_start_matches('v'));
+    if check {
+        if up_to_date {
+            println!("You're on the latest version.");
+        } else {
+            println!("Update available: v{current} -> {tag}. Run `mermaid update` to install it.");
+        }
+        return Ok(());
+    }
+    if up_to_date && !force {
+        println!("Already up to date.");
+        return Ok(());
+    }
+
+    // Replace the binary in the directory it's running from, in place.
+    let exe =
+        std::env::current_exe().map_err(|e| anyhow!("could not locate current executable: {e}"))?;
+    let install_dir = exe
+        .parent()
+        .ok_or_else(|| anyhow!("current executable has no parent directory"))?;
+    println!("Updating {} …", install_dir.display());
+    run_install_script(&client, install_dir).await?;
+    println!("Updated. New version takes effect on the next run.");
+    Ok(())
+}
+
+/// Fetch the platform install script from the Pages site and run it, pointed at
+/// `install_dir` so it updates in place without touching PATH.
+async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Result<()> {
+    let windows = cfg!(target_os = "windows");
+    let url = if windows {
+        INSTALL_PS1_URL
+    } else {
+        INSTALL_SH_URL
+    };
+    let script = client
+        .get(url)
+        .header("User-Agent", "mermaid-cli")
+        .send()
+        .await
+        .map_err(|e| anyhow!("could not fetch install script: {e}"))?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    let ext = if windows { "ps1" } else { "sh" };
+    let script_path =
+        std::env::temp_dir().join(format!("mermaid-update-{}.{ext}", std::process::id()));
+    std::fs::write(&script_path, script)
+        .map_err(|e| anyhow!("could not stage install script: {e}"))?;
+
+    let mut cmd = if windows {
+        let mut c = tokio::process::Command::new("powershell");
+        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+        c.arg(&script_path);
+        c
+    } else {
+        let mut c = tokio::process::Command::new("sh");
+        c.arg(&script_path);
+        c
+    };
+    cmd.env("MERMAID_INSTALL_DIR", install_dir)
+        .env("MERMAID_NO_MODIFY_PATH", "1");
+
+    let status = cmd
+        .status()
+        .await
+        .map_err(|e| anyhow!("could not run install script: {e}"))?;
+    let _ = std::fs::remove_file(&script_path);
+    if !status.success() {
+        bail!("install script exited with {:?}", status.code());
+    }
+    Ok(())
+}
+
+/// Parse a `[v]MAJOR.MINOR.PATCH[-pre][+build]` string into a comparable tuple.
+fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+    let core = s.trim().trim_start_matches('v');
+    let core = core.split(['-', '+']).next().unwrap_or(core);
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// True iff `current` is at least `latest` (no update needed). Unparseable
+/// versions fall back to string equality, so we never falsely report
+/// up-to-date on garbage — at worst we re-run the (idempotent) installer.
+fn version_at_least(current: &str, latest: &str) -> bool {
+    match (parse_semver(current), parse_semver(latest)) {
+        (Some(c), Some(l)) => c >= l,
+        _ => current == latest,
+    }
+}
+
 /// Show configured MCP servers
 fn show_mcp_servers() {
     let config = load_config().unwrap_or_default();
@@ -1915,6 +2049,24 @@ fn build_pr_argv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_compare_handles_update_logic() {
+        // Up to date / newer than latest ⇒ no update.
+        assert!(version_at_least("0.10.2", "0.10.2"));
+        assert!(version_at_least("0.11.0", "0.10.2"));
+        assert!(version_at_least("1.0.0", "0.99.99"));
+        // Older ⇒ update available.
+        assert!(!version_at_least("0.10.1", "0.10.2"));
+        assert!(!version_at_least("0.9.0", "0.10.0"));
+        assert!(!version_at_least("0.10.2", "0.11.0"));
+        // Pre-release/build suffixes and `v` prefixes are tolerated.
+        assert!(version_at_least("0.10.2", "v0.10.2"));
+        assert_eq!(parse_semver("v0.11.0-rc1+build"), Some((0, 11, 0)));
+        assert_eq!(parse_semver("0.10"), Some((0, 10, 0)));
+        // Garbage never falsely reports up-to-date unless identical.
+        assert!(!version_at_least("0.10.2", "not-a-version"));
+    }
 
     #[test]
     fn host_from_remote_url_detects_provider() {

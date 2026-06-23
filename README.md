@@ -25,24 +25,35 @@ Mermaid's runtime is an Elm/MVU pattern: one pure reducer (`fn update(State, Msg
 
 Read [`docs/architecture.md`](docs/architecture.md) for the full tour. The [adding a tool](docs/adding_tools.md) and [adding a provider](docs/adding_providers.md) recipes are one file each; [`docs/replay_debugging.md`](docs/replay_debugging.md) covers record/replay for reproducing bugs.
 
-## Quick Start
+## Get started
 
-Prebuilt binaries for Linux, macOS, and Windows (plus `.deb`/`.rpm`) are attached to every [GitHub Release](https://github.com/noahsabaj/mermaid-cli/releases).
+No Rust or cargo required — the installer downloads a prebuilt binary for your platform from the latest [GitHub Release](https://github.com/noahsabaj/mermaid-cli/releases), verifies its checksum, and puts `mermaid` on your PATH.
+
+**macOS / Linux**
 
 ```bash
-# Build and install the latest release from git
-cargo install --git https://github.com/noahsabaj/mermaid-cli
-
-# Or from a local clone
-git clone https://github.com/noahsabaj/mermaid-cli.git
-cd mermaid-cli
-cargo install --path .
-
-# From crates.io
-cargo install mermaid-cli
+curl -fsSL https://noahsabaj.github.io/mermaid-cli/install.sh | sh
 ```
 
-> The crates.io release can lag the newest tag. For the latest version, use the GitHub Release binaries or the `--git` install above.
+**Windows (PowerShell)**
+
+```powershell
+irm https://noahsabaj.github.io/mermaid-cli/install.ps1 | iex
+```
+
+Then run `mermaid` to start, and `mermaid update` whenever you want the newest version. (Set `MERMAID_INSTALL_DIR` to change the install location, or `MERMAID_VERSION=vX.Y.Z` to pin a specific release.)
+
+<details>
+<summary>Install with cargo instead (needs the Rust toolchain)</summary>
+
+```bash
+cargo install mermaid-cli                                      # from crates.io
+cargo install --git https://github.com/noahsabaj/mermaid-cli   # latest from git
+```
+
+Prebuilt binaries (plus `.deb`/`.rpm`) are attached to every release; the crates.io release can lag the newest tag.
+
+</details>
 
 Local inference requires [Ollama](https://ollama.com) (models auto-pull if not found locally). Cloud providers are optional — see [Remote Providers](#remote-providers) below.
 
