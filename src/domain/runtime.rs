@@ -248,6 +248,13 @@ pub struct RuntimeState {
     pub processes: Vec<ManagedProcess>,
     #[serde(default)]
     pub timeline: Vec<RuntimeTimelineEvent>,
+    /// Estimated token cost of the built-in tool schemas the effect runner
+    /// appends to every model request during dispatch. The reducer's
+    /// `/context` preview builds an MCP-only request and can't see these, so
+    /// the runner reports the figure via `Msg::BuiltinToolSchemaTokens` and
+    /// `/context` folds it in to match what dispatch actually decides.
+    #[serde(default)]
+    pub builtin_tool_schema_tokens: usize,
 }
 
 impl RuntimeState {
@@ -256,6 +263,7 @@ impl RuntimeState {
             provider_capabilities: ProviderCapabilitySnapshot::from_model_id(model_id),
             processes: Vec::new(),
             timeline: Vec::new(),
+            builtin_tool_schema_tokens: 0,
         }
     }
 

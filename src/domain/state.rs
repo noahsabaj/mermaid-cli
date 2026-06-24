@@ -316,6 +316,26 @@ impl ContextUsageSnapshot {
     pub fn is_estimate(&self) -> bool {
         self.source == TokenUsageSource::Estimate
     }
+
+    /// Return a copy with `extra` tokens folded into the running total. Used by
+    /// `/context` to add built-in tool-schema tokens that the reducer's
+    /// MCP-only request estimate can't see. Recomputes `remaining_tokens` and
+    /// `used_percent`; the breakdown is left untouched (the caller surfaces the
+    /// built-in figure on its own line so the MCP line stays accurate).
+    pub fn with_additional_tokens(mut self, extra: usize) -> Self {
+        if extra == 0 {
+            return self;
+        }
+        self.used_tokens = self.used_tokens.saturating_add(extra);
+        self.remaining_tokens = self
+            .max_tokens
+            .map(|max| max.saturating_sub(self.used_tokens));
+        self.used_percent = self
+            .max_tokens
+            .filter(|max| *max > 0)
+            .map(|max| ((self.used_tokens.saturating_mul(100)) / max).min(100) as u8);
+        self
+    }
 }
 
 pub fn estimate_context_usage_for_request(
@@ -364,14 +384,7 @@ pub fn estimate_context_usage_for_request(
                 .saturating_add(tool_call_chars.div_ceil(4))
         })
         .sum();
-    let tool_schema: Vec<_> = request
-        .tools
-        .iter()
-        .map(|tool| tool.to_openai_json())
-        .collect();
-    let tool_schema_tokens = serde_json::to_string(&tool_schema)
-        .map(|s| approx_tokens(&s))
-        .unwrap_or(0);
+    let tool_schema_tokens = estimate_tool_schema_tokens(&request.tools);
     let image_count = request
         .messages
         .iter()
@@ -394,6 +407,18 @@ pub fn estimate_context_usage_for_request(
 
 fn approx_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
+}
+
+/// Estimate the token cost of a set of tool schemas as the model sees them
+/// (serialized OpenAI-style). Shared by `estimate_context_usage_for_request`
+/// and the effect runner so the reducer's `/context` preview can account for
+/// the built-in tool schemas that are only appended to the request during
+/// dispatch enrichment.
+pub fn estimate_tool_schema_tokens(tools: &[super::cmd::ToolDefinition]) -> usize {
+    let tool_schema: Vec<_> = tools.iter().map(|tool| tool.to_openai_json()).collect();
+    serde_json::to_string(&tool_schema)
+        .map(|s| approx_tokens(&s))
+        .unwrap_or(0)
 }
 
 /// Persistent conversational state that survives across turns.
@@ -711,8 +736,10 @@ pub struct UiState {
     pub palette_cursor: Option<usize>,
     /// Messages the user typed while a turn was in flight. The
     /// reducer pops the oldest and auto-submits on a successful
-    /// `StreamDone`. FIFO order.
-    pub queued_messages: VecDeque<String>,
+    /// `StreamDone`. FIFO order. Each entry carries the attachment
+    /// ids that were present when the user submitted it, so the
+    /// auto-submit sends the images that belonged to *that* message.
+    pub queued_messages: VecDeque<QueuedMessage>,
     /// Last terminal title dispatched via `Cmd::SetTerminalTitle`.
     /// Arms that change `session.conversation.title` consult this
     /// and emit a fresh `SetTerminalTitle` only on diff.
@@ -786,6 +813,16 @@ pub struct Attachment {
     pub temp_path: PathBuf,
     pub size_bytes: usize,
     pub format: String,
+}
+
+/// A user message queued while a turn was in flight, with the attachment
+/// ids that were present at submit time. Capturing the ids here (instead
+/// of re-reading live `ui.attachments` at drain time) ensures the
+/// auto-submit consumes the images the user attached to *this* message.
+#[derive(Debug, Clone)]
+pub struct QueuedMessage {
+    pub text: String,
+    pub attachment_ids: Vec<u64>,
 }
 
 /// MCP server lifecycle state. Mutation is driven by `Msg::McpServer*`

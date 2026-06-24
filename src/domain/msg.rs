@@ -92,6 +92,11 @@ pub enum Msg {
         turn: TurnId,
         snapshot: ContextUsageSnapshot,
     },
+    /// The effect runner's estimate of the built-in tool-schema token cost
+    /// it appends to every request during dispatch. Not turn-scoped — the
+    /// reducer stores it on `runtime` so `/context` can fold it into its
+    /// MCP-only estimate and agree with what dispatch actually decides.
+    BuiltinToolSchemaTokens(usize),
     /// Context compaction completed and produced a replacement
     /// model-visible history.
     CompactionFinished {
@@ -440,6 +445,7 @@ impl Msg {
             Msg::StreamReasoning { .. } => MsgKind::StreamReasoning,
             Msg::StreamToolCall { .. } => MsgKind::StreamToolCall,
             Msg::ContextUsageEstimated { .. } => MsgKind::ContextUsageEstimated,
+            Msg::BuiltinToolSchemaTokens(_) => MsgKind::BuiltinToolSchemaTokens,
             Msg::CompactionFinished { .. } => MsgKind::CompactionFinished,
             Msg::CompactionFailed { .. } => MsgKind::CompactionFailed,
             Msg::StreamDone { .. } => MsgKind::StreamDone,
@@ -491,6 +497,7 @@ pub enum MsgKind {
     StreamReasoning,
     StreamToolCall,
     ContextUsageEstimated,
+    BuiltinToolSchemaTokens,
     CompactionFinished,
     CompactionFailed,
     StreamDone,

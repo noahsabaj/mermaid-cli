@@ -539,7 +539,10 @@ mod tests {
             outcomes: Vec::new(),
         };
         s.ui.queued_messages
-            .push_back("please steer this".to_string());
+            .push_back(crate::domain::QueuedMessage {
+                text: "please steer this".to_string(),
+                attachment_ids: Vec::new(),
+            });
         let frame = render_to_string(&s);
         assert!(frame.contains("Running tools"), "expected tool status");
         assert!(
