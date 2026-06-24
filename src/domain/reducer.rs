@@ -31,7 +31,7 @@ use crate::runtime::TaskStatus;
 use super::cmd::{ChatRequest, Cmd};
 use super::compaction::{
     CompactionArchive, CompactionPolicy, CompactionRequest, CompactionResult, CompactionTrigger,
-    compaction_receipt, context_exceeds_hard_limit, should_auto_compact,
+    context_exceeds_hard_limit, should_auto_compact,
 };
 use super::ids::TurnId;
 use super::msg::{KeyCode, KeyMods, Msg, Paste, SlashCmd};
@@ -2132,11 +2132,9 @@ fn handle_compaction_finished(
         state.turn = TurnState::Idle;
     }
 
-    // Post the compaction receipt into the transcript. SaveCompactionArchive
-    // (below) persists the conversation, so no separate save is needed.
-    state
-        .session
-        .append(ChatMessage::system(compaction_receipt(&record)));
+    // The compaction's replacement message already carries the receipt text, so
+    // the old transient banner that repeated it is simply gone.
+    // SaveCompactionArchive persists the stripped conversation.
     cmds.push(Cmd::SaveCompactionArchive {
         archive,
         record,

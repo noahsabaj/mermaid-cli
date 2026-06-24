@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use mermaid_cli::app::Config;
 use mermaid_cli::domain::{
     Cmd, CompactionRecord, CompactionResult, CompactionTrigger, ContextUsageSnapshot, Msg,
-    PendingToolCall, PromptTokenBreakdown, SlashCmd, State, StatusKind, ToolCallId, ToolOutcome,
-    TurnId, TurnState, start_executing_tools, start_generating, update,
+    PendingToolCall, PromptTokenBreakdown, SlashCmd, State, ToolCallId, ToolOutcome, TurnId,
+    TurnState, start_executing_tools, start_generating, update,
 };
 use mermaid_cli::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
 use mermaid_cli::models::{ChatMessage, ChatMessageKind, MessageRole};
@@ -505,17 +505,19 @@ fn compaction_finished_replaces_history_and_archives_head() {
 }
 
 #[test]
-fn slash_unknown_sets_warn_status() {
+fn slash_unknown_posts_to_transcript() {
+    // The transient banner is gone; an unknown command posts to the transcript.
     let (state, cmds) = update(fresh(), Msg::Slash(SlashCmd::Unknown("nope".to_string())));
-    assert!(state.status.is_some());
-    assert!(matches!(
-        state.status.as_ref().unwrap().kind,
-        StatusKind::Warn
-    ));
+    assert!(state.status.is_none(), "no banner is set");
     assert!(
-        cmds.iter()
-            .any(|c| matches!(c, Cmd::DismissStatusAfter { .. }))
+        state
+            .session
+            .messages()
+            .last()
+            .is_some_and(|m| m.content.contains("Unknown command: /nope")),
+        "unknown command posts a note to the chat transcript"
     );
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
 }
 
 // ─── Quit + exit ───────────────────────────────────────────────────
