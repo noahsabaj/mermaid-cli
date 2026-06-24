@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-06-23
+
+### Fixed
+
+- **Status line no longer bleeds off-screen.** A long `Running tools: <cmd> …
+  (esc to interrupt …)` now splits onto two rows when it doesn't fit and
+  truncates each row to the terminal width — nothing overflows, including
+  unbreakable file paths. The reserved height is stable and capped so the input
+  box can't be evicted on a short terminal.
+- **Esc never exits.** A second Esc while a turn was already cancelling used to
+  quit mermaid (and could leave a backgrounded process holding the terminal). Esc
+  now only cancels; only Ctrl+C / Ctrl+D / `/quit` exit.
+- **Diff backgrounds fill the whole row.** Tab-indented diffs no longer show a
+  ragged "staircase" — tabs are expanded so the red/green bar spans the full
+  width, and tab indentation is now visible.
+- **Quieter tool execution.** Live tool output (build lines, pids, streamed file
+  contents) no longer flickers a transient line above the input; the status line
+  names the running tool and full output stays in the transcript.
+- **Ollama cloud models work on first use.** `mermaid --model <name>:cloud` no
+  longer fails at startup trying to `ollama pull` a cloud model — cloud models
+  are served by the daemon and skip the local pull.
+- **Markdown loose-list bodies hang-indent** under their bullet instead of
+  dropping flush to the left margin.
+- **Installer takes PATH precedence** and warns when another `mermaid` (e.g. a
+  stale `cargo install`) earlier on PATH would shadow the install.
+
+### Added
+
+- **Homebrew + Scoop + WinGet.** `brew install noahsabaj/mermaid/mermaid`,
+  `scoop install mermaid`, and `winget install NoahSabaj.Mermaid` (once accepted
+  upstream). All three are bumped automatically by the release pipeline.
+
 ## [0.11.0] - 2026-06-22
 
 ### Added
@@ -859,7 +891,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.0...v0.10.1
