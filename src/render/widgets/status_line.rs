@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::GenerationStatus;
+use crate::domain::QueuedMessage;
 use crate::render::theme::Theme;
 
 /// How many queued-message rows to show under the spinner before stopping.
@@ -50,7 +51,7 @@ pub fn build_status_lines(
     tokens_received: usize,
     tokens_estimated: bool,
     active_tool: Option<&str>,
-    queued_messages: &VecDeque<String>,
+    queued_messages: &VecDeque<QueuedMessage>,
     theme: &Theme,
     width: u16,
 ) -> Vec<Line<'static>> {
@@ -138,7 +139,7 @@ pub fn build_status_lines(
     let body_budget = width.saturating_sub(2); // "> " prefix
     for queued in queued_messages.iter().take(MAX_QUEUED_ROWS) {
         lines.push(Line::from(vec![Span::styled(
-            format!("> {}", truncate_to_cells(queued, body_budget)),
+            format!("> {}", truncate_to_cells(&queued.text, body_budget)),
             Style::new()
                 .fg(theme.colors.text_primary.to_color())
                 .bg(ratatui::style::Color::Rgb(60, 60, 80)), // Subtle purple highlight

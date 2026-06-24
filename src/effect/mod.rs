@@ -251,6 +251,17 @@ impl EffectRunner {
                 }
                 let _ = tx.send(Msg::TurnCancelled(turn)).await;
             });
+        } else {
+            // The scope was already reaped — its `JoinSet` drained to empty
+            // and `reap_empty_scopes` (top of `dispatch`) removed it before
+            // this cancel landed. The reducer is still in `Cancelling` with
+            // no other way to learn the turn ended, so emit the terminal
+            // event anyway. Idempotent: `handle_turn_cancelled` no-ops on
+            // any turn that isn't currently `Cancelling`.
+            let tx = self.msg_tx.clone();
+            self.detached.spawn(async move {
+                let _ = tx.send(Msg::TurnCancelled(turn)).await;
+            });
         }
     }
 
@@ -296,6 +307,11 @@ impl EffectRunner {
                 // single source of truth for what the model sees.
                 if let Some(tools) = &self.tools {
                     let mut enriched = tools.describe_all();
+                    // Report the built-in tool-schema token cost so the
+                    // reducer's /context preview can fold it into its MCP-only
+                    // estimate and agree with what the model actually sees.
+                    let builtin_tokens = crate::domain::estimate_tool_schema_tokens(&enriched);
+                    let _ = tx.try_send(Msg::BuiltinToolSchemaTokens(builtin_tokens));
                     enriched.append(&mut request.tools);
                     request.tools = enriched;
                 }
@@ -1114,34 +1130,29 @@ async fn dispatch_call_model(
                 let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
             },
             Err(err) => {
-                let hard_limit =
-                    crate::domain::context_exceeds_hard_limit(&context_snapshot, &request, policy);
+                // Auto-compaction is best-effort. If it can't reduce the
+                // context — the estimate is roughest exactly at the limit, so
+                // a large preserved tail can read `after >= before` — don't
+                // kill the turn. Log it, surface a soft warning, and proceed
+                // with the original request; the provider's own context limit
+                // is the real gate. (Manual `/compact` keeps its hard error
+                // via `run_compaction`'s reduction guard.)
+                if token.is_cancelled() {
+                    return;
+                }
+                tracing::warn!(
+                    turn = %turn,
+                    error = %err,
+                    "auto-compaction failed; proceeding with the un-compacted request",
+                );
                 let _ = msg_tx
                     .send(Msg::CompactionFailed {
                         turn,
                         trigger: CompactionTrigger::AutoThreshold,
                         message: err.to_string(),
-                        kind: if hard_limit {
-                            crate::domain::StatusKind::Error
-                        } else {
-                            crate::domain::StatusKind::Warn
-                        },
+                        kind: crate::domain::StatusKind::Warn,
                     })
                     .await;
-                if hard_limit {
-                    let error = UserFacingError {
-                        summary: "Context too large".to_string(),
-                        message: format!(
-                            "The next request needs {} tokens before response reserve, and automatic compaction failed: {}",
-                            context_snapshot.used_tokens, err
-                        ),
-                        suggestion: "Run /compact with focus instructions, or /clear to start a fresh session.".to_string(),
-                        category: crate::models::ErrorCategory::Config,
-                        recoverable: true,
-                    };
-                    let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
-                    return;
-                }
             },
         }
     }
@@ -2300,6 +2311,36 @@ mod tests {
             "cancel terminal message took {:?}",
             start.elapsed()
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_scope_emits_turn_cancelled_even_after_reaping() {
+        // Regression (Axis 1 #9): if a turn's tasks complete and
+        // `reap_empty_scopes` removes the now-empty scope before the user's
+        // cancel lands, `drop_scope` used to be a silent no-op and the reducer
+        // stuck forever in `Cancelling`. The terminal `TurnCancelled` must fire
+        // even when the scope is already gone.
+        let (mut r, mut rx) = runner();
+        let turn = TurnId(88);
+        {
+            let scope = r.scope_mut(turn);
+            scope.spawn(async {}); // completes immediately
+        }
+        assert_eq!(r.scope_count(), 1);
+
+        // Let the task finish, then any dispatch reaps the now-empty scope.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        r.dispatch(Cmd::Exit);
+        assert_eq!(r.scope_count(), 0, "completed scope should be reaped");
+
+        // The scope is gone, but the reducer is still `Cancelling`: cancel must
+        // still produce a terminal message.
+        r.dispatch(Cmd::CancelScope(turn));
+        let msg = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("cancel on a reaped scope must still emit a terminal message")
+            .expect("channel alive");
+        assert!(matches!(msg, Msg::TurnCancelled(t) if t == turn));
     }
 
     #[tokio::test]

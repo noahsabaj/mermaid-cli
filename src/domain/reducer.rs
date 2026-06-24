@@ -175,6 +175,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 state.session.context_usage = Some(snapshot);
             }
         },
+        Msg::BuiltinToolSchemaTokens(tokens) => {
+            state.runtime.builtin_tool_schema_tokens = tokens;
+        },
         Msg::CompactionFinished { turn, result } => {
             handle_compaction_finished(&mut state, &mut cmds, turn, result);
         },
@@ -1003,7 +1006,13 @@ fn handle_submit_prompt(
     // reducer's StreamDone arm pops the oldest queued message and
     // auto-submits it.
     if !matches!(state.turn, TurnState::Idle) {
-        state.ui.queued_messages.push_back(text);
+        state
+            .ui
+            .queued_messages
+            .push_back(super::state::QueuedMessage {
+                text,
+                attachment_ids: attachment_ids.to_vec(),
+            });
         return;
     }
 
@@ -1017,6 +1026,15 @@ fn handle_submit_prompt(
             true
         }
     });
+    // Submitting consumes attachments while the bar may still be focused;
+    // re-clamp the selection so the render layer never indexes past the
+    // shrunken list (mirrors the Delete-key path in handle_key).
+    if state.ui.attachments.is_empty() {
+        state.ui.attachment_focused = false;
+        state.ui.attachment_selected = 0;
+    } else if state.ui.attachment_selected >= state.ui.attachments.len() {
+        state.ui.attachment_selected = state.ui.attachments.len() - 1;
+    }
 
     let mut user_msg = ChatMessage::user(text.clone());
     if !images.is_empty() {
@@ -1702,7 +1720,11 @@ fn context_text(state: &State) -> String {
         .as_ref()
         .and_then(|snapshot| snapshot.max_tokens)
         .or(state.runtime.provider_capabilities.max_context_tokens);
-    let next_snapshot = super::state::estimate_context_usage_for_request(&request, max_context);
+    // The request here carries MCP tools only; the effect runner appends the
+    // built-in tool schemas during dispatch. Fold their estimated cost in so
+    // the verdict/hard-limit lines agree with what dispatch actually decides.
+    let next_snapshot = super::state::estimate_context_usage_for_request(&request, max_context)
+        .with_additional_tokens(state.runtime.builtin_tool_schema_tokens);
     let policy = CompactionPolicy::default();
     let response_reserve = policy.response_reserve(request.max_tokens);
     let usage_summary = match (next_snapshot.used_percent, next_snapshot.max_tokens) {
@@ -1797,13 +1819,17 @@ fn context_text(state: &State) -> String {
             breakdown.tool_count,
             format_compact_count(breakdown.tool_schema_tokens)
         ));
+        if state.runtime.builtin_tool_schema_tokens > 0 {
+            lines.push(format!(
+                "- built-in tool schemas: {}",
+                format_compact_count(state.runtime.builtin_tool_schema_tokens)
+            ));
+        } else {
+            lines.push("- built-in tool schemas: measured on the first model call".to_string());
+        }
         if breakdown.image_count > 0 {
             lines.push(format!("- images: {}", breakdown.image_count));
         }
-        lines.push(
-            "Built-in tool schemas are measured on the next model call after dispatch enrichment."
-                .to_string(),
-        );
     }
 
     if let Some(last) = state.session.conversation.compactions.last() {
@@ -2060,6 +2086,28 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     state.should_exit = true;
     state.ui.pending_msgs.clear();
     state.pending_approval.clear();
+    // Quitting mid-stream: preserve whatever the model already produced so
+    // `--continue` shows what was on screen. Commit the in-flight partial
+    // as an assistant message with an interrupted marker before saving.
+    if let TurnState::Generating {
+        partial_text,
+        partial_reasoning,
+        thinking_signature,
+        ..
+    } = &mut state.turn
+        && !partial_text.trim().is_empty()
+    {
+        let text = std::mem::take(partial_text);
+        let reasoning = std::mem::take(partial_reasoning);
+        let sig = thinking_signature.take();
+        let msg = commit_assistant_message(
+            format!("{text}\n\n_[interrupted]_"),
+            reasoning,
+            Vec::new(),
+            sig,
+        );
+        state.session.append(msg);
+    }
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
     cmds.push(Cmd::Exit);
 }
@@ -2181,7 +2229,18 @@ fn handle_stream_tool_call(
         && *id == turn
     {
         pending_tool_calls.push(call);
+        return;
     }
+    // The stale filter at update_step's top guarantees this event's turn
+    // matches the active turn, so reaching here means the turn already
+    // advanced past Generating (e.g. into ExecutingTools) before this tool
+    // call arrived. Single-channel relay ordering should prevent it; log so
+    // a provider that ever emits a ToolCall after Done is diagnosable.
+    tracing::warn!(
+        event_turn = %turn,
+        active_turn = ?state.turn.id(),
+        "reducer: dropped StreamToolCall — turn not in Generating state",
+    );
 }
 
 fn handle_stream_done(
@@ -2252,9 +2311,11 @@ fn handle_stream_done(
             context.breakdown = prev.breakdown.clone();
         }
         state.session.context_usage = Some(context);
-    } else {
-        state.session.last_token_usage = None;
     }
+    // When a turn reports no usage (common on tool follow-ups), leave the
+    // prior request's `last_token_usage` intact rather than nulling it —
+    // the footer's "Last API request" should reflect the last request that
+    // actually reported usage, not flip to "n/a".
 
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
 
@@ -2295,10 +2356,9 @@ fn handle_stream_done(
     // `update()` re-enters cleanly — preserves stale-filter
     // semantics instead of inline-invoking.
     if let Some(next) = state.ui.queued_messages.pop_front() {
-        let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
         state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
-            text: next,
-            attachment_ids,
+            text: next.text,
+            attachment_ids: next.attachment_ids,
         });
     }
 }
@@ -2351,10 +2411,9 @@ fn handle_turn_cancelled(state: &mut State, turn: TurnId) {
         TurnState::Cancelling { id, .. } if id == turn => {
             state.turn = TurnState::Idle;
             if let Some(next) = state.ui.queued_messages.pop_front() {
-                let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
                 state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
-                    text: next,
-                    attachment_ids,
+                    text: next.text,
+                    attachment_ids: next.attachment_ids,
                 });
             }
         },
@@ -3131,11 +3190,17 @@ mod tests {
         state
             .ui
             .queued_messages
-            .push_back("first queued".to_string());
+            .push_back(super::super::state::QueuedMessage {
+                text: "first queued".to_string(),
+                attachment_ids: Vec::new(),
+            });
         state
             .ui
             .queued_messages
-            .push_back("second queued".to_string());
+            .push_back(super::super::state::QueuedMessage {
+                text: "second queued".to_string(),
+                attachment_ids: Vec::new(),
+            });
 
         let (state, cmds) = update(state, Msg::TurnCancelled(TurnId(1)));
 
@@ -3144,7 +3209,7 @@ mod tests {
         assert_eq!(state.session.messages()[0].content, "first queued");
         assert_eq!(state.ui.queued_messages.len(), 1);
         assert_eq!(
-            state.ui.queued_messages.front().map(String::as_str),
+            state.ui.queued_messages.front().map(|q| q.text.as_str()),
             Some("second queued")
         );
     }
@@ -3965,6 +4030,252 @@ mod tests {
         // Tool result message was appended.
         let last = state.session.messages().last().unwrap();
         assert_eq!(last.role, MessageRole::Tool);
+    }
+
+    fn test_attachment(id: u64) -> crate::domain::Attachment {
+        crate::domain::Attachment {
+            id,
+            base64_data: "AAAA".to_string(),
+            temp_path: PathBuf::from(format!("/tmp/a{id}.png")),
+            size_bytes: 4,
+            format: "png".to_string(),
+        }
+    }
+
+    fn generating(id: u64, partial: &str) -> TurnState {
+        TurnState::Generating {
+            id: TurnId(id),
+            started: std::time::SystemTime::now(),
+            partial_text: partial.to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn queued_message_keeps_attachments_from_queue_time() {
+        // Axis 1 #1: a message queued while busy must re-submit with the
+        // attachments present when it was queued, not whatever is live when the
+        // FIFO drains.
+        let mut state = fresh_state();
+        state.turn = generating(5, "answer");
+        state.ui.attachments.push(test_attachment(1));
+
+        // Busy → queued, capturing attachment id 1.
+        let (mut state, _) = update(
+            state,
+            Msg::SubmitPrompt {
+                text: "queued".to_string(),
+                attachment_ids: vec![1],
+            },
+        );
+        assert_eq!(state.ui.queued_messages.len(), 1);
+
+        // User swaps attachments while the turn is still running.
+        state.ui.attachments.clear();
+        state.ui.attachments.push(test_attachment(2));
+
+        // Turn completes → queued message drains and re-submits.
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+            },
+        );
+
+        // The re-submit targeted attachment id 1 (now gone), so live id 2 is
+        // untouched — proving the queued ids were used, not the live set.
+        assert_eq!(state.ui.attachments.len(), 1);
+        assert_eq!(state.ui.attachments[0].id, 2);
+        let queued_msg = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.role == MessageRole::User && m.content == "queued")
+            .expect("queued message submitted");
+        assert!(queued_msg.images.is_none());
+    }
+
+    #[test]
+    fn stream_done_without_usage_keeps_previous_last_token_usage() {
+        // Axis 1 #2: a turn reporting no usage must not wipe the last request's
+        // usage to "n/a".
+        let mut state = fresh_state();
+        state.turn = generating(1, "first");
+        let (mut state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(1),
+                usage: Some(crate::models::TokenUsage::provider(120, 30, 150)),
+                thinking_signature: None,
+            },
+        );
+        assert_eq!(state.session.last_token_usage.unwrap().prompt_tokens, 120);
+
+        // A second turn reports no usage (common on tool follow-ups).
+        state.turn = generating(2, "second");
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(2),
+                usage: None,
+                thinking_signature: None,
+            },
+        );
+        assert_eq!(
+            state
+                .session
+                .last_token_usage
+                .expect("retained")
+                .prompt_tokens,
+            120
+        );
+    }
+
+    #[test]
+    fn stream_tool_call_outside_generating_is_dropped_without_panic() {
+        // Axis 1 #5: a tool-call event arriving after the turn left Generating
+        // is dropped (and logged), never panics or mutates state.
+        let mut state = fresh_state();
+        let call = PendingToolCall {
+            call_id: super::super::ids::ToolCallId(1),
+            source: crate::models::tool_call::ToolCall {
+                id: Some("c1".to_string()),
+                function: crate::models::tool_call::FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "foo"}),
+                },
+            },
+        };
+        state.turn = start_executing_tools(TurnId(3), vec![call]);
+        let (state, cmds) = update(
+            state,
+            Msg::StreamToolCall {
+                turn: TurnId(3),
+                call: crate::models::tool_call::ToolCall {
+                    id: Some("late".to_string()),
+                    function: crate::models::tool_call::FunctionCall {
+                        name: "write_file".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
+                },
+            },
+        );
+        assert!(matches!(state.turn, TurnState::ExecutingTools { .. }));
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn exit_commits_interrupted_partial_before_saving() {
+        // Axis 1 #6: quitting mid-stream preserves the partial assistant reply
+        // (with an interrupted marker) so `--continue` shows what was on screen.
+        let mut state = fresh_state();
+        state.turn = generating(1, "half written");
+        let (state, cmds) = update(state, Msg::Quit);
+        assert!(state.should_exit);
+        let last = state.session.messages().last().expect("a message");
+        assert_eq!(last.role, MessageRole::Assistant);
+        assert!(last.content.contains("half written"));
+        assert!(last.content.contains("[interrupted]"));
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    }
+
+    #[test]
+    fn submit_clears_attachment_focus_when_consumed() {
+        // Axis 1 #7: submitting while the attachment bar is focused must
+        // re-clamp the selection so the render layer can't index past the
+        // now-empty list.
+        let mut state = fresh_state();
+        state.ui.attachments.push(test_attachment(1));
+        state.ui.attachment_focused = true;
+        state.ui.attachment_selected = 0;
+        let (state, _) = update(
+            state,
+            Msg::SubmitPrompt {
+                text: "go".to_string(),
+                attachment_ids: vec![1],
+            },
+        );
+        assert!(state.ui.attachments.is_empty());
+        assert!(!state.ui.attachment_focused);
+        assert_eq!(state.ui.attachment_selected, 0);
+    }
+
+    #[test]
+    fn backgrounded_tool_completes_turn_not_stranded() {
+        // Axis 1 #8 (verified non-bug): Ctrl+B fires BackgroundScope but leaves
+        // the reducer in ExecutingTools; the detachable tool still returns a
+        // success outcome, so the turn advances normally. Locks that behavior.
+        let mut state = fresh_state();
+        let call = PendingToolCall {
+            call_id: super::super::ids::ToolCallId(1),
+            source: crate::models::tool_call::ToolCall {
+                id: Some("c1".to_string()),
+                function: crate::models::tool_call::FunctionCall {
+                    name: "execute_command".to_string(),
+                    arguments: serde_json::json!({"command": "sleep 9"}),
+                },
+            },
+        };
+        state.turn = start_executing_tools(TurnId(3), vec![call]);
+        state.session.append(ChatMessage::assistant("tools follow"));
+
+        // Ctrl+B → BackgroundScope; reducer stays in ExecutingTools.
+        let (state, cmds) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('b'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::BackgroundScope(TurnId(3))))
+        );
+        assert!(matches!(state.turn, TurnState::ExecutingTools { .. }));
+
+        // The detached command returns a normal success outcome → turn advances.
+        let (state, cmds) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(3),
+                call_id: super::super::ids::ToolCallId(1),
+                outcome: ToolOutcome::success(
+                    "Moved to background.\nPID: 1234",
+                    "moved to background",
+                    0.1,
+                ),
+            },
+        );
+        assert!(matches!(state.turn, TurnState::Generating { .. }));
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
+    }
+
+    #[test]
+    fn builtin_tool_schema_tokens_msg_updates_runtime() {
+        // Axis 1 #4: the runner's report lands on runtime state.
+        let state = fresh_state();
+        let (state, _) = update(state, Msg::BuiltinToolSchemaTokens(4321));
+        assert_eq!(state.runtime.builtin_tool_schema_tokens, 4321);
+    }
+
+    #[test]
+    fn context_text_folds_in_builtin_tool_tokens() {
+        // Axis 1 #4: /context shows a disclaimer before the runner reports, and
+        // the real figure afterward.
+        let mut state = fresh_state();
+        let before = context_text(&state);
+        assert!(before.contains("built-in tool schemas: measured on the first model call"));
+
+        state.runtime.builtin_tool_schema_tokens = 5000;
+        let after = context_text(&state);
+        assert!(after.contains("built-in tool schemas:"));
+        assert!(!after.contains("measured on the first model call"));
     }
 
     #[test]

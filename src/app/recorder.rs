@@ -137,6 +137,7 @@ pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
         }),
         Msg::StreamToolCall { call, .. } => serde_json::to_value(call)
             .unwrap_or_else(|_| unsupported("tool call was not serializable")),
+        Msg::BuiltinToolSchemaTokens(tokens) => serde_json::json!({"tokens": tokens}),
         Msg::ContextUsageEstimated { snapshot, .. } => serde_json::json!({
             "used_tokens": snapshot.used_tokens,
             "max_tokens": snapshot.max_tokens,
