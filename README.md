@@ -43,6 +43,24 @@ irm https://noahsabaj.github.io/mermaid-cli/install.ps1 | iex
 
 Then run `mermaid` to start, and `mermaid update` whenever you want the newest version. (Set `MERMAID_INSTALL_DIR` to change the install location, or `MERMAID_VERSION=vX.Y.Z` to pin a specific release.)
 
+**Or install with a package manager**
+
+```bash
+# Homebrew (macOS / Linux)
+brew install noahsabaj/mermaid/mermaid
+
+# Scoop (Windows)
+scoop bucket add mermaid https://github.com/noahsabaj/scoop-mermaid
+scoop install mermaid
+```
+
+```powershell
+# WinGet (Windows) — pending review on the official winget-pkgs repo
+winget install NoahSabaj.Mermaid
+```
+
+All three are bumped automatically on every release; upgrade with `mermaid update` or your package manager.
+
 <details>
 <summary>Install with cargo instead (needs the Rust toolchain)</summary>
 
@@ -109,6 +127,7 @@ mermaid --system-prompt-file ./prompt.md         # Replace the default prompt fo
 mermaid list                                    # List available models across providers
 mermaid doctor                                  # First-run readiness check
 mermaid status                                  # Lower-level Ollama, MCP, and provider config
+mermaid update                                  # Update to the latest release (or use brew/scoop)
 mermaid self-test                               # Fast deterministic Mermaid self-test
 mermaid init                                    # Create default config file
 mermaid cloud-setup                             # Configure Ollama Cloud API key
@@ -129,6 +148,8 @@ mermaid pr create                               # Open a PR/MR from the current 
 | Enter | Send message (or queue while the model is generating) |
 | Esc | Stop generation / dismiss command palette or attachment focus |
 | Ctrl+C | Quit (auto-saves the session) |
+| Ctrl+D | Quit when the input box is empty (auto-saves the session) |
+| Ctrl+B | While tools are running, send the foreground command to the background (it keeps running as a `/processes` entry) |
 | Alt+T | Cycle reasoning level: `None → Minimal → Low → Medium → High → XHigh → Max → None` |
 | Shift+Tab | Cycle safety mode: `read_only → ask → auto → full_access → read_only` (session-scoped) |
 | Ctrl+V | Paste image or text from clipboard |
@@ -161,6 +182,13 @@ Model and context:
 - `/usage`, `/context`, `/compact [instructions]`
 - `/model-info <model>`
 
+Durable memory:
+
+- `/memory` (alias `/memories`) — list the durable facts Mermaid has saved across sessions
+- `/remember <fact>` — save a fact to durable memory
+- `/forget <name>` — delete a saved memory by name
+- `/consolidate-memory` (aliases `/memory-consolidate`, `/prune-memory`) — merge duplicates and prune stale memories
+
 Safety and recovery:
 
 - `/safety [read_only|ask|auto|full_access]` (alias `/permission`) — show or set the session safety mode; Shift+Tab cycles it
@@ -190,6 +218,7 @@ The model uses these autonomously via native tool calling:
 | `delete_file` | Delete files (timestamped backup) |
 | `create_directory` | Create directories |
 | `execute_command` | Run shell commands; background mode registers PID/log/URL metadata for GUI apps and dev servers |
+| `memory` | Manage durable cross-session memory (remember / update / forget facts; project, shared, or global scope) |
 | `web_search` | Search the web (Ollama Cloud) |
 | `web_fetch` | Fetch URL content as markdown (Ollama Cloud) |
 | `agent` | Spawn autonomous sub-agent for parallel tasks |
@@ -264,7 +293,7 @@ port = 11434
 # actions. "auto" runs an LLM classifier that vets each borderline action
 # against your stated intent — aligned actions run automatically, risky ones
 # escalate to an approval prompt. "full_access" auto-runs everything (the
-# pre-0.8 default); "read_only" blocks all mutations. Change it live with
+# legacy default); "read_only" blocks all mutations. Change it live with
 # Shift+Tab or `/safety <mode>` (session-scoped; this value is the persistent
 # default each session starts from).
 mode = "ask"
@@ -274,7 +303,7 @@ checkpoint_on_mutation = true
 # auto_classifier_model = "anthropic/claude-haiku-4-5"
 
 [non_interactive]
-# Current v0.8 run behavior is controlled by CLI flags:
+# Run behavior is controlled by CLI flags:
 #   mermaid run "prompt" --format json --max-tokens 4096 --no-execute
 # These fields remain in the schema for compatibility but are not the
 # source of truth for `mermaid run`.
