@@ -175,11 +175,11 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         1
     };
 
-    // F9: one-row banner for `state.status`. Previously the reducer
-    // set state.status for slash commands, MCP errors, and model-pull
-    // progress but no widget painted it. Height is 1 when a status is
-    // present, 0 otherwise.
-    let status_banner_height: u16 = if state.status.is_some() { 1 } else { 0 };
+    // The transient status banner that used to live here is gone — that zone is
+    // the generation spinner's alone. Feedback, errors, and command results now
+    // post into the chat transcript instead. The zone is kept at height 0 to
+    // preserve the chunk indices below.
+    let status_banner_height: u16 = 0;
 
     // Reserve the status zone's height to match its row count, but never so much
     // that the input box or bottom bar get evicted on a short terminal: keep room
@@ -288,14 +288,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         frame.render_widget(attachment_widget, chunks[2]);
     }
 
-    // F9 banner for state.status — above input, below attachments.
-    if let Some(ref status) = state.status {
-        let banner = widgets::StatusBannerWidget {
-            theme: &rstate.theme,
-            status,
-        };
-        frame.render_widget(banner, chunks[3]);
-    }
+    // (Status-banner zone intentionally left unpainted — see status_banner_height.)
 
     // Input box.
     let input_widget = InputWidget {
@@ -654,11 +647,11 @@ mod tests {
         );
     }
 
-    /// F9: `state.status` is painted as a banner above input. Before
-    /// this, the reducer would set `state.status` for slash-command
-    /// feedback and MCP errors but no widget displayed it.
+    /// The transient status banner was removed — that zone above the input
+    /// belongs to the generation spinner alone, so `state.status` is never
+    /// painted even when set. Command feedback goes to the chat transcript now.
     #[test]
-    fn state_status_renders_as_banner() {
+    fn state_status_is_never_painted() {
         let mut s = mock_state();
         s.status = Some(StatusLine {
             text: "Reasoning: high".to_string(),
@@ -667,18 +660,8 @@ mod tests {
         });
         let frame = render_to_string(&s);
         assert!(
-            frame.contains("Reasoning: high"),
-            "state.status must reach the screen"
+            !frame.contains("Reasoning: high"),
+            "the status banner is gone; state.status must not reach the screen"
         );
-    }
-
-    #[test]
-    fn unused_status_line_struct_silences_warning() {
-        // Guard against dead_code on the imported StatusLine + StatusKind.
-        let _ = StatusLine {
-            text: "x".to_string(),
-            kind: StatusKind::Info,
-            shown_at: std::time::SystemTime::now(),
-        };
     }
 }
