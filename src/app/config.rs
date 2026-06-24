@@ -137,6 +137,13 @@ pub struct SafetyConfig {
     /// point the vet at a cheaper/faster model than the one driving the work.
     #[serde(default)]
     pub auto_classifier_model: Option<String>,
+    /// Headless escape hatch: when true, non-replayable tools (web/mcp/
+    /// subagent/computer_use) are allowed to PROCEED on an `Ask` decision in a
+    /// headless run (no approval UI) instead of being blocked. Default `false`
+    /// — `mermaid run` in `ask` mode otherwise refuses these. Set via
+    /// `--allow-untrusted-tools` or config for CI that needs them.
+    #[serde(default)]
+    pub allow_untrusted_headless_tools: bool,
 }
 
 impl Default for SafetyConfig {
@@ -149,6 +156,7 @@ impl Default for SafetyConfig {
             checkpoint_on_mutation: true,
             overrides: Vec::new(),
             auto_classifier_model: None,
+            allow_untrusted_headless_tools: false,
         }
     }
 }

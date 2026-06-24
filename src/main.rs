@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
         format,
         max_tokens,
         no_execute,
+        allow_untrusted_tools,
     }) = &cli.command
     {
         return dispatch_non_interactive(
@@ -46,6 +47,7 @@ async fn main() -> Result<()> {
             *format,
             *max_tokens,
             *no_execute,
+            *allow_untrusted_tools,
         )
         .await;
     }
@@ -152,6 +154,7 @@ async fn dispatch_non_interactive(
     format: OutputFormat,
     max_tokens: Option<usize>,
     no_execute: bool,
+    allow_untrusted_tools: bool,
 ) -> Result<()> {
     let cli_model_provided = cli.model.is_some();
     let model_id = resolve_model_id(cli.model.as_deref(), &config).await?;
@@ -172,6 +175,11 @@ async fn dispatch_non_interactive(
     // F6 `run --max-tokens <n>`: overlay the config's per-model cap.
     if let Some(n) = max_tokens {
         config.default_model.max_tokens = n;
+    }
+    // `run --allow-untrusted-tools`: headless opt-in for non-replayable tools
+    // on an Ask decision (otherwise blocked when there's no approval UI).
+    if allow_untrusted_tools {
+        config.safety.allow_untrusted_headless_tools = true;
     }
 
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);

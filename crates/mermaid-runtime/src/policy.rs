@@ -325,7 +325,27 @@ fn override_matches(rule: &PolicyOverride, request: &ActionRequest) -> bool {
             .as_deref()
             .or(request.path.as_deref())
             .unwrap_or(&request.summary);
-        if !haystack.contains(pattern) {
+        let matched = if rule.decision == PolicyOverrideDecision::Allow {
+            // Anchor `Allow` overrides so a permissive rule can't be widened by
+            // embedding the pattern in a larger/chained command. For shell
+            // commands the pattern must be the argv0 basename AND the command
+            // must be a single command (no chaining operators); otherwise it
+            // falls through to the mode default. Path/summary requests require
+            // an exact match. (`Ask`/`Deny` keep substring matching — safe to
+            // over-match.)
+            match request.command.as_deref() {
+                Some(cmd) => {
+                    let tokens = tokenize(cmd);
+                    let has_chain = tokens.iter().any(|t| SHELL_OPERATORS.contains(&t.as_str()));
+                    let argv0 = tokens.first().map(|t| basename(t));
+                    !has_chain && argv0 == Some(pattern)
+                },
+                None => haystack == pattern,
+            }
+        } else {
+            haystack.contains(pattern)
+        };
+        if !matched {
             return false;
         }
     }
@@ -597,7 +617,7 @@ fn classify_shell_command(command: &str) -> RiskClass {
 
 fn is_dangerous_root(arg: &str) -> bool {
     let a = arg.trim_matches(['"', '\'']);
-    matches!(
+    if matches!(
         a,
         "/" | "/*"
             | "~"
@@ -623,6 +643,28 @@ fn is_dangerous_root(arg: &str) -> bool {
             | "/opt"
     ) || a.starts_with("/*")
         || a == "$home"
+    {
+        return true;
+    }
+    // Windows roots. The POSIX shell tokenizer can strip backslashes, so match
+    // drive roots leniently in both `c:\…` and stripped `c:…` forms. Best-effort
+    // (the gate is the real boundary).
+    let aw = a.to_ascii_lowercase();
+    matches!(
+        aw.as_str(),
+        "c:" | "c:\\"
+            | "c:/"
+            | "\\"
+            | "%systemroot%"
+            | "%systemdrive%"
+            | "%userprofile%"
+            | "%homepath%"
+    ) || aw.starts_with("c:\\windows")
+        || aw.starts_with("c:/windows")
+        || aw.starts_with("c:windows")
+        || aw.starts_with("c:\\users")
+        || aw.starts_with("c:/users")
+        || aw.starts_with("c:users")
 }
 
 /// True if any token is a short flag (`-rf`) or long flag (`--recursive`)
@@ -641,12 +683,57 @@ fn flag_present(tokens: &[String], want: char) -> bool {
     })
 }
 
+/// Shell interpreters whose `-c <script>` payload we recurse into so a
+/// destructive command can't hide inside a quoted argument.
+const SHELL_INTERPRETERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
+
+/// Sensitive write targets (system dirs, cron, SSH keys, shell dotfiles). A
+/// redirect or `tee` to one of these is hard-denied even when the command head
+/// is benign (`echo … > /etc/cron.d/x`). Best-effort defense-in-depth.
+fn is_sensitive_write_target(path: &str) -> bool {
+    let p = path.trim_matches(['"', '\'']);
+    const SENSITIVE_PREFIXES: &[&str] = &[
+        "/etc/",
+        "/boot/",
+        "/sys/",
+        "/dev/",
+        "/usr/",
+        "/bin/",
+        "/sbin/",
+        "/lib",
+        "/var/spool/cron",
+    ];
+    if SENSITIVE_PREFIXES.iter().any(|pre| p.starts_with(pre)) {
+        return true;
+    }
+    if p.contains("/.ssh/") || p.contains("/cron") {
+        return true;
+    }
+    const SENSITIVE_SUFFIXES: &[&str] = &[
+        "/.bashrc",
+        "/.zshrc",
+        "/.profile",
+        "/.bash_profile",
+        "/.zprofile",
+        "/authorized_keys",
+    ];
+    if SENSITIVE_SUFFIXES.iter().any(|suf| p.ends_with(suf)) {
+        return true;
+    }
+    // Windows system / startup dirs (when backslashes survive tokenization).
+    p.contains("\\windows\\") || p.contains("\\system32\\") || p.contains("\\startup\\")
+}
+
 /// Hard-deny check for catastrophic commands. Operates on the TOKENIZED,
 /// case-normalized form so it survives extra whitespace, flag reordering,
 /// and absolute-path binaries (`/bin/rm`). This remains best-effort
 /// defense-in-depth — the real boundary is deny-by-default + approval — but
 /// it is no longer bypassable by trivial syntactic variation.
 fn contains_destructive_pattern(command: &str) -> bool {
+    destructive_with_depth(command, 0)
+}
+
+fn destructive_with_depth(command: &str, depth: u8) -> bool {
     let lower = command.to_ascii_lowercase();
     // Fork bomb, regardless of spacing.
     let nospace: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
@@ -666,8 +753,56 @@ fn contains_destructive_pattern(command: &str) -> bool {
         if matches!(head, "rm" | "chmod" | "chown") && recursive_on_root {
             return true;
         }
+        // Windows recursive delete (`del /s` / `rd /s`) of a dangerous root.
+        if matches!(head, "del" | "erase" | "rd" | "rmdir")
+            && rest.iter().any(|a| a == "/s")
+            && rest.iter().any(|a| is_dangerous_root(a))
+        {
+            return true;
+        }
+        // Formatting a drive.
+        if head == "format"
+            && rest
+                .iter()
+                .any(|a| is_dangerous_root(a) || a.ends_with(':'))
+        {
+            return true;
+        }
         // dd overwriting a block device.
         if head == "dd" && rest.iter().any(|a| a.starts_with("of=/dev/")) {
+            return true;
+        }
+        // A shell interpreter running `-c <script>` — recurse into the script so
+        // `bash -c "rm -rf /"` can't smuggle a destructive command past the
+        // tokenizer. Bounded depth guards crafted nesting.
+        if SHELL_INTERPRETERS.contains(&head)
+            && depth < 3
+            && let Some(pos) = rest.iter().position(|a| a == "-c")
+            && let Some(script) = rest.get(pos + 1)
+            && destructive_with_depth(script, depth + 1)
+        {
+            return true;
+        }
+    }
+    // Redirect / `tee` to a sensitive target (cron, dotfiles, ssh, system dirs).
+    for (i, tok) in tokens.iter().enumerate() {
+        if let Some(after) = tok.strip_prefix('>') {
+            let after = after.trim_start_matches('>');
+            let target = if after.is_empty() {
+                tokens.get(i + 1).map(String::as_str)
+            } else {
+                Some(after)
+            };
+            if let Some(target) = target
+                && is_sensitive_write_target(target)
+            {
+                return true;
+            }
+        }
+        if basename(tok) == "tee"
+            && let Some(target) = tokens[i + 1..].iter().find(|t| !t.starts_with('-'))
+            && is_sensitive_write_target(target)
+        {
             return true;
         }
     }
@@ -828,6 +963,140 @@ mod tests {
                 "expected Destructive Deny for {cmd:?}, got {decision:?}",
             );
         }
+    }
+
+    #[test]
+    fn shell_interpreter_c_payload_destructive_is_hard_denied() {
+        // #5: a destructive command hidden inside `bash -c "…"` must not slip
+        // past the tokenizer.
+        for cmd in [
+            "bash -c \"rm -rf /\"",
+            "sh -c 'rm -rf ~'",
+            "zsh -c \"rm -rf $HOME\"",
+            "bash -c \"true && rm -rf /\"",
+        ] {
+            let decision = PolicyEngine::new(SafetyMode::FullAccess).decide(&shell(cmd));
+            assert!(
+                matches!(
+                    decision,
+                    PolicyDecision::Deny {
+                        risk: RiskClass::Destructive,
+                        ..
+                    }
+                ),
+                "expected Destructive Deny for {cmd:?}, got {decision:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn windows_destructive_commands_are_hard_denied() {
+        // #6: Windows recursive delete / format of a system root.
+        for cmd in [
+            "del /s /q C:\\",
+            "rd /s /q C:\\Windows",
+            "rmdir /s C:\\Users",
+            "format C:",
+        ] {
+            let decision = PolicyEngine::new(SafetyMode::FullAccess).decide(&shell(cmd));
+            assert!(
+                matches!(
+                    decision,
+                    PolicyDecision::Deny {
+                        risk: RiskClass::Destructive,
+                        ..
+                    }
+                ),
+                "expected Destructive Deny for {cmd:?}, got {decision:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_to_sensitive_target_is_hard_denied() {
+        // #7: a benign head writing to cron / ssh / dotfiles / system paths via
+        // a redirect or `tee`.
+        for cmd in [
+            "echo '* * * * * root sh' > /etc/cron.d/pwn",
+            "echo evil >> ~/.bashrc",
+            "echo key | tee ~/.ssh/authorized_keys",
+            "printf x > /etc/passwd",
+        ] {
+            let decision = PolicyEngine::new(SafetyMode::FullAccess).decide(&shell(cmd));
+            assert!(
+                matches!(
+                    decision,
+                    PolicyDecision::Deny {
+                        risk: RiskClass::Destructive,
+                        ..
+                    }
+                ),
+                "expected Destructive Deny for {cmd:?}, got {decision:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_to_workspace_file_is_not_destructive() {
+        // Guard: an ordinary in-project redirect still runs (ShellMutation), not
+        // hard-denied.
+        let decision =
+            PolicyEngine::new(SafetyMode::FullAccess).decide(&shell("echo hi > out.txt"));
+        assert!(
+            matches!(decision, PolicyDecision::Allow { .. }),
+            "got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn allow_override_is_anchored_to_argv0_and_single_command() {
+        // #8: an Allow override on `git` must not allow a chained command that
+        // merely shares argv0.
+        let allow_git = PolicyOverride {
+            tool: Some("execute_command".to_string()),
+            pattern: Some("git".to_string()),
+            decision: PolicyOverrideDecision::Allow,
+            ..Default::default()
+        };
+        let engine = PolicyEngine::new(SafetyMode::Ask).with_overrides(vec![allow_git]);
+
+        assert!(
+            matches!(
+                engine.decide(&shell("git status")),
+                PolicyDecision::Allow { .. }
+            ),
+            "plain git should be allowed by the override",
+        );
+        assert!(
+            matches!(
+                engine.decide(&shell("git status | sh")),
+                PolicyDecision::Ask { .. }
+            ),
+            "chained command must not be widened by the override",
+        );
+        assert!(
+            !matches!(
+                engine.decide(&shell("foo; git status")),
+                PolicyDecision::Allow { .. }
+            ),
+            "override must not apply when argv0 isn't the allowed binary",
+        );
+    }
+
+    #[test]
+    fn deny_override_still_substring_matches() {
+        // #8: Deny overrides keep substring matching (safe to over-match).
+        let deny_curl = PolicyOverride {
+            tool: Some("execute_command".to_string()),
+            pattern: Some("curl".to_string()),
+            decision: PolicyOverrideDecision::Deny,
+            ..Default::default()
+        };
+        let engine = PolicyEngine::new(SafetyMode::FullAccess).with_overrides(vec![deny_curl]);
+        assert!(matches!(
+            engine.decide(&shell("echo x && curl http://x")),
+            PolicyDecision::Deny { .. }
+        ));
     }
 
     #[test]

@@ -191,6 +191,9 @@ impl ToolExecutor for WebFetchTool {
         let Some(url) = args.get("url").and_then(|v| v.as_str()) else {
             return ToolOutcome::error("web_fetch requires 'url' (string)", 0.0);
         };
+        if let Err(reason) = validate_fetch_url(url) {
+            return ToolOutcome::error(format!("web_fetch: {reason}"), 0.0);
+        }
         if let Some(blocked) = super::policy_gate::gate_external(
             &ctx,
             "web_fetch",
@@ -288,9 +291,84 @@ fn parse_queries(args: &serde_json::Value) -> Result<Vec<(String, usize)>, Strin
     Err("web_search requires 'query' (string) or 'queries' (array)".to_string())
 }
 
+/// Reject obviously-unsafe fetch URLs client-side before handing them to the
+/// (server-side) Ollama fetch API: only `http`/`https`, and no loopback /
+/// link-local / private / metadata hosts. Defense-in-depth against SSRF-style
+/// abuse via model-supplied URLs.
+fn validate_fetch_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {},
+        other => {
+            return Err(format!(
+                "unsupported URL scheme '{other}' (only http/https allowed)"
+            ));
+        },
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+    if is_blocked_host(host) {
+        return Err(format!("refusing to fetch internal/loopback host '{host}'"));
+    }
+    Ok(())
+}
+
+fn is_blocked_host(host: &str) -> bool {
+    let h = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    if h == "localhost" || h.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = h.parse::<std::net::Ipv4Addr>() {
+        return ip.is_loopback()      // 127.0.0.0/8
+            || ip.is_private()       // 10/8, 172.16/12, 192.168/16
+            || ip.is_link_local()    // 169.254/16 (incl. 169.254.169.254 metadata)
+            || ip.is_unspecified()   // 0.0.0.0
+            || ip.is_broadcast();
+    }
+    if let Ok(ip) = h.parse::<std::net::Ipv6Addr>() {
+        return ip.is_loopback() || ip.is_unspecified();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_fetch_url_blocks_unsafe_targets() {
+        // #9: scheme + internal-host guards.
+        for bad in [
+            "file:///etc/passwd",
+            "ftp://example.com/x",
+            "http://localhost/admin",
+            "http://127.0.0.1:8080",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/",
+            "http://192.168.1.1/",
+            "http://[::1]/",
+            "not a url",
+        ] {
+            assert!(
+                validate_fetch_url(bad).is_err(),
+                "expected reject for {bad:?}",
+            );
+        }
+        for good in [
+            "https://example.com",
+            "http://example.com/page?x=1",
+            "https://docs.rs/serde",
+        ] {
+            assert!(
+                validate_fetch_url(good).is_ok(),
+                "expected accept for {good:?}",
+            );
+        }
+    }
 
     #[test]
     fn parse_queries_single_form() {

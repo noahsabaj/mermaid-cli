@@ -92,14 +92,26 @@ pub async fn gate(
                 // old non-replayable bypass).
                 inline_decision(ctx, broker, &request, risk, None).await
             } else if !replayable {
-                // Headless non-replayable: no checkpoint/replay path, so an Ask
-                // can't be satisfied out-of-band — proceed (only ReadOnly/Deny
-                // blocks these).
-                tracing::debug!(
-                    tool = %request.tool,
-                    "policy Ask on non-replayable tool with no approval UI; proceeding",
-                );
-                Gate::Proceed { risk }
+                // Headless non-replayable (web/mcp/subagent/computer_use): no
+                // checkpoint/replay path, so an Ask can't be satisfied
+                // out-of-band. Fail closed by default — only proceed when the
+                // run explicitly opted in via `--allow-untrusted-tools`.
+                if ctx.config.safety.allow_untrusted_headless_tools {
+                    tracing::debug!(
+                        tool = %request.tool,
+                        "policy Ask on non-replayable tool; proceeding (--allow-untrusted-tools)",
+                    );
+                    Gate::Proceed { risk }
+                } else {
+                    Gate::Block(ToolOutcome::error(
+                        format!(
+                            "{} requires approval, but this is a headless run with no approval UI. \
+                             Re-run with --allow-untrusted-tools, or use a safety mode of auto/full_access.",
+                            request.summary
+                        ),
+                        0.0,
+                    ))
+                }
             } else {
                 block_for_approval(
                     ctx,
@@ -359,6 +371,60 @@ mod tests {
             None,
             None,
         )
+    }
+
+    fn ctx_headless_opted_in() -> ExecContext {
+        let mut config = crate::app::Config::default();
+        config.safety.mode = SafetyMode::Ask;
+        config.safety.allow_untrusted_headless_tools = true;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(4);
+        ExecContext::new(
+            tokio_util::sync::CancellationToken::new(),
+            tx,
+            ToolCallId(1),
+            TurnId(1),
+            PathBuf::from("."),
+            Arc::new(config),
+            String::new(),
+            None,
+            SafetyMode::Ask,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn headless_ask_blocks_non_replayable_unless_opted_in() {
+        // #3: web/mcp/subagent/computer_use on an Ask decision with no approval
+        // UI is blocked by default, allowed only with the opt-in flag.
+        let req = || ActionRequest::new("web_fetch", ToolCategory::Web, "web_fetch https://x");
+
+        let blocked = gate(
+            &ctx(SafetyMode::Ask),
+            req(),
+            &[],
+            serde_json::json!({}),
+            false,
+        )
+        .await;
+        assert!(
+            matches!(blocked, Gate::Block(_)),
+            "headless Ask should block by default"
+        );
+
+        let proceed = gate(
+            &ctx_headless_opted_in(),
+            req(),
+            &[],
+            serde_json::json!({}),
+            false,
+        )
+        .await;
+        assert!(
+            matches!(proceed, Gate::Proceed { .. }),
+            "--allow-untrusted-tools should let it proceed",
+        );
     }
 
     /// Stub classifier with a fixed verdict — drives the `Classify` path

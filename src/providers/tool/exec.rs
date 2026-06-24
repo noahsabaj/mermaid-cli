@@ -119,16 +119,38 @@ impl ToolExecutor for ExecuteCommandTool {
             return ToolOutcome::error(format!("Dangerous command blocked: {}", command), 0.0);
         }
 
-        let mut policy_request = crate::runtime::ActionRequest::new(
-            "execute_command",
-            crate::runtime::ToolCategory::Shell,
-            command.to_string(),
-        );
+        // Resolve the effective working directory and decide containment. An
+        // out-of-project cwd is allowed but escalated to ExternalDirectory so
+        // the gate won't auto-allow even a read-only command run outside the
+        // project — closing the working_dir containment bypass.
+        let (effective_workdir, within_project) = match args
+            .get("working_dir")
+            .and_then(|v| v.as_str())
+        {
+            Some(raw) => match super::path_safety::resolve_path_within(&ctx.workdir, raw) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    return ToolOutcome::error(format!("execute_command working_dir: {e}"), 0.0);
+                },
+            },
+            None => (ctx.workdir.clone(), true),
+        };
+
+        let category = if within_project {
+            crate::runtime::ToolCategory::Shell
+        } else {
+            crate::runtime::ToolCategory::ExternalDirectory
+        };
+        let mut policy_request =
+            crate::runtime::ActionRequest::new("execute_command", category, command.to_string());
         policy_request.command = Some(command.to_string());
+        if !within_project {
+            policy_request.path = Some(effective_workdir.display().to_string());
+        }
         let pending_action = serde_json::json!({
             "tool": "execute_command",
             "args": args.clone(),
-            "workdir": ctx.workdir.display().to_string(),
+            "workdir": effective_workdir.display().to_string(),
             "turn_id": ctx.turn.0,
             "call_id": ctx.call_id.0,
             "task_id": ctx.task_id.clone(),
@@ -159,16 +181,12 @@ impl ToolExecutor for ExecuteCommandTool {
             Ok(mode) => mode,
             Err(error) => return ToolOutcome::error(error, 0.0),
         };
-        let working_dir = args
-            .get("working_dir")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
         let shell_payload = serde_json::json!({
             "task_id": ctx.task_id.clone(),
             "turn_id": ctx.turn.0,
             "call_id": ctx.call_id.0,
             "command": command,
-            "working_dir": working_dir.clone().unwrap_or_else(|| ctx.workdir.display().to_string()),
+            "working_dir": effective_workdir.display().to_string(),
         });
         let _ = crate::runtime::run_plugin_hooks("before_shell", &shell_payload);
         if mode == CommandMode::Background {
@@ -189,7 +207,7 @@ impl ToolExecutor for ExecuteCommandTool {
                 .map(str::to_string);
             let outcome = run_background_command(
                 command,
-                working_dir.as_deref(),
+                &effective_workdir,
                 startup_timeout_secs,
                 ready_pattern.as_deref(),
                 open_url.as_deref(),
@@ -234,11 +252,7 @@ impl ToolExecutor for ExecuteCommandTool {
             // cancel branch), tokio reaps the child. No orphans.
             .kill_on_drop(true);
 
-        if let Some(dir) = working_dir.as_ref() {
-            cmd.current_dir(dir);
-        } else {
-            cmd.current_dir(&ctx.workdir);
-        }
+        cmd.current_dir(&effective_workdir);
         scrub_secret_env(&mut cmd);
 
         let run_fut = run_command(cmd, progress, ctx.background.clone());
@@ -257,7 +271,7 @@ impl ToolExecutor for ExecuteCommandTool {
                 ToolOutcome::error(message, duration_secs).with_metadata(command_metadata(
                     CommandMetadataInput {
                         command: command.clone(),
-                        working_dir: working_dir.clone(),
+                        working_dir: Some(effective_workdir.display().to_string()),
                         exit_code: None,
                         timed_out: true,
                         background: false,
@@ -278,7 +292,7 @@ impl ToolExecutor for ExecuteCommandTool {
                         .with_metadata(command_metadata(
                             CommandMetadataInput {
                                 command: command.clone(),
-                                working_dir: working_dir.clone(),
+                                working_dir: Some(effective_workdir.display().to_string()),
                                 exit_code: run.exit_code,
                                 timed_out: false,
                                 background: false,
@@ -302,18 +316,14 @@ impl ToolExecutor for ExecuteCommandTool {
                         id: format!("bg-{pid}"),
                         pid,
                         command: command.to_string(),
-                        cwd: Some(
-                            working_dir
-                                .clone()
-                                .unwrap_or_else(|| ctx.workdir.display().to_string()),
-                        ),
+                        cwd: Some(effective_workdir.display().to_string()),
                         log_path: log_path_str.clone(),
                         detected_url: None,
                         status: ManagedProcessStatus::Running,
                     };
                     let mut metadata = command_metadata(CommandMetadataInput {
                         command: command.to_string(),
-                        working_dir: working_dir.clone(),
+                        working_dir: Some(effective_workdir.display().to_string()),
                         exit_code: None,
                         timed_out: false,
                         background: true,
@@ -334,7 +344,7 @@ impl ToolExecutor for ExecuteCommandTool {
                         .with_metadata(command_metadata(
                             CommandMetadataInput {
                                 command: command.clone(),
-                                working_dir: working_dir.clone(),
+                                working_dir: Some(effective_workdir.display().to_string()),
                                 exit_code: None,
                                 timed_out: false,
                                 background: false,
@@ -370,7 +380,7 @@ struct BackgroundStartup {
 
 async fn run_background_command(
     command: &str,
-    working_dir: Option<&str>,
+    workdir: &Path,
     startup_timeout_secs: u64,
     ready_pattern: Option<&str>,
     open_url: Option<&str>,
@@ -379,11 +389,8 @@ async fn run_background_command(
     let start = Instant::now();
 
     {
-        let workdir = working_dir
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ctx.workdir.clone());
         let log_path = background_log_path();
-        let pid = match launch_background_process(command, &workdir, &log_path).await {
+        let pid = match launch_background_process(command, workdir, &log_path).await {
             Ok(pid) => pid,
             Err(error) => {
                 return ToolOutcome::error(error, start.elapsed().as_secs_f64());
@@ -457,7 +464,7 @@ async fn run_background_command(
         let byte_count = output.len();
         let mut metadata = command_metadata(CommandMetadataInput {
             command: command.to_string(),
-            working_dir: working_dir.map(str::to_string),
+            working_dir: Some(workdir.display().to_string()),
             exit_code: None,
             timed_out: false,
             background: true,
@@ -834,20 +841,33 @@ const SECRET_ENV_VARS: &[&str] = &[
 /// vars, `XAUTHORITY`, etc. and still work.
 fn scrub_secret_env(cmd: &mut Command) {
     for (name, _) in std::env::vars() {
-        let upper = name.to_ascii_uppercase();
-        let looks_secret = SECRET_ENV_VARS.contains(&upper.as_str())
-            || upper.contains("API_KEY")
-            || upper.contains("APIKEY")
-            || upper.contains("ACCESS_KEY")
-            || upper.contains("SECRET")
-            || upper.contains("PASSWORD")
-            || upper.contains("PASSWD")
-            || upper.contains("CREDENTIAL")
-            || upper.contains("TOKEN");
-        if looks_secret {
+        if is_secret_env_name(&name) {
             cmd.env_remove(&name);
         }
     }
+}
+
+/// True if an env var name looks like it carries a secret/credential and must
+/// not leak into a model-run child process. Denylist (not allowlist) so
+/// ordinary build/run vars (`PATH`, toolchain, `XAUTHORITY`, …) survive.
+fn is_secret_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    SECRET_ENV_VARS.contains(&upper.as_str())
+        || upper.contains("API_KEY")
+        || upper.contains("APIKEY")
+        || upper.contains("ACCESS_KEY")
+        || upper.contains("PRIVATE_KEY")
+        || upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("PASSWD")
+        || upper.contains("CREDENTIAL")
+        || upper.contains("TOKEN")
+        || upper.contains("WEBHOOK")
+        || upper.contains("DATABASE_URL")
+        || upper.ends_with("_DSN")
+        || upper.contains("CONNECTION_STRING")
+        || upper == "KUBECONFIG"
+        || upper == "SSH_AUTH_SOCK"
 }
 
 /// Drain a child stream, capping the captured bytes at `cap` so a chatty or
@@ -1085,6 +1105,97 @@ mod tests {
     use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use std::path::PathBuf;
+
+    #[test]
+    fn secret_env_name_denylist_covers_common_carriers() {
+        // #4: secrets the old denylist missed.
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "MY_SERVICE_PRIVATE_KEY",
+            "DATABASE_URL",
+            "SENTRY_DSN",
+            "SLACK_WEBHOOK_URL",
+            "KUBECONFIG",
+            "SSH_AUTH_SOCK",
+            "DB_PASSWORD",
+            "PG_CONNECTION_STRING",
+        ] {
+            assert!(is_secret_env_name(name), "{name} should be scrubbed");
+        }
+        // Ordinary build/run vars must survive.
+        for name in [
+            "PATH",
+            "HOME",
+            "CARGO_HOME",
+            "LANG",
+            "XAUTHORITY",
+            "RUSTUP_HOME",
+        ] {
+            assert!(!is_secret_env_name(name), "{name} should NOT be scrubbed");
+        }
+    }
+
+    #[tokio::test]
+    async fn out_of_project_working_dir_is_escalated_and_blocked() {
+        // #1: a read-only command auto-runs in-project, but the same command
+        // with an out-of-project working_dir is escalated to ExternalDirectory
+        // and denied (here, by ReadOnly mode — proving it's no longer treated
+        // as an auto-allowable in-project read).
+        let project = std::env::temp_dir().join(format!("mermaid_wd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(&project).unwrap();
+        let outside = project.parent().unwrap().to_path_buf();
+
+        let mk_ctx = || {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            let mut config = crate::app::Config::default();
+            config.safety.mode = crate::runtime::SafetyMode::ReadOnly;
+            let ctx = crate::providers::ctx::ExecContext::new(
+                tokio_util::sync::CancellationToken::new(),
+                tx,
+                ToolCallId(1),
+                TurnId(1),
+                project.clone(),
+                std::sync::Arc::new(config),
+                String::new(),
+                None,
+                crate::runtime::SafetyMode::ReadOnly,
+                None,
+                None,
+                None,
+            );
+            (ctx, rx)
+        };
+
+        let (ctx, _rx) = mk_ctx();
+        let outcome = ExecuteCommandTool
+            .execute(serde_json::json!({"command": "echo hi"}), ctx)
+            .await;
+        assert!(
+            outcome.is_success(),
+            "in-project read-only echo should run: {outcome:?}",
+        );
+
+        let (ctx, _rx) = mk_ctx();
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": "echo hi",
+                    "working_dir": outside.display().to_string(),
+                }),
+                ctx,
+            )
+            .await;
+        assert_eq!(
+            outcome.status,
+            crate::domain::ToolStatus::Error,
+            "out-of-project working_dir must be escalated + blocked: {outcome:?}",
+        );
+
+        let _ = std::fs::remove_dir_all(&project);
+    }
 
     #[tokio::test]
     async fn safe_command_runs_and_captures_output() {
