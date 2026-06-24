@@ -8,8 +8,15 @@ use std::process::{Command, Stdio};
 
 use super::DaemonCommand;
 
+// These describe the Linux systemd user service. Their only consumers are the
+// `cfg(target_os = "linux")` / `cfg(test)` helpers below, so on Windows/macOS
+// non-test builds they are retained but unused — allow that without disturbing
+// the Linux build, where they are genuinely live.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const SERVICE_NAME: &str = "mermaidd.service";
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const DEFAULT_TCP_ADDR: &str = "127.0.0.1:39871";
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const DAEMON_BIN_ENV: &str = "MERMAID_DAEMON_BIN";
 
 #[cfg(target_os = "linux")]
@@ -160,6 +167,7 @@ fn systemd_user_dir_from(config_home: Option<PathBuf>, home: Option<PathBuf>) ->
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn resolve_mermaidd_path() -> PathBuf {
     if let Some(path) = std::env::var_os(DAEMON_BIN_ENV).filter(|value| !value.is_empty()) {
         return PathBuf::from(path);
@@ -188,6 +196,7 @@ fn resolve_mermaidd_path() -> PathBuf {
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn daemon_binary_name() -> &'static str {
     #[cfg(windows)]
     {
