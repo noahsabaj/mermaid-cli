@@ -36,8 +36,8 @@ use super::compaction::{
 use super::ids::TurnId;
 use super::msg::{KeyCode, KeyMods, Msg, Paste, SlashCmd};
 use super::state::{
-    GenPhase, McpServerEntry, McpServerStatus, State, StatusKind, StatusLine, TokenUsageTotals,
-    ToolOutcome, TurnState, UiMode,
+    GenPhase, McpServerEntry, McpServerStatus, State, StatusKind, TokenUsageTotals, ToolOutcome,
+    TurnState, UiMode,
 };
 use super::transition::{
     action_display_for, commit_assistant_message, fill_outcome, start_generating,
@@ -291,11 +291,11 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     status,
                     tools: Vec::new(),
                 });
-            state.status = Some(StatusLine {
-                text: format!("MCP server {} errored: {}", name, reason),
-                kind: StatusKind::Error,
-                shown_at: std::time::SystemTime::now(),
-            });
+            push_system(
+                &mut state,
+                &mut cmds,
+                format!("MCP server {} errored: {}", name, reason),
+            );
         },
         Msg::McpServerStopped { name } => {
             if let Some(entry) = state.mcp.servers.get_mut(&name) {
@@ -371,21 +371,12 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         Msg::ModelPullFinished { model } => {
-            state.status = Some(StatusLine {
-                text: format!("Pulled {}", model),
-                kind: StatusKind::Info,
-                shown_at: std::time::SystemTime::now(),
-            });
-            cmds.push(Cmd::DismissStatusAfter { ms: 2_000 });
+            push_system(&mut state, &mut cmds, format!("Pulled {}", model));
         },
-        Msg::ModelPullProgress(line) => {
-            state.status = Some(StatusLine {
-                text: format!("ollama: {}", line),
-                kind: StatusKind::Info,
-                shown_at: std::time::SystemTime::now(),
-            });
-            // Don't dismiss — the next progress line will overwrite
-            // this one; the final ModelPullFinished dismisses.
+        Msg::ModelPullProgress(_line) => {
+            // Pull progress used to stream into the status banner. With the
+            // banner gone we don't surface line-by-line progress (it would spam
+            // the transcript); the final ModelPullFinished posts one line.
         },
 
         // ── Housekeeping ────────────────────────────────────────────
@@ -408,21 +399,13 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
         Msg::TransientStatus {
             text,
-            kind,
-            dismiss_ms,
+            kind: _,
+            dismiss_ms: _,
         } => {
-            // F14: generic async-feedback banner. An effect handler
-            // that wants to say "clipboard is empty", "config saved",
-            // etc. ships its one-liner here; we render it via the
-            // existing StatusBannerWidget and self-dismiss.
-            state.status = Some(StatusLine {
-                text,
-                kind,
-                shown_at: std::time::SystemTime::now(),
-            });
-            if dismiss_ms > 0 {
-                cmds.push(Cmd::DismissStatusAfter { ms: dismiss_ms });
-            }
+            // Generic async feedback from effect handlers ("clipboard is empty",
+            // "config saved", etc.). Routed into the chat transcript instead of
+            // the old transient banner above the input.
+            push_system(&mut state, &mut cmds, text);
         },
         Msg::OpenImageAt {
             message_index,
@@ -587,12 +570,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             model_id: state.session.model_id.clone(),
             level: next,
         });
-        state.status = Some(StatusLine {
-            text: format!("Reasoning: {}", next.as_str()),
-            kind: StatusKind::Info,
-            shown_at: std::time::SystemTime::now(),
-        });
-        cmds.push(Cmd::DismissStatusAfter { ms: 2_000 });
+        // The bottom status bar already shows the new reasoning level — no banner.
         return;
     }
 
@@ -603,12 +581,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     if code == KeyCode::BackTab {
         let next = cycle_safety(state.session.safety_mode);
         state.session.safety_mode = next;
-        state.status = Some(StatusLine {
-            text: format!("Safety: {}", next.as_str()),
-            kind: StatusKind::Info,
-            shown_at: std::time::SystemTime::now(),
-        });
-        cmds.push(Cmd::DismissStatusAfter { ms: 2_000 });
+        // The bottom status bar already shows the new safety mode — no banner.
         return;
     }
 
@@ -1083,35 +1056,28 @@ fn handle_submit_prompt(
 fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
     match cmd {
         SlashCmd::Model(None) => {
-            state.status = Some(StatusLine {
-                text: format!("Current model: {}", state.session.model_id),
-                kind: StatusKind::Info,
-                shown_at: std::time::SystemTime::now(),
-            });
-            cmds.push(Cmd::DismissStatusAfter { ms: 3_000 });
+            push_system(
+                state,
+                cmds,
+                format!("Current model: {}", state.session.model_id),
+            );
         },
         SlashCmd::Model(Some(new_model)) => {
             let pull_target = ollama_pull_target(&new_model);
             state.session.model_id = new_model.clone();
             state.runtime.set_model(&new_model);
-            state.status = Some(StatusLine {
-                text: format!("Model: {}", new_model),
-                kind: StatusKind::Info,
-                shown_at: std::time::SystemTime::now(),
-            });
+            // The bottom status bar shows the new model — no banner.
             cmds.push(Cmd::PersistLastModel(new_model));
             if let Some(model) = pull_target {
                 cmds.push(Cmd::PullOllamaModel { model });
             }
-            cmds.push(Cmd::DismissStatusAfter { ms: 3_000 });
         },
         SlashCmd::Reasoning(None) => {
-            state.status = Some(StatusLine {
-                text: format!("Reasoning: {}", state.session.reasoning.as_str()),
-                kind: StatusKind::Info,
-                shown_at: std::time::SystemTime::now(),
-            });
-            cmds.push(Cmd::DismissStatusAfter { ms: 3_000 });
+            push_system(
+                state,
+                cmds,
+                format!("Reasoning: {}", state.session.reasoning.as_str()),
+            );
         },
         SlashCmd::Reasoning(Some(level)) => {
             state.session.reasoning = level;
@@ -1121,25 +1087,19 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             });
         },
         SlashCmd::Safety(None) => {
-            state.status = Some(StatusLine {
-                text: format!(
+            push_system(
+                state,
+                cmds,
+                format!(
                     "Safety: {} — options: read_only, ask, auto, full_access (Shift+Tab cycles)",
                     state.session.safety_mode.as_str()
                 ),
-                kind: StatusKind::Info,
-                shown_at: std::time::SystemTime::now(),
-            });
-            cmds.push(Cmd::DismissStatusAfter { ms: 4_000 });
+            );
         },
         SlashCmd::Safety(Some(mode)) => {
             // Session-scoped (mirrors Shift+Tab) — not written to the config.
             state.session.safety_mode = mode;
-            state.status = Some(StatusLine {
-                text: format!("Safety: {}", mode.as_str()),
-                kind: StatusKind::Info,
-                shown_at: std::time::SystemTime::now(),
-            });
-            cmds.push(Cmd::DismissStatusAfter { ms: 2_000 });
+            // The bottom status bar shows the new mode — no banner.
         },
         SlashCmd::VisibleReasoning(arg) => {
             match visible_reasoning_value(arg.as_deref(), state.ui.show_reasoning) {
@@ -1456,13 +1416,11 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             // fights with ratatui's raw mode. The in-TUI command
             // points users at the `mermaid cloud-setup` subcommand
             // instead — clean separation of modes.
-            state.status = Some(StatusLine {
-                text: "Run `mermaid cloud-setup` from your shell, then restart mermaid."
-                    .to_string(),
-                kind: StatusKind::Info,
-                shown_at: std::time::SystemTime::now(),
-            });
-            cmds.push(Cmd::DismissStatusAfter { ms: 5_000 });
+            push_system(
+                state,
+                cmds,
+                "Run `mermaid cloud-setup` from your shell, then restart mermaid.",
+            );
         },
         SlashCmd::Help => {
             state.session.append(ChatMessage::system(help_text()));
@@ -1472,12 +1430,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             request_exit(state, cmds);
         },
         SlashCmd::Unknown(name) => {
-            state.status = Some(StatusLine {
-                text: format!("Unknown command: /{}", name),
-                kind: StatusKind::Warn,
-                shown_at: std::time::SystemTime::now(),
-            });
-            cmds.push(Cmd::DismissStatusAfter { ms: 2_500 });
+            push_system(state, cmds, format!("Unknown command: /{}", name));
         },
     }
 }
@@ -1491,19 +1444,29 @@ fn visible_reasoning_value(arg: Option<&str>, current: bool) -> Result<bool, &'s
     }
 }
 
+/// Append a one-off system note to the chat transcript (and persist it).
+///
+/// This is where command feedback, errors, and query answers go now that the
+/// transient status banner above the input is gone — they live in the
+/// scrollable transcript instead of flashing in the spinner's row. The zone
+/// above the input is reserved for the generation spinner alone.
+fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) {
+    state.session.append(ChatMessage::system(text.into()));
+    cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+}
+
+/// Back-compat shim for the many call sites that used the old transient banner.
+/// Routes their text into the chat transcript via [`push_system`]; the severity
+/// and dismiss timeout no longer mean anything (there's no banner to color or
+/// auto-clear).
 fn set_status(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     text: impl Into<String>,
-    kind: StatusKind,
-    dismiss_ms: u64,
+    _kind: StatusKind,
+    _dismiss_ms: u64,
 ) {
-    state.status = Some(StatusLine {
-        text: text.into(),
-        kind,
-        shown_at: std::time::SystemTime::now(),
-    });
-    cmds.push(Cmd::DismissStatusAfter { ms: dismiss_ms });
+    push_system(state, cmds, text);
 }
 
 fn ollama_pull_target(model_id: &str) -> Option<String> {
@@ -1528,22 +1491,12 @@ fn ollama_pull_target(model_id: &str) -> Option<String> {
 
 fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: Option<String>) {
     if !matches!(state.turn, TurnState::Idle) {
-        state.status = Some(StatusLine {
-            text: "Cannot compact while a turn is active.".to_string(),
-            kind: StatusKind::Warn,
-            shown_at: std::time::SystemTime::now(),
-        });
-        cmds.push(Cmd::DismissStatusAfter { ms: 3_000 });
+        push_system(state, cmds, "Cannot compact while a turn is active.");
         return;
     }
 
     if state.session.messages().len() < 3 {
-        state.status = Some(StatusLine {
-            text: "Not enough conversation history to compact.".to_string(),
-            kind: StatusKind::Info,
-            shown_at: std::time::SystemTime::now(),
-        });
-        cmds.push(Cmd::DismissStatusAfter { ms: 3_000 });
+        push_system(state, cmds, "Not enough conversation history to compact.");
         return;
     }
 
@@ -2179,17 +2132,16 @@ fn handle_compaction_finished(
         state.turn = TurnState::Idle;
     }
 
-    state.status = Some(StatusLine {
-        text: compaction_receipt(&record),
-        kind: StatusKind::Info,
-        shown_at: std::time::SystemTime::now(),
-    });
+    // Post the compaction receipt into the transcript. SaveCompactionArchive
+    // (below) persists the conversation, so no separate save is needed.
+    state
+        .session
+        .append(ChatMessage::system(compaction_receipt(&record)));
     cmds.push(Cmd::SaveCompactionArchive {
         archive,
         record,
         conversation: state.session.conversation.clone(),
     });
-    cmds.push(Cmd::DismissStatusAfter { ms: 5_000 });
 }
 
 fn handle_compaction_failed(
@@ -2212,11 +2164,10 @@ fn handle_compaction_failed(
         CompactionTrigger::AutoThreshold => "Auto-compaction skipped",
         CompactionTrigger::ContextLimitRetry => "Context-limit compaction failed",
     };
-    state.status = Some(StatusLine {
-        text: format!("{}: {}", prefix, message),
-        kind,
-        shown_at: std::time::SystemTime::now(),
-    });
+    let _ = kind;
+    state
+        .session
+        .append(ChatMessage::system(format!("{}: {}", prefix, message)));
 }
 
 fn handle_stream_tool_call(
@@ -2902,11 +2853,10 @@ mod tests {
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::ReadClipboard)));
     }
 
-    /// F14: `Msg::TransientStatus` sets `state.status` and schedules
-    /// auto-dismissal. This is the generic "async effect wants to show
-    /// a banner" path — used by clipboard-read feedback.
+    /// Generic async feedback (`Msg::TransientStatus`, e.g. clipboard results)
+    /// posts a system message into the chat transcript — there is no banner.
     #[test]
-    fn transient_status_sets_banner_and_schedules_dismiss() {
+    fn transient_status_posts_to_chat_transcript() {
         let state = fresh_state();
         let (state, cmds) = update(
             state,
@@ -2916,12 +2866,16 @@ mod tests {
                 dismiss_ms: 2_000,
             },
         );
-        let s = state.status.expect("status set");
-        assert_eq!(s.text, "Clipboard is empty");
-        assert_eq!(s.kind, StatusKind::Info);
+        assert!(state.status.is_none(), "no banner is set");
+        let last = state
+            .session
+            .messages()
+            .last()
+            .expect("a transcript message was appended");
+        assert!(last.content.contains("Clipboard is empty"));
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, Cmd::DismissStatusAfter { ms: 2_000 }))
+            cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
+            "the transcript message is persisted"
         );
     }
 
@@ -3565,7 +3519,14 @@ mod tests {
         // No-arg /remember explains usage instead of dispatching.
         let (state, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::Remember(None)));
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::RememberMemory { .. })));
-        assert!(state.status.is_some());
+        assert!(
+            state
+                .session
+                .messages()
+                .last()
+                .is_some_and(|m| m.content.contains("Usage: /remember")),
+            "no-arg /remember posts a usage hint to the transcript"
+        );
 
         // /consolidate-memory routes to the model-assisted prune effect.
         let (_s, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::ConsolidateMemory));
@@ -3959,19 +3920,18 @@ mod tests {
             McpServerStatus::Errored { reason } => assert_eq!(reason, "exit 1"),
             _ => panic!("expected Errored"),
         }
-        assert!(state.status.is_some());
-    }
-
-    #[test]
-    fn status_dismiss_clears_status_line() {
-        let mut state = fresh_state();
-        state.status = Some(StatusLine {
-            text: "info".to_string(),
-            kind: StatusKind::Info,
-            shown_at: std::time::SystemTime::now(),
-        });
-        let (state, _) = update(state, Msg::StatusDismiss);
-        assert!(state.status.is_none());
+        assert!(
+            state.status.is_none(),
+            "no banner — errors go to the transcript"
+        );
+        assert!(
+            state
+                .session
+                .messages()
+                .last()
+                .is_some_and(|m| m.content.contains("MCP server s1 errored: exit 1")),
+            "the MCP error must be posted to the chat transcript"
+        );
     }
 
     #[test]

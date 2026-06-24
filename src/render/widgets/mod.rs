@@ -11,7 +11,6 @@ mod conversation_list;
 mod input;
 mod slash_palette;
 mod status;
-mod status_banner;
 mod status_line;
 
 pub use approval::ApprovalModalWidget;
@@ -21,7 +20,6 @@ pub use conversation_list::ConversationListWidget;
 pub use input::{InputState, InputWidget};
 pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
-pub use status_banner::StatusBannerWidget;
 pub use status_line::build_status_lines;
 
 /// Local-to-render-layer generation phase enum. The compose function
