@@ -41,6 +41,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - OpenAI cached input tokens are no longer double-counted in the input total.
   - OpenAI-compat non-streaming responses strip inline `<think>` tags; the
     temperature is clamped to 0–2 for OpenAI-compat and Ollama.
+- **Concurrency, runtime & MCP hardening (review axis 5).**
+  - A slow or hung **plugin hook no longer freezes the app**: hooks now run off
+    the event loop (`spawn_blocking`) and are killed if they overrun a 30s
+    bound, instead of a synchronous `child.wait()` with no timeout.
+  - **MCP servers are now gracefully shut down on exit** (stdin-EOF → terminate →
+    kill ladder) instead of being orphaned, and `/mcp` stop actually kills the
+    server's child rather than only updating the UI.
+  - A flaky MCP server no longer slowly leaks request slots — the pending-request
+    map entry is removed on timeout/error.
+  - A cancelled foreground command now tree-kills its process group, so a
+    grandchild it forked (`sh -c "server &"`) isn't orphaned.
+  - Restarting a managed process waits (bounded) for the old PID to exit before
+    respawning, avoiding a port clash with its predecessor.
 
 ### Changed
 

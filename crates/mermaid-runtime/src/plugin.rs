@@ -1,12 +1,18 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{NewPluginInstall, PluginInstallRecord, RuntimeStore, data_dir};
+
+/// A plugin hook that runs longer than this is killed. Hooks are fire-and-forget
+/// observers, so a runaway one must never hang the caller (the TUI event loop,
+/// the daemon, or the CLI) — this bound is what makes that guarantee.
+const HOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginManifest {
@@ -166,21 +172,46 @@ pub fn run_plugin_hooks(event: &str, payload: &serde_json::Value) -> Result<()> 
                     continue; // isolate: one bad hook must not abort the rest
                 },
             };
-            if let Some(stdin) = child.stdin.as_mut() {
+            // Write the payload, then DROP stdin so the hook sees EOF. Without
+            // this, a hook that reads stdin-to-EOF blocks the wait forever.
+            if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(&payload_bytes);
             }
-            match child.wait() {
-                Ok(status) if !status.success() => {
-                    tracing::warn!(plugin = %plugin.name, hook = %hook, %status, "plugin hook failed");
-                },
-                Err(err) => {
-                    tracing::warn!(plugin = %plugin.name, error = %err, "plugin hook wait failed");
-                },
-                _ => {},
-            }
+            wait_hook_bounded(&mut child, &plugin.name, &hook, HOOK_TIMEOUT);
         }
     }
     Ok(())
+}
+
+/// Wait for a plugin hook to exit, killing it if it overruns `timeout`.
+/// Synchronous — the runtime crate has no async runtime; callers that must not
+/// block an executor (the `effect/` loop) wrap `run_plugin_hooks` in
+/// `spawn_blocking`.
+fn wait_hook_bounded(child: &mut std::process::Child, plugin: &str, hook: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    tracing::warn!(plugin = %plugin, hook = %hook, %status, "plugin hook failed");
+                }
+                return;
+            },
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::warn!(plugin = %plugin, hook = %hook, "plugin hook timed out; killed");
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            },
+            Err(err) => {
+                tracing::warn!(plugin = %plugin, error = %err, "plugin hook wait failed");
+                return;
+            },
+        }
+    }
 }
 
 fn load_plugin_manifest(path: &Path) -> Result<(PathBuf, PathBuf, PluginManifest)> {
@@ -329,5 +360,46 @@ mod tests {
         let json = serde_json::to_string(&manifest).expect("serialize");
         assert!(json.contains("\"capabilities\""));
         assert!(!json.contains("\"permissions\""));
+    }
+
+    #[test]
+    fn hook_overrunning_timeout_is_killed() {
+        use std::time::{Duration, Instant};
+        // A hook that sleeps far past the timeout must be killed, and
+        // wait_hook_bounded must return promptly (no permanent hang).
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 10")
+            .spawn()
+            .expect("spawn sleep");
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 11 127.0.0.1 >NUL"])
+            .spawn()
+            .expect("spawn ping");
+        let start = Instant::now();
+        super::wait_hook_bounded(&mut child, "test", "hook", Duration::from_millis(150));
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "should return promptly after killing the overrunning hook"
+        );
+    }
+
+    #[test]
+    fn hook_that_exits_quickly_returns_without_kill() {
+        use std::time::{Duration, Instant};
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("spawn exit");
+        let start = Instant::now();
+        super::wait_hook_bounded(&mut child, "test", "hook", Duration::from_secs(30));
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 }

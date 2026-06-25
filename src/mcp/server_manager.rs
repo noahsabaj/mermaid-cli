@@ -206,4 +206,38 @@ impl McpServerManager {
             client.shutdown().await;
         }
     }
+
+    /// Stop a single named server: kill its child via the transport. The
+    /// stdout-reader task then exits on EOF — no explicit abort needed. Returns
+    /// `true` if a server matched.
+    ///
+    /// The registry entry lingers (the manager is shared immutably behind an
+    /// `Arc`, so the `HashMap` can't be mutated here), but the child's stdin
+    /// pipe is now closed: a later `call_tool` to a stopped server fails fast
+    /// (broken pipe), not a hang. Fully removing the entry would need
+    /// interior-mutability on the manager.
+    pub async fn stop_server(&self, name: &str) -> bool {
+        match self.servers.get(name) {
+            Some(client) => {
+                info!("Stopping MCP server: {}", name);
+                client.shutdown().await;
+                true
+            },
+            None => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_unknown_server_returns_false() {
+        // No servers configured ⇒ empty manager; stopping an unknown name is a
+        // no-op that reports `false` rather than panicking.
+        let mgr = McpServerManager::start(&HashMap::new()).await;
+        assert!(!mgr.has_servers());
+        assert!(!mgr.stop_server("does-not-exist").await);
+    }
 }

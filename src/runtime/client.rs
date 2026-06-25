@@ -911,6 +911,21 @@ impl RuntimeService {
             .get(id)?
             .with_context(|| format!("process not found: {}", id))?;
         let _ = kill_pid(process.pid);
+        // Wait (bounded) for the old PID to actually exit before respawning —
+        // the kill above is fire-and-forget (async signal / taskkill), so an
+        // immediate respawn can race the old process for its listening port.
+        // Poll until it's gone, then fail-open after 5s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pid_alive(process.pid) {
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    pid = process.pid,
+                    "restart_process: old pid still alive after 5s; respawning anyway"
+                );
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         let mut command = Command::new("sh");
         command.arg("-c").arg(&process.command);
         if let Some(cwd) = process.cwd.as_deref() {
@@ -1214,6 +1229,24 @@ fn kill_pid(pid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Best-effort synchronous liveness check for a pid. The runtime client is sync,
+/// so it can't reuse the async `process_running` in `providers::tool::exec`.
+fn pid_alive(pid: u32) -> bool {
+    if cfg!(windows) {
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+            .unwrap_or(false)
+    } else {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1224,6 +1257,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir.join("runtime.sqlite3")
+    }
+
+    #[test]
+    fn pid_alive_detects_live_and_dead() {
+        // Our own process is alive.
+        assert!(pid_alive(std::process::id()));
+        // A reaped child is dead (#6 — the restart wait polls this).
+        #[cfg(unix)]
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        #[cfg(windows)]
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("spawn exit");
+        let pid = child.id();
+        let _ = child.wait();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert!(!pid_alive(pid));
     }
 
     #[test]
