@@ -247,20 +247,24 @@ impl ToolExecutor for ExecuteCommandTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // `kill_on_drop` on the `Command` — when this
-            // Command is dropped (by select! falling through the
-            // cancel branch), tokio reaps the child. No orphans.
+            // `kill_on_drop` reaps the direct shell child; the cancel branch in
+            // `run_command` additionally tree-kills the process group, so a
+            // forked grandchild (e.g. `sh -c "server &"`) isn't orphaned.
             .kill_on_drop(true);
+
+        // Unix: lead a new process group so cancel can signal the whole group.
+        // (Windows kills the tree by pid via `taskkill /T`, no group needed.)
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         cmd.current_dir(&effective_workdir);
         scrub_secret_env(&mut cmd);
 
-        let run_fut = run_command(cmd, progress, ctx.background.clone());
+        let run_fut = run_command(cmd, progress, ctx.token.clone(), ctx.background.clone());
         let timeout_fut = tokio::time::sleep(Duration::from_secs(timeout_secs));
 
         let outcome = tokio::select! {
             biased;
-            _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             _ = timeout_fut => {
                 let message = format!(
                     "Command timed out after {} seconds and was killed. \
@@ -338,6 +342,7 @@ impl ToolExecutor for ExecuteCommandTool {
                     ToolOutcome::success(output, "moved to background", duration_secs)
                         .with_metadata(metadata)
                 },
+                Ok(CommandRunResult::Cancelled) => ToolOutcome::cancelled(),
                 Err(e) => {
                     let duration_secs = start.elapsed().as_secs_f64();
                     ToolOutcome::error(format!("Command failed: {}", e), duration_secs)
@@ -683,6 +688,32 @@ async fn kill_background_process(pid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Kill a foreground child AND its descendants on cancel. Windows: `taskkill
+/// /T` walks the process tree. Unix: the foreground child is spawned as a
+/// process-group leader (`process_group(0)`), so killing the negative pid hits
+/// the whole group — catching a grandchild the bare `kill_on_drop` would orphan.
+#[cfg(target_os = "windows")]
+async fn kill_process_tree(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn kill_process_tree(pid: u32) {
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+}
+
 /// Windows: `taskkill /T` kills the whole tree (a `cmd /C` wrapper spawns the
 /// real child), `/F` forces it.
 #[cfg(target_os = "windows")]
@@ -808,11 +839,12 @@ struct CommandRunOutput {
     stderr_lines: usize,
 }
 
-/// Result of driving a foreground command: it either ran to completion, or the
-/// user pressed Ctrl+B and it was detached to keep running in the background.
+/// Result of driving a foreground command: ran to completion, was detached
+/// (Ctrl+B), or was cancelled (the turn token fired and we killed the tree).
 enum CommandRunResult {
     Completed(CommandRunOutput),
     Detached { pid: u32, log_path: PathBuf },
+    Cancelled,
 }
 
 /// Names that must never be inherited by a spawned command. Provider API
@@ -925,6 +957,7 @@ async fn read_capped<R: AsyncRead + Unpin>(
 async fn run_command(
     mut cmd: Command,
     progress: tokio::sync::mpsc::Sender<ProgressEvent>,
+    token: tokio_util::sync::CancellationToken,
     background: tokio_util::sync::CancellationToken,
 ) -> std::io::Result<CommandRunResult> {
     let mut child = cmd.spawn()?;
@@ -975,6 +1008,17 @@ async fn run_command(
             // task — it runs on, keeping the child alive and the log filling.
             drop(driver);
             Ok(CommandRunResult::Detached { pid: pid.unwrap_or(0), log_path })
+        }
+        _ = token.cancelled() => {
+            // Turn cancelled (Esc): the detached `driver` would otherwise keep
+            // the child (and any grandchild it forked) alive until it exited on
+            // its own. Kill the whole tree/group, abort the driver, drop the log.
+            if let Some(p) = pid {
+                kill_process_tree(p).await;
+            }
+            driver.abort();
+            let _ = tokio::fs::remove_file(&log_path).await;
+            Ok(CommandRunResult::Cancelled)
         }
         res = done_rx => {
             // Normal completion — drop the tee log.

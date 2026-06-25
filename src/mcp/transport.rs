@@ -150,34 +150,54 @@ impl StdioTransport {
             "params": params,
         });
 
-        // Register pending response before sending (avoid race)
+        // Serialize BEFORE registering the pending entry so a (theoretical)
+        // serialization failure can't leak it.
+        let msg = format!("{}\n", serde_json::to_string(&request)?);
+
+        // Register pending response before sending (avoid the race where the
+        // reader sees the response before we've inserted the sender).
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
             pending.insert(id, tx);
         }
 
-        // Write request as newline-delimited JSON
-        let msg = format!("{}\n", serde_json::to_string(&request)?);
+        // Write the request. On any failure, drop the pending entry first —
+        // otherwise a flaky server slowly grows the map with dead senders.
         {
             let mut stdin = self.stdin.lock().await;
-            stdin.write_all(msg.as_bytes()).await.with_context(|| {
-                format!("Failed to write to MCP server stdin (method: {})", method)
-            })?;
-            stdin.flush().await?;
+            if let Err(e) = stdin.write_all(msg.as_bytes()).await {
+                drop(stdin);
+                self.pending.lock().await.remove(&id);
+                return Err(e).with_context(|| {
+                    format!("Failed to write to MCP server stdin (method: {})", method)
+                });
+            }
+            if let Err(e) = stdin.flush().await {
+                drop(stdin);
+                self.pending.lock().await.remove(&id);
+                return Err(e.into());
+            }
         }
 
-        // Wait for response with timeout
-        let response = timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), rx)
-            .await
-            .map_err(|_| {
-                anyhow!(
+        // Wait for the response, removing the pending entry on EVERY non-success
+        // exit (timeout or channel-closed) so it can't leak. On success the
+        // reader task has already removed it.
+        let response = match timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), rx).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&id);
+                return Err(anyhow!("MCP response channel closed unexpectedly"));
+            },
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(anyhow!(
                     "MCP request timed out after {}s: {}",
                     REQUEST_TIMEOUT_SECS,
                     method
-                )
-            })?
-            .map_err(|_| anyhow!("MCP response channel closed unexpectedly"))?;
+                ));
+            },
+        };
 
         // Check for JSON-RPC error
         if let Some(error) = response.get("error") {

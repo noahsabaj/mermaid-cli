@@ -315,15 +315,17 @@ impl EffectRunner {
                     enriched.append(&mut request.tools);
                     request.tools = enriched;
                 }
-                let _ = crate::runtime::run_plugin_hooks(
+                // Detached + off the blocking pool: never run a plugin hook on
+                // the synchronous dispatch path (it would freeze input/render).
+                self.detached.spawn(fire_plugin_hooks(
                     "prompt_submit",
-                    &serde_json::json!({
+                    serde_json::json!({
                         "turn_id": turn.0,
                         "model_id": request.model_id.clone(),
                         "message_count": request.messages.len(),
                         "tool_count": request.tools.len(),
                     }),
-                );
+                ));
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
@@ -469,15 +471,16 @@ impl EffectRunner {
                                         archive_path: Some(path.display().to_string()),
                                         verification_status: Some("verified".to_string()),
                                     });
-                                let _ = crate::runtime::run_plugin_hooks(
+                                fire_plugin_hooks(
                                     "compaction",
-                                    &serde_json::json!({
+                                    serde_json::json!({
                                         "id": compaction_id,
                                         "task_id": task_id.clone(),
                                         "session_id": conversation_id,
                                         "archive_path": path.display().to_string(),
                                     }),
-                                );
+                                )
+                                .await;
                             }
                             if manager.save_conversation(&conversation).is_ok() {
                                 let _ = tx.send(Msg::SessionSaved).await;
@@ -945,6 +948,11 @@ impl EffectRunner {
             Cmd::StopMcpServer { name } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn(async move {
+                    // Actually kill the child before claiming it's stopped —
+                    // otherwise the UI says "stopped" while the server runs on.
+                    if let Some(mgr) = crate::mcp::manager_ref::get() {
+                        mgr.stop_server(&name).await;
+                    }
                     let _ = tx.send(Msg::McpServerStopped { name }).await;
                 });
             },
@@ -1026,6 +1034,14 @@ impl EffectRunner {
         let shutdown_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
 
         let drain = async {
+            // Gracefully shut down MCP server children (the stdin-EOF →
+            // terminate → kill ladder in `McpServerManager::shutdown`). The
+            // manager lives in a `'static OnceLock` that never drops, so this
+            // explicit call on the exit path is the only thing that reaps those
+            // child processes. No-op when no servers were configured.
+            if let Some(mgr) = crate::mcp::manager_ref::get() {
+                mgr.shutdown().await;
+            }
             for (_, mut scope) in self.scopes.drain() {
                 scope.drain().await;
             }
@@ -1162,11 +1178,24 @@ async fn dispatch_call_model(
     let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
     let ctx = StreamContext::new(token.clone(), stream_tx, turn);
 
-    // Drain stream events into Msgs on a sibling task. Drops when
-    // the sink closes (provider's final `Done` or cancel).
+    // Drain stream events into Msgs on a sibling task. Ends when the sink
+    // closes (provider's final `Done` or completion) OR the turn token is
+    // cancelled — `select!`ing on the token ties this relay to the turn's
+    // structured cancellation so a cancel drops it within a tick instead of
+    // waiting on the next event. (A separate task is required: the relay must
+    // run concurrently with `provider.chat` for streaming backpressure.)
     let relay_tx = msg_tx.clone();
+    let relay_token = token.clone();
     let relay = tokio::spawn(async move {
-        while let Some(event) = stream_rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = relay_token.cancelled() => break,
+                ev = stream_rx.recv() => match ev {
+                    Some(ev) => ev,
+                    None => break,
+                },
+            };
             let msg = match event {
                 StreamEvent::Text(chunk) => Msg::StreamText { turn, chunk },
                 StreamEvent::Reasoning(chunk) => Msg::StreamReasoning { turn, chunk },
@@ -1243,7 +1272,7 @@ async fn dispatch_call_model(
                 }
             }
             let error = classify_error_for_ui(&e);
-            run_provider_error_hook(&request.model_id, &error);
+            run_provider_error_hook(&request.model_id, &error).await;
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
         },
     }
@@ -1261,8 +1290,17 @@ async fn dispatch_provider_stream(
     let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
     let ctx = StreamContext::new(token.clone(), stream_tx, turn);
     let relay_tx = msg_tx.clone();
+    let relay_token = token.clone();
     let relay = tokio::spawn(async move {
-        while let Some(event) = stream_rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = relay_token.cancelled() => break,
+                ev = stream_rx.recv() => match ev {
+                    Some(ev) => ev,
+                    None => break,
+                },
+            };
             let msg = match event {
                 StreamEvent::Text(chunk) => Msg::StreamText { turn, chunk },
                 StreamEvent::Reasoning(chunk) => Msg::StreamReasoning { turn, chunk },
@@ -1290,7 +1328,7 @@ async fn dispatch_provider_stream(
         Ok(_) | Err(ModelError::Cancelled) => {},
         Err(e) => {
             let error = classify_error_for_ui(&e);
-            run_provider_error_hook(&model_id, &error);
+            run_provider_error_hook(&model_id, &error).await;
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
         },
     }
@@ -1298,17 +1336,28 @@ async fn dispatch_provider_stream(
     let _ = relay.await;
 }
 
-fn run_provider_error_hook(model_id: &str, error: &crate::models::UserFacingError) {
-    let _ = crate::runtime::run_plugin_hooks(
+/// Run plugin hooks OFF the async executor. `run_plugin_hooks` is synchronous —
+/// it spawns hook children and bounded-waits on them — so calling it inline
+/// would block a tokio worker, or (on the `dispatch` path) the whole event loop.
+/// `spawn_blocking` moves it to the blocking pool. Hooks are fire-and-forget
+/// observers, so the result is dropped.
+async fn fire_plugin_hooks(event: &'static str, payload: serde_json::Value) {
+    let _ = tokio::task::spawn_blocking(move || crate::runtime::run_plugin_hooks(event, &payload))
+        .await;
+}
+
+async fn run_provider_error_hook(model_id: &str, error: &crate::models::UserFacingError) {
+    fire_plugin_hooks(
         "provider_error",
-        &serde_json::json!({
+        serde_json::json!({
             "model_id": model_id,
             "summary": &error.summary,
             "message": &error.message,
             "category": format!("{:?}", error.category),
             "recoverable": error.recoverable,
         }),
-    );
+    )
+    .await;
 }
 
 /// Derive a short title for a `/remember` memory from free-text input: the
@@ -1859,8 +1908,17 @@ async fn dispatch_execute_tool(
     // relay loop cleanly.
     let (progress_tx, mut progress_rx) = mpsc::channel(16);
     let relay_tx = msg_tx.clone();
+    let relay_token = token.clone();
     let progress_relay = tokio::spawn(async move {
-        while let Some(event) = progress_rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = relay_token.cancelled() => break,
+                ev = progress_rx.recv() => match ev {
+                    Some(ev) => ev,
+                    None => break,
+                },
+            };
             if relay_tx
                 .send(Msg::ToolProgress {
                     turn,
@@ -1895,7 +1953,7 @@ async fn dispatch_execute_tool(
         "call_id": call_id.0,
         "tool": tool_key,
     });
-    let _ = crate::runtime::run_plugin_hooks("before_tool_use", &before_payload);
+    fire_plugin_hooks("before_tool_use", before_payload).await;
     let outcome = tool.execute(args, ctx).await;
     let after_payload = serde_json::json!({
         "turn_id": turn.0,
@@ -1904,7 +1962,7 @@ async fn dispatch_execute_tool(
         "status": tool_status_label(outcome.status),
         "summary": &outcome.summary,
     });
-    let _ = crate::runtime::run_plugin_hooks("after_tool_use", &after_payload);
+    fire_plugin_hooks("after_tool_use", after_payload).await;
     finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
     let _ = progress_relay.await;
     let _ = msg_tx
