@@ -176,17 +176,17 @@ async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json:
             "ok": true,
             "plugins": store.plugins().list()?,
         })),
-        "pairings" => Ok(serde_json::json!({
-            "ok": true,
-            "pairings": store.pairing_tokens().list()?,
-        })),
+        // NOTE: there is deliberately no `pairings` command. Listing token
+        // hashes + labels over the socket exposed them to any same-UID process;
+        // pairing-token inspection now goes through the owner-only `mermaid pair
+        // list` CLI, which reads the store directly.
         "snapshot" => Ok(serde_json::to_value(
             mermaid_cli::runtime::RuntimeService::from_store(store).snapshot()?,
         )?),
         other => Ok(serde_json::json!({
             "ok": false,
             "error": format!("unknown command: {}", other),
-            "commands": ["health", "sessions", "tasks", "processes", "approvals", "tool_runs", "checkpoints", "plugins", "pairings", "snapshot"],
+            "commands": ["health", "sessions", "tasks", "processes", "approvals", "tool_runs", "checkpoints", "plugins", "snapshot"],
             "json_commands": ["create_task", "run", "update_task", "session_messages", "runtime_snapshot", "runtime_dashboard", "runtime_diagnostics", "runtime_hygiene_preview", "runtime_hygiene_archive", "runtime_task_detail", "runtime_approval_detail", "runtime_checkpoint_detail", "runtime_tasks", "runtime_processes", "runtime_approvals", "runtime_tool_runs", "runtime_checkpoints", "runtime_plugins", "logs", "stop_process", "restart_process", "open_process", "ports", "restore_checkpoint", "approve", "deny", "plugin_preview", "plugin_install", "set_plugin_enabled", "model_info", "set_safety_mode", "pair"],
         })),
     }
@@ -466,14 +466,14 @@ async fn handle_json_command(
             )
         },
         "plugin_preview" => {
-            let preview = mermaid_cli::runtime::plugin_permission_preview(std::path::Path::new(
+            let preview = mermaid_cli::runtime::plugin_capability_preview(std::path::Path::new(
                 str_field(body, "path")?,
             ))?;
             Ok(serde_json::json!({"ok": true, "preview": preview}))
         },
         "plugin_install" => {
             let path = std::path::Path::new(str_field(body, "path")?);
-            let preview = mermaid_cli::runtime::plugin_permission_preview(path)?;
+            let preview = mermaid_cli::runtime::plugin_capability_preview(path)?;
             let plugin = mermaid_cli::runtime::install_plugin_from_path(path)?;
             Ok(serde_json::json!({"ok": true, "preview": preview, "plugin": plugin}))
         },
@@ -496,6 +496,11 @@ async fn handle_json_command(
         "pair" => {
             let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
             let label = body.get("label").and_then(|v| v.as_str());
+            let ttl_days = body
+                .get("ttl_days")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(mermaid_cli::runtime::DEFAULT_PAIRING_TTL_DAYS);
+            let expires_at = mermaid_cli::runtime::pairing_expiry_from_now(ttl_days);
             let (token, hash) = match body.get("token_hash").and_then(|v| v.as_str()) {
                 Some(hash) if !hash.is_empty() => (None, hash.to_string()),
                 _ => {
@@ -503,7 +508,9 @@ async fn handle_json_command(
                     (Some(token), hash)
                 },
             };
-            let record = store.pairing_tokens().create(&hash, label)?;
+            let record = store
+                .pairing_tokens()
+                .create(&hash, label, expires_at.as_deref())?;
             Ok(serde_json::json!({"ok": true, "pairing": record, "token": token}))
         },
         other => Ok(serde_json::json!({
@@ -531,6 +538,9 @@ fn command_requires_auth(command: &str) -> bool {
             | "set_safety_mode"
             | "runtime_hygiene_archive"
             | "pair"
+            // Process logs can carry sensitive command output; require the
+            // pairing token like the other privileged reads/mutations.
+            | "logs"
     )
 }
 
@@ -546,7 +556,8 @@ fn authorize(body: &serde_json::Value) -> Result<bool> {
     };
     let hash = mermaid_cli::runtime::hash_pairing_token(token);
     let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
-    let Some(record) = store.pairing_tokens().get_enabled_by_hash(&hash)? else {
+    // Constant-time hash match + expiry enforced inside verify_token.
+    let Some(record) = store.pairing_tokens().verify_token(&hash)? else {
         return Ok(false);
     };
     store.pairing_tokens().mark_used(&record.id)?;
@@ -607,6 +618,7 @@ mod tests {
             "set_safety_mode",
             "runtime_hygiene_archive",
             "pair",
+            "logs",
         ] {
             assert!(super::command_requires_auth(command), "{command}");
         }
@@ -625,7 +637,6 @@ mod tests {
             "runtime_tool_runs",
             "runtime_checkpoints",
             "runtime_plugins",
-            "logs",
             "ports",
         ] {
             assert!(!super::command_requires_auth(command), "{command}");

@@ -583,7 +583,9 @@ impl RuntimeService {
             compactions: self.store.compactions().list(100)?,
             plugins: self.store.plugins().list()?,
             provider_probes: self.store.provider_probes().list(None, None)?,
-            pairings: self.store.pairing_tokens().list()?,
+            // Redact token hashes — this snapshot is served over the local
+            // socket to same-UID processes without auth.
+            pairings: self.store.pairing_tokens().list_redacted()?,
             safety: crate::app::load_config().unwrap_or_default().safety,
         })
     }
@@ -598,7 +600,7 @@ impl RuntimeService {
         let compactions = self.store.compactions().list(100)?;
         let plugins = self.store.plugins().list()?;
         let provider_probes = self.store.provider_probes().list(None, None)?;
-        let pairings = self.store.pairing_tokens().list()?;
+        let pairings = self.store.pairing_tokens().list_redacted()?;
 
         let running_tasks = tasks
             .iter()

@@ -200,11 +200,10 @@ pub enum Commands {
         #[command(subcommand)]
         command: DaemonCommand,
     },
-    /// Create a remote pairing token
+    /// Manage remote pairing tokens
     Pair {
-        /// Human label for the remote client
-        #[arg(long)]
-        label: Option<String>,
+        #[command(subcommand)]
+        command: PairCommand,
     },
     /// Internal self-QA commands. Hidden from normal help output.
     #[command(hide = true)]
@@ -282,6 +281,26 @@ pub enum PluginCommand {
     Audit {
         /// Path containing plugin.toml
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PairCommand {
+    /// Create a pairing token (the secret is printed once)
+    Create {
+        /// Human label for the remote client
+        #[arg(long)]
+        label: Option<String>,
+        /// Days until the token expires (0 = never expires; default 30)
+        #[arg(long)]
+        ttl_days: Option<i64>,
+    },
+    /// List pairing tokens (id, label, created, expiry, status)
+    List,
+    /// Revoke a pairing token by id
+    Revoke {
+        /// Pairing token id
+        id: String,
     },
 }
 

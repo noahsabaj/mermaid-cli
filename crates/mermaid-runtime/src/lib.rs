@@ -6,11 +6,15 @@
 //! processes, and the future provider/memory/checkpoint tables.
 
 pub mod approval;
+pub mod atomic;
 pub mod checkpoint;
 pub mod daemon;
+mod pathguard;
 pub mod plugin;
 pub mod policy;
 pub mod storage;
+
+pub use atomic::write_atomic;
 
 pub use approval::{ApprovalReplayResult, approve_and_replay, deny_approval};
 pub use checkpoint::{
@@ -18,11 +22,11 @@ pub use checkpoint::{
     restore_checkpoint,
 };
 pub use daemon::{
-    daemon_socket_path, generate_pairing_token, hash_pairing_token, request_daemon_json,
-    request_daemon_text, snapshot_field_from_daemon,
+    DEFAULT_PAIRING_TTL_DAYS, daemon_socket_path, generate_pairing_token, hash_pairing_token,
+    pairing_expiry_from_now, request_daemon_json, request_daemon_text, snapshot_field_from_daemon,
 };
 pub use plugin::{
-    PluginManifest, PluginPermissionPreview, install_plugin_from_path, plugin_permission_preview,
+    PluginCapabilityPreview, PluginManifest, install_plugin_from_path, plugin_capability_preview,
     run_plugin_hooks, validate_plugin_manifest, write_plugin_lockfile,
 };
 pub use policy::{

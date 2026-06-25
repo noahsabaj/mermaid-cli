@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::pathguard::contain_within;
 use crate::{NewApproval, NewCheckpoint, RuntimeStore, data_dir};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,7 +103,9 @@ pub fn create_checkpoint_for_task(
         created_at: chrono::Utc::now().to_rfc3339(),
     };
     let manifest_path = root.join("manifest.json");
-    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+    // Atomic write: a crash mid-write must not leave a half-written manifest —
+    // restore depends on it parsing cleanly.
+    crate::write_atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
 
     if let Ok(store) = RuntimeStore::open_default() {
         let _ = store.checkpoints().create(NewCheckpoint {
@@ -142,7 +145,22 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
     let manifest: CheckpointManifest = serde_json::from_str(&raw)?;
     let project_root = PathBuf::from(&manifest.project_path);
     for file in &manifest.files {
-        let target = project_root.join(&file.path);
+        // The manifest is on-disk state a tampered or shared checkpoint could
+        // have rewritten. Confine every restore target to the recorded project
+        // root — rejecting absolute paths and `..` escapes — before any
+        // copy/create/delete. The create side stores relative in-project paths;
+        // anything that doesn't resolve inside the root is skipped, not run.
+        let target = match contain_within(&project_root, &file.path) {
+            Ok(target) => target,
+            Err(err) => {
+                tracing::warn!(
+                    path = %file.path,
+                    error = %err,
+                    "skipping checkpoint entry that escapes the project root"
+                );
+                continue;
+            },
+        };
         if file.existed {
             let rel = file
                 .snapshot_relpath
@@ -250,6 +268,7 @@ fn snapshot_shadow_git(
 
     run_git(&worktree, ["add", "-A"])?;
     let status = Command::new("git")
+        .args(HOOKS_OFF)
         .arg("diff")
         .arg("--cached")
         .arg("--quiet")
@@ -269,12 +288,20 @@ fn snapshot_shadow_git(
     })
 }
 
+/// Disable repo-provided git hooks on every shadow-git invocation. The shadow
+/// worktree lives under the data dir, but the project's own hooks (and a
+/// tampered shadow repo) must never run as a side effect of taking a
+/// checkpoint. A nonexistent hooks dir ⇒ git runs no hooks (works on Windows
+/// Git too). Mirrors the `core.hooksPath=/dev/null` hardening in `plugin.rs`.
+const HOOKS_OFF: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
+
 fn run_git<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<()> {
     run_git_with_env(cwd, args)
 }
 
 fn run_git_with_env<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<()> {
     let status = Command::new("git")
+        .args(HOOKS_OFF)
         .args(args)
         .current_dir(cwd)
         .env("GIT_AUTHOR_NAME", "Mermaid Checkpoints")
@@ -293,7 +320,11 @@ fn run_git_with_env<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<()> {
 }
 
 fn git_output<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String> {
-    let output = Command::new("git").args(args).current_dir(cwd).output()?;
+    let output = Command::new("git")
+        .args(HOOKS_OFF)
+        .args(args)
+        .current_dir(cwd)
+        .output()?;
     anyhow::ensure!(output.status.success(), "shadow git command failed");
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -347,6 +378,60 @@ mod tests {
             "before"
         );
         assert!(!root.join("new.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_rejects_paths_escaping_project_root() {
+        // Build a real checkpoint, then tamper its on-disk manifest to add
+        // entries whose paths escape the project root (one `..`-relative, one
+        // absolute), and confirm restore refuses to touch the outside target.
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("mermaid_ckpt_escape_{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "before").unwrap();
+
+        let manifest = create_checkpoint(&root, &[root.join("a.txt")], None).unwrap();
+
+        // A file OUTSIDE the project root that a tampered manifest tries to delete.
+        let outside = std::env::temp_dir().join(format!("mermaid_ckpt_outside_{pid}.txt"));
+        std::fs::write(&outside, "do not delete").unwrap();
+        let outside_name = outside.file_name().unwrap().to_string_lossy().to_string();
+
+        let manifest_path = data_dir()
+            .unwrap()
+            .join("checkpoints")
+            .join(&manifest.id)
+            .join("manifest.json");
+        let mut tampered: CheckpointManifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        // existed=false ⇒ restore would try to remove the resolved target.
+        tampered.files.push(CheckpointFile {
+            path: format!("../{outside_name}"),
+            existed: false,
+            snapshot_relpath: None,
+        });
+        tampered.files.push(CheckpointFile {
+            path: outside.display().to_string(),
+            existed: false,
+            snapshot_relpath: None,
+        });
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&tampered).unwrap(),
+        )
+        .unwrap();
+
+        let _ = restore_checkpoint(&manifest.id).unwrap();
+
+        assert!(
+            outside.exists(),
+            "restore must not delete a file outside the project root"
+        );
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "do not delete");
+
+        let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

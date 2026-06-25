@@ -4,6 +4,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::pathguard::contain_within;
 use crate::{ApprovalRecord, RuntimeStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,7 +124,7 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
         "write_file" => {
             let path = string_arg(args, "path")?;
             let content = string_arg(args, "content")?;
-            let target = resolve_replay_path(&workdir, path)?;
+            let target = contain_within(&workdir, path)?;
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -134,19 +135,19 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
             let path = string_arg(args, "path")?;
             let old = string_arg(args, "old_string")?;
             let new = string_arg(args, "new_string")?;
-            let target = resolve_replay_path(&workdir, path)?;
+            let target = contain_within(&workdir, path)?;
             replay_edit(&target, old, new)?;
             Ok(format!("replayed edit_file {}", target.display()))
         },
         "delete_file" => {
             let path = string_arg(args, "path")?;
-            let target = resolve_replay_path(&workdir, path)?;
+            let target = contain_within(&workdir, path)?;
             std::fs::remove_file(&target)?;
             Ok(format!("replayed delete_file {}", target.display()))
         },
         "create_directory" => {
             let path = string_arg(args, "path")?;
-            let target = resolve_replay_path(&workdir, path)?;
+            let target = contain_within(&workdir, path)?;
             std::fs::create_dir_all(&target)?;
             Ok(format!("replayed create_directory {}", target.display()))
         },
@@ -156,11 +157,14 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
 
 fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<String> {
     let command = string_arg(args, "command")?;
-    let effective_dir = args
-        .get("working_dir")
-        .and_then(|value| value.as_str())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workdir.to_path_buf());
+    // Confine the replay cwd to the recorded workdir. The command itself is an
+    // already-approved shell string (replayed verbatim), but a tampered
+    // `working_dir` must not let the replay escape the project root — this
+    // mirrors the containment the write/edit/delete arms already apply.
+    let effective_dir = match args.get("working_dir").and_then(|value| value.as_str()) {
+        Some(dir) => contain_within(workdir, dir)?,
+        None => workdir.to_path_buf(),
+    };
     let mode = args
         .get("mode")
         .and_then(|value| value.as_str())
@@ -207,36 +211,6 @@ fn replay_edit(path: &Path, old_string: &str, new_string: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolve_replay_path(workdir: &Path, path: &str) -> Result<PathBuf> {
-    let candidate = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        workdir.join(path)
-    };
-    let lexical = normalize_lexical(&candidate);
-    let root = normalize_lexical(workdir);
-    anyhow::ensure!(
-        lexical.starts_with(&root),
-        "approval replay path escapes workdir: {}",
-        path
-    );
-    Ok(lexical)
-}
-
-fn normalize_lexical(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {},
-            std::path::Component::ParentDir => {
-                out.pop();
-            },
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
 fn string_arg<'a>(args: &'a serde_json::Value, name: &str) -> Result<&'a str> {
     args.get(name)
         .and_then(|value| value.as_str())
@@ -248,9 +222,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_replay_path_rejects_parent_escape() {
+    fn replay_path_rejects_parent_escape() {
         let root = std::env::temp_dir().join("mermaid_replay_root");
-        assert!(resolve_replay_path(&root, "../escape").is_err());
+        assert!(contain_within(&root, "../escape").is_err());
+    }
+
+    #[test]
+    fn replay_execute_command_rejects_escaping_working_dir() {
+        let root = std::env::temp_dir().join(format!("mermaid_replay_exec_{}", std::process::id()));
+        let action = serde_json::json!({
+            "tool": "execute_command",
+            "workdir": root,
+            "args": {"command": "true", "working_dir": "../escape"}
+        });
+        // Containment fails before any shell is spawned, so this is portable.
+        assert!(
+            replay_pending_action(&action).is_err(),
+            "an escaping working_dir must be rejected before exec"
+        );
     }
 
     #[test]

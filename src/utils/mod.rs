@@ -2,7 +2,6 @@
 // All external access must go through this gateway
 
 // Private submodules - not directly accessible from outside
-mod atomic;
 mod auth;
 mod checks;
 mod logger;
@@ -16,7 +15,6 @@ mod timestamp;
 mod tokenizer;
 
 // Public re-exports - the ONLY way to access utils functionality
-pub use atomic::write_atomic;
 pub use auth::{resolve_api_key, resolve_api_key_with_fallback};
 pub use checks::{CheckResult, check_ollama_available, check_ollama_model};
 pub use logger::{init_logger, log_debug, log_error, log_info, log_progress, log_warn};

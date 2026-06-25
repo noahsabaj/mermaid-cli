@@ -173,7 +173,7 @@ impl ConversationManager {
         let json = serde_json::to_string_pretty(conversation)?;
         // Atomic write: a crash mid-save must not empty/corrupt the session
         // file (this is the hot path, rewritten after nearly every message).
-        crate::utils::write_atomic(&path, json.as_bytes())?;
+        crate::runtime::write_atomic(&path, json.as_bytes())?;
 
         Ok(())
     }
@@ -188,7 +188,7 @@ impl ConversationManager {
         let json = serde_json::to_string_pretty(archive)?;
         // Atomic write: the archive is the ONLY durable copy of messages
         // dropped by a compaction — a partial write would lose them.
-        crate::utils::write_atomic(&path, json.as_bytes())?;
+        crate::runtime::write_atomic(&path, json.as_bytes())?;
         Ok(path)
     }
 
