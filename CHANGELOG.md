@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Daemon, checkpoint, and storage hardening (review axis 3).**
+  - Approval replay is now single-shot — a *denied* approval can no longer be
+    resurrected as approved, and a stored action can't be replayed N times.
+  - `restore_checkpoint` confines every restored path to the checkpoint's
+    recorded project root; a tampered manifest can no longer write or delete
+    files outside it (absolute paths and `..` escapes are rejected). The
+    approval-replay exec path gets the same containment.
+  - Pairing tokens are matched in constant time (no SQL `=` timing channel); the
+    unauthenticated `pairings` socket command that exposed token hashes is
+    removed; `logs` now requires the pairing token; daemon snapshots redact token
+    hashes.
+  - On Windows the data dir (SQLite DB with token hashes + transcripts) is locked
+    to the current user via `icacls` instead of inheriting default ACLs.
+  - Checkpoint shadow-git commands run with hooks disabled, and checkpoint /
+    plugin manifests are written atomically.
+
+### Changed
+
+- **BREAKING — pairing tokens now expire.** New tokens default to a 30-day TTL.
+  `mermaid pair` becomes `mermaid pair create [--label L] [--ttl-days N]`
+  (`--ttl-days 0` = never expires), plus `mermaid pair list` and `mermaid pair
+  revoke <id>`. Existing tokens get a 30-day grace window from first upgrade.
+- **BREAKING — plugins install disabled.** `mermaid plugin install` no longer
+  auto-enables a plugin; run `mermaid plugin enable <id>` (which now prints the
+  plugin's declared capabilities) to activate its hooks. The manifest
+  `permissions` field is renamed `capabilities` and documented as advisory
+  disclosure, not a sandbox.
+
 ## [0.11.1] - 2026-06-23
 
 ### Fixed

@@ -16,7 +16,7 @@ use crate::{
     utils::{resolve_api_key, resolve_api_key_with_fallback},
 };
 
-use super::{Commands, GitHost, OutputFormat, PluginCommand, PrCommand, QaCommand};
+use super::{Commands, GitHost, OutputFormat, PairCommand, PluginCommand, PrCommand, QaCommand};
 
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
@@ -133,8 +133,8 @@ pub async fn handle_command(
             super::daemon::handle_daemon_command(command)?;
             Ok(true)
         },
-        Commands::Pair { label } => {
-            pair(label.as_deref())?;
+        Commands::Pair { command } => {
+            handle_pair(command)?;
             Ok(true)
         },
         Commands::Qa { command } => {
@@ -1301,10 +1301,17 @@ fn restore_checkpoint(id: &str) -> Result<()> {
 fn handle_plugin(command: &PluginCommand) -> Result<()> {
     match command {
         PluginCommand::Install { path } => {
-            let preview = crate::runtime::plugin_permission_preview(path)?;
-            print_plugin_permission_preview(&preview);
+            let preview = crate::runtime::plugin_capability_preview(path)?;
+            print_plugin_capability_preview(&preview);
             let record = crate::runtime::install_plugin_from_path(path)?;
-            println!("Installed plugin {} ({})", record.name, record.id);
+            println!(
+                "Installed plugin {} ({}) — DISABLED.",
+                record.name, record.id
+            );
+            println!(
+                "Run `mermaid plugin enable {}` to activate it (this runs the plugin's hook code).",
+                record.id
+            );
         },
         PluginCommand::List => {
             let plugins = RuntimeClient::auto().list_plugins()?.value;
@@ -1327,8 +1334,20 @@ fn handle_plugin(command: &PluginCommand) -> Result<()> {
             }
         },
         PluginCommand::Enable { id } => {
-            RuntimeClient::auto().set_plugin_enabled(id, true)?;
-            println!("Enabled plugin {}", id);
+            // Surface what the plugin declares before activating its native code.
+            let client = RuntimeClient::auto();
+            if let Some(plugin) = client
+                .list_plugins()?
+                .value
+                .into_iter()
+                .find(|p| p.id == *id || p.name == *id)
+                && let Ok(preview) =
+                    crate::runtime::plugin_capability_preview(Path::new(&plugin.source))
+            {
+                print_plugin_capability_preview(&preview);
+            }
+            client.set_plugin_enabled(id, true)?;
+            println!("Enabled plugin {} — its hooks will now run.", id);
         },
         PluginCommand::Disable { id } => {
             RuntimeClient::auto().set_plugin_enabled(id, false)?;
@@ -1344,25 +1363,28 @@ fn handle_plugin(command: &PluginCommand) -> Result<()> {
             let manifest: crate::runtime::PluginManifest = toml::from_str(&raw)?;
             let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
             crate::runtime::validate_plugin_manifest(&manifest, root)?;
-            let preview = crate::runtime::plugin_permission_preview(path)?;
+            let preview = crate::runtime::plugin_capability_preview(path)?;
             println!("Plugin manifest is valid: {}", manifest.name);
-            print_plugin_permission_preview(&preview);
+            print_plugin_capability_preview(&preview);
         },
     }
     Ok(())
 }
 
-fn print_plugin_permission_preview(preview: &crate::runtime::PluginPermissionPreview) {
-    println!("Permission preview for plugin {}", preview.name);
-    if preview.declared_permissions.is_empty() && preview.permissions_toml.is_none() {
-        println!("  permissions: (none declared)");
+fn print_plugin_capability_preview(preview: &crate::runtime::PluginCapabilityPreview) {
+    println!(
+        "Capabilities declared by plugin {} (advisory, not sandbox-enforced):",
+        preview.name
+    );
+    if preview.declared_capabilities.is_empty() && preview.capabilities_toml.is_none() {
+        println!("  capabilities: (none declared)");
     } else {
-        if !preview.declared_permissions.is_empty() {
-            println!("  declared: {}", preview.declared_permissions.join(", "));
+        if !preview.declared_capabilities.is_empty() {
+            println!("  declared: {}", preview.declared_capabilities.join(", "));
         }
-        if let Some(value) = &preview.permissions_toml {
+        if let Some(value) = &preview.capabilities_toml {
             println!(
-                "  permissions.toml: {}",
+                "  capabilities.toml: {}",
                 serde_json::to_string(value).unwrap_or_else(|_| "<unprintable>".to_string())
             );
         }
@@ -1378,18 +1400,56 @@ fn print_plugin_permission_preview(preview: &crate::runtime::PluginPermissionPre
     }
 }
 
-fn pair(label: Option<&str>) -> Result<()> {
-    let (token, hash) = crate::runtime::generate_pairing_token()?;
-    let record = RuntimeStore::open_default()?
-        .pairing_tokens()
-        .create(&hash, label)?;
-    println!("Pairing token id: {}", record.id);
-    println!("Pairing token: {}", token);
-    println!(
-        "Use with daemon JSON by setting {}.",
-        crate::runtime::daemon::DAEMON_TOKEN_ENV
-    );
-    println!("Store this now; Mermaid will not print it again.");
+fn handle_pair(command: &PairCommand) -> Result<()> {
+    let store = RuntimeStore::open_default()?;
+    match command {
+        PairCommand::Create { label, ttl_days } => {
+            let ttl = ttl_days.unwrap_or(crate::runtime::DEFAULT_PAIRING_TTL_DAYS);
+            let expires_at = crate::runtime::pairing_expiry_from_now(ttl);
+            let (token, hash) = crate::runtime::generate_pairing_token()?;
+            let record =
+                store
+                    .pairing_tokens()
+                    .create(&hash, label.as_deref(), expires_at.as_deref())?;
+            println!("Pairing token id: {}", record.id);
+            println!("Pairing token: {}", token);
+            println!(
+                "Expires: {}",
+                record.expires_at.as_deref().unwrap_or("never")
+            );
+            println!(
+                "Use with daemon JSON by setting {}.",
+                crate::runtime::daemon::DAEMON_TOKEN_ENV
+            );
+            println!("Store this now; Mermaid will not print it again.");
+        },
+        PairCommand::List => {
+            let tokens = store.pairing_tokens().list()?;
+            if tokens.is_empty() {
+                println!("No pairing tokens.");
+            } else {
+                // Never print token_hash — only the non-secret metadata.
+                for t in tokens {
+                    println!(
+                        "{} [{}] label={} created={} expires={} last_used={}",
+                        t.id,
+                        if t.enabled { "active" } else { "revoked" },
+                        t.label.as_deref().unwrap_or("-"),
+                        t.created_at,
+                        t.expires_at.as_deref().unwrap_or("never"),
+                        t.last_used_at.as_deref().unwrap_or("never"),
+                    );
+                }
+            }
+        },
+        PairCommand::Revoke { id } => {
+            if store.pairing_tokens().revoke(id)? {
+                println!("Revoked pairing token {id}");
+            } else {
+                println!("No active pairing token with id {id}");
+            }
+        },
+    }
     Ok(())
 }
 

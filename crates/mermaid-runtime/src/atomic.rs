@@ -2,10 +2,11 @@
 //!
 //! Plain `fs::write` truncates the target to zero length and then writes the
 //! new contents in place. A crash / kill / disk-full between those two steps
-//! leaves the file empty or half-written — catastrophic for session and
-//! checkpoint state that is rewritten in full on every save. [`write_atomic`]
-//! writes to a temp sibling, fsyncs it, then renames over the target, so a
-//! reader always sees either the old complete file or the new complete file.
+//! leaves the file empty or half-written — catastrophic for session,
+//! checkpoint, and plugin-lockfile state that is rewritten in full on every
+//! save. [`write_atomic`] writes to a temp sibling, fsyncs it, then renames over
+//! the target, so a reader always sees either the old complete file or the new
+//! complete file.
 
 use std::fs::{self, File};
 use std::io::Write;

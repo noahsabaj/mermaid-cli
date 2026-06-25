@@ -384,6 +384,8 @@ pub struct PairingTokenRecord {
     pub enabled: bool,
     pub created_at: String,
     pub last_used_at: Option<String>,
+    /// RFC3339 expiry. `None` = never expires (opt-in via `--ttl-days 0`).
+    pub expires_at: Option<String>,
 }
 
 /// SQLite-backed durable runtime state.
@@ -404,6 +406,35 @@ impl RuntimeStore {
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        // Windows has no mode bits, so the DB (token hashes, transcripts) would
+        // otherwise inherit the parent's default ACL. Lock it to the current
+        // user via `icacls`. A sentinel makes this run once (first open, or
+        // first open after upgrade for an already-loose dir) rather than on
+        // every store open — the daemon opens the store per request. Best-effort
+        // like the Unix branch: never fail the store open on an ACL hiccup.
+        #[cfg(windows)]
+        {
+            let sentinel = dir.join(".acl-hardened");
+            if !sentinel.exists()
+                && let Ok(user) = std::env::var("USERNAME")
+                && !user.is_empty()
+            {
+                let hardened = std::process::Command::new("icacls")
+                    .arg(&dir)
+                    .arg("/inheritance:r")
+                    .arg("/grant:r")
+                    .arg(format!("{user}:(OI)(CI)F"))
+                    .arg("/T")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|status| status.success())
+                    .unwrap_or(false);
+                if hardened {
+                    let _ = std::fs::write(&sentinel, b"1");
+                }
+            }
         }
         Self::open(dir.join("runtime.sqlite3"))
     }
@@ -630,7 +661,8 @@ impl RuntimeStore {
                 label TEXT,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
-                last_used_at TEXT
+                last_used_at TEXT,
+                expires_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_pairing_tokens_enabled
                 ON pairing_tokens(enabled, created_at);
@@ -644,6 +676,18 @@ impl RuntimeStore {
         ensure_column(&self.conn, "approvals", "archive_reason", "TEXT")?;
         ensure_column(&self.conn, "checkpoints", "archived_at", "TEXT")?;
         ensure_column(&self.conn, "checkpoints", "archive_reason", "TEXT")?;
+        // Pairing-token TTL. When the column is first added to an existing DB,
+        // backfill live tokens with a 30-day grace window from now rather than
+        // expiring them instantly on upgrade. Fresh DBs already have the column
+        // (so no backfill) and only tokens minted with `--ttl-days 0` keep a
+        // NULL (never-expires) value going forward.
+        if ensure_column(&self.conn, "pairing_tokens", "expires_at", "TEXT")? {
+            let grace = (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+            self.conn.execute(
+                "UPDATE pairing_tokens SET expires_at = ?1 WHERE expires_at IS NULL",
+                params![grace],
+            )?;
+        }
 
         let version: i32 = self
             .conn
@@ -994,13 +1038,24 @@ impl ApprovalsRepo<'_> {
     }
 
     pub fn decide(&self, id: &str, user_decision: &str) -> Result<()> {
+        // Single-shot decision: only an undecided, un-archived approval can be
+        // decided. This is the guard behind approval-replay safety — a denied
+        // approval cannot be resurrected as "approved", and because every
+        // replay routes through `decide` first (see
+        // `approval::approve_and_replay`), a stored action cannot be replayed
+        // more than once. Mirrors the `archive` `WHERE archived_at IS NULL`
+        // idempotency pattern below.
         let changed = self.conn.execute(
             "UPDATE approvals
              SET user_decision = ?2, decided_at = ?3
-             WHERE id = ?1",
+             WHERE id = ?1 AND user_decision IS NULL AND archived_at IS NULL",
             params![id, user_decision, now_rfc3339()],
         )?;
-        anyhow::ensure!(changed > 0, "approval not found: {}", id);
+        anyhow::ensure!(
+            changed > 0,
+            "approval {} cannot be decided (already decided, archived, or not found)",
+            id
+        );
         Ok(())
     }
 
@@ -1450,12 +1505,18 @@ pub struct PairingTokensRepo<'a> {
 }
 
 impl PairingTokensRepo<'_> {
-    pub fn create(&self, token_hash: &str, label: Option<&str>) -> Result<PairingTokenRecord> {
+    pub fn create(
+        &self,
+        token_hash: &str,
+        label: Option<&str>,
+        expires_at: Option<&str>,
+    ) -> Result<PairingTokenRecord> {
         let id = fresh_id("pairing");
         self.conn.execute(
-            "INSERT INTO pairing_tokens (id, token_hash, label, enabled, created_at, last_used_at)
-             VALUES (?1, ?2, ?3, 1, ?4, NULL)",
-            params![id, token_hash, label, now_rfc3339()],
+            "INSERT INTO pairing_tokens
+                 (id, token_hash, label, enabled, created_at, last_used_at, expires_at)
+             VALUES (?1, ?2, ?3, 1, ?4, NULL, ?5)",
+            params![id, token_hash, label, now_rfc3339(), expires_at],
         )?;
         self.get(&id)?
             .context("pairing token was inserted but could not be reloaded")
@@ -1464,7 +1525,7 @@ impl PairingTokensRepo<'_> {
     pub fn get(&self, id: &str) -> Result<Option<PairingTokenRecord>> {
         self.conn
             .query_row(
-                "SELECT id, token_hash, label, enabled, created_at, last_used_at
+                "SELECT id, token_hash, label, enabled, created_at, last_used_at, expires_at
                  FROM pairing_tokens WHERE id = ?1",
                 [id],
                 pairing_from_row,
@@ -1473,26 +1534,57 @@ impl PairingTokensRepo<'_> {
             .map_err(Into::into)
     }
 
-    pub fn get_enabled_by_hash(&self, token_hash: &str) -> Result<Option<PairingTokenRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, token_hash, label, enabled, created_at, last_used_at
-                 FROM pairing_tokens WHERE token_hash = ?1 AND enabled = 1",
-                [token_hash],
-                pairing_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
+    /// Look up an enabled, unexpired pairing token by hash.
+    ///
+    /// The hash is **not** matched in SQL (`WHERE token_hash = ?`) — that is a
+    /// DB-level equality on the secret and a theoretical timing channel.
+    /// Instead we fetch the enabled, unexpired candidates (neither predicate is
+    /// secret) and compare each hash in constant time. The candidate count is
+    /// tiny and not secret. All candidates are scanned without early exit so the
+    /// timing doesn't reveal which (if any) token matched.
+    pub fn verify_token(&self, token_hash: &str) -> Result<Option<PairingTokenRecord>> {
+        let now = now_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, token_hash, label, enabled, created_at, last_used_at, expires_at
+             FROM pairing_tokens
+             WHERE enabled = 1 AND (expires_at IS NULL OR expires_at > ?1)",
+        )?;
+        let candidates = stmt
+            .query_map([&now], pairing_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut found = None;
+        for record in candidates {
+            if ct_eq(record.token_hash.as_bytes(), token_hash.as_bytes()) {
+                found = Some(record);
+            }
+        }
+        Ok(found)
     }
 
     pub fn list(&self) -> Result<Vec<PairingTokenRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, token_hash, label, enabled, created_at, last_used_at
+            "SELECT id, token_hash, label, enabled, created_at, last_used_at, expires_at
              FROM pairing_tokens ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], pairing_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    /// Like [`list`](Self::list), but with `token_hash` blanked. Use for any
+    /// surface that crosses a trust boundary — e.g. the daemon snapshot served
+    /// over the local socket to same-UID processes. The hash is
+    /// secret-equivalent (it's all `verify_token` compares against) and must
+    /// not leave the store.
+    pub fn list_redacted(&self) -> Result<Vec<PairingTokenRecord>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .map(|mut record| {
+                record.token_hash = String::new();
+                record
+            })
+            .collect())
     }
 
     pub fn mark_used(&self, id: &str) -> Result<()> {
@@ -1502,22 +1594,58 @@ impl PairingTokensRepo<'_> {
         )?;
         Ok(())
     }
+
+    /// Revoke a token by disabling it. Returns `true` if a live token was
+    /// revoked, `false` if it was already disabled or unknown.
+    pub fn revoke(&self, id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE pairing_tokens SET enabled = 0 WHERE id = ?1 AND enabled = 1",
+            params![id],
+        )?;
+        Ok(changed > 0)
+    }
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+/// Add `column` to `table` if it is missing. Returns `true` iff the column was
+/// just created (so the caller can run a one-time backfill).
+///
+/// SQL identifiers cannot be bound as `?` parameters, so `table`/`column`/
+/// `definition` are interpolated. All call sites pass compile-time constants
+/// today; the validation below makes that a hard invariant rather than a latent
+/// injection footgun if a future caller ever threads in dynamic input.
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<bool> {
+    fn is_sql_identifier(s: &str) -> bool {
+        let mut chars = s.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+    const ALLOWED_DEFINITIONS: &[&str] = &["TEXT", "INTEGER", "REAL", "BLOB"];
+    anyhow::ensure!(
+        is_sql_identifier(table),
+        "invalid table identifier: {table}"
+    );
+    anyhow::ensure!(
+        is_sql_identifier(column),
+        "invalid column identifier: {column}"
+    );
+    anyhow::ensure!(
+        ALLOWED_DEFINITIONS.contains(&definition),
+        "unsupported column definition: {definition}"
+    );
+
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let name: String = row.get(1)?;
         if name == column {
-            return Ok(());
+            return Ok(false);
         }
     }
     conn.execute(
         &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
         [],
     )?;
-    Ok(())
+    Ok(true)
 }
 
 pub fn data_dir() -> Result<PathBuf> {
@@ -1688,6 +1816,7 @@ fn pairing_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairingTokenRec
         enabled: enabled != 0,
         created_at: row.get("created_at")?,
         last_used_at: row.get("last_used_at")?,
+        expires_at: row.get("expires_at")?,
     })
 }
 
@@ -1733,6 +1862,21 @@ impl std::error::Error for UnknownRuntimeEnum {}
 
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// Constant-time byte-slice equality. Unlike `==` (or a SQL `=`), it never
+/// short-circuits on the first differing byte, so it leaks no timing signal
+/// about how much of a secret matched. Lengths are compared first; the length
+/// of a token hash is fixed and not secret.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn fresh_id(prefix: &str) -> String {
@@ -1907,6 +2051,50 @@ mod tests {
     }
 
     #[test]
+    fn approval_decide_is_single_shot() {
+        let path = temp_db("approval_decide_guard");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let make = |action: &str| {
+            store
+                .approvals()
+                .create(NewApproval {
+                    task_id: None,
+                    proposed_action: action.to_string(),
+                    risk_classification: "file_mutation".to_string(),
+                    policy_decision: "ask".to_string(),
+                    args_summary: None,
+                    checkpoint_id: None,
+                    pending_action_json: None,
+                })
+                .expect("create approval")
+        };
+
+        // A second decision on an already-decided approval is rejected — this
+        // is what stops a stored action from being replayed N times.
+        let a = make("write_file a");
+        store
+            .approvals()
+            .decide(&a.id, "approved")
+            .expect("first decide");
+        assert!(
+            store.approvals().decide(&a.id, "approved").is_err(),
+            "re-approving an approved approval must be rejected"
+        );
+
+        // A denied approval cannot be resurrected as approved.
+        let b = make("write_file b");
+        store.approvals().decide(&b.id, "denied").expect("deny");
+        assert!(
+            store.approvals().decide(&b.id, "approved").is_err(),
+            "a denied approval must not be re-decidable as approved"
+        );
+        let reloaded = store.approvals().get(&b.id).unwrap().unwrap();
+        assert_eq!(reloaded.user_decision.as_deref(), Some("denied"));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn archived_approvals_and_checkpoints_are_hidden_from_visible_lists() {
         let path = temp_db("archive_visibility");
         let store = RuntimeStore::open(&path).expect("open store");
@@ -2051,7 +2239,7 @@ mod tests {
 
         let pairing = store
             .pairing_tokens()
-            .create("hash", Some("phone"))
+            .create("hash", Some("phone"), None)
             .expect("pairing");
         store.pairing_tokens().mark_used(&pairing.id).unwrap();
         assert!(
@@ -2063,6 +2251,67 @@ mod tests {
                 .last_used_at
                 .is_some()
         );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn pairing_token_expiry_and_revoke() {
+        let path = temp_db("pairing_ttl");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let tokens = store.pairing_tokens();
+
+        // A never-expiring token verifies.
+        let live = tokens
+            .create("live_hash", Some("a"), None)
+            .expect("create live");
+        assert!(tokens.verify_token("live_hash").unwrap().is_some());
+
+        // A future expiry still verifies; a past expiry does not.
+        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        tokens
+            .create("future_hash", None, Some(&future))
+            .expect("create future");
+        assert!(tokens.verify_token("future_hash").unwrap().is_some());
+
+        let past = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        tokens
+            .create("past_hash", None, Some(&past))
+            .expect("create past");
+        assert!(
+            tokens.verify_token("past_hash").unwrap().is_none(),
+            "an expired token must not verify"
+        );
+
+        // Revoking disables the token.
+        assert!(tokens.revoke(&live.id).unwrap());
+        assert!(tokens.verify_token("live_hash").unwrap().is_none());
+        assert!(
+            !tokens.revoke(&live.id).unwrap(),
+            "double revoke is a no-op"
+        );
+
+        // A non-matching hash never verifies.
+        assert!(tokens.verify_token("nope").unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn ct_eq_matches_only_identical_bytes() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"ab"));
+        assert!(!ct_eq(b"", b"x"));
+        assert!(ct_eq(b"", b""));
+    }
+
+    #[test]
+    fn ensure_column_rejects_non_identifier() {
+        let path = temp_db("ensure_col");
+        let store = RuntimeStore::open(&path).expect("open store");
+        assert!(ensure_column(&store.conn, "approvals; DROP", "x", "TEXT").is_err());
+        assert!(ensure_column(&store.conn, "approvals", "x-y", "TEXT").is_err());
+        assert!(ensure_column(&store.conn, "approvals", "x", "TEXT; DROP").is_err());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

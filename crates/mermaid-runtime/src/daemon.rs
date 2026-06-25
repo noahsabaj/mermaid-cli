@@ -11,6 +11,18 @@ use crate::data_dir;
 
 pub const DAEMON_TOKEN_ENV: &str = "MERMAID_DAEMON_TOKEN";
 
+/// Default lifetime for a freshly minted pairing token. Tokens expire so a
+/// leaked or forgotten token can't be replayed indefinitely; `--ttl-days 0`
+/// opts out for long-lived automation.
+pub const DEFAULT_PAIRING_TTL_DAYS: i64 = 30;
+
+/// RFC3339 expiry `ttl_days` from now, or `None` when `ttl_days <= 0`
+/// (never expires). Shared by the daemon `pair` command and the local CLI so
+/// both honor the same TTL semantics.
+pub fn pairing_expiry_from_now(ttl_days: i64) -> Option<String> {
+    (ttl_days > 0).then(|| (chrono::Utc::now() + chrono::Duration::days(ttl_days)).to_rfc3339())
+}
+
 pub fn daemon_socket_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("mermaidd.sock"))
 }

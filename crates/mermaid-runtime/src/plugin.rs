@@ -23,19 +23,28 @@ pub struct PluginManifest {
     pub hooks: Vec<String>,
     #[serde(default)]
     pub mcp: Vec<String>,
+    /// Capabilities the plugin *declares* it uses (e.g. "network", "filesystem").
+    /// ADVISORY ONLY — surfaced at install/enable time for informed consent, not
+    /// enforced. A plugin hook is a native child process running with the user's
+    /// privileges; the runtime cannot confine it to this list without OS-level
+    /// sandboxing, so the field documents intent rather than granting a sandbox.
+    /// The real boundary is the explicit `mermaid plugin enable` decision.
     #[serde(default)]
-    pub permissions: Vec<String>,
+    pub capabilities: Vec<String>,
     #[serde(default)]
     pub prompts: Vec<String>,
     #[serde(default)]
     pub bin: Vec<String>,
 }
 
+/// A summary of what a plugin declares it will do, shown before install/enable.
+/// These are advisory disclosures for informed consent, not an enforced sandbox
+/// (see [`PluginManifest::capabilities`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginPermissionPreview {
+pub struct PluginCapabilityPreview {
     pub name: String,
-    pub declared_permissions: Vec<String>,
-    pub permissions_toml: Option<toml::Value>,
+    pub declared_capabilities: Vec<String>,
+    pub capabilities_toml: Option<toml::Value>,
     pub hooks: Vec<String>,
     pub mcp: Vec<String>,
     pub bin: Vec<String>,
@@ -62,28 +71,32 @@ pub fn install_plugin_from_path(path: &Path) -> Result<PluginInstallRecord> {
         name: manifest.name,
         source: root.display().to_string(),
         version: manifest.version,
-        enabled: true,
+        // Installed plugins are DISABLED by default. A hook runs native code
+        // with the user's privileges, so activation is a separate, explicit
+        // decision (`mermaid plugin enable <id>`) — never a side effect of
+        // install. This is the meaningful boundary in a hook system.
+        enabled: false,
         manifest_json,
     })?;
     write_plugin_lockfile()?;
     Ok(record)
 }
 
-pub fn plugin_permission_preview(path: &Path) -> Result<PluginPermissionPreview> {
+pub fn plugin_capability_preview(path: &Path) -> Result<PluginCapabilityPreview> {
     let (_manifest_path, root, manifest) = load_plugin_manifest(path)?;
     validate_plugin_manifest(&manifest, &root)?;
-    let permissions_path = root.join("permissions.toml");
-    let permissions_toml = if permissions_path.exists() {
-        let raw = std::fs::read_to_string(&permissions_path)
-            .with_context(|| format!("failed to read {}", permissions_path.display()))?;
+    let capabilities_path = root.join("capabilities.toml");
+    let capabilities_toml = if capabilities_path.exists() {
+        let raw = std::fs::read_to_string(&capabilities_path)
+            .with_context(|| format!("failed to read {}", capabilities_path.display()))?;
         Some(toml::from_str(&raw)?)
     } else {
         None
     };
-    Ok(PluginPermissionPreview {
+    Ok(PluginCapabilityPreview {
         name: manifest.name,
-        declared_permissions: manifest.permissions,
-        permissions_toml,
+        declared_capabilities: manifest.capabilities,
+        capabilities_toml,
         hooks: manifest.hooks,
         mcp: manifest.mcp,
         bin: manifest.bin,
@@ -97,7 +110,8 @@ pub fn write_plugin_lockfile() -> Result<PathBuf> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, serde_json::to_vec_pretty(&plugins)?)?;
+    // Atomic write so a crash can't leave a truncated lockfile.
+    crate::write_atomic(&path, &serde_json::to_vec_pretty(&plugins)?)?;
     Ok(path)
 }
 
@@ -105,6 +119,10 @@ pub fn run_plugin_hooks(event: &str, payload: &serde_json::Value) -> Result<()> 
     let store = RuntimeStore::open_default()?;
     let payload_bytes = serde_json::to_string(payload)?.into_bytes();
     for plugin in store.plugins().list()? {
+        // The enabled flag is the trust boundary: a plugin runs native hook
+        // code only after an explicit `plugin enable`. Declared capabilities are
+        // advisory and intentionally not consulted here — they cannot constrain
+        // a native child process.
         if !plugin.enabled {
             continue;
         }
@@ -292,10 +310,24 @@ mod tests {
             agents: vec![],
             hooks: vec![],
             mcp: vec![],
-            permissions: vec![],
+            capabilities: vec![],
             prompts: vec![],
             bin: vec![],
         };
         assert!(validate_plugin_manifest(&manifest, &root).is_err());
+    }
+
+    #[test]
+    fn manifest_round_trips_capabilities_field() {
+        let toml_src = r#"
+            name = "demo"
+            capabilities = ["network", "filesystem"]
+        "#;
+        let manifest: PluginManifest = toml::from_str(toml_src).expect("parse manifest");
+        assert_eq!(manifest.capabilities, vec!["network", "filesystem"]);
+        // Serializes back under the new key, and the old key is gone.
+        let json = serde_json::to_string(&manifest).expect("serialize");
+        assert!(json.contains("\"capabilities\""));
+        assert!(!json.contains("\"permissions\""));
     }
 }
