@@ -170,6 +170,28 @@ pub enum ChatMessageKind {
     ContextCheckpoint,
 }
 
+/// Why a model stopped generating, normalized across providers.
+///
+/// Providers report this as Anthropic `stop_reason`, OpenAI `finish_reason`,
+/// or Gemini `finishReason`. It used to be parsed and discarded, so a
+/// `max_tokens` truncation or a `content_filter`/safety block looked identical
+/// to a clean finish. The agent loop now inspects it: `Length` surfaces a
+/// truncation notice, and an empty `ContentFilter` finish becomes an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    /// Normal end of turn (`end_turn`, `stop`, `stop_sequence`, `STOP`).
+    Stop,
+    /// Stopped to call a tool (`tool_use`, `tool_calls`).
+    ToolUse,
+    /// Hit the output token limit — the response is truncated.
+    Length,
+    /// Blocked by a content filter / safety system / recitation check.
+    ContentFilter,
+    /// A reason we don't specifically model; carries the raw provider string.
+    Other(String),
+}
+
 /// Response from a model
 #[derive(Debug, Clone)]
 pub struct ModelResponse {
@@ -183,6 +205,9 @@ pub struct ModelResponse {
     pub thinking: Option<String>,
     /// Tool calls from the model (Ollama native function calling)
     pub tool_calls: Option<Vec<crate::models::tool_call::ToolCall>>,
+    /// Why generation stopped, when the provider reported it. `None` if the
+    /// provider didn't say (or the adapter doesn't yet map it).
+    pub stop_reason: Option<FinishReason>,
     /// Anthropic thinking-block signature (encrypted server state). Set
     /// only by `AnthropicAdapter`; other adapters leave it `None`. The
     /// agent loop's commit step copies this onto the resulting assistant
@@ -392,6 +417,7 @@ mod tests {
             model_name: "ollama/tinyllama".to_string(),
             thinking: None,
             tool_calls: None,
+            stop_reason: None,
             thinking_signature: None,
         };
 

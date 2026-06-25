@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::{ToolCallId, TurnId};
 use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{ChatMessage, ReasoningChunk, TokenUsage};
+use crate::models::{ChatMessage, FinishReason, ReasoningChunk, TokenUsage};
 use crate::runtime::SafetyMode;
 
 use super::approval::ApprovalBroker;
@@ -59,11 +59,13 @@ pub enum StreamEvent {
     /// (Anthropic). Adapters that only have it at the end can attach
     /// it to `Done` instead.
     ThinkingSignature(String),
-    /// Stream complete. Carries final token usage (None if unknown)
-    /// and any terminal thinking signature.
+    /// Stream complete. Carries final token usage (None if unknown),
+    /// any terminal thinking signature, and why generation stopped
+    /// (so the reducer can flag truncation / a content block).
     Done {
         usage: Option<TokenUsage>,
         thinking_signature: Option<String>,
+        stop_reason: Option<FinishReason>,
     },
 }
 
@@ -76,6 +78,7 @@ pub struct FinalResponse {
     pub usage: Option<TokenUsage>,
     pub thinking_signature: Option<String>,
     pub tool_calls: Vec<ModelToolCall>,
+    pub stop_reason: Option<FinishReason>,
 }
 
 /// What a `ToolExecutor::execute()` receives.

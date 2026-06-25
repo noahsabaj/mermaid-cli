@@ -27,5 +27,6 @@ pub use tool_call::{FunctionCall, ToolCall};
 
 pub use traits::Model;
 pub use types::{
-    ChatMessage, ChatMessageKind, MessageRole, ModelResponse, TokenUsage, TokenUsageSource,
+    ChatMessage, ChatMessageKind, FinishReason, MessageRole, ModelResponse, TokenUsage,
+    TokenUsageSource,
 };

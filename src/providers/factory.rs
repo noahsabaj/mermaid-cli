@@ -114,6 +114,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
         let base_url = user_cfg
             .and_then(|c| c.base_url.clone())
             .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
+        validate_provider_base_url(&base_url)?;
         let api_key_env = user_cfg
             .and_then(|c| c.api_key_env.as_deref())
             .unwrap_or("ANTHROPIC_API_KEY");
@@ -128,6 +129,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
         let base_url = user_cfg
             .and_then(|c| c.base_url.clone())
             .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
+        validate_provider_base_url(&base_url)?;
         let api_key = match user_cfg.and_then(|c| c.api_key_env.as_deref()) {
             Some(api_key_env) => require_key("gemini", api_key_env)?,
             None => {
@@ -144,6 +146,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
         let base_url = user_cfg
             .and_then(|c| c.base_url.clone())
             .unwrap_or_else(|| profile.base_url.to_string());
+        validate_provider_base_url(&base_url)?;
         let api_key_env = user_cfg
             .and_then(|c| c.api_key_env.as_deref())
             .unwrap_or(profile.api_key_env);
@@ -172,6 +175,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
                 provider_lc
             ))
         })?;
+        validate_provider_base_url(&base_url)?;
         let api_key_env = user_cfg.api_key_env.as_deref().ok_or_else(|| {
             ModelError::InvalidRequest(format!(
                 "custom provider '{}' requires api_key_env in config",
@@ -257,9 +261,63 @@ fn user_profile_to_static(
     Some(Box::leak(profile))
 }
 
+/// Validate a provider `base_url` before it's handed an API key. Requires
+/// http/https, and **requires https for any non-loopback, non-private host** —
+/// a typo'd or hostile `http://` endpoint would otherwise receive the bearer
+/// key in cleartext. Plain http stays allowed for loopback / RFC-1918 hosts so
+/// local model servers (Ollama, vLLM) keep working.
+fn validate_provider_base_url(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| {
+        ModelError::InvalidRequest(format!("invalid provider base_url '{url}': {e}"))
+    })?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_local_host(parsed.host_str().unwrap_or_default()) => Ok(()),
+        "http" => Err(ModelError::InvalidRequest(format!(
+            "provider base_url '{url}' uses http:// to a non-local host — refusing to send the API \
+             key in cleartext. Use https, or a loopback/private host for a local server."
+        ))),
+        other => Err(ModelError::InvalidRequest(format!(
+            "provider base_url '{url}' has unsupported scheme '{other}' (use http or https)"
+        ))),
+    }
+}
+
+/// True for loopback / RFC-1918 / link-local hosts where plain http is
+/// acceptable (a local model server, not a credential-leaking remote). The
+/// inverse of the SSRF `is_blocked_host` in `providers::tool::web`.
+fn is_local_host(host: &str) -> bool {
+    let h = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    if h == "localhost" || h.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = h.parse::<std::net::Ipv4Addr>() {
+        return ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified();
+    }
+    if let Ok(ip) = h.parse::<std::net::Ipv6Addr>() {
+        return ip.is_loopback() || ip.is_unspecified();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_url_requires_https_for_remote_hosts() {
+        // Remote http is refused (would leak the bearer key in cleartext).
+        assert!(validate_provider_base_url("http://api.example.com/v1").is_err());
+        assert!(validate_provider_base_url("ftp://example.com").is_err());
+        // https remote and http local are both fine.
+        assert!(validate_provider_base_url("https://api.example.com/v1").is_ok());
+        assert!(validate_provider_base_url("http://localhost:11434/v1").is_ok());
+        assert!(validate_provider_base_url("http://127.0.0.1:8000").is_ok());
+        assert!(validate_provider_base_url("http://192.168.1.5:8080").is_ok());
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn unique_env(prefix: &str) -> String {

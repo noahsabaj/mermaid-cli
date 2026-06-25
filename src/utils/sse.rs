@@ -181,6 +181,16 @@ mod tests {
     }
 
     #[test]
+    fn done_sentinel_with_crlf_is_consumed_not_emitted() {
+        // #11 regression: with CRLF framing the `[DONE]` sentinel must match
+        // exactly (no trailing `\r`), so it's swallowed rather than surfaced as
+        // a bogus event that would fail JSON parsing downstream.
+        let mut buf = b"data: real\r\n\r\ndata: [DONE]\r\n\r\n".to_vec();
+        let events = drain_sse_events(&mut buf);
+        assert_eq!(events, vec!["real".to_string()]);
+    }
+
+    #[test]
     fn multiline_data_field_joined_with_newline() {
         // Per SSE spec, multiple `data:` lines in one event are joined
         // with `\n` to form the payload. Rare in practice for our

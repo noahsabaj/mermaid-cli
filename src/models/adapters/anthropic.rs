@@ -38,7 +38,7 @@ use crate::models::reasoning::{
 use crate::models::stream::{StreamCallback, StreamEvent};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
-use crate::models::types::{ChatMessage, MessageRole, ModelResponse, TokenUsage};
+use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
 use crate::utils::drain_sse_events;
 
 const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
@@ -59,6 +59,61 @@ fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) 
         buf.truncate(end);
         buf.push_str(TRUNCATION_MARKER);
         *truncated = true;
+    }
+}
+
+/// Map Anthropic's `stop_reason` onto the normalized [`FinishReason`].
+fn map_anthropic_stop_reason(s: &str) -> FinishReason {
+    match s {
+        "end_turn" | "stop_sequence" => FinishReason::Stop,
+        "tool_use" => FinishReason::ToolUse,
+        "max_tokens" => FinishReason::Length,
+        "refusal" => FinishReason::ContentFilter,
+        other => FinishReason::Other(other.to_string()),
+    }
+}
+
+/// Finalize one completed (or interrupted) content block into the response
+/// accumulators. Shared by the `content_block_stop` handler and the post-loop
+/// drain, so a block that never received its stop event (a mid-message cutoff)
+/// is recovered identically — including a fully-streamed `tool_use`.
+fn finalize_block(
+    acc: BlockAccumulator,
+    text_acc: &mut String,
+    thinking_acc: &mut String,
+    signature_acc: &mut Option<String>,
+    tool_calls_done: &mut Vec<ToolCall>,
+    callback: &StreamCallback,
+) {
+    match acc {
+        BlockAccumulator::Text(s) => text_acc.push_str(&s),
+        BlockAccumulator::Thinking { content, signature } => {
+            thinking_acc.push_str(&content);
+            if signature.is_some() {
+                *signature_acc = signature;
+            }
+        },
+        BlockAccumulator::ToolUse {
+            id,
+            name,
+            input_buf,
+        } => {
+            let arguments: Value = if input_buf.is_empty() {
+                json!({})
+            } else {
+                match serde_json::from_str(&input_buf) {
+                    Ok(v) => v,
+                    Err(_) => Value::String(input_buf),
+                }
+            };
+            let tc = ToolCall {
+                id: if id.is_empty() { None } else { Some(id) },
+                function: FunctionCall { name, arguments },
+            };
+            callback(StreamEvent::ToolCall(tc.clone()));
+            tool_calls_done.push(tc);
+        },
+        BlockAccumulator::Other => {},
     }
 }
 
@@ -636,10 +691,23 @@ impl AnthropicAdapter {
         .with_cache_creation(cache_creation)
         .with_cached_input(cache_read);
 
+        let stop_reason = json.stop_reason.as_deref().map(map_anthropic_stop_reason);
+        if text_acc.is_empty()
+            && tool_calls.is_empty()
+            && stop_reason == Some(FinishReason::ContentFilter)
+        {
+            return Err(ModelError::Backend(BackendError::ProviderError {
+                provider: "anthropic".to_string(),
+                code: Some("refusal".to_string()),
+                message: "Anthropic returned no content (refusal / content filter)".to_string(),
+            }));
+        }
+
         Ok(ModelResponse {
             content: text_acc,
             usage: Some(usage),
             model_name: self.model_name.clone(),
+            stop_reason,
             thinking: if thinking_acc.is_empty() {
                 None
             } else {
@@ -678,6 +746,7 @@ impl AnthropicAdapter {
         let mut completion_tokens: usize = 0;
         let mut cache_creation_tokens: usize = 0;
         let mut cache_read_tokens: usize = 0;
+        let mut stop_reason: Option<FinishReason> = None;
         // Per-block-index accumulators. Anthropic emits content_block_*
         // events tagged with an `index` field; multiple blocks (text +
         // thinking + tool_use) interleave, so we track each by index.
@@ -789,6 +858,14 @@ impl AnthropicAdapter {
                                     .unwrap_or("");
                                 if !text.is_empty() && !truncated {
                                     if !hide_reasoning_trace {
+                                        // #9: this is intentionally `None` here —
+                                        // `signature_delta` arrives AFTER the
+                                        // thinking deltas, so streamed reasoning
+                                        // chunks can't carry it. The final
+                                        // `ModelResponse.thinking_signature`
+                                        // (captured at block stop) is correct and
+                                        // is what round-trips; streamed chunks are
+                                        // display-only.
                                         callback(StreamEvent::Reasoning(ReasoningChunk {
                                             text: text.to_string(),
                                             signature: signature.clone(),
@@ -823,38 +900,14 @@ impl AnthropicAdapter {
                         let index =
                             parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                         if let Some(acc) = blocks.remove(&index) {
-                            match acc {
-                                BlockAccumulator::Text(s) => {
-                                    text_acc.push_str(&s);
-                                },
-                                BlockAccumulator::Thinking { content, signature } => {
-                                    thinking_acc.push_str(&content);
-                                    if signature.is_some() {
-                                        signature_acc = signature;
-                                    }
-                                },
-                                BlockAccumulator::ToolUse {
-                                    id,
-                                    name,
-                                    input_buf,
-                                } => {
-                                    let arguments: Value = if input_buf.is_empty() {
-                                        json!({})
-                                    } else {
-                                        match serde_json::from_str(&input_buf) {
-                                            Ok(v) => v,
-                                            Err(_) => Value::String(input_buf),
-                                        }
-                                    };
-                                    let tc = ToolCall {
-                                        id: if id.is_empty() { None } else { Some(id) },
-                                        function: FunctionCall { name, arguments },
-                                    };
-                                    callback(StreamEvent::ToolCall(tc.clone()));
-                                    tool_calls_done.push(tc);
-                                },
-                                BlockAccumulator::Other => {},
-                            }
+                            finalize_block(
+                                acc,
+                                &mut text_acc,
+                                &mut thinking_acc,
+                                &mut signature_acc,
+                                &mut tool_calls_done,
+                                &callback,
+                            );
                         }
                     },
                     "message_delta" => {
@@ -864,6 +917,13 @@ impl AnthropicAdapter {
                             .and_then(|v| v.as_u64())
                         {
                             completion_tokens = out as usize;
+                        }
+                        // The terminal stop_reason rides on `message_delta`.
+                        if let Some(sr) = parsed
+                            .pointer("/delta/stop_reason")
+                            .and_then(|v| v.as_str())
+                        {
+                            stop_reason = Some(map_anthropic_stop_reason(sr));
                         }
                     },
                     "message_stop" => {
@@ -897,6 +957,29 @@ impl AnthropicAdapter {
             }
         }
 
+        // The stream may end without a `message_stop` (e.g. a proxy sends
+        // `Connection: close` mid-message). Finalize any blocks still open so a
+        // fully-streamed `tool_use` or text block isn't silently dropped — the
+        // agent would otherwise "forget" the tool call and return an empty Ok.
+        if !blocks.is_empty() {
+            tracing::warn!(
+                open_blocks = blocks.len(),
+                "Anthropic stream ended without message_stop; draining open blocks"
+            );
+            let mut remaining: Vec<(usize, BlockAccumulator)> = blocks.into_iter().collect();
+            remaining.sort_by_key(|(idx, _)| *idx);
+            for (_idx, acc) in remaining {
+                finalize_block(
+                    acc,
+                    &mut text_acc,
+                    &mut thinking_acc,
+                    &mut signature_acc,
+                    &mut tool_calls_done,
+                    &callback,
+                );
+            }
+        }
+
         let total_tokens = prompt_tokens
             .saturating_add(completion_tokens)
             .saturating_add(cache_creation_tokens)
@@ -906,6 +989,19 @@ impl AnthropicAdapter {
         // emitted it here, the reducer would commit the assistant
         // message on our signature-less Done and drop the real one.
 
+        // A refusal / content block that produced no usable output is an
+        // error, not an empty success (matches the non-streaming path).
+        if text_acc.is_empty()
+            && tool_calls_done.is_empty()
+            && stop_reason == Some(FinishReason::ContentFilter)
+        {
+            return Err(ModelError::Backend(BackendError::ProviderError {
+                provider: "anthropic".to_string(),
+                code: Some("refusal".to_string()),
+                message: "Anthropic returned no content (refusal / content filter)".to_string(),
+            }));
+        }
+
         Ok(ModelResponse {
             content: text_acc,
             usage: Some(
@@ -914,6 +1010,7 @@ impl AnthropicAdapter {
                     .with_cached_input(cache_read_tokens),
             ),
             model_name: self.model_name.clone(),
+            stop_reason,
             thinking: if thinking_acc.is_empty() {
                 None
             } else {
@@ -976,6 +1073,8 @@ struct AnthropicResponse {
     content: Vec<ContentBlockOut>,
     #[serde(default)]
     usage: UsageOut,
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1094,6 +1193,49 @@ mod tests {
                 })
                 .unwrap_or(false)
         })
+    }
+
+    #[test]
+    fn maps_anthropic_stop_reasons() {
+        assert_eq!(map_anthropic_stop_reason("end_turn"), FinishReason::Stop);
+        assert_eq!(
+            map_anthropic_stop_reason("max_tokens"),
+            FinishReason::Length
+        );
+        assert_eq!(map_anthropic_stop_reason("tool_use"), FinishReason::ToolUse);
+        assert_eq!(
+            map_anthropic_stop_reason("refusal"),
+            FinishReason::ContentFilter
+        );
+    }
+
+    #[test]
+    fn finalize_block_recovers_tool_use() {
+        // #4: a fully-streamed tool_use block must be recovered even when it's
+        // drained outside `content_block_stop` (the mid-cutoff path).
+        let events: std::sync::Arc<std::sync::Mutex<Vec<StreamEvent>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ev = events.clone();
+        let cb: StreamCallback = std::sync::Arc::new(move |e| ev.lock().unwrap().push(e));
+        let mut text = String::new();
+        let mut thinking = String::new();
+        let mut sig = None;
+        let mut tools = Vec::new();
+        finalize_block(
+            BlockAccumulator::ToolUse {
+                id: "tu_1".to_string(),
+                name: "read_file".to_string(),
+                input_buf: r#"{"path":"a.txt"}"#.to_string(),
+            },
+            &mut text,
+            &mut thinking,
+            &mut sig,
+            &mut tools,
+            &cb,
+        );
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].function.name, "read_file");
+        assert_eq!(events.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -193,8 +193,16 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             turn,
             usage,
             thinking_signature,
+            stop_reason,
         } => {
-            handle_stream_done(&mut state, &mut cmds, turn, usage, thinking_signature);
+            handle_stream_done(
+                &mut state,
+                &mut cmds,
+                turn,
+                usage,
+                thinking_signature,
+                stop_reason,
+            );
         },
         Msg::UpstreamError { turn, error } => {
             handle_upstream_error(&mut state, turn, error);
@@ -2249,6 +2257,7 @@ fn handle_stream_done(
     turn: TurnId,
     usage: Option<crate::models::TokenUsage>,
     thinking_signature: Option<String>,
+    stop_reason: Option<crate::models::FinishReason>,
 ) {
     // Unpack the Generating state, drop it into Idle temporarily;
     // the branch below decides whether to stay Idle (no tool calls)
@@ -2286,6 +2295,24 @@ fn handle_stream_done(
         final_sig,
     );
     state.session.append(msg);
+
+    // Surface a terminal stop reason that would otherwise leave the response
+    // silently incomplete. (A refusal with no content is turned into an error
+    // upstream in the adapter; here we only see reasons that still produced
+    // output.)
+    match stop_reason {
+        Some(crate::models::FinishReason::Length) => push_system(
+            state,
+            cmds,
+            "⚠ Response truncated — reached the model's max output-token limit.",
+        ),
+        Some(crate::models::FinishReason::ContentFilter) => push_system(
+            state,
+            cmds,
+            "⚠ Response was flagged by the provider's content filter.",
+        ),
+        _ => {},
+    }
 
     // Provider token usage is per API request. Track both the last
     // reported request and the session total so the footer can label
@@ -3319,6 +3346,7 @@ mod tests {
                 turn: TurnId(5),
                 usage: None,
                 thinking_signature: None,
+                stop_reason: None,
             },
         );
         assert!(matches!(state.turn, TurnState::Idle));
@@ -3347,6 +3375,7 @@ mod tests {
                 turn: TurnId(5),
                 usage: Some(crate::models::TokenUsage::provider(120, 30, 150)),
                 thinking_signature: None,
+                stop_reason: None,
             },
         );
 
@@ -4085,6 +4114,7 @@ mod tests {
                 turn: TurnId(5),
                 usage: None,
                 thinking_signature: None,
+                stop_reason: None,
             },
         );
 
@@ -4113,6 +4143,7 @@ mod tests {
                 turn: TurnId(1),
                 usage: Some(crate::models::TokenUsage::provider(120, 30, 150)),
                 thinking_signature: None,
+                stop_reason: None,
             },
         );
         assert_eq!(state.session.last_token_usage.unwrap().prompt_tokens, 120);
@@ -4125,6 +4156,7 @@ mod tests {
                 turn: TurnId(2),
                 usage: None,
                 thinking_signature: None,
+                stop_reason: None,
             },
         );
         assert_eq!(
