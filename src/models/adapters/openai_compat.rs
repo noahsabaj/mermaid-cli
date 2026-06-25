@@ -59,7 +59,7 @@ use crate::models::reasoning::{
 use crate::models::stream::{StreamCallback, StreamEvent};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
-use crate::models::types::{ChatMessage, MessageRole, ModelResponse, TokenUsage};
+use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
 use crate::utils::drain_sse_events;
 
 const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
@@ -80,6 +80,17 @@ fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) 
         buf.truncate(end);
         buf.push_str(TRUNCATION_MARKER);
         *truncated = true;
+    }
+}
+
+/// Map OpenAI's `finish_reason` onto the normalized [`FinishReason`].
+fn map_openai_finish_reason(s: &str) -> FinishReason {
+    match s {
+        "stop" => FinishReason::Stop,
+        "length" => FinishReason::Length,
+        "tool_calls" | "function_call" => FinishReason::ToolUse,
+        "content_filter" => FinishReason::ContentFilter,
+        other => FinishReason::Other(other.to_string()),
     }
 }
 
@@ -221,7 +232,8 @@ impl OpenAICompatAdapter {
             "model": self.model_name,
             "messages": json_messages,
             "stream": stream,
-            "temperature": config.temperature,
+            // Clamp to OpenAI's accepted 0..=2 (a stale config value otherwise 400s).
+            "temperature": config.temperature.clamp(0.0, 2.0),
         });
 
         if stream {
@@ -330,6 +342,22 @@ impl OpenAICompatAdapter {
         // Reasoning content: extract from the named field if the profile
         // points at one. For `InlineThinkTags`, leave it in `content`
         // for now — Wave 6 wires the stripper.
+        // For InlineThinkTags providers the non-streaming body still contains
+        // `<think>…</think>`; run it through the same stripper the streaming path
+        // uses so reasoning is separated out of `content` (#5).
+        let raw_content = choice.message.content.unwrap_or_default();
+        let (content, inline_thinking) = match self.profile.reasoning_extraction {
+            ReasoningExtraction::InlineThinkTags => {
+                let mut ts = ThinkTagState::new();
+                let (mut text, mut reasoning) = ts.feed(&raw_content);
+                let (text_tail, reasoning_tail) = ts.flush();
+                text.push_str(&text_tail);
+                reasoning.push_str(&reasoning_tail);
+                (text, (!reasoning.is_empty()).then_some(reasoning))
+            },
+            _ => (raw_content, None),
+        };
+
         let thinking = match self.profile.reasoning_extraction {
             ReasoningExtraction::DeltaContentField(field) => choice
                 .message
@@ -338,6 +366,7 @@ impl OpenAICompatAdapter {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty()),
+            ReasoningExtraction::InlineThinkTags => inline_thinking,
             _ => None,
         };
 
@@ -347,10 +376,26 @@ impl OpenAICompatAdapter {
             .filter(|v| !v.is_empty())
             .map(|raw| raw.into_iter().filter_map(parse_full_tool_call).collect());
 
+        let stop_reason = choice
+            .finish_reason
+            .as_deref()
+            .map(map_openai_finish_reason);
+        if content.is_empty()
+            && tool_calls.is_none()
+            && stop_reason == Some(FinishReason::ContentFilter)
+        {
+            return Err(ModelError::Backend(BackendError::ProviderError {
+                provider: self.profile.name.to_string(),
+                code: Some("content_filter".to_string()),
+                message: "Provider returned no content (content filter)".to_string(),
+            }));
+        }
+
         Ok(ModelResponse {
-            content: choice.message.content.unwrap_or_default(),
+            content,
             usage,
             model_name: self.model_name.clone(),
+            stop_reason,
             thinking,
             tool_calls,
             thinking_signature: None,
@@ -387,6 +432,7 @@ impl OpenAICompatAdapter {
         let mut prompt_tokens = 0usize;
         let mut completion_tokens = 0usize;
         let mut total_tokens = None;
+        let mut stop_reason: Option<FinishReason> = None;
         // For providers that emit `<think>...</think>` inline in
         // `delta.content`, route the content channel through this state
         // machine so reasoning gets split out into its own
@@ -427,6 +473,9 @@ impl OpenAICompatAdapter {
                     continue;
                 };
 
+                if let Some(fr) = &choice.finish_reason {
+                    stop_reason = Some(map_openai_finish_reason(fr));
+                }
                 let delta = choice.delta;
 
                 // Reasoning extraction (separate field). InlineThinkTags
@@ -558,6 +607,19 @@ impl OpenAICompatAdapter {
             Some(final_tool_calls)
         };
 
+        // A content-filter refusal that produced no usable output is an error,
+        // not an empty success.
+        if content_acc.is_empty()
+            && tool_calls.is_none()
+            && stop_reason == Some(FinishReason::ContentFilter)
+        {
+            return Err(ModelError::Backend(BackendError::ProviderError {
+                provider: self.profile.name.to_string(),
+                code: Some("content_filter".to_string()),
+                message: "Provider returned no content (content filter)".to_string(),
+            }));
+        }
+
         Ok(ModelResponse {
             content: content_acc,
             usage: Some(TokenUsage::provider(
@@ -566,6 +628,7 @@ impl OpenAICompatAdapter {
                 total_tokens,
             )),
             model_name: self.model_name.clone(),
+            stop_reason,
             thinking,
             tool_calls,
             thinking_signature: None,
@@ -692,6 +755,8 @@ struct ChatCompletion {
 #[derive(Debug, Deserialize)]
 struct NonStreamingChoice {
     message: ResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 /// Non-streaming response message. `extra` captures whatever extra fields
@@ -719,11 +784,10 @@ struct ChatCompletionChunk {
 struct StreamingChoice {
     #[serde(default)]
     delta: DeltaMessage,
-    // finish_reason captured but not used yet; the SSE [DONE] sentinel
-    // and stream EOF both terminate the loop. Keeping the field present
-    // means serde won't fail if a provider includes it.
+    /// Terminal reason (`stop`/`length`/`tool_calls`/`content_filter`).
+    /// Mapped to `FinishReason` so truncation and refusals surface instead of
+    /// looking like a clean finish.
     #[serde(default)]
-    #[allow(dead_code)]
     finish_reason: Option<String>,
 }
 
@@ -771,11 +835,11 @@ struct CompletionTokensDetailsWire {
 }
 
 fn token_usage_from_wire(usage: UsageWire) -> TokenUsage {
-    let prompt_tokens = usage.prompt_tokens.unwrap_or(0);
+    let raw_prompt_tokens = usage.prompt_tokens.unwrap_or(0);
     let completion_tokens = usage.completion_tokens.unwrap_or(0);
     let total_tokens = usage
         .total_tokens
-        .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
+        .unwrap_or_else(|| raw_prompt_tokens.saturating_add(completion_tokens));
 
     let cached_input_tokens = usage
         .prompt_tokens_details
@@ -788,6 +852,12 @@ fn token_usage_from_wire(usage: UsageWire) -> TokenUsage {
                 .and_then(|d| d.cached_tokens)
         })
         .unwrap_or(0);
+    // OpenAI's `prompt_tokens` already INCLUDES the cached tokens (a nested
+    // breakdown), unlike Anthropic's disjoint buckets. Subtract them so the
+    // shared `TokenUsage::input_total_tokens()` (prompt + cached) doesn't
+    // double-count the cache hit. `total_tokens` stays the wire value (the
+    // billing truth); the fallback above intentionally uses the raw prompt.
+    let prompt_tokens = raw_prompt_tokens.saturating_sub(cached_input_tokens);
     let reasoning_output_tokens = usage
         .completion_tokens_details
         .as_ref()
@@ -1061,6 +1131,33 @@ mod tests {
     use crate::models::providers::lookup_provider;
 
     #[test]
+    fn maps_openai_finish_reasons() {
+        assert_eq!(map_openai_finish_reason("stop"), FinishReason::Stop);
+        assert_eq!(map_openai_finish_reason("length"), FinishReason::Length);
+        assert_eq!(
+            map_openai_finish_reason("tool_calls"),
+            FinishReason::ToolUse
+        );
+        assert_eq!(
+            map_openai_finish_reason("content_filter"),
+            FinishReason::ContentFilter
+        );
+    }
+
+    #[test]
+    fn think_tags_stripped_via_feed_then_flush() {
+        // The non-streaming InlineThinkTags path feeds the whole body then
+        // flushes, splitting reasoning out of content (#5).
+        let mut ts = ThinkTagState::new();
+        let (mut text, mut reasoning) = ts.feed("<think>weighing</think>answer");
+        let (t2, r2) = ts.flush();
+        text.push_str(&t2);
+        reasoning.push_str(&r2);
+        assert_eq!(text, "answer");
+        assert_eq!(reasoning, "weighing");
+    }
+
+    #[test]
     fn accumulate_tool_call_drops_implausible_index() {
         // H9: a stream-controlled huge index must not grow the Vec.
         let mut partials: Vec<PartialToolCall> = Vec::new();
@@ -1145,6 +1242,26 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, 40);
         assert_eq!(usage.reasoning_output_tokens, 12);
         assert_eq!(usage.total_tokens, 125);
+    }
+
+    #[test]
+    fn cache_hit_does_not_double_count_input_total() {
+        // #6: OpenAI nests cached tokens inside prompt_tokens; input_total must
+        // be 100 (the real input), not 100 + 40.
+        let usage = token_usage_from_wire(UsageWire {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(25),
+            total_tokens: Some(125),
+            prompt_tokens_details: Some(PromptTokensDetailsWire {
+                cached_tokens: Some(40),
+            }),
+            completion_tokens_details: None,
+            input_tokens_details: None,
+            output_tokens_details: None,
+        });
+        assert_eq!(usage.input_total_tokens(), 100);
+        assert_eq!(usage.prompt_tokens, 60);
+        assert_eq!(usage.cached_input_tokens, 40);
     }
 
     #[test]

@@ -1175,10 +1175,12 @@ async fn dispatch_call_model(
                 StreamEvent::Done {
                     usage,
                     thinking_signature,
+                    stop_reason,
                 } => Msg::StreamDone {
                     turn,
                     usage,
                     thinking_signature,
+                    stop_reason,
                 },
             };
             if relay_tx.send(msg).await.is_err() {
@@ -1269,10 +1271,12 @@ async fn dispatch_provider_stream(
                 StreamEvent::Done {
                     usage,
                     thinking_signature,
+                    stop_reason,
                 } => Msg::StreamDone {
                     turn,
                     usage,
                     thinking_signature,
+                    stop_reason,
                 },
             };
             if relay_tx.send(msg).await.is_err() {

@@ -17,6 +17,9 @@ pub const DEFAULT_MAX_ATTEMPTS: usize = 3;
 
 const DEFAULT_INITIAL_DELAY_MS: u64 = 500;
 const MAX_DELAY_MS: u64 = 3_000;
+/// Upper bound on how long we'll wait, even if a server's `Retry-After` asks
+/// for more — a hostile or misconfigured value mustn't hang the turn.
+const MAX_RETRY_AFTER_MS: u64 = 60_000;
 
 /// Retry a closure whose output is `Result<reqwest::Response>`
 /// whenever the response was a transient upstream failure (5xx / 429
@@ -55,6 +58,17 @@ where
         let result = build_and_send().await;
         let transience = classify(&result);
 
+        // A server-provided `Retry-After` (429) is the authoritative wait —
+        // read it while we still hold the response.
+        let retry_after_ms = if transience.reason() == "http_429" {
+            result
+                .as_ref()
+                .ok()
+                .and_then(|r| parse_retry_after_ms(r.headers()))
+        } else {
+            None
+        };
+
         if !transience.is_transient() || attempt >= policy.max_attempts {
             if transience.is_transient() {
                 tracing::warn!(
@@ -62,21 +76,60 @@ where
                     reason = transience.reason(),
                     "middleware: transient upstream failure — retries exhausted"
                 );
+                // A persistent 429 becomes a typed `RateLimit` so the UI can show
+                // a rate-limit affordance instead of a generic HTTP error.
+                if transience.reason() == "http_429" && result.is_ok() {
+                    return Err(ModelError::RateLimit {
+                        retry_after: retry_after_ms.map(|ms| ms / 1000),
+                    });
+                }
             }
             return result;
         }
 
+        // Honor `Retry-After` when present (capped so a hostile/huge value can't
+        // hang the turn); otherwise a jittered exponential backoff that avoids
+        // synchronized retries across concurrent clients.
+        let sleep_ms = jitter(delay_ms)
+            .max(retry_after_ms.unwrap_or(0))
+            .min(MAX_RETRY_AFTER_MS);
         tracing::warn!(
             attempt,
             max = policy.max_attempts,
-            delay_ms,
+            sleep_ms,
             reason = transience.reason(),
             "middleware: retrying transient upstream failure"
         );
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         attempt += 1;
         delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
     }
+}
+
+/// Parse a `Retry-After` header into milliseconds. Handles the integer
+/// delta-seconds form (what OpenAI / Anthropic send); the rare HTTP-date form
+/// falls through to `None` and we use the backoff instead.
+fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    raw.trim()
+        .parse::<u64>()
+        .ok()
+        .map(|secs| secs.saturating_mul(1000))
+}
+
+/// Apply ±20% jitter to `delay_ms` from a cheap time source (no rng dependency)
+/// so concurrent clients don't retry in lockstep (thundering herd).
+fn jitter(delay_ms: u64) -> u64 {
+    let span = delay_ms / 5;
+    if span == 0 {
+        return delay_ms;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let offset = nanos % (2 * span + 1);
+    delay_ms - span + offset
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -187,7 +240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_429() {
+    async fn retries_429_then_surfaces_rate_limit() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
         let result = retry_transient_http_with(RetryPolicy { max_attempts: 2 }, &mut move || {
@@ -198,9 +251,20 @@ mod tests {
             }
         })
         .await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().status().as_u16(), 429);
+        // A persistent 429 retries, then surfaces as a typed RateLimit (#2).
+        assert!(matches!(result, Err(ModelError::RateLimit { .. })));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn jitter_stays_within_band() {
+        // ±20% band: jitter(1000) ∈ [800, 1200].
+        for _ in 0..100 {
+            let j = jitter(1000);
+            assert!((800..=1200).contains(&j), "jitter out of band: {j}");
+        }
+        // Tiny delays (span 0) pass through unchanged.
+        assert_eq!(jitter(3), 3);
     }
 
     #[tokio::test]

@@ -59,10 +59,12 @@ impl ModelProvider for GeminiProvider {
         };
 
         let usage = response.usage.clone();
+        let stop_reason = response.stop_reason.clone();
         // Terminal Done through the ordered relay, then drain (see openai_compat).
         let _ = relay_tx.send(StreamEvent::Done {
             usage: usage.clone(),
             thinking_signature: None,
+            stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
         let _ = relay_handle.await;
@@ -71,6 +73,7 @@ impl ModelProvider for GeminiProvider {
             usage,
             thinking_signature: None,
             tool_calls: response.tool_calls.unwrap_or_default(),
+            stop_reason,
         })
     }
 }
@@ -104,6 +107,7 @@ fn forward_callback(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) -> St
                     None
                 },
                 thinking_signature: None,
+                stop_reason: None,
             },
         };
         let _ = sink.send(mapped);

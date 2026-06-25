@@ -58,6 +58,7 @@ fn happy_path_turn_ends_idle_with_assistant_message() {
             turn: id,
             usage: None,
             thinking_signature: None,
+            stop_reason: None,
         },
     );
 
@@ -93,6 +94,7 @@ fn stale_stream_chunks_cannot_corrupt_current_turn() {
             turn: turn_a,
             usage: None,
             thinking_signature: None,
+            stop_reason: None,
         },
     );
 
@@ -562,6 +564,7 @@ fn stream_tool_call_buffers_then_stream_done_transitions_to_executing_tools() {
             turn: id,
             usage: None,
             thinking_signature: None,
+            stop_reason: None,
         },
     );
 

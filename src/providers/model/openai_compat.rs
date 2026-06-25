@@ -70,12 +70,14 @@ impl ModelProvider for OpenAICompatProvider {
         };
 
         let usage = response.usage.clone();
+        let stop_reason = response.stop_reason.clone();
         // Route the terminal Done through the SAME ordered relay (not directly
         // on the bounded sink) so it can't overtake a still-buffered ToolCall,
         // then await the relay drain before returning.
         let _ = relay_tx.send(StreamEvent::Done {
             usage: usage.clone(),
             thinking_signature: None,
+            stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
         let _ = relay_handle.await;
@@ -84,6 +86,7 @@ impl ModelProvider for OpenAICompatProvider {
             usage,
             thinking_signature: None,
             tool_calls: response.tool_calls.unwrap_or_default(),
+            stop_reason,
         })
     }
 }
@@ -117,6 +120,7 @@ fn forward_callback(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) -> St
                     None
                 },
                 thinking_signature: None,
+                stop_reason: None,
             },
         };
         let _ = sink.send(mapped);

@@ -255,6 +255,7 @@ impl OllamaAdapter {
                 total_tokens,
             )),
             model_name: self.model_name.clone(),
+            stop_reason: None,
             thinking,
             tool_calls,
             thinking_signature: None,
@@ -435,7 +436,8 @@ impl OllamaAdapter {
         );
 
         let mut options = json!({});
-        options["temperature"] = json!(config.temperature);
+        // Clamp to the conventional 0..=2 range (matches the other adapters).
+        options["temperature"] = json!(config.temperature.clamp(0.0, 2.0));
         if let Some(num_ctx) = ollama_opts.num_ctx {
             options["num_ctx"] = json!(num_ctx);
         }
@@ -507,6 +509,7 @@ impl OllamaAdapter {
                 prompt_tokens.saturating_add(completion_tokens),
             )),
             model_name: self.model_name.clone(),
+            stop_reason: None,
             thinking,
             tool_calls,
             thinking_signature: None,

@@ -105,10 +105,12 @@ impl ModelProvider for OllamaProvider {
         // lets multi-turn extended thinking round-trip.
         let usage = response.usage.clone();
         let thinking_signature = response.thinking_signature.clone();
+        let stop_reason = response.stop_reason.clone();
         // Terminal Done through the ordered relay, then drain (see stream_bridge).
         let _ = relay_tx.send(StreamEvent::Done {
             usage: usage.clone(),
             thinking_signature: thinking_signature.clone(),
+            stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
         let _ = relay_handle.await;
@@ -117,6 +119,7 @@ impl ModelProvider for OllamaProvider {
             usage,
             thinking_signature,
             tool_calls: response.tool_calls.unwrap_or_default(),
+            stop_reason,
         })
     }
 }
@@ -173,6 +176,7 @@ fn stream_callback_for(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) ->
                     None
                 },
                 thinking_signature: None,
+                stop_reason: None,
             },
         };
         // Synchronous send preserves ordering. Ignore errors — the

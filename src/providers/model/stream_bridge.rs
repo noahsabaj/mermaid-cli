@@ -80,6 +80,7 @@ mod tests {
             .send(StreamEvent::Done {
                 usage: None,
                 thinking_signature: None,
+                stop_reason: None,
             })
             .unwrap();
 

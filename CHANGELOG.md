@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Checkpoint shadow-git commands run with hooks disabled, and checkpoint /
     plugin manifests are written atomically.
 
+### Fixed
+
+- **Provider-adapter correctness (review axis 4).**
+  - Truncation (`max_tokens`) and content-filter / safety refusals are no longer
+    silently treated as a clean finish: a `⚠ truncated` note now appears, and a
+    refusal that produced no usable content ends the turn with a clear error
+    (Gemini's streaming path now matches its non-streaming behavior, applied
+    across all adapters).
+  - Anthropic streams cut mid-message (a proxy `Connection: close` without
+    `message_stop`) no longer drop a fully-streamed tool call.
+  - 429s now honor the server's `Retry-After` (capped at 60s) instead of a fixed
+    ~1.5s backoff, surface as a typed rate-limit error, and every retry backoff
+    is jittered to avoid synchronized retries.
+  - OpenAI cached input tokens are no longer double-counted in the input total.
+  - OpenAI-compat non-streaming responses strip inline `<think>` tags; the
+    temperature is clamped to 0–2 for OpenAI-compat and Ollama.
+
 ### Changed
 
 - **BREAKING — pairing tokens now expire.** New tokens default to a 30-day TTL.
@@ -36,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin's declared capabilities) to activate its hooks. The manifest
   `permissions` field is renamed `capabilities` and documented as advisory
   disclosure, not a sandbox.
+- **Provider `base_url` now requires HTTPS for non-local hosts.** A custom or
+  overridden provider endpoint on plain `http://` to a public host is refused (it
+  would send the API key in cleartext); `http://localhost` and private hosts stay
+  allowed for local model servers (Ollama, vLLM).
 
 ## [0.11.1] - 2026-06-23
 

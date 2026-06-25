@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use crate::app::McpServerConfig;
 use crate::app::instructions::LoadedInstructions;
 use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError};
+use crate::models::{FinishReason, ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError};
 use crate::runtime::{
     ApprovalRecord, CheckpointRecord, PluginInstallRecord, ProcessRecord, SafetyMode, TaskRecord,
     TaskTimelineEvent,
@@ -118,6 +118,9 @@ pub enum Msg {
         turn: TurnId,
         usage: Option<TokenUsage>,
         thinking_signature: Option<String>,
+        /// Why the model stopped (truncation / content block / normal), when
+        /// the provider reported it. Drives the truncation status note.
+        stop_reason: Option<FinishReason>,
     },
     /// Upstream returned a recoverable or terminal error. Reducer
     /// commits an error line and returns to `Idle` (or surfaces a

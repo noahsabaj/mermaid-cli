@@ -28,7 +28,11 @@
 //!   for thinking blocks — multi-turn reasoning is stateless on the
 //!   client side. This is significantly simpler than Anthropic.
 //! - Tool call IDs are synthesized (`call_<n>`) since Gemini doesn't
-//!   supply them; tool results match by name on the wire.
+//!   supply them; tool results match by **name** on the wire. The protocol has
+//!   no call-id field on `functionCall`/`functionResponse`, so two parallel
+//!   calls to the *same* tool in one turn are associated only by ORDER — we
+//!   keep calls and results in arrival order so positional matching holds. This
+//!   is an inherent Gemini limitation, not fixable in the wire format.
 //!
 //! # Caching note (Step 5b)
 //!
@@ -67,7 +71,7 @@ use crate::models::reasoning::{
 use crate::models::stream::{StreamCallback, StreamEvent};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
-use crate::models::types::{ChatMessage, MessageRole, ModelResponse, TokenUsage};
+use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
 use crate::utils::drain_sse_events;
 
 const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
@@ -85,6 +89,20 @@ fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) 
         buf.truncate(end);
         buf.push_str(TRUNCATION_MARKER);
         *truncated = true;
+    }
+}
+
+/// Map Gemini's `finishReason` onto the normalized [`FinishReason`]. Gemini
+/// reports tool calls with `STOP` (the call rides in `parts`), so there is no
+/// `ToolUse` mapping; safety/recitation/blocklist reasons are content blocks.
+fn map_gemini_finish_reason(s: &str) -> FinishReason {
+    match s {
+        "STOP" => FinishReason::Stop,
+        "MAX_TOKENS" => FinishReason::Length,
+        "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" => {
+            FinishReason::ContentFilter
+        },
+        other => FinishReason::Other(other.to_string()),
     }
 }
 
@@ -529,8 +547,13 @@ impl GeminiAdapter {
         let mut text_acc = String::new();
         let mut thinking_acc = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut stop_reason: Option<FinishReason> = None;
 
         if let Some(candidate) = json.candidates.into_iter().next() {
+            stop_reason = candidate
+                .finish_reason
+                .as_deref()
+                .map(map_gemini_finish_reason);
             match candidate.content {
                 Some(content) => {
                     for part in content.parts {
@@ -587,6 +610,7 @@ impl GeminiAdapter {
             content: text_acc,
             usage: Some(usage),
             model_name: self.model_name.clone(),
+            stop_reason,
             thinking: if thinking_acc.is_empty() {
                 None
             } else {
@@ -652,6 +676,7 @@ impl GeminiAdapter {
                     .with_reasoning_output(state.reasoning_output_tokens),
             ),
             model_name: self.model_name.clone(),
+            stop_reason: state.finish_reason,
             thinking: if state.thinking_acc.is_empty() {
                 None
             } else {
@@ -681,6 +706,7 @@ struct StreamState {
     cached_input_tokens: usize,
     reasoning_output_tokens: usize,
     total_tokens: usize,
+    finish_reason: Option<FinishReason>,
 }
 
 /// Process one SSE event payload (already JSON-decoded). Mutates `state`
@@ -736,6 +762,15 @@ fn process_chunk_payload(
         }
     }
 
+    // Terminal finishReason rides on the candidate (may co-arrive with the
+    // final parts, or alone on a content-free block). Record it either way.
+    let finish_reason = parsed
+        .pointer("/candidates/0/finishReason")
+        .and_then(|v| v.as_str());
+    if let Some(fr) = finish_reason {
+        state.finish_reason = Some(map_gemini_finish_reason(fr));
+    }
+
     // Walk parts. Each chunk's parts are NEW content (concatenated
     // client-side) — Gemini does not echo prior parts in subsequent
     // chunks.
@@ -743,6 +778,21 @@ fn process_chunk_payload(
         .pointer("/candidates/0/content/parts")
         .and_then(|v| v.as_array())
     else {
+        // No parts. A terminal block (safety/recitation/etc.) that produced no
+        // content must surface as an error — matching the non-streaming path —
+        // rather than a silent empty success. A normal STOP/MAX_TOKENS chunk
+        // with no parts (final usage-only chunk) is fine.
+        if let Some(fr) = finish_reason
+            && !matches!(fr, "STOP" | "MAX_TOKENS" | "FINISH_REASON_UNSPECIFIED")
+            && state.text_acc.is_empty()
+            && state.tool_calls_done.is_empty()
+        {
+            return Err(ModelError::Backend(BackendError::ProviderError {
+                provider: "gemini".to_string(),
+                code: Some(fr.to_string()),
+                message: format!("Gemini returned no content (finishReason={fr})"),
+            }));
+        }
         return Ok(());
     };
 
@@ -1714,5 +1764,55 @@ mod tests {
         assert_eq!(state.tool_calls_done.len(), 2);
         assert_eq!(state.tool_calls_done[0].id.as_deref(), Some("call_0"));
         assert_eq!(state.tool_calls_done[1].id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn stream_safety_block_with_no_parts_errors() {
+        let (cb, _events) = record_callback();
+        let mut state = StreamState::default();
+        // A content-free SAFETY block must error, not silently succeed (#1).
+        let chunk = json!({ "candidates": [{ "finishReason": "SAFETY" }] }).to_string();
+        assert!(process_chunk_payload(&chunk, &mut state, &cb, false).is_err());
+    }
+
+    #[test]
+    fn stream_max_tokens_keeps_partial_and_sets_length() {
+        let (cb, _events) = record_callback();
+        let mut state = StreamState::default();
+        let chunk = json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "partial"}]},
+                "finishReason": "MAX_TOKENS"
+            }]
+        })
+        .to_string();
+        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        assert_eq!(state.finish_reason, Some(FinishReason::Length));
+        assert_eq!(state.text_acc, "partial");
+    }
+
+    #[test]
+    fn parallel_same_tool_calls_keep_call_order() {
+        // #8: Gemini's wire protocol has no call id, so two calls to the SAME
+        // tool in one turn are associated by POSITION. We synthesize ids in
+        // arrival order and must emit results in the same order — that ordering
+        // is the only correctness lever, so pin it against accidental reordering.
+        let (cb, _events) = record_callback();
+        let mut state = StreamState::default();
+        let chunk = json!({
+            "candidates": [{
+                "content": {"parts": [
+                    {"functionCall": {"name": "read_file", "args": {"path": "a"}}},
+                    {"functionCall": {"name": "read_file", "args": {"path": "b"}}}
+                ]}
+            }]
+        })
+        .to_string();
+        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        assert_eq!(state.tool_calls_done.len(), 2);
+        assert_eq!(state.tool_calls_done[0].id.as_deref(), Some("call_0"));
+        assert_eq!(state.tool_calls_done[1].id.as_deref(), Some("call_1"));
+        assert_eq!(state.tool_calls_done[0].function.arguments["path"], "a");
+        assert_eq!(state.tool_calls_done[1].function.arguments["path"], "b");
     }
 }
