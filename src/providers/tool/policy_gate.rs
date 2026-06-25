@@ -669,7 +669,9 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::domain::Msg>(8);
         let broker = crate::providers::ApprovalBroker::new(tx);
         // Approve-always once so the key is allowlisted, then a second call
-        // must proceed WITHOUT emitting another prompt.
+        // with the SAME argv0+subcommand must proceed WITHOUT emitting another
+        // prompt. (Per #10, multiplexers key on argv0+subcommand, so both must
+        // share the `npm run` prefix; a different subcommand re-prompts.)
         let ctx1 = ctx_with_broker(broker.clone());
         let b1 = broker.clone();
         let h1 = tokio::spawn(async move {
@@ -692,7 +694,7 @@ mod tests {
         let ctx2 = ctx_with_broker(broker.clone());
         let g2 = gate(
             &ctx2,
-            shell_request("npm test"),
+            shell_request("npm run test"),
             &[],
             serde_json::json!({}),
             true,
