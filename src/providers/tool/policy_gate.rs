@@ -92,14 +92,26 @@ pub async fn gate(
                 // old non-replayable bypass).
                 inline_decision(ctx, broker, &request, risk, None).await
             } else if !replayable {
-                // Headless non-replayable: no checkpoint/replay path, so an Ask
-                // can't be satisfied out-of-band — proceed (only ReadOnly/Deny
-                // blocks these).
-                tracing::debug!(
-                    tool = %request.tool,
-                    "policy Ask on non-replayable tool with no approval UI; proceeding",
-                );
-                Gate::Proceed { risk }
+                // Headless non-replayable (web/mcp/subagent/computer_use): no
+                // checkpoint/replay path, so an Ask can't be satisfied
+                // out-of-band. Fail closed by default — only proceed when the
+                // run explicitly opted in via `--allow-untrusted-tools`.
+                if ctx.config.safety.allow_untrusted_headless_tools {
+                    tracing::debug!(
+                        tool = %request.tool,
+                        "policy Ask on non-replayable tool; proceeding (--allow-untrusted-tools)",
+                    );
+                    Gate::Proceed { risk }
+                } else {
+                    Gate::Block(ToolOutcome::error(
+                        format!(
+                            "{} requires approval, but this is a headless run with no approval UI. \
+                             Re-run with --allow-untrusted-tools, or use a safety mode of auto/full_access.",
+                            request.summary
+                        ),
+                        0.0,
+                    ))
+                }
             } else {
                 block_for_approval(
                     ctx,
@@ -361,6 +373,60 @@ mod tests {
         )
     }
 
+    fn ctx_headless_opted_in() -> ExecContext {
+        let mut config = crate::app::Config::default();
+        config.safety.mode = SafetyMode::Ask;
+        config.safety.allow_untrusted_headless_tools = true;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(4);
+        ExecContext::new(
+            tokio_util::sync::CancellationToken::new(),
+            tx,
+            ToolCallId(1),
+            TurnId(1),
+            PathBuf::from("."),
+            Arc::new(config),
+            String::new(),
+            None,
+            SafetyMode::Ask,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn headless_ask_blocks_non_replayable_unless_opted_in() {
+        // #3: web/mcp/subagent/computer_use on an Ask decision with no approval
+        // UI is blocked by default, allowed only with the opt-in flag.
+        let req = || ActionRequest::new("web_fetch", ToolCategory::Web, "web_fetch https://x");
+
+        let blocked = gate(
+            &ctx(SafetyMode::Ask),
+            req(),
+            &[],
+            serde_json::json!({}),
+            false,
+        )
+        .await;
+        assert!(
+            matches!(blocked, Gate::Block(_)),
+            "headless Ask should block by default"
+        );
+
+        let proceed = gate(
+            &ctx_headless_opted_in(),
+            req(),
+            &[],
+            serde_json::json!({}),
+            false,
+        )
+        .await;
+        assert!(
+            matches!(proceed, Gate::Proceed { .. }),
+            "--allow-untrusted-tools should let it proceed",
+        );
+    }
+
     /// Stub classifier with a fixed verdict — drives the `Classify` path
     /// without a real model call.
     struct StubClassifier {
@@ -603,7 +669,9 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::domain::Msg>(8);
         let broker = crate::providers::ApprovalBroker::new(tx);
         // Approve-always once so the key is allowlisted, then a second call
-        // must proceed WITHOUT emitting another prompt.
+        // with the SAME argv0+subcommand must proceed WITHOUT emitting another
+        // prompt. (Per #10, multiplexers key on argv0+subcommand, so both must
+        // share the `npm run` prefix; a different subcommand re-prompts.)
         let ctx1 = ctx_with_broker(broker.clone());
         let b1 = broker.clone();
         let h1 = tokio::spawn(async move {
@@ -626,7 +694,7 @@ mod tests {
         let ctx2 = ctx_with_broker(broker.clone());
         let g2 = gate(
             &ctx2,
-            shell_request("npm test"),
+            shell_request("npm run test"),
             &[],
             serde_json::json!({}),
             true,

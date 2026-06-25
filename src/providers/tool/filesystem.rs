@@ -22,6 +22,7 @@ use crate::render::diff::{DIFF_ADDED_MARKER, DIFF_REMOVED_MARKER};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
+use super::path_safety::resolve_path_safe;
 
 /// Small helper for building a `ToolDefinition` with a typical
 /// JSON-schema-shaped input_schema. Keeps the per-tool definitions
@@ -582,118 +583,6 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
         return Ok(out);
     }
     Err("read_file requires 'path' or 'paths'".to_string())
-}
-
-/// Resolve a caller-supplied path against `workdir`, enforcing the
-/// "absolute paths outside the project are blocked" contract advertised
-/// in the tool schema.
-///
-/// Rules (F10):
-/// - Relative paths → joined onto `workdir` unchanged. `..` components
-///   are NOT rejected here — a relative `../foo` resolves against the
-///   workdir and then gets the same absolute-path containment check as
-///   an absolute input.
-/// - Absolute paths → canonicalized (resolves `..` + symlinks) and
-///   checked against the canonicalized `workdir`. Escape → `Err`.
-/// - Non-existent paths that won't canonicalize → lexical fallback:
-///   normalize `..` components manually, then compare prefixes. This
-///   matters for `write_file` / `create_directory` where the target
-///   doesn't exist yet.
-fn resolve_path_safe(workdir: &Path, raw: &str) -> Result<PathBuf, String> {
-    let p = PathBuf::from(raw);
-    let candidate = if p.is_absolute() { p } else { workdir.join(&p) };
-
-    // Canonical project root. If the workdir itself can't canonicalize we
-    // cannot make a sound containment decision — fail closed rather than
-    // falling back to a weaker lexical check.
-    let root = std::fs::canonicalize(workdir).map_err(|e| {
-        format!(
-            "cannot canonicalize project dir '{}': {}",
-            workdir.display(),
-            e
-        )
-    })?;
-
-    // Resolve the target THROUGH symlinks and return the resolved path (the
-    // callers operate on this, not the raw candidate). For an existing target
-    // `canonicalize` gives the real location; for a not-yet-existing target
-    // (write_file / create_directory) we canonicalize the nearest existing
-    // ancestor — which resolves any symlinked parent — and re-attach the
-    // remaining components. This closes both the symlink-follow/TOCTOU gap and
-    // the symlinked-parent-on-create gap.
-    let resolved = match std::fs::canonicalize(&candidate) {
-        Ok(real) => real,
-        Err(_) => resolve_via_existing_ancestor(&candidate)?,
-    };
-
-    if resolved.starts_with(&root) {
-        Ok(resolved)
-    } else {
-        Err(format!(
-            "path '{}' is outside the project directory '{}'",
-            raw,
-            workdir.display()
-        ))
-    }
-}
-
-/// Resolve a not-yet-existing target by canonicalizing its nearest existing
-/// ancestor (resolving any symlinked parent directory) and re-joining the
-/// remaining path components lexically. Rejects paths with no
-/// canonicalizable ancestor.
-fn resolve_via_existing_ancestor(candidate: &Path) -> Result<PathBuf, String> {
-    let normalized = lexical_normalize(candidate);
-    let mut ancestor = normalized.as_path();
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        if let Ok(real) = std::fs::canonicalize(ancestor) {
-            let mut out = real;
-            for comp in tail.iter().rev() {
-                out.push(comp);
-            }
-            return Ok(out);
-        }
-        let Some(file) = ancestor.file_name() else {
-            return Err(format!(
-                "cannot resolve path '{}': no existing ancestor directory",
-                candidate.display()
-            ));
-        };
-        tail.push(file.to_os_string());
-        match ancestor.parent() {
-            Some(parent) => ancestor = parent,
-            None => {
-                return Err(format!(
-                    "cannot resolve path '{}': no existing ancestor directory",
-                    candidate.display()
-                ));
-            },
-        }
-    }
-}
-
-/// Normalize a path lexically (no filesystem access), collapsing `.` and
-/// resolving `..` without symlink expansion. Used when a target doesn't
-/// exist yet (write_file / create_directory) so `canonicalize` would
-/// fail but we still want to reject `..`-escapes.
-fn lexical_normalize(p: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::ParentDir => {
-                // Drop the last segment if one exists; otherwise keep
-                // the `..` (can only happen on relative paths, which
-                // the caller has already joined against workdir).
-                if !out.pop() {
-                    out.push("..");
-                }
-            },
-            Component::CurDir => {},
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<String> {

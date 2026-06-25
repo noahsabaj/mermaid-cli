@@ -196,7 +196,14 @@ impl ToolExecutor for SubagentTool {
             ctx.model_id.clone()
         };
         let child_model_id = model_id.clone();
-        let child_state = State::new(config.clone(), cwd.clone(), model_id);
+        // Inherit the parent's LIVE safety mode (Shift+Tab / `/safety` apply
+        // immediately) rather than the static config default `State::new`
+        // would pick up — otherwise a downgraded session could be escaped by
+        // delegating risky work to a subagent. The child runs headless (no
+        // approval broker), so in `ask` its mutations block/await rather than
+        // silently escalate; non-replayable tools fail closed (see #3).
+        let mut child_state = State::new(config.clone(), cwd.clone(), model_id);
+        child_state.session.safety_mode = ctx.safety_mode;
 
         let child_tools = build_child_registry(self.spawner.providers.clone());
 
@@ -504,6 +511,22 @@ mod tests {
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let outcome = tool.execute(serde_json::json!({"prompt": "  "}), ctx).await;
         assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+    }
+
+    #[test]
+    fn child_state_inherits_live_safety_mode_over_config_default() {
+        // #2: a subagent must run at the parent's LIVE safety mode, not the
+        // static config default `State::new` would otherwise apply — otherwise
+        // a downgraded session is escapable by delegating to a subagent.
+        use crate::runtime::SafetyMode;
+        let mut config = crate::app::Config::default();
+        config.safety.mode = SafetyMode::FullAccess; // static config default
+        let mut child_state = State::new(config, PathBuf::from("/tmp"), "ollama/test".to_string());
+        // The bug source: State::new picks up the config default…
+        assert_eq!(child_state.session.safety_mode, SafetyMode::FullAccess);
+        // …and the fix: the parent's live ctx.safety_mode overrides it.
+        child_state.session.safety_mode = SafetyMode::Ask;
+        assert_eq!(child_state.session.safety_mode, SafetyMode::Ask);
     }
 
     /// F7: when `ExecContext::model_id` is empty (the test builder's

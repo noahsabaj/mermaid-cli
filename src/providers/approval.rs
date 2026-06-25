@@ -139,9 +139,18 @@ impl ApprovalBroker {
     }
 }
 
+/// Multiplexer binaries that run arbitrary subcommands — keyed on argv0 + the
+/// first subcommand so approving `npm test` doesn't also clear `npm run <x>`.
+const MULTIPLEXER_BINARIES: &[&str] = &[
+    "npm", "yarn", "pnpm", "bun", "npx", "make", "cargo", "git", "go", "docker", "kubectl",
+    "python", "python3", "node", "deno",
+];
+
 /// Compute the session "don't ask again" allowlist key. Per-tool, except
-/// `execute_command`, which keys on argv0 (basename) so approving `npm test`
-/// also clears `npm run build` but still prompts on `rm`.
+/// `execute_command`, which keys on argv0 (basename) so approving `ls -la`
+/// clears `ls` but `rm` still prompts. For multiplexer binaries
+/// (npm/cargo/git/…) the first subcommand is included so approving `npm test`
+/// doesn't also clear `npm run <anything>`.
 pub fn allowlist_key(tool: &str, command: Option<&str>) -> String {
     if tool == "execute_command"
         && let Some(cmd) = command
@@ -149,6 +158,11 @@ pub fn allowlist_key(tool: &str, command: Option<&str>) -> String {
         && !argv0.is_empty()
     {
         let base = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
+        if MULTIPLEXER_BINARIES.contains(&base)
+            && let Some(sub) = cmd.split_whitespace().skip(1).find(|t| !t.starts_with('-'))
+        {
+            return format!("execute_command:{} {}", base, sub);
+        }
         return format!("execute_command:{}", base);
     }
     tool.to_string()
@@ -161,16 +175,39 @@ mod tests {
     #[test]
     fn allowlist_key_is_per_tool_with_shell_argv0() {
         assert_eq!(allowlist_key("write_file", None), "write_file");
+        // Plain binaries key on argv0 basename.
         assert_eq!(
-            allowlist_key("execute_command", Some("npm test")),
-            "execute_command:npm"
-        );
-        assert_eq!(
-            allowlist_key("execute_command", Some("/usr/bin/git status")),
-            "execute_command:git"
+            allowlist_key("execute_command", Some("ls -la")),
+            "execute_command:ls"
         );
         // No command falls back to the bare tool key.
         assert_eq!(allowlist_key("execute_command", None), "execute_command");
+    }
+
+    #[test]
+    fn allowlist_key_includes_subcommand_for_multiplexers() {
+        // #10: approving `npm test` must not allowlist `npm run <anything>`.
+        assert_eq!(
+            allowlist_key("execute_command", Some("npm test")),
+            "execute_command:npm test"
+        );
+        assert_eq!(
+            allowlist_key("execute_command", Some("npm run build")),
+            "execute_command:npm run"
+        );
+        assert_ne!(
+            allowlist_key("execute_command", Some("npm test")),
+            allowlist_key("execute_command", Some("npm run build")),
+        );
+        // Flags between argv0 and the subcommand are skipped.
+        assert_eq!(
+            allowlist_key("execute_command", Some("/usr/bin/git status")),
+            "execute_command:git status"
+        );
+        assert_eq!(
+            allowlist_key("execute_command", Some("cargo --quiet build")),
+            "execute_command:cargo build"
+        );
     }
 
     #[tokio::test]

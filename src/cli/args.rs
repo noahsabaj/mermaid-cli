@@ -250,6 +250,12 @@ pub enum Commands {
         /// Don't execute agent actions (dry run)
         #[arg(long)]
         no_execute: bool,
+
+        /// Allow non-replayable tools (web/mcp/subagent/computer-use) to run on
+        /// an `Ask` decision in this headless run. Off by default — `ask` mode
+        /// otherwise refuses them when there's no approval UI.
+        #[arg(long)]
+        allow_untrusted_tools: bool,
     },
 }
 
