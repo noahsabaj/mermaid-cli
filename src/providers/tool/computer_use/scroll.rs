@@ -53,7 +53,7 @@ impl ToolExecutor for ScrollTool {
 
     async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
-        if let Err(error) = self.driver.ensure_alive() {
+        if let Err(error) = self.driver.ensure_alive_async().await {
             return ToolOutcome::error(error, started.elapsed().as_secs_f64());
         }
         if let Some(blocked) = super::super::policy_gate::gate_external(

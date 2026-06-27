@@ -23,6 +23,39 @@ fn validate_conversation_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Marker left in a message's text when its screenshot bytes are dropped on save.
+const SCREENSHOT_ELIDED_MARKER: &str = "\n[screenshot not persisted]";
+
+/// Return a sanitized copy of `messages` with computer-use screenshot bytes
+/// removed before they reach durable storage (#99). Screenshots — which can
+/// capture on-screen secrets — attach to **non-User** messages (the assistant
+/// message the capture is routed onto, or a tool outcome); user-supplied
+/// multimodal images attach to **User** messages and are intentional content,
+/// so they're preserved. The live in-memory conversation is untouched (this
+/// runs on a copy at the save chokepoint), so the chat and model context still
+/// see the screenshot for the session — only the on-disk copy is scrubbed.
+///
+/// Returns `None` when nothing needed stripping, so the hot save path avoids a
+/// clone in the common (no-screenshot) case.
+fn strip_persisted_screenshots(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
+    let needs = messages
+        .iter()
+        .any(|m| m.role != MessageRole::User && m.images.is_some());
+    if !needs {
+        return None;
+    }
+    let mut out = messages.to_vec();
+    for m in out.iter_mut() {
+        if m.role != MessageRole::User && m.images.is_some() {
+            m.images = None;
+            if !m.content.ends_with(SCREENSHOT_ELIDED_MARKER) {
+                m.content.push_str(SCREENSHOT_ELIDED_MARKER);
+            }
+        }
+    }
+    Some(out)
+}
+
 /// A complete conversation history
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationHistory {
@@ -167,10 +200,23 @@ impl ConversationManager {
 
     /// Save a conversation to disk
     pub fn save_conversation(&self, conversation: &ConversationHistory) -> Result<()> {
+        // The id field is persisted and round-trips through (potentially
+        // tampered) on-disk state; validate it before it drives the write path,
+        // so a loaded conversation can't escape the conversations dir on save.
+        validate_conversation_id(&conversation.id)?;
         let filename = format!("{}.json", conversation.id);
         let path = self.conversations_dir.join(filename);
 
-        let json = serde_json::to_string_pretty(conversation)?;
+        // Strip computer-use screenshot bytes before they hit disk (#99). Only
+        // clones the conversation when there is actually something to scrub.
+        let json = match strip_persisted_screenshots(&conversation.messages) {
+            Some(sanitized) => {
+                let mut redacted = conversation.clone();
+                redacted.messages = sanitized;
+                serde_json::to_string_pretty(&redacted)?
+            },
+            None => serde_json::to_string_pretty(conversation)?,
+        };
         // Atomic write: a crash mid-save must not empty/corrupt the session
         // file (this is the hot path, rewritten after nearly every message).
         crate::runtime::write_atomic(&path, json.as_bytes())?;
@@ -182,10 +228,30 @@ impl ConversationManager {
     /// outside the hot conversation JSON so `/load` and `/list` don't
     /// parse old transcripts on every startup.
     pub fn save_compaction_archive(&self, archive: &CompactionArchive) -> Result<PathBuf> {
+        // Both the conversation id (a directory component) and the archive id
+        // (a file component) come from persisted state and must not traverse.
+        validate_conversation_id(&archive.conversation_id)?;
+        anyhow::ensure!(
+            !archive.id.is_empty()
+                && !archive.id.contains(['/', '\\'])
+                && !archive.id.contains(".."),
+            "invalid compaction archive id: {:?}",
+            archive.id
+        );
         let dir = self.compactions_dir.join(&archive.conversation_id);
         fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", archive.id));
-        let json = serde_json::to_string_pretty(archive)?;
+        // The archive is the only durable copy of compacted-out messages; scrub
+        // screenshot bytes here too so they don't survive in compaction archives
+        // (#99). Clones only when a screenshot is actually present.
+        let json = match strip_persisted_screenshots(&archive.messages) {
+            Some(sanitized) => {
+                let mut redacted = archive.clone();
+                redacted.messages = sanitized;
+                serde_json::to_string_pretty(&redacted)?
+            },
+            None => serde_json::to_string_pretty(archive)?,
+        };
         // Atomic write: the archive is the ONLY durable copy of messages
         // dropped by a compaction — a partial write would lose them.
         crate::runtime::write_atomic(&path, json.as_bytes())?;
@@ -200,6 +266,9 @@ impl ConversationManager {
 
         let json = fs::read_to_string(path)?;
         let conversation: ConversationHistory = serde_json::from_str(&json)?;
+        // The file name was validated, but the deserialized `id` (which drives
+        // later saves) is independent on-disk state — validate it too.
+        validate_conversation_id(&conversation.id)?;
 
         Ok(conversation)
     }
@@ -229,6 +298,11 @@ impl ConversationManager {
 
         let json = fs::read_to_string(&path)?;
         let conv: ConversationHistory = serde_json::from_str(&json)?;
+        // A planted session file with a traversing `id` must not become the
+        // resumed conversation (its id would later drive an out-of-dir save).
+        if validate_conversation_id(&conv.id).is_err() {
+            return Ok(None);
+        }
         Ok(Some(conv))
     }
 
@@ -290,6 +364,64 @@ mod tests {
         assert!(validate_conversation_id("/etc/passwd").is_err());
         assert!(validate_conversation_id("20260101_120000").is_err()); // too short
         assert!(validate_conversation_id("abcdefgh_120000_001").is_err()); // non-digits
+    }
+
+    #[test]
+    fn strip_persisted_screenshots_drops_assistant_images_keeps_user_images() {
+        let messages = vec![
+            ChatMessage::user("look at this").with_images(vec!["USER_PASTED_B64".to_string()]),
+            ChatMessage::assistant("here is the screen")
+                .with_images(vec!["SCREENSHOT_B64".to_string()]),
+            ChatMessage::assistant("no image here"),
+        ];
+        let sanitized = strip_persisted_screenshots(&messages).expect("had a screenshot to strip");
+        // User-supplied image preserved.
+        assert_eq!(
+            sanitized[0].images.as_deref(),
+            Some(["USER_PASTED_B64".to_string()].as_slice())
+        );
+        // Assistant screenshot dropped + marker added.
+        assert!(sanitized[1].images.is_none());
+        assert!(sanitized[1].content.ends_with(SCREENSHOT_ELIDED_MARKER));
+        // Untouched assistant message is unchanged (no spurious marker).
+        assert!(!sanitized[2].content.ends_with(SCREENSHOT_ELIDED_MARKER));
+    }
+
+    #[test]
+    fn strip_persisted_screenshots_is_none_without_assistant_images() {
+        let messages = vec![
+            ChatMessage::user("hi").with_images(vec!["USER_B64".to_string()]),
+            ChatMessage::assistant("no images"),
+        ];
+        assert!(strip_persisted_screenshots(&messages).is_none());
+    }
+
+    #[test]
+    fn saved_conversation_json_has_no_screenshot_bytes() {
+        let dir = std::env::temp_dir().join("mermaid_strip_test");
+        let _ = fs::create_dir_all(&dir);
+        let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into());
+        conv.messages = vec![
+            ChatMessage::user("u").with_images(vec!["USERIMG".to_string()]),
+            ChatMessage::assistant("a").with_images(vec!["SHOTBYTES".to_string()]),
+        ];
+        let store = ConversationManager {
+            conversations_dir: dir.clone(),
+            compactions_dir: dir.clone(),
+        };
+        store.save_conversation(&conv).expect("save");
+        let raw = fs::read_to_string(dir.join(format!("{}.json", conv.id))).expect("read");
+        assert!(
+            !raw.contains("SHOTBYTES"),
+            "screenshot leaked to disk: {raw}"
+        );
+        assert!(raw.contains("USERIMG"), "user image should persist");
+        // Live conversation untouched — still carries the screenshot in-session.
+        assert_eq!(
+            conv.messages[1].images.as_deref(),
+            Some(["SHOTBYTES".to_string()].as_slice())
+        );
+        let _ = fs::remove_file(dir.join(format!("{}.json", conv.id)));
     }
 
     #[test]

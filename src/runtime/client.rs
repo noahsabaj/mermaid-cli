@@ -473,7 +473,14 @@ impl RuntimeClient {
         T: DeserializeOwned,
         F: FnOnce(&RuntimeService) -> Result<T>,
     {
-        self.read_inner(body, false, local)
+        // #21: attach the pairing token when the client has one. Reads are now
+        // gated server-side (`command_requires_auth`), so a `daemon_with_token`
+        // client must send its token to read off the socket; a tokenless
+        // `auto()` client sends nothing and `PreferDaemon` falls back to a local
+        // DB read on the daemon's auth rejection. `request_daemon` only attaches
+        // the token if one is present, so tokenless clients are unchanged, and
+        // ungated commands (`health`/`ports`) are served regardless.
+        self.read_inner(body, true, local)
     }
 
     fn action<T, F>(&self, body: Value, local: F) -> Result<T>
@@ -875,12 +882,27 @@ impl RuntimeService {
         let path = process
             .log_path
             .with_context(|| format!("process has no log path: {}", id))?;
-        let bytes = std::fs::read(&path).with_context(|| format!("failed to read {}", path))?;
-        let tail = tail_bytes.unwrap_or(32 * 1024).min(512 * 1024) as usize;
-        let start = bytes.len().saturating_sub(tail);
+        let tail = tail_bytes.unwrap_or(32 * 1024).min(512 * 1024);
+        // Seek to the tail rather than reading the whole file: a long-running
+        // dev server can produce a multi-GB log, and we only ever return the
+        // last `tail` bytes. `std::fs::read` would have pinned the whole file
+        // in RAM first (#41).
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file =
+            std::fs::File::open(&path).with_context(|| format!("failed to read {}", path))?;
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let start = len.saturating_sub(tail);
+        if start > 0 {
+            file.seek(SeekFrom::Start(start))
+                .with_context(|| format!("failed to seek {}", path))?;
+        }
+        let mut bytes = Vec::new();
+        file.take(tail)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("failed to read {}", path))?;
         Ok(RuntimeProcessLog {
             ok: true,
-            content: String::from_utf8_lossy(&bytes[start..]).into_owned(),
+            content: String::from_utf8_lossy(&bytes).into_owned(),
         })
     }
 

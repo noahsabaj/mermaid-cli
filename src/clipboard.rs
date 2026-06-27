@@ -146,7 +146,9 @@ pub fn read_image_bytes() -> Result<(Vec<u8>, String)> {
         },
         ClipboardBackend::MacOS => {
             // Use osascript to save clipboard image to a temp file, then read it
-            let temp_path = std::env::temp_dir().join("mermaid-clipboard-paste.png");
+            // 0700 per-user scratch dir, not a world-readable shared /tmp path
+            // another local user could read or pre-create/symlink (#11).
+            let temp_path = crate::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
             let temp_str = temp_path.to_string_lossy();
             let script = format!(
                 "set theFile to POSIX file \"{}\"\n\
@@ -183,7 +185,9 @@ pub fn read_image_bytes() -> Result<(Vec<u8>, String)> {
         },
         ClipboardBackend::Windows => {
             // Use PowerShell to save clipboard image to temp file
-            let temp_path = std::env::temp_dir().join("mermaid-clipboard-paste.png");
+            // 0700 per-user scratch dir, not a world-readable shared /tmp path
+            // another local user could read or pre-create/symlink (#11).
+            let temp_path = crate::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
             let temp_str = temp_path.to_string_lossy();
             let script = format!(
                 "Add-Type -AssemblyName System.Windows.Forms; \

@@ -183,12 +183,18 @@ fn find_line_break(remaining: &str, line_width: usize) -> usize {
             .unwrap_or(remaining.len());
     }
 
-    // Prefer a whitespace break within the accepted byte range. (`pos + 1`
-    // assumes 1-byte ASCII whitespace, which is overwhelmingly the common
-    // case in source text and matches the prior behavior.)
+    // Prefer a whitespace break within the accepted byte range. Advance past
+    // the whitespace char by its UTF-8 length so the returned offset is always
+    // a char boundary — `char::is_whitespace` matches multibyte spaces (NBSP
+    // U+00A0 = 2 bytes, ideographic space U+3000 = 3 bytes, U+2028, …) that a
+    // naive `pos + 1` would split mid-codepoint, panicking the renderer on the
+    // subsequent slice. For 1-byte ASCII whitespace this is identical to the
+    // old `pos + 1`.
     remaining[..hard_break]
-        .rfind(char::is_whitespace)
-        .map(|pos| pos + 1)
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(pos, c)| pos + c.len_utf8())
         .unwrap_or(hard_break)
 }
 
@@ -396,6 +402,31 @@ mod tests {
         // Double-width char on a 1-cell viewport: must still consume the
         // char (return offset 3) so the wrap loop can't spin forever.
         assert_eq!(find_line_break("你hello", 1), 3);
+    }
+
+    #[test]
+    fn find_line_break_multibyte_whitespace_is_char_boundary() {
+        // Regression: `char::is_whitespace` matches multibyte spaces (NBSP
+        // U+00A0 = 2 bytes, ideographic space U+3000 = 3 bytes, U+2028,
+        // U+202F …). A naive `pos + 1` break offset lands mid-codepoint and
+        // the caller's `&rem[bp..]` slice panics the whole renderer. The
+        // break must always be a char boundary, and the full wrap path must
+        // not panic.
+        for s in [
+            "aaaa\u{00A0}bbbbbbbbbbbbbbbb",
+            "\u{3000}\u{3000}wwwwwwwwwwwwwww",
+            "word\u{2028}word\u{202F}wordwordword",
+        ] {
+            for width in 1..=20 {
+                let bp = find_line_break(s, width);
+                assert!(
+                    s.is_char_boundary(bp),
+                    "break {bp} not a char boundary in {s:?} at width {width}",
+                );
+                let _ = &s[bp..]; // must not panic
+            }
+            let _ = wrap_input_with_prompt(s, 8);
+        }
     }
 
     #[test]

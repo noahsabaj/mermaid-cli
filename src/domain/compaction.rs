@@ -322,6 +322,11 @@ pub fn build_replacement_messages(
     prepared: &PreparedCompaction,
     record: &CompactionRecord,
 ) -> Vec<ChatMessage> {
+    // The summary is model-generated from the full conversation and is persisted
+    // (replacement message + conversation file). Scrub any credential it echoed
+    // back from the archived turns before it's written (#70).
+    let summary = crate::utils::redact_secrets(summary);
+    let summary = summary.as_str();
     let checkpoint = format!(
         "# {}\n\nCompaction id: {}\nTrigger: {}\nCreated: {}\nArchived messages: {}\nPreserved messages: {}\n\n{}",
         CHECKPOINT_MARKER,

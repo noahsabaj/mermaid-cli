@@ -59,11 +59,63 @@ pub async fn gate_external(
     summary: String,
     args: &serde_json::Value,
 ) -> Option<ToolOutcome> {
-    let request = ActionRequest::new(tool, category, summary);
+    let mut request = ActionRequest::new(tool, category, summary);
+    // Surface a concrete, content-bearing detail (the text being typed, the URL
+    // being fetched, the MCP server__tool + args). Without this the Auto-mode
+    // classifier and the human approval prompt see only the tool name and a
+    // generic summary — so they can't actually vet *what* the action does
+    // (#29, #30, #31).
+    request.command = action_detail(tool, args);
     let pending = serde_json::json!({ "tool": tool, "args": args });
     match gate(ctx, request, &[], pending, false).await {
         Gate::Block(outcome) => Some(outcome),
         Gate::Proceed { .. } => None,
+    }
+}
+
+/// Build a concise, content-bearing one-line detail for an external action,
+/// landing in `ActionRequest.command`. This is what the Auto classifier vets
+/// and the approval modal shows, so it must reflect the *content* — not just
+/// the tool name. Returns `None` when there's nothing useful to add beyond the
+/// summary the caller already provided.
+fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
+    /// Char-boundary-safe clamp for the preview.
+    fn clip(s: &str, max: usize) -> String {
+        if s.len() <= max {
+            return s.to_string();
+        }
+        let end = s.floor_char_boundary(max);
+        format!("{}…", &s[..end])
+    }
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str());
+    let i = |k: &str| args.get(k).and_then(|v| v.as_i64());
+    match tool {
+        "type_text" => Some(format!("type_text {:?}", clip(s("text")?, 200))),
+        "press_key" => Some(format!("press_key {}", s("key").or_else(|| s("keys"))?)),
+        "click" | "mouse_move" => match (i("x"), i("y")) {
+            (Some(x), Some(y)) => Some(format!("{tool} ({x}, {y})")),
+            _ => None,
+        },
+        "scroll" => {
+            let dir = s("direction").unwrap_or("");
+            Some(
+                format!("scroll {dir} {}", i("amount").unwrap_or(0))
+                    .trim()
+                    .to_string(),
+            )
+        },
+        "web_fetch" => Some(format!("web_fetch {}", clip(s("url")?, 200))),
+        "mcp_proxy" => {
+            let server = s("server_name").unwrap_or("?");
+            let name = s("tool_name").unwrap_or("?");
+            let arg_preview = args
+                .get("arguments")
+                .filter(|a| !a.is_null())
+                .map(|a| clip(&a.to_string(), 200))
+                .unwrap_or_default();
+            Some(format!("mcp {server}__{name}({arg_preview})"))
+        },
+        _ => None,
     }
 }
 
@@ -189,7 +241,9 @@ async fn inline_decision(
     classifier_reason: Option<String>,
 ) -> Gate {
     let key = allowlist_key(&request.tool, request.command.as_deref());
-    if broker.is_allowlisted(&key) {
+    // An empty key marks a non-allowlistable action — always prompt, never
+    // match a stored entry (#6, #31).
+    if !key.is_empty() && broker.is_allowlisted(&key) {
         return Gate::Proceed { risk };
     }
     let kind = if classifier_reason.is_some() {
@@ -222,8 +276,15 @@ async fn inline_decision(
 /// Build the modal body: the concrete command/path being run, plus any
 /// Auto-review reason. Kept here so the render layer stays dumb.
 fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>) -> String {
+    use crate::runtime::ToolCategory as C;
     let mut body = if let Some(cmd) = &request.command {
-        format!("$ {}", cmd)
+        // A `$ ` prefix reads as "shell command"; only use it for actual shell
+        // categories. Computer-use / MCP details (`type_text "…"`, `mcp s__t(…)`)
+        // render verbatim so the prompt isn't misleading (#30, #31).
+        match request.category {
+            C::Shell | C::Git | C::Process => format!("$ {}", cmd),
+            _ => cmd.clone(),
+        }
     } else if let Some(path) = &request.path {
         format!("{}  ({})", path, request.summary)
     } else {
@@ -668,10 +729,11 @@ mod tests {
     async fn inline_allowlisted_skips_prompt() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::domain::Msg>(8);
         let broker = crate::providers::ApprovalBroker::new(tx);
-        // Approve-always once so the key is allowlisted, then a second call
-        // with the SAME argv0+subcommand must proceed WITHOUT emitting another
-        // prompt. (Per #10, multiplexers key on argv0+subcommand, so both must
-        // share the `npm run` prefix; a different subcommand re-prompts.)
+        // Approve-always once so the key is allowlisted, then the SAME command
+        // must proceed WITHOUT emitting another prompt. (#6: execute_command
+        // keys on the full normalized command, so only an identical command is
+        // cleared — a different-argument command re-prompts; that distinction is
+        // covered by the `allowlist_key` unit tests.)
         let ctx1 = ctx_with_broker(broker.clone());
         let b1 = broker.clone();
         let h1 = tokio::spawn(async move {
@@ -694,7 +756,7 @@ mod tests {
         let ctx2 = ctx_with_broker(broker.clone());
         let g2 = gate(
             &ctx2,
-            shell_request("npm run test"),
+            shell_request("npm run build"),
             &[],
             serde_json::json!({}),
             true,
@@ -702,7 +764,7 @@ mod tests {
         .await;
         assert!(
             matches!(g2, Gate::Proceed { .. }),
-            "allowlisted key should skip the prompt"
+            "the identical allowlisted command should skip the prompt"
         );
         assert!(rx.try_recv().is_err(), "no second prompt should be sent");
     }

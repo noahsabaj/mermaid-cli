@@ -66,6 +66,39 @@ pub const MAX_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
 /// integer (guards against a crafted stream OOM-ing the daemon).
 pub const MAX_TOOL_CALLS: usize = 256;
 
+// Bound-before-allocate frame caps (Cause 2)
+// Every one of these guards a buffer whose size is driven by an untrusted
+// peer (an MCP server, a daemon client, a model provider). They're sized
+// generously — well above any legitimate payload — because their only job is
+// to stop a peer that streams bytes *without* a delimiter from growing a
+// buffer without bound. A legitimate large payload is delimited and so is
+// never anywhere near these.
+/// Max bytes in a single MCP JSON-RPC line before the frame is dropped and the
+/// reader resyncs to the next newline. MCP tool results can be large (a server
+/// returning a file), hence the generous ceiling.
+pub const MAX_MCP_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// Max bytes in a single daemon control-command line. Commands are short JSON
+/// control messages; anything larger is malformed or hostile.
+pub const MAX_DAEMON_COMMAND_BYTES: usize = 1024 * 1024;
+/// Max bytes accumulated in an SSE reassembly buffer without a complete event
+/// boundary. A provider that streams bytes but never emits the `\n\n` event
+/// separator would otherwise grow the buffer unbounded.
+pub const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+/// Max bytes buffered for one streaming tool call's arguments. Tool arguments
+/// (e.g. a file's contents for a `write_file`) can be large, so this is
+/// generous; past it we stop appending so a crafted stream can't grow the
+/// buffer without bound.
+pub const MAX_TOOL_ARG_BYTES: usize = 4 * 1024 * 1024;
+/// Max number of `queries[]` honored in a single `web_search` call, and of
+/// `paths[]` in a single `read_file` call. Bounds the fan-out a single tool
+/// call can request.
+pub const MAX_BATCH_TOOL_ITEMS: usize = 32;
+/// Max bytes read from an Ollama `web_search`/`web_fetch` HTTP response body
+/// before the read is aborted. The body is JSON we fully buffer to parse; this
+/// stops a compromised or misconfigured endpoint from returning a multi-GB
+/// body that `Response::json` would buffer unbounded.
+pub const MAX_WEB_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 // UI Cache
 /// Maximum entries in the markdown parse cache before eviction
 pub const MARKDOWN_CACHE_MAX_ENTRIES: usize = 200;

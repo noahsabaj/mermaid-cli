@@ -2,7 +2,7 @@
 use anyhow::{Context, Result};
 
 #[cfg(unix)]
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 #[cfg(unix)]
 const DEFAULT_TCP_ADDR: &str = "127.0.0.1:39871";
@@ -113,9 +113,21 @@ async fn handle_stream_inner<S>(stream: S, require_auth: bool) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Bounded read: a pre-auth client (especially over TCP) must not be able to
+    // stream bytes without a newline and grow this buffer without bound (#22).
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
+    let line = match mermaid_cli::utils::read_line_capped(
+        &mut reader,
+        mermaid_cli::constants::MAX_DAEMON_COMMAND_BYTES,
+    )
+    .await?
+    {
+        mermaid_cli::utils::CappedLine::Line(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        mermaid_cli::utils::CappedLine::TooLong => {
+            anyhow::bail!("daemon command exceeded size cap")
+        },
+        mermaid_cli::utils::CappedLine::Eof => String::new(),
+    };
     let response = handle_command(line.trim(), require_auth).await?;
     let mut stream = reader.into_inner();
     stream.write_all(response.to_string().as_bytes()).await?;
@@ -541,6 +553,30 @@ fn command_requires_auth(command: &str) -> bool {
             // Process logs can carry sensitive command output; require the
             // pairing token like the other privileged reads/mutations.
             | "logs"
+            // #21 (breaking, consistent with the #66 hardening): the read
+            // commands expose session messages, full DB snapshots, and the
+            // runtime panels — all of which can carry project/credential
+            // content. Gate them behind the pairing token too, so a same-UID
+            // process can't read them off the socket without pairing. The
+            // in-process `RuntimeClient` (PreferDaemon) simply falls back to a
+            // direct local read when the daemon rejects, so the TUI is
+            // unaffected; explicit daemon clients must use `daemon_with_token`.
+            | "session_messages"
+            | "snapshot"
+            | "runtime_snapshot"
+            | "runtime_dashboard"
+            | "runtime_diagnostics"
+            | "runtime_hygiene_preview"
+            | "runtime_task_detail"
+            | "runtime_approval_detail"
+            | "runtime_checkpoint_detail"
+            | "runtime_tasks"
+            | "runtime_processes"
+            | "runtime_approvals"
+            | "runtime_tool_runs"
+            | "runtime_checkpoints"
+            | "runtime_plugins"
+            | "model_info"
     )
 }
 
@@ -619,10 +655,10 @@ mod tests {
             "runtime_hygiene_archive",
             "pair",
             "logs",
-        ] {
-            assert!(super::command_requires_auth(command), "{command}");
-        }
-        for command in [
+            // #21: privileged reads now gated behind the pairing token too —
+            // they expose session messages, full DB snapshots, and the runtime
+            // panels, any of which can carry project/credential content.
+            "session_messages",
             "snapshot",
             "runtime_snapshot",
             "runtime_dashboard",
@@ -637,8 +673,14 @@ mod tests {
             "runtime_tool_runs",
             "runtime_checkpoints",
             "runtime_plugins",
-            "ports",
+            "model_info",
         ] {
+            assert!(super::command_requires_auth(command), "{command}");
+        }
+        // Liveness/discovery commands stay unauthenticated: they expose no
+        // project or credential content, and `health`/`ports` are used for
+        // daemon discovery before a token is available.
+        for command in ["health", "ports", "version"] {
             assert!(!super::command_requires_auth(command), "{command}");
         }
     }

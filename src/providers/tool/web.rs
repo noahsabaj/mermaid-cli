@@ -125,6 +125,14 @@ impl ToolExecutor for WebSearchTool {
             }
         }
 
+        // Cap the aggregate output. Per-result content is already truncated to
+        // WEB_CONTENT_MAX_CHARS, but many results across many queries can still
+        // bloat context (and memory) past what any single result's cap bounds (#28).
+        let combined = crate::utils::truncate_content(
+            &combined,
+            crate::constants::WEB_SEARCH_AGGREGATE_MAX_CHARS,
+        );
+
         let duration_secs = start.elapsed().as_secs_f64();
         let requested_count = queries.iter().map(|(_, count)| *count).sum();
         let query_texts = queries.iter().map(|(query, _)| query.clone()).collect();
@@ -259,6 +267,13 @@ fn format_fetch(url: &str, page: &WebFetchResult) -> String {
 
 fn parse_queries(args: &serde_json::Value) -> Result<Vec<(String, usize)>, String> {
     if let Some(arr) = args.get("queries").and_then(|v| v.as_array()) {
+        if arr.len() > crate::constants::MAX_BATCH_TOOL_ITEMS {
+            return Err(format!(
+                "web_search: too many queries ({}); cap is {} per call — split the request",
+                arr.len(),
+                crate::constants::MAX_BATCH_TOOL_ITEMS
+            ));
+        }
         let mut out = Vec::with_capacity(arr.len());
         for v in arr {
             let Some(obj) = v.as_object() else {
@@ -315,24 +330,13 @@ fn validate_fetch_url(url: &str) -> Result<(), String> {
 }
 
 fn is_blocked_host(host: &str) -> bool {
-    let h = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase();
-    if h == "localhost" || h.ends_with(".localhost") {
-        return true;
-    }
-    if let Ok(ip) = h.parse::<std::net::Ipv4Addr>() {
-        return ip.is_loopback()      // 127.0.0.0/8
-            || ip.is_private()       // 10/8, 172.16/12, 192.168/16
-            || ip.is_link_local()    // 169.254/16 (incl. 169.254.169.254 metadata)
-            || ip.is_unspecified()   // 0.0.0.0
-            || ip.is_broadcast();
-    }
-    if let Ok(ip) = h.parse::<std::net::Ipv6Addr>() {
-        return ip.is_loopback() || ip.is_unspecified();
-    }
-    false
+    // Block every non-public host (loopback, RFC-1918/ULA, link-local incl.
+    // cloud metadata 169.254.169.254, CGNAT, unspecified). The shared
+    // classifier covers the IPv4-mapped-IPv6 / ULA / link-local-IPv6 / CGNAT
+    // forms a hand-rolled IPv4 check missed. Lexical only: a DNS name resolving
+    // to an internal address can't be caught here (the fetch is performed
+    // server-side by Ollama, not from this process).
+    crate::utils::classify_host(host).is_internal()
 }
 
 #[cfg(test)]
@@ -351,6 +355,11 @@ mod tests {
             "http://10.0.0.5/",
             "http://192.168.1.1/",
             "http://[::1]/",
+            // #27/#80: IPv6/CGNAT bypasses the old IPv4-centric blocklist missed.
+            "http://[::ffff:169.254.169.254]/latest/meta-data/",
+            "http://[fc00::1]/",
+            "http://[fe80::1]/",
+            "http://100.100.100.200/",
             "not a url",
         ] {
             assert!(
@@ -404,5 +413,25 @@ mod tests {
         let args = serde_json::json!({"query": "q", "max_results": 0});
         let q = parse_queries(&args).unwrap();
         assert_eq!(q[0].1, 1);
+    }
+
+    #[test]
+    fn parse_queries_rejects_excess_fan_out() {
+        // #90: a single call can't request unbounded fan-out.
+        let many: Vec<_> = (0..crate::constants::MAX_BATCH_TOOL_ITEMS + 1)
+            .map(|i| serde_json::json!({"query": format!("q{i}")}))
+            .collect();
+        let args = serde_json::json!({ "queries": many });
+        assert!(parse_queries(&args).is_err());
+
+        // Exactly at the cap is still accepted.
+        let at_cap: Vec<_> = (0..crate::constants::MAX_BATCH_TOOL_ITEMS)
+            .map(|i| serde_json::json!({"query": format!("q{i}")}))
+            .collect();
+        let args = serde_json::json!({ "queries": at_cap });
+        assert_eq!(
+            parse_queries(&args).unwrap().len(),
+            crate::constants::MAX_BATCH_TOOL_ITEMS
+        );
     }
 }

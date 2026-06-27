@@ -104,6 +104,8 @@ pub async fn run_non_interactive_with(
         text: prompt,
         attachment_ids: vec![],
     };
+    // Inject the wall clock as data so the reducer stays pure (Cause 3).
+    state.now = chrono::Local::now();
     let (new_state, cmds) = update(state, seed);
     state = new_state;
     for cmd in cmds {
@@ -124,6 +126,7 @@ pub async fn run_non_interactive_with(
                     None => continue,
                 },
             };
+            state.now = chrono::Local::now();
             let (new_state, cmds) = update(state, msg);
             state = new_state;
             for cmd in cmds {

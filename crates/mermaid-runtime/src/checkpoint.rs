@@ -1,11 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::pathguard::contain_within;
+use crate::pathguard::{contain_within, contain_within_canonical};
 use crate::{NewApproval, NewCheckpoint, RuntimeStore, data_dir};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,19 +138,25 @@ pub fn create_checkpoint_for_task(
 }
 
 pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
-    let root = data_dir()?.join("checkpoints").join(id);
-    let manifest_path = root.join("manifest.json");
+    // Confine the checkpoint id to the checkpoints dir: reject `..`/absolute
+    // traversal that would read a manifest from anywhere on disk.
+    let checkpoints_dir = data_dir()?.join("checkpoints");
+    let ckpt_dir = contain_within(&checkpoints_dir, id)
+        .with_context(|| format!("invalid checkpoint id: {id:?}"))?;
+    let manifest_path = ckpt_dir.join("manifest.json");
     let raw = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
     let manifest: CheckpointManifest = serde_json::from_str(&raw)?;
-    let project_root = PathBuf::from(&manifest.project_path);
+    // The confinement root must be a trusted, sane project directory — never a
+    // value the (tamperable) manifest can redirect to `/` or a system dir.
+    let project_root = resolve_restore_root(id, &manifest)?;
     for file in &manifest.files {
         // The manifest is on-disk state a tampered or shared checkpoint could
         // have rewritten. Confine every restore target to the recorded project
-        // root — rejecting absolute paths and `..` escapes — before any
-        // copy/create/delete. The create side stores relative in-project paths;
-        // anything that doesn't resolve inside the root is skipped, not run.
-        let target = match contain_within(&project_root, &file.path) {
+        // root — rejecting absolute paths, `..` escapes, AND symlinks planted
+        // inside the root — before any copy/create/delete. Anything that
+        // doesn't resolve inside the root is skipped, not run.
+        let target = match contain_within_canonical(&project_root, &file.path) {
             Ok(target) => target,
             Err(err) => {
                 tracing::warn!(
@@ -166,7 +172,21 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
                 .snapshot_relpath
                 .as_ref()
                 .context("checkpoint file missing snapshot_relpath")?;
-            let source = root.join(rel);
+            // The snapshot source is also a manifest-supplied string; confine it
+            // to this checkpoint's own directory so a crafted `snapshot_relpath`
+            // (`../../etc/passwd`) can't read an arbitrary file as the copy
+            // source.
+            let source = match contain_within(&ckpt_dir, rel) {
+                Ok(source) => source,
+                Err(err) => {
+                    tracing::warn!(
+                        relpath = %rel,
+                        error = %err,
+                        "skipping checkpoint entry with an escaping snapshot_relpath"
+                    );
+                    continue;
+                },
+            };
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -208,6 +228,36 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
         }
     }
     Ok(manifest)
+}
+
+/// Resolve the trusted project root a checkpoint may restore into. Prefer the
+/// DB-recorded `project_path` (written at create time) and require the manifest
+/// to agree with it, so a manifest-only tamper is rejected. Either way the root
+/// must be an absolute directory with at least one normal component — a bare
+/// filesystem root (`/`, `C:\`) confines nothing, since every absolute path
+/// `starts_with` it (the original escape primitive).
+fn resolve_restore_root(id: &str, manifest: &CheckpointManifest) -> Result<PathBuf> {
+    let recorded = RuntimeStore::open_default()
+        .ok()
+        .and_then(|store| store.checkpoints().get(id).ok().flatten())
+        .map(|rec| rec.project_path);
+    let root_str = match recorded {
+        Some(db_path) => {
+            anyhow::ensure!(
+                db_path == manifest.project_path,
+                "checkpoint project_path does not match the recorded root (tampered manifest?)"
+            );
+            db_path
+        },
+        None => manifest.project_path.clone(),
+    };
+    let root = PathBuf::from(&root_str);
+    anyhow::ensure!(
+        root.is_absolute() && root.components().any(|c| matches!(c, Component::Normal(_))),
+        "unsafe checkpoint project root: {}",
+        root.display()
+    );
+    Ok(root)
 }
 
 fn sanitize_relpath(path: &str) -> String {
@@ -429,6 +479,52 @@ mod tests {
             outside.exists(),
             "restore must not delete a file outside the project root"
         );
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "do not delete");
+
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_rejects_tampered_project_root() {
+        // #3: a manifest whose `project_path` is rewritten to `/` (so lexical
+        // containment passes for ANY absolute path) must be rejected — the
+        // root can't be redirected to a filesystem root or disagree with the
+        // DB-recorded path.
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("mermaid_ckpt_root_{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "before").unwrap();
+        let manifest = create_checkpoint(&root, &[root.join("a.txt")], None).unwrap();
+
+        let outside = std::env::temp_dir().join(format!("mermaid_ckpt_root_outside_{pid}.txt"));
+        std::fs::write(&outside, "do not delete").unwrap();
+
+        let manifest_path = data_dir()
+            .unwrap()
+            .join("checkpoints")
+            .join(&manifest.id)
+            .join("manifest.json");
+        let mut tampered: CheckpointManifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        tampered.project_path = "/".to_string();
+        tampered.files.push(CheckpointFile {
+            path: outside.display().to_string(),
+            existed: false,
+            snapshot_relpath: None,
+        });
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&tampered).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            restore_checkpoint(&manifest.id).is_err(),
+            "restore must reject a tampered project_path"
+        );
+        assert!(outside.exists(), "restore must not delete an outside file");
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "do not delete");
 
         let _ = std::fs::remove_file(&outside);

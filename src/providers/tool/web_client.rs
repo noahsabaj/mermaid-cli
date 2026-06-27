@@ -116,9 +116,9 @@ impl WebSearchClient {
                         ));
                     }
 
-                    response
-                        .json::<OllamaSearchResponse>()
-                        .await
+                    let body =
+                        read_body_capped(response, crate::constants::MAX_WEB_BODY_BYTES).await?;
+                    serde_json::from_slice::<OllamaSearchResponse>(&body)
                         .map_err(|e| anyhow!("Failed to parse Ollama search response: {}", e))
                 }
             },
@@ -186,9 +186,9 @@ impl WebSearchClient {
                         return Err(anyhow!("Failed to fetch {}: HTTP {}", url, status));
                     }
 
-                    response
-                        .json::<OllamaFetchResponse>()
-                        .await
+                    let body =
+                        read_body_capped(response, crate::constants::MAX_WEB_BODY_BYTES).await?;
+                    serde_json::from_slice::<OllamaFetchResponse>(&body)
                         .map_err(|e| anyhow!("Failed to parse fetch response: {}", e))
                 }
             },
@@ -229,6 +229,33 @@ impl WebSearchClient {
 
         formatted
     }
+}
+
+/// Read a reqwest response body, refusing to buffer more than `max_bytes`.
+/// `Response::json`/`bytes` buffer the whole body unbounded; a compromised or
+/// misconfigured Ollama endpoint could return a multi-gigabyte body and OOM the
+/// (long-lived) process. We reject early on an oversized `Content-Length` and
+/// also enforce the cap while streaming (a lying or absent header can't bypass
+/// it) (#28).
+async fn read_body_capped(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    use futures::StreamExt;
+    if let Some(len) = response.content_length()
+        && len as usize > max_bytes
+    {
+        return Err(anyhow!(
+            "response body too large: {len} bytes exceeds {max_bytes} cap"
+        ));
+    }
+    let mut stream = response.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| anyhow!("error reading response body: {e}"))?;
+        if buf.len() + chunk.len() > max_bytes {
+            return Err(anyhow!("response body exceeded {max_bytes} byte cap"));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]

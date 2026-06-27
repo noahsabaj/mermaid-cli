@@ -106,16 +106,17 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // `Running tools: <cmd>` plus the trailing `(esc to interrupt …)` fold onto
     // continuation rows instead of bleeding off the right edge.
     let status_lines = if state.is_busy() {
+        // Elapsed is computed from the injected `state.now` (stamped every tick),
+        // not the live wall clock, so the rendered frame is a pure function of
+        // State (Cause 3). Visually identical — both resolve to whole seconds.
+        let now_sys = std::time::SystemTime::from(state.now);
+        let elapsed_since =
+            |t: std::time::SystemTime| now_sys.duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
         let elapsed_secs = match &state.turn {
-            TurnState::Generating { started, .. } | TurnState::Compacting { started, .. } => {
-                started.elapsed().map(|d| d.as_secs()).unwrap_or(0)
-            },
-            TurnState::Cancelling { since, .. } => {
-                since.elapsed().map(|d| d.as_secs()).unwrap_or(0)
-            },
-            TurnState::ExecutingTools { started, .. } => {
-                started.elapsed().map(|d| d.as_secs()).unwrap_or(0)
-            },
+            TurnState::Generating { started, .. }
+            | TurnState::Compacting { started, .. }
+            | TurnState::ExecutingTools { started, .. } => elapsed_since(*started),
+            TurnState::Cancelling { since, .. } => elapsed_since(*since),
             TurnState::Idle => 0,
         };
         // While tools run, name the in-flight one(s) so the status line isn't an
@@ -334,15 +335,23 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // persistent status bar — whichever the UI mode dictates.
     if let Some(item) = state.pending_approval.front() {
         use widgets::ApprovalModalWidget;
+        // Content-bearing external tools (type_text, MCP, …) are
+        // non-allowlistable: the gate leaves their scope empty, and we omit the
+        // "don't ask again" option so the user can't blanket-approve them (#6, #31).
+        let options = if item.allowlist_scope.is_empty() {
+            vec!["1. Yes".to_string(), "2. No  (Esc)".to_string()]
+        } else {
+            vec![
+                "1. Yes".to_string(),
+                format!("2. Yes, and don't ask again for `{}`", item.allowlist_scope),
+                "3. No  (Esc)".to_string(),
+            ]
+        };
         let widget = ApprovalModalWidget {
             theme: &rstate.theme,
             title: format!("Approval required — {}  [{}]", item.tool, item.risk),
             body: item.prompt.as_str(),
-            options: vec![
-                "1. Yes".to_string(),
-                format!("2. Yes, and don't ask again for `{}`", item.allowlist_scope),
-                "3. No  (Esc)".to_string(),
-            ],
+            options,
             selected_index: Some(item.selected_option),
             accent: rstate.theme.colors.warning.to_color(),
         };
@@ -492,7 +501,10 @@ mod tests {
     #[test]
     fn status_line_appears_during_generating() {
         let mut s = mock_state();
-        s.turn = crate::domain::transition::start_generating(crate::domain::TurnId(1));
+        s.turn = crate::domain::transition::start_generating(
+            crate::domain::TurnId(1),
+            std::time::SystemTime::now(),
+        );
         let frame = render_to_string(&s);
         assert!(
             frame.contains("Sending") || frame.contains("Thinking") || frame.contains("Streaming"),

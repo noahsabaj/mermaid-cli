@@ -19,6 +19,8 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use chrono::{DateTime, Local};
+
 use crate::app::instructions::LoadedInstructions;
 use crate::app::{Config, McpServerConfig};
 use crate::models::ChatMessage;
@@ -76,6 +78,14 @@ pub struct State {
     /// Quit flag. When set, the main loop drains pending effects and
     /// exits. The reducer never panics on its own; it sets this instead.
     pub should_exit: bool,
+    /// Wall-clock for the current reducer step, injected as data (Cause 3).
+    /// The driver stamps this once per tick — `Local::now()` live, or the
+    /// recorded entry's `ts` on replay — *before* calling `update`. The
+    /// reducer and the `transition` helpers read `state.now` instead of
+    /// `Local::now()` / `SystemTime::now()`, so `update(State, Msg)` is a pure
+    /// function of its inputs: the same `(State, Msg)` always yields the same
+    /// `State`, and folding a recorded `Msg` log recomputes State exactly.
+    pub now: DateTime<Local>,
 }
 
 impl State {
@@ -140,6 +150,11 @@ impl State {
             status: None,
             runtime,
             should_exit: false,
+            // Seed the injected clock so a freshly-built State is usable before
+            // the driver's first per-tick stamp. The driver overwrites this on
+            // every iteration (Cause 3); the reducer never reads the wall clock
+            // directly.
+            now: Local::now(),
         }
     }
 

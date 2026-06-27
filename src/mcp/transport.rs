@@ -9,10 +9,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Duration, timeout};
+
+use crate::constants::MAX_MCP_FRAME_BYTES;
+use crate::utils::{CappedLine, read_line_capped};
 
 /// Default timeout for JSON-RPC request/response round-trips
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -93,8 +96,22 @@ impl StdioTransport {
         // Background task: read stdout for JSON-RPC responses
         let pending_clone = Arc::clone(&pending);
         let reader_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let line = match read_line_capped(&mut reader, MAX_MCP_FRAME_BYTES).await {
+                    Ok(CappedLine::Line(bytes)) => match String::from_utf8(bytes) {
+                        Ok(s) => s,
+                        // A non-UTF-8 JSON-RPC frame means the stream is
+                        // corrupt; stop reading. Mirrors the prior `.lines()`
+                        // adaptor, which also terminated on invalid UTF-8.
+                        Err(_) => break,
+                    },
+                    Ok(CappedLine::TooLong) => {
+                        tracing::warn!("MCP: dropping oversize stdout frame (exceeds cap)");
+                        continue;
+                    },
+                    Ok(CappedLine::Eof) | Err(_) => break,
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -124,9 +141,15 @@ impl StdioTransport {
 
         // Background task: read stderr for logging (not JSON-RPC)
         tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                tracing::debug!("MCP stderr: {}", line);
+            let mut reader = BufReader::new(stderr);
+            loop {
+                match read_line_capped(&mut reader, MAX_MCP_FRAME_BYTES).await {
+                    Ok(CappedLine::Line(bytes)) => {
+                        tracing::debug!("MCP stderr: {}", String::from_utf8_lossy(&bytes));
+                    },
+                    Ok(CappedLine::TooLong) => continue,
+                    Ok(CappedLine::Eof) | Err(_) => break,
+                }
             }
         });
 

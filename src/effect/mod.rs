@@ -280,10 +280,25 @@ impl EffectRunner {
     /// harvested via `join_next`/`try_join_next`, so we first drain
     /// any ready completions per scope.
     fn reap_empty_scopes(&mut self) {
+        self.reap_detached();
         self.scopes.retain(|_, scope| {
             scope.drain_completed();
             !scope.is_empty()
         });
+    }
+
+    /// Harvest finished detached tasks. Without this the `detached` JoinSet
+    /// grows for the whole session (every fire-and-forget effect lingers as a
+    /// completed-but-unjoined handle), and a panicking detached task vanishes
+    /// without a trace. Non-blocking — only already-finished tasks are taken (#38).
+    fn reap_detached(&mut self) {
+        while let Some(result) = self.detached.try_join_next() {
+            if let Err(e) = result
+                && !e.is_cancelled()
+            {
+                tracing::warn!(error = %e, "effect: detached task panicked");
+            }
+        }
     }
 
     /// Route a single `Cmd` into the appropriate spawn + handler.
@@ -329,7 +344,36 @@ impl EffectRunner {
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
-                    dispatch_call_model(tx, providers, turn, request, token).await;
+                    use futures::FutureExt;
+                    let fallback_tx = tx.clone();
+                    if std::panic::AssertUnwindSafe(dispatch_call_model(
+                        tx, providers, turn, request, token,
+                    ))
+                    .catch_unwind()
+                    .await
+                    .is_err()
+                    {
+                        // The dispatch task panicked. A turn whose model call
+                        // never emits a terminal Msg stays in `Generating`
+                        // forever; emit one so the reducer can leave that state
+                        // instead of wedging (#43).
+                        tracing::error!(turn = %turn, "dispatch_call_model panicked");
+                        let _ = fallback_tx
+                            .send(Msg::UpstreamError {
+                                turn,
+                                error: crate::models::UserFacingError {
+                                    summary: "Internal error".to_string(),
+                                    message: "The model dispatch task panicked unexpectedly."
+                                        .to_string(),
+                                    suggestion: "This is a bug. Please retry; if it persists, \
+                                                 check the logs."
+                                        .to_string(),
+                                    category: crate::models::ErrorCategory::Internal,
+                                    recoverable: true,
+                                },
+                            })
+                            .await;
+                    }
                 });
             },
             Cmd::CompactConversation { turn, mut request } => {
@@ -390,7 +434,9 @@ impl EffectRunner {
                 let token = scope.token();
                 let background = scope.background_token();
                 scope.spawn(async move {
-                    dispatch_execute_tool(
+                    use futures::FutureExt;
+                    let fallback_tx = tx.clone();
+                    if std::panic::AssertUnwindSafe(dispatch_execute_tool(
                         tx,
                         tools,
                         workdir,
@@ -406,8 +452,31 @@ impl EffectRunner {
                         intent,
                         classifier,
                         approval,
-                    )
-                    .await;
+                    ))
+                    .catch_unwind()
+                    .await
+                    .is_err()
+                    {
+                        // The tool task panicked. Its turn waits on a
+                        // `ToolFinished` for this `call_id` that will now never
+                        // arrive; emit a terminal error outcome so the turn
+                        // doesn't wedge (#43).
+                        tracing::error!(
+                            turn = %turn,
+                            call_id = call_id.0,
+                            "dispatch_execute_tool panicked"
+                        );
+                        let _ = fallback_tx
+                            .send(Msg::ToolFinished {
+                                turn,
+                                call_id,
+                                outcome: crate::domain::ToolOutcome::error(
+                                    "internal error: the tool execution task panicked".to_string(),
+                                    0.0,
+                                ),
+                            })
+                            .await;
+                    }
                 });
             },
             Cmd::ResolveApproval { call_id, decision } => {
@@ -678,47 +747,49 @@ impl EffectRunner {
             },
             Cmd::ListRuntimeTasks { limit } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                // Synchronous rusqlite read — run on the blocking pool so it
+                // never stalls an async worker thread (#40).
+                self.detached.spawn_blocking(move || {
                     let tasks = crate::runtime::RuntimeClient::auto()
                         .list_tasks(limit)
                         .map(|read| read.value)
                         .unwrap_or_default();
-                    let _ = tx.send(Msg::RuntimeTasksListed(tasks)).await;
+                    let _ = tx.blocking_send(Msg::RuntimeTasksListed(tasks));
                 });
             },
             Cmd::LoadRuntimeTask { id } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let (task, events) = crate::runtime::RuntimeClient::auto()
                         .task_detail(&id)
                         .map(|read| (Some(read.value.task), read.value.events))
                         .unwrap_or((None, Vec::new()));
-                    let _ = tx.send(Msg::RuntimeTaskLoaded { task, events }).await;
+                    let _ = tx.blocking_send(Msg::RuntimeTaskLoaded { task, events });
                 });
             },
             Cmd::ListRuntimeProcesses { limit } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let processes = crate::runtime::RuntimeClient::auto()
                         .list_processes(limit)
                         .map(|read| read.value)
                         .unwrap_or_default();
-                    let _ = tx.send(Msg::RuntimeProcessesListed(processes)).await;
+                    let _ = tx.blocking_send(Msg::RuntimeProcessesListed(processes));
                 });
             },
             Cmd::ShowRuntimeProcessLogs { id } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let text = crate::runtime::RuntimeClient::auto()
                         .process_log(&id, None)
                         .map(|log| format!("Process log {}\n\n{}", id, log.content))
                         .unwrap_or_else(|err| format!("Process log error: {}", err));
-                    let _ = tx.send(Msg::RuntimeText(text)).await;
+                    let _ = tx.blocking_send(Msg::RuntimeText(text));
                 });
             },
             Cmd::StopRuntimeProcess { id } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let msg = match crate::runtime::RuntimeClient::auto().stop_process(&id) {
                         Ok(response) => Msg::TransientStatus {
                             text: format!("Stopped process {} (pid {})", id, response.item.pid),
@@ -731,12 +802,12 @@ impl EffectRunner {
                             dismiss_ms: 5_000,
                         },
                     };
-                    let _ = tx.send(msg).await;
+                    let _ = tx.blocking_send(msg);
                 });
             },
             Cmd::RestartRuntimeProcess { id } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let msg = match crate::runtime::RuntimeClient::auto().restart_process(&id) {
                         Ok(response) => Msg::TransientStatus {
                             text: format!("Restarted process {} (pid {})", id, response.item.pid),
@@ -749,11 +820,11 @@ impl EffectRunner {
                             dismiss_ms: 5_000,
                         },
                     };
-                    let _ = tx.send(msg).await;
+                    let _ = tx.blocking_send(msg);
                 });
             },
             Cmd::OpenRuntimeTarget { target } => {
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let resolved = crate::runtime::RuntimeService::open_default()
                         .and_then(|service| service.resolve_open_target(&target))
                         .unwrap_or(target);
@@ -762,27 +833,27 @@ impl EffectRunner {
             },
             Cmd::ShowRuntimePorts => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let text = crate::runtime::RuntimeClient::auto()
                         .ports()
                         .map(|ports| format!("Listening TCP ports\n\n{}", ports.ports))
                         .unwrap_or_else(|err| format!("Port inspection failed: {}", err));
-                    let _ = tx.send(Msg::RuntimeText(text)).await;
+                    let _ = tx.blocking_send(Msg::RuntimeText(text));
                 });
             },
             Cmd::ListRuntimeApprovals => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let approvals = crate::runtime::RuntimeClient::auto()
                         .list_approvals()
                         .map(|read| read.value)
                         .unwrap_or_default();
-                    let _ = tx.send(Msg::RuntimeApprovalsListed(approvals)).await;
+                    let _ = tx.blocking_send(Msg::RuntimeApprovalsListed(approvals));
                 });
             },
             Cmd::DecideRuntimeApproval { id, decision } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let result = if decision == "approved" {
                         crate::runtime::RuntimeClient::auto().approve(&id)
                     } else {
@@ -804,27 +875,27 @@ impl EffectRunner {
                             dismiss_ms: 5_000,
                         },
                     };
-                    let _ = tx.send(msg).await;
+                    let _ = tx.blocking_send(msg);
                 });
             },
             Cmd::ListRuntimeCheckpoints { limit } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let checkpoints = crate::runtime::RuntimeClient::auto()
                         .list_checkpoints(limit)
                         .map(|read| read.value)
                         .unwrap_or_default();
-                    let _ = tx.send(Msg::RuntimeCheckpointsListed(checkpoints)).await;
+                    let _ = tx.blocking_send(Msg::RuntimeCheckpointsListed(checkpoints));
                 });
             },
             Cmd::ListRuntimePlugins => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let plugins = crate::runtime::RuntimeClient::auto()
                         .list_plugins()
                         .map(|read| read.value)
                         .unwrap_or_default();
-                    let _ = tx.send(Msg::RuntimePluginsListed(plugins)).await;
+                    let _ = tx.blocking_send(Msg::RuntimePluginsListed(plugins));
                 });
             },
             Cmd::UpdateRuntimeTaskStatus {
@@ -833,7 +904,7 @@ impl EffectRunner {
                 final_report,
             } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let msg = match crate::runtime::RuntimeStore::open_default().and_then(|store| {
                         store
                             .tasks()
@@ -850,13 +921,13 @@ impl EffectRunner {
                             dismiss_ms: 4_000,
                         },
                     };
-                    let _ = tx.send(msg).await;
+                    let _ = tx.blocking_send(msg);
                 });
             },
             Cmd::CreateRuntimeCheckpoint { paths } => {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let pending_action = Some(serde_json::json!({
                         "source": "tui",
                         "command": "checkpoint",
@@ -878,12 +949,12 @@ impl EffectRunner {
                                 dismiss_ms: 5_000,
                             },
                         };
-                    let _ = tx.send(msg).await;
+                    let _ = tx.blocking_send(msg);
                 });
             },
             Cmd::RestoreRuntimeCheckpoint { id } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let msg = match crate::runtime::RuntimeClient::auto().restore_checkpoint(&id) {
                         Ok(result) => Msg::TransientStatus {
                             text: format!(
@@ -905,14 +976,14 @@ impl EffectRunner {
                             dismiss_ms: 5_000,
                         },
                     };
-                    let _ = tx.send(msg).await;
+                    let _ = tx.blocking_send(msg);
                 });
             },
             Cmd::ShowRuntimeModelInfo { model } => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
+                self.detached.spawn_blocking(move || {
                     let text = runtime_model_info_text(&model);
-                    let _ = tx.send(Msg::RuntimeText(text)).await;
+                    let _ = tx.blocking_send(Msg::RuntimeText(text));
                 });
             },
             Cmd::InitMcpServers(configs) => {
@@ -1010,7 +1081,12 @@ impl EffectRunner {
                 if !self.terminal_title_enabled {
                     return;
                 }
-                self.detached.spawn(async move {
+                // Offload the terminal write to the blocking pool: writing to
+                // stdout can block when the terminal (or a downstream pipe) is
+                // slow, and an async worker must not block on it (#44). The
+                // OSC-2 title sequence is out-of-band relative to the renderer's
+                // frame draws, so it doesn't corrupt them.
+                self.detached.spawn_blocking(move || {
                     use std::io::Write;
                     let seq = format!("\x1b]2;{}\x07", title);
                     let mut stdout = std::io::stdout();
@@ -1034,6 +1110,15 @@ impl EffectRunner {
         let shutdown_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
 
         let drain = async {
+            // If an MCP init is still in flight, its child processes are already
+            // spawned but `set_manager` hasn't run yet — `get()` below would
+            // return `None` and we'd leak those children. Wait (bounded) for init
+            // to settle so the manager is installed before we reap it (#59).
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                crate::mcp::manager_ref::wait_ready(),
+            )
+            .await;
             // Gracefully shut down MCP server children (the stdin-EOF →
             // terminate → kill ladder in `McpServerManager::shutdown`). The
             // manager lives in a `'static OnceLock` that never drops, so this
@@ -1069,6 +1154,18 @@ impl EffectRunner {
 /// cached) and streams its events onto the Msg channel. Without a
 /// bound `ProviderFactory` (unit tests), emits a single
 /// `UpstreamError` so the reducer ends the turn cleanly.
+/// Await a sibling relay task's handle, logging a panic (but not a normal
+/// post-cancellation abort). These relays run alongside the provider/tool call
+/// for streaming backpressure; awaiting their handle keeps a stray panic from
+/// vanishing the way a bare `let _ = handle.await` would (#58, #60).
+async fn join_logged(handle: tokio::task::JoinHandle<()>, what: &str) {
+    if let Err(e) = handle.await
+        && !e.is_cancelled()
+    {
+        tracing::warn!(error = %e, task = what, "effect: sibling relay task panicked");
+    }
+}
+
 async fn dispatch_call_model(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
@@ -1099,7 +1196,14 @@ async fn dispatch_call_model(
             return;
         },
     };
-    record_provider_capabilities(&request.model_id, provider.capabilities());
+    {
+        // Telemetry write — offload the synchronous DB upserts to the blocking
+        // pool so they never stall this model-call dispatch path, which runs on
+        // every turn (#39).
+        let model_id = request.model_id.clone();
+        let caps = provider.capabilities().clone();
+        tokio::task::spawn_blocking(move || record_provider_capabilities(&model_id, &caps));
+    }
     if !request.tools.is_empty() && !provider.capabilities().supports_tools {
         let _ = msg_tx
             .send(Msg::TransientStatus {
@@ -1254,7 +1358,7 @@ async fn dispatch_call_model(
                         let mut retry_request = request;
                         retry_request.messages = result.replacement_messages.clone();
                         let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
-                        let _ = relay.await;
+                        join_logged(relay, "stream_relay").await;
                         dispatch_provider_stream(msg_tx, provider, turn, retry_request, token)
                             .await;
                         return;
@@ -1277,7 +1381,7 @@ async fn dispatch_call_model(
         },
     }
 
-    let _ = relay.await;
+    join_logged(relay, "stream_relay").await;
 }
 
 async fn dispatch_provider_stream(
@@ -1333,7 +1437,7 @@ async fn dispatch_provider_stream(
         },
     }
 
-    let _ = relay.await;
+    join_logged(relay, "stream_relay").await;
 }
 
 /// Run plugin hooks OFF the async executor. `run_plugin_hooks` is synchronous —
@@ -1886,7 +1990,8 @@ async fn dispatch_execute_tool(
             source.function.arguments.clone(),
         )
     };
-    let tool_run_id = start_runtime_tool_run(task_id.as_deref(), turn, call_id, tool_key, &args);
+    let tool_run_id =
+        start_runtime_tool_run(task_id.as_deref(), turn, call_id, tool_key, &args).await;
 
     let Some(tool) = registry.get(tool_key) else {
         let outcome = crate::domain::ToolOutcome::error(format!("unknown tool: {}", tool_key), 0.0);
@@ -1964,7 +2069,7 @@ async fn dispatch_execute_tool(
     });
     fire_plugin_hooks("after_tool_use", after_payload).await;
     finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
-    let _ = progress_relay.await;
+    join_logged(progress_relay, "tool_progress_relay").await;
     let _ = msg_tx
         .send(Msg::ToolFinished {
             turn,
@@ -1974,32 +2079,45 @@ async fn dispatch_execute_tool(
         .await;
 }
 
-fn start_runtime_tool_run(
+async fn start_runtime_tool_run(
     task_id: Option<&str>,
     turn: TurnId,
     call_id: crate::domain::ToolCallId,
     tool_name: &str,
     args: &serde_json::Value,
 ) -> Option<String> {
-    crate::runtime::RuntimeStore::open_default()
-        .and_then(|store| {
-            store.tool_runs().start(crate::runtime::NewToolRun {
-                id: None,
-                task_id: task_id.map(str::to_string),
-                turn_id: Some(turn.0.to_string()),
-                call_id: Some(call_id.0.to_string()),
-                tool_name: tool_name.to_string(),
-                args_json: serde_json::to_string(args).ok(),
+    // Synchronous rusqlite write on the hot tool-execution path — offload it to
+    // the blocking pool. The id is needed by `finish`, so we await the result
+    // (unlike `finish`, which is fire-and-forget) (#39).
+    let task_id = task_id.map(str::to_string);
+    let tool_name = tool_name.to_string();
+    let args_json = serde_json::to_string(args).ok();
+    tokio::task::spawn_blocking(move || {
+        crate::runtime::RuntimeStore::open_default()
+            .and_then(|store| {
+                store.tool_runs().start(crate::runtime::NewToolRun {
+                    id: None,
+                    task_id,
+                    turn_id: Some(turn.0.to_string()),
+                    call_id: Some(call_id.0.to_string()),
+                    tool_name,
+                    args_json,
+                })
             })
-        })
-        .map(|record| record.id)
-        .ok()
+            .map(|record| record.id)
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 fn finish_runtime_tool_run(tool_run_id: Option<&str>, outcome: &crate::domain::ToolOutcome) {
     let Some(tool_run_id) = tool_run_id else {
         return;
     };
+    let tool_run_id = tool_run_id.to_string();
+    let status = tool_status_label(outcome.status).to_string();
     let output_json = serde_json::to_string(&serde_json::json!({
         "status": tool_status_label(outcome.status),
         "summary": &outcome.summary,
@@ -2010,13 +2128,15 @@ fn finish_runtime_tool_run(tool_run_id: Option<&str>, outcome: &crate::domain::T
         "duration_secs": outcome.duration_secs,
     }))
     .ok();
-    if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
-        let _ = store.tool_runs().finish(
-            tool_run_id,
-            tool_status_label(outcome.status),
-            output_json.as_deref(),
-        );
-    }
+    // Fire-and-forget telemetry write on the blocking pool — don't stall the
+    // tool-finish path waiting on rusqlite (#39).
+    tokio::task::spawn_blocking(move || {
+        if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
+            let _ = store
+                .tool_runs()
+                .finish(&tool_run_id, &status, output_json.as_deref());
+        }
+    });
 }
 
 fn tool_status_label(status: crate::domain::ToolStatus) -> &'static str {
@@ -2091,15 +2211,18 @@ async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
         },
     };
 
-    if let Some(stdout) = child.stdout.take() {
+    // Capture the reader's handle instead of orphaning it: the child's stdout
+    // closes when it exits, so this task finishes right after `child.wait`
+    // below — we join it there so a panic is logged, not silently lost (#60).
+    let reader_handle = child.stdout.take().map(|stdout| {
         let tx_inner = tx.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 let _ = tx_inner.send(Msg::ModelPullProgress(line)).await;
             }
-        });
-    }
+        })
+    });
 
     match child.wait().await {
         Ok(status) if status.success() => {
@@ -2121,6 +2244,12 @@ async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
                 )))
                 .await;
         },
+    }
+
+    // The child has exited; its stdout is closed, so the reader is finishing.
+    // Join it (logging a panic) so it isn't left orphaned (#60).
+    if let Some(handle) = reader_handle {
+        join_logged(handle, "ollama_pull_reader").await;
     }
 }
 

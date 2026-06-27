@@ -66,10 +66,12 @@ pub fn fill_outcome(
 
 /// Transition `Idle → Generating`. Always pure: the caller builds a
 /// `ChatRequest` separately and returns it to the reducer as a `Cmd`.
-pub fn start_generating(id: TurnId) -> TurnState {
+/// `now` is the reducer step's injected clock (`state.now`), so the
+/// `started` stamp is deterministic on replay rather than read live (Cause 3).
+pub fn start_generating(id: TurnId, now: SystemTime) -> TurnState {
     TurnState::Generating {
         id,
-        started: SystemTime::now(),
+        started: now,
         partial_text: String::new(),
         partial_reasoning: String::new(),
         tokens: 0,
@@ -81,12 +83,17 @@ pub fn start_generating(id: TurnId) -> TurnState {
 
 /// Transition `Generating → ExecutingTools`. Allocates `None` slots
 /// for every call so the invariant ("outcomes.len() == calls.len()")
-/// is upheld by construction.
-pub fn start_executing_tools(id: TurnId, calls: Vec<PendingToolCall>) -> TurnState {
+/// is upheld by construction. `now` is the reducer step's injected clock
+/// (`state.now`) so `started` is deterministic on replay (Cause 3).
+pub fn start_executing_tools(
+    id: TurnId,
+    calls: Vec<PendingToolCall>,
+    now: SystemTime,
+) -> TurnState {
     let outcomes = vec![None; calls.len()];
     TurnState::ExecutingTools {
         id,
-        started: SystemTime::now(),
+        started: now,
         calls,
         outcomes,
     }
@@ -102,6 +109,7 @@ pub fn commit_assistant_message(
     partial_reasoning: String,
     tool_calls: Vec<ModelToolCall>,
     thinking_signature: Option<String>,
+    now: chrono::DateTime<chrono::Local>,
 ) -> ChatMessage {
     let thinking = if partial_reasoning.is_empty() {
         None
@@ -111,7 +119,7 @@ pub fn commit_assistant_message(
     let mut msg = ChatMessage {
         role: MessageRole::Assistant,
         content: partial_text,
-        timestamp: chrono::Local::now(),
+        timestamp: now,
         kind: crate::models::ChatMessageKind::Normal,
         metadata: None,
         actions: Vec::new(),
@@ -739,7 +747,7 @@ mod tests {
 
     #[test]
     fn start_generating_produces_fresh_sending_phase() {
-        let s = start_generating(TurnId(1));
+        let s = start_generating(TurnId(1), SystemTime::now());
         match s {
             TurnState::Generating {
                 phase,
@@ -762,7 +770,7 @@ mod tests {
             sample_call(2, "b"),
             sample_call(3, "c"),
         ];
-        let s = start_executing_tools(TurnId(1), calls);
+        let s = start_executing_tools(TurnId(1), calls, SystemTime::now());
         match s {
             TurnState::ExecutingTools {
                 outcomes, calls, ..
@@ -782,6 +790,7 @@ mod tests {
             "reasoning".to_string(),
             vec![],
             Some("sig_abc".to_string()),
+            chrono::Local::now(),
         );
         assert_eq!(m.content, "hello");
         assert_eq!(m.thinking.as_deref(), Some("reasoning"));
@@ -790,7 +799,13 @@ mod tests {
 
     #[test]
     fn commit_assistant_message_empty_reasoning_is_none() {
-        let m = commit_assistant_message("hi".to_string(), String::new(), vec![], None);
+        let m = commit_assistant_message(
+            "hi".to_string(),
+            String::new(),
+            vec![],
+            None,
+            chrono::Local::now(),
+        );
         assert!(m.thinking.is_none());
     }
 
