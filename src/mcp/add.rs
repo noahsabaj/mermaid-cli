@@ -16,7 +16,7 @@ use super::registry;
 /// Resolution chain: built-in registry → convention → npm search.
 /// Prompts for required env vars, validates by spawning the server,
 /// then saves to config.toml.
-pub async fn add_server(name: &str) -> Result<()> {
+pub async fn add_server(name: &str, assume_yes: bool) -> Result<()> {
     // Check if already configured
     let mut config = load_config().unwrap_or_default();
     if config.mcp_servers.contains_key(name) {
@@ -32,8 +32,9 @@ pub async fn add_server(name: &str) -> Result<()> {
 
     println!("\nResolving '{}'...", name);
 
-    // Resolve the server package via A → B → C
-    let resolved = registry::resolve(name).await?;
+    // Resolve the server package via A → B → C. A non-registry result requires
+    // explicit confirmation (or --yes) before it is returned (#10).
+    let resolved = registry::resolve(name, assume_yes).await?;
 
     // Prompt for required environment variables
     let mut env = HashMap::new();

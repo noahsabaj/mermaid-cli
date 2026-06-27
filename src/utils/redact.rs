@@ -89,6 +89,11 @@ mod tests {
             "export AWS_SECRET_ACCESS_KEY=[REDACTED]"
         );
         assert_eq!(redact_secrets("password = hunter2"), "password=[REDACTED]");
+        // CLI-arg form — the new #93 usage context (MCP server args / stderr).
+        assert_eq!(
+            redact_secrets("--api-key=sk-abcdefghijklmnop1234"),
+            "--api-key=[REDACTED]"
+        );
     }
 
     #[test]

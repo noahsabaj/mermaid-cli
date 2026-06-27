@@ -18,8 +18,9 @@
 //! These entries are load-bearing for the `mermaid add <name>` UX —
 //! a stale or 404 package here produces a confusing first-run error.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
+use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
 use super::client::McpClient;
@@ -266,27 +267,94 @@ pub async fn validate_server(
     .map_err(|_| anyhow!("Server initialization timed out (60s)"))?
 }
 
-/// Step B: Try convention-based package name patterns (npm only).
-async fn try_conventions(name: &str) -> Option<String> {
-    let patterns = [
+/// The npm package-name conventions tried for an unknown server name. Pure (no
+/// I/O) so the set and ordering are unit-tested.
+fn convention_patterns(name: &str) -> Vec<String> {
+    vec![
         format!("@{}/mcp-server", name),
         format!("{}-mcp-server", name),
         format!("@modelcontextprotocol/server-{}", name),
         format!("{}-mcp", name),
-    ];
+    ]
+}
 
-    for pattern in &patterns {
-        println!("  Trying {}...", pattern);
-        let empty_env = HashMap::new();
-        if validate_server("npx", pattern, &[], &empty_env)
-            .await
-            .is_ok()
-        {
-            return Some(pattern.clone());
+/// Check whether an npm package *exists* via a registry metadata lookup —
+/// WITHOUT executing it. This is the #10 fix: the old code probed convention
+/// names by running `npx -y <guess>`, so a typosquatted guess executed before
+/// any confirmation. A metadata GET never runs the package.
+async fn npm_package_exists(client: &reqwest::Client, package: &str) -> Result<bool> {
+    // Scoped names (`@scope/name`) must percent-encode the slash for the
+    // packument path.
+    let encoded = package.replace('/', "%2F");
+    let url = format!("https://registry.npmjs.org/{}", encoded);
+    let response = client
+        .get(&url)
+        // Abbreviated packument — we only inspect the status code.
+        .header("Accept", "application/vnd.npm.install-v1+json")
+        .send()
+        .await
+        .map_err(|e| anyhow!("npm registry lookup failed (network unavailable?): {}", e))?;
+    match response.status() {
+        reqwest::StatusCode::OK => Ok(true),
+        reqwest::StatusCode::NOT_FOUND => Ok(false),
+        other => Err(anyhow!(
+            "npm registry returned HTTP {} for '{}'",
+            other,
+            package
+        )),
+    }
+}
+
+/// Step B: probe convention-based npm names for *existence* (a metadata
+/// lookup), NOT by spawning them (the #10 RCE). Returns the first that exists.
+async fn try_conventions(client: &reqwest::Client, name: &str) -> Option<String> {
+    for pattern in convention_patterns(name) {
+        println!("  Checking npm for {}...", pattern);
+        if npm_package_exists(client, &pattern).await.unwrap_or(false) {
+            return Some(pattern);
         }
     }
-
     None
+}
+
+/// Whether `s` is `y`/`yes` (case-insensitive). Default is NO — anything else,
+/// including empty input / EOF, is declined.
+fn is_affirmative(s: &str) -> bool {
+    s.eq_ignore_ascii_case("y") || s.eq_ignore_ascii_case("yes")
+}
+
+/// Fail-closed policy (#10): refuse to run an untrusted package when there is
+/// no interactive terminal to confirm at and `--yes` was not passed. Also
+/// defeats `yes | mermaid add <typo>`, since a pipe is not a TTY.
+fn should_refuse_noninteractive(is_tty: bool, assume_yes: bool) -> bool {
+    !is_tty && !assume_yes
+}
+
+/// Confirm (default NO) before fetching+running a package that is NOT in the
+/// trusted built-in registry — the #10 gate. `assume_yes` (`--yes`) is an
+/// explicit opt-in for scripted use; without it a non-interactive session
+/// refuses rather than silently running untrusted code.
+fn confirm_untrusted_package(package: &str, command: &str, assume_yes: bool) -> Result<bool> {
+    if assume_yes {
+        return Ok(true);
+    }
+    if should_refuse_noninteractive(io::stdin().is_terminal(), assume_yes) {
+        bail!(
+            "Refusing to fetch and run untrusted package '{package}' via `{command} -y {package}` \
+             non-interactively — it is not in Mermaid's trusted registry, and a typosquatted \
+             package could run arbitrary code. Re-run in an interactive terminal to confirm, or \
+             pass --yes to allow it."
+        );
+    }
+    print!(
+        "About to fetch and run UNTRUSTED package '{package}' via `{command} -y {package}`.\n\
+         It is not in Mermaid's trusted registry; a typosquatted package could run arbitrary \
+         code. Continue? [y/N]: "
+    );
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(is_affirmative(input.trim()))
 }
 
 /// Step C: Search npm registry for MCP server packages.
@@ -295,7 +363,7 @@ async fn try_conventions(name: &str) -> Option<String> {
 /// which delegates to the `url` crate's RFC-3986 form-urlencoded
 /// serializer. No hand-rolled escaping — special characters in `name`
 /// (%, &, =, UTF-8, …) are all handled correctly.
-async fn search_npm(name: &str) -> Result<Option<(String, String)>> {
+async fn search_npm(client: &reqwest::Client, name: &str) -> Result<Option<(String, String)>> {
     let query = format!("{} mcp server", name);
 
     let url = reqwest::Url::parse_with_params(
@@ -303,10 +371,6 @@ async fn search_npm(name: &str) -> Result<Option<(String, String)>> {
         &[("text", query.as_str()), ("size", "5")],
     )
     .map_err(|e| anyhow!("Failed to build npm search URL: {}", e))?;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()?;
 
     let response = client
         .get(url)
@@ -355,10 +419,13 @@ async fn search_npm(name: &str) -> Result<Option<(String, String)>> {
     Ok(None)
 }
 
-/// Resolve an MCP server name to a validated, ready-to-configure server.
-/// Tries: A (built-in) → B (convention) → C (npm search)
-pub async fn resolve(name: &str) -> Result<ResolvedServer> {
-    // Step A: Built-in registry
+/// Resolve an MCP server name to a ready-to-configure server.
+/// Tries: A (built-in registry, trusted) → B (npm convention names) →
+/// C (npm search). Any non-registry result must be confirmed before it is
+/// returned, because configuring it leads to executing it via `npx -y` (#10).
+/// `assume_yes` (from `--yes`) is an explicit opt-in for non-interactive use.
+pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
+    // Step A: Built-in registry — curated/trusted, no confirmation needed.
     if let Some(entry) = lookup(name) {
         println!("Found: {} ({})", entry.package, entry.description);
         return Ok(ResolvedServer {
@@ -375,9 +442,20 @@ pub async fn resolve(name: &str) -> Result<ResolvedServer> {
 
     println!("Not in built-in registry, trying conventions...");
 
-    // Step B: Convention-based (npm only)
-    if let Some(package) = try_conventions(name).await {
+    // One HTTP client shared by the existence check (B) and the search (C).
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+
+    // Step B: convention names — existence check only (no spawn), then confirm.
+    if let Some(package) = try_conventions(&client, name).await {
         println!("Found: {}", package);
+        if !confirm_untrusted_package(&package, "npx", assume_yes)? {
+            bail!(
+                "Cancelled: did not confirm running untrusted package '{}'.",
+                package
+            );
+        }
         return Ok(ResolvedServer {
             command: "npx".to_string(),
             package,
@@ -388,23 +466,17 @@ pub async fn resolve(name: &str) -> Result<ResolvedServer> {
 
     println!("Searching npm registry...");
 
-    // Step C: npm search
-    match search_npm(name).await {
+    // Step C: npm search — HTTP only (safe). Confirm before returning; the
+    // package is validated (executed) exactly once afterwards, by `add_server`.
+    match search_npm(&client, name).await {
         Ok(Some((package, description))) => {
             println!("Found: {} — {}", package, description);
-
-            // Validate the npm result actually works
-            let empty_env = HashMap::new();
-            validate_server("npx", &package, &[], &empty_env)
-                .await
-                .map_err(|e| {
-                    anyhow!(
-                        "Found npm package '{}' but it failed validation: {}",
-                        package,
-                        e
-                    )
-                })?;
-
+            if !confirm_untrusted_package(&package, "npx", assume_yes)? {
+                bail!(
+                    "Cancelled: did not confirm running untrusted package '{}'.",
+                    package
+                );
+            }
             Ok(ResolvedServer {
                 command: "npx".to_string(),
                 package,
@@ -502,5 +574,54 @@ mod tests {
             lookup("brave-search").unwrap().extra_args,
             &["--transport", "stdio"]
         );
+    }
+
+    #[test]
+    fn convention_patterns_are_exact_and_ordered() {
+        assert_eq!(
+            convention_patterns("foo"),
+            vec![
+                "@foo/mcp-server".to_string(),
+                "foo-mcp-server".to_string(),
+                "@modelcontextprotocol/server-foo".to_string(),
+                "foo-mcp".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn is_affirmative_defaults_to_no() {
+        for yes in ["y", "Y", "yes", "YES", "Yes"] {
+            assert!(is_affirmative(yes), "{yes:?} should be affirmative");
+        }
+        for no in ["", " ", "n", "no", "nope", "x", "yeah"] {
+            assert!(!is_affirmative(no), "{no:?} should not be affirmative");
+        }
+    }
+
+    #[test]
+    fn noninteractive_without_yes_is_refused() {
+        // #10 fail-closed policy: refuse only when there is no TTY AND no --yes.
+        assert!(should_refuse_noninteractive(false, false)); // no tty, no --yes → refuse
+        assert!(!should_refuse_noninteractive(true, false)); // tty → prompt
+        assert!(!should_refuse_noninteractive(false, true)); // --yes → allow
+        assert!(!should_refuse_noninteractive(true, true));
+    }
+
+    #[test]
+    fn assume_yes_confirms_without_io() {
+        // --yes short-circuits before any TTY check / stdin read, so it never
+        // blocks. (The assume_yes=false path is NOT exercised here: under a TTY
+        // it would block on stdin.read_line.)
+        assert!(confirm_untrusted_package("evil-pkg", "npx", true).unwrap());
+    }
+
+    #[tokio::test]
+    async fn resolve_registry_name_needs_no_network_or_confirmation() {
+        // A trusted built-in entry resolves via lookup() alone — no HTTP, no
+        // prompt — so the untrusted-package gate never fires for curated entries.
+        let resolved = resolve("context7", false).await.expect("registry resolve");
+        assert_eq!(resolved.command, "npx");
+        assert_eq!(resolved.package, "@upstash/context7-mcp");
     }
 }

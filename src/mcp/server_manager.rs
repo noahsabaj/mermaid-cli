@@ -32,7 +32,8 @@ impl McpServerManager {
                 "Starting MCP server: {} ({} {})",
                 name,
                 config.command,
-                config.args.join(" ")
+                // Redact args — they can carry secrets (e.g. `--api-key=…`) (#93).
+                crate::utils::redact_secrets(&config.args.join(" "))
             );
 
             match Self::start_one(name, config).await {
