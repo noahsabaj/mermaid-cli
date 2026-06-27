@@ -4,19 +4,20 @@ Derived from the architectural + security review that produced **116 findings**
 (`#1`–`#116`) grouped under 7 root causes. The root causes and two sweep-ins
 were fixed across the Axis hardening PRs (GitHub PRs #64–#68 — not to be
 confused with findings #64/#68 below); the four partial residuals plus the
-fail-open verdict parse were closed afterward. This file tracks what's left.
+fail-open verdict parse were closed afterward, and **Group 2 (MCP client)** was
+completed next. This file tracks what's left.
 
 - **Last updated:** 2026-06-27
-- **Status:** 58 resolved · **58 remaining** · 0 CRITICAL left · 1 HIGH left
+- **Status:** 66 resolved · **50 remaining** · 0 CRITICAL left · 0 HIGH left
 - **Severity legend:** `HIGH` exploitable / data-loss · `MED` correctness or
   availability · `LOW`/`INFO` hardening, cosmetics, or by-design risk to confirm.
 
-Remaining work is split into six groups by subsystem, so each is a single
+Remaining work is split into five groups by subsystem, so each is a single
 coherent review surface (one PR). Suggested order is by risk — see the end.
 
 ---
 
-## Remaining (58)
+## Remaining (50)
 
 ### Group 1 — Provider adapters, retry & auth (13 · 3 MED, 10 LOW)
 `models/adapters/*`, `effect/middleware`, `providers/factory`
@@ -34,18 +35,6 @@ coherent review surface (one PR). Suggested order is by risk — see the end.
 - [ ] **#86** `LOW` `models/adapters/ollama.rs:610` — forces cleartext `http://`; host classifier exists but isn't wired here.
 - [ ] **#87** `LOW` retry jitter entropy from `subsec_nanos()`.
 - [ ] **#88** `LOW` `ollama/cloud_setup.rs` — Ollama cloud key stored plaintext in `config.toml`.
-
-### Group 2 — MCP client robustness & safety (8 · 1 HIGH, 2 MED, 5 LOW)
-`mcp/transport`, `mcp/registry`, `mcp/add`, `tool/mcp`
-
-- [ ] **#10** `HIGH` `mcp/registry.rs:270-434` — `mermaid add <unknown>` speculatively runs guessed packages via `npx -y` (typosquat RCE). *Previously deferred.*
-- [ ] **#36** `MED` `mcp/transport.rs:97` — one invalid-UTF-8 byte permanently kills the reader task.
-- [ ] **#37** `MED` `mcp/transport.rs:168-231` — no timeout on stdin write/flush → whole-server hang.
-- [ ] **#89** `LOW` `mcp/transport.rs:110` — response dispatch matches `id` only (server-initiated request can collide).
-- [ ] **#91** `LOW` `tool/mcp.rs:106` — `isError:true` reported to the model as `Success`.
-- [ ] **#92** `LOW` `mcp/transport.rs:263` — `start_kill()` is SIGKILL, not the documented SIGTERM.
-- [ ] **#93** `LOW` `mcp/add.rs` + `server_manager.rs:31` — MCP secret env & command args echoed/logged. *Deferred from Cause 7; redaction chokepoint doesn't cover MCP setup.*
-- [ ] **#94** `LOW` `mcp/transport.rs` — in-flight requests not failed on stdout EOF (full 30 s wait).
 
 ### Group 3 — Computer-use (6 · 2 MED, 4 LOW)
 `providers/tool/computer_use/*`
@@ -104,30 +93,38 @@ coherent review surface (one PR). Suggested order is by risk — see the end.
 
 ## Suggested order (by risk)
 
-1. **Group 2 — MCP** — the lone HIGH (#10) plus two whole-server-hang bugs (#36/#37).
-2. **Group 4 — Daemon/persistence** — token & exec-from-DB surface (#65, #63, #62).
-3. **Group 3 — Computer-use** — the `i32` overflow (#32) and ungated capture (#98).
-4. **Group 1 — Providers** — large but low-risk correctness; mostly mechanical.
-5. **Group 5 — MVU core** — the deferred purity residuals; some carry a real behavioral tradeoff (#45, #18).
-6. **Group 6 — App shell** — mostly cosmetic, latent, or by-design-to-confirm.
+1. **Group 4 — Daemon/persistence** — token & exec-from-DB surface (#65, #63, #62).
+2. **Group 3 — Computer-use** — the `i32` overflow (#32) and ungated capture (#98).
+3. **Group 1 — Providers** — large but low-risk correctness; mostly mechanical.
+4. **Group 5 — MVU core** — the deferred purity residuals; some carry a real behavioral tradeoff (#45, #18).
+5. **Group 6 — App shell** — mostly cosmetic, latent, or by-design-to-confirm.
 
 **Cheapest high-value picks across groups:** #65 (never-expiring token), #72
-(message-ordering 400), #36/#37 (MCP reader robustness), #93 (extend redaction
-to MCP logging).
+(message-ordering 400), #61 (wall-nanos ID collision), #111 (silently-swallowed
+malformed config).
 
 ## Deliberate deferrals (conscious, not misses)
 
 - **#18, #45, #54, #55** — reducer/render *I/O-and-env* residuals left after the
   time-injection core landed. Determinism for `(State, Msg) → State` holds;
   these concern render purity / turn-freshness tradeoffs.
-- **#93** — the redaction chokepoint scrubs the recorder, memory, and compaction
-  summaries; it does **not** yet cover MCP server-setup logging or `add.rs`
-  config storage.
-- **#10** — deferred once already; highest single residual risk.
 
 ---
 
-## Resolved (58)
+## Resolved (66)
+
+**Group 2 — MCP client robustness & safety (8 · 1 HIGH, 2 MED, 5 LOW):**
+#10 (typosquat RCE — convention/search now probe the npm registry for package
+*existence* instead of executing `npx -y <guess>`; a default-NO confirmation
+gate, fail-closed when non-interactive, with a `--yes` opt-in, guards any
+non-registry package), #36 (reader skips a non-UTF-8 frame instead of dying),
+#37 (stdin write/flush — and `send_notification` — are timeout-bounded), #89
+(only true JSON-RPC responses complete a pending request; server-initiated
+requests no longer collide), #91 (`isError:true` maps to a tool `Error`, not
+`Success`), #92 (real SIGTERM before SIGKILL on Unix; docstring corrected), #93
+(MCP server args + stderr + spawn-error context run through the redaction
+chokepoint), #94 (pending requests fail fast on stdout EOF instead of waiting
+the 30 s timeout).
 
 **This session — partial residuals + fail-open parse (5):**
 #7 (Auto-classifier prompt-injection hardening), #23 (`parse_verdict`

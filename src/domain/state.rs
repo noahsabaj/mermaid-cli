@@ -681,6 +681,22 @@ impl ToolOutcome {
         )
     }
 
+    /// Override the status after construction. When transitioning to
+    /// `Error`, populate `error` from `model_content` (if not already set)
+    /// so the renderer — `action_display_for`, which falls back to
+    /// `error_message().unwrap_or("[cancelled]")` — surfaces the failure
+    /// instead of mislabeling it as a cancellation. The MCP proxy uses this
+    /// for `isError: true` results (#91): the model still sees the server's
+    /// content verbatim via `model_content`, but the outcome reads as an
+    /// error rather than a success.
+    pub fn with_status(mut self, status: ToolStatus) -> Self {
+        if status == ToolStatus::Error && self.error.is_none() {
+            self.error = Some(self.model_content.clone());
+        }
+        self.status = status;
+        self
+    }
+
     pub fn was_cancelled(&self) -> bool {
         self.status == ToolStatus::Cancelled
     }

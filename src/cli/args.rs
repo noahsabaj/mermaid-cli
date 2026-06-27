@@ -215,6 +215,11 @@ pub enum Commands {
     Add {
         /// MCP server name (e.g., context7, github, filesystem)
         name: String,
+        /// Skip the confirmation prompt before fetching and running a package
+        /// that is not in the built-in registry (for scripted/CI use). Without
+        /// this, adding an unknown package fails closed when there is no TTY.
+        #[arg(long)]
+        yes: bool,
     },
     /// Remove a configured MCP server
     Remove {

@@ -13,7 +13,7 @@
 
 use async_trait::async_trait;
 
-use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata, ToolStatus};
 use crate::mcp::{McpServerManager, manager_ref};
 
 use super::super::ctx::ExecContext;
@@ -104,19 +104,12 @@ impl ToolExecutor for McpToolProxy {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             result = call => match result {
-                Ok(tool_result) => {
-                    let (text, images) = McpServerManager::format_tool_result(&tool_result);
-                    let mut outcome = ToolOutcome::success(
-                        text,
-                        format!("{}:{} completed", server_name, tool_name),
-                        start.elapsed().as_secs_f64(),
-                    )
-                    .with_metadata(mcp_metadata(server_name, tool_name));
-                    if let Some(images) = images {
-                        outcome = outcome.with_images(images);
-                    }
-                    outcome
-                },
+                Ok(tool_result) => outcome_from_mcp(
+                    &tool_result,
+                    server_name,
+                    tool_name,
+                    start.elapsed().as_secs_f64(),
+                ),
                 Err(e) => ToolOutcome::error(
                     format!("mcp_proxy({}:{}): {}", server_name, tool_name, e),
                     start.elapsed().as_secs_f64(),
@@ -135,6 +128,41 @@ fn mcp_metadata(server_name: &str, tool_name: &str) -> ToolRunMetadata {
         },
         ..ToolRunMetadata::default()
     }
+}
+
+/// Map a completed MCP `tools/call` result onto a `ToolOutcome`, honoring the
+/// MCP `isError` flag (#91). A successful JSON-RPC round-trip can still carry a
+/// tool-level failure (`isError: true`); in that case the model must see an
+/// *error* outcome — the server's own content verbatim, status `Error` — not a
+/// success. Pure so both branches are unit-tested.
+fn outcome_from_mcp(
+    tool_result: &crate::mcp::McpToolResult,
+    server_name: &str,
+    tool_name: &str,
+    duration_secs: f64,
+) -> ToolOutcome {
+    let (text, images) = McpServerManager::format_tool_result(tool_result);
+    let verb = if tool_result.is_error {
+        "failed"
+    } else {
+        "completed"
+    };
+    // Build the success-shaped outcome first so `model_content == text` and the
+    // metadata/images wiring matches the non-error path exactly (with_metadata
+    // must precede with_images — with_metadata replaces the metadata box).
+    let mut outcome = ToolOutcome::success(
+        text,
+        format!("{}:{} {}", server_name, tool_name, verb),
+        duration_secs,
+    )
+    .with_metadata(mcp_metadata(server_name, tool_name));
+    if let Some(images) = images {
+        outcome = outcome.with_images(images);
+    }
+    if tool_result.is_error {
+        outcome = outcome.with_status(ToolStatus::Error);
+    }
+    outcome
 }
 
 #[cfg(test)]
@@ -176,5 +204,35 @@ mod tests {
         // Either Error (uninitialized) or Error (server not found) —
         // both acceptable; the test asserts *not Finished*.
         assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+    }
+
+    #[test]
+    fn outcome_from_mcp_is_error_maps_to_error_status_preserving_content() {
+        use crate::mcp::{ContentBlock, McpToolResult};
+        let result = McpToolResult {
+            content: vec![ContentBlock::Text("boom: rate limited".into())],
+            is_error: true,
+        };
+        let outcome = outcome_from_mcp(&result, "slack", "send", 0.5);
+        assert_eq!(outcome.status, ToolStatus::Error);
+        // The model sees the server's own error content verbatim — no "Error:" prefix.
+        assert_eq!(outcome.output(), "boom: rate limited");
+        // `error` is populated so the renderer shows the failure, not "[cancelled]".
+        assert_eq!(outcome.error_message(), Some("boom: rate limited"));
+        assert_eq!(outcome.summary, "slack:send failed");
+    }
+
+    #[test]
+    fn outcome_from_mcp_success_maps_to_success_status() {
+        use crate::mcp::{ContentBlock, McpToolResult};
+        let result = McpToolResult {
+            content: vec![ContentBlock::Text("ok".into())],
+            is_error: false,
+        };
+        let outcome = outcome_from_mcp(&result, "slack", "send", 0.5);
+        assert_eq!(outcome.status, ToolStatus::Success);
+        assert_eq!(outcome.output(), "ok");
+        assert_eq!(outcome.error_message(), None);
+        assert_eq!(outcome.summary, "slack:send completed");
     }
 }
