@@ -84,6 +84,10 @@ pub struct Config {
     #[serde(default)]
     pub memory: MemoryConfig,
 
+    /// Computer-use (desktop control) preferences.
+    #[serde(default)]
+    pub computer_use: ComputerUseConfig,
+
     /// Runtime-only prompt customizations supplied by CLI flags. These are
     /// deliberately skipped when saving config so one-off agent personas do
     /// not pollute the user's persistent Mermaid settings.
@@ -177,6 +181,26 @@ impl Default for MemoryConfig {
         Self {
             enabled: true,
             index_cap_bytes: crate::constants::MAX_MEMORY_INDEX_BYTES,
+        }
+    }
+}
+
+/// Computer-use (desktop control) preferences.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComputerUseConfig {
+    /// After a successful click / type_text / press_key, auto-capture the
+    /// focused window and attach it inline so the model can verify the result.
+    /// On by default (non-breaking); set false to cut the per-action capture
+    /// cost + image tokens when visual feedback isn't needed. The model can
+    /// still call `screenshot` explicitly.
+    pub auto_screenshot: bool,
+}
+
+impl Default for ComputerUseConfig {
+    fn default() -> Self {
+        Self {
+            auto_screenshot: true,
         }
     }
 }
@@ -608,6 +632,13 @@ mod tests {
         let cfg: Config = toml::from_str(toml_blob).expect("backward compat");
         assert!(cfg.reasoning_per_model.is_empty());
         assert!(!cfg.prompt.is_customized());
+    }
+
+    #[test]
+    fn config_defaults_computer_use_auto_screenshot_on() {
+        // An empty/legacy config must keep the auto-screenshot behavior (#98).
+        let cfg: Config = toml::from_str("").expect("empty config");
+        assert!(cfg.computer_use.auto_screenshot);
     }
 
     #[test]

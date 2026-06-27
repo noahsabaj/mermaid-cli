@@ -37,6 +37,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::domain::{ToolMetadata, ToolOutcome, ToolRunMetadata};
+use crate::providers::ctx::{ExecContext, ProgressEvent};
 
 pub use click::ClickTool;
 pub use driver::ComputerUseDriver;
@@ -61,6 +62,22 @@ impl Backend {
     /// Whether the driver has any tools it can run on this backend.
     pub fn is_usable(self) -> bool {
         !matches!(self, Backend::Unsupported)
+    }
+
+    /// Whether this backend can inject pointer + keyboard events (click,
+    /// type_text, press_key, scroll, mouse_move). X11 (xdotool) and Wayland
+    /// (ydotool/wtype) only; macOS capture works via `screencapture`, but the
+    /// input verbs are unimplemented and `bail!` in the driver, so they must
+    /// not be advertised there (#35). Windows is a stub.
+    pub fn supports_input_injection(self) -> bool {
+        matches!(self, Backend::X11 | Backend::Wayland)
+    }
+
+    /// Whether this backend can enumerate windows (`list_windows`). X11 only —
+    /// via `xdotool search`; Wayland has no portable primitive and the driver
+    /// `bail!`s (#35).
+    pub fn supports_window_listing(self) -> bool {
+        matches!(self, Backend::X11)
     }
 }
 
@@ -180,6 +197,38 @@ pub(super) fn computer_use_success(
     )
 }
 
+/// Shared post-action auto-screenshot for click / type_text / press_key.
+///
+/// When `computer_use.auto_screenshot` is enabled, captures the focused window,
+/// emits an inline `Artifact` preview on the progress channel, and returns
+/// `(summary, base64_png)` for the caller to fold into its outcome. Returns
+/// `None` when the flag is off OR the best-effort capture failed — callers then
+/// build a screenshot-less outcome (#98). Gating lives here so the three tools
+/// share one decision point rather than three byte-identical blocks.
+pub(super) async fn emit_auto_screenshot(
+    driver: &ComputerUseDriver,
+    ctx: &ExecContext,
+    caption: &'static str,
+) -> Option<(String, String)> {
+    if !ctx.config.computer_use.auto_screenshot {
+        return None;
+    }
+    let (summary, base64_png) = driver.capture_focused_for_autoshot(&ctx.token).await?;
+    if let Ok(bytes) =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &base64_png)
+    {
+        let _ = ctx
+            .progress
+            .send(ProgressEvent::Artifact {
+                mime: "image/png".to_string(),
+                data: bytes,
+                caption: Some(caption.to_string()),
+            })
+            .await;
+    }
+    Some((summary, base64_png))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,11 +242,53 @@ mod tests {
     }
 
     #[test]
+    fn input_injection_only_on_linux_backends() {
+        assert!(Backend::X11.supports_input_injection());
+        assert!(Backend::Wayland.supports_input_injection());
+        assert!(!Backend::MacOS.supports_input_injection());
+        assert!(!Backend::Windows.supports_input_injection());
+        assert!(!Backend::Unsupported.supports_input_injection());
+    }
+
+    #[test]
+    fn window_listing_only_on_x11() {
+        assert!(Backend::X11.supports_window_listing());
+        assert!(!Backend::Wayland.supports_window_listing());
+        assert!(!Backend::MacOS.supports_window_listing());
+    }
+
+    #[test]
     fn probe_does_not_panic_on_headless() {
         // In the test runner (no DISPLAY, no WAYLAND_DISPLAY on most
         // CI envs), probe() must return Unsupported without panicking.
         // We don't assert a specific result because dev machines may
         // have a live display.
         let _ = probe();
+    }
+
+    #[tokio::test]
+    async fn auto_screenshot_is_noop_when_disabled() {
+        use crate::domain::{ToolCallId, TurnId};
+        let mut cfg = crate::app::Config::default();
+        cfg.computer_use.auto_screenshot = false;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(8);
+        let ctx = ExecContext::new(
+            tokio_util::sync::CancellationToken::new(),
+            tx,
+            ToolCallId(1),
+            TurnId(1),
+            std::path::PathBuf::from("/tmp"),
+            std::sync::Arc::new(cfg),
+            String::new(),
+            None,
+            crate::runtime::SafetyMode::FullAccess,
+            None,
+            None,
+            None,
+        );
+        // Backend is irrelevant — the flag short-circuits before any capture.
+        let driver = ComputerUseDriver::new(Backend::Unsupported);
+        assert!(emit_auto_screenshot(&driver, &ctx, "test").await.is_none());
+        assert!(rx.try_recv().is_err(), "no artifact emitted when disabled");
     }
 }

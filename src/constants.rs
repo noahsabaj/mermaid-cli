@@ -141,6 +141,16 @@ pub const SCREENSHOT_REGISTRY_CAPACITY: usize = 16;
 /// content (with a placeholder noting where the image was elided) so
 /// the model knows what was dropped from context.
 pub const MAX_RETAINED_SCREENSHOTS: usize = 3;
+/// Per-command wall-clock cap for the synchronous geometry/probe helpers
+/// (xdotool getactivewindow/getwindowgeometry, xrandr --query, the list_windows
+/// search). These return in tens of ms; a wedged display (dead X socket,
+/// detached SSH) must not hang the agent loop (#97).
+pub const COMPUTER_USE_CMD_TIMEOUT_SECS: u64 = 5;
+/// Wall-clock cap for the screenshot downscale step (ImageMagick `convert` /
+/// `ffmpeg`). Larger than the probe cap — re-encoding a 4K PNG is legitimately
+/// slower than a geometry query. On timeout we fall through to the next encoder,
+/// then to sending the full-resolution capture (#97).
+pub const SCREENSHOT_DOWNSCALE_TIMEOUT_SECS: u64 = 15;
 
 // Project instructions (Step 5h)
 /// Maximum bytes loaded from project instruction files before truncation. ~10k

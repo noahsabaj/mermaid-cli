@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::constants::POST_KEY_DELAY_MS;
 use crate::domain::{ToolDefinition, ToolOutcome};
-use crate::providers::ctx::{ExecContext, ProgressEvent};
+use crate::providers::ctx::ExecContext;
 
 use super::super::ToolExecutor;
 use super::computer_use_success;
@@ -90,24 +90,16 @@ impl ToolExecutor for PressKeyTool {
         tokio::time::sleep(std::time::Duration::from_millis(POST_KEY_DELAY_MS)).await;
         let base_msg = format!("Pressed: {}", key);
 
-        let (summary, image) = match self.driver.capture_focused_for_autoshot(&ctx.token).await {
+        let (summary, image) = match super::emit_auto_screenshot(
+            &self.driver,
+            &ctx,
+            "press_key auto-screenshot",
+        )
+        .await
+        {
             Some((s, b64)) => (Some(s), Some(b64)),
             None => (None, None),
         };
-
-        if let Some(b64) = &image
-            && let Ok(bytes) =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
-        {
-            let _ = ctx
-                .progress
-                .send(ProgressEvent::Artifact {
-                    mime: "image/png".to_string(),
-                    data: bytes,
-                    caption: Some("press_key auto-screenshot".to_string()),
-                })
-                .await;
-        }
 
         let out = match &summary {
             Some(s) => format!("{}\n[auto-screenshot: {}]", base_msg, s),

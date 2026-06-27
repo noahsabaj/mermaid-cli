@@ -41,6 +41,12 @@ pub struct ScreenshotMetadata {
     pub scale_factor: f64,
     pub offset_x: i32,
     pub offset_y: i32,
+    /// Displayed (post-downscale) pixel dimensions — the exact frame the model
+    /// reasoned over. `scale_coords` clamps model-supplied coords to
+    /// `[0, width) × [0, height)` before translating (#96); a value of `0`
+    /// means the PNG header was unreadable, so the upper clamp is skipped.
+    pub width: u32,
+    pub height: u32,
     /// Human-readable capture kind (`"fullscreen"`, `"focused window"`,
     /// …). Surfaced in error messages if the model references an
     /// evicted id.
@@ -197,9 +203,28 @@ impl ComputerUseDriver {
                     .to_string()
             })?,
         };
+        // #96: clamp the model-supplied coords into the frame's own pixel bounds
+        // before translating (skip the upper clamp when a dim is 0 = PNG header
+        // unreadable, so `clamp`'s min <= max precondition always holds).
+        let cx = if meta.width > 0 {
+            x.clamp(0, meta.width as i32 - 1)
+        } else {
+            x.max(0)
+        };
+        let cy = if meta.height > 0 {
+            y.clamp(0, meta.height as i32 - 1)
+        } else {
+            y.max(0)
+        };
+        // #32: the f64 -> i32 cast already saturates (NaN -> 0, ±huge ->
+        // i32::MIN/MAX); the `+ offset` i32 add is the real defect — it panics on
+        // overflow in debug and wraps to a negative coord in release.
+        // saturating_add mirrors the saturating_sub at driver.rs:452. The clamp
+        // above already bounds the result inside the region; this is
+        // defense-in-depth for extreme offsets.
         Ok((
-            (x as f64 * meta.scale_factor) as i32 + meta.offset_x,
-            (y as f64 * meta.scale_factor) as i32 + meta.offset_y,
+            ((cx as f64 * meta.scale_factor) as i32).saturating_add(meta.offset_x),
+            ((cy as f64 * meta.scale_factor) as i32).saturating_add(meta.offset_y),
         ))
     }
 
@@ -209,6 +234,8 @@ impl ComputerUseDriver {
         scale_factor: f64,
         offset_x: i32,
         offset_y: i32,
+        width: u32,
+        height: u32,
         kind: String,
     ) -> u64 {
         let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
@@ -218,6 +245,8 @@ impl ComputerUseDriver {
                 scale_factor,
                 offset_x,
                 offset_y,
+                width,
+                height,
                 kind,
             });
         }
@@ -248,13 +277,24 @@ impl ComputerUseDriver {
             dispatch_capture(self.backend, &spec, &temp_str, token).await?;
 
         let scale_factor = downscale_if_needed(&temp_str, SCREENSHOT_MAX_WIDTH).await?;
-        let id = self.register_screenshot(scale_factor, offset_x, offset_y, kind.clone());
 
         let raw_bytes = tokio::fs::read(&temp_path)
             .await
             .context("reading captured screenshot")?;
         let width = read_png_width(&raw_bytes).unwrap_or(0);
         let height = read_png_height(&raw_bytes).unwrap_or(0);
+
+        // Register AFTER dims are known so `scale_coords` can clamp model coords
+        // to this frame's pixel bounds (#96).
+        let id = self.register_screenshot(
+            scale_factor,
+            offset_x,
+            offset_y,
+            width,
+            height,
+            kind.clone(),
+        );
+
         let base64_png = general_purpose::STANDARD.encode(&raw_bytes);
 
         let offset_info = if offset_x != 0 || offset_y != 0 {
@@ -617,12 +657,17 @@ async fn dispatch_capture(
              output name."
         ),
         (Backend::MacOS, ScreenshotSpec::Focused) => {
-            run_cmd_cancellable(
-                Command::new("screencapture").args(["-x", "-W", out_path]),
-                token,
-            )
-            .await?;
-            Ok((0, 0, "focused window".to_string()))
+            // #100: `screencapture -W` captures only the focused window but
+            // reports no origin, so a click computed from the frame mis-targets
+            // whenever the window isn't at screen (0,0). Capture the full main
+            // display instead — the (0,0) offset is then genuinely correct and
+            // coords translate exactly. We deliberately avoid an AppleScript
+            // window-position probe: it returns points, but offsets here are in
+            // device pixels, so it'd be 2x off on a Retina display (a silent bug
+            // we can't catch on the Linux CI).
+            run_cmd_cancellable(Command::new("screencapture").args(["-x", out_path]), token)
+                .await?;
+            Ok((0, 0, "focused window (full display on macOS)".to_string()))
         },
         (Backend::X11, ScreenshotSpec::Region(x, y, w, h)) => {
             run_cmd_cancellable(
@@ -739,7 +784,25 @@ pub(crate) async fn run_cmd_cancellable(
 }
 
 async fn run_cmd_stdout(cmd: &mut Command) -> Result<String> {
-    let out = cmd.output().await.context("subprocess spawn")?;
+    run_cmd_stdout_with_timeout(
+        cmd,
+        std::time::Duration::from_secs(crate::constants::COMPUTER_USE_CMD_TIMEOUT_SECS),
+    )
+    .await
+}
+
+/// `run_cmd_stdout` with an explicit cap (extracted so the timeout is testable
+/// with a tiny duration). `kill_on_drop(true)` reaps the child if the timeout
+/// fires and the `output()` future is dropped (#97).
+async fn run_cmd_stdout_with_timeout(
+    cmd: &mut Command,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    cmd.kill_on_drop(true);
+    let out = match tokio::time::timeout(timeout, cmd.output()).await {
+        Ok(res) => res.context("subprocess spawn")?,
+        Err(_) => anyhow::bail!("subprocess timed out after {:?}", timeout),
+    };
     if !out.status.success() {
         anyhow::bail!(
             "subprocess failed: {}",
@@ -846,30 +909,44 @@ async fn downscale_if_needed(path: &str, max_width: u32) -> Result<f64> {
     }
     let scale_factor = original_width as f64 / max_width as f64;
     let scaled = format!("{}.scaled.png", path);
+    // #97: time-box the encoders + kill_on_drop. The double `Ok(Ok(..))` means a
+    // timeout (outer Err) OR a spawn error (inner Err) falls through to the next
+    // encoder and finally to the full-resolution fallback below — preserving the
+    // existing graceful degradation rather than hanging the agent loop.
+    let downscale_timeout =
+        std::time::Duration::from_secs(crate::constants::SCREENSHOT_DOWNSCALE_TIMEOUT_SECS);
 
-    let convert = Command::new("convert")
-        .args([path, "-resize", &format!("{}x", max_width), &scaled])
-        .output()
-        .await;
-    if let Ok(o) = convert
+    let convert = tokio::time::timeout(
+        downscale_timeout,
+        Command::new("convert")
+            .args([path, "-resize", &format!("{}x", max_width), &scaled])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    if let Ok(Ok(o)) = convert
         && o.status.success()
     {
         tokio::fs::rename(&scaled, path).await?;
         return Ok(scale_factor);
     }
 
-    let ffmpeg = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-i",
-            path,
-            "-vf",
-            &format!("scale={}:-1", max_width),
-            &scaled,
-        ])
-        .output()
-        .await;
-    if let Ok(o) = ffmpeg
+    let ffmpeg = tokio::time::timeout(
+        downscale_timeout,
+        Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i",
+                path,
+                "-vf",
+                &format!("scale={}:-1", max_width),
+                &scaled,
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    if let Ok(Ok(o)) = ffmpeg
         && o.status.success()
     {
         tokio::fs::rename(&scaled, path).await?;
@@ -897,6 +974,8 @@ mod tests {
                 scale_factor: 1.0,
                 offset_x: 0,
                 offset_y: 0,
+                width: 0,
+                height: 0,
                 kind: "fullscreen".to_string(),
             });
         }
@@ -915,17 +994,50 @@ mod tests {
     #[test]
     fn scale_coords_applies_scale_and_offset() {
         let d = ComputerUseDriver::new(Backend::X11);
-        let id = d.register_screenshot(2.0, 100, 50, "fullscreen".to_string());
+        let id = d.register_screenshot(2.0, 100, 50, 640, 480, "fullscreen".to_string());
         let (sx, sy) = d.scale_coords(10, 20, Some(id)).unwrap();
         assert_eq!(sx, 100 + 20);
         assert_eq!(sy, 50 + 40);
     }
 
     #[test]
+    fn scale_coords_saturates_on_offset_overflow() {
+        // #32: a huge model x + positive offset must not panic (debug) or wrap to
+        // a negative coord (release). width/height = 0 disables the #96 upper
+        // clamp so the value actually reaches the offset add.
+        let d = ComputerUseDriver::new(Backend::X11);
+        let id = d.register_screenshot(1.0, 100, 100, 0, 0, "fullscreen".to_string());
+        let (sx, sy) = d.scale_coords(i32::MAX, i32::MAX, Some(id)).unwrap();
+        assert_eq!(sx, i32::MAX);
+        assert_eq!(sy, i32::MAX);
+    }
+
+    #[test]
+    fn scale_coords_clamps_negative_into_region() {
+        // #96: negative model coords clamp to the region's top-left origin.
+        let d = ComputerUseDriver::new(Backend::X11);
+        let id = d.register_screenshot(2.0, 100, 50, 640, 480, "region".to_string());
+        assert_eq!(d.scale_coords(-9999, -1, Some(id)).unwrap(), (100, 50));
+    }
+
+    #[test]
+    fn scale_coords_clamps_over_max_into_region() {
+        // #96: coords past the frame clamp to the last in-frame pixel and stay
+        // inside [offset, offset + region_dim).
+        let d = ComputerUseDriver::new(Backend::X11);
+        let id = d.register_screenshot(2.0, 100, 50, 640, 480, "region".to_string());
+        let (sx, sy) = d.scale_coords(100_000, 100_000, Some(id)).unwrap();
+        // x: clamp 100000 -> 639; 639*2 + 100 = 1378. y: 479*2 + 50 = 1008.
+        assert_eq!((sx, sy), (1378, 1008));
+        // region real size = 1280x960; in-frame bounds [100,1380) x [50,1010).
+        assert!(sx < 100 + 1280 && sy < 50 + 960);
+    }
+
+    #[test]
     fn scale_coords_errors_on_evicted_id() {
         let d = ComputerUseDriver::new(Backend::X11);
         for _ in 0..(SCREENSHOT_REGISTRY_CAPACITY + 1) {
-            d.register_screenshot(1.0, 0, 0, "fullscreen".to_string());
+            d.register_screenshot(1.0, 0, 0, 0, 0, "fullscreen".to_string());
         }
         // id 0 is evicted now.
         let err = d.scale_coords(0, 0, Some(0)).unwrap_err();
@@ -947,5 +1059,26 @@ mod tests {
     fn ensure_alive_fails_on_unsupported_backend() {
         let d = ComputerUseDriver::new(Backend::Unsupported);
         assert!(d.ensure_alive().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_cmd_stdout_times_out_on_slow_command() {
+        // #97: a wedged probe must not hang — the seam fires the timeout, drops
+        // the future (kill_on_drop reaps the child), and bails.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("5");
+        let err = run_cmd_stdout_with_timeout(&mut cmd, std::time::Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_cmd_stdout_returns_output_for_fast_command() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hi");
+        assert_eq!(run_cmd_stdout(&mut cmd).await.unwrap().trim(), "hi");
     }
 }

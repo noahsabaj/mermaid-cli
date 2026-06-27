@@ -143,6 +143,26 @@ pub enum TuiMode {
 }
 
 impl ToolRegistry {
+    /// Register the computer-use tools the given backend can actually drive.
+    /// Screenshot works on every usable backend; the five input tools need
+    /// pointer/keyboard injection (X11/Wayland); `list_windows` is X11-only.
+    /// Advertising a tool the backend can't drive means the model is told it
+    /// has a capability that `bail!`s at call time (#35).
+    fn register_computer_use_tools(&mut self, backend: computer_use::Backend) {
+        let driver = Arc::new(computer_use::ComputerUseDriver::new(backend));
+        self.register(Arc::new(computer_use::ScreenshotTool::new(driver.clone())));
+        if backend.supports_input_injection() {
+            self.register(Arc::new(computer_use::ClickTool::new(driver.clone())));
+            self.register(Arc::new(computer_use::TypeTextTool::new(driver.clone())));
+            self.register(Arc::new(computer_use::PressKeyTool::new(driver.clone())));
+            self.register(Arc::new(computer_use::ScrollTool::new(driver.clone())));
+            self.register(Arc::new(computer_use::MouseMoveTool::new(driver.clone())));
+        }
+        if backend.supports_window_listing() {
+            self.register(Arc::new(computer_use::ListWindowsTool::new(driver.clone())));
+        }
+    }
+
     /// Config-aware factory. Always registers filesystem + exec +
     /// the MCP proxy + the subagent tool. Conditionally registers:
     ///
@@ -150,8 +170,9 @@ impl ToolRegistry {
     ///     (via `utils::resolve_api_key`). Without a key, the tools
     ///     would error on every call — so we don't advertise them at
     ///     all.
-    ///   - All seven computer-use tools iff `mode == Interactive`
-    ///     AND `computer_use::probe()` returns a usable backend.
+    ///   - The computer-use tools the detected backend can drive (see
+    ///     `register_computer_use_tools`) iff `mode == Interactive` AND
+    ///     `computer_use::probe()` returns a usable backend.
     ///
     /// `providers` is the shared `ProviderFactory` that the effect
     /// runner also holds; the `SubagentSpawner` needs it so child
@@ -186,14 +207,7 @@ impl ToolRegistry {
         if mode == TuiMode::Interactive {
             let backend = computer_use::probe();
             if backend.is_usable() {
-                let driver = Arc::new(computer_use::ComputerUseDriver::new(backend));
-                r.register(Arc::new(computer_use::ScreenshotTool::new(driver.clone())));
-                r.register(Arc::new(computer_use::ClickTool::new(driver.clone())));
-                r.register(Arc::new(computer_use::TypeTextTool::new(driver.clone())));
-                r.register(Arc::new(computer_use::PressKeyTool::new(driver.clone())));
-                r.register(Arc::new(computer_use::ScrollTool::new(driver.clone())));
-                r.register(Arc::new(computer_use::MouseMoveTool::new(driver.clone())));
-                r.register(Arc::new(computer_use::ListWindowsTool::new(driver)));
+                r.register_computer_use_tools(backend);
             }
         }
 
@@ -228,6 +242,50 @@ mod tests {
         }
         assert!(r.get("not_a_tool").is_none());
         assert!(r.len() >= 6);
+    }
+
+    #[test]
+    fn computer_use_registration_is_selective_per_backend() {
+        use computer_use::Backend;
+        let reg = |b: Backend| {
+            let mut r = ToolRegistry::new();
+            r.register_computer_use_tools(b);
+            r
+        };
+
+        // macOS: only screenshot — the input verbs + list_windows bail at
+        // runtime, so advertising them just wastes the model's turns (#35).
+        let mac = reg(Backend::MacOS);
+        assert!(mac.get("screenshot").is_some());
+        for t in [
+            "click",
+            "type_text",
+            "press_key",
+            "scroll",
+            "mouse_move",
+            "list_windows",
+        ] {
+            assert!(mac.get(t).is_none(), "macOS must not advertise {t}");
+        }
+
+        // Wayland: input tools, but no list_windows (no portable enumeration).
+        let way = reg(Backend::Wayland);
+        assert!(way.get("click").is_some());
+        assert!(way.get("list_windows").is_none());
+
+        // X11: all seven.
+        let x11 = reg(Backend::X11);
+        for t in [
+            "screenshot",
+            "click",
+            "type_text",
+            "press_key",
+            "scroll",
+            "mouse_move",
+            "list_windows",
+        ] {
+            assert!(x11.get(t).is_some(), "X11 missing {t}");
+        }
     }
 
     #[test]
