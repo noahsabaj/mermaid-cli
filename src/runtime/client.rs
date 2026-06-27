@@ -932,6 +932,14 @@ impl RuntimeService {
             .processes()
             .get(id)?
             .with_context(|| format!("process not found: {}", id))?;
+        // #63: the command comes from a `processes` row; a tampered DB could swap
+        // in a destructive command. Refuse to respawn it (mirrors exec.rs's
+        // execute_command pre-check) before killing or spawning anything.
+        anyhow::ensure!(
+            !crate::runtime::is_destructive_command(&process.command),
+            "refusing to restart process {id}: command flagged destructive: {:?}",
+            process.command
+        );
         let _ = kill_pid(process.pid);
         // Wait (bounded) for the old PID to actually exit before respawning —
         // the kill above is fire-and-forget (async signal / taskkill), so an
@@ -988,6 +996,7 @@ impl RuntimeService {
             .detected_url
             .or(process.log_path)
             .with_context(|| format!("process has no URL or log path: {}", id))?;
+        validate_open_target(&target)?;
         crate::utils::open_file(target.clone());
         Ok(RuntimeProcessOpen { ok: true, target })
     }
@@ -1269,6 +1278,35 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Validate a process "open" target before handing it to the OS opener (#63 —
+/// defense-in-depth for a tampered local `processes` row). The target is either
+/// a detected URL (a local dev server) or a log-file path mermaid wrote.
+pub(crate) fn validate_open_target(target: &str) -> Result<()> {
+    // Gate on the `://` authority so a bare path or Windows drive (`C:\…`, which
+    // `Url::parse` would read as scheme "c") isn't misclassified as a URL.
+    if target.contains("://") {
+        let url = reqwest::Url::parse(target)
+            .with_context(|| format!("refusing to open unparseable URL target: {target:?}"))?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "http" | "https"),
+            "refusing to open non-http(s) URL target: {target:?}"
+        );
+        // Dev-server URLs are loopback by design, so we deliberately do NOT apply
+        // an SSRF host-class block here — the scheme allowlist is the control.
+        return Ok(());
+    }
+    // Not a URL → a filesystem path (the process log). Open only an existing
+    // regular file; this also rejects opaque `javascript:`/`data:` URIs, which
+    // have no `://` and so fail the regular-file check.
+    let meta = std::fs::metadata(target)
+        .with_context(|| format!("refusing to open missing target: {target:?}"))?;
+    anyhow::ensure!(
+        meta.is_file(),
+        "refusing to open non-regular-file target: {target:?}"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1297,6 +1335,65 @@ mod tests {
         let _ = child.wait();
         std::thread::sleep(std::time::Duration::from_millis(250));
         assert!(!pid_alive(pid));
+    }
+
+    #[test]
+    fn validate_open_target_allows_http_rejects_file_and_js() {
+        assert!(super::validate_open_target("http://localhost:3000").is_ok());
+        assert!(super::validate_open_target("https://localhost:8443/app").is_ok());
+        assert!(super::validate_open_target("file:///etc/passwd").is_err());
+        assert!(super::validate_open_target("javascript:alert(1)").is_err());
+        assert!(super::validate_open_target("data:text/html,<x>").is_err());
+        assert!(super::validate_open_target("/no/such/path/xyz.log").is_err());
+    }
+
+    #[test]
+    fn restart_process_refuses_destructive_command() {
+        let path = temp_db("restart_destructive");
+        let service = RuntimeService::from_store(RuntimeStore::open(&path).expect("open store"));
+        let rec = service
+            .store
+            .processes()
+            .upsert(NewProcess {
+                id: Some("p-destruct".to_string()),
+                task_id: None,
+                pid: 0,
+                command: "rm -rf /".to_string(),
+                cwd: None,
+                log_path: None,
+                detected_url: None,
+                status: ProcessStatus::Running,
+                health: None,
+            })
+            .expect("seed process");
+        // Refused before kill/spawn (pid 0 is never signaled).
+        let err = service.restart_process(&rec.id).unwrap_err();
+        assert!(err.to_string().contains("destructive"), "{err}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn open_process_rejects_file_url_target() {
+        let path = temp_db("open_file_url");
+        let service = RuntimeService::from_store(RuntimeStore::open(&path).expect("open store"));
+        let rec = service
+            .store
+            .processes()
+            .upsert(NewProcess {
+                id: Some("p-open".to_string()),
+                task_id: None,
+                pid: 0,
+                command: "true".to_string(),
+                cwd: None,
+                log_path: None,
+                detected_url: Some("file:///etc/passwd".to_string()),
+                status: ProcessStatus::Running,
+                health: None,
+            })
+            .expect("seed process");
+        // Errors before open_file — nothing is launched.
+        assert!(service.open_process(&rec.id).is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

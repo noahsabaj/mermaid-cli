@@ -11,8 +11,19 @@ const DEFAULT_TCP_ADDR: &str = "127.0.0.1:39871";
 #[tokio::main]
 async fn main() -> Result<()> {
     let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
-    let socket_path = mermaid_cli::runtime::data_dir()?.join("mermaidd.sock");
+    let data_dir = mermaid_cli::runtime::data_dir()?;
+    let socket_path = data_dir.join("mermaidd.sock");
     drop(store);
+
+    // #66: the 0700 data dir is what makes the 0600 socket meaningful.
+    // `open_default` warns but stays non-fatal on a chmod failure (a shared
+    // CLI/test path); here, at the daemon's privilege boundary, refuse to serve
+    // on a loose dir.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to lock data dir {} to 0700", data_dir.display()))?;
+    }
 
     if socket_path.exists() {
         std::fs::remove_file(&socket_path)
@@ -22,17 +33,47 @@ async fn main() -> Result<()> {
     let listener = tokio::net::UnixListener::bind(&socket_path)
         .with_context(|| format!("failed to bind {}", socket_path.display()))?;
     // Restrict the control socket to the owning user (0600). Combined with the
-    // 0700 data dir, no other local UID can reach the agent control plane.
+    // 0700 data dir, no other local UID can reach the agent control plane. A
+    // failed lockdown is fatal — never serve the control plane world-reachable.
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| {
+                format!(
+                    "failed to lock control socket {} to 0600",
+                    socket_path.display()
+                )
+            })?;
     }
     println!("mermaidd listening on {}", socket_path.display());
 
     maybe_spawn_tcp_listener().await;
 
+    // The socket lives in the 0700 data dir we own, so its file-owner uid is our
+    // uid; reject any peer whose uid doesn't match (#66) — defense-in-depth
+    // behind the 0600 perms, via std `MetadataExt::uid` (no extra crate).
+    use std::os::unix::fs::MetadataExt;
+    let owner_uid = std::fs::metadata(&socket_path)
+        .with_context(|| format!("failed to stat control socket {}", socket_path.display()))?
+        .uid();
+
     loop {
         let (stream, _) = listener.accept().await?;
+        match stream.peer_cred() {
+            Ok(cred) if uid_allowed(cred.uid(), owner_uid) => {},
+            Ok(cred) => {
+                tracing::warn!(
+                    peer_uid = cred.uid(),
+                    owner_uid,
+                    "rejecting unix client: uid mismatch"
+                );
+                continue;
+            },
+            Err(err) => {
+                tracing::warn!(error = %err, "rejecting unix client: peer_cred failed");
+                continue;
+            },
+        }
         tokio::spawn(async move {
             if let Err(err) = handle_stream(stream).await {
                 tracing::warn!(error = %err, "mermaidd client failed");
@@ -41,11 +82,20 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Whether a connecting peer's uid may drive the control plane: the socket owner
+/// (us) or root (already omnipotent locally, so rejecting it adds no security and
+/// breaks admin tooling).
+#[cfg(unix)]
+fn uid_allowed(peer_uid: u32, owner_uid: u32) -> bool {
+    peer_uid == owner_uid || peer_uid == 0
+}
+
 #[cfg(unix)]
 async fn maybe_spawn_tcp_listener() {
     // TCP control is OFF by default — it exposes the agent control plane to
     // every local UID and anything that can reach loopback. Opt in with
-    // MERMAID_DAEMON_ENABLE_TCP=1.
+    // MERMAID_DAEMON_ENABLE_TCP=1. Unlike the Unix socket, a TcpStream carries no
+    // peer credentials (#66), so mandatory token auth is its only gate.
     if !std::env::var("MERMAID_DAEMON_ENABLE_TCP")
         .is_ok_and(|value| value == "1" || value == "true")
     {
@@ -60,10 +110,14 @@ async fn maybe_spawn_tcp_listener() {
                     let tcp_file = dir.join("mermaidd.tcp");
                     if std::fs::write(&tcp_file, local_addr.to_string()).is_ok() {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(
+                        // The hint file holds a loopback address, not a secret, so
+                        // a chmod failure warns rather than killing the listener.
+                        if let Err(err) = std::fs::set_permissions(
                             &tcp_file,
                             std::fs::Permissions::from_mode(0o600),
-                        );
+                        ) {
+                            tracing::warn!(file = %tcp_file.display(), error = %err, "failed to lock tcp hint file to 0600");
+                        }
                     }
                 }
                 println!("mermaidd tcp listening on {}", local_addr);
@@ -512,6 +566,9 @@ async fn handle_json_command(
                 .get("ttl_days")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(mermaid_cli::runtime::DEFAULT_PAIRING_TTL_DAYS);
+            // #65: clamp so a socket caller can't mint a never-expiring token by
+            // sending ttl_days <= 0.
+            let ttl_days = mermaid_cli::runtime::clamp_pairing_ttl_days(ttl_days);
             let expires_at = mermaid_cli::runtime::pairing_expiry_from_now(ttl_days);
             let (token, hash) = match body.get("token_hash").and_then(|v| v.as_str()) {
                 Some(hash) if !hash.is_empty() => (None, hash.to_string()),
@@ -545,6 +602,9 @@ fn command_requires_auth(command: &str) -> bool {
             | "stop_process"
             | "restart_process"
             | "open_process"
+            // #67: preview resolves a plugin source, which can `git clone/pull` a
+            // remote URL when MERMAID_ALLOW_PLUGIN_FETCH=1 — gate it like install.
+            | "plugin_preview"
             | "plugin_install"
             | "set_plugin_enabled"
             | "set_safety_mode"
@@ -649,6 +709,7 @@ mod tests {
             "stop_process",
             "restart_process",
             "open_process",
+            "plugin_preview",
             "plugin_install",
             "set_plugin_enabled",
             "set_safety_mode",
@@ -683,6 +744,16 @@ mod tests {
         for command in ["health", "ports", "version"] {
             assert!(!super::command_requires_auth(command), "{command}");
         }
+    }
+
+    #[test]
+    fn uid_allowed_accepts_owner_and_root_only() {
+        assert!(super::uid_allowed(1000, 1000), "owner uid must be allowed");
+        assert!(super::uid_allowed(0, 1000), "root must be allowed");
+        assert!(
+            !super::uid_allowed(1001, 1000),
+            "a non-owner, non-root uid must be rejected"
+        );
     }
 
     #[test]

@@ -4,20 +4,21 @@ Derived from the architectural + security review that produced **116 findings**
 (`#1`–`#116`) grouped under 7 root causes. The root causes and two sweep-ins
 were fixed across the Axis hardening PRs (GitHub PRs #64–#68 — not to be
 confused with findings #64/#68 below); the four partial residuals plus the
-fail-open verdict parse were closed afterward, and **Group 2 (MCP client)** was
-completed next. This file tracks what's left.
+fail-open verdict parse were closed afterward, then **Group 2 (MCP client)** and
+**Group 4 (daemon, persistence & storage)** were completed. This file tracks
+what's left.
 
 - **Last updated:** 2026-06-27
-- **Status:** 66 resolved · **50 remaining** · 0 CRITICAL left · 0 HIGH left
+- **Status:** 74 resolved · **42 remaining** · 0 CRITICAL left · 0 HIGH left
 - **Severity legend:** `HIGH` exploitable / data-loss · `MED` correctness or
   availability · `LOW`/`INFO` hardening, cosmetics, or by-design risk to confirm.
 
-Remaining work is split into five groups by subsystem, so each is a single
+Remaining work is split into four groups by subsystem, so each is a single
 coherent review surface (one PR). Suggested order is by risk — see the end.
 
 ---
 
-## Remaining (50)
+## Remaining (42)
 
 ### Group 1 — Provider adapters, retry & auth (13 · 3 MED, 10 LOW)
 `models/adapters/*`, `effect/middleware`, `providers/factory`
@@ -45,18 +46,6 @@ coherent review surface (one PR). Suggested order is by risk — see the end.
 - [ ] **#97** `LOW` `computer_use/driver.rs` — geometry/probe subprocess has no `kill_on_drop`/timeout.
 - [ ] **#98** `LOW` `computer_use/{click,type_text,press_key}.rs` — implicit post-action auto-screenshot is ungated.
 - [ ] **#100** `LOW` `computer_use/driver.rs:598` — macOS focused-capture offset (0,0) latent mis-click.
-
-### Group 4 — Daemon, persistence & storage (8 · 8 LOW)
-`bin/mermaidd`, `runtime/storage`, `runtime/approval`, `runtime/client`
-
-- [ ] **#61** `LOW` `runtime/storage.rs:1882` — wall-nanos IDs can collide → `ON CONFLICT` overwrites unrelated rows.
-- [ ] **#62** `LOW` `runtime/approval.rs:17` — `approve_and_replay` not transactional (crash mid-replay → stuck "approved").
-- [ ] **#63** `LOW` `runtime/client.rs:929` — `restart_process`/`open_process` exec command + URL from DB rows.
-- [ ] **#64** `LOW` `runtime/storage.rs:1550` — token expiry compared as an RFC3339 string.
-- [ ] **#65** `LOW` `bin/mermaidd.rs:496` — `pair ttl_days<=0` mints a never-expiring token (defeats 30-day TTL).
-- [ ] **#66** `LOW` `bin/mermaidd.rs:26` — socket/dir perms best-effort (`let _ =`), no `SO_PEERCRED`.
-- [ ] **#67** `LOW` `bin/mermaidd.rs:468` — ungated `plugin_preview` can trigger a git fetch (env-gated).
-- [ ] **#68** `LOW` `session/conversation.rs:230` — `--continue` hard-fails on a corrupt newest file (list tolerates it).
 
 ### Group 5 — MVU core: reducer/render purity, compaction, turn lifecycle (12 · 2 MED, 10 LOW)
 `domain/reducer`, `domain/compaction`, `render/widgets/*`
@@ -93,15 +82,14 @@ coherent review surface (one PR). Suggested order is by risk — see the end.
 
 ## Suggested order (by risk)
 
-1. **Group 4 — Daemon/persistence** — token & exec-from-DB surface (#65, #63, #62).
-2. **Group 3 — Computer-use** — the `i32` overflow (#32) and ungated capture (#98).
-3. **Group 1 — Providers** — large but low-risk correctness; mostly mechanical.
-4. **Group 5 — MVU core** — the deferred purity residuals; some carry a real behavioral tradeoff (#45, #18).
-5. **Group 6 — App shell** — mostly cosmetic, latent, or by-design-to-confirm.
+1. **Group 3 — Computer-use** — the `i32` overflow (#32) and ungated capture (#98).
+2. **Group 1 — Providers** — large but low-risk correctness; mostly mechanical.
+3. **Group 5 — MVU core** — the deferred purity residuals; some carry a real behavioral tradeoff (#45, #18).
+4. **Group 6 — App shell** — mostly cosmetic, latent, or by-design-to-confirm.
 
-**Cheapest high-value picks across groups:** #65 (never-expiring token), #72
-(message-ordering 400), #61 (wall-nanos ID collision), #111 (silently-swallowed
-malformed config).
+**Cheapest high-value picks across groups:** #32 (`i32` overflow → bad click /
+debug panic), #72 (message-ordering 400), #111 (silently-swallowed malformed
+config).
 
 ## Deliberate deferrals (conscious, not misses)
 
@@ -111,7 +99,26 @@ malformed config).
 
 ---
 
-## Resolved (66)
+## Resolved (74)
+
+**Group 4 — Daemon, persistence & storage (8 · 8 LOW):**
+#61 (collision-free `fresh_id` — a per-process random salt plus a monotonic
+counter make same-nanosecond ID collisions impossible, so the `ON CONFLICT`
+upserts can't silently overwrite an unrelated row), #62 (`approve_and_replay`
+runs the un-rollback-able replay effect *before* the "approved" mark, so a crash
+leaves the approval re-runnable instead of stuck "approved but never applied"),
+#63 (`restart_process` refuses a DB command flagged destructive; `open_process`
+and the TUI open path validate the DB target — only `http(s)` URLs or existing
+files reach the OS opener), #64 (token expiry compared as a parsed instant,
+failing closed — not an RFC3339 string compare), #65 (the daemon `pair` command
+clamps a client-supplied `ttl_days <= 0` to the 30-day default so a socket caller
+can't mint a never-expiring token; the local CLI's owner-only opt-out is
+unchanged), #66 (socket/data-dir chmod failures are fatal at the daemon boundary,
+and the Unix accept loop rejects any peer whose uid isn't the socket owner or
+root — TCP still relies on token auth), #67 (`plugin_preview` now requires the
+pairing token, like `plugin_install`, so an unauthenticated caller can't trigger
+a git fetch), #68 (`--continue` tolerates a corrupt newest conversation file,
+falling back to the newest valid one like the session picker).
 
 **Group 2 — MCP client robustness & safety (8 · 1 HIGH, 2 MED, 5 LOW):**
 #10 (typosquat RCE — convention/search now probe the npm registry for package
