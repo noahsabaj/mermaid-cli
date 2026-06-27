@@ -23,6 +23,19 @@ pub fn pairing_expiry_from_now(ttl_days: i64) -> Option<String> {
     (ttl_days > 0).then(|| (chrono::Utc::now() + chrono::Duration::days(ttl_days)).to_rfc3339())
 }
 
+/// Clamp a *client-supplied* pairing TTL so a daemon socket caller can't mint a
+/// never-expiring token by sending `ttl_days <= 0`: non-positive input becomes
+/// the default TTL, positive values pass through. The local `mermaid pair` CLI
+/// deliberately does **not** call this — its `--ttl-days 0` "never expires"
+/// opt-out is an owner-only choice with no privilege boundary (#65).
+pub fn clamp_pairing_ttl_days(ttl_days: i64) -> i64 {
+    if ttl_days <= 0 {
+        DEFAULT_PAIRING_TTL_DAYS
+    } else {
+        ttl_days
+    }
+}
+
 pub fn daemon_socket_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("mermaidd.sock"))
 }
@@ -124,5 +137,16 @@ mod tests {
         let (token, hash) = generate_pairing_token().expect("token");
         assert!(token.starts_with("mermaid_"));
         assert_eq!(hash, hash_pairing_token(&token));
+    }
+
+    #[test]
+    fn clamp_pairing_ttl_days_forces_expiry_for_non_positive() {
+        assert_eq!(clamp_pairing_ttl_days(0), DEFAULT_PAIRING_TTL_DAYS);
+        assert_eq!(clamp_pairing_ttl_days(-5), DEFAULT_PAIRING_TTL_DAYS);
+        assert_eq!(clamp_pairing_ttl_days(7), 7);
+        // The #65 property: a clamped non-positive ttl yields a NON-NULL expiry,
+        // exactly as the daemon `pair` handler composes the two helpers.
+        assert!(pairing_expiry_from_now(clamp_pairing_ttl_days(0)).is_some());
+        assert!(pairing_expiry_from_now(clamp_pairing_ttl_days(-1)).is_some());
     }
 }

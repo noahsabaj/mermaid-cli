@@ -828,6 +828,13 @@ impl EffectRunner {
                     let resolved = crate::runtime::RuntimeService::open_default()
                         .and_then(|service| service.resolve_open_target(&target))
                         .unwrap_or(target);
+                    // #63: the resolved value can be a `detected_url`/`log_path`
+                    // from a `processes` row — validate before the OS opener,
+                    // exactly like `open_process`.
+                    if let Err(err) = crate::runtime::validate_open_target(&resolved) {
+                        tracing::warn!(error = %err, "refusing to open runtime target");
+                        return;
+                    }
                     crate::utils::open_file(resolved);
                 });
             },

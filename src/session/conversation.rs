@@ -273,37 +273,46 @@ impl ConversationManager {
         Ok(conversation)
     }
 
-    /// Load the most recent conversation.
+    /// Load the most recent *valid* conversation.
     ///
-    /// Picks the newest file by filesystem mtime, then deserializes only
-    /// that one file. Much cheaper than `list_conversations()` (which
-    /// reads and parses every file) in directories with many sessions.
+    /// Iterates files newest-first by mtime and returns the first that reads,
+    /// parses, and has a valid id — skipping (with a warning) any unreadable,
+    /// unparseable, or traversing-id file. Mirrors `list_conversations`'s
+    /// tolerance so one corrupt/partial file (e.g. a crash mid-write) can't make
+    /// `--continue` hard-fail; it falls back to the next-newest valid conversation.
     pub fn load_last_conversation(&self) -> Result<Option<ConversationHistory>> {
         let Ok(entries) = fs::read_dir(&self.conversations_dir) else {
             return Ok(None);
         };
 
-        let newest = entries
+        let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = entries
             .flatten()
             .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
             .filter_map(|e| {
                 let mtime = e.metadata().ok()?.modified().ok()?;
                 Some((mtime, e.path()))
             })
-            .max_by_key(|(mtime, _)| *mtime);
+            .collect();
+        candidates.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
 
-        let Some((_, path)) = newest else {
-            return Ok(None);
-        };
-
-        let json = fs::read_to_string(&path)?;
-        let conv: ConversationHistory = serde_json::from_str(&json)?;
-        // A planted session file with a traversing `id` must not become the
-        // resumed conversation (its id would later drive an out-of-dir save).
-        if validate_conversation_id(&conv.id).is_err() {
-            return Ok(None);
+        for (_, path) in candidates {
+            let Ok(json) = fs::read_to_string(&path) else {
+                tracing::warn!(path = %path.display(), "skipping unreadable conversation file");
+                continue;
+            };
+            let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json) else {
+                tracing::warn!(path = %path.display(), "skipping unparseable conversation file");
+                continue;
+            };
+            // A planted session file with a traversing `id` must not become the
+            // resumed conversation (its id would later drive an out-of-dir save).
+            if validate_conversation_id(&conv.id).is_err() {
+                tracing::warn!(path = %path.display(), id = %conv.id, "skipping conversation with invalid id");
+                continue;
+            }
+            return Ok(Some(conv));
         }
-        Ok(Some(conv))
+        Ok(None)
     }
 
     /// List all conversations in the project
@@ -571,6 +580,43 @@ mod tests {
             "should return the most-recently-written file"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_last_conversation_skips_corrupt_newest_falls_back_to_valid() {
+        let dir = std::env::temp_dir().join("mermaid_test_conv_corrupt");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+
+        let good = ConversationHistory::new("/tmp".into(), "m".into());
+        manager.save_conversation(&good).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Plant a NEWER, corrupt file (well-formed name, garbage contents): the
+        // newest-by-mtime entry is unparseable, so #68 must skip it.
+        let corrupt = manager.conversations_dir().join("20991231_235959_999.json");
+        fs::write(&corrupt, b"{ not valid json").unwrap();
+
+        let last = manager.load_last_conversation().unwrap().unwrap();
+        assert_eq!(
+            last.id, good.id,
+            "must fall back to the newest VALID conversation"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_last_conversation_none_when_only_corrupt() {
+        let dir = std::env::temp_dir().join("mermaid_test_conv_only_corrupt");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+        fs::write(
+            manager.conversations_dir().join("20991231_235959_998.json"),
+            b"nope",
+        )
+        .unwrap();
+        assert!(manager.load_last_conversation().unwrap().is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 

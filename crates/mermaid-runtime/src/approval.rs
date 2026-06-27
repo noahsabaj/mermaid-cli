@@ -16,15 +16,39 @@ pub struct ApprovalReplayResult {
 
 pub fn approve_and_replay(id: &str) -> Result<ApprovalReplayResult> {
     let store = RuntimeStore::open_default()?;
-    store.approvals().decide(id, "approved")?;
+    approve_and_replay_with(&store, id)
+}
+
+/// Core of [`approve_and_replay`] with the store injected (so it is unit-testable
+/// against a temp DB).
+///
+/// `replay_pending_action` performs a filesystem write or a process spawn —
+/// effects SQLite cannot roll back — so they run *before* the "approved" mark is
+/// written. A crash mid-replay therefore leaves the approval undecided and
+/// safely re-runnable, never "approved but never applied" (#62). The single-shot
+/// `decide` is the last mutation; its `WHERE user_decision IS NULL` guard closes
+/// the residual same-user race and makes a second call a no-op error.
+pub(crate) fn approve_and_replay_with(
+    store: &RuntimeStore,
+    id: &str,
+) -> Result<ApprovalReplayResult> {
+    // Load *without* deciding, and refuse anything already decided or archived
+    // (mirrors `decide`'s `WHERE`), so a denied/archived approval can't be replayed.
     let approval = store
         .approvals()
         .get(id)?
-        .with_context(|| format!("approval not found after approval: {id}"))?;
+        .with_context(|| format!("approval not found: {id}"))?;
+    anyhow::ensure!(
+        approval.user_decision.is_none() && approval.archived_at.is_none(),
+        "approval {id} cannot be replayed (already decided or archived)"
+    );
 
     let Some(raw_action) = approval.pending_action_json.as_deref() else {
+        // Nothing to replay: just record the decision (no effect to order around).
+        store.approvals().decide(id, "approved")?;
+        let approval = store.approvals().get(id)?;
         return Ok(ApprovalReplayResult {
-            approval: Some(approval),
+            approval,
             replayed: false,
             summary: "approval recorded; no pending action was stored".to_string(),
         });
@@ -32,7 +56,16 @@ pub fn approve_and_replay(id: &str) -> Result<ApprovalReplayResult> {
 
     let action: serde_json::Value = serde_json::from_str(raw_action)
         .with_context(|| format!("approval {id} pending action was not valid JSON"))?;
+    // 1) Effect first — the un-rollback-able fs write / process spawn.
     let summary = replay_pending_action(&action)?;
+    // 2) Mark approved last — only now is "approved" both true and durable.
+    store.approvals().decide(id, "approved")?;
+    let approval = store
+        .approvals()
+        .get(id)?
+        .with_context(|| format!("approval not found after approval: {id}"))?;
+
+    // 3) Best-effort bookkeeping.
     let _ = crate::run_plugin_hooks(
         "approval_decided",
         &serde_json::json!({
@@ -287,5 +320,100 @@ mod tests {
         });
         let summary = replay_pending_action(&action).unwrap();
         assert!(summary.contains("write_file"));
+    }
+
+    fn temp_store(name: &str) -> RuntimeStore {
+        let dir = std::env::temp_dir().join(format!("mermaid_approval_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("runtime.sqlite3");
+        RuntimeStore::open(&path).expect("open store")
+    }
+
+    fn pending_approval(store: &RuntimeStore, action: &serde_json::Value) -> String {
+        store
+            .approvals()
+            .create(crate::NewApproval {
+                task_id: None,
+                proposed_action: "test".to_string(),
+                risk_classification: "low".to_string(),
+                policy_decision: "ask".to_string(),
+                args_summary: None,
+                checkpoint_id: None,
+                pending_action_json: Some(action.to_string()),
+            })
+            .expect("create approval")
+            .id
+    }
+
+    fn temp_workdir(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("mermaid_approve_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn approve_replay_marks_approved_only_after_effect() {
+        let store = temp_store("ok");
+        let root = temp_workdir("ok");
+        let action = serde_json::json!({
+            "tool": "write_file",
+            "workdir": root,
+            "args": {"path": "out.txt", "content": "hello"}
+        });
+        let id = pending_approval(&store, &action);
+
+        let result = approve_and_replay_with(&store, &id).expect("replay should succeed");
+        assert!(result.replayed);
+        assert!(
+            root.join("out.txt").exists(),
+            "the file effect must have run"
+        );
+        let decided = store.approvals().get(&id).unwrap().unwrap();
+        assert_eq!(decided.user_decision.as_deref(), Some("approved"));
+    }
+
+    #[test]
+    fn failed_replay_leaves_approval_pending() {
+        let store = temp_store("fail");
+        let root = temp_workdir("fail");
+        // delete_file of a path that doesn't exist → replay errors *after* the
+        // pending pre-check but *before* `decide`, so the approval must stay
+        // undecided (re-runnable), never "approved but never applied" (#62).
+        let action = serde_json::json!({
+            "tool": "delete_file",
+            "workdir": root,
+            "args": {"path": "nope.txt"}
+        });
+        let id = pending_approval(&store, &action);
+
+        assert!(approve_and_replay_with(&store, &id).is_err());
+        let still = store.approvals().get(&id).unwrap().unwrap();
+        assert!(
+            still.user_decision.is_none(),
+            "a failed replay must not mark the approval approved"
+        );
+    }
+
+    #[test]
+    fn second_approve_is_single_shot() {
+        let store = temp_store("twice");
+        let root = temp_workdir("twice");
+        let action = serde_json::json!({
+            "tool": "create_directory",
+            "workdir": root,
+            "args": {"path": "sub"}
+        });
+        let id = pending_approval(&store, &action);
+
+        approve_and_replay_with(&store, &id).expect("first approve succeeds");
+        assert!(
+            approve_and_replay_with(&store, &id).is_err(),
+            "a second approve must be rejected (already decided)"
+        );
+        let decided = store.approvals().get(&id).unwrap().unwrap();
+        assert_eq!(decided.user_decision.as_deref(), Some("approved"));
     }
 }

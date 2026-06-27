@@ -1,5 +1,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -1039,12 +1041,12 @@ impl ApprovalsRepo<'_> {
 
     pub fn decide(&self, id: &str, user_decision: &str) -> Result<()> {
         // Single-shot decision: only an undecided, un-archived approval can be
-        // decided. This is the guard behind approval-replay safety — a denied
-        // approval cannot be resurrected as "approved", and because every
-        // replay routes through `decide` first (see
-        // `approval::approve_and_replay`), a stored action cannot be replayed
-        // more than once. Mirrors the `archive` `WHERE archived_at IS NULL`
-        // idempotency pattern below.
+        // decided, so a denied approval cannot be resurrected as "approved".
+        // `approval::approve_and_replay` runs the (un-rollback-able) replay
+        // effect *before* calling `decide`, so the "approved" mark lands only
+        // after the action ran: a crash mid-replay leaves the row undecided and
+        // safely re-runnable, never "approved but never applied" (#62). Mirrors
+        // the `archive` `WHERE archived_at IS NULL` idempotency pattern below.
         let changed = self.conn.execute(
             "UPDATE approvals
              SET user_decision = ?2, decided_at = ?3
@@ -1543,17 +1545,24 @@ impl PairingTokensRepo<'_> {
     /// tiny and not secret. All candidates are scanned without early exit so the
     /// timing doesn't reveal which (if any) token matched.
     pub fn verify_token(&self, token_hash: &str) -> Result<Option<PairingTokenRecord>> {
-        let now = now_rfc3339();
+        // Expiry is evaluated in Rust as a parsed instant (see `is_expired`),
+        // not via a SQL `expires_at > ?` string compare. The skipped-because-
+        // expired branch is on non-secret data; the hash itself is still matched
+        // in constant time over every non-expired candidate with no early exit.
+        let now = chrono::Utc::now();
         let mut stmt = self.conn.prepare(
             "SELECT id, token_hash, label, enabled, created_at, last_used_at, expires_at
              FROM pairing_tokens
-             WHERE enabled = 1 AND (expires_at IS NULL OR expires_at > ?1)",
+             WHERE enabled = 1",
         )?;
         let candidates = stmt
-            .query_map([&now], pairing_from_row)?
+            .query_map([], pairing_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut found = None;
         for record in candidates {
+            if is_expired(record.expires_at.as_deref(), now) {
+                continue;
+            }
             if ct_eq(record.token_hash.as_bytes(), token_hash.as_bytes()) {
                 found = Some(record);
             }
@@ -1879,12 +1888,45 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Whether a pairing token's `expires_at` is in the past relative to `now`.
+///
+/// `None` (SQL `NULL`) means "never expires" — the documented `--ttl-days 0`
+/// opt-out. A present-but-unparseable value fails closed (treated as expired).
+/// Expiry is compared as a parsed instant rather than via a SQL `expires_at > ?`
+/// string compare, which only orders correctly while every stored value is the
+/// canonical `now_rfc3339()` shape (#64).
+fn is_expired(expires_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match expires_at {
+        None => false,
+        Some(raw) => match chrono::DateTime::parse_from_rfc3339(raw) {
+            Ok(dt) => dt <= now,
+            Err(_) => true,
+        },
+    }
+}
+
 fn fresh_id(prefix: &str) -> String {
+    // In-process monotonic counter: two ids minted in the same nanosecond (a
+    // coarse clock, or a clock stepping backward) can never be equal, so the
+    // `ON CONFLICT(id) DO UPDATE` upserts can't silently overwrite an unrelated
+    // row (#61). A per-process random salt removes the clock dependence so ids
+    // minted across a daemon restart don't collide either (getrandom is already
+    // a dependency — see `daemon.rs`).
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    static SALT: OnceLock<u64> = OnceLock::new();
+    let salt = *SALT.get_or_init(|| {
+        let mut bytes = [0u8; 8];
+        // The monotonic counter alone still guarantees in-process uniqueness if
+        // the RNG ever fails, so a best-effort fill is fine here.
+        let _ = getrandom::fill(&mut bytes);
+        u64::from_le_bytes(bytes)
+    });
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    format!("{}-{:x}", prefix, nanos)
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{nanos:x}-{salt:x}-{seq:x}")
 }
 
 #[cfg(test)]
@@ -2282,6 +2324,29 @@ mod tests {
             "an expired token must not verify"
         );
 
+        // A future expiry rendered with a non-UTC offset still verifies, even
+        // though its RFC3339 string sorts lexically *before* `now_rfc3339()` —
+        // this would wrongly read as expired under the old SQL string compare (#64).
+        let skewed = (chrono::Utc::now() + chrono::Duration::hours(1))
+            .with_timezone(&chrono::FixedOffset::west_opt(3 * 3600).unwrap())
+            .to_rfc3339();
+        tokens
+            .create("skew_hash", None, Some(&skewed))
+            .expect("create skewed");
+        assert!(
+            tokens.verify_token("skew_hash").unwrap().is_some(),
+            "a future token in a non-UTC offset must verify (parsed-instant compare)"
+        );
+
+        // A present-but-unparseable expiry fails closed (treated as expired).
+        tokens
+            .create("garbage_hash", None, Some("not-a-timestamp"))
+            .expect("create garbage");
+        assert!(
+            tokens.verify_token("garbage_hash").unwrap().is_none(),
+            "an unparseable expiry must fail closed"
+        );
+
         // Revoking disables the token.
         assert!(tokens.revoke(&live.id).unwrap());
         assert!(tokens.verify_token("live_hash").unwrap().is_none());
@@ -2303,6 +2368,18 @@ mod tests {
         assert!(!ct_eq(b"abc", b"ab"));
         assert!(!ct_eq(b"", b"x"));
         assert!(ct_eq(b"", b""));
+    }
+
+    #[test]
+    fn fresh_id_is_collision_free_in_tight_loop() {
+        // The #61 stress: ids minted back-to-back (same nanosecond on a coarse
+        // clock) must all be distinct and keep the `prefix-` shape.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10_000 {
+            let id = fresh_id("process");
+            assert!(id.starts_with("process-"), "id must keep prefix: {id}");
+            assert!(seen.insert(id), "fresh_id produced a duplicate");
+        }
     }
 
     #[test]

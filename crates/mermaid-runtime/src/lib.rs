@@ -22,8 +22,9 @@ pub use checkpoint::{
     restore_checkpoint,
 };
 pub use daemon::{
-    DEFAULT_PAIRING_TTL_DAYS, daemon_socket_path, generate_pairing_token, hash_pairing_token,
-    pairing_expiry_from_now, request_daemon_json, request_daemon_text, snapshot_field_from_daemon,
+    DEFAULT_PAIRING_TTL_DAYS, clamp_pairing_ttl_days, daemon_socket_path, generate_pairing_token,
+    hash_pairing_token, pairing_expiry_from_now, request_daemon_json, request_daemon_text,
+    snapshot_field_from_daemon,
 };
 pub use pathguard::{OpenIntent, create_dir_all_beneath, open_beneath, remove_file_beneath};
 pub use plugin::{
