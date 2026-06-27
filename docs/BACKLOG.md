@@ -4,21 +4,21 @@ Derived from the architectural + security review that produced **116 findings**
 (`#1`–`#116`) grouped under 7 root causes. The root causes and two sweep-ins
 were fixed across the Axis hardening PRs (GitHub PRs #64–#68 — not to be
 confused with findings #64/#68 below); the four partial residuals plus the
-fail-open verdict parse were closed afterward, then **Group 2 (MCP client)** and
-**Group 4 (daemon, persistence & storage)** were completed. This file tracks
-what's left.
+fail-open verdict parse were closed afterward, then **Group 2 (MCP client)**,
+**Group 4 (daemon, persistence & storage)**, and **Group 3 (computer-use)** were
+completed. This file tracks what's left.
 
 - **Last updated:** 2026-06-27
-- **Status:** 74 resolved · **42 remaining** · 0 CRITICAL left · 0 HIGH left
+- **Status:** 80 resolved · **36 remaining** · 0 CRITICAL left · 0 HIGH left
 - **Severity legend:** `HIGH` exploitable / data-loss · `MED` correctness or
   availability · `LOW`/`INFO` hardening, cosmetics, or by-design risk to confirm.
 
-Remaining work is split into four groups by subsystem, so each is a single
+Remaining work is split into three groups by subsystem, so each is a single
 coherent review surface (one PR). Suggested order is by risk — see the end.
 
 ---
 
-## Remaining (42)
+## Remaining (36)
 
 ### Group 1 — Provider adapters, retry & auth (13 · 3 MED, 10 LOW)
 `models/adapters/*`, `effect/middleware`, `providers/factory`
@@ -36,16 +36,6 @@ coherent review surface (one PR). Suggested order is by risk — see the end.
 - [ ] **#86** `LOW` `models/adapters/ollama.rs:610` — forces cleartext `http://`; host classifier exists but isn't wired here.
 - [ ] **#87** `LOW` retry jitter entropy from `subsec_nanos()`.
 - [ ] **#88** `LOW` `ollama/cloud_setup.rs` — Ollama cloud key stored plaintext in `config.toml`.
-
-### Group 3 — Computer-use (6 · 2 MED, 4 LOW)
-`providers/tool/computer_use/*`
-
-- [ ] **#32** `MED` `computer_use/driver.rs:184` — `scale_coords` can overflow `i32` (wrapped-negative click / debug panic).
-- [ ] **#35** `MED` `computer_use/mod.rs:72` — macOS registers 7 tools but 6 always `bail!` (no `cliclick`).
-- [ ] **#96** `LOW` `computer_use/click.rs`, `mouse_move.rs` — coordinates truncated, never clamped to display size.
-- [ ] **#97** `LOW` `computer_use/driver.rs` — geometry/probe subprocess has no `kill_on_drop`/timeout.
-- [ ] **#98** `LOW` `computer_use/{click,type_text,press_key}.rs` — implicit post-action auto-screenshot is ungated.
-- [ ] **#100** `LOW` `computer_use/driver.rs:598` — macOS focused-capture offset (0,0) latent mis-click.
 
 ### Group 5 — MVU core: reducer/render purity, compaction, turn lifecycle (12 · 2 MED, 10 LOW)
 `domain/reducer`, `domain/compaction`, `render/widgets/*`
@@ -82,14 +72,13 @@ coherent review surface (one PR). Suggested order is by risk — see the end.
 
 ## Suggested order (by risk)
 
-1. **Group 3 — Computer-use** — the `i32` overflow (#32) and ungated capture (#98).
-2. **Group 1 — Providers** — large but low-risk correctness; mostly mechanical.
-3. **Group 5 — MVU core** — the deferred purity residuals; some carry a real behavioral tradeoff (#45, #18).
-4. **Group 6 — App shell** — mostly cosmetic, latent, or by-design-to-confirm.
+1. **Group 1 — Providers** — large but low-risk correctness; mostly mechanical.
+2. **Group 5 — MVU core** — the deferred purity residuals; some carry a real behavioral tradeoff (#45, #18).
+3. **Group 6 — App shell** — mostly cosmetic, latent, or by-design-to-confirm.
 
-**Cheapest high-value picks across groups:** #32 (`i32` overflow → bad click /
-debug panic), #72 (message-ordering 400), #111 (silently-swallowed malformed
-config).
+**Cheapest high-value picks across groups:** #72 (message-ordering 400), #111
+(silently-swallowed malformed config), #88 (plaintext Ollama cloud key in
+`config.toml`).
 
 ## Deliberate deferrals (conscious, not misses)
 
@@ -99,7 +88,21 @@ config).
 
 ---
 
-## Resolved (74)
+## Resolved (80)
+
+**Group 3 — Computer-use (6 · 2 MED, 4 LOW):**
+#32 (`scale_coords` translation is now saturating — the `+ offset` i32 add no
+longer panics in debug or wraps to a negative click in release), #35 (the registry
+advertises only the tools a backend can drive — macOS gets just `screenshot`,
+Wayland drops `list_windows` — instead of offering input verbs that `bail!` at
+call time), #96 (model-supplied click/move coords are clamped to the screenshot's
+own pixel bounds at the `scale_coords` chokepoint), #97 (the geometry/probe helpers
+and the downscale encoders run under `kill_on_drop` + a `tokio::time::timeout`, so
+a wedged xdotool/xrandr/convert can't hang the agent loop), #98 (the implicit
+post-action auto-screenshot is gated behind a new `computer_use.auto_screenshot`
+config flag, default on, and de-duplicated into one helper), #100 (macOS focused
+capture now grabs the full display so the reported `(0,0)` offset is genuinely
+correct — avoiding an AppleScript points-vs-device-pixels Retina hazard).
 
 **Group 4 — Daemon, persistence & storage (8 · 8 LOW):**
 #61 (collision-free `fresh_id` — a per-process random salt plus a monotonic
