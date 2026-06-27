@@ -65,6 +65,29 @@ pub(crate) fn resolve_path_within(workdir: &Path, raw: &str) -> Result<(PathBuf,
     Ok((resolved, within))
 }
 
+/// Compute the workdir-relative, lexically-normalized form of `raw`, erroring if
+/// it escapes `workdir`. The result is the `rel` argument for the confined
+/// fd-based helpers ([`mermaid_runtime::open_beneath`] et al.): those resolve it
+/// beneath a directory fd for `workdir` under `RESOLVE_BENEATH`, so the bytes
+/// hit the same inode the kernel confined — closing the check-then-write TOCTOU
+/// that a by-path `std::fs` call leaves open. `resolve_path_safe` remains the
+/// canonical containment gate; this is the lexical companion that names the path
+/// relative to the root.
+pub(crate) fn relative_within(workdir: &Path, raw: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(raw);
+    let candidate = if p.is_absolute() { p } else { workdir.join(&p) };
+    let normalized = lexical_normalize(&candidate);
+    let root = lexical_normalize(workdir);
+    match normalized.strip_prefix(&root) {
+        Ok(rel) => Ok(rel.to_path_buf()),
+        Err(_) => Err(format!(
+            "path '{}' is outside the project directory '{}'",
+            raw,
+            workdir.display()
+        )),
+    }
+}
+
 /// Resolve a not-yet-existing target by canonicalizing its nearest existing
 /// ancestor (resolving any symlinked parent directory) and re-joining the
 /// remaining path components lexically. Rejects paths with no canonicalizable
@@ -147,5 +170,30 @@ mod tests {
         assert!(resolve_path_safe(&root, "sub").is_ok());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn relative_within_names_path_relative_to_root() {
+        let root = std::env::temp_dir().join(format!("mermaid_rel_{}", std::process::id()));
+
+        // In-project paths come back relative to the root.
+        assert_eq!(
+            relative_within(&root, "sub/file.txt").unwrap(),
+            PathBuf::from("sub/file.txt")
+        );
+        // Interior `..` that stays inside is collapsed.
+        assert_eq!(
+            relative_within(&root, "a/../b.txt").unwrap(),
+            PathBuf::from("b.txt")
+        );
+        // An absolute path that happens to be inside the root is re-relativized.
+        assert_eq!(
+            relative_within(&root, root.join("c.txt").to_str().unwrap()).unwrap(),
+            PathBuf::from("c.txt")
+        );
+        // Escapes are rejected.
+        assert!(relative_within(&root, "../escape").is_err());
+        #[cfg(unix)]
+        assert!(relative_within(&root, "/etc/passwd").is_err());
     }
 }

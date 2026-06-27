@@ -650,6 +650,17 @@ impl GeminiAdapter {
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| ModelError::StreamError(e.to_string()))?;
+            // Bound SSE reassembly: a server that streams bytes but never emits
+            // the `\n\n` event separator would otherwise grow `buf` without
+            // bound. At this point `buf` holds only the un-terminated residue
+            // from the previous drain, so this never trips on legitimately
+            // buffered complete events (#50).
+            if buf.len() > crate::constants::MAX_SSE_BUFFER_BYTES {
+                return Err(ModelError::StreamError(format!(
+                    "SSE stream exceeded {} byte reassembly cap without a complete event",
+                    crate::constants::MAX_SSE_BUFFER_BYTES
+                )));
+            }
             buf.extend_from_slice(&chunk);
 
             for payload in drain_sse_events(&mut buf) {

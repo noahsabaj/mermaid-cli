@@ -147,15 +147,23 @@ pub fn load_from_paths(paths: &[PathBuf]) -> Option<LoadedInstructions> {
     for path in paths {
         let metadata = std::fs::metadata(path).ok()?;
         let mtime = metadata.modified().ok()?;
-        let raw = std::fs::read_to_string(path).ok()?;
-        total_byte_len = total_byte_len.saturating_add(raw.len());
+        let true_len = metadata.len() as usize;
+        // Bounded read: never slurp a giant MERMAID.md whole just to truncate it
+        // afterwards (#16). Read one byte past the cap so the combined-body
+        // truncation check below still detects an oversized single file; the
+        // true on-disk size comes from the stat above, so `byte_len` stays
+        // accurate rather than reflecting the capped read.
+        let (bytes, _truncated) =
+            crate::utils::read_file_capped(path, MAX_INSTRUCTIONS_BYTES.saturating_add(1)).ok()?;
+        let raw = String::from_utf8_lossy(&bytes).into_owned();
+        total_byte_len = total_byte_len.saturating_add(true_len);
         if mtime > latest_mtime {
             latest_mtime = mtime;
         }
         sources.push(InstructionSource {
             path: path.to_path_buf(),
             mtime,
-            byte_len: raw.len(),
+            byte_len: true_len,
         });
         bodies.push((path.to_path_buf(), raw));
     }

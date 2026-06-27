@@ -18,13 +18,13 @@ Everything else is detail.
 
 3. **Effects as data.** The reducer returns `Cmd` values. It never calls a provider, writes a file, or spawns a task. `src/effect/EffectRunner::dispatch` turns each `Cmd` into real work on the tokio runtime. Retry, tracing, and rate-limiting wrap the dispatcher uniformly instead of being re-implemented inside each adapter.
 
-4. **Structured concurrency per turn.** Every in-flight turn owns a `TurnScope` (`src/effect/turn_scope.rs`): one `CancellationToken`, one `JoinSet`. Spawning a task into the scope ties its lifetime to the turn. Cancelling the token signals every child at its next `.await`. Cancelling the scope drops every handle. There is no `task.abort()` anywhere in the codebase; the only way to stop in-flight work is `Cmd::CancelScope(TurnId)`.
+4. **Structured concurrency per turn.** Every in-flight turn owns a `TurnScope` (`src/effect/turn_scope.rs`): one `CancellationToken`, one `JoinSet`. Spawning a task into the scope ties its lifetime to the turn. Cancelling the token signals every child at its next `.await`. Cancelling the scope drops every handle. The way to stop in-flight work is `Cmd::CancelScope(TurnId)`. The one deliberate exception is the detachable command driver in `providers::tool::exec`: it's a raw (non-scoped) `tokio::spawn` so Ctrl+B can let it outlive the turn, and on Esc-cancel it is `abort()`ed explicitly after its process tree is force-killed.
 
 ## The modules
 
 ```
 src/
-├── domain/      — pure, no async, no I/O.
+├── domain/      — pure, no async, no I/O, no wall-clock (time arrives as `state.now`).
 │   ├── state.rs        State, TurnState, UiState, Session
 │   ├── msg.rs          Msg (~25 variants)
 │   ├── cmd.rs          Cmd
@@ -99,6 +99,7 @@ loop {
         _ = tick.tick()     => Some(Msg::Tick),      // 60 Hz
     };
 
+    state.now = Local::now();                        // inject the clock as data
     let (new_state, cmds) = update(state, msg);
     state = new_state;
     for cmd in cmds { runner.dispatch(cmd); }
@@ -106,6 +107,12 @@ loop {
     if state.should_exit { break; }
 }
 ```
+
+The `state.now = Local::now()` stamp is the one place the loop reads the wall
+clock; `update` and the `transition` helpers read `state.now` instead of calling
+the clock themselves. That keeps the reducer a pure function of `(State, Msg)`
+and makes `--replay` a faithful fold — a replay driver stamps each recorded
+entry's `ts` here instead of the live clock (see Cause 3 / `replay_debugging.md`).
 
 That's the whole thing. There is no second runtime. There are no observer callbacks. The render is pure — it takes `&State`, paints into ratatui, mutates nothing.
 

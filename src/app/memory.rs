@@ -411,7 +411,12 @@ pub fn write_to_dir(
 ) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(format!("{}.md", slugify(name)));
-    std::fs::write(&path, render_file(name, description, scope, tags, body))?;
+    // Redact credential-shaped strings before persisting model-written memory:
+    // a fact that summarizes a `.env` the model read would otherwise store a
+    // key in the durable (and always-index-loaded) memory file (#69).
+    let description = crate::utils::redact_secrets(description);
+    let body = crate::utils::redact_secrets(body);
+    std::fs::write(&path, render_file(name, &description, scope, tags, &body))?;
     Ok(path)
 }
 

@@ -158,6 +158,22 @@ impl ComputerUseDriver {
         }
     }
 
+    /// Async form of [`ensure_alive`]. The X11 display probe spawns a
+    /// `xdpyinfo`/`xdotool` subprocess and blocks on its exit; on the async
+    /// tool path that would block a worker, so run it on the blocking pool (#34).
+    pub async fn ensure_alive_async(&self) -> Result<(), String> {
+        let backend = self.backend;
+        match tokio::task::spawn_blocking(move || super::display_is_reachable(backend)).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "Display unreachable (backend={:?}). Was the session \
+                 detached, or did `DISPLAY` change?",
+                self.backend
+            )),
+            Err(_) => Err("display liveness probe failed to run".to_string()),
+        }
+    }
+
     /// Translate model-space coords to screen-space using the metadata
     /// registered for `screenshot_id` (or the latest if None).
     pub fn scale_coords(
@@ -215,11 +231,16 @@ impl ComputerUseDriver {
         spec: ScreenshotSpec,
         token: &CancellationToken,
     ) -> Result<CaptureResult> {
-        self.ensure_alive()
+        self.ensure_alive_async()
+            .await
             .map_err(|error| anyhow::anyhow!(error))?;
 
         let seq = self.file_counter.fetch_add(1, Ordering::Relaxed);
-        let temp_path = std::env::temp_dir().join(format!("mermaid-screenshot-{}.png", seq));
+        // Write screenshots into the 0700 per-user scratch dir, not a
+        // world-readable fixed path in shared /tmp where another local user
+        // could read the captured frame (#33).
+        let temp_path =
+            crate::utils::private_temp_dir()?.join(format!("mermaid-screenshot-{}.png", seq));
         let temp_str = temp_path.to_string_lossy().to_string();
         let _guard = TempFileGuard(temp_path.clone());
 

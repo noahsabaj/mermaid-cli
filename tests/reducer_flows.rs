@@ -119,7 +119,7 @@ fn stale_stream_chunks_cannot_corrupt_current_turn() {
 #[test]
 fn stream_text_from_prior_turn_is_ignored() {
     let mut state = fresh();
-    state.turn = start_generating(TurnId(10));
+    state.turn = start_generating(TurnId(10), std::time::SystemTime::now());
     let (state, _) = update(
         state,
         Msg::StreamText {
@@ -160,7 +160,7 @@ fn tool_outcomes_must_all_land_before_followup_call() {
             },
         },
     ];
-    state.turn = start_executing_tools(TurnId(1), calls);
+    state.turn = start_executing_tools(TurnId(1), calls, std::time::SystemTime::now());
     // Plant the prior assistant message so action displays attach.
     state
         .session
@@ -215,7 +215,7 @@ fn cancelled_tool_produces_placeholder_in_history() {
             },
         },
     };
-    state.turn = start_executing_tools(TurnId(3), vec![call]);
+    state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
     state
         .session
         .append(mermaid_cli::models::ChatMessage::assistant("calling tool"));
@@ -239,7 +239,7 @@ fn cancelled_tool_produces_placeholder_in_history() {
 #[test]
 fn cancel_emits_scope_cancel_and_transitions_cancelling() {
     let mut state = fresh();
-    state.turn = start_generating(TurnId(7));
+    state.turn = start_generating(TurnId(7), std::time::SystemTime::now());
 
     let (state, cmds) = update(state, Msg::CancelTurn);
     assert!(
@@ -315,7 +315,7 @@ fn stale_turn_cancelled_does_not_mutate_state() {
 #[test]
 fn upstream_error_ends_turn_exactly_once() {
     let mut state = fresh();
-    state.turn = start_generating(TurnId(4));
+    state.turn = start_generating(TurnId(4), std::time::SystemTime::now());
 
     let err = mermaid_cli::models::UserFacingError {
         summary: "Server error".to_string(),
@@ -350,7 +350,7 @@ fn upstream_error_ends_turn_exactly_once() {
 #[test]
 fn upstream_error_from_stale_turn_is_dropped() {
     let mut state = fresh();
-    state.turn = start_generating(TurnId(8));
+    state.turn = start_generating(TurnId(8), std::time::SystemTime::now());
     let err = mermaid_cli::models::UserFacingError {
         summary: "late".to_string(),
         message: "".to_string(),
@@ -623,6 +623,7 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
                 },
             },
         }],
+        std::time::SystemTime::now(),
     );
 
     let data = vec![0x89, 0x50, 0x4E, 0x47]; // PNG magic bytes — content doesn't matter

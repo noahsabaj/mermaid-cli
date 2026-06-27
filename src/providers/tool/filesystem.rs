@@ -22,7 +22,7 @@ use crate::render::diff::{DIFF_ADDED_MARKER, DIFF_REMOVED_MARKER};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
-use super::path_safety::resolve_path_safe;
+use super::path_safety::{relative_within, resolve_path_safe};
 
 /// Small helper for building a `ToolDefinition` with a typical
 /// JSON-schema-shaped input_schema. Keeps the per-tool definitions
@@ -184,6 +184,10 @@ impl ToolExecutor for EditFileTool {
             Ok(p) => p,
             Err(e) => return err(&format!("edit_file: {}", e), 0.0),
         };
+        let rel = match relative_within(&ctx.workdir, raw_path) {
+            Ok(r) => r,
+            Err(e) => return err(&format!("edit_file: {}", e), 0.0),
+        };
         let pending_action = serde_json::json!({
             "tool": "edit_file",
             "args": {
@@ -222,13 +226,13 @@ impl ToolExecutor for EditFileTool {
         }
         let old_owned = old_string.to_string();
         let new_owned = new_string.to_string();
-        let abs_clone = abs.clone();
+        let workdir = ctx.workdir.clone();
         let display_path = raw_path.to_string();
 
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || edit_blocking(&abs_clone, &old_owned, &new_owned)) => {
+            result = tokio::task::spawn_blocking(move || edit_blocking(&workdir, &rel, &old_owned, &new_owned)) => {
                 match result {
                     Ok(Ok(edit)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -293,6 +297,10 @@ impl ToolExecutor for DeleteFileTool {
             Ok(p) => p,
             Err(e) => return err(&format!("delete_file: {}", e), 0.0),
         };
+        let rel = match relative_within(&ctx.workdir, raw_path) {
+            Ok(r) => r,
+            Err(e) => return err(&format!("delete_file: {}", e), 0.0),
+        };
         let pending_action = serde_json::json!({
             "tool": "delete_file",
             "args": { "path": raw_path },
@@ -326,11 +334,12 @@ impl ToolExecutor for DeleteFileTool {
             return err(&format!("delete_file checkpoint failed: {}", e), 0.0);
         }
         let display = raw_path.to_string();
+        let workdir = ctx.workdir.clone();
 
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || std::fs::remove_file(&abs)) => {
+            result = tokio::task::spawn_blocking(move || crate::runtime::remove_file_beneath(&workdir, &rel)) => {
                 match result {
                     Ok(Ok(())) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -385,6 +394,10 @@ impl ToolExecutor for CreateDirectoryTool {
             Ok(p) => p,
             Err(e) => return err(&format!("create_directory: {}", e), 0.0),
         };
+        let rel = match relative_within(&ctx.workdir, raw_path) {
+            Ok(r) => r,
+            Err(e) => return err(&format!("create_directory: {}", e), 0.0),
+        };
         let pending_action = serde_json::json!({
             "tool": "create_directory",
             "args": { "path": raw_path },
@@ -418,11 +431,12 @@ impl ToolExecutor for CreateDirectoryTool {
             return err(&format!("create_directory checkpoint failed: {}", e), 0.0);
         }
         let display = raw_path.to_string();
+        let workdir = ctx.workdir.clone();
 
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || std::fs::create_dir_all(&abs)) => {
+            result = tokio::task::spawn_blocking(move || crate::runtime::create_dir_all_beneath(&workdir, &rel)) => {
                 match result {
                     Ok(Ok(())) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -484,6 +498,11 @@ impl ToolExecutor for WriteFileTool {
             Ok(p) => p,
             Err(e) => return ToolOutcome::error(format!("write_file: {}", e), 0.0),
         };
+        // Workdir-relative name for the confined fd write (the actual byte path).
+        let rel = match relative_within(&ctx.workdir, path) {
+            Ok(r) => r,
+            Err(e) => return ToolOutcome::error(format!("write_file: {}", e), 0.0),
+        };
         let pending_action = serde_json::json!({
             "tool": "write_file",
             "args": { "path": path, "content": content },
@@ -523,11 +542,12 @@ impl ToolExecutor for WriteFileTool {
         let created = Some(old_content.is_none());
         let diff = generate_display_diff(old_content.as_deref().unwrap_or(""), content);
         let content = content.to_string();
+        let workdir = ctx.workdir.clone();
 
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || write_one_blocking(&abs_path, &content)) => {
+            result = tokio::task::spawn_blocking(move || write_one_blocking(&workdir, &rel, &content)) => {
                 match result {
                     Ok(Ok(actual_line_count)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -573,6 +593,13 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
         return Ok(vec![p.to_string()]);
     }
     if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
+        if arr.len() > crate::constants::MAX_BATCH_TOOL_ITEMS {
+            return Err(format!(
+                "read_file: too many paths ({}); cap is {} per call — split the request",
+                arr.len(),
+                crate::constants::MAX_BATCH_TOOL_ITEMS
+            ));
+        }
         let mut out = Vec::with_capacity(arr.len());
         for v in arr {
             let Some(s) = v.as_str() else {
@@ -586,33 +613,49 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
 }
 
 async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<String> {
-    let abs = resolve_path_safe(workdir, raw)
+    // Canonical containment gate — rejects escapes (incl. existing symlinks that
+    // resolve outside the project) before we touch the file.
+    resolve_path_safe(workdir, raw)
         .map_err(|msg| std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg))?;
-    let abs_clone = abs.clone();
+    // Workdir-relative name for the confined fd read, so the bytes come from the
+    // inode the kernel resolved under RESOLVE_BENEATH rather than whatever a
+    // concurrently-swapped symlink now points at (#77).
+    let rel = relative_within(workdir, raw)
+        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg))?;
+    let workdir = workdir.to_path_buf();
     let content = tokio::task::spawn_blocking(move || {
-        let data = std::fs::read(&abs_clone)?;
-        if data.len() > MAX_FILE_READ_BYTES {
+        let file = crate::runtime::open_beneath(&workdir, &rel, crate::runtime::OpenIntent::Read)?;
+        // Bounded read: never pull more than the cap (+1 probe byte) into RAM,
+        // so a model pointing `read_file` at a multi-gigabyte file can't OOM the
+        // process — a full read would have slurped the whole thing first (#15).
+        let (data, truncated) = crate::utils::read_capped(file, MAX_FILE_READ_BYTES)?;
+        let mut s = String::from_utf8_lossy(&data).into_owned();
+        if truncated {
             // Char-boundary-safe truncation with a marker footer.
-            let mut s = String::from_utf8_lossy(&data).into_owned();
             let cut = s.floor_char_boundary(MAX_FILE_READ_BYTES);
             s.truncate(cut);
             s.push_str("\n\n[TRUNCATED: file exceeded read cap]");
-            Ok::<_, std::io::Error>(s)
-        } else {
-            Ok(String::from_utf8_lossy(&data).into_owned())
         }
+        Ok::<_, std::io::Error>(s)
     })
     .await
     .map_err(|e| std::io::Error::other(e.to_string()))??;
-    let _ = abs;
     Ok(content)
 }
 
-fn write_one_blocking(path: &Path, content: &str) -> std::io::Result<usize> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// Write `content` to `rel` beneath `workdir` through the symlink-confined
+/// opener, creating parent dirs the same way. The bytes land on the inode the
+/// kernel resolved under `RESOLVE_BENEATH`, so a parent dir swapped for an
+/// escaping symlink after the path check can't redirect the write (#77).
+fn write_one_blocking(workdir: &Path, rel: &Path, content: &str) -> std::io::Result<usize> {
+    if let Some(parent) = rel.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        crate::runtime::create_dir_all_beneath(workdir, parent)?;
     }
-    std::fs::write(path, content)?;
+    let mut file =
+        crate::runtime::open_beneath(workdir, rel, crate::runtime::OpenIntent::WriteTruncate)?;
+    std::io::Write::write_all(&mut file, content.as_bytes())?;
     Ok(content.lines().count())
 }
 
@@ -670,8 +713,23 @@ struct EditResult {
     truncated: bool,
 }
 
-fn edit_blocking(path: &Path, old_string: &str, new_string: &str) -> std::io::Result<EditResult> {
-    let current = std::fs::read_to_string(path)?;
+/// Read-modify-write `rel` beneath `workdir` entirely through the
+/// symlink-confined opener, so both the read and the write bind to the inode the
+/// kernel resolved under `RESOLVE_BENEATH` — a swapped-in symlink can't redirect
+/// either half (#77).
+fn edit_blocking(
+    workdir: &Path,
+    rel: &Path,
+    old_string: &str,
+    new_string: &str,
+) -> std::io::Result<EditResult> {
+    let current = {
+        let mut file =
+            crate::runtime::open_beneath(workdir, rel, crate::runtime::OpenIntent::Read)?;
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut file, &mut s)?;
+        s
+    };
     let count = current.matches(old_string).count();
     if count == 0 {
         return Err(std::io::Error::other(
@@ -686,7 +744,9 @@ fn edit_blocking(path: &Path, old_string: &str, new_string: &str) -> std::io::Re
     }
     let updated = current.replacen(old_string, new_string, 1);
     let diff = generate_display_diff(&current, &updated);
-    std::fs::write(path, updated)?;
+    let mut file =
+        crate::runtime::open_beneath(workdir, rel, crate::runtime::OpenIntent::WriteTruncate)?;
+    std::io::Write::write_all(&mut file, updated.as_bytes())?;
     Ok(EditResult {
         replacements: 1,
         display_diff: diff.display_diff,

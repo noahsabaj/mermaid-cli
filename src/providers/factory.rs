@@ -272,35 +272,23 @@ fn validate_provider_base_url(url: &str) -> Result<()> {
     })?;
     match parsed.scheme() {
         "https" => Ok(()),
-        "http" if is_local_host(parsed.host_str().unwrap_or_default()) => Ok(()),
+        // Plaintext http is only safe to LOOPBACK: a key sent over http to any
+        // other host — including a LAN/private one — crosses the wire in
+        // cleartext. Every caller here is a key-bearing provider; keyless local
+        // Ollama uses a separate path that doesn't validate.
+        "http"
+            if crate::utils::classify_host(parsed.host_str().unwrap_or_default()).is_loopback() =>
+        {
+            Ok(())
+        },
         "http" => Err(ModelError::InvalidRequest(format!(
-            "provider base_url '{url}' uses http:// to a non-local host — refusing to send the API \
-             key in cleartext. Use https, or a loopback/private host for a local server."
+            "provider base_url '{url}' uses http:// to a non-loopback host — refusing to send the \
+             API key in cleartext. Use https, or http://localhost for a local server."
         ))),
         other => Err(ModelError::InvalidRequest(format!(
             "provider base_url '{url}' has unsupported scheme '{other}' (use http or https)"
         ))),
     }
-}
-
-/// True for loopback / RFC-1918 / link-local hosts where plain http is
-/// acceptable (a local model server, not a credential-leaking remote). The
-/// inverse of the SSRF `is_blocked_host` in `providers::tool::web`.
-fn is_local_host(host: &str) -> bool {
-    let h = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase();
-    if h == "localhost" || h.ends_with(".localhost") {
-        return true;
-    }
-    if let Ok(ip) = h.parse::<std::net::Ipv4Addr>() {
-        return ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified();
-    }
-    if let Ok(ip) = h.parse::<std::net::Ipv6Addr>() {
-        return ip.is_loopback() || ip.is_unspecified();
-    }
-    false
 }
 
 #[cfg(test)]
@@ -312,11 +300,15 @@ mod tests {
         // Remote http is refused (would leak the bearer key in cleartext).
         assert!(validate_provider_base_url("http://api.example.com/v1").is_err());
         assert!(validate_provider_base_url("ftp://example.com").is_err());
-        // https remote and http local are both fine.
+        // https anywhere and http to LOOPBACK are fine.
         assert!(validate_provider_base_url("https://api.example.com/v1").is_ok());
         assert!(validate_provider_base_url("http://localhost:11434/v1").is_ok());
         assert!(validate_provider_base_url("http://127.0.0.1:8000").is_ok());
-        assert!(validate_provider_base_url("http://192.168.1.5:8080").is_ok());
+        assert!(validate_provider_base_url("http://[::1]:8000").is_ok());
+        // #26: http to a non-loopback host (even a private LAN one) is refused —
+        // the API key would otherwise cross the wire in cleartext.
+        assert!(validate_provider_base_url("http://192.168.1.5:8080").is_err());
+        assert!(validate_provider_base_url("http://169.254.169.254").is_err());
     }
     use std::sync::atomic::{AtomicUsize, Ordering};
 

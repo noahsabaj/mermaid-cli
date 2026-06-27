@@ -9,6 +9,8 @@
 //! This is the runtime-crate sibling of the main crate's `path_safety` helper;
 //! `mermaid-runtime` is the lower crate and cannot depend on it.
 
+use std::fs::File;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
@@ -35,6 +37,41 @@ pub(crate) fn contain_within(root: &Path, raw: &str) -> Result<PathBuf> {
     Ok(lexical)
 }
 
+/// Like [`contain_within`], but also defeats a symlink planted *inside* the
+/// root that would redirect a write/delete outside it: the canonical form of
+/// the target's nearest existing ancestor must stay within the canonical root.
+///
+/// The target itself may not exist yet (restoring a deleted file), so we walk
+/// up to the nearest existing ancestor and canonicalize that. Falls back to the
+/// lexical result when the root doesn't yet exist on disk (nothing to escape
+/// through).
+pub(crate) fn contain_within_canonical(root: &Path, raw: &str) -> Result<PathBuf> {
+    let lexical = contain_within(root, raw)?;
+    let canon_root = match std::fs::canonicalize(root) {
+        Ok(r) => r,
+        Err(_) => return Ok(lexical),
+    };
+    let mut ancestor = lexical.as_path();
+    let existing = loop {
+        if ancestor.exists() {
+            break Some(ancestor);
+        }
+        match ancestor.parent() {
+            Some(p) => ancestor = p,
+            None => break None,
+        }
+    };
+    if let Some(existing) = existing
+        && let Ok(canon) = std::fs::canonicalize(existing)
+    {
+        anyhow::ensure!(
+            canon.starts_with(&canon_root),
+            "path escapes the project root via a symlink: {raw}"
+        );
+    }
+    Ok(lexical)
+}
+
 /// Collapse `.` and `..` components lexically (no filesystem access, no symlink
 /// resolution).
 fn normalize_lexical(path: &Path) -> PathBuf {
@@ -49,6 +86,201 @@ fn normalize_lexical(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// What kind of access an [`open_beneath`] call needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenIntent {
+    /// Open an existing file read-only.
+    Read,
+    /// Create-or-truncate for writing (`O_WRONLY|O_CREAT|O_TRUNC`).
+    WriteTruncate,
+}
+
+/// Open `root`-relative `rel` for `intent` **without ever traversing out of
+/// `root`** — closing the check-then-write TOCTOU where an intermediate
+/// directory is swapped for a symlink after a lexical path check but before the
+/// operation (#77). The returned [`File`] is bound to the exact inode the
+/// confinement resolved, so subsequent reads/writes can't be redirected.
+///
+/// On Linux this is enforced atomically by the kernel via
+/// `openat2(RESOLVE_BENEATH)` relative to a directory fd for `root`. We use
+/// `RESOLVE_BENEATH` (which forbids escaping the root via absolute paths, `..`,
+/// or magic links) but **not** `RESOLVE_NO_SYMLINKS`, so legitimate *in-tree*
+/// symlinks keep working — only escapes are refused, matching the existing
+/// [`contain_within_canonical`] semantics. On pre-5.6 kernels (`ENOSYS`) or
+/// non-Linux targets it falls back to `contain_within_canonical` + a plain open
+/// (documented best-effort: the lexical check still holds, but the open is by
+/// path).
+pub fn open_beneath(root: &Path, rel: &Path, intent: OpenIntent) -> io::Result<File> {
+    #[cfg(target_os = "linux")]
+    {
+        match linux::open_beneath(root, rel, intent) {
+            Err(e) if e == rustix::io::Errno::NOSYS => {}, // pre-5.6 kernel: fall through
+            other => return other.map_err(io::Error::from),
+        }
+    }
+    fallback::open(root, rel, intent)
+}
+
+/// Confined `mkdir -p` for a `root`-relative directory path: creates each
+/// missing component beneath `root`, refusing to descend through a symlink that
+/// escapes (#77). On Linux: `mkdirat` + `openat2(RESOLVE_BENEATH)` per
+/// component; otherwise the `contain_within_canonical` + `std::fs` fallback.
+pub fn create_dir_all_beneath(root: &Path, rel: &Path) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        match linux::create_dir_all_beneath(root, rel) {
+            Err(e) if e == rustix::io::Errno::NOSYS => {},
+            other => return other.map_err(io::Error::from),
+        }
+    }
+    fallback::create_dir_all(root, rel)
+}
+
+/// Confined unlink of a `root`-relative file (#77): opens the parent under
+/// `RESOLVE_BENEATH` and `unlinkat`s the leaf, so a swapped-in symlink parent
+/// can't redirect the delete outside `root`.
+pub fn remove_file_beneath(root: &Path, rel: &Path) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        match linux::remove_file_beneath(root, rel) {
+            Err(e) if e == rustix::io::Errno::NOSYS => {},
+            other => return other.map_err(io::Error::from),
+        }
+    }
+    fallback::remove_file(root, rel)
+}
+
+/// Linux `openat2(RESOLVE_BENEATH)` implementation. Each fn returns
+/// `Err(Errno::NOSYS)` on a kernel that predates `openat2` (5.6) so the public
+/// wrapper can fall back.
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::fs::File;
+    use std::path::{Component, Path};
+
+    use rustix::fd::OwnedFd;
+    use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, mkdirat, open, openat2, unlinkat};
+    use rustix::io::Errno;
+
+    use super::OpenIntent;
+
+    /// Open a path-only (`O_PATH`) directory fd for `dir`, used as the anchor
+    /// for the confined `openat2` calls below.
+    fn open_dir(dir: &Path) -> Result<OwnedFd, Errno> {
+        open(
+            dir,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+    }
+
+    /// Descend into `name` beneath `dir_fd`, refusing any escape.
+    fn open_subdir(dir_fd: &OwnedFd, name: &Path) -> Result<OwnedFd, Errno> {
+        openat2(
+            dir_fd,
+            name,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH,
+        )
+    }
+
+    pub(super) fn open_beneath(root: &Path, rel: &Path, intent: OpenIntent) -> Result<File, Errno> {
+        let root_fd = open_dir(root)?;
+        let (flags, mode) = match intent {
+            OpenIntent::Read => (OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty()),
+            OpenIntent::WriteTruncate => (
+                OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o644),
+            ),
+        };
+        let fd = openat2(&root_fd, rel, flags, mode, ResolveFlags::BENEATH)?;
+        Ok(File::from(fd))
+    }
+
+    pub(super) fn create_dir_all_beneath(root: &Path, rel: &Path) -> Result<(), Errno> {
+        let mut dir = open_dir(root)?;
+        for comp in rel.components() {
+            let name: &Path = match comp {
+                Component::Normal(n) => Path::new(n),
+                Component::CurDir => continue,
+                // Absolute prefixes / `..` would be rejected by BENEATH anyway;
+                // surface a clean error rather than attempting them.
+                _ => return Err(Errno::INVAL),
+            };
+            match mkdirat(&dir, name, Mode::from_raw_mode(0o755)) {
+                Ok(()) | Err(Errno::EXIST) => {},
+                Err(e) => return Err(e),
+            }
+            dir = open_subdir(&dir, name)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn remove_file_beneath(root: &Path, rel: &Path) -> Result<(), Errno> {
+        let root_fd = open_dir(root)?;
+        let leaf = rel.file_name().ok_or(Errno::INVAL)?;
+        let parent = rel.parent().unwrap_or_else(|| Path::new(""));
+        let parent_fd = if parent.as_os_str().is_empty() {
+            root_fd
+        } else {
+            open_subdir(&root_fd, parent)?
+        };
+        unlinkat(&parent_fd, Path::new(leaf), AtFlags::empty())
+    }
+}
+
+/// Best-effort fallback used on non-Linux targets and pre-`openat2` kernels:
+/// the lexical + canonical-ancestor containment check, then a plain `std::fs`
+/// open by path. The TOCTOU window remains here, but the lexical guarantee does
+/// not regress relative to the prior implementation.
+///
+/// One deliberate behavioral difference from the Linux path: because this leans
+/// on `std::fs::canonicalize`, it *follows* an absolute symlink that resolves
+/// back inside the root, whereas `RESOLVE_BENEATH` rejects every absolute
+/// symlink outright. Both still refuse escapes — the fallback is simply more
+/// permissive on that one in-tree edge case. Reconciling it would mean
+/// hand-rolling per-component symlink inspection here, exactly the fragile
+/// logic `openat2` exists to replace, so the mismatch is documented rather than
+/// papered over.
+mod fallback {
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use super::{OpenIntent, contain_within_canonical};
+
+    fn validated(root: &Path, rel: &Path) -> io::Result<PathBuf> {
+        let rel_str = rel
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-UTF-8 path"))?;
+        contain_within_canonical(root, rel_str)
+            .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))
+    }
+
+    pub(super) fn open(root: &Path, rel: &Path, intent: OpenIntent) -> io::Result<File> {
+        let path = validated(root, rel)?;
+        match intent {
+            OpenIntent::Read => File::open(&path),
+            OpenIntent::WriteTruncate => OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path),
+        }
+    }
+
+    pub(super) fn create_dir_all(root: &Path, rel: &Path) -> io::Result<()> {
+        let path = validated(root, rel)?;
+        std::fs::create_dir_all(&path)
+    }
+
+    pub(super) fn remove_file(root: &Path, rel: &Path) -> io::Result<()> {
+        let path = validated(root, rel)?;
+        std::fs::remove_file(&path)
+    }
 }
 
 #[cfg(test)]
@@ -85,5 +317,144 @@ mod tests {
         let p = contain_within(&root, "a/../b.txt").unwrap();
         assert!(p.ends_with("b.txt"));
         assert!(p.starts_with(normalize_lexical(&root)));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod confined_tests {
+    use std::io::{Read, Write};
+
+    use super::*;
+
+    /// A throwaway directory unique to this test run + `tag` (tests share a PID).
+    fn unique_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("mermaid_beneath_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn create_write_read_roundtrip_stays_in_root() {
+        let root = unique_dir("rw");
+        create_dir_all_beneath(&root, Path::new("sub/inner")).unwrap();
+        {
+            let mut f = open_beneath(
+                &root,
+                Path::new("sub/inner/file.txt"),
+                OpenIntent::WriteTruncate,
+            )
+            .unwrap();
+            f.write_all(b"hello").unwrap();
+        }
+        // The bytes landed at the confined inode.
+        assert_eq!(
+            std::fs::read_to_string(root.join("sub/inner/file.txt")).unwrap(),
+            "hello"
+        );
+        // And read back through the confined opener.
+        let mut buf = String::new();
+        open_beneath(&root, Path::new("sub/inner/file.txt"), OpenIntent::Read)
+            .unwrap()
+            .read_to_string(&mut buf)
+            .unwrap();
+        assert_eq!(buf, "hello");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn open_beneath_refuses_write_through_escaping_symlink() {
+        let root = unique_dir("escape_root");
+        let outside = unique_dir("escape_outside");
+        // Plant a symlink *inside* the root that redirects outside it — the
+        // exact TOCTOU shape #77 is about.
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let res = open_beneath(
+            &root,
+            Path::new("escape/evil.txt"),
+            OpenIntent::WriteTruncate,
+        );
+        assert!(
+            res.is_err(),
+            "write through escaping symlink must be refused"
+        );
+        assert!(
+            !outside.join("evil.txt").exists(),
+            "nothing should have been written outside the root"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn open_beneath_follows_in_tree_symlink() {
+        // The crux of choosing RESOLVE_BENEATH over RESOLVE_NO_SYMLINKS: a
+        // symlink that stays *inside* the root (the node_modules / monorepo
+        // case) must still resolve. A relative in-tree link is followed; only
+        // escapes are refused.
+        let root = unique_dir("intree");
+        std::fs::create_dir(root.join("real")).unwrap();
+        // Relative target so resolution stays beneath the root.
+        std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+
+        {
+            let mut f =
+                open_beneath(&root, Path::new("link/file.txt"), OpenIntent::WriteTruncate).unwrap();
+            f.write_all(b"via-symlink").unwrap();
+        }
+        // The bytes landed in the real directory the in-tree link points at.
+        assert_eq!(
+            std::fs::read_to_string(root.join("real/file.txt")).unwrap(),
+            "via-symlink"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_dir_all_beneath_refuses_escape() {
+        let root = unique_dir("mkdir_root");
+        let outside = unique_dir("mkdir_outside");
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let res = create_dir_all_beneath(&root, Path::new("escape/newdir"));
+        assert!(
+            res.is_err(),
+            "mkdir through escaping symlink must be refused"
+        );
+        assert!(!outside.join("newdir").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn remove_file_beneath_deletes_in_root_and_refuses_escape() {
+        let root = unique_dir("rm_root");
+        {
+            let mut f =
+                open_beneath(&root, Path::new("gone.txt"), OpenIntent::WriteTruncate).unwrap();
+            f.write_all(b"x").unwrap();
+        }
+        assert!(root.join("gone.txt").exists());
+        remove_file_beneath(&root, Path::new("gone.txt")).unwrap();
+        assert!(!root.join("gone.txt").exists());
+
+        // A victim outside the root, reachable only via an escaping symlink, is
+        // safe from a confined unlink.
+        let outside = unique_dir("rm_outside");
+        std::fs::write(outside.join("victim.txt"), b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        let res = remove_file_beneath(&root, Path::new("escape/victim.txt"));
+        assert!(
+            res.is_err(),
+            "unlink through escaping symlink must be refused"
+        );
+        assert!(outside.join("victim.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

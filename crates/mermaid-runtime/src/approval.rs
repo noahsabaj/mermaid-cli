@@ -155,6 +155,34 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
     }
 }
 
+/// Provider keys + name patterns that must not leak into a replayed child's
+/// environment. Mirrors `providers::tool::exec::is_secret_env_name` in the main
+/// crate (the runtime crate can't depend on it). Denylist, so ordinary
+/// build/run vars (`PATH`, toolchain, `XAUTHORITY`, …) survive.
+fn is_secret_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.contains("API_KEY")
+        || upper.contains("APIKEY")
+        || upper.contains("ACCESS_KEY")
+        || upper.contains("PRIVATE_KEY")
+        || upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("PASSWD")
+        || upper.contains("TOKEN")
+        || upper.contains("CREDENTIAL")
+}
+
+/// Strip secret-bearing env vars from a replay child. The daemon's environment
+/// holds provider API keys and the pairing token; an approved shell command
+/// must not be able to read them back out (#24).
+fn scrub_secret_env(cmd: &mut Command) {
+    for (name, _) in std::env::vars() {
+        if is_secret_env_name(&name) {
+            cmd.env_remove(&name);
+        }
+    }
+}
+
 fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<String> {
     let command = string_arg(args, "command")?;
     // Confine the replay cwd to the recorded workdir. The command itself is an
@@ -169,11 +197,18 @@ fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<St
         .get("mode")
         .and_then(|value| value.as_str())
         .unwrap_or("wait");
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command).current_dir(&effective_dir);
+    scrub_secret_env(&mut cmd);
     if mode == "background" {
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&effective_dir)
+        // New process group so the detached child (and anything it forks) can be
+        // signalled/reaped as a unit rather than leaking grandchildren (#24).
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let child = cmd
             .spawn()
             .with_context(|| format!("failed to replay background command `{command}`"))?;
         return Ok(format!(
@@ -181,10 +216,7 @@ fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<St
             child.id()
         ));
     }
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(&effective_dir)
+    let output = cmd
         .output()
         .with_context(|| format!("failed to replay command `{command}`"))?;
     anyhow::ensure!(

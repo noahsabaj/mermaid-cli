@@ -65,8 +65,13 @@ impl Recorder {
         &mut self,
         kind: MsgKind,
         turn: Option<TurnId>,
-        body: serde_json::Value,
+        mut body: serde_json::Value,
     ) -> Result<()> {
+        // Single redaction choke point: scrub credential-shaped strings out of
+        // every recorded payload before it hits disk. A `read_file .env` result,
+        // a pasted token, or an API error echoing a key would otherwise be
+        // persisted in cleartext in the `--record` log (#17).
+        crate::utils::redact_json(&mut body);
         let entry = serde_json::json!({
             "ts": Local::now().to_rfc3339(),
             "kind": format!("{:?}", kind),
@@ -523,6 +528,51 @@ mod tests {
         assert_eq!(entries[0].kind, "Tick");
         assert_eq!(entries[1].body["text"], "hello");
         assert_eq!(entries[2].turn, Some(7));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_kind_redacts_secrets_in_body() {
+        // A recorded payload carrying a credential (e.g. a `read_file .env`
+        // result or an API error echoing a key) must hit disk scrubbed (#17).
+        let path = tmpfile("redact.jsonl");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut r = Recorder::open(&path).expect("open");
+            r.record_kind(
+                MsgKind::StreamText,
+                None,
+                serde_json::json!({
+                    "chunk": "OPENAI_API_KEY=sk-abcdefghijklmnop1234",
+                    "nested": ["Authorization: Bearer abcdef123456ghijkl"],
+                }),
+            )
+            .expect("record");
+            r.flush().expect("flush");
+        }
+
+        let raw = std::fs::read_to_string(&path).expect("read back");
+        assert!(
+            !raw.contains("sk-abcdefghijklmnop1234"),
+            "raw secret leaked: {raw}"
+        );
+        assert!(
+            !raw.contains("abcdef123456ghijkl"),
+            "bearer token leaked: {raw}"
+        );
+        assert!(
+            raw.contains("[REDACTED]"),
+            "expected redaction marker: {raw}"
+        );
+
+        let replay = Replay::open(&path).expect("replay");
+        let entries: Vec<_> = replay.collect::<Result<_>>().expect("all parse");
+        assert_eq!(entries[0].body["chunk"], "OPENAI_API_KEY=[REDACTED]");
+        assert_eq!(
+            entries[0].body["nested"][0],
+            "Authorization: Bearer [REDACTED]"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

@@ -10,8 +10,12 @@
 //!      doesn't match `state.turn.id()` is dropped without state
 //!      change. This is the architectural safeguard that the previous
 //!      `check_interrupt` polling tried to enforce by convention.
-//!   4. **Cancellation is explicit.** The only way to abort in-flight
-//!      work is `Cmd::CancelScope(turn)`. No `handle.abort()` anywhere.
+//!   4. **Cancellation is explicit.** The way to stop in-flight work is
+//!      `Cmd::CancelScope(turn)`, which cancels the turn's token so every
+//!      scoped task unwinds at its next `.await`. The sole `JoinHandle::abort`
+//!      is in `providers::tool::exec`: the detachable command driver is a raw
+//!      (non-scoped) task by design — Ctrl+B lets it outlive the turn — so on
+//!      Esc-cancel it's aborted explicitly after its process tree is killed.
 //!
 //! Internal split:
 //!
@@ -325,6 +329,16 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // Silent. Reducer already committed; save is just durability.
         },
         Msg::ConversationLoaded(history) => {
+            // If a turn was in flight when the user loaded another conversation
+            // (`/load` mid-generation), cancel its scope first. Otherwise we
+            // overwrite `state.turn` to `Idle` below and lose the only handle —
+            // the turn's CancellationToken + JoinSet — that could stop the
+            // running model call and tool tasks, orphaning them uncancellable;
+            // their parked approval requests could never be answered either (#2).
+            if let Some(id) = state.turn.id() {
+                cmds.push(Cmd::CancelScope(id));
+                state.pending_approval.clear();
+            }
             state.session.conversation = history;
             state.turn = TurnState::Idle;
             state.ui.mode = UiMode::EditingInput;
@@ -392,8 +406,10 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
 
         // ── Housekeeping ────────────────────────────────────────────
         Msg::Tick => {
-            // Nothing stateful yet; render uses `SystemTime::now()`
-            // directly for elapsed-time display.
+            // No state change here. The driver stamps `state.now` before every
+            // tick (Cause 3), and render derives the elapsed-time spinner from
+            // `state.now` — so a 60 Hz Tick advances the display without the
+            // reducer or render ever reading the wall clock.
         },
         Msg::StatusDismiss => {
             state.status = None;
@@ -472,11 +488,20 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // the parked tool task via the broker.
     if !state.pending_approval.is_empty() {
         use crate::domain::ApprovalChoice;
-        // 0 = Yes, 1 = Yes-always, 2 = No.
-        const APPROVAL_OPTIONS: usize = 3;
-        let choice_for = |idx: usize| match idx {
-            0 => ApprovalChoice::Approve,
-            1 => ApprovalChoice::ApproveAlways,
+        // Content-bearing external tools are non-allowlistable: the gate signals
+        // this with an empty allowlist scope, and the modal then omits the
+        // middle "approve always" option (#6, #31). Layout:
+        //   allowlistable:     0 = Yes, 1 = Yes-always, 2 = No
+        //   non-allowlistable: 0 = Yes,                 1 = No
+        let allowlistable = state
+            .pending_approval
+            .front()
+            .map(|i| !i.allowlist_scope.is_empty())
+            .unwrap_or(false);
+        let option_count = if allowlistable { 3 } else { 2 };
+        let choice_for = |idx: usize| match (allowlistable, idx) {
+            (true, 0) | (false, 0) => ApprovalChoice::Approve,
+            (true, 1) => ApprovalChoice::ApproveAlways,
             _ => ApprovalChoice::Deny,
         };
         // Copy the current highlight out so the ↑/↓ arms can take a fresh
@@ -490,9 +515,16 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             KeyCode::Char('1') | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 Some(ApprovalChoice::Approve)
             },
-            KeyCode::Char('2') | KeyCode::Char('a') | KeyCode::Char('A') => {
+            // 'a'/'A' and '2' select approve-always only when allowlistable;
+            // when not, '2' is the (second, final) "No" option.
+            KeyCode::Char('a') | KeyCode::Char('A') if allowlistable => {
                 Some(ApprovalChoice::ApproveAlways)
             },
+            KeyCode::Char('2') => Some(if allowlistable {
+                ApprovalChoice::ApproveAlways
+            } else {
+                ApprovalChoice::Deny
+            }),
             KeyCode::Char('3') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Escape => {
                 Some(ApprovalChoice::Deny)
             },
@@ -505,7 +537,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             },
             KeyCode::Down => {
                 if let Some(front) = state.pending_approval.front_mut() {
-                    front.selected_option = (selected + 1).min(APPROVAL_OPTIONS - 1);
+                    front.selected_option = (selected + 1).min(option_count - 1);
                 }
                 None
             },
@@ -1072,7 +1104,7 @@ fn handle_submit_prompt(
     state.memory = refreshed_memory;
 
     let turn = state.ids.fresh_turn();
-    state.turn = start_generating(turn);
+    state.turn = start_generating(turn, std::time::SystemTime::from(state.now));
     cmds.push(Cmd::CallModel {
         turn,
         request: build_chat_request(state),
@@ -1536,7 +1568,7 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
     let turn = state.ids.fresh_turn();
     state.turn = TurnState::Compacting {
         id: turn,
-        started: std::time::SystemTime::now(),
+        started: std::time::SystemTime::from(state.now),
         trigger: CompactionTrigger::Manual,
     };
     // The live "Compacting…" status comes from the TurnState::Compacting status
@@ -2080,7 +2112,7 @@ fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
     state.pending_approval.clear();
     state.turn = TurnState::Cancelling {
         id,
-        since: std::time::SystemTime::now(),
+        since: std::time::SystemTime::from(state.now),
     };
 }
 
@@ -2097,6 +2129,7 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     // Quitting mid-stream: preserve whatever the model already produced so
     // `--continue` shows what was on screen. Commit the in-flight partial
     // as an assistant message with an interrupted marker before saving.
+    let now = state.now;
     if let TurnState::Generating {
         partial_text,
         partial_reasoning,
@@ -2113,6 +2146,7 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
             reasoning,
             Vec::new(),
             sig,
+            now,
         );
         state.session.append(msg);
     }
@@ -2293,6 +2327,7 @@ fn handle_stream_done(
         partial_reasoning,
         tool_calls.clone(),
         final_sig,
+        state.now,
     );
     state.session.append(msg);
 
@@ -2374,7 +2409,11 @@ fn handle_stream_done(
                 intent: intent.clone(),
             });
         }
-        state.turn = super::transition::start_executing_tools(turn, pending);
+        state.turn = super::transition::start_executing_tools(
+            turn,
+            pending,
+            std::time::SystemTime::from(state.now),
+        );
         return;
     }
 
@@ -2473,11 +2512,12 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
     // same error a second time directly above the input, which is
     // just noise. The chat entry is persistent (scrollable);
     // duplicating as a transient banner adds nothing.
+    let now = state.now;
     state.turn = TurnState::Idle;
     let msg = ChatMessage {
         role: MessageRole::Assistant,
         content: String::new(),
-        timestamp: chrono::Local::now(),
+        timestamp: now,
         kind: crate::models::ChatMessageKind::Normal,
         metadata: None,
         actions: vec![super::action::ActionDisplay {
@@ -2586,7 +2626,7 @@ fn handle_tool_finished(
             state.session.append(m);
         }
         let next_turn = state.ids.fresh_turn();
-        state.turn = start_generating(next_turn);
+        state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
         cmds.push(Cmd::CallModel {
             turn: next_turn,
             request: build_chat_request(state),
@@ -2858,7 +2898,7 @@ mod tests {
     fn tool_progress_output_does_not_touch_status_banner() {
         use crate::providers::ProgressEvent;
         let mut state = fresh_state();
-        state.turn = start_generating(TurnId(1));
+        state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
         let turn = state.current_turn_id().unwrap();
 
         let (state, _cmds) = update(
@@ -3018,7 +3058,7 @@ mod tests {
     #[test]
     fn ctrl_c_during_turn_exits_and_cancels_scope() {
         let mut state = fresh_state();
-        state.turn = start_generating(TurnId(5));
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
         let msg = Msg::Key(Key {
             code: KeyCode::Char('c'),
             modifiers: KeyMods::ctrl(),
@@ -3030,6 +3070,65 @@ mod tests {
                 .any(|c| matches!(c, Cmd::CancelScope(TurnId(5))))
         );
         assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
+    }
+
+    #[test]
+    fn load_conversation_mid_turn_cancels_orphaned_scope() {
+        // `/load` while a turn is generating must cancel the in-flight scope,
+        // not silently overwrite `state.turn` and orphan the running tasks (#2).
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
+        let history = fresh_state().session.conversation.clone();
+        let (state, cmds) = update(state, Msg::ConversationLoaded(history));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::CancelScope(TurnId(5)))),
+            "loading a conversation mid-turn must cancel the in-flight scope"
+        );
+        assert!(matches!(state.turn, TurnState::Idle));
+    }
+
+    #[test]
+    fn load_conversation_when_idle_does_not_cancel() {
+        // No in-flight turn → nothing to cancel; `/load` just swaps state.
+        let state = fresh_state();
+        let history = fresh_state().session.conversation.clone();
+        let (state, cmds) = update(state, Msg::ConversationLoaded(history));
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::CancelScope(_))));
+        assert!(matches!(state.turn, TurnState::Idle));
+    }
+
+    #[test]
+    fn reducer_reads_injected_now_not_wall_clock() {
+        // Cause 3 determinism: the reducer stamps turn timestamps from
+        // `state.now`, never `SystemTime::now()` / `Local::now()`. Folding the
+        // same `(State, Msg)` with the same injected `now` must produce a
+        // byte-identical `since`, and it must equal the injected value — proving
+        // the reducer is a pure function of its inputs and a replay fold
+        // reproduces State exactly.
+        let now = chrono::Local::now();
+        let cancel_since = |injected: chrono::DateTime<chrono::Local>| {
+            let mut state = fresh_state();
+            state.now = injected;
+            state.turn = start_generating(TurnId(1), std::time::SystemTime::from(injected));
+            let (state, cmds) = update(state, Msg::CancelTurn);
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, Cmd::CancelScope(TurnId(1))))
+            );
+            match state.turn {
+                TurnState::Cancelling { since, .. } => since,
+                other => panic!("expected Cancelling, got {other:?}"),
+            }
+        };
+        // Same injected clock ⇒ identical result, regardless of real wall time.
+        assert_eq!(cancel_since(now), cancel_since(now));
+        // And the stamp is exactly the injected value, not "roughly now".
+        assert_eq!(cancel_since(now), std::time::SystemTime::from(now));
+        // A different injected clock yields a correspondingly different stamp.
+        let earlier = now - chrono::Duration::seconds(3600);
+        assert_eq!(cancel_since(earlier), std::time::SystemTime::from(earlier));
+        assert_ne!(cancel_since(earlier), cancel_since(now));
     }
 
     #[test]
@@ -3114,7 +3213,7 @@ mod tests {
     #[test]
     fn esc_during_turn_transitions_to_cancelling() {
         let mut state = fresh_state();
-        state.turn = start_generating(TurnId(5));
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
         let msg = Msg::Key(Key {
             code: KeyCode::Escape,
             modifiers: KeyMods::default(),
@@ -3193,7 +3292,7 @@ mod tests {
     #[test]
     fn submit_prompt_when_busy_is_dropped() {
         let mut state = fresh_state();
-        state.turn = start_generating(TurnId(1));
+        state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
         let msg = Msg::SubmitPrompt {
             text: "ignored".to_string(),
             attachment_ids: vec![],
@@ -3256,7 +3355,7 @@ mod tests {
     #[test]
     fn stale_stream_text_dropped_silently() {
         let mut state = fresh_state();
-        state.turn = start_generating(TurnId(5));
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
         let msg = Msg::StreamText {
             turn: TurnId(4), // stale!
             chunk: "should be dropped".to_string(),
@@ -3272,7 +3371,7 @@ mod tests {
     #[test]
     fn current_turn_stream_text_accumulates() {
         let mut state = fresh_state();
-        state.turn = start_generating(TurnId(5));
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
         let (state, _) = update(
             state,
             Msg::StreamText {
@@ -3303,7 +3402,7 @@ mod tests {
     #[test]
     fn reasoning_chunk_transitions_phase_to_thinking() {
         let mut state = fresh_state();
-        state.turn = start_generating(TurnId(5));
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
         let (state, _) = update(
             state,
             Msg::StreamReasoning {
@@ -3451,7 +3550,7 @@ mod tests {
     #[test]
     fn handle_upstream_error_refuses_mismatched_turn_id() {
         let mut state = fresh_state();
-        state.turn = start_generating(TurnId(5));
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
         let err = crate::models::UserFacingError {
             summary: "Stale".to_string(),
             message: "wrong turn".to_string(),
@@ -3471,7 +3570,7 @@ mod tests {
     #[test]
     fn upstream_error_ends_turn_and_records_line() {
         let mut state = fresh_state();
-        state.turn = start_generating(TurnId(1));
+        state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
         let err = crate::models::UserFacingError {
             summary: "Server error".to_string(),
             message: "500 internal".to_string(),
@@ -3716,7 +3815,7 @@ mod tests {
     /// the reducer in a live turn first).
     fn pending_approval_state() -> State {
         let mut state = fresh_state();
-        state.turn = start_generating(TurnId(1));
+        state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
         let (state, _) = update(
             state,
             Msg::ApprovalRequested {
@@ -3750,7 +3849,7 @@ mod tests {
         });
         // While tools are executing → emit BackgroundScope(turn).
         let mut state = fresh_state();
-        state.turn = start_executing_tools(TurnId(9), Vec::new());
+        state.turn = start_executing_tools(TurnId(9), Vec::new(), std::time::SystemTime::now());
         let (_s, cmds) = update(state, ctrl_b.clone());
         assert!(
             cmds.iter()
@@ -4039,7 +4138,7 @@ mod tests {
                 },
             },
         };
-        state.turn = start_executing_tools(TurnId(3), vec![call]);
+        state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
         // The reducer looks up the "last assistant message" to attach
         // an ActionDisplay — plant one so the lookup doesn't silently
         // no-op in this test.
@@ -4184,7 +4283,7 @@ mod tests {
                 },
             },
         };
-        state.turn = start_executing_tools(TurnId(3), vec![call]);
+        state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
         let (state, cmds) = update(
             state,
             Msg::StreamToolCall {
@@ -4254,7 +4353,7 @@ mod tests {
                 },
             },
         };
-        state.turn = start_executing_tools(TurnId(3), vec![call]);
+        state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
         state.session.append(ChatMessage::assistant("tools follow"));
 
         // Ctrl+B → BackgroundScope; reducer stays in ExecutingTools.
@@ -4327,7 +4426,7 @@ mod tests {
                 },
             },
         };
-        state.turn = start_executing_tools(TurnId(3), vec![call]);
+        state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
         state.session.append(ChatMessage::assistant("tools follow"));
 
         let (state, _) = update(
@@ -4391,7 +4490,7 @@ mod tests {
                 },
             },
         ];
-        state.turn = start_executing_tools(TurnId(3), calls);
+        state.turn = start_executing_tools(TurnId(3), calls, std::time::SystemTime::now());
         state.session.append(ChatMessage::assistant("tools follow"));
 
         let (state, cmds) = update(
@@ -4430,6 +4529,7 @@ mod tests {
                     },
                 },
             }],
+            std::time::SystemTime::now(),
         );
 
         let (state, cmds) = update(

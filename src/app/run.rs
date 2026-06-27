@@ -257,6 +257,12 @@ pub async fn run_interactive_with(
             let _ = r.record_kind(msg.kind(), msg.turn_id(), body);
         }
 
+        // Inject the wall clock as data (Cause 3): stamp `state.now` once per
+        // tick so `update` and the `transition` helpers read it instead of
+        // calling `Local::now()` / `SystemTime::now()`. This keeps the reducer
+        // a pure function of `(State, Msg)` — a replay driver folds the same
+        // log by stamping each recorded entry's `ts` here instead.
+        state.now = chrono::Local::now();
         let (new_state, cmds) = update(state, msg);
         state = new_state;
         for cmd in cmds {

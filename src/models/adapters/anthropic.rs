@@ -62,6 +62,26 @@ fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) 
     }
 }
 
+/// Append a streaming tool-argument fragment, hard-capping the buffer at
+/// `MAX_TOOL_ARG_BYTES`. A crafted stream could otherwise send unbounded
+/// `partial_json` fragments and grow this buffer without limit (the daemon is
+/// long-lived). Past the cap we stop appending at a char boundary; the
+/// now-truncated JSON simply fails to parse and falls back to a raw string —
+/// bounded, not an OOM (#14).
+fn push_tool_arg(buf: &mut String, frag: &str) {
+    let cap = crate::constants::MAX_TOOL_ARG_BYTES;
+    if buf.len() >= cap {
+        return;
+    }
+    if buf.len() + frag.len() <= cap {
+        buf.push_str(frag);
+    } else {
+        let room = cap - buf.len();
+        let end = frag.floor_char_boundary(room);
+        buf.push_str(&frag[..end]);
+    }
+}
+
 /// Map Anthropic's `stop_reason` onto the normalized [`FinishReason`].
 fn map_anthropic_stop_reason(s: &str) -> FinishReason {
     match s {
@@ -754,6 +774,17 @@ impl AnthropicAdapter {
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| ModelError::StreamError(e.to_string()))?;
+            // Bound SSE reassembly: a server that streams bytes but never emits
+            // the `\n\n` event separator would otherwise grow `buf` without
+            // bound. At this point `buf` holds only the un-terminated residue
+            // from the previous drain, so this never trips on legitimately
+            // buffered complete events (#50).
+            if buf.len() > crate::constants::MAX_SSE_BUFFER_BYTES {
+                return Err(ModelError::StreamError(format!(
+                    "SSE stream exceeded {} byte reassembly cap without a complete event",
+                    crate::constants::MAX_SSE_BUFFER_BYTES
+                )));
+            }
             buf.extend_from_slice(&chunk);
 
             for payload in drain_sse_events(&mut buf) {
@@ -888,7 +919,7 @@ impl AnthropicAdapter {
                                     .and_then(|d| d.get("partial_json"))
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
-                                input_buf.push_str(frag);
+                                push_tool_arg(input_buf, frag);
                             },
                             _ => {
                                 // delta type doesn't match block type

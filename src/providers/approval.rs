@@ -131,7 +131,10 @@ impl ApprovalBroker {
     pub fn resolve(&self, call_id: ToolCallId, decision: ApprovalDecision) {
         let entry = self.pending.lock().unwrap().remove(&call_id);
         if let Some(entry) = entry {
-            if decision == ApprovalDecision::ApproveAlways {
+            // An empty key marks a non-allowlistable action (content-bearing
+            // external tools): never persist it, so "approve always" can't be
+            // recorded for them even if the choice somehow arrives (#6, #31).
+            if decision == ApprovalDecision::ApproveAlways && !entry.allowlist_key.is_empty() {
                 self.allowlist.lock().unwrap().insert(entry.allowlist_key);
             }
             let _ = entry.tx.send(decision);
@@ -139,31 +142,42 @@ impl ApprovalBroker {
     }
 }
 
-/// Multiplexer binaries that run arbitrary subcommands — keyed on argv0 + the
-/// first subcommand so approving `npm test` doesn't also clear `npm run <x>`.
-const MULTIPLEXER_BINARIES: &[&str] = &[
-    "npm", "yarn", "pnpm", "bun", "npx", "make", "cargo", "git", "go", "docker", "kubectl",
-    "python", "python3", "node", "deno",
+/// External tools whose risk depends on live runtime context (which window has
+/// focus, what page is loaded, which untrusted server answers), not just their
+/// arguments. A blanket "don't ask again" for these is unsafe — "always type
+/// anything" / "always run any MCP tool" — so they're non-allowlistable: an
+/// empty key, which the gate and modal treat as "no approve-always" (#6, #31).
+const NON_ALLOWLISTABLE_TOOLS: &[&str] = &[
+    "type_text",
+    "press_key",
+    "click",
+    "mouse_move",
+    "scroll",
+    "mcp_proxy",
 ];
 
-/// Compute the session "don't ask again" allowlist key. Per-tool, except
-/// `execute_command`, which keys on argv0 (basename) so approving `ls -la`
-/// clears `ls` but `rm` still prompts. For multiplexer binaries
-/// (npm/cargo/git/…) the first subcommand is included so approving `npm test`
-/// doesn't also clear `npm run <anything>`.
+/// Compute the session "don't ask again" allowlist key.
+///
+/// - Content-bearing external tools ([`NON_ALLOWLISTABLE_TOOLS`]) return an
+///   **empty** key, meaning non-allowlistable: the modal hides the
+///   approve-always option and the broker never persists an entry.
+/// - `execute_command` keys on the **full normalized command** (whitespace
+///   collapsed), so approving `curl https://safe.example` does NOT also clear
+///   `curl https://evil.example` — argv0 keying was too coarse for a tool whose
+///   danger lives entirely in its arguments (#6).
+/// - Everything else keys per-tool.
 pub fn allowlist_key(tool: &str, command: Option<&str>) -> String {
-    if tool == "execute_command"
-        && let Some(cmd) = command
-        && let Some(argv0) = cmd.split_whitespace().next()
-        && !argv0.is_empty()
-    {
-        let base = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
-        if MULTIPLEXER_BINARIES.contains(&base)
-            && let Some(sub) = cmd.split_whitespace().skip(1).find(|t| !t.starts_with('-'))
-        {
-            return format!("execute_command:{} {}", base, sub);
+    if NON_ALLOWLISTABLE_TOOLS.contains(&tool) {
+        return String::new();
+    }
+    if tool == "execute_command" {
+        if let Some(cmd) = command {
+            let normalized = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !normalized.is_empty() {
+                return format!("execute_command:{normalized}");
+            }
         }
-        return format!("execute_command:{}", base);
+        return "execute_command".to_string();
     }
     tool.to_string()
 }
@@ -173,41 +187,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allowlist_key_is_per_tool_with_shell_argv0() {
+    fn allowlist_key_is_per_tool_with_full_command() {
         assert_eq!(allowlist_key("write_file", None), "write_file");
-        // Plain binaries key on argv0 basename.
+        // #6: execute_command keys on the FULL normalized command, so approving
+        // one invocation can't clear a different-argument one.
         assert_eq!(
             allowlist_key("execute_command", Some("ls -la")),
-            "execute_command:ls"
+            "execute_command:ls -la"
         );
         // No command falls back to the bare tool key.
         assert_eq!(allowlist_key("execute_command", None), "execute_command");
     }
 
     #[test]
-    fn allowlist_key_includes_subcommand_for_multiplexers() {
-        // #10: approving `npm test` must not allowlist `npm run <anything>`.
+    fn allowlist_key_distinguishes_argument_variants() {
+        // #6: approving `curl https://safe` must NOT also clear `curl https://evil`.
+        assert_ne!(
+            allowlist_key("execute_command", Some("curl https://safe.example")),
+            allowlist_key("execute_command", Some("curl https://evil.example")),
+        );
+        // Whitespace is normalized so trivial spacing differences still match.
+        assert_eq!(
+            allowlist_key("execute_command", Some("cargo   build")),
+            allowlist_key("execute_command", Some("cargo build")),
+        );
         assert_eq!(
             allowlist_key("execute_command", Some("npm test")),
             "execute_command:npm test"
-        );
-        assert_eq!(
-            allowlist_key("execute_command", Some("npm run build")),
-            "execute_command:npm run"
         );
         assert_ne!(
             allowlist_key("execute_command", Some("npm test")),
             allowlist_key("execute_command", Some("npm run build")),
         );
-        // Flags between argv0 and the subcommand are skipped.
-        assert_eq!(
-            allowlist_key("execute_command", Some("/usr/bin/git status")),
-            "execute_command:git status"
-        );
-        assert_eq!(
-            allowlist_key("execute_command", Some("cargo --quiet build")),
-            "execute_command:cargo build"
-        );
+    }
+
+    #[test]
+    fn content_bearing_tools_are_non_allowlistable() {
+        // #6/#31: a blanket "approve always" for these is unsafe (their risk is
+        // context-dependent), so the key is empty ⇒ non-allowlistable.
+        for tool in [
+            "type_text",
+            "press_key",
+            "click",
+            "mouse_move",
+            "scroll",
+            "mcp_proxy",
+        ] {
+            assert_eq!(
+                allowlist_key(tool, None),
+                "",
+                "{tool} must be non-allowlistable"
+            );
+        }
     }
 
     #[tokio::test]
