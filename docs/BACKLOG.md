@@ -6,49 +6,51 @@ were fixed across the Axis hardening PRs (GitHub PRs #64–#68 — not to be
 confused with findings #64/#68 below); the four partial residuals plus the
 fail-open verdict parse were closed afterward, then **Group 2 (MCP client)**,
 **Group 4 (daemon, persistence & storage)**, **Group 3 (computer-use)**,
-**Group 1 (provider adapters, retry & auth)**, and **Group 5 (MVU core)** were
-completed. This file tracks what's left.
+**Group 1 (provider adapters, retry & auth)**, **Group 5 (MVU core)**, and
+**Group 6 (app shell)** were completed. **All 116 findings are now resolved.**
 
 - **Last updated:** 2026-06-28
-- **Status:** 105 resolved · **11 remaining** · 0 CRITICAL left · 0 HIGH left
+- **Status:** **116 resolved · 0 remaining** · 0 CRITICAL · 0 HIGH · backlog closed
 - **Severity legend:** `HIGH` exploitable / data-loss · `MED` correctness or
   availability · `LOW`/`INFO` hardening, cosmetics, or by-design risk to confirm.
 
-Remaining work is one group (Group 6 — app shell): a single coherent review
-surface (one PR). See the end for the cheapest high-value picks.
+Every finding from the review has been resolved across the hardening groups
+below; no work remains.
 
 ---
 
-## Remaining (11)
+## Resolved (116)
 
-### Group 6 — App shell: CLI, config, subagent, filesystem tools (11 · 11 LOW)
-`app/*`, `commands`, `instructions`, `providers/tool/{subagent,filesystem}`
-
-- [ ] **#75** `LOW` `providers/tool/subagent.rs:436` — depth-3 nesting unreachable (dead `MAX_DEPTH` gate).
-- [ ] **#76** `LOW` `providers/tool/subagent.rs:231` — timeout drops child via `Drop`, not graceful `shutdown()`.
-- [ ] **#78** `LOW` `providers/tool/filesystem.rs:120` — false `truncated` flag when file content contains the marker.
-- [ ] **#79** `LOW` `providers/tool/filesystem.rs:83` — `read_file` advertised "in parallel" but reads sequentially.
-- [ ] **#108** `LOW` `app/instructions.rs:115` — `~/AGENTS.md` loaded despite the "don't search home" comment.
-- [ ] **#109** `LOW` `domain/reducer.rs:2605` + `config.rs` — `AGENTS.md`/`MERMAID.md` content into the system prompt (unsandboxed, by-design).
-- [ ] **#110** `LOW` `commands.rs:1602` — `mermaid update` runs a fetched install script with no checksum/confirm.
-- [ ] **#111** `LOW` `main.rs:25` / `commands.rs:1672` — `load_config().unwrap_or_default()` silently swallows a malformed config.
-- [ ] **#112** `LOW` `app/run.rs:148` — `biased;` select can starve input/signal arms under sustained streaming.
-- [ ] **#113** `LOW` `commands.rs:1286` — `mermaid restore` overwrites the working tree with no confirmation.
-- [ ] **#116** `INFO` `docs/qa.md` — hardcodes a developer-specific path.
-
----
-
-## Suggested order (by risk)
-
-1. **Group 6 — App shell** — the last group: mostly cosmetic, latent, or by-design-to-confirm.
-
-**Cheapest high-value picks:** #111 (silently-swallowed malformed config), #110
-(`mermaid update` runs a fetched script with no checksum/confirm), #113 (`mermaid
-restore` overwrites the working tree with no confirmation).
-
----
-
-## Resolved (105)
+**Group 6 — App shell: CLI, config, subagent, filesystem tools (11 · 10 LOW, 1 INFO):**
+#75 (the `agent` tool's `MAX_DEPTH`/`SUBAGENT_DEPTH` machinery was dead — a
+`tokio::task_local` that doesn't survive the tool-dispatch spawn boundary, and
+`build_child_registry` already omits the `agent` tool so subagents can't nest at
+all; removed the dead gate — the registry exclusion is the real, working guard),
+#76 (a timed-out subagent now shuts its child `EffectRunner` down: the timeout
+moved inside `drive_child` so the single unconditional `shutdown()` runs on every
+exit path, instead of the runner being dropped and leaking its MCP children),
+#78 (`read_file`'s `truncated` flag comes from the bounded read, not a sniff of
+the output for the marker string — a file whose own content contained that text
+used to be falsely flagged), #79 (the `read_file` schema no longer claims "in
+parallel"; the reads are sequential by design), #108 (the instruction-file walk
+checks the `$HOME` boundary *before* searching, so `~/AGENTS.md` is no longer
+loaded; the walk is now injectable so the rule is unit-tested without mutating
+the process env), #109 (a single `AGENTS.md`/`MERMAID.md` is wrapped in a
+`# Project Instructions:` header like the multi-file and memory paths, so it
+reaches the system prompt as clearly-bounded project data rather than unlabeled
+trusted-system text), #110 (`mermaid update` confirms before downloading +
+running the install script — fail-closed in a non-interactive session, `--force`
+bypasses), #111 (a malformed config is no longer silently swallowed — startup +
+user-facing reads warn via `load_config_or_warn`, and the config-mutating
+`persist_*` / `mcp add` / safety-mode paths propagate the error instead of
+clobbering the file with defaults), #112 (the main event loop's `tokio::select!`
+dropped `biased;` so sustained streaming can't starve the input/signal/tick
+arms), #113 (`mermaid restore` confirms before overwriting the working tree —
+fail-closed non-interactive, `--force` bypasses), #116 (the QA harness test root
+is env-overridable via `MERMAID_QA_TEST_ENV` with a generic default — no
+developer-specific hardcoded path). A shared `utils::confirm` gate now backs the
+#110/#113 confirmations and the MCP untrusted-package prompt (#10), replacing the
+duplicated y/N + fail-closed logic.
 
 **Group 5 — MVU core: reducer/render purity, compaction, turn lifecycle (12 · 2 MED, 10 LOW):**
 #45 (the reducer no longer does the synchronous `MERMAID.md`/memory refresh — a

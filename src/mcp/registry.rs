@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use super::client::McpClient;
 use super::transport::StdioTransport;
+use crate::utils::{is_affirmative, should_refuse_noninteractive};
 
 /// A resolved MCP server ready for configuration
 pub struct ResolvedServer {
@@ -317,19 +318,6 @@ async fn try_conventions(client: &reqwest::Client, name: &str) -> Option<String>
     None
 }
 
-/// Whether `s` is `y`/`yes` (case-insensitive). Default is NO — anything else,
-/// including empty input / EOF, is declined.
-fn is_affirmative(s: &str) -> bool {
-    s.eq_ignore_ascii_case("y") || s.eq_ignore_ascii_case("yes")
-}
-
-/// Fail-closed policy (#10): refuse to run an untrusted package when there is
-/// no interactive terminal to confirm at and `--yes` was not passed. Also
-/// defeats `yes | mermaid add <typo>`, since a pipe is not a TTY.
-fn should_refuse_noninteractive(is_tty: bool, assume_yes: bool) -> bool {
-    !is_tty && !assume_yes
-}
-
 /// Confirm (default NO) before fetching+running a package that is NOT in the
 /// trusted built-in registry — the #10 gate. `assume_yes` (`--yes`) is an
 /// explicit opt-in for scripted use; without it a non-interactive session
@@ -587,25 +575,6 @@ mod tests {
                 "foo-mcp".to_string(),
             ]
         );
-    }
-
-    #[test]
-    fn is_affirmative_defaults_to_no() {
-        for yes in ["y", "Y", "yes", "YES", "Yes"] {
-            assert!(is_affirmative(yes), "{yes:?} should be affirmative");
-        }
-        for no in ["", " ", "n", "no", "nope", "x", "yeah"] {
-            assert!(!is_affirmative(no), "{no:?} should not be affirmative");
-        }
-    }
-
-    #[test]
-    fn noninteractive_without_yes_is_refused() {
-        // #10 fail-closed policy: refuse only when there is no TTY AND no --yes.
-        assert!(should_refuse_noninteractive(false, false)); // no tty, no --yes → refuse
-        assert!(!should_refuse_noninteractive(true, false)); // tty → prompt
-        assert!(!should_refuse_noninteractive(false, true)); // --yes → allow
-        assert!(!should_refuse_noninteractive(true, true));
     }
 
     #[test]

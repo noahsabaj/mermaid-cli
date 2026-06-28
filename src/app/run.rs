@@ -149,20 +149,23 @@ pub async fn run_interactive_with(
             Some(queued)
         } else {
             let selected = tokio::select! {
-                biased;
-                // 1. Effect results first. Streaming chunks are hot; we
-                //    want render latency low when the model is producing
-                //    tokens.
+                // Fair (unbiased) polling. With `biased;`, the hot `msg_rx`
+                // arm would always win under sustained streaming and starve
+                // terminal input + OS signals (#112). Fair selection still
+                // drains streaming promptly — it's almost always ready — while
+                // guaranteeing the input/signal/tick arms get serviced too.
+                //
+                // Effect results (streaming chunks, tool output, …).
                 m = msg_rx.recv() => Sel::Msg(m),
-                // 2. Crossterm events. Handled below, outside the select!,
-                //    so coalescing can re-borrow `events`.
+                // Crossterm events. Handled below, outside the select!, so
+                // coalescing can re-borrow `events`.
                 e = events.next() => Sel::Term(e),
-                // 3. OS lifecycle signals. A typed Ctrl+C in raw mode is
-                //    handled by the crossterm branch above; this covers
-                //    SIGINT/SIGTERM/SIGHUP delivered externally.
+                // OS lifecycle signals. A typed Ctrl+C in raw mode is handled
+                // by the crossterm branch above; this covers SIGINT/SIGTERM/
+                // SIGHUP delivered externally.
                 s = lifecycle.next_msg() => Sel::Msg(s),
-                // 4. Tick — drives elapsed-time displays + self-dismissing
-                //    status lines without busy-waiting.
+                // Tick — drives elapsed-time displays + self-dismissing status
+                // lines without busy-waiting.
                 _ = tick.tick() => Sel::Msg(Some(Msg::Tick)),
             };
 

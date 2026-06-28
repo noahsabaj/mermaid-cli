@@ -1032,7 +1032,7 @@ impl RuntimeService {
     }
 
     pub fn set_safety_mode(&self, mode: &str) -> Result<crate::app::SafetyConfig> {
-        let mut config = crate::app::load_config().unwrap_or_default();
+        let mut config = crate::app::load_config()?;
         config.safety.mode = super::SafetyMode::parse(mode)
             .ok_or_else(|| anyhow::anyhow!("unknown safety mode: {}", mode))?;
         crate::app::save_config(&config, None)?;

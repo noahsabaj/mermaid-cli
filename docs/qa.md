@@ -16,7 +16,7 @@ python3 scripts/qa_mermaid.py
 
 Defaults:
 
-- Test root: `/home/nsabaj/Code/test-env`
+- Test root: `~/.cache/mermaid-qa/test-env` (override with `MERMAID_QA_TEST_ENV` or `--test-env`)
 - Tier: `fast` (deterministic checks, no model call)
 - Real-model tier: `minimax-m2.7:cloud`
 - Binary: `target/debug/mermaid`
@@ -28,8 +28,10 @@ manual TUI interaction.
 
 ## What It Wipes
 
-The harness owns `/home/nsabaj/Code/test-env`. On each run it removes existing
-contents there, except prior `.qa-runs` logs unless `--wipe-runs` is passed.
+The harness owns the test root (`~/.cache/mermaid-qa/test-env` by default;
+override via `MERMAID_QA_TEST_ENV` or `--test-env`). On each run it removes
+existing contents there, except prior `.qa-runs` logs unless `--wipe-runs` is
+passed.
 It refuses dangerous reset targets such as `/`, `$HOME`, the Mermaid repo, and
 unmarked custom paths.
 

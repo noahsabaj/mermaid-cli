@@ -18,7 +18,7 @@ use super::registry;
 /// then saves to config.toml.
 pub async fn add_server(name: &str, assume_yes: bool) -> Result<()> {
     // Check if already configured
-    let mut config = load_config().unwrap_or_default();
+    let mut config = load_config()?;
     if config.mcp_servers.contains_key(name) {
         print!("'{}' is already configured. Overwrite? [y/N]: ", name);
         io::stdout().flush()?;
@@ -134,7 +134,7 @@ pub async fn add_server(name: &str, assume_yes: bool) -> Result<()> {
 
 /// Remove an MCP server from the config.
 pub async fn remove_server(name: &str) -> Result<()> {
-    let mut config = load_config().unwrap_or_default();
+    let mut config = load_config()?;
 
     if config.mcp_servers.remove(name).is_some() {
         save_config(&config, None)?;

@@ -24,7 +24,12 @@ from typing import Callable, Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TEST_ENV = Path("/home/nsabaj/Code/test-env").resolve()
+# Generic, env-overridable default — no developer-specific hardcoded path (#116).
+# Set MERMAID_QA_TEST_ENV to use a custom location (which must contain a
+# QA_MARKER file; see the marker check in `prepare_test_env`).
+DEFAULT_TEST_ENV = Path(
+    os.environ.get("MERMAID_QA_TEST_ENV") or Path.home() / ".cache" / "mermaid-qa" / "test-env"
+).resolve()
 DEFAULT_MODEL = "minimax-m2.7:cloud"
 QA_MARKER = ".mermaid-qa-root"
 IGNORED_PARTS = {

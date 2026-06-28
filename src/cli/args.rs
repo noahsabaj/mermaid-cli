@@ -189,6 +189,9 @@ pub enum Commands {
     Restore {
         /// Checkpoint id
         id: String,
+        /// Skip the confirmation prompt (required for non-interactive use)
+        #[arg(short, long)]
+        force: bool,
     },
     /// Manage Mermaid plugin bundles
     Plugin {

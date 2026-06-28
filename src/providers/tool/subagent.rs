@@ -12,9 +12,8 @@
 //!
 //! - `SubagentSpawner` owns the shared `ProviderFactory` + a
 //!   `Semaphore(max_inflight)` that backpressures parallel fan-out.
-//!   Depth tracking uses `tokio::task_local!` so nested subagents
-//!   (a subagent calling `agent`) can see their own depth without
-//!   threading state through `ExecContext`.
+//!   Subagents can't themselves spawn subagents — `build_child_registry`
+//!   omits the `agent` tool — so there's no recursion to depth-cap.
 //! - `SubagentTool::execute` builds a fresh child `State`, a
 //!   filtered `ToolRegistry` (no self-recursion, no GUI tools), and
 //!   a child `EffectRunner` + msg channel. It drives the child
@@ -28,7 +27,6 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{Semaphore, mpsc};
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
@@ -42,10 +40,6 @@ use crate::providers::ctx::{ExecContext, ProgressEvent, SubagentPhase};
 use super::ToolExecutor;
 use super::ToolRegistry;
 
-/// Maximum nesting depth. `agent` calling `agent` calling `agent`
-/// works up to this cap; the fourth-level spawn errors cleanly.
-pub const MAX_DEPTH: usize = 3;
-
 /// Maximum subagents running simultaneously across the whole process.
 /// Covers the pathological "parent emits 30 agent calls in one turn"
 /// case. Hit this cap → later calls block on the semaphore until
@@ -55,14 +49,6 @@ pub const MAX_INFLIGHT: usize = 10;
 /// Hard ceiling on a subagent's wall-clock runtime. Above this the
 /// subagent is cancelled and reports `Error`.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 20 * 60;
-
-tokio::task_local! {
-    /// Current subagent depth. Unset (=0) at the root; incremented
-    /// once per `SubagentTool::execute` nesting. Read via
-    /// `SUBAGENT_DEPTH.try_with(|d| *d).unwrap_or(0)` (so unset ==
-    /// root).
-    static SUBAGENT_DEPTH: usize;
-}
 
 /// Shared spawner. One per process; held by `SubagentTool`.
 pub struct SubagentSpawner {
@@ -104,10 +90,9 @@ impl ToolExecutor for SubagentTool {
                  independent sub-task. Useful for parallel fan-out (emit multiple `agent` \
                  calls in the same turn to run them concurrently) or for scoping a noisy \
                  sub-task (the child's tool output doesn't clutter the parent's turn). \
-                 Depth-capped at {max_depth}; breadth-capped at {max_breadth} concurrent. \
-                 Subagents don't get GUI (screenshot/click/…) access because coordinate \
-                 metadata can't be shared cleanly.",
-                max_depth = MAX_DEPTH,
+                 Breadth-capped at {max_breadth} concurrent; subagents can't themselves \
+                 spawn subagents. Subagents don't get GUI (screenshot/click/…) access \
+                 because coordinate metadata can't be shared cleanly.",
                 max_breadth = MAX_INFLIGHT,
             ),
             input_schema: serde_json::json!({
@@ -129,12 +114,6 @@ impl ToolExecutor for SubagentTool {
 
     async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
-
-        // Depth gate: if we're already at the cap, return immediately.
-        let current_depth = SUBAGENT_DEPTH.try_with(|d| *d).unwrap_or(0);
-        if current_depth >= MAX_DEPTH {
-            return ToolOutcome::error(format!("subagent depth limit {} reached", MAX_DEPTH), 0.0);
-        }
 
         // Parse args.
         let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
@@ -215,9 +194,10 @@ impl ToolExecutor for SubagentTool {
         let child_runner =
             EffectRunner::new_child(child_tx, cwd, self.spawner.providers.clone(), child_tools);
 
-        // Depth-scoped drive: nested `agent` calls inside this child
-        // see `current_depth + 1` via `SUBAGENT_DEPTH.try_with`.
-        let drive = drive_child(
+        // Drive the child reducer loop to completion. The wall-clock
+        // timeout lives inside `drive_child` so the child runner is always
+        // shut down — even on timeout — rather than dropped mid-flight (#76).
+        let result = drive_child(
             child_state,
             child_runner,
             child_rx,
@@ -225,22 +205,16 @@ impl ToolExecutor for SubagentTool {
             prompt,
             description.clone(),
             child_token,
-        );
-        let depth_scoped = SUBAGENT_DEPTH.scope(current_depth + 1, drive);
-
-        let result = timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS), depth_scoped).await;
+        )
+        .await;
         drop(permit);
 
         let elapsed = started.elapsed().as_secs_f64();
         match result {
-            Ok(Ok(summary)) => ToolOutcome::success(summary, "subagent completed", elapsed)
+            Ok(summary) => ToolOutcome::success(summary, "subagent completed", elapsed)
                 .with_metadata(subagent_metadata(child_model_id)),
-            Ok(Err(DriveError::Cancelled)) => ToolOutcome::cancelled(),
-            Ok(Err(DriveError::Errored(e))) => {
-                ToolOutcome::error(format!("subagent ({}): {}", description, e), elapsed)
-                    .with_metadata(subagent_metadata(child_model_id))
-            },
-            Err(_) => ToolOutcome::error(
+            Err(DriveError::Cancelled) => ToolOutcome::cancelled(),
+            Err(DriveError::TimedOut) => ToolOutcome::error(
                 format!(
                     "subagent ({}) exceeded {}s timeout",
                     description, DEFAULT_TIMEOUT_SECS
@@ -248,6 +222,10 @@ impl ToolExecutor for SubagentTool {
                 elapsed,
             )
             .with_metadata(subagent_metadata(child_model_id)),
+            Err(DriveError::Errored(e)) => {
+                ToolOutcome::error(format!("subagent ({}): {}", description, e), elapsed)
+                    .with_metadata(subagent_metadata(child_model_id))
+            },
         }
     }
 }
@@ -261,6 +239,7 @@ fn subagent_metadata(model_id: String) -> ToolRunMetadata {
 
 enum DriveError {
     Cancelled,
+    TimedOut,
     Errored(String),
 }
 
@@ -300,11 +279,19 @@ async fn drive_child(
         runner.dispatch(cmd);
     }
 
-    // Loop until the child reducer reaches Idle with no queued work.
+    // Drive the child reducer to Idle, bounded by a wall-clock deadline.
+    // The deadline is a `select!` arm (not a `timeout()` wrapper) so the
+    // single `runner.shutdown()` below always runs — on normal exit,
+    // cancel, OR timeout — instead of the runner being dropped mid-flight
+    // and leaking its MCP children (#76).
+    let deadline = tokio::time::sleep(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+    tokio::pin!(deadline);
+
+    let mut outcome: Result<(), DriveError> = Ok(());
     loop {
         if token.is_cancelled() {
-            runner.shutdown().await;
-            return Err(DriveError::Cancelled);
+            outcome = Err(DriveError::Cancelled);
+            break;
         }
         if matches!(state.turn, TurnState::Idle) && state.ui.queued_messages.is_empty() {
             break;
@@ -313,15 +300,16 @@ async fn drive_child(
         let msg = tokio::select! {
             biased;
             _ = token.cancelled() => {
-                runner.shutdown().await;
-                return Err(DriveError::Cancelled);
+                outcome = Err(DriveError::Cancelled);
+                break;
+            },
+            _ = &mut deadline => {
+                outcome = Err(DriveError::TimedOut);
+                break;
             },
             recv = msg_rx.recv() => match recv {
                 Some(m) => m,
-                None => {
-                    // Channel closed — child runner shut down.
-                    break;
-                },
+                None => break, // channel closed — child runner shut down
             },
         };
 
@@ -340,7 +328,11 @@ async fn drive_child(
         }
     }
 
+    // Always reap the child runner (cancel scopes, gracefully terminate MCP
+    // server children) regardless of how the loop exited.
     runner.shutdown().await;
+
+    outcome?;
 
     // Extract last assistant message as the result.
     let summary = state
@@ -423,8 +415,8 @@ fn lookup_tool_name(state: &State, call_id: crate::domain::ToolCallId) -> Option
 /// Construct the child `ToolRegistry` — a subset of what the parent
 /// offers. Explicitly excludes:
 ///
-///   - `agent` itself — depth cap would catch it but excluding up
-///     front saves a wasted call.
+///   - `agent` itself — subagents don't spawn subagents. This
+///     exclusion is the guard (there is no depth counter).
 ///   - All seven GUI / computer-use tools — the parent's
 ///     `ComputerUseDriver` owns the screenshot coord registry; a
 ///     subagent clicking would corrupt the parent's latest-capture
@@ -451,7 +443,8 @@ fn build_child_registry(providers: Arc<ProviderFactory>) -> Arc<ToolRegistry> {
         r.register(Arc::new(WebFetchTool::new(key)));
     }
     // NO computer_use::*  — GUI tools are parent-only.
-    // NO subagent::SubagentTool — depth cap would catch it.
+    // NO subagent::SubagentTool — subagents can't spawn subagents; this
+    // exclusion IS the guard (there is no depth counter).
     // Silence unused-import if the above imports don't all resolve.
     let _ = computer_use::probe;
     let _ = providers;
@@ -479,28 +472,6 @@ mod tests {
     use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use std::path::PathBuf;
-
-    #[tokio::test]
-    async fn depth_cap_rejects_when_at_max() {
-        let spawner = Arc::new(SubagentSpawner::new(Arc::new(ProviderFactory::new(
-            crate::app::Config::default(),
-        ))));
-        let tool = SubagentTool::new(spawner);
-        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
-
-        let outcome = SUBAGENT_DEPTH
-            .scope(
-                MAX_DEPTH,
-                tool.execute(serde_json::json!({"prompt": "hi"}), ctx),
-            )
-            .await;
-        let error = outcome.error_message().expect("expected error");
-        assert!(
-            error.contains("depth limit"),
-            "expected depth-limit error, got: {}",
-            error
-        );
-    }
 
     #[tokio::test]
     async fn empty_prompt_is_rejected() {

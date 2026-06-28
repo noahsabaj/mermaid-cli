@@ -356,6 +356,21 @@ pub fn load_config() -> Result<Config> {
     }
 }
 
+/// Like [`load_config`] but never fails: if a config file exists yet is
+/// malformed, warn on stderr and fall back to defaults — instead of silently
+/// swallowing the error (#111). An *absent* file is not an error (`load_config`
+/// returns defaults for it), so the warning fires only for a genuine
+/// read/parse failure the user should know about.
+pub fn load_config_or_warn() -> Config {
+    match load_config() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("mermaid: {e:#}");
+            Config::default()
+        },
+    }
+}
+
 /// Get the path to the single config file
 pub fn get_config_path() -> Result<PathBuf> {
     Ok(get_config_dir()?.join("config.toml"))
@@ -408,9 +423,11 @@ pub fn init_config() -> Result<()> {
     Ok(())
 }
 
-/// Persist the last used model to config file
+/// Persist the last used model to config file. On a malformed config it
+/// propagates the error (the caller drops it) rather than clobbering the file
+/// with defaults — the three `persist_*` helpers all do this (#111).
 pub fn persist_last_model(model: &str) -> Result<()> {
-    let mut config = load_config().unwrap_or_default();
+    let mut config = load_config()?;
     config.last_used_model = Some(model.to_string());
     save_config(&config, None)
 }
@@ -419,7 +436,7 @@ pub fn persist_last_model(model: &str) -> Result<()> {
 /// `persist_last_model` — used by the `/reasoning` slash command and the
 /// Alt+T cycle handler so the choice survives across sessions.
 pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
-    let mut config = load_config().unwrap_or_default();
+    let mut config = load_config()?;
     config.default_model.reasoning = level;
     save_config(&config, None)
 }
@@ -430,7 +447,7 @@ pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
 /// the choice sticks per-model rather than bleeding into other models on
 /// next session start.
 pub fn persist_reasoning_for_model(model_id: &str, level: ReasoningLevel) -> Result<()> {
-    let mut config = load_config().unwrap_or_default();
+    let mut config = load_config()?;
     config
         .reasoning_per_model
         .insert(model_id.to_string(), level);
