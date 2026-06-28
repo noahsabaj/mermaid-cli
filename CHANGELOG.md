@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`mermaid run ""` now errors instead of silently doing nothing.** An empty or
   whitespace-only prompt is rejected at parse time (`prompt cannot be empty`,
   exit 2) rather than producing no output with a success exit code.
+- **`mermaidd` no longer starts (or clobbers) the daemon when probed.** It
+  ignored all arguments and went straight to binding the control socket —
+  removing any existing one first — so `mermaidd --version`/`--help`/a typo would
+  boot a foreground daemon, and doing so while the managed daemon was running
+  would unlink its socket and orphan it. `mermaidd` now answers
+  `--version`/`--help`, rejects unknown arguments (exit 2), and refuses to start
+  when a live daemon already holds the socket (only a stale socket is removed).
 - **Provider-adapter correctness (review axis 4).**
   - Truncation (`max_tokens`) and content-filter / safety refusals are no longer
     silently treated as a clean finish: a `⚠ truncated` note now appears, and a
