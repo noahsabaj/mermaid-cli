@@ -277,6 +277,11 @@ pub enum Msg {
         message_index: usize,
         image_index: usize,
     },
+    /// Copy the current chat text selection to the system clipboard. The main
+    /// loop reads the selected text from the render layer (`rstate.chat`) and
+    /// emits this, so the side effect flows through `update()` — and is recorded
+    /// for replay — instead of being dispatched out-of-band (#18).
+    CopySelection(String),
 }
 
 /// Bare key event — deliberately smaller than crossterm's `KeyEvent`
@@ -481,6 +486,7 @@ impl Msg {
             Msg::MouseScroll { .. } => MsgKind::MouseScroll,
             Msg::OpenImageAt { .. } => MsgKind::OpenImageAt,
             Msg::TransientStatus { .. } => MsgKind::TransientStatus,
+            Msg::CopySelection(_) => MsgKind::CopySelection,
         }
     }
 }
@@ -525,6 +531,7 @@ pub enum MsgKind {
     MouseScroll,
     OpenImageAt,
     TransientStatus,
+    CopySelection,
 }
 
 /// Helper for `app::event_source` — pass through the MCP config that

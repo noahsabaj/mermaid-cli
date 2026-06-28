@@ -292,6 +292,36 @@ fn slice_by_cells(s: &str, c0: usize, c1: usize) -> &str {
     &s[start..end]
 }
 
+/// Pad `s` on the right with spaces until it spans `cells` display columns,
+/// measured with `UnicodeWidthStr::width` (not chars/bytes) so a CJK/emoji row's
+/// background bar fills to the true visual edge instead of falling short (#101).
+/// Never truncates — an already-too-wide `s` is returned unchanged.
+fn pad_to_cells(s: &str, cells: usize) -> String {
+    let w = s.width();
+    if w >= cells {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + (cells - w));
+    out.push_str(s);
+    out.push_str(&" ".repeat(cells - w));
+    out
+}
+
+/// First-line spacing for a user message: the run of spaces before the
+/// right-aligned timestamp. All inputs are display-cell widths so CJK/emoji
+/// align correctly (#104). Returns `min_gap` plus whatever slack remains to
+/// push the timestamp to `content_width`'s right edge.
+fn user_timestamp_padding(
+    role_prefix_width: usize,
+    text_width: usize,
+    timestamp_width: usize,
+    min_gap: usize,
+    content_width: usize,
+) -> usize {
+    let total_used = role_prefix_width + text_width + min_gap + timestamp_width;
+    min_gap + content_width.saturating_sub(total_used)
+}
+
 /// The plain text of a rendered line (spans concatenated, styles dropped).
 fn line_plain_text(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -532,7 +562,10 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             } else {
                 // For User messages: format timestamp and display on right edge
                 let formatted_timestamp = format_relative_timestamp(msg.timestamp);
-                let timestamp_len = formatted_timestamp.len();
+                // Display cells, not bytes — a CJK/emoji timestamp (or message)
+                // would otherwise mis-reserve space and push the right-aligned
+                // timestamp off its column (#104).
+                let timestamp_width = formatted_timestamp.width();
                 let min_gap = 3; // minimum spaces between text and timestamp
 
                 // Content is clean — timestamps are injected at API call time only
@@ -540,8 +573,8 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
                 // Reserve space on the first line for role prefix + gap + timestamp
                 // so text wraps early enough to not overlap the timestamp
-                let role_prefix_width = role_prefix.len() + 1; // "You " = prefix + space
-                let first_line_reserved = role_prefix_width + min_gap + timestamp_len;
+                let role_prefix_width = role_prefix.width() + 1; // "You " = prefix + space
+                let first_line_reserved = role_prefix_width + min_gap + timestamp_width;
 
                 // Manually wrap the user message with hanging indent (2 spaces)
                 let wrapped = wrap_text_with_indent(
@@ -555,7 +588,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     if line_idx == 0 {
                         // First line: add role prefix and timestamp on right
                         let text_content = wrapped_line.trim_start(); // Remove the indent we added
-                        let text_len = text_content.len();
+                        let text_width = text_content.width();
 
                         let mut spans = vec![
                             Span::styled(
@@ -567,10 +600,14 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
                         // Always add at least min_gap spaces, plus any extra from word-boundary slack.
                         // Align the timestamp to the content right edge (before the scrollbar gutter).
-                        let used_width = role_prefix_width + text_len;
-                        let total_used = used_width + min_gap + timestamp_len;
-                        let extra_padding = (content_width as usize).saturating_sub(total_used);
-                        spans.push(Span::raw(" ".repeat(min_gap + extra_padding)));
+                        let pad = user_timestamp_padding(
+                            role_prefix_width,
+                            text_width,
+                            timestamp_width,
+                            min_gap,
+                            content_width as usize,
+                        );
+                        spans.push(Span::raw(" ".repeat(pad)));
                         spans.push(Span::styled(
                             formatted_timestamp.clone(),
                             Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)),
@@ -948,8 +985,7 @@ fn render_actions(
                             match parse_diff_line(&diff_line) {
                                 DiffLineKind::Removed => {
                                     let text = format!("    {}", diff_line);
-                                    let padded =
-                                        format!("{:<width$}", text, width = viewport_width);
+                                    let padded = pad_to_cells(&text, viewport_width);
                                     lines.push(Line::from(vec![Span::styled(
                                         padded,
                                         Style::new()
@@ -959,8 +995,7 @@ fn render_actions(
                                 },
                                 DiffLineKind::Added => {
                                     let text = format!("    {}", diff_line);
-                                    let padded =
-                                        format!("{:<width$}", text, width = viewport_width);
+                                    let padded = pad_to_cells(&text, viewport_width);
                                     lines.push(Line::from(vec![Span::styled(
                                         padded,
                                         Style::new()
@@ -1258,6 +1293,28 @@ mod tests {
         assert_eq!(slice_by_cells("hello world", 0, 5), "hello");
         assert_eq!(slice_by_cells("hello world", 6, 11), "world");
         assert_eq!(slice_by_cells("你好world", 2, 7), "好wor");
+    }
+
+    #[test]
+    fn pad_to_cells_fills_to_display_width() {
+        assert_eq!(pad_to_cells("ab", 5), "ab   ");
+        // "你好" = 4 display cells; pad to 6 → exactly 2 trailing spaces (#101).
+        assert_eq!(pad_to_cells("你好", 6), "你好  ");
+        // Already wide enough → unchanged (never truncates).
+        assert_eq!(pad_to_cells("你好", 3), "你好");
+        assert_eq!(pad_to_cells("", 0), "");
+    }
+
+    #[test]
+    fn user_timestamp_padding_aligns_on_display_cells() {
+        // ASCII: prefix(4) + text(5) + gap(3) + ts(8) = 20 used; content 40.
+        assert_eq!(user_timestamp_padding(4, 5, 8, 3, 40), 23);
+        // A wider (CJK) message shrinks the gap but the timestamp still lands at
+        // the content right edge: role + text + pad + ts == content_width (#104).
+        let pad = user_timestamp_padding(4, 10, 8, 3, 40);
+        assert_eq!(4 + 10 + pad + 8, 40);
+        // Overflow (text wider than the line) clamps to min_gap, never underflows.
+        assert_eq!(user_timestamp_padding(4, 100, 8, 3, 40), 3);
     }
 
     #[test]

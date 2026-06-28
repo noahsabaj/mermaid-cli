@@ -90,15 +90,43 @@ fn truncate(s: &str, max: usize) -> String {
 /// `2026-04-21T14:30:12-04:00` → `2026-04-21 14:30`. If parsing fails
 /// for any reason, returns the original string.
 fn short_timestamp(rfc3339: &str) -> String {
-    // Extract up to 16 chars of the RFC3339 date/time portion.
-    // `YYYY-MM-DDTHH:MM` → swap the 'T' for a space.
+    // Extract the `YYYY-MM-DDTHH:MM` portion (16 ASCII bytes) and swap the
+    // 'T' for a space. Clamp to a char boundary so a malformed value with a
+    // multi-byte sequence straddling byte 16 can't panic the slice (#102).
     if rfc3339.len() >= 16 {
-        let mut s = rfc3339[..16].to_string();
+        let cut = rfc3339.floor_char_boundary(16);
+        let mut s = rfc3339[..cut].to_string();
         if let Some(t_pos) = s.find('T') {
             s.replace_range(t_pos..t_pos + 1, " ");
         }
         s
     } else {
         rfc3339.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_timestamp_formats_rfc3339() {
+        assert_eq!(
+            short_timestamp("2026-04-21T14:30:12-04:00"),
+            "2026-04-21 14:30"
+        );
+    }
+
+    #[test]
+    fn short_timestamp_passes_through_short_input() {
+        assert_eq!(short_timestamp("2026"), "2026");
+        assert_eq!(short_timestamp(""), "");
+    }
+
+    #[test]
+    fn short_timestamp_does_not_panic_on_multibyte_boundary() {
+        // "2026-04-21T14:3" is 15 bytes; then "好" (3 bytes) straddles byte 16.
+        // floor_char_boundary(16) backs up to byte 15 instead of panicking (#102).
+        assert_eq!(short_timestamp("2026-04-21T14:3好0:12"), "2026-04-21 14:3");
     }
 }

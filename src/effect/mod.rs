@@ -31,6 +31,7 @@
 //! through `Cmd::CancelScope(TurnId)` → the scope's
 //! `CancellationToken`.
 
+mod config_watch;
 mod middleware;
 mod turn_scope;
 
@@ -41,7 +42,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::app::Config;
+use crate::app::{Config, MemoryConfig};
 use crate::domain::{
     Cmd, CompactionPolicy, CompactionRequest, CompactionResult, CompactionTrigger, Msg, TurnId,
 };
@@ -108,6 +109,10 @@ pub struct EffectRunner {
     /// `with_interactive_approvals`); headless + child runners leave it `None`,
     /// so the gate falls back to the out-of-band DB-approval flow.
     approval: Option<crate::providers::ApprovalBroker>,
+    /// Abort handle for the background config watcher (#45). It's a perpetual
+    /// loop living in `detached`, so `shutdown` aborts it explicitly before
+    /// draining — otherwise the drain would block on it until the timeout.
+    config_watch: Option<tokio::task::AbortHandle>,
 }
 
 impl EffectRunner {
@@ -123,6 +128,7 @@ impl EffectRunner {
             task_id: None,
             terminal_title_enabled: true,
             approval: None,
+            config_watch: None,
         }
     }
 
@@ -132,6 +138,20 @@ impl EffectRunner {
     pub fn with_interactive_approvals(mut self) -> Self {
         self.approval = Some(crate::providers::ApprovalBroker::new(self.msg_tx.clone()));
         self
+    }
+
+    /// Start the background config watcher (#45): it polls `MERMAID.md` + memory
+    /// and emits `Msg::InstructionsChanged`/`MemoryChanged` on change, so the
+    /// reducer reads them as injected data instead of refreshing inline. Call
+    /// once at startup. Live-loop only — a replay driver feeds the recorded
+    /// Changed Msgs rather than polling.
+    pub fn spawn_config_watcher(&mut self, cwd: PathBuf, memory: MemoryConfig) {
+        let handle = self.detached.spawn(config_watch::config_watcher(
+            self.msg_tx.clone(),
+            cwd,
+            memory,
+        ));
+        self.config_watch = Some(handle);
     }
 
     /// Attach a durable runtime task id so tool runs, approvals,
@@ -1111,6 +1131,12 @@ impl EffectRunner {
         for (id, scope) in self.scopes.iter() {
             tracing::debug!(turn = %id, "shutdown: cancelling scope");
             scope.cancel();
+        }
+
+        // The config watcher (#45) is a perpetual loop in `detached`; abort it
+        // so the drain below doesn't block on it until the bounded timeout.
+        if let Some(handle) = self.config_watch.take() {
+            handle.abort();
         }
 
         // Drain with a bounded timeout.

@@ -44,6 +44,11 @@ pub struct RenderCache {
     pub chat: ChatState,
     pub markdown_cache: FxHashMap<u64, Vec<ratatui::text::Line<'static>>>,
     pub theme: theme::Theme,
+    /// Host + user for the status bar's `user@host:cwd` line, read once at
+    /// startup so `StatusWidget::render` doesn't hit the environment on every
+    /// frame (#55). Process-constant, so caching here is exact.
+    pub hostname: String,
+    pub username: String,
     /// F13: last `state.ui.mouse_scroll_accum` value we applied to
     /// `chat.scroll_up/down`. Diffing lets the reducer stay pure —
     /// it just publishes a counter; render owns the chat-state side.
@@ -56,6 +61,12 @@ impl Default for RenderCache {
             chat: ChatState::new(),
             markdown_cache: FxHashMap::default(),
             theme: theme::Theme::dark(),
+            hostname: std::env::var("HOSTNAME")
+                .or_else(|_| std::env::var("HOST"))
+                .unwrap_or_else(|_| "localhost".to_string()),
+            username: std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "user".to_string()),
             last_mouse_scroll_accum: 0,
         }
     }
@@ -395,6 +406,8 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let status_widget = StatusWidget {
             theme: &rstate.theme,
             working_dir: &cwd,
+            hostname: &rstate.hostname,
+            username: &rstate.username,
             context_usage: state.session.context_usage.as_ref(),
             last_usage: state.session.last_token_usage,
             session_usage: state.session.cumulative_token_usage,

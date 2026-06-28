@@ -243,10 +243,15 @@ pub fn prepare_compaction(
     }
 
     let archived_messages = messages[..split].to_vec();
-    let preserved_messages = messages[split..].to_vec();
+    let mut preserved_messages = messages[split..].to_vec();
     if archived_messages.is_empty() || preserved_messages.is_empty() {
         return Err(CompactionSkip::NothingToCompact);
     }
+    // The tail is forwarded verbatim into the next request; scrub any
+    // pre-existing orphan `tool_use` (e.g. a turn cancelled after the model
+    // emitted tool calls but before any result committed) so the unpaired call
+    // can't 400 the provider (#71).
+    drop_orphan_tool_calls(&mut preserved_messages);
 
     let previous_summary = archived_messages
         .iter()
@@ -461,6 +466,30 @@ fn summary_prompt(prepared: &PreparedCompaction, focus: Option<&str>) -> String 
     )
 }
 
+/// Strip assistant `tool_calls` that have no matching `tool_result` later in
+/// `messages` (#71). Compaction preserves a recent tail verbatim; if that tail
+/// inherits a pre-existing orphan — e.g. a turn cancelled after the model
+/// emitted tool calls but before any result committed — forwarding the unpaired
+/// `tool_use` makes providers (Anthropic) reject the next request with a 400.
+/// Drop the orphaned calls (keeping the assistant's text) rather than fabricate
+/// results. A call with no `id` can't be paired, so it's treated as orphaned.
+fn drop_orphan_tool_calls(messages: &mut [ChatMessage]) {
+    let answered: std::collections::HashSet<String> = messages
+        .iter()
+        .filter(|m| m.role == MessageRole::Tool)
+        .filter_map(|m| m.tool_call_id.clone())
+        .collect();
+    for m in messages.iter_mut() {
+        let Some(calls) = m.tool_calls.as_mut() else {
+            continue;
+        };
+        calls.retain(|c| c.id.as_deref().is_some_and(|id| answered.contains(id)));
+        if calls.is_empty() {
+            m.tool_calls = None;
+        }
+    }
+}
+
 fn tail_start_index(messages: &[ChatMessage], policy: CompactionPolicy) -> Option<usize> {
     let mut user_turns = 0usize;
     let mut start = None;
@@ -641,6 +670,70 @@ mod tests {
         assert_eq!(prepared.archived_messages.len(), 2);
         assert_eq!(prepared.preserved_messages.len(), 3);
         assert_eq!(prepared.preserved_messages[0].content, "two");
+    }
+
+    fn tool_call(id: &str, name: &str) -> crate::models::tool_call::ToolCall {
+        crate::models::tool_call::ToolCall {
+            id: Some(id.to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: name.to_string(),
+                arguments: serde_json::json!({}),
+            },
+        }
+    }
+
+    #[test]
+    fn prepare_strips_orphan_tool_call_from_preserved_tail() {
+        // A tail that inherits an assistant(tool_calls) with no matching result
+        // (e.g. a cancelled tool turn) must not forward the unpaired tool_use (#71).
+        let mut orphan = ChatMessage::assistant("calling a tool");
+        orphan.tool_calls = Some(vec![tool_call("call_1", "do_thing")]);
+        let messages = vec![
+            ChatMessage::user("one"),
+            ChatMessage::assistant("one answer"),
+            ChatMessage::user("two"),
+            orphan,
+            ChatMessage::user("three"),
+        ];
+        let request = CompactionRequest::manual(request_with(messages), None);
+        let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
+        let has_orphan = prepared
+            .preserved_messages
+            .iter()
+            .any(|m| m.tool_calls.as_ref().is_some_and(|c| !c.is_empty()));
+        assert!(
+            !has_orphan,
+            "orphan tool_use must be stripped from the tail"
+        );
+        // The message itself (its text) is preserved — only the calls are dropped.
+        assert!(
+            prepared
+                .preserved_messages
+                .iter()
+                .any(|m| m.content == "calling a tool")
+        );
+    }
+
+    #[test]
+    fn prepare_keeps_paired_tool_call_in_tail() {
+        // The mirror case: a tool_call whose result is also in the tail survives.
+        let mut asst = ChatMessage::assistant("calling");
+        asst.tool_calls = Some(vec![tool_call("call_1", "do_thing")]);
+        let messages = vec![
+            ChatMessage::user("one"),
+            ChatMessage::assistant("one answer"),
+            ChatMessage::user("two"),
+            asst,
+            ChatMessage::tool("call_1", "do_thing", "ok"),
+            ChatMessage::user("three"),
+        ];
+        let request = CompactionRequest::manual(request_with(messages), None);
+        let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
+        let kept = prepared
+            .preserved_messages
+            .iter()
+            .any(|m| m.tool_calls.as_ref().is_some_and(|c| !c.is_empty()));
+        assert!(kept, "a tool_call paired with its result must be preserved");
     }
 
     #[test]
