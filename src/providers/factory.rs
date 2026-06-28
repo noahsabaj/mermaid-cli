@@ -44,12 +44,19 @@ use super::model::{
     AnthropicProvider, GeminiProvider, ModelProvider, OllamaProvider, OpenAICompatProvider,
 };
 
+/// A lazily-built, shared provider. `OnceCell` gives single-flight construction
+/// (#84); the outer `Arc` lets `resolve` clone the cell out from under the cache
+/// lock and initialize it without holding the lock across the build.
+type ProviderCell = Arc<tokio::sync::OnceCell<Arc<dyn ModelProvider>>>;
+
 /// Per-process provider cache. Providers are expensive to construct
 /// (HTTP client, connection pool, capability lookup) so the effect
 /// runner asks for them lazily and reuses across turns.
 pub struct ProviderFactory {
     config: Arc<Config>,
-    cache: Mutex<std::collections::HashMap<String, Arc<dyn ModelProvider>>>,
+    /// Per-key cache of built providers, keyed by normalized model id (#83). The
+    /// `Mutex` is only held to get-or-insert a cell, never across the build.
+    cache: Mutex<std::collections::HashMap<String, ProviderCell>>,
 }
 
 impl ProviderFactory {
@@ -68,19 +75,25 @@ impl ProviderFactory {
     /// ID. Hits the cache on the second and subsequent calls for the
     /// same ID.
     pub async fn resolve(&self, model_id: &str) -> Result<Arc<dyn ModelProvider>> {
-        {
-            let cache = self.cache.lock().await;
-            if let Some(p) = cache.get(model_id) {
-                return Ok(Arc::clone(p));
-            }
-        }
-
-        let provider = build_provider(&self.config, model_id).await?;
-        let arc: Arc<dyn ModelProvider> = Arc::from(provider);
-
-        let mut cache = self.cache.lock().await;
-        cache.insert(model_id.to_string(), Arc::clone(&arc));
-        Ok(arc)
+        let key = normalize_cache_key(model_id);
+        // Get-or-insert the per-key cell under a brief lock, then initialize it
+        // exactly once outside the lock (#84). A failed build isn't cached, so a
+        // transient error can be retried on the next call.
+        let cell = {
+            let mut cache = self.cache.lock().await;
+            Arc::clone(
+                cache
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        let provider = cell
+            .get_or_try_init(|| async {
+                let p = build_provider(&self.config, model_id).await?;
+                Ok::<Arc<dyn ModelProvider>, ModelError>(Arc::from(p))
+            })
+            .await?;
+        Ok(Arc::clone(provider))
     }
 }
 
@@ -199,6 +212,14 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
     )))
 }
 
+/// Cache key for a model id: the provider segment lowercased (matching
+/// `build_provider`'s own normalization) so `Anthropic/x` and `anthropic/x`
+/// resolve to one cached provider instead of building two identical ones (#83).
+fn normalize_cache_key(model_id: &str) -> String {
+    let (provider, model) = parse_model_id(model_id);
+    format!("{}/{}", provider.to_lowercase(), model)
+}
+
 /// Parse `provider/model` → `(provider, model)`. Bare strings are
 /// Ollama by convention.
 fn parse_model_id(model_id: &str) -> (String, &str) {
@@ -210,7 +231,9 @@ fn parse_model_id(model_id: &str) -> (String, &str) {
 
 fn ollama_backend_config(config: &Config) -> BackendConfig {
     BackendConfig {
-        ollama_url: format!("http://{}:{}", config.ollama.host, config.ollama.port),
+        // Scheme-less: `normalize_url` in the adapter picks http (loopback/LAN)
+        // vs https (public) by host class (#86).
+        ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
         max_idle_per_host: 10,
         timeout_secs: 10,
     }
@@ -382,5 +405,38 @@ mod tests {
                 );
             },
         }
+    }
+
+    #[test]
+    fn normalize_cache_key_lowercases_provider_only() {
+        // #83: provider segment is lowercased; the model segment is preserved.
+        assert_eq!(
+            normalize_cache_key("Anthropic/Claude-X"),
+            "anthropic/Claude-X"
+        );
+        assert_eq!(
+            normalize_cache_key("anthropic/Claude-X"),
+            "anthropic/Claude-X"
+        );
+        // Bare names default to the ollama provider.
+        assert_eq!(normalize_cache_key("qwen3:30b"), "ollama/qwen3:30b");
+    }
+
+    #[tokio::test]
+    async fn resolve_is_single_flight_and_cached() {
+        // Ollama is keyless and builds no network connection, so this resolves
+        // offline. Two concurrent resolves with different provider casing must
+        // return the same cached instance (#83 normalization + #84 single-flight).
+        let f = ProviderFactory::new(Config::default());
+        let (a, b) = tokio::join!(
+            f.resolve("ollama/test-model"),
+            f.resolve("Ollama/test-model"),
+        );
+        let a = a.expect("resolve a");
+        let b = b.expect("resolve b");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "expected one cached provider for casing variants + concurrent resolve"
+        );
     }
 }

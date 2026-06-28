@@ -18,7 +18,7 @@ use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::reasoning::{ReasoningChunk, ReasoningLevel};
 use crate::models::stream::{StreamCallback, StreamEvent};
 use crate::models::traits::Model;
-use crate::models::types::{ChatMessage, MessageRole, ModelResponse, TokenUsage};
+use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
 use crate::utils::drain_complete_lines;
 
 /// Marker appended to `content` and `thinking` once the per-stream size cap
@@ -40,6 +40,9 @@ struct StreamAccumulator {
     hide_reasoning_trace: bool,
     prompt_tokens: usize,
     completion_tokens: usize,
+    /// Ollama's `done_reason` from the terminal chunk, mapped to a
+    /// `FinishReason` for the final `ModelResponse` instead of `None` (#13).
+    done_reason: Option<String>,
     /// True once `content` OR `thinking` has been truncated to the size cap.
     /// Once set, further chunks are silently dropped — both from the
     /// accumulator AND from typed-event emission. Prevents a runaway model
@@ -182,6 +185,7 @@ impl OllamaAdapter {
             hide_reasoning_trace,
             prompt_tokens: 0,
             completion_tokens: 0,
+            done_reason: None,
             truncated: false,
         };
 
@@ -238,7 +242,7 @@ impl OllamaAdapter {
         } else {
             Some(acc.tool_calls)
         };
-        let total_tokens = acc.prompt_tokens + acc.completion_tokens;
+        let total_tokens = acc.prompt_tokens.saturating_add(acc.completion_tokens);
 
         // F3: the adapter no longer emits a terminal `Done` through the
         // callback. The v0.7 provider wrapper (`providers::model::*`)
@@ -255,7 +259,7 @@ impl OllamaAdapter {
                 total_tokens,
             )),
             model_name: self.model_name.clone(),
-            stop_reason: None,
+            stop_reason: acc.done_reason.as_deref().map(map_ollama_done_reason),
             thinking,
             tool_calls,
             thinking_signature: None,
@@ -325,13 +329,16 @@ impl OllamaAdapter {
             );
         }
 
-        // Capture token usage from the `done` chunk.
+        // Capture token usage + stop reason from the `done` chunk.
         if json_chunk.done {
             if let Some(count) = json_chunk.prompt_eval_count {
                 acc.prompt_tokens = count;
             }
             if let Some(count) = json_chunk.eval_count {
                 acc.completion_tokens = count;
+            }
+            if json_chunk.done_reason.is_some() {
+                acc.done_reason = json_chunk.done_reason.clone();
             }
         }
     }
@@ -509,7 +516,7 @@ impl OllamaAdapter {
                 prompt_tokens.saturating_add(completion_tokens),
             )),
             model_name: self.model_name.clone(),
-            stop_reason: None,
+            stop_reason: json.done_reason.as_deref().map(map_ollama_done_reason),
             thinking,
             tool_calls,
             thinking_signature: None,
@@ -583,6 +590,8 @@ struct OllamaStreamChunk {
     prompt_eval_count: Option<usize>,
     #[serde(default)]
     eval_count: Option<usize>,
+    #[serde(default)]
+    done_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -607,6 +616,18 @@ pub(crate) struct OllamaModel {
 
 // Helper functions
 
+/// Map Ollama's `done_reason` to the shared `FinishReason`. Ollama emits `"stop"`
+/// (natural end) and `"length"` (hit `num_predict`/context); anything else
+/// (operational reasons like `"load"`) is preserved via `Other` so it still
+/// surfaces rather than being dropped to `None` (#13).
+fn map_ollama_done_reason(s: &str) -> FinishReason {
+    match s {
+        "stop" => FinishReason::Stop,
+        "length" => FinishReason::Length,
+        other => FinishReason::Other(other.to_string()),
+    }
+}
+
 fn normalize_url(url: &str) -> String {
     let mut normalized = url.trim().to_string();
 
@@ -615,9 +636,19 @@ fn normalize_url(url: &str) -> String {
         normalized = normalized.replace("0.0.0.0", "127.0.0.1");
     }
 
-    // Add http:// if missing
+    // Add a scheme if missing, chosen by host class: loopback / private / LAN
+    // hosts may use cleartext http, but a public host defaults to https so
+    // prompt data isn't sent over the open internet in the clear (#86). An
+    // explicit scheme (http or https) is always respected. Mirrors the factory's
+    // `validate_provider_base_url` gate.
     if !normalized.starts_with("http://") && !normalized.starts_with("https://") {
-        normalized = format!("http://{}", normalized);
+        let host = normalized.split(['/', ':']).next().unwrap_or("");
+        let scheme = if crate::utils::classify_host(host).is_internal() {
+            "http"
+        } else {
+            "https"
+        };
+        normalized = format!("{}://{}", scheme, normalized);
     }
 
     // Add default Ollama port if missing (only for http; https keeps its default 443).
@@ -734,6 +765,22 @@ mod tests {
             normalize_url("http://0.0.0.0:11434"),
             "http://127.0.0.1:11434"
         );
+    }
+
+    #[test]
+    fn normalize_url_public_host_defaults_to_https() {
+        // #86: a scheme-less public host must not be addressed over cleartext.
+        assert_eq!(
+            normalize_url("my-remote-ollama.com:11434"),
+            "https://my-remote-ollama.com:11434"
+        );
+    }
+
+    #[test]
+    fn normalize_url_private_host_stays_http() {
+        // Loopback / LAN hosts keep cleartext http (no port → :11434 added).
+        assert_eq!(normalize_url("192.168.1.50"), "http://192.168.1.50:11434");
+        assert_eq!(normalize_url("127.0.0.1:11434"), "http://127.0.0.1:11434");
     }
 
     // --- think mapping from ReasoningLevel (Step 4) ---
@@ -854,6 +901,55 @@ mod tests {
         assert!(is_gpt_oss("GPT-OSS:20b"));
         assert!(!is_gpt_oss("qwen3-coder:30b"));
         assert!(!is_gpt_oss("gpt-4o"));
+    }
+
+    #[test]
+    fn map_ollama_done_reason_maps_known_and_preserves_unknown() {
+        use super::{FinishReason, map_ollama_done_reason};
+        assert_eq!(map_ollama_done_reason("stop"), FinishReason::Stop);
+        assert_eq!(map_ollama_done_reason("length"), FinishReason::Length);
+        assert_eq!(
+            map_ollama_done_reason("load"),
+            FinishReason::Other("load".to_string())
+        );
+    }
+
+    #[test]
+    fn process_stream_chunk_captures_done_reason_and_saturates_tokens() {
+        // #13: the terminal chunk's done_reason is recorded (was hardcoded None).
+        // #49: token totals use saturating_add (here near usize::MAX).
+        use super::{OllamaMessage, OllamaStreamChunk, StreamAccumulator};
+        let mut acc = StreamAccumulator {
+            content: String::new(),
+            thinking: String::new(),
+            tool_calls: Vec::new(),
+            hide_reasoning_trace: false,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            done_reason: None,
+            truncated: false,
+        };
+        let chunk = OllamaStreamChunk {
+            message: OllamaMessage {
+                role: "assistant".to_string(),
+                content: String::new(),
+                thinking: None,
+                tool_calls: None,
+            },
+            done: true,
+            prompt_eval_count: Some(usize::MAX),
+            eval_count: Some(10),
+            done_reason: Some("length".to_string()),
+        };
+        OllamaAdapter::process_stream_chunk(&chunk, None, &mut acc);
+        assert_eq!(acc.done_reason.as_deref(), Some("length"));
+        assert_eq!(acc.prompt_tokens, usize::MAX);
+        assert_eq!(acc.completion_tokens, 10);
+        // #49: the total saturates instead of wrapping/panicking.
+        assert_eq!(
+            acc.prompt_tokens.saturating_add(acc.completion_tokens),
+            usize::MAX
+        );
     }
 
     /// Step 5h: Ollama doesn't cache, so the dynamic MERMAID.md suffix is

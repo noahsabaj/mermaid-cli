@@ -5,37 +5,21 @@ Derived from the architectural + security review that produced **116 findings**
 were fixed across the Axis hardening PRs (GitHub PRs #64–#68 — not to be
 confused with findings #64/#68 below); the four partial residuals plus the
 fail-open verdict parse were closed afterward, then **Group 2 (MCP client)**,
-**Group 4 (daemon, persistence & storage)**, and **Group 3 (computer-use)** were
-completed. This file tracks what's left.
+**Group 4 (daemon, persistence & storage)**, **Group 3 (computer-use)**, and
+**Group 1 (provider adapters, retry & auth)** were completed. This file tracks
+what's left.
 
 - **Last updated:** 2026-06-27
-- **Status:** 80 resolved · **36 remaining** · 0 CRITICAL left · 0 HIGH left
+- **Status:** 93 resolved · **23 remaining** · 0 CRITICAL left · 0 HIGH left
 - **Severity legend:** `HIGH` exploitable / data-loss · `MED` correctness or
   availability · `LOW`/`INFO` hardening, cosmetics, or by-design risk to confirm.
 
-Remaining work is split into three groups by subsystem, so each is a single
+Remaining work is split into two groups by subsystem, so each is a single
 coherent review surface (one PR). Suggested order is by risk — see the end.
 
 ---
 
-## Remaining (36)
-
-### Group 1 — Provider adapters, retry & auth (13 · 3 MED, 10 LOW)
-`models/adapters/*`, `effect/middleware`, `providers/factory`
-
-- [ ] **#12** `MED` `models/adapters/openai_compat.rs:464` — streaming path drops cached-input & reasoning tokens.
-- [ ] **#13** `MED` `models/adapters/ollama.rs:258` — Ollama never surfaces a stop reason (`done_reason` unparsed).
-- [ ] **#42** `MED` `effect/middleware.rs:103` — retry backoff doesn't race the cancel token (seconds of cancel latency).
-- [ ] **#49** `LOW` `models/adapters/ollama.rs:241` — non-saturating token `+` (overflow on untrusted totals).
-- [ ] **#51** `LOW` `models/adapters/gemini.rs` — `FINISH_REASON_UNSPECIFIED` errors only on the non-stream path.
-- [ ] **#52** `LOW` `utils/sse.rs:50` — empty `data:` keep-alive frame tears down the stream.
-- [ ] **#53** `LOW` `models/adapters/anthropic.rs:166` — legacy thinking budget ≥ `max_tokens` → guaranteed 400.
-- [ ] **#83** `LOW` `providers/factory.rs:70` — un-normalized cache key; key/config frozen until restart.
-- [ ] **#84** `LOW` `providers/factory.rs` — concurrent first-build double-builds the provider.
-- [ ] **#85** `LOW` `…/retry.rs:36` — retries every error class, including non-idempotent web POSTs.
-- [ ] **#86** `LOW` `models/adapters/ollama.rs:610` — forces cleartext `http://`; host classifier exists but isn't wired here.
-- [ ] **#87** `LOW` retry jitter entropy from `subsec_nanos()`.
-- [ ] **#88** `LOW` `ollama/cloud_setup.rs` — Ollama cloud key stored plaintext in `config.toml`.
+## Remaining (23)
 
 ### Group 5 — MVU core: reducer/render purity, compaction, turn lifecycle (12 · 2 MED, 10 LOW)
 `domain/reducer`, `domain/compaction`, `render/widgets/*`
@@ -72,13 +56,11 @@ coherent review surface (one PR). Suggested order is by risk — see the end.
 
 ## Suggested order (by risk)
 
-1. **Group 1 — Providers** — large but low-risk correctness; mostly mechanical.
-2. **Group 5 — MVU core** — the deferred purity residuals; some carry a real behavioral tradeoff (#45, #18).
-3. **Group 6 — App shell** — mostly cosmetic, latent, or by-design-to-confirm.
+1. **Group 5 — MVU core** — the deferred purity residuals; some carry a real behavioral tradeoff (#45, #18).
+2. **Group 6 — App shell** — mostly cosmetic, latent, or by-design-to-confirm.
 
 **Cheapest high-value picks across groups:** #72 (message-ordering 400), #111
-(silently-swallowed malformed config), #88 (plaintext Ollama cloud key in
-`config.toml`).
+(silently-swallowed malformed config), #71 (orphan `tool_use` → provider 400).
 
 ## Deliberate deferrals (conscious, not misses)
 
@@ -88,7 +70,33 @@ coherent review surface (one PR). Suggested order is by risk — see the end.
 
 ---
 
-## Resolved (80)
+## Resolved (93)
+
+**Group 1 — Provider adapters, retry & auth (13 · 3 MED, 10 LOW):**
+#12 (the OpenAI-compat streaming path now carries cached-input + reasoning tokens
+through the same `token_usage_from_wire` converter the non-stream path uses, instead
+of dropping them), #13 (Ollama maps the response `done_reason` to a `FinishReason`
+on both the streaming and non-streaming paths instead of hardcoding `None`), #49
+(Ollama's streaming token total uses `saturating_add`, matching the non-stream path —
+no overflow on untrusted counts), #51 (Gemini treats an empty
+`FINISH_REASON_UNSPECIFIED` response identically on both paths via one shared
+predicate), #53 (the Anthropic legacy thinking budget returns `None` when
+`max_tokens <= 1024` rather than emitting `budget >= max_tokens`, a guaranteed 400),
+#52 (the SSE reader skips an empty `data:` keep-alive frame instead of emitting `""`
+and tearing the stream down), #83 (the provider cache key is normalized — provider
+segment lowercased — so `Anthropic/x` and `anthropic/x` share one cached instance),
+#84 (the cache uses a per-key `OnceCell` so concurrent first-callers build the
+provider exactly once, without holding the lock across the build), #85
+(`retry_async_if` skips terminal errors — the Ollama web search/fetch POSTs no longer
+retry 4xx, only network failures / 5xx / 429), #87 (retry jitter draws real entropy
+from `getrandom` instead of `subsec_nanos()`, via one impl shared by the retry and
+middleware layers), #86 (the Ollama adapter picks the URL scheme by host class —
+loopback/LAN stay http, public hosts default to https — instead of forcing cleartext),
+#88 (the Ollama cloud key is read from `OLLAMA_API_KEY` only and never written to
+`config.toml`; the field and its on-disk read-back cache were removed entirely). #42
+was already satisfied by the existing invariant: the model wrappers `select!` the
+whole `chat` future against `ctx.token.cancelled()`, so a cancel drops the in-flight
+retry-backoff sleep — documented rather than re-plumbed through the `Model` trait.
 
 **Group 3 — Computer-use (6 · 2 MED, 4 LOW):**
 #32 (`scale_coords` translation is now saturating — the `+ offset` i32 add no

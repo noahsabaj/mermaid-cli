@@ -183,6 +183,12 @@ fn legacy_budget_for(level: ReasoningLevel, max_tokens: usize) -> Option<u32> {
         ReasoningLevel::XHigh => 24000,
         ReasoningLevel::Max => 32000,
     };
+    // Anthropic requires `budget_tokens < max_tokens` with a 1024 floor; when
+    // max_tokens can't fit a 1024 budget strictly below it, disable thinking
+    // rather than emit `budget >= max_tokens` — a guaranteed 400 (#53).
+    if max_tokens <= 1024 {
+        return None;
+    }
     let ceiling = max_tokens.saturating_sub(1024) as u32;
     Some(proposed.min(ceiling).max(1024))
 }
@@ -1349,6 +1355,13 @@ mod tests {
         assert_eq!(legacy_budget_for(ReasoningLevel::Max, 64000), Some(32000));
         // Max with low max_tokens → clamped, but not below 1024.
         assert_eq!(legacy_budget_for(ReasoningLevel::Max, 2000), Some(1024));
+        // #53: max_tokens at/below the 1024 floor can't fit a budget strictly
+        // below it → None (a budget >= max_tokens is a guaranteed 400).
+        assert_eq!(legacy_budget_for(ReasoningLevel::High, 1024), None);
+        assert_eq!(legacy_budget_for(ReasoningLevel::Max, 512), None);
+        // Just above the floor: a budget is returned and is strictly < max_tokens.
+        let b = legacy_budget_for(ReasoningLevel::High, 2048).expect("fits");
+        assert!(b < 2048, "budget {b} must be < max_tokens");
     }
 
     #[test]

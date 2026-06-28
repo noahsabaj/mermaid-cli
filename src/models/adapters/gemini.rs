@@ -95,6 +95,15 @@ fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) 
 /// Map Gemini's `finishReason` onto the normalized [`FinishReason`]. Gemini
 /// reports tool calls with `STOP` (the call rides in `parts`), so there is no
 /// `ToolUse` mapping; safety/recitation/blocklist reasons are content blocks.
+/// Whether an empty (no-content) Gemini candidate/chunk is a benign normal
+/// completion rather than a block to surface as an error. `FINISH_REASON_
+/// UNSPECIFIED` is included — it's not a safety block, and intermediate stream
+/// chunks legitimately carry it — so the streaming and non-streaming paths treat
+/// an empty response identically (#51).
+fn gemini_empty_is_benign(reason: &str) -> bool {
+    matches!(reason, "STOP" | "MAX_TOKENS" | "FINISH_REASON_UNSPECIFIED")
+}
+
 fn map_gemini_finish_reason(s: &str) -> FinishReason {
     match s {
         "STOP" => FinishReason::Stop,
@@ -580,7 +589,7 @@ impl GeminiAdapter {
                     // a parse failure. Surface a clear error keyed off the
                     // finishReason rather than returning an empty success.
                     let reason = candidate.finish_reason.as_deref().unwrap_or("unknown");
-                    if !matches!(reason, "STOP" | "MAX_TOKENS") {
+                    if !gemini_empty_is_benign(reason) {
                         return Err(ModelError::Backend(BackendError::ProviderError {
                             provider: "gemini".to_string(),
                             code: Some(reason.to_string()),
@@ -794,7 +803,7 @@ fn process_chunk_payload(
         // rather than a silent empty success. A normal STOP/MAX_TOKENS chunk
         // with no parts (final usage-only chunk) is fine.
         if let Some(fr) = finish_reason
-            && !matches!(fr, "STOP" | "MAX_TOKENS" | "FINISH_REASON_UNSPECIFIED")
+            && !gemini_empty_is_benign(fr)
             && state.text_acc.is_empty()
             && state.tool_calls_done.is_empty()
         {
@@ -1027,6 +1036,18 @@ mod tests {
         assert_eq!(resp.candidates.len(), 1);
         assert!(resp.candidates[0].content.is_none());
         assert_eq!(resp.candidates[0].finish_reason.as_deref(), Some("SAFETY"));
+    }
+
+    #[test]
+    fn empty_response_benign_only_for_non_blocks() {
+        // #51: both the streaming and non-streaming paths now treat an empty
+        // response as benign for these reasons (UNSPECIFIED included — not a
+        // block); a real block like SAFETY/RECITATION still surfaces an error.
+        assert!(gemini_empty_is_benign("STOP"));
+        assert!(gemini_empty_is_benign("MAX_TOKENS"));
+        assert!(gemini_empty_is_benign("FINISH_REASON_UNSPECIFIED"));
+        assert!(!gemini_empty_is_benign("SAFETY"));
+        assert!(!gemini_empty_is_benign("RECITATION"));
     }
 
     fn test_adapter() -> GeminiAdapter {
