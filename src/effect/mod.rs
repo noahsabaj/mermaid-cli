@@ -233,7 +233,13 @@ impl EffectRunner {
         providers: Arc<ProviderFactory>,
         tools: Arc<ToolRegistry>,
     ) -> Self {
-        Self::new(msg_tx, workdir).with_bindings(providers, tools)
+        // A subagent's runner is never the interactive top-level, so it must
+        // NOT emit OSC 2 terminal-title escapes: in a headless `mermaid run`
+        // the parent suppresses them, but an un-suppressed child leaks
+        // `\x1b]2;…\x07` into stdout and corrupts `--format json`/`text` output.
+        Self::new(msg_tx, workdir)
+            .with_bindings(providers, tools)
+            .without_terminal_title()
     }
 
     /// Get or create the scope for a turn. Idempotent. The scope is
@@ -2427,6 +2433,21 @@ mod tests {
 
     fn runner() -> (EffectRunner, mpsc::Receiver<Msg>) {
         EffectRunner::pair(PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn new_child_suppresses_terminal_title() {
+        // A subagent's child runner must not emit OSC 2 terminal titles —
+        // otherwise they leak into a headless parent's stdout and corrupt
+        // `--format json`/`text` output (caught during live headless testing).
+        let (tx, _rx) = mpsc::channel::<Msg>(MSG_CHANNEL_CAPACITY);
+        let providers = Arc::new(ProviderFactory::new(crate::app::Config::default()));
+        let tools = Arc::new(ToolRegistry::new());
+        let child = EffectRunner::new_child(tx, PathBuf::from("/tmp"), providers, tools);
+        assert!(
+            !child.terminal_title_enabled,
+            "subagent child runner must suppress terminal-title escapes"
+        );
     }
 
     #[test]
