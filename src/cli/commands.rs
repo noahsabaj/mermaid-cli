@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
-    app::{Config, get_config_dir, init_config, load_config},
+    app::{Config, get_config_dir, init_config, load_config_or_warn},
     domain::{
         ChatRequest, Cmd, CompactionRecord, CompactionResult, CompactionTrigger, Msg, SlashCmd,
         State, build_replacement_messages, estimate_context_usage_for_request, prepare_compaction,
@@ -121,8 +121,8 @@ pub async fn handle_command(
             show_checkpoints(*limit)?;
             Ok(true)
         },
-        Commands::Restore { id } => {
-            restore_checkpoint(id)?;
+        Commands::Restore { id, force } => {
+            restore_checkpoint(id, *force)?;
             Ok(true)
         },
         Commands::Plugin { command } => {
@@ -1283,7 +1283,17 @@ fn show_checkpoints(limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn restore_checkpoint(id: &str) -> Result<()> {
+fn restore_checkpoint(id: &str, force: bool) -> Result<()> {
+    // Restoring overwrites the working tree from the checkpoint. Confirm first
+    // (default NO); `--force` is the scripted-use bypass, and a non-interactive
+    // session without it refuses rather than clobbering the tree unprompted (#113).
+    if !crate::utils::confirm_or_refuse(
+        &format!("Restore checkpoint {id}? This overwrites the current working tree."),
+        force,
+    )? {
+        println!("Restore cancelled.");
+        return Ok(());
+    }
     let manifest = RuntimeClient::auto().restore_checkpoint(id)?.checkpoint;
     println!("Restored {} ({} files)", manifest.id, manifest.files.len());
     if let Some(repo) = manifest.shadow_git_repo {
@@ -1591,6 +1601,27 @@ async fn run_update(check: bool, force: bool) -> Result<()> {
     let install_dir = exe
         .parent()
         .ok_or_else(|| anyhow!("current executable has no parent directory"))?;
+
+    // Confirm before fetching + running the install script — it executes
+    // downloaded shell/PowerShell and replaces the running binary. `--force` is
+    // the scripted-use bypass; a non-interactive session without it refuses
+    // rather than running fetched code unprompted (#110).
+    let script_url = if cfg!(target_os = "windows") {
+        INSTALL_PS1_URL
+    } else {
+        INSTALL_SH_URL
+    };
+    if !crate::utils::confirm_or_refuse(
+        &format!(
+            "About to download and run {script_url} to replace {}.",
+            install_dir.display()
+        ),
+        force,
+    )? {
+        println!("Update cancelled.");
+        return Ok(());
+    }
+
     println!("Updating {} …", install_dir.display());
     run_install_script(&client, install_dir).await?;
     println!("Updated. New version takes effect on the next run.");
@@ -1669,7 +1700,7 @@ fn version_at_least(current: &str, latest: &str) -> bool {
 
 /// Show configured MCP servers
 fn show_mcp_servers() {
-    let config = load_config().unwrap_or_default();
+    let config = load_config_or_warn();
 
     if config.mcp_servers.is_empty() {
         println!("No MCP servers configured.\n");

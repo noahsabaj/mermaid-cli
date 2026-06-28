@@ -3,7 +3,7 @@ use clap::Parser;
 
 use mermaid_cli::{
     app::{
-        InteractiveOptions, RunOptions, format_result, load_config, persist_last_model,
+        InteractiveOptions, RunOptions, format_result, load_config_or_warn, persist_last_model,
         persist_reasoning_for_model, resolve_model_id, run_interactive_with,
         run_non_interactive_with,
     },
@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
     // Handle stand-alone subcommands first (init, list, status, add,
     // remove, mcp, version). Returns Ok(true) when the subcommand
     // handled the invocation and we should exit.
-    let mut config = load_config().unwrap_or_default();
+    let mut config = load_config_or_warn();
     apply_prompt_flags(&cli, &mut config)?;
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
     if let Some(cmd) = &cli.command

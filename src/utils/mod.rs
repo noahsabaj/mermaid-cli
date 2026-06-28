@@ -5,6 +5,7 @@
 mod auth;
 mod bounded;
 mod checks;
+mod confirm;
 mod logger;
 mod mutex_ext;
 mod ndjson;
@@ -22,6 +23,7 @@ mod tokenizer;
 pub use auth::{resolve_api_key, resolve_api_key_with_fallback};
 pub use bounded::{CappedLine, read_capped, read_file_capped, read_line_capped};
 pub use checks::{CheckResult, check_ollama_available, check_ollama_model};
+pub use confirm::{confirm_or_refuse, is_affirmative, should_refuse_noninteractive};
 pub use logger::{init_logger, log_debug, log_error, log_info, log_progress, log_warn};
 pub use mutex_ext::{MutexExt, lock_arc_mutex_safe};
 pub use ndjson::drain_complete_lines;

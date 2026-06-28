@@ -46,6 +46,10 @@ CLAUDE.md
 .DS_Store
 Thumbs.db
 
+# Python bytecode (the qa harness in scripts/ is Python)
+__pycache__/
+*.pyc
+
 # Test artifacts
 tarpaulin-report.html
 cobertura.xml

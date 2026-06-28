@@ -15,7 +15,7 @@ pub mod terminal;
 // Public re-exports - the ONLY way to access app functionality
 pub use config::{
     Config, McpServerConfig, MemoryConfig, SafetyConfig, UserProviderConfig, get_config_dir,
-    init_config, load_config, persist_default_reasoning, persist_last_model,
+    init_config, load_config, load_config_or_warn, persist_default_reasoning, persist_last_model,
     persist_reasoning_for_model, resolve_model_id, save_config,
 };
 pub use event_source::{event_to_msg, parse_slash_command};

@@ -56,7 +56,7 @@ impl ToolExecutor for ReadFileTool {
                     "paths": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Multiple files to read in parallel."
+                        "description": "Multiple files to read sequentially, in order."
                     }
                 },
                 "oneOf": [
@@ -79,6 +79,7 @@ impl ToolExecutor for ReadFileTool {
         let start = std::time::Instant::now();
         let workdir = ctx.workdir.clone();
         let mut combined = String::new();
+        let mut any_truncated = false;
 
         for (idx, raw_path) in paths.iter().enumerate() {
             // Race the file read against the turn's cancel token. If
@@ -90,7 +91,8 @@ impl ToolExecutor for ReadFileTool {
                 },
                 read = read_one(&workdir, raw_path) => {
                     match read {
-                        Ok(content) => {
+                        Ok((content, was_truncated)) => {
+                            any_truncated |= was_truncated;
                             if paths.len() > 1 {
                                 let _ = ctx.progress.send(ProgressEvent::Status(
                                     format!("read {}/{}: {}", idx + 1, paths.len(), raw_path),
@@ -117,7 +119,10 @@ impl ToolExecutor for ReadFileTool {
         let duration_secs = start.elapsed().as_secs_f64();
         let line_count = combined.lines().count();
         let byte_count = combined.len();
-        let truncated = combined.contains("[TRUNCATED: file exceeded read cap]");
+        // The REAL truncation flag from the bounded read — not a sniff for the
+        // marker string, which a file containing that literal text would
+        // falsely trip (#78).
+        let truncated = any_truncated;
         ToolOutcome::success(
             combined,
             format!(
@@ -612,7 +617,11 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
     Err("read_file requires 'path' or 'paths'".to_string())
 }
 
-async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<String> {
+/// Read one file (bounded). Returns the (possibly marker-footed) text and the
+/// REAL truncation flag from the bounded read, so the caller propagates that
+/// rather than sniffing the output for the marker string — which a file whose
+/// own content contains that literal text would otherwise falsely trip (#78).
+async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<(String, bool)> {
     // Canonical containment gate — rejects escapes (incl. existing symlinks that
     // resolve outside the project) before we touch the file.
     resolve_path_safe(workdir, raw)
@@ -623,7 +632,7 @@ async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<String> {
     let rel = relative_within(workdir, raw)
         .map_err(|msg| std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg))?;
     let workdir = workdir.to_path_buf();
-    let content = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         let file = crate::runtime::open_beneath(&workdir, &rel, crate::runtime::OpenIntent::Read)?;
         // Bounded read: never pull more than the cap (+1 probe byte) into RAM,
         // so a model pointing `read_file` at a multi-gigabyte file can't OOM the
@@ -636,11 +645,11 @@ async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<String> {
             s.truncate(cut);
             s.push_str("\n\n[TRUNCATED: file exceeded read cap]");
         }
-        Ok::<_, std::io::Error>(s)
+        Ok::<_, std::io::Error>((s, truncated))
     })
     .await
     .map_err(|e| std::io::Error::other(e.to_string()))??;
-    Ok(content)
+    Ok(result)
 }
 
 /// Write `content` to `rel` beneath `workdir` through the symlink-confined
@@ -965,6 +974,33 @@ mod tests {
         assert!(output.contains("alpha"));
         assert!(output.contains("=== b.txt ==="));
         assert!(output.contains("beta"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_file_with_marker_in_content_is_not_flagged_truncated() {
+        // #78: a small file whose own content contains the truncation-marker
+        // string must NOT be reported as truncated — the flag comes from the
+        // bounded read now, not a substring sniff of the output.
+        let dir = temp_root("read_marker_content");
+        fs::write(
+            dir.join("a.txt"),
+            "before\n\n[TRUNCATED: file exceeded read cap]\nafter",
+        )
+        .expect("write");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "a.txt"}), ctx)
+            .await;
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        match &outcome.metadata.detail {
+            ToolMetadata::ReadFile { truncated, .. } => assert!(
+                !truncated,
+                "a file whose content contains the marker must not be flagged truncated"
+            ),
+            other => panic!("expected ReadFile metadata, got {:?}", other),
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

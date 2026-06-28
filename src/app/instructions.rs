@@ -97,8 +97,22 @@ pub enum ReloadOutcome {
 /// directory, in precedence order, or an empty vec if none exist.
 pub fn find_instruction_files(start: &Path) -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    find_instruction_files_bounded(start, home.as_deref())
+}
+
+/// Walk implementation with the `$HOME` boundary injected, so tests can
+/// exercise the "stop at home" rule (#108) without mutating the process-global
+/// `HOME` env var (which would race other threads' tests).
+fn find_instruction_files_bounded(start: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     let mut current = start.to_path_buf();
     for _ in 0..MAX_WALK_DEPTH {
+        // Stop at $HOME *before* searching — don't load the user's home-dir
+        // instruction files (or anything above home). Checked first so a walk
+        // that climbs into home can't pick up `~/AGENTS.md` (#108); the old
+        // order searched, found, and returned it before this guard ran.
+        if home == Some(current.as_path()) {
+            return Vec::new();
+        }
         let found: Vec<PathBuf> = INSTRUCTION_FILENAMES
             .iter()
             .map(|name| current.join(name))
@@ -107,17 +121,10 @@ pub fn find_instruction_files(start: &Path) -> Vec<PathBuf> {
         if !found.is_empty() {
             return found;
         }
-        // Stop at the git root (the .git entry itself ends the walk;
-        // most projects vendor instruction files at the repo root).
+        // Stop at the git root (the .git entry itself ends the walk; most
+        // projects vendor instruction files at the repo root). Checked *after*
+        // discovery so a file AT the git root still loads.
         if current.join(".git").exists() {
-            return Vec::new();
-        }
-        // Stop at $HOME — don't search the user's home directory or
-        // anything above it. Avoids accidentally picking up a
-        // long-forgotten instruction file from a sibling project.
-        if let Some(ref h) = home
-            && current == *h
-        {
             return Vec::new();
         }
         // Move up one level. If we're at the filesystem root, stop.
@@ -262,13 +269,10 @@ pub fn refresh(
 }
 
 fn combine_instruction_bodies(bodies: Vec<(PathBuf, String)>) -> String {
-    if bodies.len() == 1 {
-        return bodies
-            .into_iter()
-            .next()
-            .map(|(_, body)| body)
-            .unwrap_or_default();
-    }
+    // Always wrap each file in a labeled header — even a single file — so the
+    // content lands in the system prompt as clearly-bounded project data
+    // rather than blending into trusted system authority (#109). Matches the
+    // memory block's `# Memory` header and the multi-file labeling below.
     bodies
         .into_iter()
         .map(|(path, body)| {
@@ -380,6 +384,47 @@ mod tests {
     }
 
     #[test]
+    fn find_instruction_files_stops_at_home_boundary() {
+        // #108: a walk that climbs into $HOME must NOT pick up the home-dir
+        // AGENTS.md. The boundary is injected (no global env mutation), so the
+        // test is race-free. Without the fix the walk would search `home`,
+        // find AGENTS.md, and return it before the home guard ever ran.
+        let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = temp_dir("home_boundary");
+        fs::write(home.join("AGENTS.md"), "home rules").unwrap();
+        let child = home.join("project");
+        fs::create_dir_all(&child).unwrap();
+        // No .git anywhere between child and home, so only the home guard can
+        // stop the climb.
+        let found = find_instruction_files_bounded(&child, Some(home.as_path()));
+        assert!(
+            found.is_empty(),
+            "walk must stop at $HOME and not load ~/AGENTS.md, got {found:?}"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn single_file_instructions_get_labeled_header() {
+        // #109: even a single instruction file is wrapped in a labeled
+        // boundary so it reaches the system prompt as clearly-bounded project
+        // data, not unlabeled trusted-system text.
+        let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("single_header");
+        fs::write(dir.join("MERMAID.md"), "do the thing").unwrap();
+        let loaded = load_from_path(&dir.join("MERMAID.md")).expect("load");
+        assert!(
+            loaded
+                .content
+                .starts_with("# Project Instructions: MERMAID.md"),
+            "single-file instructions must carry a labeled header, got: {:?}",
+            loaded.content
+        );
+        assert!(loaded.content.contains("do the thing"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn load_from_path_truncates_oversized_file() {
         let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir("oversized");
@@ -433,7 +478,9 @@ mod tests {
         fs::write(&path, "v2 longer content here").unwrap();
         let (after, outcome) = refresh(Some(prior), &dir);
         assert!(matches!(outcome, ReloadOutcome::Reloaded { .. }));
-        assert_eq!(after.unwrap().content, "v2 longer content here");
+        let content = after.unwrap().content;
+        assert!(content.contains("# Project Instructions: MERMAID.md"));
+        assert!(content.contains("v2 longer content here"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -461,7 +508,9 @@ mod tests {
         fs::write(dir.join("MERMAID.md"), "fresh").unwrap();
         let (after, outcome) = refresh(None, &dir);
         assert!(matches!(outcome, ReloadOutcome::LoadedFirst { .. }));
-        assert_eq!(after.unwrap().content, "fresh");
+        let content = after.unwrap().content;
+        assert!(content.contains("# Project Instructions: MERMAID.md"));
+        assert!(content.contains("fresh"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
