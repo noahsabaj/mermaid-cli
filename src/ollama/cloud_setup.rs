@@ -1,152 +1,97 @@
 use anyhow::Result;
-use std::io::{self, Write};
 
-use crate::app::{get_config_dir, load_config, save_config};
-
-/// Check if Ollama cloud is configured (API key exists)
+/// Whether the Ollama Cloud key is configured — i.e. the `OLLAMA_API_KEY`
+/// environment variable is set to a non-empty value. The key is never read from
+/// or written to `config.toml` (#88).
 pub fn is_cloud_configured() -> bool {
-    // Check environment variable first
-    if std::env::var("OLLAMA_API_KEY").is_ok() {
-        return true;
-    }
-
-    // Check config file
-    if let Ok(config) = load_config() {
-        return config.ollama.cloud_api_key.is_some();
-    }
-
-    false
+    get_cloud_api_key().is_some()
 }
 
-/// Interactive setup flow for Ollama cloud API key
-/// Returns true if setup was completed successfully
+/// Interactive Ollama Cloud setup. Mermaid resolves the cloud key from the
+/// `OLLAMA_API_KEY` environment variable only — it is never written to
+/// `config.toml` (#88), matching how every other provider key is handled. So
+/// this explains how to set the variable rather than prompting for and saving a
+/// secret to disk. Returns whether the key is currently configured.
 pub fn setup_cloud_interactive() -> Result<bool> {
     println!("\n=== Ollama Cloud Setup ===\n");
-    println!("Ollama Cloud allows you to run large models on datacenter-grade hardware.");
-    println!("Cloud models use the :cloud suffix (e.g., kimi-k2-thinking:cloud)\n");
-    println!("To get started:");
-    println!("  1. Visit https://ollama.com/cloud");
-    println!("  2. Sign in or create an account");
-    println!("  3. Generate an API key\n");
+    println!("Ollama Cloud runs large models on datacenter-grade hardware.");
+    println!("Cloud models use the :cloud suffix (e.g., kimi-k2-thinking:cloud).\n");
+    println!("Mermaid reads the key from the OLLAMA_API_KEY environment variable");
+    println!("and never writes it to disk. To configure it:\n");
+    println!("  1. Get an API key at https://ollama.com/cloud");
+    println!("  2. Export it in your shell:\n");
+    println!("       export OLLAMA_API_KEY=<your-key>\n");
+    println!("  3. To persist it, add that line to your shell rc (e.g. ~/.bashrc");
+    println!("     or ~/.zshrc), then start a new shell.\n");
 
-    print!("Would you like to set up Ollama Cloud now? [Y/n]: ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let input = input.trim().to_lowercase();
-
-    if input == "n" || input == "no" {
-        println!("\nSkipping cloud setup. You can set it up later with:");
-        println!("  export OLLAMA_API_KEY=your_key_here");
-        println!("  Or add it to ~/.config/mermaid/config.toml");
-        return Ok(false);
+    if is_cloud_configured() {
+        println!("✓ OLLAMA_API_KEY is set — cloud models are available.\n");
+    } else {
+        println!("OLLAMA_API_KEY is not set yet; cloud models stay unavailable");
+        println!("until you set it and re-run mermaid.\n");
     }
-
-    // Prompt for API key without echoing to terminal (shell history /
-    // scrollback safety). Falls back to read_line on platforms where
-    // rpassword can't hide input.
-    let api_key_input = rpassword::prompt_password("\nEnter your Ollama Cloud API key: ")?;
-    let api_key = api_key_input.trim();
-
-    if api_key.is_empty() {
-        println!("\nNo API key provided. Setup cancelled.");
-        return Ok(false);
-    }
-
-    // Validate API key format (basic check)
-    if api_key.len() < 10 {
-        println!("\nAPI key seems too short. Please check and try again.");
-        return Ok(false);
-    }
-
-    // Load or create config
-    let mut config = load_config().unwrap_or_default();
-
-    // Save API key to config
-    config.ollama.cloud_api_key = Some(api_key.to_string());
-
-    // Save config file
-    let config_path = get_config_dir()?.join("config.toml");
-    save_config(&config, Some(config_path.clone()))?;
-    // The cloud key just changed on disk — drop the memoized value so the next
-    // `get_cloud_api_key()` reflects it immediately (#46).
-    invalidate_cloud_api_key_cache();
-
-    println!(
-        "\n✓ Ollama Cloud API key saved to: {}",
-        config_path.display()
-    );
-    println!("\nYou can now use cloud models with the :cloud suffix:");
-    println!("  :model kimi-k2-thinking:cloud");
-    println!("  :model qwen3-coder:480b-cloud");
-    println!("  :model deepseek-v3.1:671b-cloud\n");
-
-    Ok(true)
+    Ok(is_cloud_configured())
 }
 
-/// Memoized config-file cloud key. `None` = not yet loaded; `Some(x)` = the
-/// loaded value (itself possibly `None`). The only runtime writer of
-/// `config.ollama.cloud_api_key` is [`setup_cloud_interactive`], which calls
-/// [`invalidate_cloud_api_key_cache`] after rewriting the config — so this
-/// cache can never hide a freshly-configured key.
-static CONFIG_CLOUD_KEY: std::sync::RwLock<Option<Option<String>>> = std::sync::RwLock::new(None);
-
-/// Get the Ollama Cloud API key from environment or config.
+/// Get the Ollama Cloud API key from the `OLLAMA_API_KEY` environment variable.
 ///
-/// Priority: `OLLAMA_API_KEY` env var > config file `cloud_api_key`. The env
-/// var is always checked live; the config-file value is read from disk once and
-/// memoized, because this runs on the per-request chat path and a blocking
-/// `load_config()` disk read on every call stalls the async worker (#46).
+/// Resolved from the environment only and never persisted to disk (#88),
+/// mirroring [`crate::utils::resolve_api_key`]. Empty values are treated as
+/// unset.
 pub fn get_cloud_api_key() -> Option<String> {
-    // Check environment variable first (cheap, always live).
-    if let Ok(key) = std::env::var("OLLAMA_API_KEY")
-        && !key.is_empty()
-    {
-        return Some(key);
-    }
-
-    // Fast path: return the memoized config-file key.
-    if let Ok(guard) = CONFIG_CLOUD_KEY.read()
-        && let Some(cached) = guard.as_ref()
-    {
-        return cached.clone();
-    }
-
-    // Slow path: read the config from disk once, then memoize.
-    let value = load_config().ok().and_then(|c| c.ollama.cloud_api_key);
-    if let Ok(mut guard) = CONFIG_CLOUD_KEY.write() {
-        *guard = Some(value.clone());
-    }
-    value
+    std::env::var("OLLAMA_API_KEY")
+        .ok()
+        .filter(|key| !key.is_empty())
 }
 
-/// Invalidate the memoized config-file cloud key so the next
-/// [`get_cloud_api_key`] re-reads it from disk. Call after rewriting the config.
-pub fn invalidate_cloud_api_key_cache() {
-    if let Ok(mut guard) = CONFIG_CLOUD_KEY.write() {
-        *guard = None;
-    }
-}
-
-/// Check if a model name requires cloud access
+/// Check if a model name requires cloud access.
 pub fn is_cloud_model(model_name: &str) -> bool {
     model_name.ends_with(":cloud")
 }
 
-/// Prompt user to set up cloud if trying to use a cloud model without API key
+/// Prompt the user to configure cloud access if a cloud model is requested
+/// without `OLLAMA_API_KEY` set.
 pub fn prompt_cloud_setup_if_needed(model_name: &str) -> Result<bool> {
     if !is_cloud_model(model_name) {
-        return Ok(true); // Not a cloud model, proceed
+        return Ok(true); // Not a cloud model, proceed.
     }
 
     if is_cloud_configured() {
-        return Ok(true); // Already configured, proceed
+        return Ok(true); // Already configured, proceed.
     }
 
-    // Cloud model requested but not configured
-    println!("\n⚠ Cloud model requested but Ollama Cloud is not configured.");
+    println!("\n⚠ Cloud model requested but OLLAMA_API_KEY is not set.");
     println!("   Model: {}\n", model_name);
 
     setup_cloud_interactive()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_cloud_model_detects_suffix() {
+        assert!(is_cloud_model("kimi-k2-thinking:cloud"));
+        assert!(!is_cloud_model("qwen3-coder:30b"));
+        // Only the exact ":cloud" suffix counts (a "-cloud" tag does not).
+        assert!(!is_cloud_model("qwen3-coder:480b-cloud"));
+    }
+
+    #[test]
+    fn get_cloud_api_key_resolves_from_env_only() {
+        // #88: the key comes from the environment, never from config on disk.
+        temp_env::with_vars([("OLLAMA_API_KEY", Some("sk-test"))], || {
+            assert_eq!(get_cloud_api_key().as_deref(), Some("sk-test"));
+            assert!(is_cloud_configured());
+        });
+        temp_env::with_vars([("OLLAMA_API_KEY", None::<&str>)], || {
+            assert_eq!(get_cloud_api_key(), None);
+            assert!(!is_cloud_configured());
+        });
+        // Empty is treated as unset.
+        temp_env::with_vars([("OLLAMA_API_KEY", Some(""))], || {
+            assert_eq!(get_cloud_api_key(), None);
+        });
+    }
 }

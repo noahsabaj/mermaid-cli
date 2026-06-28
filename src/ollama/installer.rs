@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// config. Falls back to an empty list on any HTTP error.
 async fn list_installed_models(config: &Config) -> Vec<String> {
     let backend = BackendConfig {
-        ollama_url: format!("http://{}:{}", config.ollama.host, config.ollama.port),
+        ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
         timeout_secs: 5,
         max_idle_per_host: 2,
     };

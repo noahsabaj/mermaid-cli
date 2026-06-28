@@ -453,6 +453,9 @@ impl OpenAICompatAdapter {
         let mut completion_tokens = 0usize;
         let mut total_tokens = None;
         let mut stop_reason: Option<FinishReason> = None;
+        // #12: the full token breakdown (cached-input + reasoning) from the last
+        // usage chunk; the scalar fields above are the fallback when absent.
+        let mut usage_acc: Option<TokenUsage> = None;
         // For providers that emit `<think>...</think>` inline in
         // `delta.content`, route the content channel through this state
         // machine so reasoning gets split out into its own
@@ -492,12 +495,16 @@ impl OpenAICompatAdapter {
                     },
                 };
 
-                if let Some(usage) = parsed.usage.as_ref() {
+                if let Some(usage) = parsed.usage {
                     prompt_tokens = usage.prompt_tokens.unwrap_or(prompt_tokens);
                     completion_tokens = usage.completion_tokens.unwrap_or(completion_tokens);
                     if let Some(total) = usage.total_tokens {
                         total_tokens = Some(total);
                     }
+                    // #12: capture the cached-input + reasoning breakdown the
+                    // scalars above drop, via the same converter the non-stream
+                    // path uses.
+                    usage_acc = Some(token_usage_from_wire(usage));
                 }
 
                 let Some(choice) = parsed.choices.into_iter().next() else {
@@ -653,11 +660,9 @@ impl OpenAICompatAdapter {
 
         Ok(ModelResponse {
             content: content_acc,
-            usage: Some(TokenUsage::provider(
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-            )),
+            usage: Some(usage_acc.unwrap_or_else(|| {
+                TokenUsage::provider(prompt_tokens, completion_tokens, total_tokens)
+            })),
             model_name: self.model_name.clone(),
             stop_reason,
             thinking,

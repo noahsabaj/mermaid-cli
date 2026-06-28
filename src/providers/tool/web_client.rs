@@ -1,4 +1,4 @@
-use crate::utils::{RetryConfig, retry_async};
+use crate::utils::{RetryConfig, retry_async_if};
 use anyhow::{Result, anyhow};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,36 @@ struct OllamaFetchResponse {
 }
 
 const OLLAMA_API_BASE: &str = "https://ollama.com/api";
+
+/// Carries the HTTP status of a non-success Ollama API response so the retry
+/// classifier can tell retryable (5xx / 429) from terminal (4xx) responses
+/// without string-matching the error message (#85).
+#[derive(Debug)]
+struct HttpStatusError {
+    status: u16,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
+/// Retry only transient web-API failures: network timeout/connect errors and
+/// 5xx / 429 responses. Terminal 4xx (auth, bad request) and parse errors are
+/// surfaced immediately rather than retried `max_attempts` times (#85). The
+/// typed errors are found through anyhow's `.context()` layers via downcast.
+fn web_error_is_retryable(e: &anyhow::Error) -> bool {
+    if let Some(re) = e.downcast_ref::<reqwest::Error>() {
+        return re.is_timeout() || re.is_connect();
+    }
+    if let Some(h) = e.downcast_ref::<HttpStatusError>() {
+        return h.status == 429 || (500..600).contains(&h.status);
+    }
+    false
+}
 
 /// Web search client that uses Ollama's cloud API
 #[derive(Clone)]
@@ -88,7 +118,7 @@ impl WebSearchClient {
         let api_key = self.api_key.clone();
         let query_owned = query.to_string();
         // `count` is Copy (usize) — safe to capture by value across retries
-        let ollama_response: OllamaSearchResponse = retry_async(
+        let ollama_response: OllamaSearchResponse = retry_async_if(
             || {
                 let client = client.clone();
                 let api_key = api_key.clone();
@@ -104,16 +134,20 @@ impl WebSearchClient {
                         .timeout(Duration::from_secs(30))
                         .send()
                         .await
-                        .map_err(|e| anyhow!("Failed to reach Ollama web search API: {}", e))?;
+                        .map_err(|e| {
+                            anyhow::Error::new(e).context("Failed to reach Ollama web search API")
+                        })?;
 
                     if !response.status().is_success() {
                         let status = response.status();
                         let body = response.text().await.unwrap_or_default();
-                        return Err(anyhow!(
+                        return Err(anyhow::Error::new(HttpStatusError {
+                            status: status.as_u16(),
+                        })
+                        .context(format!(
                             "Ollama web search API returned error {}: {}",
-                            status,
-                            body
-                        ));
+                            status, body
+                        )));
                     }
 
                     let body =
@@ -123,6 +157,7 @@ impl WebSearchClient {
                 }
             },
             &retry_config,
+            web_error_is_retryable,
         )
         .await?;
 
@@ -166,7 +201,7 @@ impl WebSearchClient {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let url_owned = url.to_string();
-        let response: OllamaFetchResponse = retry_async(
+        let response: OllamaFetchResponse = retry_async_if(
             || {
                 let client = client.clone();
                 let api_key = api_key.clone();
@@ -179,11 +214,16 @@ impl WebSearchClient {
                         .timeout(Duration::from_secs(15))
                         .send()
                         .await
-                        .map_err(|e| anyhow!("Failed to fetch {}: {}", url, e))?;
+                        .map_err(|e| {
+                            anyhow::Error::new(e).context(format!("Failed to fetch {}", url))
+                        })?;
 
                     if !response.status().is_success() {
                         let status = response.status();
-                        return Err(anyhow!("Failed to fetch {}: HTTP {}", url, status));
+                        return Err(anyhow::Error::new(HttpStatusError {
+                            status: status.as_u16(),
+                        })
+                        .context(format!("Failed to fetch {}", url)));
                     }
 
                     let body =
@@ -193,6 +233,7 @@ impl WebSearchClient {
                 }
             },
             &retry_config,
+            web_error_is_retryable,
         )
         .await?;
 
@@ -283,5 +324,27 @@ mod tests {
         assert!(formatted.contains("Test Article"));
         assert!(formatted.contains("https://example.com"));
         assert!(formatted.contains("[/SEARCH_RESULTS]"));
+    }
+
+    #[test]
+    fn web_error_is_retryable_classifies_status() {
+        // #85: 5xx / 429 retry; 4xx and untyped (parse) errors are terminal.
+        assert!(web_error_is_retryable(&anyhow::Error::new(
+            HttpStatusError { status: 500 }
+        )));
+        assert!(web_error_is_retryable(&anyhow::Error::new(
+            HttpStatusError { status: 429 }
+        )));
+        assert!(!web_error_is_retryable(&anyhow::Error::new(
+            HttpStatusError { status: 404 }
+        )));
+        assert!(!web_error_is_retryable(&anyhow::Error::new(
+            HttpStatusError { status: 401 }
+        )));
+        assert!(!web_error_is_retryable(&anyhow!("parse failed")));
+        // Production wraps the status error with .context(); downcast must still
+        // find it through the context layer.
+        let wrapped = anyhow::Error::new(HttpStatusError { status: 503 }).context("upstream");
+        assert!(web_error_is_retryable(&wrapped));
     }
 }

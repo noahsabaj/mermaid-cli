@@ -1521,7 +1521,7 @@ pub async fn list_models(config: &Config) -> Result<()> {
 async fn list_ollama_models(config: &Config) -> Vec<String> {
     use crate::models::adapters::ollama::OllamaAdapter;
     let backend = BackendConfig {
-        ollama_url: format!("http://{}:{}", config.ollama.host, config.ollama.port),
+        ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
         timeout_secs: 5,
         max_idle_per_host: 2,
     };

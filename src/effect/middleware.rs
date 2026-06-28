@@ -90,7 +90,7 @@ where
         // Honor `Retry-After` when present (capped so a hostile/huge value can't
         // hang the turn); otherwise a jittered exponential backoff that avoids
         // synchronized retries across concurrent clients.
-        let sleep_ms = jitter(delay_ms)
+        let sleep_ms = crate::utils::jitter(delay_ms)
             .max(retry_after_ms.unwrap_or(0))
             .min(MAX_RETRY_AFTER_MS);
         tracing::warn!(
@@ -100,6 +100,13 @@ where
             reason = transience.reason(),
             "middleware: retrying transient upstream failure"
         );
+        // No explicit cancel race here (#42): this retry only runs inside a
+        // provider's `chat`, which the model wrapper drives under
+        // `select! { ctx.token.cancelled() => …, chat_fut => … }` (the
+        // model/mod.rs cancellation invariant). A cancel drops `chat_fut`, and
+        // with it this in-flight sleep, so the backoff is already promptly
+        // cancellable — threading a token down the Model trait would add surface
+        // for no behavioral gain.
         tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         attempt += 1;
         delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
@@ -115,21 +122,6 @@ fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .parse::<u64>()
         .ok()
         .map(|secs| secs.saturating_mul(1000))
-}
-
-/// Apply ±20% jitter to `delay_ms` from a cheap time source (no rng dependency)
-/// so concurrent clients don't retry in lockstep (thundering herd).
-fn jitter(delay_ms: u64) -> u64 {
-    let span = delay_ms / 5;
-    if span == 0 {
-        return delay_ms;
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-    let offset = nanos % (2 * span + 1);
-    delay_ms - span + offset
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,17 +246,6 @@ mod tests {
         // A persistent 429 retries, then surfaces as a typed RateLimit (#2).
         assert!(matches!(result, Err(ModelError::RateLimit { .. })));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn jitter_stays_within_band() {
-        // ±20% band: jitter(1000) ∈ [800, 1200].
-        for _ in 0..100 {
-            let j = jitter(1000);
-            assert!((800..=1200).contains(&j), "jitter out of band: {j}");
-        }
-        // Tiny delays (span 0) pass through unchanged.
-        assert_eq!(jitter(3), 3);
     }
 
     #[tokio::test]

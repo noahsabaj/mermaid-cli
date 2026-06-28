@@ -3,10 +3,8 @@
 //! Mermaid's auth surface is uniform across providers: an API key lives in
 //! an environment variable, with the option to override the variable name
 //! per-provider in `config.toml`. There's no in-config secret storage —
-//! keys never sit on disk in plaintext via this helper. (The legacy
-//! `cloud_api_key` field on `[ollama]` predates this and writes the key
-//! to disk; that path stays for backward compat but is not what new
-//! providers should use.)
+//! keys never sit on disk in plaintext. The Ollama cloud key follows the same
+//! rule: it is read from `OLLAMA_API_KEY` and never persisted (#88).
 
 /// Resolve an API key from the environment.
 ///
