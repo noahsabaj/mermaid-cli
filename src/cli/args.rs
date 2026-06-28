@@ -244,6 +244,7 @@ pub enum Commands {
     /// Run a single prompt non-interactively
     Run {
         /// The prompt to execute
+        #[arg(value_parser = non_empty_prompt)]
         prompt: String,
 
         /// Output format (text, json, markdown)
@@ -405,4 +406,48 @@ pub enum OutputFormat {
     Json,
     /// Markdown formatted output
     Markdown,
+}
+
+/// Reject an empty or whitespace-only `run` prompt at parse time, so
+/// `mermaid run ""` fails with a clear usage error instead of silently
+/// producing nothing. Only the emptiness check trims — the original string
+/// is preserved on success, since leading/trailing whitespace can be
+/// meaningful prompt content.
+fn non_empty_prompt(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        Err("prompt cannot be empty".to_string())
+    } else {
+        Ok(s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn non_empty_prompt_rejects_blank() {
+        assert!(non_empty_prompt("").is_err());
+        assert!(non_empty_prompt("   ").is_err());
+        assert!(non_empty_prompt("\t\n ").is_err());
+    }
+
+    #[test]
+    fn non_empty_prompt_preserves_content_including_surrounding_space() {
+        assert_eq!(non_empty_prompt("hello").unwrap(), "hello");
+        assert_eq!(non_empty_prompt("  hi  ").unwrap(), "  hi  ");
+    }
+
+    #[test]
+    fn cli_run_rejects_empty_prompt() {
+        let err = Cli::try_parse_from(["mermaid", "run", ""])
+            .expect_err("empty prompt must be rejected at parse time");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn cli_run_accepts_normal_prompt() {
+        assert!(Cli::try_parse_from(["mermaid", "run", "do a thing"]).is_ok());
+    }
 }
