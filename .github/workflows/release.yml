@@ -386,6 +386,12 @@ jobs:
 
       - name: Submit to WinGet
         if: steps.gate.outputs.enabled == 'true'
+        # The action only *bumps* an existing winget-pkgs entry; until
+        # NoahSabaj.Mermaid is seeded (microsoft/winget-pkgs#391817, pending
+        # upstream review) this step fails. Tolerate it so the release run stays
+        # green — it becomes a no-op once the seed lands and the bump succeeds.
+        # Remove this line then.
+        continue-on-error: true
         uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
         with:
           identifier: NoahSabaj.Mermaid
