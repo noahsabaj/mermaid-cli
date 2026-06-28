@@ -8,8 +8,61 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 const DEFAULT_TCP_ADDR: &str = "127.0.0.1:39871";
 
 #[cfg(unix)]
+const HELP: &str = "\
+mermaidd — Mermaid's background daemon (durable runtime state, remote attach,
+long-running process ownership).
+
+Usage: mermaidd [--version | --help]
+
+With no arguments it runs the daemon in the foreground, serving the control
+socket. It is normally managed via the `mermaid daemon` subcommands (install,
+start, stop, restart, status, logs) rather than invoked directly.
+";
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum CliAction {
+    Run,
+    Version,
+    Help,
+    Unknown(String),
+}
+
+/// Classify `mermaidd`'s invocation. The daemon takes no real arguments, but it
+/// is on `PATH` (and in the distro packages), so it must answer
+/// `--version`/`--help` and reject unknown arguments rather than silently
+/// starting the daemon: a `mermaidd --version` probe would otherwise boot a
+/// foreground daemon and — because startup replaces the control socket — could
+/// knock a running daemon off its socket.
+#[cfg(unix)]
+fn classify_args<I: IntoIterator<Item = String>>(args: I) -> CliAction {
+    match args.into_iter().next().as_deref() {
+        None => CliAction::Run,
+        Some("--version" | "-V" | "version") => CliAction::Version,
+        Some("--help" | "-h" | "help") => CliAction::Help,
+        Some(other) => CliAction::Unknown(other.to_string()),
+    }
+}
+
+#[cfg(unix)]
 #[tokio::main]
 async fn main() -> Result<()> {
+    match classify_args(std::env::args().skip(1)) {
+        CliAction::Run => {},
+        CliAction::Version => {
+            println!("mermaidd {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        },
+        CliAction::Help => {
+            print!("{HELP}");
+            return Ok(());
+        },
+        CliAction::Unknown(arg) => {
+            eprintln!("mermaidd: unrecognized argument '{arg}'\n\n{HELP}");
+            std::process::exit(2);
+        },
+    }
+
     let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
     let data_dir = mermaid_cli::runtime::data_dir()?;
     let socket_path = data_dir.join("mermaidd.sock");
@@ -26,6 +79,17 @@ async fn main() -> Result<()> {
     }
 
     if socket_path.exists() {
+        // Don't clobber a daemon that's already serving here. If something
+        // accepts a connection on the socket, refuse — unlinking it would knock
+        // the live daemon off its socket path (a `mermaidd --version`-style
+        // probe or a second manual start). Only a stale socket left by a
+        // crashed daemon — where connecting fails — is removed so we can rebind.
+        if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+            anyhow::bail!(
+                "a mermaidd daemon is already running on {} — use `mermaid daemon restart` to replace it",
+                socket_path.display()
+            );
+        }
         std::fs::remove_file(&socket_path)
             .with_context(|| format!("failed to remove stale socket {}", socket_path.display()))?;
     }
@@ -690,6 +754,22 @@ fn bool_field(body: &serde_json::Value, name: &str) -> Result<bool> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn classify_args_handles_flags_help_and_unknowns() {
+        use super::{CliAction, classify_args};
+        assert_eq!(classify_args(Vec::<String>::new()), CliAction::Run);
+        for v in ["--version", "-V", "version"] {
+            assert_eq!(classify_args([v.to_string()]), CliAction::Version, "{v}");
+        }
+        for h in ["--help", "-h", "help"] {
+            assert_eq!(classify_args([h.to_string()]), CliAction::Help, "{h}");
+        }
+        assert_eq!(
+            classify_args(["--bogus".to_string()]),
+            CliAction::Unknown("--bogus".to_string())
+        );
+    }
+
     fn temp_db(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("mermaidd_runtime_hygiene_{name}"));
         let _ = std::fs::remove_dir_all(&dir);
