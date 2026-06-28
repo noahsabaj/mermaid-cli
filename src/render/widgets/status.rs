@@ -16,6 +16,11 @@ use crate::runtime::SafetyMode;
 pub struct StatusWidget<'a> {
     pub theme: &'a Theme,
     pub working_dir: &'a str,
+    /// Hostname + username for the `user@host:cwd` line, resolved once at
+    /// startup and threaded in (#55) rather than read from the environment on
+    /// every frame.
+    pub hostname: &'a str,
+    pub username: &'a str,
     pub context_usage: Option<&'a ContextUsageSnapshot>,
     pub last_usage: Option<TokenUsageTotals>,
     pub session_usage: TokenUsageTotals,
@@ -35,16 +40,9 @@ pub struct StatusWidget<'a> {
 
 impl<'a> Widget for StatusWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Get hostname and username for directory display
-        let hostname = std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("HOST"))
-            .unwrap_or_else(|_| "localhost".to_string());
-        let username = std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "user".to_string());
-
-        // Line 1: username@hostname:/path (left) | token usage (right, fixed position)
-        let directory_text = format!("{}@{}:{}", username, hostname, self.working_dir);
+        // Line 1: username@hostname:/path (left) | token usage (right, fixed position).
+        // Host/user are resolved once at startup and passed in (#55).
+        let directory_text = format!("{}@{}:{}", self.username, self.hostname, self.working_dir);
         let token_text =
             format_token_status(self.context_usage, self.last_usage, self.session_usage);
 
@@ -63,7 +61,7 @@ impl<'a> Widget for StatusWidget<'a> {
         let line1_spans = vec![
             // Directory (fixed to left)
             Span::styled(
-                format!("{}@{}", username, hostname),
+                format!("{}@{}", self.username, self.hostname),
                 Style::new().fg(ratatui::style::Color::Green).bold(),
             ),
             Span::styled(

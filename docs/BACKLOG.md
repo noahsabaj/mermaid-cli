@@ -5,37 +5,21 @@ Derived from the architectural + security review that produced **116 findings**
 were fixed across the Axis hardening PRs (GitHub PRs #64–#68 — not to be
 confused with findings #64/#68 below); the four partial residuals plus the
 fail-open verdict parse were closed afterward, then **Group 2 (MCP client)**,
-**Group 4 (daemon, persistence & storage)**, **Group 3 (computer-use)**, and
-**Group 1 (provider adapters, retry & auth)** were completed. This file tracks
-what's left.
+**Group 4 (daemon, persistence & storage)**, **Group 3 (computer-use)**,
+**Group 1 (provider adapters, retry & auth)**, and **Group 5 (MVU core)** were
+completed. This file tracks what's left.
 
-- **Last updated:** 2026-06-27
-- **Status:** 93 resolved · **23 remaining** · 0 CRITICAL left · 0 HIGH left
+- **Last updated:** 2026-06-28
+- **Status:** 105 resolved · **11 remaining** · 0 CRITICAL left · 0 HIGH left
 - **Severity legend:** `HIGH` exploitable / data-loss · `MED` correctness or
   availability · `LOW`/`INFO` hardening, cosmetics, or by-design risk to confirm.
 
-Remaining work is split into two groups by subsystem, so each is a single
-coherent review surface (one PR). Suggested order is by risk — see the end.
+Remaining work is one group (Group 6 — app shell): a single coherent review
+surface (one PR). See the end for the cheapest high-value picks.
 
 ---
 
-## Remaining (23)
-
-### Group 5 — MVU core: reducer/render purity, compaction, turn lifecycle (12 · 2 MED, 10 LOW)
-`domain/reducer`, `domain/compaction`, `render/widgets/*`
-
-- [ ] **#18** `MED` `app/run.rs:186-241` — clipboard `Cmd` + selection mutation in the event-loop arm, outside `update()` (unrecorded; render not pure). *Cause-3 deferral.*
-- [ ] **#45** `MED` `domain/reducer.rs` — synchronous `instructions::refresh`/`memory::refresh` fs I/O in the reducer on the main-loop thread. *Cause-3 deferral (async `Cmd` changes turn-freshness semantics).*
-- [ ] **#54** `LOW` `domain/reducer.rs:1016/2454` — `std::env::temp_dir()` read inside the reducer.
-- [ ] **#55** `LOW` `render/widgets/status.rs:39` — `StatusWidget::render` reads `HOSTNAME`/`USER` every frame.
-- [ ] **#71** `LOW` `domain/compaction.rs:459` — forwards a pre-existing orphan `tool_use` unpaired → provider 400.
-- [ ] **#72** `LOW` `domain/reducer.rs:2297` — `⚠ truncated` note inserted between `tool_calls` and results → possible 400.
-- [ ] **#73** `LOW` `domain/reducer.rs:2187` — `/compact` completion doesn't drain `queued_messages`.
-- [ ] **#74** `LOW` `domain/reducer.rs:236` — `ApprovalRequested` during `Cancelling` can outlive its turn.
-- [ ] **#101** `LOW` `render/widgets/chat.rs:952` — diff-row background fill uses char count, not display cells (CJK).
-- [ ] **#104** `LOW` `render/widgets/chat.rs:535` — user-msg timestamp alignment from byte lengths (CJK/emoji).
-- [ ] **#102** `LOW` `render/widgets/conversation_list.rs:96` — `[..16]` not char-boundary safe (latent).
-- [ ] **#103** `LOW` `render/widgets/slash_palette.rs:84` — slice trusts an unclamped `selected_index` (latent).
+## Remaining (11)
 
 ### Group 6 — App shell: CLI, config, subagent, filesystem tools (11 · 11 LOW)
 `app/*`, `commands`, `instructions`, `providers/tool/{subagent,filesystem}`
@@ -56,21 +40,40 @@ coherent review surface (one PR). Suggested order is by risk — see the end.
 
 ## Suggested order (by risk)
 
-1. **Group 5 — MVU core** — the deferred purity residuals; some carry a real behavioral tradeoff (#45, #18).
-2. **Group 6 — App shell** — mostly cosmetic, latent, or by-design-to-confirm.
+1. **Group 6 — App shell** — the last group: mostly cosmetic, latent, or by-design-to-confirm.
 
-**Cheapest high-value picks across groups:** #72 (message-ordering 400), #111
-(silently-swallowed malformed config), #71 (orphan `tool_use` → provider 400).
-
-## Deliberate deferrals (conscious, not misses)
-
-- **#18, #45, #54, #55** — reducer/render *I/O-and-env* residuals left after the
-  time-injection core landed. Determinism for `(State, Msg) → State` holds;
-  these concern render purity / turn-freshness tradeoffs.
+**Cheapest high-value picks:** #111 (silently-swallowed malformed config), #110
+(`mermaid update` runs a fetched script with no checksum/confirm), #113 (`mermaid
+restore` overwrites the working tree with no confirmation).
 
 ---
 
-## Resolved (93)
+## Resolved (105)
+
+**Group 5 — MVU core: reducer/render purity, compaction, turn lifecycle (12 · 2 MED, 10 LOW):**
+#45 (the reducer no longer does the synchronous `MERMAID.md`/memory refresh — a
+background **config watcher** in the effect layer polls and emits
+`Msg::InstructionsChanged`/`MemoryChanged`, so `update()` is genuinely I/O-free
+and a `--record` log replays without re-statting the live filesystem; edits also
+land faster, before the next submit — the "both" design chosen over the
+sync-exception and async-lag alternatives), #18 (the clipboard copy routes
+through a new `Msg::CopySelection` → `Cmd::CopyToClipboard`, so the side effect is
+recorded/replayable instead of dispatched out-of-band; the text selection stays
+render-layer state), #54 (`temp_dir` injected once into `State` at startup, like
+`cwd` — the reducer reads it instead of calling `std::env::temp_dir()`), #55
+(`StatusWidget` takes host/user as props read once into `RenderCache`, not from
+the environment every frame). Message-sequence + turn lifecycle: #71 (compaction
+strips a pre-existing orphan `tool_use` from the preserved tail so it can't 400
+the next request), #72 (the `⚠ truncated`/content-filter note is suppressed when
+tool calls are pending, so it never lands between `tool_calls` and their
+results), #73 (manual `/compact` completion drains `queued_messages`,
+auto-submitting a message typed during compaction), #74 (`ApprovalRequested` is
+dropped when the turn is already `Cancelling`, so a modal can't outlive its
+turn). Unicode/display: #101 (diff-row background fills by display cells via a
+`pad_to_cells` helper, not char count), #104 (user-message timestamp alignment
+measures display width, not bytes), #102 (`conversation_list` truncates on a
+`floor_char_boundary`, never mid-`char`), #103 (`slash_palette` clamps
+`selected_index` before slicing).
 
 **Group 1 — Provider adapters, retry & auth (13 · 3 MED, 10 LOW):**
 #12 (the OpenAI-compat streaming path now carries cached-input + reasoning tokens

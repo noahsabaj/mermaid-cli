@@ -56,6 +56,10 @@ pub struct State {
     /// receive it via `ExecContext::workdir` and spawned subprocesses
     /// inherit it. Centralized here so tests can inject a fake cwd.
     pub cwd: PathBuf,
+    /// System temp dir, captured once at startup (`std::env::temp_dir()`).
+    /// Pasted-image attachments build their scratch path from it; holding it
+    /// here keeps the reducer free of the env read it used to do inline (#54).
+    pub temp_dir: PathBuf,
     pub ids: IdAllocatorBundle,
     /// When `Some`, the next render should pop up a modal confirmation
     /// (e.g. "are you sure you want to /clear?"). Cleared by the
@@ -144,6 +148,7 @@ impl State {
             instructions: None,
             memory: None,
             cwd,
+            temp_dir: std::env::temp_dir(),
             ids: IdAllocatorBundle::default(),
             confirm: None,
             pending_approval: VecDeque::new(),

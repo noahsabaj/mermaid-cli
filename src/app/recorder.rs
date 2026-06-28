@@ -307,6 +307,9 @@ pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
             "message_index": message_index,
             "image_index": image_index,
         }),
+        // Record only the selection length — the copied text doesn't affect
+        // reducer State (it just emits a clipboard Cmd) and may be large/sensitive.
+        Msg::CopySelection(text) => serde_json::json!({ "len": text.chars().count() }),
     }
 }
 

@@ -246,6 +246,13 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             prompt,
             allowlist_scope,
         } => {
+            // Drop approval requests for a turn that's already being cancelled:
+            // its tool task is unwinding, so surfacing (and parking on) a modal
+            // would outlive the turn (#74). The stale-filter lets a same-id
+            // `Cancelling` turn through, so guard the state explicitly here.
+            if matches!(state.turn, TurnState::Cancelling { .. }) {
+                return (state, cmds);
+            }
             // Enqueue a modal; the parked tool task waits until the user
             // answers (key handler → Cmd::ResolveApproval). FIFO so multiple
             // gated tools in one turn are shown one at a time.
@@ -439,6 +446,15 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             image_index,
         } => {
             handle_open_image_at(&mut state, &mut cmds, message_index, image_index);
+        },
+        Msg::CopySelection(text) => {
+            // The selection itself lives in the render layer; the main loop
+            // resolves it to text and hands it here so the clipboard write is an
+            // `update()`-emitted Cmd (recorded for replay) rather than an
+            // out-of-band dispatch (#18).
+            if !text.is_empty() {
+                cmds.push(Cmd::CopyToClipboard(text));
+            }
         },
     }
 
@@ -1013,7 +1029,9 @@ fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
         },
         Paste::Image { bytes, format } => {
             let id = state.ids.tool_call.next();
-            let temp_path = std::env::temp_dir().join(format!("mermaid-img-{}.{}", id, format));
+            let temp_path = state
+                .temp_dir
+                .join(format!("mermaid-img-{}.{}", id, format));
             state.ui.attachments.push(super::state::Attachment {
                 id,
                 base64_data: base64::Engine::encode(
@@ -1089,20 +1107,11 @@ fn handle_submit_prompt(
     // only on actual change.
     emit_title_if_changed(state, cmds);
 
-    // F8: refresh MERMAID.md synchronously BEFORE building the chat
-    // request, so edits the user made between turns land in the very
-    // next call instead of the one after. The reducer's "no I/O" law
-    // has a deliberate exception for this: a single `stat` on a local
-    // file (plus an optional <40KB read on mtime change) is
-    // microseconds and doesn't need an async ceremony. See
-    // `crate::app::instructions::refresh`.
-    let (refreshed, _outcome) =
-        crate::app::instructions::refresh(state.instructions.take(), &state.cwd);
-    state.instructions = refreshed;
-    let (refreshed_memory, _) =
-        crate::app::memory::refresh(state.memory.take(), &state.cwd, &state.settings.memory);
-    state.memory = refreshed_memory;
-
+    // Instructions/memory are kept fresh by the background config watcher (#45),
+    // which stamps `state.instructions`/`state.memory` via
+    // `Msg::InstructionsChanged`/`MemoryChanged`. The reducer reads them here as
+    // injected data — no inline I/O — so `update()` stays pure and a recorded
+    // session replays without re-statting the live filesystem.
     let turn = state.ids.fresh_turn();
     state.turn = start_generating(turn, std::time::SystemTime::from(state.now));
     cmds.push(Cmd::CallModel {
@@ -1558,13 +1567,8 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
         return;
     }
 
-    let (refreshed, _outcome) =
-        crate::app::instructions::refresh(state.instructions.take(), &state.cwd);
-    state.instructions = refreshed;
-    let (refreshed_memory, _) =
-        crate::app::memory::refresh(state.memory.take(), &state.cwd, &state.settings.memory);
-    state.memory = refreshed_memory;
-
+    // Instructions/memory are kept fresh by the config watcher (#45); read as
+    // injected data so the reducer does no I/O before building the request.
     let turn = state.ids.fresh_turn();
     state.turn = TurnState::Compacting {
         id: turn,
@@ -2220,6 +2224,16 @@ fn handle_compaction_finished(
 
     if manual {
         state.turn = TurnState::Idle;
+        // Drain one queued message on the way out, same as the no-tool-calls
+        // tail of `handle_stream_done` / `handle_turn_cancelled` (#73). A
+        // message the user typed during `/compact` would otherwise sit in the
+        // FIFO until some later turn happened to end.
+        if let Some(next) = state.ui.queued_messages.pop_front() {
+            state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
+                text: next.text,
+                attachment_ids: next.attachment_ids,
+            });
+        }
     }
 
     // The compaction's replacement message already carries the receipt text, so
@@ -2334,19 +2348,24 @@ fn handle_stream_done(
     // Surface a terminal stop reason that would otherwise leave the response
     // silently incomplete. (A refusal with no content is turned into an error
     // upstream in the adapter; here we only see reasons that still produced
-    // output.)
-    match stop_reason {
-        Some(crate::models::FinishReason::Length) => push_system(
-            state,
-            cmds,
-            "⚠ Response truncated — reached the model's max output-token limit.",
-        ),
-        Some(crate::models::FinishReason::ContentFilter) => push_system(
-            state,
-            cmds,
-            "⚠ Response was flagged by the provider's content filter.",
-        ),
-        _ => {},
+    // output.) Skip it when tool calls are pending: a system message inserted
+    // between the assistant's `tool_calls` and their results breaks provider
+    // pairing → 400 (#72). A Length/ContentFilter stop *with* tool calls is
+    // contradictory anyway, so dropping the note in that case is safe.
+    if tool_calls.is_empty() {
+        match stop_reason {
+            Some(crate::models::FinishReason::Length) => push_system(
+                state,
+                cmds,
+                "⚠ Response truncated — reached the model's max output-token limit.",
+            ),
+            Some(crate::models::FinishReason::ContentFilter) => push_system(
+                state,
+                cmds,
+                "⚠ Response was flagged by the provider's content filter.",
+            ),
+            _ => {},
+        }
     }
 
     // Provider token usage is per API request. Track both the last
@@ -2454,7 +2473,7 @@ fn handle_open_image_at(
         return;
     };
     let id = state.ids.tool_call.next();
-    let temp_path = std::env::temp_dir().join(format!("mermaid-img-{}.png", id));
+    let temp_path = state.temp_dir.join(format!("mermaid-img-{}.png", id));
     cmds.push(Cmd::WriteImageToTemp {
         path: temp_path.clone(),
         bytes,
@@ -3276,13 +3295,12 @@ mod tests {
         };
         let (state, cmds) = update(state, msg);
         assert!(matches!(state.turn, TurnState::Generating { .. }));
-        // F8: CallModel only — RefreshInstructions is now a synchronous
-        // pre-flight inside handle_submit_prompt, so the Cmd stays
-        // available for explicit refreshes but isn't emitted here.
+        // CallModel only — instructions/memory freshness comes from the config
+        // watcher (#45), so submit neither refreshes inline nor emits a Cmd.
         assert!(cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
         assert!(
             !cmds.iter().any(|c| matches!(c, Cmd::RefreshInstructions)),
-            "F8: refresh happens inline; no longer queued as a Cmd",
+            "submit must not emit a refresh Cmd; the watcher keeps config fresh (#45)",
         );
         // user message committed
         assert_eq!(state.session.messages().len(), 1);
@@ -3906,6 +3924,47 @@ mod tests {
             state.pending_approval.front().unwrap().tool,
             "execute_command"
         );
+    }
+
+    #[test]
+    fn approval_requested_during_cancelling_is_dropped() {
+        // #74: a tool task unwinding under cancellation can still emit an
+        // ApprovalRequested; parking a modal for it would outlive the turn.
+        let mut state = fresh_state();
+        state.turn = TurnState::Cancelling {
+            id: TurnId(1),
+            since: std::time::SystemTime::now(),
+        };
+        let (state, _) = update(
+            state,
+            Msg::ApprovalRequested {
+                turn: TurnId(1),
+                call_id: super::super::ids::ToolCallId(5),
+                tool: "execute_command".to_string(),
+                risk: "shell_mutation".to_string(),
+                kind: crate::domain::ApprovalKind::Shell,
+                prompt: "$ rm -rf /".to_string(),
+                allowlist_scope: "execute_command:rm".to_string(),
+            },
+        );
+        assert!(
+            state.pending_approval.is_empty(),
+            "approval for a cancelling turn must not be queued (#74)"
+        );
+    }
+
+    #[test]
+    fn copy_selection_emits_clipboard_cmd_when_nonempty() {
+        // #18: the copy side effect flows through the reducer as a Cmd.
+        let (_s, cmds) = update(fresh_state(), Msg::CopySelection("hello".to_string()));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::CopyToClipboard(t) if t == "hello")),
+            "non-empty selection should emit CopyToClipboard"
+        );
+        // An empty selection is a no-op — no clipboard Cmd.
+        let (_s, cmds) = update(fresh_state(), Msg::CopySelection(String::new()));
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::CopyToClipboard(_))));
     }
 
     #[test]

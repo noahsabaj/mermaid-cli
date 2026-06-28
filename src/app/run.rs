@@ -99,6 +99,10 @@ pub async fn run_interactive_with(
     // Interactive TUI: enable inline approval prompts so `ask` mode (and Auto
     // escalations) pause and prompt instead of erroring out.
     let mut runner = runner.with_interactive_approvals();
+    // Keep instructions/memory fresh via the background config watcher (#45):
+    // it emits Msg::InstructionsChanged/MemoryChanged on change, so the reducer
+    // reads them as injected data and never does the refresh I/O inline.
+    runner.spawn_config_watcher(cwd.clone(), config.memory.clone());
     let mut terminal = Some(TerminalGuard::setup()?);
     let mut rstate = RenderCache::new();
     let mut events = EventStream::new();
@@ -106,9 +110,8 @@ pub async fn run_interactive_with(
     let mut tick = interval(Duration::from_millis(16));
     let mut recorder = opts.recorder;
 
-    // Boot effects: MCP server init (if configured) + an initial
-    // instructions refresh so MERMAID.md content is in State before
-    // the first prompt.
+    // Boot effects: MCP server init (if configured). Instructions/memory are
+    // loaded by the config watcher started above (#45), not here.
     for cmd in bootstrap_cmds(&config) {
         runner.dispatch(cmd);
     }
@@ -218,12 +221,15 @@ pub async fn run_interactive_with(
                             && k.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
                             && matches!(k.code, crossterm::event::KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
                         {
-                            if let Some(text) = rstate.chat.selected_text()
-                                && !text.is_empty()
-                            {
-                                runner.dispatch(Cmd::CopyToClipboard(text));
-                            }
-                            None
+                            // Route the copy through the reducer (#18): the
+                            // selection lives in the render layer, but emitting a
+                            // Msg keeps the clipboard side effect recorded +
+                            // replayable instead of dispatched out-of-band.
+                            rstate
+                                .chat
+                                .selected_text()
+                                .filter(|t| !t.is_empty())
+                                .map(Msg::CopySelection)
                         } else {
                             // Coalesce a paste burst (crossterm 0.29 doesn't
                             // deliver Event::Paste on the Windows console — a
@@ -290,10 +296,12 @@ pub async fn run_interactive_with(
 }
 
 /// Commands dispatched on startup before the first iteration of the
-/// loop. Fires MCP init (if configured) + an initial instructions
-/// sweep so MERMAID.md content lands before the first prompt.
+/// loop. Fires MCP init (if configured). Instructions/memory are loaded
+/// by the config watcher (#45), not here.
 fn bootstrap_cmds(config: &Config) -> Vec<Cmd> {
-    let mut cmds = vec![Cmd::RefreshInstructions, Cmd::RefreshMemory];
+    // Instructions/memory load + stay fresh via the config watcher (#45),
+    // started in `run_interactive_with`. Bootstrap only handles MCP init.
+    let mut cmds = Vec::new();
     if !config.mcp_servers.is_empty() {
         cmds.push(Cmd::InitMcpServers(config.mcp_servers.clone()));
     }
@@ -305,15 +313,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bootstrap_includes_refresh_instructions() {
+    fn bootstrap_is_empty_without_mcp_servers() {
+        // Instructions/memory load via the config watcher (#45), not bootstrap;
+        // with no MCP servers configured, bootstrap emits nothing.
         let cmds = bootstrap_cmds(&Config::default());
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::RefreshInstructions)));
-    }
-
-    #[test]
-    fn bootstrap_includes_refresh_memory() {
-        let cmds = bootstrap_cmds(&Config::default());
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::RefreshMemory)));
+        assert!(cmds.is_empty());
     }
 
     #[test]

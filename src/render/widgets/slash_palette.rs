@@ -28,8 +28,9 @@ pub struct SlashPaletteWidget<'a> {
     pub theme: &'a Theme,
     /// Already-filtered (and ordered) list of commands to display.
     pub commands: Vec<&'static SlashCommand>,
-    /// Index into `commands` of the highlighted row. Caller is
-    /// responsible for keeping it in bounds (or setting 0 on empty).
+    /// Index into `commands` of the highlighted row. `render` clamps it to
+    /// the valid range (or 0 when empty), so an out-of-range value from the
+    /// caller can't panic the row slice (#103).
     pub selected_index: usize,
 }
 
@@ -41,8 +42,12 @@ impl<'a> Widget for SlashPaletteWidget<'a> {
         // selection sits at the bottom row of the visible window. Same
         // pattern as most terminal palettes (fzf, less +F).
         let total = self.commands.len();
-        let scroll_offset = if self.selected_index >= MAX_VISIBLE_ROWS {
-            self.selected_index + 1 - MAX_VISIBLE_ROWS
+        // Clamp defensively: an out-of-range `selected_index` would drive
+        // `scroll_offset` past `visible_end` and panic the
+        // `commands[scroll_offset..visible_end]` slice below (#103).
+        let selected = self.selected_index.min(total.saturating_sub(1));
+        let scroll_offset = if selected >= MAX_VISIBLE_ROWS {
+            selected + 1 - MAX_VISIBLE_ROWS
         } else {
             0
         };
@@ -84,7 +89,7 @@ impl<'a> Widget for SlashPaletteWidget<'a> {
         for (offset, cmd) in self.commands[scroll_offset..visible_end].iter().enumerate() {
             // Recover the absolute index for selection comparison.
             let absolute_index = scroll_offset + offset;
-            let is_selected = absolute_index == self.selected_index;
+            let is_selected = absolute_index == selected;
 
             // Build the `/name [arg_hint]` chunk. The arg_hint is in a
             // softer color so the eye lands on the command name first.
@@ -120,5 +125,31 @@ impl<'a> Widget for SlashPaletteWidget<'a> {
         }
 
         Paragraph::new(lines).block(block).render(area, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn out_of_bounds_selection_does_not_panic() {
+        // #103: a caller that lets `selected_index` exceed the filtered list
+        // must not panic the `commands[scroll_offset..visible_end]` slice.
+        let theme = Theme::dark();
+        let commands = crate::domain::slash_commands::filter_by_prefix("");
+        assert!(!commands.is_empty(), "registry should expose commands");
+        let widget = SlashPaletteWidget {
+            theme: &theme,
+            commands,
+            selected_index: 9999,
+        };
+        let backend = TestBackend::new(80, 12);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| f.render_widget(widget, Rect::new(0, 0, 80, 12)))
+            .expect("render must not panic on OOB selection");
     }
 }

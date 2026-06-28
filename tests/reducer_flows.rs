@@ -507,6 +507,157 @@ fn compaction_finished_replaces_history_and_archives_head() {
 }
 
 #[test]
+fn truncation_note_skipped_when_tool_calls_pending() {
+    // #72: a `Length` stop with buffered tool calls must NOT insert a "⚠
+    // truncated" system message between the assistant's tool_calls and the tool
+    // results — that ordering 400s Anthropic. The note is dropped; the turn
+    // proceeds to ExecutingTools.
+    let (state, _) = user_submit(fresh(), "do a thing");
+    let id = state.current_turn_id().unwrap();
+    let (state, _) = update(
+        state,
+        Msg::StreamToolCall {
+            turn: id,
+            call: ModelToolCall {
+                id: Some("call_1".to_string()),
+                function: FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "x"}),
+                },
+            },
+        },
+    );
+    let (state, _) = update(
+        state,
+        Msg::StreamDone {
+            turn: id,
+            usage: None,
+            thinking_signature: None,
+            stop_reason: Some(mermaid_cli::models::FinishReason::Length),
+        },
+    );
+    assert!(
+        matches!(state.turn, TurnState::ExecutingTools { .. }),
+        "expected ExecutingTools; got {:?}",
+        state.turn
+    );
+    assert!(
+        !state
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.role == MessageRole::System && m.content.contains("truncated")),
+        "truncation note must not be inserted between tool_calls and their results"
+    );
+}
+
+#[test]
+fn truncation_note_shown_when_no_tool_calls() {
+    // The mirror of #72: a `Length` stop with no tool calls still surfaces the
+    // note (the turn ends, so ordering is safe).
+    let (state, _) = user_submit(fresh(), "summarize");
+    let id = state.current_turn_id().unwrap();
+    let (state, _) = update(
+        state,
+        Msg::StreamDone {
+            turn: id,
+            usage: None,
+            thinking_signature: None,
+            stop_reason: Some(mermaid_cli::models::FinishReason::Length),
+        },
+    );
+    assert!(matches!(state.turn, TurnState::Idle));
+    assert!(
+        state
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.role == MessageRole::System && m.content.contains("truncated")),
+        "a Length stop with no tool calls should surface the truncation note"
+    );
+}
+
+#[test]
+fn manual_compaction_finish_drains_queued_message() {
+    // #73: a message typed during `/compact` must auto-submit when compaction
+    // finishes, not sit in the queue until some later turn happens to end.
+    let mut state = fresh();
+    state.session.append(ChatMessage::user("old prompt"));
+    state.session.append(ChatMessage::assistant("old answer"));
+    state.session.append(ChatMessage::user("new prompt"));
+    let (state, _) = update(state, Msg::Slash(SlashCmd::Compact(None)));
+    let turn = state.turn.id().expect("compaction turn");
+
+    // User types while compaction runs → queued (turn is Compacting, not Idle).
+    let (state, _) = update(
+        state,
+        Msg::SubmitPrompt {
+            text: "while you were compacting".to_string(),
+            attachment_ids: vec![],
+        },
+    );
+    assert_eq!(
+        state.ui.queued_messages.len(),
+        1,
+        "message should queue during compaction"
+    );
+
+    let snap = |msg_tokens| {
+        ContextUsageSnapshot::from_estimate(
+            PromptTokenBreakdown {
+                system_tokens: 10,
+                instructions_tokens: 0,
+                message_tokens: msg_tokens,
+                tool_schema_tokens: 0,
+                image_count: 0,
+                message_count: 3,
+                tool_count: 0,
+            },
+            Some(1_000),
+        )
+    };
+    let mut checkpoint = ChatMessage::user("MERMAID CONTEXT CHECKPOINT\n## Goal\n- continue");
+    checkpoint.kind = ChatMessageKind::ContextCheckpoint;
+    let result = CompactionResult {
+        record: CompactionRecord {
+            id: "compact_test".to_string(),
+            trigger: CompactionTrigger::Manual,
+            created_at: chrono::Local::now(),
+            before_tokens: 100,
+            after_tokens: 30,
+            archived_message_count: 2,
+            preserved_message_count: 1,
+            summary_tokens: 10,
+            duration_secs: 0.5,
+            verified: true,
+            verification_error: None,
+            focus: None,
+            archive_path: None,
+        },
+        replacement_messages: vec![checkpoint, ChatMessage::user("new prompt")],
+        archived_messages: vec![
+            ChatMessage::user("old prompt"),
+            ChatMessage::assistant("old answer"),
+        ],
+        before_snapshot: snap(90),
+        after_snapshot: snap(20),
+        usage: None,
+    };
+
+    let (state, cmds) = update(state, Msg::CompactionFinished { turn, result });
+    // The queued message drained → the folded SubmitPrompt auto-started a turn.
+    assert!(
+        state.ui.queued_messages.is_empty(),
+        "queued message must drain on manual compaction finish (#73)"
+    );
+    assert!(
+        cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+        "draining the queued message should auto-submit it (CallModel emitted)"
+    );
+    assert!(matches!(state.turn, TurnState::Generating { .. }));
+}
+
+#[test]
 fn slash_unknown_posts_to_transcript() {
     // The transient banner is gone; an unknown command posts to the transcript.
     let (state, cmds) = update(fresh(), Msg::Slash(SlashCmd::Unknown("nope".to_string())));
