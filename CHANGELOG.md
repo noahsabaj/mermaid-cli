@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-28
+
 ### Security
 
 - **Daemon, checkpoint, and storage hardening (review axis 3).**
@@ -27,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Headless `mermaid run` output is no longer corrupted by a subagent.** A
+  subagent's runner emitted an OSC 2 terminal-title escape (`\x1b]2;…`) into
+  stdout even in headless mode (it didn't inherit the parent's title
+  suppression), producing invalid `--format json` — and stray bytes in
+  `text`/`markdown` — whenever the `agent` tool ran.
+- **`mermaid run ""` now errors instead of silently doing nothing.** An empty or
+  whitespace-only prompt is rejected at parse time (`prompt cannot be empty`,
+  exit 2) rather than producing no output with a success exit code.
 - **Provider-adapter correctness (review axis 4).**
   - Truncation (`max_tokens`) and content-filter / safety refusals are no longer
     silently treated as a clean finish: a `⚠ truncated` note now appears, and a
@@ -955,7 +965,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.1...v0.10.2
