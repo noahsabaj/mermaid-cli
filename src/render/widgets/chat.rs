@@ -530,6 +530,16 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     let preformatted = parsed_line.style.bg == Some(code_bg);
                     let base_style = parsed_line.style;
 
+                    // Continuation indent for wrapping: the 2-cell message gutter
+                    // every line carries, plus this line's own content-start column
+                    // so a wrapped list item's continuations hang under its text
+                    // (after the marker) instead of snapping back to the gutter.
+                    let continuation = if preformatted {
+                        2
+                    } else {
+                        2 + crate::render::markdown::line_hanging_indent(&parsed_line, self.theme)
+                    };
+
                     // Add role indicator to first line or 2-space margin to others.
                     let mut spans = if line_idx == 0 {
                         vec![Span::styled(
@@ -547,7 +557,11 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                         // word-collapse) so wide lines stay readable.
                         lines.extend(wrap_preformatted(new_line, content_width as usize, 2));
                     } else {
-                        lines.extend(wrap_styled_line(new_line, content_width as usize, 2));
+                        lines.extend(wrap_styled_line(
+                            new_line,
+                            content_width as usize,
+                            continuation,
+                        ));
                     }
                 }
 
@@ -1590,6 +1604,34 @@ mod tests {
             first.starts_with("  ") && first.trim_start().starts_with("No source"),
             "first wrapped segment must keep the 2-space gutter; got {first:?}"
         );
+    }
+
+    /// End-to-end: a wrapped list item keeps the bullet on the first segment and
+    /// hangs its continuation lines under the item text (col 6 = 2 gutter + 2
+    /// nesting indent + 2 marker), instead of snapping back to the message gutter.
+    /// Exercises the same span shape chat.rs builds, with the continuation indent
+    /// chat.rs derives via markdown::line_hanging_indent (4) + the gutter (2).
+    #[test]
+    fn wrap_styled_line_hangs_list_continuation_under_marker() {
+        let line = Line::from(vec![
+            Span::raw("  "), // message gutter (chat.rs)
+            Span::raw("  "), // list nesting indent (markdown)
+            Span::raw("• "), // marker (markdown)
+            Span::raw("alpha beta gamma delta epsilon zeta eta theta iota".to_string()),
+        ]);
+        let wrapped = wrap_styled_line(line, 24, 6);
+        assert!(wrapped.len() >= 2, "should wrap");
+        assert!(
+            first_segment_text(&wrapped).starts_with("    • "),
+            "first segment keeps gutter + nesting + marker"
+        );
+        for cont in &wrapped[1..] {
+            let t: String = cont.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                t.starts_with("      ") && t.chars().nth(6).is_some_and(|c| c != ' '),
+                "continuation hangs under the item text at col 6; got {t:?}"
+            );
+        }
     }
 
     /// The fix preserves whitespace margins only — the message bullet "● " must
