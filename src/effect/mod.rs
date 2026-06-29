@@ -1257,7 +1257,12 @@ async fn dispatch_call_model(
         request.tools.clear();
     }
 
-    let max_context_tokens = provider.capabilities().max_context_tokens.or_else(|| {
+    // Resolve the *effective* context window. For Ollama this probes the model's
+    // real window and auto-fits num_ctx to memory (cache-first, off the UI
+    // thread); for other providers it's the static advertised window. Using the
+    // effective value here is what un-skips auto-compaction for Ollama (which had
+    // `NoKnownContextLimit`) and gives the status bar real numbers.
+    let max_context_tokens = provider.resolve_context_window().await.or_else(|| {
         crate::domain::runtime::infer_static_context_window_for_model_id(&request.model_id)
     });
     let context_snapshot =

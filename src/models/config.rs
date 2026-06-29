@@ -174,6 +174,7 @@ impl ModelConfig {
             num_gpu: self.get_backend_option_i32("ollama", "num_gpu"),
             num_thread: self.get_backend_option_i32("ollama", "num_thread"),
             num_ctx: self.get_backend_option_i32("ollama", "num_ctx"),
+            num_predict: self.get_backend_option_i32("ollama", "num_predict"),
             numa: self.get_backend_option_bool("ollama", "numa"),
         }
     }
@@ -185,6 +186,11 @@ pub struct OllamaOptions {
     pub num_gpu: Option<i32>,
     pub num_thread: Option<i32>,
     pub num_ctx: Option<i32>,
+    /// Output token cap (`num_predict`). Every other adapter forwards
+    /// `max_tokens`; Ollama left output unbounded, so a small `num_ctx` was the
+    /// only stop condition. Derived in `build_model_config` (see
+    /// `ollama_sizing::resolve_ollama_num_predict`).
+    pub num_predict: Option<i32>,
     pub numa: Option<bool>,
 }
 

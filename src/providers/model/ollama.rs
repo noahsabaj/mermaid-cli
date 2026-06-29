@@ -12,11 +12,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::domain::ChatRequest;
-use crate::models::adapters::ollama::OllamaAdapter;
+use crate::models::adapters::ollama::{OllamaAdapter, OllamaModelInfo};
+use crate::models::adapters::ollama_sizing::{
+    NumCtxInputs, default_ollama_num_predict, resolve_ollama_num_ctx,
+};
 use crate::models::{
     BackendConfig, Model, ModelConfig, ModelError, ReasoningChunk, Result, StreamCallback,
     StreamEvent as ModelStreamEvent,
 };
+use crate::runtime::{NewProviderProbe, RuntimeStore};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
@@ -31,6 +35,12 @@ pub struct OllamaProvider {
     /// call time. Before F11 these were silently dropped because the
     /// wrapper built `ModelConfig` only from `ChatRequest` fields.
     config: Arc<crate::app::Config>,
+    /// Cached `/api/show` probe (context window + dims + weight). Filled once per
+    /// process per model — the provider itself is cached by `ProviderFactory`, so
+    /// this fires a single network probe per model. Backed by the cross-session
+    /// `provider_probes` table. Probe *failures* are not cached (left empty for a
+    /// cheap retry next turn).
+    ctx_cell: tokio::sync::OnceCell<OllamaModelInfo>,
 }
 
 impl OllamaProvider {
@@ -56,7 +66,54 @@ impl OllamaProvider {
             adapter,
             capabilities,
             config,
+            ctx_cell: tokio::sync::OnceCell::new(),
         })
+    }
+
+    /// Probe the model's capabilities, cache-first. In-process `OnceCell` backed
+    /// by the cross-session `provider_probes` table; failures aren't cached.
+    async fn probe(&self) -> Option<OllamaModelInfo> {
+        self.ctx_cell
+            .get_or_try_init(|| async { self.load_probe().await.ok_or(()) })
+            .await
+            .ok()
+            .cloned()
+    }
+
+    async fn load_probe(&self) -> Option<OllamaModelInfo> {
+        let model = self.adapter.name().to_string();
+        if let Some(info) = load_probe_from_db(model.clone()).await {
+            return Some(info);
+        }
+        let info = self.adapter.show_model_info().await?;
+        save_probe_to_db(model, info.clone()).await;
+        Some(info)
+    }
+
+    /// Assemble the sizing inputs from the probe, host memory, and config. Built
+    /// here and in the effect layer from the same (cached) sources so the
+    /// effective window can't diverge between the request and compaction.
+    async fn num_ctx_inputs(&self, info: &OllamaModelInfo) -> NumCtxInputs {
+        let allow_ram_offload = self.config.ollama.allow_ram_offload;
+        // Only fetch the budget we'll actually use: VRAM when keeping the model
+        // on the GPU (default), system RAM when offload is allowed.
+        let (vram_bytes, system_ram_bytes) = if allow_ram_offload {
+            (None, crate::utils::system_ram_bytes())
+        } else {
+            (crate::utils::gpu_vram_bytes().await, None)
+        };
+        NumCtxInputs {
+            model_max: info.context_length,
+            dims: info.dims,
+            model_weight_bytes: info.weight_bytes,
+            // Phase 2 threads a per-model `/context` override here.
+            per_model_override: None,
+            global_num_ctx: self.config.ollama.num_ctx,
+            allow_ram_offload,
+            vram_bytes,
+            system_ram_bytes,
+            max_auto_cap: self.config.ollama.max_auto_num_ctx,
+        }
     }
 }
 
@@ -66,8 +123,18 @@ impl ModelProvider for OllamaProvider {
         &self.capabilities
     }
 
+    async fn resolve_context_window(&self) -> Option<usize> {
+        let info = self.probe().await.unwrap_or_default();
+        let inputs = self.num_ctx_inputs(&info).await;
+        resolve_ollama_num_ctx(&inputs).map(|r| r.value)
+    }
+
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
-        let config = build_model_config(&request, &self.config);
+        // Resolve the effective window first (cache-first probe). Idempotent with
+        // the effect layer's call — both read the same cached probe + memory, so
+        // what we send as num_ctx matches what compaction assumes.
+        let effective = self.resolve_context_window().await;
+        let config = build_model_config(&request, &self.config, effective);
         // Ordered relay (F2): the adapter's sync callback pushes into an
         // `UnboundedSender` (synchronous, FIFO). A single relay task drains
         // into the bounded sink in order, avoiding the per-event `tokio::
@@ -126,7 +193,14 @@ impl ModelProvider for OllamaProvider {
 
 // ─── helpers ────────────────────────────────────────────────────────
 
-fn build_model_config(request: &ChatRequest, app_config: &crate::app::Config) -> ModelConfig {
+/// `num_ctx` is the resolved effective window (auto-fitted, or override/global);
+/// passing it here keeps a single source of truth — the direct `config.ollama.
+/// num_ctx` forward is gone because the resolver already considered it.
+fn build_model_config(
+    request: &ChatRequest,
+    app_config: &crate::app::Config,
+    num_ctx: Option<usize>,
+) -> ModelConfig {
     let mut mc = ModelConfig {
         model: request.model_id.clone(),
         temperature: request.temperature,
@@ -137,14 +211,29 @@ fn build_model_config(request: &ChatRequest, app_config: &crate::app::Config) ->
         tools: request.tools.iter().map(|t| t.to_openai_json()).collect(),
         ..Default::default()
     };
-    // F11: forward Ollama hardware options from the user's app config.
-    // Previously these fields were configured + persisted but silently
-    // ignored because this wrapper built ModelConfig in isolation.
+    // Effective context window (auto-fitted to memory / override / global).
+    if let Some(n) = num_ctx {
+        mc.set_backend_option("ollama".into(), "num_ctx".into(), n.to_string());
+    }
+    // Output cap: max_tokens + reasoning headroom, bounded by the room left in
+    // num_ctx. Without this Ollama generates unbounded and only stops when the
+    // window fills — the truncation bug.
+    let num_predict = default_ollama_num_predict(
+        request.max_tokens,
+        request.reasoning,
+        num_ctx,
+        estimate_prompt_tokens(request),
+    );
+    mc.set_backend_option(
+        "ollama".into(),
+        "num_predict".into(),
+        num_predict.to_string(),
+    );
+
+    // F11: forward Ollama hardware options from the user's app config (num_ctx is
+    // now handled above via the resolver).
     if let Some(v) = app_config.ollama.num_gpu {
         mc.set_backend_option("ollama".into(), "num_gpu".into(), v.to_string());
-    }
-    if let Some(v) = app_config.ollama.num_ctx {
-        mc.set_backend_option("ollama".into(), "num_ctx".into(), v.to_string());
     }
     if let Some(v) = app_config.ollama.num_thread {
         mc.set_backend_option("ollama".into(), "num_thread".into(), v.to_string());
@@ -153,6 +242,74 @@ fn build_model_config(request: &ChatRequest, app_config: &crate::app::Config) ->
         mc.set_backend_option("ollama".into(), "numa".into(), v.to_string());
     }
     mc
+}
+
+/// Rough prompt-token estimate (≈4 chars/token) for bounding `num_predict`
+/// against the remaining room in `num_ctx`. Approximate by design — it only
+/// gates the output cap, never the prompt itself.
+fn estimate_prompt_tokens(request: &ChatRequest) -> usize {
+    let chars = request.system_prompt.len()
+        + request.instructions.as_deref().map_or(0, str::len)
+        + request
+            .messages
+            .iter()
+            .map(|m| m.content.len())
+            .sum::<usize>();
+    chars / 4
+}
+
+/// Load a cached probe from `provider_probes` (within TTL). Runs the blocking
+/// SQLite read off the async runtime. Best-effort: any failure → `None`.
+async fn load_probe_from_db(model: String) -> Option<OllamaModelInfo> {
+    tokio::task::spawn_blocking(move || {
+        let store = RuntimeStore::open_default().ok()?;
+        let rec = store
+            .provider_probes()
+            .get("ollama", &model, "context_probe")
+            .ok()??;
+        if probe_is_stale(&rec.probed_at) {
+            return None;
+        }
+        serde_json::from_str::<OllamaModelInfo>(&rec.capability_value).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Persist a probe to `provider_probes` for subsequent sessions. Best-effort.
+async fn save_probe_to_db(model: String, info: OllamaModelInfo) {
+    let _ = tokio::task::spawn_blocking(move || -> Option<()> {
+        let value = serde_json::to_string(&info).ok()?;
+        let store = RuntimeStore::open_default().ok()?;
+        store
+            .provider_probes()
+            .upsert(NewProviderProbe {
+                provider: "ollama".into(),
+                model_id: model,
+                capability_key: "context_probe".into(),
+                capability_value: value,
+                confidence: "probed".into(),
+                error: None,
+            })
+            .ok()?;
+        Some(())
+    })
+    .await;
+}
+
+fn probe_is_stale(probed_at: &str) -> bool {
+    use chrono::{DateTime, Utc};
+    match DateTime::parse_from_rfc3339(probed_at) {
+        Ok(t) => {
+            Utc::now()
+                .signed_duration_since(t.with_timezone(&Utc))
+                .num_days()
+                >= crate::constants::OLLAMA_PROBE_TTL_DAYS
+        },
+        // Unparseable timestamp → treat as stale and re-probe.
+        Err(_) => true,
+    }
 }
 
 /// Build a `StreamCallback` that forwards `ModelStreamEvent`s from the
@@ -202,7 +359,7 @@ mod tests {
             tools: vec![],
         };
         let app_cfg = crate::app::Config::default();
-        let cfg = build_model_config(&req, &app_cfg);
+        let cfg = build_model_config(&req, &app_cfg, None);
         assert_eq!(cfg.model, "ollama/test");
         assert_eq!(cfg.temperature, 0.3);
         assert_eq!(cfg.max_tokens, 2048);
@@ -214,11 +371,11 @@ mod tests {
         );
     }
 
-    /// F11 regression guard: Ollama hardware options in the user's
-    /// app config must land in the ModelConfig's backend_options so
-    /// the adapter's `build_request_body` emits them under `options`.
-    /// Before F11 these were configured + persisted but never reached
-    /// the wire — `num_ctx = 8192` in config.toml was a silent no-op.
+    /// F11 regression guard: Ollama hardware options in the user's app config
+    /// must land in the ModelConfig's backend_options so the adapter's
+    /// `build_request_body` emits them under `options`. `num_ctx` now arrives via
+    /// the resolver param (not a direct config forward), and `num_predict` is
+    /// always derived.
     #[test]
     fn build_model_config_forwards_ollama_hardware_options() {
         let req = ChatRequest {
@@ -232,17 +389,37 @@ mod tests {
             tools: vec![],
         };
         let mut app_cfg = crate::app::Config::default();
-        app_cfg.ollama.num_ctx = Some(8192);
         app_cfg.ollama.num_gpu = Some(10);
         app_cfg.ollama.num_thread = Some(8);
         app_cfg.ollama.numa = Some(true);
 
-        let cfg = build_model_config(&req, &app_cfg);
+        // The effective num_ctx (8192) is passed in by the resolver.
+        let cfg = build_model_config(&req, &app_cfg, Some(8192));
         let opts = cfg.ollama_options();
         assert_eq!(opts.num_ctx, Some(8192));
         assert_eq!(opts.num_gpu, Some(10));
         assert_eq!(opts.num_thread, Some(8));
         assert_eq!(opts.numa, Some(true));
+        assert!(opts.num_predict.is_some(), "num_predict is always derived");
+    }
+
+    /// `num_predict` is derived from max_tokens + the reasoning headroom, bounded
+    /// by the room left in num_ctx.
+    #[test]
+    fn build_model_config_derives_num_predict() {
+        let req = ChatRequest {
+            model_id: "ollama/test".to_string(),
+            messages: vec![],
+            system_prompt: String::new(),
+            instructions: None,
+            reasoning: crate::models::ReasoningLevel::Max,
+            temperature: 0.7,
+            max_tokens: 4096,
+            tools: vec![],
+        };
+        let cfg = build_model_config(&req, &crate::app::Config::default(), Some(131_072));
+        // 4096 + 8192 (Max reserve), plenty of room in a 131072 window.
+        assert_eq!(cfg.ollama_options().num_predict, Some(12_288));
     }
 
     #[tokio::test]

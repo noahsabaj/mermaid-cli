@@ -299,6 +299,16 @@ pub struct OllamaConfig {
     pub num_ctx: Option<i32>,
     /// Enable NUMA optimization for multi-CPU systems
     pub numa: Option<bool>,
+    /// Allow Ollama to offload the model/KV cache to system RAM when it doesn't
+    /// fit VRAM. **Disabled by default**: RAM offload is 5–20× slower, so by
+    /// default Mermaid auto-fits `num_ctx` to VRAM (keeping the model on the
+    /// GPU). Enable to trade speed for a larger context window. Toggle in-app
+    /// with `/context offload on|off`.
+    pub allow_ram_offload: bool,
+    /// Optional hard cap on the auto-fitted context window (in tokens). `None`
+    /// lets auto-fit use the full memory budget up to the model's max; set this
+    /// to bound it (e.g. to leave VRAM headroom for other apps).
+    pub max_auto_num_ctx: Option<usize>,
 }
 
 impl Default for OllamaConfig {
@@ -306,10 +316,12 @@ impl Default for OllamaConfig {
         Self {
             host: String::from("localhost"),
             port: DEFAULT_OLLAMA_PORT,
-            num_gpu: None,    // Let Ollama auto-detect
-            num_thread: None, // Let Ollama auto-detect
-            num_ctx: None,    // Use model default
-            numa: None,       // Auto-detect
+            num_gpu: None,            // Let Ollama auto-detect
+            num_thread: None,         // Let Ollama auto-detect
+            num_ctx: None,            // Use model default (overrides auto-fit)
+            numa: None,               // Auto-detect
+            allow_ram_offload: false, // VRAM-only by default (RAM is slow)
+            max_auto_num_ctx: None,   // No cap; auto-fit to the memory budget
         }
     }
 }

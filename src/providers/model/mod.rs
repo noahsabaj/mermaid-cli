@@ -32,6 +32,17 @@ pub trait ModelProvider: Send + Sync {
     /// attach reasoning controls).
     fn capabilities(&self) -> &Capabilities;
 
+    /// Resolve the *effective* context window for a turn (what the model will
+    /// actually enforce). The default returns the static advertised window;
+    /// Ollama overrides this to probe the model's real window and auto-fit
+    /// `num_ctx` to host memory. `None` means "let the backend decide".
+    ///
+    /// Awaited only on the effect runtime (never the reducer), so a probe never
+    /// blocks the UI.
+    async fn resolve_context_window(&self) -> Option<usize> {
+        self.capabilities().max_context_tokens
+    }
+
     /// Stream a chat turn. Typed events flow through
     /// `ctx.sink`; the returned `FinalResponse` carries token usage
     /// and the Anthropic thinking-signature (opaque blob required to

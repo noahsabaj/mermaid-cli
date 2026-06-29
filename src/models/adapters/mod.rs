@@ -6,4 +6,5 @@
 pub mod anthropic;
 pub mod gemini;
 pub mod ollama;
+pub mod ollama_sizing;
 pub mod openai_compat;

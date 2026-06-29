@@ -43,7 +43,7 @@ pub async fn handle_command(
             Ok(true)
         },
         Commands::ModelInfo { model } => {
-            show_model_info(model)?;
+            show_model_info(model, config).await?;
             Ok(true)
         },
         Commands::Version => {
@@ -1005,21 +1005,31 @@ async fn show_models(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn show_model_info(model: &str) -> Result<()> {
+async fn show_model_info(model: &str, config: &Config) -> Result<()> {
     let snapshot = crate::domain::ProviderCapabilitySnapshot::from_model_id(model);
     let store = RuntimeStore::open_default()?;
     let provider = snapshot.provider.clone();
+
+    // The static snapshot has no context window for Ollama. Probe `/api/show` for
+    // the model's real one so this reports a real number, not "unknown".
+    let mut context_tokens = snapshot.max_context_tokens;
+    let mut context_confidence = "static";
+    if provider == "ollama" {
+        let backend = std::sync::Arc::new(crate::providers::factory::ollama_backend_config(config));
+        if let Ok(adapter) =
+            crate::models::adapters::ollama::OllamaAdapter::new(&snapshot.model, backend).await
+            && let Some(info) = adapter.show_model_info().await
+            && let Some(ctx) = info.context_length
+        {
+            context_tokens = Some(ctx);
+            context_confidence = "probed";
+        }
+    }
+
     for (key, value) in [
         ("supports_tools", snapshot.supports_tools.to_string()),
         ("supports_vision", snapshot.supports_vision.to_string()),
         ("reasoning", snapshot.reasoning.clone()),
-        (
-            "max_context_tokens",
-            snapshot
-                .max_context_tokens
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-        ),
     ] {
         let _ = store.provider_probes().upsert(NewProviderProbe {
             provider: provider.clone(),
@@ -1030,6 +1040,17 @@ fn show_model_info(model: &str) -> Result<()> {
             error: None,
         });
     }
+    // Context window separately — probed (Ollama) or static.
+    let _ = store.provider_probes().upsert(NewProviderProbe {
+        provider: provider.clone(),
+        model_id: snapshot.model.clone(),
+        capability_key: "max_context_tokens".to_string(),
+        capability_value: context_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        confidence: context_confidence.to_string(),
+        error: None,
+    });
     println!("Model: {}", model);
     println!("Provider: {}", snapshot.provider);
     println!("Name: {}", snapshot.model);
@@ -1038,8 +1059,7 @@ fn show_model_info(model: &str) -> Result<()> {
     println!("Reasoning: {}", snapshot.reasoning);
     println!(
         "Context: {}",
-        snapshot
-            .max_context_tokens
+        context_tokens
             .map(|n| n.to_string())
             .unwrap_or_else(|| "unknown".to_string())
     );

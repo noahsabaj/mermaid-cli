@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use crate::constants::MAX_RESPONSE_CHARS;
 use crate::models::ModelCapabilities;
+use crate::models::adapters::ollama_sizing::ModelDims;
 use crate::models::config::{BackendConfig, ModelConfig};
 use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::reasoning::{ReasoningChunk, ReasoningLevel};
@@ -153,6 +154,67 @@ impl OllamaAdapter {
             model_name: model_name.to_string(),
             capabilities,
         })
+    }
+
+    /// Probe `/api/show` for the model's real context window + architecture
+    /// dimensions, and `/api/tags` for its weight size. These drive auto-sizing
+    /// of `num_ctx`/`num_predict`. Best-effort: any error (server down, parse
+    /// failure, timeout) returns `None` and the caller falls back to Ollama's
+    /// defaults / the conservative cap. A short per-request timeout keeps a
+    /// slow/hung server from stalling the turn.
+    pub async fn show_model_info(&self) -> Option<OllamaModelInfo> {
+        let url = format!("{}/api/show", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&json!({ "model": self.model_name }))
+            .timeout(std::time::Duration::from_secs(
+                crate::constants::OLLAMA_PROBE_TIMEOUT_SECS,
+            ))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let show: OllamaShowResponse = resp.json().await.ok()?;
+        let context_length = context_length_from_model_info(&show.model_info);
+        let dims = dims_from_model_info(&show.model_info);
+        let weight_bytes = self.model_size_bytes().await;
+
+        // Nothing useful → signal absence so the caller retries cheaply next turn
+        // rather than caching a useless result.
+        if context_length.is_none() && dims.is_none() && weight_bytes.is_none() {
+            return None;
+        }
+        Some(OllamaModelInfo {
+            context_length,
+            dims,
+            weight_bytes,
+        })
+    }
+
+    /// This model's on-disk byte size from `/api/tags`, or `None`. Used as the
+    /// VRAM weight footprint subtracted from the auto-sizing budget.
+    async fn model_size_bytes(&self) -> Option<u64> {
+        let url = format!("{}/api/tags", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(
+                crate::constants::OLLAMA_PROBE_TIMEOUT_SECS,
+            ))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let tags: OllamaTagsResponse = resp.json().await.ok()?;
+        tags.models
+            .into_iter()
+            .find(|m| m.name == self.model_name)
+            .and_then(|m| m.size)
     }
 
     /// Handle a streaming response, emitting typed `StreamEvent`s through
@@ -448,6 +510,12 @@ impl OllamaAdapter {
         if let Some(num_ctx) = ollama_opts.num_ctx {
             options["num_ctx"] = json!(num_ctx);
         }
+        // Output cap. Without this Ollama generates unbounded and only stops when
+        // the (often tiny default) num_ctx fills — the truncation bug. Derived
+        // from max_tokens + reasoning headroom in `build_model_config`.
+        if let Some(num_predict) = ollama_opts.num_predict {
+            options["num_predict"] = json!(num_predict);
+        }
         if let Some(num_gpu) = ollama_opts.num_gpu {
             options["num_gpu"] = json!(num_gpu);
         }
@@ -457,6 +525,11 @@ impl OllamaAdapter {
         if let Some(numa) = ollama_opts.numa {
             options["numa"] = json!(numa);
         }
+        tracing::debug!(
+            "Ollama sizing: num_ctx={:?} num_predict={:?}",
+            ollama_opts.num_ctx,
+            ollama_opts.num_predict
+        );
         request_body["options"] = options;
 
         request_body
@@ -612,6 +685,33 @@ pub(crate) struct OllamaTagsResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct OllamaModel {
     pub(crate) name: String,
+    /// On-disk (quantized) byte size — closely approximates the VRAM weight
+    /// footprint, which auto-sizing subtracts from the memory budget.
+    #[serde(default)]
+    pub(crate) size: Option<u64>,
+}
+
+/// Subset of the `/api/show` response we parse — only `model_info` (the
+/// architecture-prefixed dimensions). Byte size is NOT here; it comes from
+/// `/api/tags`.
+#[derive(Debug, Deserialize)]
+struct OllamaShowResponse {
+    #[serde(default)]
+    model_info: serde_json::Value,
+}
+
+/// Capabilities probed from `/api/show` (+ `/api/tags` for the weight size),
+/// used to auto-size `num_ctx`. All fields are best-effort and independently
+/// optional. Serialized into the `provider_probes` cache so subsequent sessions
+/// skip the probe.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OllamaModelInfo {
+    /// The model's architectural max context window.
+    pub context_length: Option<usize>,
+    /// Architecture dimensions for the KV-cache estimate.
+    pub dims: Option<ModelDims>,
+    /// On-disk (quantized) weight bytes.
+    pub weight_bytes: Option<u64>,
 }
 
 // Helper functions
@@ -626,6 +726,49 @@ fn map_ollama_done_reason(s: &str) -> FinishReason {
         "length" => FinishReason::Length,
         other => FinishReason::Other(other.to_string()),
     }
+}
+
+/// Coerce a `model_info` JSON value to `usize` (the dimension keys are integers).
+fn json_to_usize(v: &serde_json::Value) -> Option<usize> {
+    v.as_u64().map(|n| n as usize)
+}
+
+/// The model's max context window from `/api/show` `model_info`. Keys are
+/// architecture-prefixed (`qwen2.context_length`, `llama.context_length`,
+/// `gptoss.context_length`, …); we prefer the prefix named by
+/// `general.architecture`, then fall back to any key ending in `.context_length`.
+/// Generic so a new architecture needs no code change.
+fn context_length_from_model_info(model_info: &serde_json::Value) -> Option<usize> {
+    let obj = model_info.as_object()?;
+    if let Some(arch) = obj.get("general.architecture").and_then(|v| v.as_str())
+        && let Some(v) = obj
+            .get(&format!("{arch}.context_length"))
+            .and_then(json_to_usize)
+    {
+        return Some(v);
+    }
+    obj.iter()
+        .find(|(k, _)| k.ends_with(".context_length"))
+        .and_then(|(_, v)| json_to_usize(v))
+}
+
+/// Architecture dimensions for the KV-cache estimate, by arch-suffixed key.
+/// `head_count_kv` defaults to `head_count` when absent (non-GQA models).
+/// Returns `None` if any required dimension is missing.
+fn dims_from_model_info(model_info: &serde_json::Value) -> Option<ModelDims> {
+    let obj = model_info.as_object()?;
+    let by_suffix = |suffix: &str| -> Option<usize> {
+        obj.iter()
+            .find(|(k, _)| k.ends_with(suffix))
+            .and_then(|(_, v)| json_to_usize(v))
+    };
+    let head_count = by_suffix(".attention.head_count")?;
+    Some(ModelDims {
+        block_count: by_suffix(".block_count")?,
+        head_count,
+        head_count_kv: by_suffix(".attention.head_count_kv").unwrap_or(head_count),
+        embedding_length: by_suffix(".embedding_length")?,
+    })
 }
 
 fn normalize_url(url: &str) -> String {
@@ -836,6 +979,101 @@ mod tests {
 
         let body = adapter.build_request_body(&messages, &config, false);
         assert_eq!(body["think"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn ollama_request_body_emits_num_ctx_and_num_predict() {
+        let adapter = make_adapter().await;
+        let mut config = ModelConfig::default();
+        config.set_backend_option("ollama".into(), "num_ctx".into(), "32768".into());
+        config.set_backend_option("ollama".into(), "num_predict".into(), "8192".into());
+
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false);
+        assert_eq!(body["options"]["num_ctx"], serde_json::json!(32768));
+        assert_eq!(body["options"]["num_predict"], serde_json::json!(8192));
+    }
+
+    #[tokio::test]
+    async fn ollama_request_body_omits_sizing_when_unset() {
+        let adapter = make_adapter().await;
+        let config = ModelConfig::default();
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false);
+        // Unset → omitted entirely so Ollama uses its own defaults.
+        assert!(body["options"].get("num_ctx").is_none());
+        assert!(body["options"].get("num_predict").is_none());
+    }
+
+    // --- /api/show model_info parsing (context window + dims) ---
+
+    #[test]
+    fn context_length_prefers_architecture_prefix() {
+        let mi = serde_json::json!({
+            "general.architecture": "qwen2",
+            "qwen2.context_length": 262_144,
+            "qwen2.block_count": 28,
+        });
+        assert_eq!(super::context_length_from_model_info(&mi), Some(262_144));
+    }
+
+    #[test]
+    fn context_length_falls_back_to_any_suffix() {
+        // No general.architecture, but a *.context_length key exists.
+        let mi = serde_json::json!({ "llama.context_length": 131_072 });
+        assert_eq!(super::context_length_from_model_info(&mi), Some(131_072));
+    }
+
+    #[test]
+    fn context_length_missing_is_none() {
+        let mi = serde_json::json!({ "general.architecture": "qwen2" });
+        assert_eq!(super::context_length_from_model_info(&mi), None);
+    }
+
+    #[test]
+    fn dims_parsed_for_gqa_model() {
+        let mi = serde_json::json!({
+            "general.architecture": "qwen2",
+            "qwen2.block_count": 28,
+            "qwen2.attention.head_count": 28,
+            "qwen2.attention.head_count_kv": 4,
+            "qwen2.embedding_length": 3584,
+        });
+        let dims = super::dims_from_model_info(&mi).unwrap();
+        assert_eq!(dims.block_count, 28);
+        assert_eq!(dims.head_count, 28);
+        assert_eq!(dims.head_count_kv, 4);
+        assert_eq!(dims.embedding_length, 3584);
+    }
+
+    #[test]
+    fn dims_head_count_kv_defaults_to_head_count() {
+        // Non-GQA model: no head_count_kv key → assume KV heads == heads.
+        let mi = serde_json::json!({
+            "llama.block_count": 32,
+            "llama.attention.head_count": 32,
+            "llama.embedding_length": 4096,
+        });
+        let dims = super::dims_from_model_info(&mi).unwrap();
+        assert_eq!(dims.head_count_kv, 32);
+    }
+
+    #[test]
+    fn dims_missing_required_is_none() {
+        let mi = serde_json::json!({ "gptoss.block_count": 24 }); // missing the rest
+        assert!(super::dims_from_model_info(&mi).is_none());
+    }
+
+    #[test]
+    fn gptoss_architecture_prefix_parsed() {
+        let mi = serde_json::json!({
+            "general.architecture": "gptoss",
+            "gptoss.context_length": 131_072,
+            "gptoss.block_count": 24,
+            "gptoss.attention.head_count": 64,
+            "gptoss.attention.head_count_kv": 8,
+            "gptoss.embedding_length": 2880,
+        });
+        assert_eq!(super::context_length_from_model_info(&mi), Some(131_072));
+        assert!(super::dims_from_model_info(&mi).is_some());
     }
 
     /// gpt-oss models require `think` as a STRING enum (not bool).
