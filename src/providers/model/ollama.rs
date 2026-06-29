@@ -122,6 +122,7 @@ impl OllamaProvider {
             vram_bytes,
             system_ram_bytes,
             max_auto_cap: self.config.ollama.max_auto_num_ctx,
+            is_cloud: crate::ollama::is_cloud_model(self.adapter.name()),
         }
     }
 }

@@ -33,6 +33,9 @@ pub enum NumCtxSource {
     /// Auto, but memory/dimensions couldn't be detected, so the conservative
     /// fallback cap was used.
     AutoFallback,
+    /// A cloud-served (`:cloud`) model: it runs on Ollama's servers, not the local
+    /// GPU, so it uses its full advertised window rather than a VRAM-based fit.
+    Cloud,
 }
 
 impl NumCtxSource {
@@ -43,6 +46,7 @@ impl NumCtxSource {
             NumCtxSource::GlobalConfig => "config",
             NumCtxSource::Auto => "auto",
             NumCtxSource::AutoFallback => "auto (fallback)",
+            NumCtxSource::Cloud => "cloud (full window)",
         }
     }
 
@@ -176,6 +180,10 @@ pub struct NumCtxInputs {
     pub system_ram_bytes: Option<u64>,
     /// Optional hard cap on the auto value (`[ollama] max_auto_num_ctx`).
     pub max_auto_cap: Option<usize>,
+    /// True for a cloud-served (`:cloud`) model. These run on Ollama's servers,
+    /// not the local GPU, so they bypass the VRAM auto-fit and use the model's
+    /// full advertised window.
+    pub is_cloud: bool,
 }
 
 /// Resolve the effective `num_ctx`. Precedence: **per-model override > global
@@ -189,6 +197,20 @@ pub fn resolve_ollama_num_ctx(inputs: &NumCtxInputs) -> Option<NumCtxResolution>
             value: n as usize,
             source: NumCtxSource::Override,
         });
+    }
+    // 1b. Cloud (`:cloud`) models run on Ollama's servers, not the local GPU, so a
+    // VRAM-based fit is meaningless — use the model's full advertised window. (An
+    // explicit per-model override above still wins; the global config below is a
+    // local-memory knob that shouldn't shrink a remote model.) Window unknown →
+    // None, so the caller omits num_ctx and the cloud service uses its default.
+    if inputs.is_cloud {
+        return inputs
+            .model_max
+            .filter(|m| *m > 0)
+            .map(|model_max| NumCtxResolution {
+                value: model_max,
+                source: NumCtxSource::Cloud,
+            });
     }
     // 2. Global config num_ctx.
     if let Some(n) = inputs.global_num_ctx.filter(|n| *n > 0) {
@@ -432,6 +454,50 @@ mod tests {
         .unwrap();
         assert_eq!(res.value, 16_384);
         assert_eq!(res.source, NumCtxSource::GlobalConfig);
+    }
+
+    #[test]
+    fn cloud_model_uses_full_window_ignoring_vram_and_global() {
+        // A `:cloud` model runs remotely, so it ignores the local GPU's VRAM (and a
+        // global num_ctx, which is a local-memory knob) and uses its full window.
+        let res = resolve_ollama_num_ctx(&NumCtxInputs {
+            model_max: Some(524_288),
+            is_cloud: true,
+            dims: Some(gqa_dims()),
+            vram_bytes: Some(8 * 1024 * 1024 * 1024), // small GPU — must be ignored
+            global_num_ctx: Some(16_384),             // local knob — ignored for cloud
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(res.value, 524_288, "cloud uses the full advertised window");
+        assert_eq!(res.source, NumCtxSource::Cloud);
+        assert!(!res.source.is_auto(), "cloud is not a VRAM auto-fit");
+    }
+
+    #[test]
+    fn cloud_model_still_honors_explicit_override() {
+        // An explicit `/context <n>` caps even a cloud model.
+        let res = resolve_ollama_num_ctx(&NumCtxInputs {
+            model_max: Some(524_288),
+            is_cloud: true,
+            per_model_override: Some(65_536),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(res.value, 65_536);
+        assert_eq!(res.source, NumCtxSource::Override);
+    }
+
+    #[test]
+    fn cloud_model_without_known_window_omits_num_ctx() {
+        // Window unknown → None, so the caller omits num_ctx and the cloud default
+        // applies (never a VRAM-derived fallback).
+        let res = resolve_ollama_num_ctx(&NumCtxInputs {
+            model_max: None,
+            is_cloud: true,
+            ..Default::default()
+        });
+        assert!(res.is_none());
     }
 
     #[test]
