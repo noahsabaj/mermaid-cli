@@ -1241,6 +1241,8 @@ fn handle_submit_prompt(
     // counters track this run start so they don't reset at every step.
     state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
     state.runtime.run_committed_tokens = 0;
+    // Fresh run — clear the truncation-recovery guard from any prior run.
+    state.runtime.truncation_recoveries = 0;
     state.turn = start_generating(turn, std::time::SystemTime::from(state.now));
     cmds.push(Cmd::CallModel {
         turn,
@@ -2486,9 +2488,20 @@ fn handle_compaction_finished(
     turn: TurnId,
     result: CompactionResult,
 ) {
-    let manual = match state.turn {
-        TurnState::Compacting { id, .. } if id == turn => true,
-        TurnState::Generating { id, .. } if id == turn => false,
+    // Manual `/compact` ends the turn; a truncation recovery resumes the run; a
+    // pre-turn auto-compaction (still `Generating`) just swaps in the compacted
+    // messages and lets the in-flight stream continue in the effect.
+    enum Outcome {
+        Manual,
+        Recovery,
+        AutoMidTurn,
+    }
+    let outcome = match state.turn {
+        TurnState::Compacting { id, trigger, .. } if id == turn => match trigger {
+            CompactionTrigger::TruncationRecovery => Outcome::Recovery,
+            _ => Outcome::Manual,
+        },
+        TurnState::Generating { id, .. } if id == turn => Outcome::AutoMidTurn,
         _ => return,
     };
 
@@ -2522,18 +2535,34 @@ fn handle_compaction_finished(
             .saturating_add(usage.total_tokens);
     }
 
-    if manual {
-        state.turn = TurnState::Idle;
-        // Drain one queued message on the way out, same as the no-tool-calls
-        // tail of `handle_stream_done` / `handle_turn_cancelled` (#73). A
-        // message the user typed during `/compact` would otherwise sit in the
-        // FIFO until some later turn happened to end.
-        if let Some(next) = state.ui.queued_messages.pop_front() {
-            state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
-                text: next.text,
-                attachment_ids: next.attachment_ids,
+    match outcome {
+        Outcome::Manual => {
+            state.turn = TurnState::Idle;
+            // Drain one queued message on the way out, same as the no-tool-calls
+            // tail of `handle_stream_done` / `handle_turn_cancelled` (#73). A
+            // message the user typed during `/compact` would otherwise sit in the
+            // FIFO until some later turn happened to end.
+            if let Some(next) = state.ui.queued_messages.pop_front() {
+                state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
+                    text: next.text,
+                    attachment_ids: next.attachment_ids,
+                });
+            }
+        },
+        Outcome::Recovery => {
+            // Resume the run with the compacted context so the model can finish the
+            // work the truncation cut off (mirrors `handle_tool_finished`'s
+            // follow-up dispatch).
+            let next_turn = state.ids.fresh_turn();
+            state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
+            cmds.push(Cmd::CallModel {
+                turn: next_turn,
+                request: build_chat_request(state),
             });
-        }
+        },
+        // Pre-turn auto-compaction: the stream is still live in the effect, which
+        // already retried with the compacted messages — nothing to do here.
+        Outcome::AutoMidTurn => {},
     }
 
     // The compaction's replacement message already carries the receipt text, so
@@ -2569,6 +2598,14 @@ fn handle_compaction_failed(
         // than printing a scary "Invalid request" every turn (still logged at WARN).
         CompactionTrigger::AutoThreshold => return,
         CompactionTrigger::ContextLimitRetry => "Context-limit compaction failed",
+        // The response truncated and recovery couldn't reduce the context (e.g. the
+        // preserved tail already fills the window). Stop the run cleanly with the
+        // manual levers instead of the raw "did not reduce" error or a retry loop.
+        CompactionTrigger::TruncationRecovery => {
+            let hint = truncation_hint(state);
+            state.session.append(ChatMessage::system(hint));
+            return;
+        },
     };
     let _ = kind;
     state
@@ -2601,6 +2638,29 @@ fn handle_stream_tool_call(
         active_turn = ?state.turn.id(),
         "reducer: dropped StreamToolCall — turn not in Generating state",
     );
+}
+
+/// The "response truncated, here's how to get more room" message shown when a
+/// length-truncation can't be (or has stopped being) auto-recovered. Shared by
+/// `handle_stream_done` (cap reached / nothing to compact) and
+/// `handle_compaction_failed` (recovery compaction couldn't reduce the context).
+fn truncation_hint(state: &State) -> String {
+    let mut msg = "Response truncated — reached the model's max output-token limit.".to_string();
+    // Ollama quick-fix: if auto-fit capped the window below the model's max, tell
+    // the user exactly how to raise it.
+    if let Some(ctx) = state.runtime.ollama_context.as_ref()
+        && let (Some(model_max), Some(eff), Some(src)) = (ctx.model_max, ctx.effective, ctx.source)
+        && src.is_auto()
+        && model_max > eff
+    {
+        msg.push_str(&format!(
+            " This model supports up to {} but the window is auto-fit to {} for your GPU — \
+             raise it with `/context max`, or allow RAM with `/context offload on`.",
+            format_compact_count(model_max),
+            format_compact_count(eff)
+        ));
+    }
+    msg
 }
 
 fn handle_stream_done(
@@ -2657,6 +2717,19 @@ fn handle_stream_done(
     );
     state.session.append(msg);
 
+    // A bare length-truncation (no tool calls) is the recoverable case below; any
+    // other ending means the run made progress, so reset the recovery guard — it
+    // should count only *consecutive* no-progress truncations.
+    let dry_truncation =
+        tool_calls.is_empty() && matches!(stop_reason, Some(crate::models::FinishReason::Length));
+    if !dry_truncation {
+        state.runtime.truncation_recoveries = 0;
+    }
+
+    // Set when a length-truncation is recoverable: instead of ending the run with
+    // a hint, compact the conversation and resume (handled after the save below).
+    let mut recovering = false;
+
     // Surface a terminal stop reason that would otherwise leave the response
     // silently incomplete. (A refusal with no content is turned into an error
     // upstream in the adapter; here we only see reasons that still produced
@@ -2667,24 +2740,22 @@ fn handle_stream_done(
     if tool_calls.is_empty() {
         match stop_reason {
             Some(crate::models::FinishReason::Length) => {
-                let mut msg =
-                    "Response truncated — reached the model's max output-token limit.".to_string();
-                // Ollama quick-fix: if auto-fit capped the window below the
-                // model's max, tell the user exactly how to raise it.
-                if let Some(ctx) = state.runtime.ollama_context.as_ref()
-                    && let (Some(model_max), Some(eff), Some(src)) =
-                        (ctx.model_max, ctx.effective, ctx.source)
-                    && src.is_auto()
-                    && model_max > eff
-                {
-                    msg.push_str(&format!(
-                        " This model supports up to {} but the window is auto-fit to {} for your GPU — \
-                         raise it with `/context max`, or allow RAM with `/context offload on`.",
-                        format_compact_count(model_max),
-                        format_compact_count(eff)
-                    ));
+                // The window filled mid-turn. If there's history to compact and
+                // we're under the per-run cap, recover (compact + continue) rather
+                // than stopping; otherwise fall back to the manual-levers hint.
+                let cap = state.settings.compaction.max_truncation_recoveries;
+                let under_cap = cap == 0 || state.runtime.truncation_recoveries < cap as u32;
+                if under_cap && state.session.messages().len() >= 3 {
+                    recovering = true;
+                    push_system(
+                        state,
+                        cmds,
+                        "Context window full — compacting the conversation to continue.",
+                    );
+                } else {
+                    let hint = truncation_hint(state);
+                    push_system(state, cmds, hint);
                 }
-                push_system(state, cmds, msg);
             },
             Some(crate::models::FinishReason::ContentFilter) => push_system(
                 state,
@@ -2766,6 +2837,28 @@ fn handle_stream_done(
             pending,
             std::time::SystemTime::from(state.now),
         );
+        return;
+    }
+
+    // Length-truncation recovery: compact the conversation, then resume the run.
+    // `Cmd::CompactConversation` force-runs compaction (no threshold gate); the
+    // `CompactionFinished` handler re-dispatches the model call with the compacted
+    // context. Returning here skips the queue-drain so the run doesn't end.
+    if recovering {
+        state.runtime.truncation_recoveries += 1;
+        let comp_turn = state.ids.fresh_turn();
+        state.turn = TurnState::Compacting {
+            id: comp_turn,
+            started: std::time::SystemTime::from(state.now),
+            trigger: CompactionTrigger::TruncationRecovery,
+        };
+        cmds.push(Cmd::CompactConversation {
+            turn: comp_turn,
+            request: CompactionRequest::auto(
+                build_chat_request(state),
+                CompactionTrigger::TruncationRecovery,
+            ),
+        });
         return;
     }
 
@@ -3944,6 +4037,286 @@ mod tests {
                 .any(|m| m.content.contains("no output")),
             "reasoning-only turn is not empty"
         );
+    }
+
+    // ── Length-truncation recovery (compact + continue) ──────────────────
+
+    fn truncating_turn(partial: &str) -> TurnState {
+        TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: partial.to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        }
+    }
+
+    fn length_done() -> Msg {
+        Msg::StreamDone {
+            turn: TurnId(5),
+            usage: None,
+            thinking_signature: None,
+            stop_reason: Some(crate::models::FinishReason::Length),
+        }
+    }
+
+    #[test]
+    fn length_truncation_recovers_by_compacting_and_continuing() {
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("build a site"));
+        state
+            .session
+            .append(ChatMessage::assistant("ok, writing files"));
+        state.turn = truncating_turn("let me fix the");
+        let (state, cmds) = update(state, length_done());
+
+        assert!(
+            matches!(
+                state.turn,
+                TurnState::Compacting {
+                    trigger: CompactionTrigger::TruncationRecovery,
+                    ..
+                }
+            ),
+            "a recoverable truncation compacts instead of ending the run"
+        );
+        assert_eq!(state.runtime.truncation_recoveries, 1, "recovery counted");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::CompactConversation { request, .. }
+                if request.trigger == CompactionTrigger::TruncationRecovery)),
+            "emits a truncation-recovery compaction"
+        );
+        assert!(
+            state.session.messages().iter().any(|m| m
+                .content
+                .contains("compacting the conversation to continue")),
+            "tells the user it's recovering"
+        );
+        assert!(
+            !state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Response truncated")),
+            "no terminal hint while recovering"
+        );
+    }
+
+    #[test]
+    fn length_truncation_at_cap_stops_with_hint() {
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("build a site"));
+        state.session.append(ChatMessage::assistant("ok"));
+        // Already at the default cap of consecutive recoveries.
+        state.runtime.truncation_recoveries =
+            state.settings.compaction.max_truncation_recoveries as u32;
+        state.turn = truncating_turn("more");
+        let (state, cmds) = update(state, length_done());
+
+        assert!(matches!(state.turn, TurnState::Idle), "run ends at the cap");
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::CompactConversation { .. })),
+            "no further compaction once capped"
+        );
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Response truncated")),
+            "shows the manual-levers hint at the cap"
+        );
+    }
+
+    #[test]
+    fn length_truncation_uncapped_keeps_recovering() {
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("x"));
+        state.session.append(ChatMessage::assistant("y"));
+        state.settings.compaction.max_truncation_recoveries = 0; // uncapped
+        state.runtime.truncation_recoveries = 99; // would exceed any finite cap
+        state.turn = truncating_turn("z");
+        let (state, cmds) = update(state, length_done());
+
+        assert!(
+            matches!(
+                state.turn,
+                TurnState::Compacting {
+                    trigger: CompactionTrigger::TruncationRecovery,
+                    ..
+                }
+            ),
+            "cap 0 means recover regardless of the count"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::CompactConversation { .. }))
+        );
+    }
+
+    #[test]
+    fn length_truncation_without_history_stops_with_hint() {
+        // Only the truncated message exists — nothing to compact, so just inform.
+        let mut state = fresh_state();
+        state.turn = truncating_turn("partial");
+        let (state, cmds) = update(state, length_done());
+
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::CompactConversation { .. }))
+        );
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Response truncated"))
+        );
+    }
+
+    #[test]
+    fn truncation_recoveries_reset_when_run_makes_progress() {
+        // A normal (non-truncated) completion is progress and clears the guard, so
+        // the cap counts only *consecutive* no-progress truncations.
+        let mut state = fresh_state();
+        state.runtime.truncation_recoveries = 2;
+        state.turn = truncating_turn("a clean final answer");
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None, // not a length truncation
+            },
+        );
+        assert_eq!(state.runtime.truncation_recoveries, 0);
+    }
+
+    fn fake_recovery_result(replacement: Vec<ChatMessage>) -> CompactionResult {
+        let snap = crate::domain::state::ContextUsageSnapshot::from_estimate(
+            crate::domain::state::PromptTokenBreakdown::default(),
+            Some(12_000),
+        );
+        CompactionResult {
+            record: crate::domain::CompactionRecord {
+                id: "rec1".to_string(),
+                trigger: CompactionTrigger::TruncationRecovery,
+                created_at: chrono::Local::now(),
+                before_tokens: 100,
+                after_tokens: 40,
+                archived_message_count: 2,
+                preserved_message_count: replacement.len(),
+                summary_tokens: 10,
+                duration_secs: 0.0,
+                verified: true,
+                verification_error: None,
+                focus: None,
+                archive_path: None,
+            },
+            replacement_messages: replacement,
+            archived_messages: vec![ChatMessage::user("archived")],
+            before_snapshot: snap.clone(),
+            after_snapshot: snap,
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn finished_truncation_recovery_resumes_the_run() {
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("original prompt"));
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::TruncationRecovery,
+        };
+        let result = fake_recovery_result(vec![ChatMessage::user("compacted context")]);
+        let (state, cmds) = update(
+            state,
+            Msg::CompactionFinished {
+                turn: TurnId(7),
+                result,
+            },
+        );
+
+        assert!(
+            matches!(state.turn, TurnState::Generating { .. }),
+            "recovery resumes generating with the compacted context"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+            "re-dispatches the model call to finish the work"
+        );
+    }
+
+    #[test]
+    fn finished_manual_compaction_still_goes_idle() {
+        // Regression guard: only TruncationRecovery resumes; manual /compact ends.
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("original prompt"));
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::Manual,
+        };
+        let result = fake_recovery_result(vec![ChatMessage::user("compacted")]);
+        let (state, cmds) = update(
+            state,
+            Msg::CompactionFinished {
+                turn: TurnId(7),
+                result,
+            },
+        );
+
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
+    }
+
+    #[test]
+    fn failed_truncation_recovery_stops_with_hint() {
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("x"));
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::TruncationRecovery,
+        };
+        let (state, _) = update(
+            state,
+            Msg::CompactionFailed {
+                turn: TurnId(7),
+                trigger: CompactionTrigger::TruncationRecovery,
+                message: "compaction did not reduce context".to_string(),
+                kind: StatusKind::Error,
+            },
+        );
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Response truncated")),
+            "a failed recovery falls back to the manual-levers hint, not a raw error"
+        );
+    }
+
+    #[test]
+    fn compaction_config_defaults_to_three() {
+        let cfg = crate::app::CompactionConfig::default();
+        assert_eq!(cfg.max_truncation_recoveries, 3);
+        // An absent [compaction] section deserializes to the default.
+        let parsed: crate::app::Config = toml::from_str("").unwrap();
+        assert_eq!(parsed.compaction.max_truncation_recoveries, 3);
     }
 
     #[test]

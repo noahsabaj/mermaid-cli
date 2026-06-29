@@ -38,6 +38,10 @@ pub const COMPACTION_SUMMARIZER_INPUT_TOKEN_BUDGET: usize = 64_000;
 pub const COMPACTION_MIN_RESPONSE_RESERVE_TOKENS: usize = 4_000;
 /// Maximum response reserve when deciding whether the next request fits.
 pub const COMPACTION_MAX_RESPONSE_RESERVE_TOKENS: usize = 20_000;
+/// Default cap on consecutive auto-compact-and-continue recoveries after a
+/// context-window truncation, before the run stops and shows the manual levers.
+/// The counter resets whenever the run makes progress; `0` means uncapped.
+pub const COMPACTION_MAX_TRUNCATION_RECOVERIES: u8 = 3;
 
 // Ollama auto-sizing
 // Mermaid probes an Ollama model's real context window (`/api/show`) and sizes

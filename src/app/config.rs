@@ -95,6 +95,10 @@ pub struct Config {
     #[serde(default)]
     pub memory: MemoryConfig,
 
+    /// Context-compaction settings.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+
     /// Computer-use (desktop control) preferences.
     #[serde(default)]
     pub computer_use: ComputerUseConfig,
@@ -192,6 +196,32 @@ impl Default for MemoryConfig {
         Self {
             enabled: true,
             index_cap_bytes: crate::constants::MAX_MEMORY_INDEX_BYTES,
+        }
+    }
+}
+
+/// Context-compaction settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompactionConfig {
+    /// Cap on consecutive auto-compact-and-continue recoveries after a
+    /// context-window truncation, before the run stops and shows the manual
+    /// levers (`/context max`, `/context offload on`). The counter resets
+    /// whenever the run makes progress, so this bounds only no-progress
+    /// thrashing on a too-small window. `0` means uncapped.
+    ///
+    /// Example:
+    /// ```toml
+    /// [compaction]
+    /// max_truncation_recoveries = 0  # never give up on its own
+    /// ```
+    pub max_truncation_recoveries: u8,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            max_truncation_recoveries: crate::constants::COMPACTION_MAX_TRUNCATION_RECOVERIES,
         }
     }
 }
