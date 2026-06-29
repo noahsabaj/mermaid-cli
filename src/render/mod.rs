@@ -634,20 +634,19 @@ mod tests {
         second_msg.thinking = Some("second private chain of thought".to_string());
         s.session.append(second_msg);
         let frame = render_to_string(&s);
-        assert_eq!(frame.matches("Reasoning hidden").count(), 1);
+        // Hidden reasoning is collapsed silently — no placeholder line.
+        assert!(!frame.contains("Reasoning hidden"));
         assert!(frame.contains("first visible answer"));
         assert!(frame.contains("second visible answer"));
         assert!(!frame.contains("first private chain of thought"));
         assert!(!frame.contains("second private chain of thought"));
     }
 
-    /// Regression: a "thought, then immediately called a tool" turn (hidden
-    /// reasoning + empty text + actions) must still put one blank line
-    /// between the "Reasoning hidden" placeholder and the first action —
-    /// the same gap every other block pair gets. Previously the placeholder
-    /// rendered flush against the first "● Bash(…)" line.
+    /// A "thought, then immediately called a tool" turn (hidden reasoning +
+    /// empty text + actions) renders the action directly — the turn is not
+    /// skipped, and there is no "reasoning hidden" placeholder ahead of it.
     #[test]
-    fn reasoning_placeholder_is_gapped_from_following_action() {
+    fn hidden_reasoning_then_action_renders_action_without_placeholder() {
         let mut s = mock_state();
         let mut msg = crate::models::ChatMessage::assistant("");
         msg.thinking = Some("private chain of thought".to_string());
@@ -664,19 +663,13 @@ mod tests {
         });
         s.session.append(msg);
         let frame = render_to_string(&s);
-        let lines: Vec<&str> = frame.lines().collect();
-        let idx = lines
-            .iter()
-            .position(|l| l.contains("Reasoning hidden"))
-            .expect("placeholder must render");
         assert!(
-            lines[idx + 1].trim().is_empty(),
-            "a blank line must separate the placeholder from the action; got {:?}",
-            &lines[idx..=(idx + 2).min(lines.len() - 1)]
+            !frame.contains("Reasoning hidden"),
+            "no reasoning-hidden placeholder"
         );
         assert!(
-            lines[idx..].iter().any(|l| l.contains("Bash")),
-            "the action must still render after the placeholder"
+            frame.contains("Bash"),
+            "the action still renders even though reasoning is hidden"
         );
     }
 

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- A subtle full-width highlight band behind your submitted prompts (Claude-Code
+- A full-width gray highlight band behind your submitted prompts (Claude-Code
   style), keeping the `>` marker, so your messages stand out in the transcript.
 - An end-of-run indicator: when an agentic run finishes, a dim "Worked for {time}
   · used {N} tokens" line appears where the spinner was — so a completed run has
@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The chat transcript scrollbar. The transcript now spans the full pane width
   (the reserved right-hand gutter column is reclaimed); scrolling is unchanged.
+- The per-turn "Reasoning hidden" placeholder line. With reasoning hidden (the
+  default), turns now collapse silently instead of printing a
+  `Reasoning hidden (/visible-reasoning on to show)` notice on every reasoning
+  turn. `/visible-reasoning on` still reveals the thinking.
 
 ### Fixed
 

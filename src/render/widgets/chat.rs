@@ -397,8 +397,6 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         state.image_click_map.clear();
         state.last_chat_area = Some((area.x, area.y, area.width, area.height));
 
-        let mut hidden_reasoning_notice_shown = false;
-
         for (idx, msg) in self.messages.iter().enumerate() {
             // Skip Tool messages - they're internal to the agent loop and their
             // content is already displayed inline in the assistant's action blocks
@@ -414,15 +412,14 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 continue;
             }
 
-            // Run summary ("Worked for … · used … tokens"): a dim, italic line
-            // where the spinner was. Display-only — excluded from the model context
+            // Run summary ("Worked for … · used … tokens"): a muted gray line where
+            // the spinner was — dimmer than the assistant's text (same gray as the
+            // timestamp), not italic. Display-only — excluded from the model context
             // by build_chat_request, so it never accumulates as conversation.
             if matches!(msg.kind, ChatMessageKind::RunSummary) {
                 lines.push(Line::from(Span::styled(
                     format!("  {}", msg.content),
-                    Style::new()
-                        .fg(self.theme.colors.text_secondary.to_color())
-                        .add_modifier(Modifier::ITALIC | Modifier::DIM),
+                    Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)),
                 )));
                 lines.push(Line::from(""));
                 continue;
@@ -477,34 +474,11 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
                         // Add blank line after thinking block
                         lines.push(Line::from(""));
-                    } else if !hidden_reasoning_notice_shown {
-                        hidden_reasoning_notice_shown = true;
-                        let marker = if msg.content.trim().is_empty() && msg.actions.is_empty() {
-                            "Reasoning-only response hidden (/visible-reasoning on to show)"
-                        } else {
-                            "Reasoning hidden (/visible-reasoning on to show)"
-                        };
-                        lines.push(Line::from(vec![
-                            Span::styled("● ", Style::new().fg(ratatui::style::Color::DarkGray)),
-                            Span::styled(
-                                marker,
-                                Style::new()
-                                    .fg(self.theme.colors.text_secondary.to_color())
-                                    .italic()
-                                    .dim(),
-                            ),
-                        ]));
-                        // Always separate the placeholder from whatever follows
-                        // (tool actions or the visible answer) with one blank
-                        // line — the same gap every other block gets. Without
-                        // this, a "thought, then called a tool" turn (empty
-                        // content + actions) rendered the placeholder flush
-                        // against the first "● Bash(…)" line.
-                        lines.push(Line::from(""));
-                        if msg.content.trim().is_empty() && msg.actions.is_empty() {
-                            continue;
-                        }
                     } else if msg.content.trim().is_empty() && msg.actions.is_empty() {
+                        // Reasoning is hidden and there's nothing else in this turn —
+                        // skip it entirely rather than render an empty bullet. No
+                        // "reasoning hidden" placeholder: /visible-reasoning controls
+                        // whether the thinking shows, silently.
                         continue;
                     }
                 }
