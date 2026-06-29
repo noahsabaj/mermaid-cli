@@ -1162,6 +1162,25 @@ fn wrap_styled_line(
     let mut current_line_width = 0usize;
     let available_width = width.saturating_sub(continuation_indent);
 
+    // Preserve the line's existing left margin (the "  " continuation gutter the
+    // caller prepends to every non-first message line) on the *first* wrapped
+    // segment. `split_whitespace` below drops leading spaces and the "first word,
+    // no indent" rule would then flush the segment to column 0 — that's the
+    // recurring bug where a wrapped paragraph escapes the message gutter while its
+    // own continuation lines (which get `continuation_indent`) stay aligned. A
+    // non-whitespace prefix like "● " is unaffected (it survives `split_whitespace`).
+    let leading_indent: usize = {
+        let mut n = 0;
+        for span in &line.spans {
+            let spaces = span.content.len() - span.content.trim_start_matches(' ').len();
+            n += spaces;
+            if spaces < span.content.len() {
+                break; // this span has non-space content, so leading run ends here
+            }
+        }
+        n
+    };
+
     for span in line.spans.clone() {
         let span_text = span.content.to_string();
         let span_style = span.style;
@@ -1179,7 +1198,13 @@ fn wrap_styled_line(
             let word_width = word_with_space.width();
 
             if current_line_width == 0 && result_lines.is_empty() {
-                // First word of first line - no indent
+                // First word of the first line: re-apply the original left margin
+                // (dropped by split_whitespace) so the segment keeps the gutter
+                // instead of flushing to column 0.
+                if leading_indent > 0 {
+                    current_line_spans.push(Span::raw(" ".repeat(leading_indent)));
+                    current_line_width += leading_indent;
+                }
                 current_line_spans.push(Span::styled(word_with_space, span_style));
                 current_line_width += word_width;
             } else if current_line_width + word_width <= available_width {
@@ -1533,6 +1558,55 @@ mod tests {
             wrapped.len() >= 2,
             "long ASCII input should wrap to multiple lines; got {}",
             wrapped.len()
+        );
+    }
+
+    fn first_segment_text(wrapped: &[Line<'static>]) -> String {
+        wrapped[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    /// Regression (recurring "paragraph escapes the gutter" bug): a non-first
+    /// message line carries a 2-space gutter prefix; when it wraps, the first
+    /// segment must keep that gutter, not flush to column 0. `split_whitespace`
+    /// used to drop the leading spaces and the "first word, no indent" rule
+    /// flushed the segment left.
+    #[test]
+    fn wrap_styled_line_keeps_gutter_on_wrapped_paragraph() {
+        let line = Line::from(vec![
+            Span::raw("  "), // the continuation gutter chat.rs prepends
+            Span::raw(
+                "No source files, no config, no docs, no build system and more words to wrap"
+                    .to_string(),
+            ),
+        ]);
+        let wrapped = wrap_styled_line(line, 30, 2);
+        assert!(wrapped.len() >= 2, "should wrap");
+        let first = first_segment_text(&wrapped);
+        assert!(
+            first.starts_with("  ") && first.trim_start().starts_with("No source"),
+            "first wrapped segment must keep the 2-space gutter; got {first:?}"
+        );
+    }
+
+    /// The fix preserves whitespace margins only — the message bullet "● " must
+    /// still sit at column 0 on the first line.
+    #[test]
+    fn wrap_styled_line_keeps_bullet_at_column_zero() {
+        let line = Line::from(vec![
+            Span::raw("● "),
+            Span::raw(
+                "a fairly long first line of a message that definitely needs to wrap".to_string(),
+            ),
+        ]);
+        let wrapped = wrap_styled_line(line, 25, 2);
+        assert!(wrapped.len() >= 2, "should wrap");
+        assert!(
+            first_segment_text(&wrapped).starts_with('●'),
+            "bullet must stay at column 0"
         );
     }
 
