@@ -2870,6 +2870,25 @@ fn handle_stream_done(
         return;
     }
 
+    // The run is fully done (no tool calls, not recovering). If it began with a
+    // user submit, emit a one-line "Worked for … · used … tokens" summary where
+    // the spinner was, then clear `run_started` so it fires exactly once per run.
+    // It's a display-only line — `build_chat_request` keeps it out of the model
+    // context.
+    if let Some(started) = state.runtime.run_started.take() {
+        let elapsed = std::time::SystemTime::from(state.now)
+            .duration_since(started)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let summary = format!(
+            "Worked for {} · used {} tokens",
+            super::transition::format_run_duration(elapsed),
+            format_compact_count(state.runtime.run_committed_tokens),
+        );
+        state.session.append(ChatMessage::run_summary(summary));
+        cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+    }
+
     // No tool calls — turn ends here. Drain the queued-message FIFO.
     // The follow-up goes through `pending_msgs` so the outer
     // `update()` re-enters cleanly — preserves stale-filter
@@ -3145,7 +3164,17 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
 
     ChatRequest {
         model_id: state.session.model_id.clone(),
-        messages: evict_stale_screenshots(state.session.messages().to_vec()),
+        // Run-summary lines ("Worked for …") are display-only UI — never send
+        // them to the model, or they'd accumulate as junk context every run.
+        messages: evict_stale_screenshots(
+            state
+                .session
+                .messages()
+                .iter()
+                .filter(|m| m.kind != crate::models::ChatMessageKind::RunSummary)
+                .cloned()
+                .collect(),
+        ),
         system_prompt: system_prompt_for_state(state),
         instructions,
         reasoning: state.session.reasoning,
@@ -3947,6 +3976,70 @@ mod tests {
         assert_eq!(
             state.runtime.run_committed_tokens, 0,
             "token counter reset on submit"
+        );
+    }
+
+    #[test]
+    fn run_end_appends_a_display_only_summary_once() {
+        let mut state = fresh_state();
+        // Run started 72s ago with some generated tokens.
+        state.runtime.run_started =
+            Some(std::time::SystemTime::from(state.now) - std::time::Duration::from_secs(72));
+        state.runtime.run_committed_tokens = 1500;
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: "final answer".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        };
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+        let summary = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .expect("a run summary should be appended at run end");
+        assert!(summary.content.contains("Worked for"));
+        assert!(
+            summary.content.contains("1m 12s"),
+            "72s should format as 1m 12s, got {:?}",
+            summary.content
+        );
+        assert!(
+            state.runtime.run_started.is_none(),
+            "run_started is cleared so the summary fires exactly once per run"
+        );
+    }
+
+    #[test]
+    fn build_chat_request_excludes_run_summaries() {
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("hello"));
+        state
+            .session
+            .append(ChatMessage::run_summary("Worked for 5s · used 100 tokens"));
+        let req = build_chat_request(&state);
+        assert!(
+            !req.messages
+                .iter()
+                .any(|m| m.kind == crate::models::ChatMessageKind::RunSummary),
+            "run summaries are display-only and must not reach the model"
+        );
+        assert!(
+            req.messages.iter().any(|m| m.content == "hello"),
+            "real conversation messages are still sent"
         );
     }
 

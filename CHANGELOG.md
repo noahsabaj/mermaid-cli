@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A subtle full-width highlight band behind your submitted prompts (Claude-Code
   style), keeping the `>` marker, so your messages stand out in the transcript.
+- An end-of-run indicator: when an agentic run finishes, a dim "Worked for {time}
+  · used {N} tokens" line appears where the spinner was — so a completed run has
+  closure and you can see how long it took. It's display-only (never sent back to
+  the model).
 
 ### Removed
 
