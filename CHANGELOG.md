@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-06-29
+
 ### Added
 
 - **Automatic Ollama context sizing — you never touch Ollama config.** Mermaid
@@ -26,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   you once when even the minimum window can't fit (e.g. the weights alone exceed
   your free VRAM). `/context` reports the fitted window as `auto (GPU-fit)`, and
   `/context <n>` / `/context offload on` still override it.
+- **Mermaid auto-compacts and continues when the context window fills.** On a small
+  window (e.g. a local model auto-fit to a modest GPU), a response that hit the
+  window mid-turn used to stop with a hint. Mermaid now compacts the conversation
+  and resumes the run automatically, bounded by a per-run cap that resets whenever
+  the run makes progress (so it only ever stops genuine no-progress thrashing). A
+  new `[compaction]` config key, `max_truncation_recoveries`, tunes the cap
+  (default `3`; `0` = uncapped).
+
+### Changed
+
+- Removed emojis from all user-facing output; status messages, warnings, and
+  indicators now use plain-text markers.
 
 ### Fixed
 
@@ -33,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ollama as `num_predict` (plus reasoning-aware headroom), bounded by the context
   window. Previously it was never sent, so a reasoning model would stop only when
   the tiny default window filled (`done_reason=length`).
+- **The live token counter and spinner track the whole run.** The counter no longer
+  sits at `0` during the thinking phase — it climbs as tokens stream — and the
+  spinner plus its elapsed/token counters now persist across every tool step of an
+  agentic run instead of resetting at each model call, so a long multi-step run
+  shows one continuous, growing total.
+- **Wrapped Markdown keeps its left margin.** Long assistant paragraphs no longer
+  flush to column 0 when they wrap, and a wrapped bullet or numbered list item now
+  hangs under its marker text instead of snapping back to the message gutter.
 
 ## [0.12.0] - 2026-06-28
 
@@ -999,7 +1021,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.10.2...v0.11.0
