@@ -229,7 +229,7 @@ fn parse_model_id(model_id: &str) -> (String, &str) {
     }
 }
 
-fn ollama_backend_config(config: &Config) -> BackendConfig {
+pub(crate) fn ollama_backend_config(config: &Config) -> BackendConfig {
     BackendConfig {
         // Scheme-less: `normalize_url` in the adapter picks http (loopback/LAN)
         // vs https (public) by host class (#86).

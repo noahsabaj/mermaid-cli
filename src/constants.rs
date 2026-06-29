@@ -39,6 +39,43 @@ pub const COMPACTION_MIN_RESPONSE_RESERVE_TOKENS: usize = 4_000;
 /// Maximum response reserve when deciding whether the next request fits.
 pub const COMPACTION_MAX_RESPONSE_RESERVE_TOKENS: usize = 20_000;
 
+// Ollama auto-sizing
+// Mermaid probes an Ollama model's real context window (`/api/show`) and sizes
+// `num_ctx`/`num_predict` automatically so users never touch Ollama config. See
+// `src/models/adapters/ollama_sizing.rs`.
+/// Conservative `num_ctx` used when memory can't be detected (and as the auto
+/// fallback). Comfortably above the compaction response reserve so auto-compaction
+/// stays sane on the smaller probed window.
+pub const DEFAULT_OLLAMA_MAX_AUTO_NUM_CTX: usize = 32_768;
+/// Floor for the auto-fit `num_ctx` (never applied above the model's own max).
+/// Equal to Ollama's own default so flooring is never worse than today.
+pub const OLLAMA_MIN_AUTO_NUM_CTX: usize = 4_096;
+/// Auto-fit `num_ctx` is rounded down to a multiple of this for clean values.
+pub const OLLAMA_NUM_CTX_ROUNDING: usize = 1_024;
+/// Bytes per KV-cache element. fp16 (2 bytes); KV-cache quantization is not
+/// modeled yet (a later refinement).
+pub const OLLAMA_KV_DTYPE_BYTES: usize = 2;
+/// Fraction of the memory budget (VRAM, or system RAM when offload is allowed)
+/// usable for model weights + KV cache; the remainder is headroom for compute
+/// buffers and other processes.
+pub const OLLAMA_MEMORY_BUDGET_FRACTION: f64 = 0.85;
+/// Floor for `num_predict` so a small `num_ctx` can't starve the answer.
+pub const OLLAMA_MIN_NUM_PREDICT: usize = 512;
+/// Tokens held back from `num_ctx` when capping `num_predict`, so the prompt +
+/// output estimate doesn't bump exactly against the window.
+pub const OLLAMA_NUM_PREDICT_MARGIN: usize = 256;
+/// Wall-clock cap for the best-effort `nvidia-smi` VRAM probe. It returns in
+/// tens of ms normally; a wedged driver must not stall model dispatch.
+pub const NVIDIA_SMI_TIMEOUT_SECS: u64 = 3;
+/// Per-request timeout for the `/api/show` + `/api/tags` capability probe. The
+/// chat client has no global timeout (streaming), so the probe sets its own so a
+/// slow/hung Ollama never stalls the turn.
+pub const OLLAMA_PROBE_TIMEOUT_SECS: u64 = 3;
+/// How long a cached `/api/show` probe stays valid in `provider_probes`. Model
+/// dimensions are static per tag; the TTL just lets a re-pulled model under the
+/// same tag refresh.
+pub const OLLAMA_PROBE_TTL_DAYS: i64 = 30;
+
 // Web Content
 /// Maximum characters to keep when truncating fetched web content
 pub const WEB_CONTENT_MAX_CHARS: usize = 5_000;

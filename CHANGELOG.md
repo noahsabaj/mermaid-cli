@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Automatic Ollama context sizing — you never touch Ollama config.** Mermaid
+  probes an Ollama model's real context window + architecture dimensions
+  (`/api/show`, cached in `provider_probes`) and auto-fits `num_ctx` to your GPU's
+  VRAM so the model stays on the GPU. CPU/RAM offload is 5–20× slower, so it's off
+  by default; the new `[ollama]` config keys `allow_ram_offload` (default `false`)
+  and `max_auto_num_ctx` tune this. The status bar and `mermaid model-info` now
+  report the real window instead of "unknown", and auto-compaction works for
+  Ollama for the first time (it was silently disabled when the context limit was
+  unknown).
+
+### Fixed
+
+- **Ollama responses no longer truncate early.** `max_tokens` is now forwarded to
+  Ollama as `num_predict` (plus reasoning-aware headroom), bounded by the context
+  window. Previously it was never sent, so a reasoning model would stop only when
+  the tiny default window filled (`done_reason=length`).
+
 ## [0.12.0] - 2026-06-28
 
 ### Security
