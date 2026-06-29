@@ -142,6 +142,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             if let TurnState::Generating {
                 id,
                 partial_text,
+                partial_reasoning,
                 phase,
                 tokens,
                 ..
@@ -150,16 +151,19 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             {
                 partial_text.push_str(&chunk);
                 *phase = GenPhase::Streaming;
-                // Rough token estimate — actual count comes in `Done`.
-                *tokens = partial_text.len() / 4;
+                // Rough live estimate of all generated tokens (answer + thinking);
+                // the actual count comes in `Done`.
+                *tokens = (partial_text.len() + partial_reasoning.len()) / 4;
             }
         },
         Msg::StreamReasoning { turn, chunk } => {
             if let TurnState::Generating {
                 id,
+                partial_text,
                 partial_reasoning,
                 phase,
                 thinking_signature,
+                tokens,
                 ..
             } = &mut state.turn
                 && *id == turn
@@ -169,6 +173,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 if let Some(sig) = chunk.signature {
                     *thinking_signature = Some(sig);
                 }
+                // Count thinking tokens too, so the live counter climbs during a
+                // long reasoning phase instead of sitting at 0 until answer text.
+                *tokens = (partial_text.len() + partial_reasoning.len()) / 4;
             }
         },
         Msg::StreamToolCall { turn, call } => {
@@ -3754,11 +3761,15 @@ mod tests {
         if let TurnState::Generating {
             phase,
             partial_reasoning,
+            tokens,
             ..
         } = &state.turn
         {
             assert_eq!(*phase, GenPhase::Thinking);
             assert_eq!(partial_reasoning, "weighing...");
+            // The live token counter must climb during thinking, not sit at 0
+            // until answer text arrives.
+            assert!(*tokens > 0, "reasoning must advance the live token counter");
         } else {
             panic!("expected Generating");
         }

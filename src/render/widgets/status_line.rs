@@ -74,10 +74,12 @@ pub fn build_status_lines(
         .fg(theme.colors.text_secondary.to_color())
         .dim();
 
-    // Arrow indicates message direction; the parenthetical names the flow.
+    // Arrow indicates message direction; the parenthetical names the flow. Only
+    // the initial prompt upload is "upstream"; once the model is thinking or
+    // streaming we're receiving generated tokens, so the counter flows downstream.
     let (arrow, flow_direction) = match status {
-        GenerationStatus::Sending | GenerationStatus::Thinking => ("↑ ", "upstream"),
-        GenerationStatus::Streaming => ("↓ ", "downstream"),
+        GenerationStatus::Sending => ("↑ ", "upstream"),
+        GenerationStatus::Thinking | GenerationStatus::Streaming => ("↓ ", "downstream"),
         GenerationStatus::RunningTools => ("• ", "tools"),
         GenerationStatus::Compacting => ("• ", "compaction"),
         GenerationStatus::Cancelling => ("• ", "cleanup"),
@@ -183,6 +185,34 @@ mod tests {
                 row_width(l)
             );
         }
+    }
+
+    #[test]
+    fn thinking_shows_downstream_arrow_and_live_token_count() {
+        // Regression: the live counter sat at 0 through the (often long) thinking
+        // phase. It must climb and read as received (downstream) tokens.
+        let theme = Theme::dark();
+        let queued = VecDeque::new();
+        let lines = build_status_lines(
+            GenerationStatus::Thinking,
+            7,
+            1_234,
+            true,
+            None,
+            &queued,
+            &theme,
+            120,
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("1234"), "must show the live count: {text}");
+        assert!(
+            text.contains('↓'),
+            "thinking receives tokens (downstream): {text}"
+        );
+        assert!(!text.contains('↑'), "thinking is not upstream: {text}");
     }
 
     #[test]
