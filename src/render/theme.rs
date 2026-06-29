@@ -30,8 +30,9 @@ pub struct ThemeColors {
     pub user_message: ColorValue,
     pub assistant_message: ColorValue,
     pub system_message: ColorValue,
-    /// Subtle full-width background band behind the user's submitted prompt
-    /// (Claude-Code style). A faint tint just off the main background.
+    /// Full-width background band behind the user's submitted prompt
+    /// (Claude-Code style). A clearly-visible neutral gray, a step above the
+    /// main background — not a blue tint.
     pub user_message_background: ColorValue,
 
     // Code highlighting
@@ -118,9 +119,9 @@ impl Theme {
                 assistant_message: ColorValue::Named("green".to_string()),
                 system_message: ColorValue::Named("yellow".to_string()),
                 user_message_background: ColorValue::Rgb {
-                    r: 234,
-                    g: 238,
-                    b: 246,
+                    r: 230,
+                    g: 230,
+                    b: 230,
                 },
 
                 code_background: ColorValue::Rgb {
@@ -176,9 +177,9 @@ impl Theme {
                 assistant_message: ColorValue::Named("green".to_string()),
                 system_message: ColorValue::Named("yellow".to_string()),
                 user_message_background: ColorValue::Rgb {
-                    r: 34,
-                    g: 38,
-                    b: 48,
+                    r: 54,
+                    g: 54,
+                    b: 54,
                 },
 
                 code_background: ColorValue::Rgb {
