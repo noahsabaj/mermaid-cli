@@ -25,7 +25,7 @@ pub fn setup_cloud_interactive() -> Result<bool> {
     println!("     or ~/.zshrc), then start a new shell.\n");
 
     if is_cloud_configured() {
-        println!("✓ OLLAMA_API_KEY is set — cloud models are available.\n");
+        println!("OLLAMA_API_KEY is set — cloud models are available.\n");
     } else {
         println!("OLLAMA_API_KEY is not set yet; cloud models stay unavailable");
         println!("until you set it and re-run mermaid.\n");
@@ -60,7 +60,7 @@ pub fn prompt_cloud_setup_if_needed(model_name: &str) -> Result<bool> {
         return Ok(true); // Already configured, proceed.
     }
 
-    println!("\n⚠ Cloud model requested but OLLAMA_API_KEY is not set.");
+    println!("\nCloud model requested but OLLAMA_API_KEY is not set.");
     println!("   Model: {}\n", model_name);
 
     setup_cloud_interactive()
