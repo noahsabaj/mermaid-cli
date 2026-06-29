@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A subtle full-width highlight band behind your submitted prompts (Claude-Code
+  style), keeping the `>` marker, so your messages stand out in the transcript.
+
 ### Removed
 
 - The chat transcript scrollbar. The transcript now spans the full pane width

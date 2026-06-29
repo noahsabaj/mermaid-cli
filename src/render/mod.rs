@@ -509,6 +509,47 @@ mod tests {
         out
     }
 
+    fn render_to_buffer(state: &State) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut rstate = RenderCache::new();
+        terminal
+            .draw(|f| render(state, &mut rstate, f))
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn user_prompt_renders_with_highlight_band() {
+        let mut s = mock_state();
+        s.session
+            .append(crate::models::ChatMessage::user("hello there"));
+        let buf = render_to_buffer(&s);
+        let band_bg = crate::render::theme::Theme::dark()
+            .colors
+            .user_message_background
+            .to_color();
+        // Row carrying the prompt text.
+        let y = (0..buf.area.height)
+            .find(|&y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("hello there")
+            })
+            .expect("user prompt should render");
+        // The band fills the row: the great majority of cells carry the band bg
+        // (a thin layout margin at the very edges may not).
+        let banded = (0..buf.area.width)
+            .filter(|&x| buf[(x, y)].bg == band_bg)
+            .count();
+        assert!(
+            banded >= (buf.area.width as usize) * 3 / 4,
+            "user prompt band should fill most of the row; only {banded}/{} cells banded",
+            buf.area.width
+        );
+    }
+
     #[test]
     fn idle_state_renders_cwd_and_model_footer() {
         let s = mock_state();
