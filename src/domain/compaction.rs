@@ -296,6 +296,7 @@ pub fn build_summary_request(
         max_tokens: policy.summary_max_tokens,
         tools: Vec::new(),
         ollama_num_ctx: base.ollama_num_ctx,
+        ollama_allow_ram_offload: base.ollama_allow_ram_offload,
     }
 }
 
@@ -321,6 +322,7 @@ pub fn build_verification_request(
         max_tokens: policy.summary_max_tokens,
         tools: Vec::new(),
         ollama_num_ctx: base.ollama_num_ctx,
+        ollama_allow_ram_offload: base.ollama_allow_ram_offload,
     }
 }
 
@@ -638,6 +640,7 @@ mod tests {
             max_tokens: 4096,
             tools: Vec::new(),
             ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         }
     }
 

@@ -1643,6 +1643,7 @@ async fn consolidate_memory(
         max_tokens: 1024,
         tools: Vec::new(),
         ollama_num_ctx: None,
+        ollama_allow_ram_offload: None,
     };
 
     let provider = match factory.resolve(&model_id).await {
@@ -2630,6 +2631,7 @@ mod tests {
             tools: vec![],
 
             ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2653,6 +2655,7 @@ mod tests {
             tools: vec![],
 
             ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2729,6 +2732,7 @@ mod tests {
                 tools: vec![],
 
                 ollama_num_ctx: None,
+                ollama_allow_ram_offload: None,
             },
         });
         assert_eq!(r.scope_count(), 1);

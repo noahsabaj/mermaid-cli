@@ -2926,6 +2926,9 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
             .ollama_num_ctx_per_model
             .get(&state.session.model_id)
             .copied(),
+        // Live offload toggle — carry the current setting so `/context offload`
+        // applies next turn without rebuilding the (startup-frozen) provider.
+        ollama_allow_ram_offload: Some(state.settings.ollama.allow_ram_offload),
     }
 }
 
@@ -4054,6 +4057,22 @@ mod tests {
             .insert("ollama/test".to_string(), 32_768);
         let req = build_chat_request(&state);
         assert_eq!(req.ollama_num_ctx, Some(32_768));
+    }
+
+    #[test]
+    fn build_chat_request_carries_live_offload_setting() {
+        // The provider's config is frozen at startup, so the live offload toggle
+        // must ride on the request to take effect on the next turn.
+        let mut state = fresh_state();
+        assert_eq!(
+            build_chat_request(&state).ollama_allow_ram_offload,
+            Some(false)
+        );
+        state.settings.ollama.allow_ram_offload = true;
+        assert_eq!(
+            build_chat_request(&state).ollama_allow_ram_offload,
+            Some(true)
+        );
     }
 
     #[test]

@@ -265,6 +265,12 @@ pub struct ChatRequest {
     /// next turn without rebuilding the cached provider. Ignored by non-Ollama
     /// providers.
     pub ollama_num_ctx: Option<u32>,
+    /// Live Ollama RAM-offload toggle (`/context offload on|off`). Rides on the
+    /// request like `ollama_num_ctx` so a toggle applies on the next turn without
+    /// rebuilding the cached provider (whose `config` is frozen at startup).
+    /// `None` falls back to the persisted `[ollama] allow_ram_offload`. Ignored
+    /// by non-Ollama providers.
+    pub ollama_allow_ram_offload: Option<bool>,
 }
 
 /// Provider-agnostic tool definition sent in the request. Concrete
@@ -483,6 +489,7 @@ mod tests {
             tools: vec![],
 
             ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         assert!(
             Cmd::CallModel {

@@ -98,8 +98,12 @@ impl OllamaProvider {
         &self,
         info: &OllamaModelInfo,
         override_num_ctx: Option<u32>,
+        override_offload: Option<bool>,
     ) -> NumCtxInputs {
-        let allow_ram_offload = self.config.ollama.allow_ram_offload;
+        // Live `/context offload` toggle wins; otherwise the persisted default.
+        // The provider's `config` is frozen at startup (the factory never
+        // rebuilds), so the toggle rides on the request instead of `config`.
+        let allow_ram_offload = override_offload.unwrap_or(self.config.ollama.allow_ram_offload);
         // Only fetch the budget we'll actually use: VRAM when keeping the model
         // on the GPU (default), system RAM when offload is allowed.
         let (vram_bytes, system_ram_bytes) = if allow_ram_offload {
@@ -129,7 +133,13 @@ impl ModelProvider for OllamaProvider {
 
     async fn resolve_context_window(&self, request: &ChatRequest) -> ContextSizing {
         let info = self.probe().await.unwrap_or_default();
-        let inputs = self.num_ctx_inputs(&info, request.ollama_num_ctx).await;
+        let inputs = self
+            .num_ctx_inputs(
+                &info,
+                request.ollama_num_ctx,
+                request.ollama_allow_ram_offload,
+            )
+            .await;
         let model_max = inputs.model_max;
         match resolve_ollama_num_ctx(&inputs) {
             Some(r) => ContextSizing {
@@ -376,6 +386,7 @@ mod tests {
             tools: vec![],
 
             ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         let app_cfg = crate::app::Config::default();
         let cfg = build_model_config(&req, &app_cfg, None);
@@ -408,6 +419,7 @@ mod tests {
             tools: vec![],
 
             ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         let mut app_cfg = crate::app::Config::default();
         app_cfg.ollama.num_gpu = Some(10);
@@ -439,6 +451,7 @@ mod tests {
             tools: vec![],
 
             ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         let cfg = build_model_config(&req, &crate::app::Config::default(), Some(131_072));
         // 4096 + 8192 (Max reserve), plenty of room in a 131072 window.

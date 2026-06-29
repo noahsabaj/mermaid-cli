@@ -140,6 +140,7 @@ mod tests {
             tools: vec![],
 
             ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         let cfg = build_model_config(&req);
         assert_eq!(cfg.reasoning, crate::models::ReasoningLevel::XHigh);

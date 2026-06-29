@@ -130,6 +130,7 @@ impl ModelAutoClassifier {
             max_tokens: VET_MAX_TOKENS,
             tools: Vec::new(),
             ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         }
     }
 }
