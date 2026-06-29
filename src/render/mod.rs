@@ -124,9 +124,15 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let elapsed_since =
             |t: std::time::SystemTime| now_sys.duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
         let elapsed_secs = match &state.turn {
-            TurnState::Generating { started, .. }
-            | TurnState::Compacting { started, .. }
-            | TurnState::ExecutingTools { started, .. } => elapsed_since(*started),
+            // A model run (generating + executing tools) anchors to the run start
+            // so the timer spans the whole agentic loop, not just this step.
+            TurnState::Generating { started, .. } | TurnState::ExecutingTools { started, .. } => {
+                state
+                    .runtime
+                    .run_started
+                    .map_or_else(|| elapsed_since(*started), elapsed_since)
+            },
+            TurnState::Compacting { started, .. } => elapsed_since(*started),
             TurnState::Cancelling { since, .. } => elapsed_since(*since),
             TurnState::Idle => 0,
         };
@@ -157,11 +163,14 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             },
             _ => None,
         };
-        // Live, char-based estimate of tokens generated so far (answer + thinking).
-        // Marked estimated (`~`) — the authoritative count lands in the footer
-        // once the turn's `Done` usage arrives.
+        // Live, char-based estimate of tokens generated so far this run (answer +
+        // thinking), accumulated across tool steps via `run_committed_tokens` so it
+        // doesn't reset each model call. Marked estimated (`~`); the authoritative
+        // count lands in the footer once the turn's `Done` usage arrives.
+        let committed = state.runtime.run_committed_tokens;
         let (tokens_display, tokens_estimated) = match &state.turn {
-            TurnState::Generating { tokens, .. } => (*tokens, true),
+            TurnState::Generating { tokens, .. } => (committed + *tokens, true),
+            TurnState::ExecutingTools { .. } => (committed, true),
             _ => (0, false),
         };
         build_status_lines(
