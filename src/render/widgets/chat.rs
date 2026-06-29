@@ -591,6 +591,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     2,                   // continuation indent
                 );
 
+                let band_start = lines.len();
                 for (line_idx, wrapped_line) in wrapped.iter().enumerate() {
                     if line_idx == 0 {
                         // First line: add role prefix and timestamp on right
@@ -625,6 +626,20 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                         // Continuation lines: already have 2-space margin from wrap_text_with_indent
                         lines.push(Line::from(wrapped_line.clone()));
                     }
+                }
+
+                // Claude-Code-style highlight band: paint a subtle full-width
+                // background behind every line of the user's submitted prompt. The
+                // ">" marker, text, and timestamp keep their own foreground colors;
+                // only the row background is added.
+                let user_bg = self.theme.colors.user_message_background.to_color();
+                let cw = content_width as usize;
+                for line in &mut lines[band_start..] {
+                    let used: usize = line.spans.iter().map(|s| s.content.width()).sum();
+                    if used < cw {
+                        line.spans.push(Span::raw(" ".repeat(cw - used)));
+                    }
+                    line.style = line.style.bg(user_bg);
                 }
             }
 
