@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   e.g. `minimax-m3:cloud` uses its full ~524k-token window instead of being
   auto-fit down to your GPU (which it never touches). An explicit `/context <n>`
   still caps it if you want.
+- Manual `/compact` on a conversation with too little history to summarize now
+  shows a calm "Nothing to compact" note instead of a misleading
+  "Compaction failed: Invalid request" error. Genuine compaction failures still
+  report as failures.
 
 ## [0.12.1] - 2026-06-29
 

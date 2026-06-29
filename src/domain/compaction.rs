@@ -186,7 +186,7 @@ impl std::fmt::Display for CompactionSkip {
             Self::NoKnownContextLimit => write!(f, "model context limit is unknown"),
             Self::AutoDisabled => write!(f, "automatic compaction is disabled"),
             Self::BelowThreshold => write!(f, "context is below compaction threshold"),
-            Self::NothingToCompact => write!(f, "not enough history to compact"),
+            Self::NothingToCompact => write!(f, "not enough conversation history to summarize"),
         }
     }
 }
