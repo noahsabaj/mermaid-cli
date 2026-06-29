@@ -14,7 +14,7 @@ use crate::domain::{ActionDetails, ActionDisplay, ActionResult, format_compact_c
 use crate::models::ChatMessageKind;
 use crate::models::{ChatMessage, MessageRole};
 use crate::render::diff::{DiffLineKind, parse_diff_line};
-use crate::render::markdown::parse_markdown;
+use crate::render::markdown::{MarkdownLine, parse_markdown};
 use crate::render::theme::Theme;
 use crate::utils::format_relative_timestamp;
 
@@ -368,7 +368,7 @@ pub struct ChatWidget<'a> {
     pub messages: &'a [ChatMessage],
     pub theme: &'a Theme,
     /// Shared markdown parse cache: content hash → parsed lines.
-    pub markdown_cache: &'a mut FxHashMap<u64, Vec<Line<'static>>>,
+    pub markdown_cache: &'a mut FxHashMap<u64, Vec<MarkdownLine>>,
     pub show_reasoning: bool,
 }
 
@@ -502,11 +502,16 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 let mut hasher = rustc_hash::FxHasher::default();
                 msg.content.hash(&mut hasher);
                 theme_seed.hash(&mut hasher);
+                // Width is part of the key: tables are wrapped to the viewport, so
+                // the same markdown yields different lines at different widths.
+                content_width.hash(&mut hasher);
                 let cache_key = hasher.finish();
                 let parsed_lines = if let Some(cached) = self.markdown_cache.get(&cache_key) {
                     cached.clone()
                 } else {
-                    let parsed = parse_markdown(&msg.content, self.theme);
+                    // Markdown content sits after the 2-cell message gutter.
+                    let md_width = (content_width as usize).saturating_sub(2);
+                    let parsed = parse_markdown(&msg.content, self.theme, md_width);
                     self.markdown_cache.insert(cache_key, parsed.clone());
                     if self.markdown_cache.len() > crate::constants::MARKDOWN_CACHE_MAX_ENTRIES {
                         self.markdown_cache.clear();
@@ -520,8 +525,8 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     // their base style (see markdown::parse_markdown). They're
                     // pre-formatted: don't word-wrap (that collapses
                     // indentation) — let the Paragraph clip overflow instead.
-                    let preformatted = parsed_line.style.bg == Some(code_bg);
-                    let base_style = parsed_line.style;
+                    let preformatted = parsed_line.preformatted;
+                    let base_style = parsed_line.line.style;
 
                     // Continuation indent for wrapping: the 2-cell message gutter
                     // every line carries, plus this line's own content-start column
@@ -530,7 +535,10 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     let continuation = if preformatted {
                         2
                     } else {
-                        2 + crate::render::markdown::line_hanging_indent(&parsed_line, self.theme)
+                        2 + crate::render::markdown::line_hanging_indent(
+                            &parsed_line.line,
+                            self.theme,
+                        )
                     };
 
                     // Add role indicator to first line or 2-space margin to others.
@@ -542,7 +550,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     } else {
                         vec![Span::raw("  ")]
                     };
-                    spans.extend(parsed_line.spans);
+                    spans.extend(parsed_line.line.spans);
                     let new_line = Line::from(spans).style(base_style);
 
                     if preformatted {
@@ -945,15 +953,18 @@ fn render_actions(
                         )]));
 
                         let preview_content = preview_lines.join("\n");
-                        let mut parsed =
-                            parse_markdown(&format!("```\n{}\n```", preview_content), theme);
+                        let mut parsed = parse_markdown(
+                            &format!("```\n{}\n```", preview_content),
+                            theme,
+                            viewport_width.saturating_sub(4),
+                        );
                         for parsed_line in parsed.iter_mut() {
                             let mut new_spans =
                                 vec![Span::styled("    ", Style::new().fg(action_color))];
-                            new_spans.append(&mut parsed_line.spans);
-                            parsed_line.spans = new_spans;
+                            new_spans.append(&mut parsed_line.line.spans);
+                            parsed_line.line.spans = new_spans;
                         }
-                        lines.extend(parsed);
+                        lines.extend(parsed.into_iter().map(|ml| ml.line));
 
                         if *line_count > 10 {
                             lines.push(Line::from(vec![

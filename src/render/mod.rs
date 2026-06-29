@@ -42,7 +42,7 @@ use widgets::{
 /// and rebuilt from `&State` at any time.
 pub struct RenderCache {
     pub chat: ChatState,
-    pub markdown_cache: FxHashMap<u64, Vec<ratatui::text::Line<'static>>>,
+    pub markdown_cache: FxHashMap<u64, Vec<crate::render::markdown::MarkdownLine>>,
     pub theme: theme::Theme,
     /// Host + user for the status bar's `user@host:cwd` line, read once at
     /// startup so `StatusWidget::render` doesn't hit the environment on every

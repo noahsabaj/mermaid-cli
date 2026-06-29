@@ -1,9 +1,19 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::render::theme::Theme;
+
+/// A parsed markdown line plus whether it is **preformatted** — i.e. must NOT be
+/// word-wrapped by the chat renderer (which collapses runs of whitespace). Code
+/// blocks and tables are preformatted: their exact spacing carries meaning
+/// (indentation, column alignment). Everything else word-wraps normally.
+#[derive(Debug, Clone)]
+pub struct MarkdownLine {
+    pub line: Line<'static>,
+    pub preformatted: bool,
+}
 
 #[derive(Debug, Clone)]
 struct ListState {
@@ -47,14 +57,15 @@ pub fn line_hanging_indent(line: &Line, theme: &Theme) -> usize {
     indent
 }
 
-/// Parse markdown and convert to theme-styled ratatui Lines.
+/// Parse markdown into theme-styled lines, each flagged [`MarkdownLine::preformatted`]
+/// when it must not be word-wrapped — code blocks and tables, whose exact spacing
+/// carries meaning (indentation, column alignment). `width` is the available
+/// content width in display cells; tables are sized and wrapped to fit it.
 ///
-/// Code-block lines are tagged by setting the returned `Line`'s base style
-/// background to the theme's `code_background`. The chat renderer keys off
-/// that to skip word-wrapping them (so indentation survives) and to know
-/// they're pre-formatted. Inline code carries the background on the *span*,
-/// not the line, so prose lines that merely contain `code` still word-wrap.
-pub fn parse_markdown(input: &str, theme: &Theme) -> Vec<Line<'static>> {
+/// Code-block lines also keep the theme's `code_background` on their base style
+/// (the gray panel look). Inline code carries the background on the *span*, not
+/// the line, so prose that merely contains `code` still word-wraps normally.
+pub fn parse_markdown(input: &str, theme: &Theme, width: usize) -> Vec<MarkdownLine> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
@@ -93,6 +104,9 @@ pub fn parse_markdown(input: &str, theme: &Theme) -> Vec<Line<'static>> {
     let mut current_row: Vec<String> = Vec::new();
     let mut current_cell = String::new();
     let mut table_header_len: usize = 0;
+    // Indices into `lines` produced by `render_table` — these are preformatted
+    // (column-aligned) and must not be word-wrapped by the chat renderer.
+    let mut table_line_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     for event in parser {
         match event {
@@ -264,7 +278,9 @@ pub fn parse_markdown(input: &str, theme: &Theme) -> Vec<Line<'static>> {
                     },
                     TagEnd::Table => {
                         in_table = false;
-                        render_table(&mut lines, &table_rows, table_header_len, theme);
+                        let from = lines.len();
+                        render_table(&mut lines, &table_rows, table_header_len, theme, width);
+                        table_line_indices.extend(from..lines.len());
                         table_rows.clear();
                     },
                     TagEnd::Link => {
@@ -331,19 +347,37 @@ pub fn parse_markdown(input: &str, theme: &Theme) -> Vec<Line<'static>> {
         lines.push(Line::from(current_line_spans));
     }
 
+    // A line is preformatted (no word-wrap) if it's a code-block line (tagged with
+    // the code background on its base style) or a table line (column-aligned).
     lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| MarkdownLine {
+            preformatted: line.style.bg == Some(code_bg) || table_line_indices.contains(&i),
+            line,
+        })
+        .collect()
 }
 
-/// Render the accumulated table rows into aligned, themed lines.
+/// Render the accumulated table rows into aligned, themed lines that fit `width`
+/// display cells. Column widths come from content (CJK-safe, min 3); if the
+/// natural table is wider than `width`, the widest columns are shrunk and long
+/// cells are word-wrapped within their column — so nothing is lost and no row
+/// overflows the viewport.
 fn render_table(
     lines: &mut Vec<Line<'static>>,
     table_rows: &[Vec<String>],
     table_header_len: usize,
     theme: &Theme,
+    width: usize,
 ) {
     let c = &theme.colors;
-    // Column widths in DISPLAY CELLS (CJK-safe), min 3.
     let num_cols = table_rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    if num_cols == 0 {
+        return;
+    }
+
+    // Natural column widths in DISPLAY CELLS (CJK-safe), min 3.
     let mut col_widths = vec![0usize; num_cols];
     for row in table_rows {
         for (i, cell) in row.iter().enumerate() {
@@ -356,31 +390,65 @@ fn render_table(
         *w = (*w).max(3);
     }
 
+    // Borders/padding cost: leading "| " (2) + " | " (3) per column. If the table
+    // is wider than the viewport, shrink the widest columns (each floored at 3)
+    // until it fits; cell text is then wrapped within the budgeted width.
+    let overhead = 2 + 3 * num_cols;
+    if col_widths.iter().sum::<usize>() + overhead > width {
+        let budget = width.saturating_sub(overhead).max(num_cols * 3);
+        let mut total: usize = col_widths.iter().sum();
+        while total > budget {
+            let widest = (0..num_cols)
+                .filter(|&i| col_widths[i] > 3)
+                .max_by_key(|&i| col_widths[i]);
+            match widest {
+                Some(i) => {
+                    col_widths[i] -= 1;
+                    total -= 1;
+                },
+                None => break, // every column already at the floor
+            }
+        }
+    }
+
     let border_style = Style::default().fg(c.text_disabled.to_color());
     let header_style = Style::default().fg(c.header.to_color()).bold();
     let cell_style = Style::default().fg(c.text_primary.to_color());
 
     for (row_idx, row) in table_rows.iter().enumerate() {
-        let mut spans = vec![Span::styled("| ", border_style)];
-        for (col_idx, cell) in row.iter().enumerate() {
-            let width = col_widths.get(col_idx).copied().unwrap_or(3);
-            let padding = width.saturating_sub(cell.width());
-            let padded = format!("{}{}", cell, " ".repeat(padding));
-            let style = if row_idx == 0 && table_header_len > 0 {
-                header_style
-            } else {
-                cell_style
-            };
-            spans.push(Span::styled(padded, style));
-            spans.push(Span::styled(" | ", border_style));
+        let style = if row_idx == 0 && table_header_len > 0 {
+            header_style
+        } else {
+            cell_style
+        };
+        // Wrap each cell to its column width; the row is as tall as its tallest cell.
+        let wrapped: Vec<Vec<String>> = (0..num_cols)
+            .map(|ci| {
+                wrap_cell(
+                    row.get(ci).map(String::as_str).unwrap_or(""),
+                    col_widths[ci],
+                )
+            })
+            .collect();
+        let row_height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+
+        for li in 0..row_height {
+            let mut spans = vec![Span::styled("| ", border_style)];
+            for ci in 0..num_cols {
+                let w = col_widths[ci];
+                let cell_line = wrapped[ci].get(li).map(String::as_str).unwrap_or("");
+                let padding = w.saturating_sub(cell_line.width());
+                let padded = format!("{}{}", cell_line, " ".repeat(padding));
+                spans.push(Span::styled(padded, style));
+                spans.push(Span::styled(" | ", border_style));
+            }
+            lines.push(Line::from(spans));
         }
-        lines.push(Line::from(spans));
 
         if row_idx == 0 && table_header_len > 0 {
             let mut sep_spans = vec![Span::styled("|-", border_style)];
-            for (col_idx, _) in row.iter().enumerate() {
-                let width = col_widths.get(col_idx).copied().unwrap_or(3);
-                sep_spans.push(Span::styled("-".repeat(width), border_style));
+            for &w in &col_widths {
+                sep_spans.push(Span::styled("-".repeat(w), border_style));
                 sep_spans.push(Span::styled("-|-", border_style));
             }
             lines.push(Line::from(sep_spans));
@@ -388,6 +456,80 @@ fn render_table(
     }
 
     lines.push(Line::from(""));
+}
+
+/// Word-wrap `text` to `width` display cells, hard-breaking any word longer than
+/// the column. Always returns at least one (possibly empty) line.
+fn wrap_cell(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for word in text.split_whitespace() {
+        let ww = word.width();
+        if ww > width {
+            // A word too wide for the column: flush the current line, then
+            // hard-break the word; the final chunk stays open so the next word
+            // can continue after it.
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            let chunks = chunk_by_width(word, width);
+            let n = chunks.len();
+            for (k, chunk) in chunks.into_iter().enumerate() {
+                if k + 1 < n {
+                    lines.push(chunk);
+                } else {
+                    cur_w = chunk.width();
+                    cur = chunk;
+                }
+            }
+            continue;
+        }
+        let sep = usize::from(!cur.is_empty());
+        if cur_w + sep + ww > width {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+            cur_w = ww;
+        } else {
+            if sep == 1 {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+            cur_w += sep + ww;
+        }
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+/// Split `s` into chunks each at most `width` display cells, never splitting a
+/// character. Used to hard-break a word longer than its column.
+fn chunk_by_width(s: &str, width: usize) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if cur_w + cw > width && !cur.is_empty() {
+            chunks.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(ch);
+        cur_w += cw;
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    chunks
 }
 
 /// Line-comment prefix(es) for a fenced-code language hint. Falls back to a
@@ -595,9 +737,13 @@ fn highlight_code_line(text: &str, comment_prefixes: &[&str], theme: &Theme) -> 
 mod tests {
     use super::*;
 
-    /// Parse with the dark theme (tests only assert on text/structure).
+    /// Parse with the dark theme at a typical width, returning the bare lines
+    /// (most tests here assert on text/structure, not the preformatted flag).
     fn md(input: &str) -> Vec<Line<'static>> {
-        parse_markdown(input, &Theme::dark())
+        parse_markdown(input, &Theme::dark(), 80)
+            .into_iter()
+            .map(|ml| ml.line)
+            .collect()
     }
 
     /// Flatten all spans in all lines into a single string.
@@ -643,7 +789,7 @@ mod tests {
 
         // Bulleted item: continuations hang under the text after "• "
         // (2-cell nesting indent + 2-cell marker).
-        let bullet = parse_markdown("- Alpha item", &theme);
+        let bullet = md("- Alpha item");
         assert_eq!(
             line_hanging_indent(find(&bullet, "Alpha"), &theme),
             4,
@@ -651,7 +797,7 @@ mod tests {
         );
 
         // Numbered item: the marker "1. " is 3 cells wide.
-        let numbered = parse_markdown("1. First item", &theme);
+        let numbered = md("1. First item");
         assert_eq!(
             line_hanging_indent(find(&numbered, "First"), &theme),
             5,
@@ -659,7 +805,7 @@ mod tests {
         );
 
         // Ordinary paragraph: no marker, no leading indent, so no hang.
-        let para = parse_markdown("Just a sentence.", &theme);
+        let para = md("Just a sentence.");
         assert_eq!(
             line_hanging_indent(find(&para, "sentence"), &theme),
             0,
@@ -910,5 +1056,87 @@ mod tests {
             cjk_row_width, ascii_row_width,
             "CJK and ASCII rows must have equal display width to align"
         );
+    }
+
+    #[test]
+    fn table_lines_flagged_preformatted_prose_is_not() {
+        // Table rows must be flagged preformatted so the chat renderer doesn't
+        // word-wrap them (which would collapse the column padding); prose must not.
+        let out = parse_markdown(
+            "Intro paragraph.\n\n| A | B |\n|---|---|\n| 1 | 2 |",
+            &Theme::dark(),
+            80,
+        );
+        let para = out
+            .iter()
+            .find(|ml| ml.line.spans.iter().any(|s| s.content.contains("Intro")))
+            .expect("paragraph present");
+        assert!(!para.preformatted, "prose must word-wrap normally");
+        let table_rows: Vec<_> = out
+            .iter()
+            .filter(|ml| {
+                ml.line
+                    .spans
+                    .first()
+                    .is_some_and(|s| s.content.starts_with('|'))
+            })
+            .collect();
+        assert!(!table_rows.is_empty(), "table should render rows");
+        assert!(
+            table_rows.iter().all(|ml| ml.preformatted),
+            "every table line must be preformatted"
+        );
+    }
+
+    #[test]
+    fn code_lines_flagged_preformatted() {
+        let out = parse_markdown("```\nlet x = 1;\n```", &Theme::dark(), 80);
+        assert!(
+            out.iter()
+                .filter(|ml| ml.line.spans.iter().any(|s| s.content.contains("let x")))
+                .all(|ml| ml.preformatted),
+            "code-block lines must be preformatted"
+        );
+    }
+
+    #[test]
+    fn wide_table_wraps_cells_to_fit() {
+        // A table wider than the viewport wraps cell text within columns rather
+        // than overflowing. Every rendered table line must fit `width`, and no
+        // cell content is lost.
+        let width = 30;
+        let out = parse_markdown(
+            "| Item | Detail |\n|------|--------|\n| one | a very long cell that cannot fit on a single line at this width |",
+            &Theme::dark(),
+            width,
+        );
+        let mut saw_table = false;
+        for ml in &out {
+            let rendered: String = ml.line.spans.iter().map(|s| s.content.as_ref()).collect();
+            if rendered.starts_with('|') {
+                saw_table = true;
+                assert!(
+                    rendered.width() <= width,
+                    "table line must fit width {width}, got {} for {rendered:?}",
+                    rendered.width()
+                );
+            }
+        }
+        assert!(saw_table, "table should have rendered");
+        // No content lost: every word of the long cell appears across the wraps.
+        let all: String = out
+            .iter()
+            .map(|ml| {
+                ml.line
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in ["very", "long", "cell", "cannot", "single", "width"] {
+            assert!(all.contains(word), "wrapped table lost the word {word:?}");
+        }
     }
 }

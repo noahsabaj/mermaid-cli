@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Markdown tables now render aligned instead of mangled.** Table lines are
+  flagged preformatted so they're no longer word-wrapped (which collapsed their
+  column padding), and tables wider than the terminal size their columns to fit
+  and wrap long cell text within the column — nothing is lost and no row overflows.
 - **Cloud (`:cloud`) Ollama models now use their full context window.** They run on
   Ollama's servers, not your local GPU, so Mermaid no longer VRAM-clamps them —
   e.g. `minimax-m3:cloud` uses its full ~524k-token window instead of being
