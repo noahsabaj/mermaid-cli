@@ -380,6 +380,17 @@ fn format_duration(seconds: f64) -> String {
     }
 }
 
+/// Human-readable duration for a finished run: "Ns", "Mm Ss", or "Hh Mm".
+pub fn format_run_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
 fn pluralize(word: &str, count: usize) -> String {
     if count == 1 {
         word.to_string()
@@ -823,5 +834,15 @@ mod tests {
         assert_eq!(msgs[0].tool_name.as_deref(), Some("read_file"));
         assert_eq!(msgs[0].content, "contents");
         assert!(msgs[1].content.contains("cancelled"));
+    }
+
+    #[test]
+    fn format_run_duration_scales() {
+        assert_eq!(format_run_duration(0), "0s");
+        assert_eq!(format_run_duration(5), "5s");
+        assert_eq!(format_run_duration(59), "59s");
+        assert_eq!(format_run_duration(72), "1m 12s");
+        assert_eq!(format_run_duration(600), "10m 0s");
+        assert_eq!(format_run_duration(3661), "1h 1m");
     }
 }

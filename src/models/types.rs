@@ -60,6 +60,15 @@ impl ChatMessage {
         Self::new(MessageRole::System, content.into())
     }
 
+    /// Create a display-only run summary (e.g. "Worked for 5m 12s · used 12.3k
+    /// tokens"). Rendered dim/italic where the spinner was; excluded from the
+    /// model context by `build_chat_request` so it never bloats the conversation.
+    pub fn run_summary(content: impl Into<String>) -> Self {
+        let mut m = Self::new(MessageRole::System, content.into());
+        m.kind = ChatMessageKind::RunSummary;
+        m
+    }
+
     /// Create a tool result message
     pub fn tool(
         tool_call_id: impl Into<String>,
@@ -168,6 +177,9 @@ pub enum ChatMessageKind {
     #[default]
     Normal,
     ContextCheckpoint,
+    /// A display-only run summary ("Worked for … · used … tokens"). Rendered
+    /// dim/italic; excluded from the model context by `build_chat_request`.
+    RunSummary,
 }
 
 /// Why a model stopped generating, normalized across providers.

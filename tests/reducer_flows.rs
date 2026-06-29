@@ -63,10 +63,14 @@ fn happy_path_turn_ends_idle_with_assistant_message() {
     );
 
     assert!(matches!(state.turn, TurnState::Idle));
-    assert_eq!(state.session.messages().len(), 2);
-    let last = state.session.messages().last().unwrap();
-    assert_eq!(last.role, MessageRole::Assistant);
-    assert_eq!(last.content, "hello back");
+    // user prompt + assistant answer + the run-end summary line ("Worked for …").
+    assert_eq!(state.session.messages().len(), 3);
+    let assistant = &state.session.messages()[1];
+    assert_eq!(assistant.role, MessageRole::Assistant);
+    assert_eq!(assistant.content, "hello back");
+    let summary = state.session.messages().last().unwrap();
+    assert_eq!(summary.kind, ChatMessageKind::RunSummary);
+    assert!(summary.content.contains("Worked for"));
     assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
 }
 
