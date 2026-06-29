@@ -1456,12 +1456,13 @@ async fn dispatch_call_model(
     // — StreamDone is already enqueued, so any warning renders after the answer.
     if completed_ok
         && request.ollama_allow_ram_offload != Some(true)
-        && let Some(p) = provider.verify_placement().await
+        && let Some(p) = provider.verify_placement(sizing.effective).await
     {
         tracing::debug!(
             size_vram_bytes = p.size_vram_bytes,
             total_bytes = p.total_bytes,
             offloaded = p.size_vram_bytes < p.total_bytes,
+            suggested_num_ctx = ?p.suggested_num_ctx,
             "Ollama placement"
         );
         let _ = msg_tx
@@ -1469,6 +1470,7 @@ async fn dispatch_call_model(
                 model_id: request.model_id.clone(),
                 size_vram_bytes: p.size_vram_bytes,
                 total_bytes: p.total_bytes,
+                suggested_num_ctx: p.suggested_num_ctx,
             })
             .await;
     }

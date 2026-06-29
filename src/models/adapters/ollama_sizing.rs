@@ -113,6 +113,38 @@ pub fn max_tokens_for_memory(
     Some((for_kv / kv_bytes_per_token as u64) as usize)
 }
 
+/// Auto-converge step: when a turn spilled out of VRAM, the largest `num_ctx`
+/// that drops enough KV-cache tokens to clear the measured `total - size_vram`
+/// overflow (rounded down to a clean step, floored at the usable minimum).
+///
+/// Works from the *observed* footprint, so it implicitly accounts for compute
+/// buffers and Ollama's own headroom rather than re-estimating them. `None` when
+/// shrinking can't help — the overflow is weights (not KV) so the target stays at
+/// or above `current`, or we're already at the floor — and the caller warns
+/// instead. Always returns a value strictly `< current`, so feeding it back each
+/// turn walks the window down monotonically and terminates at the floor.
+pub fn converge_num_ctx(
+    current: usize,
+    size_vram_bytes: u64,
+    total_bytes: u64,
+    kv_bytes_per_token: usize,
+) -> Option<usize> {
+    if kv_bytes_per_token == 0 || total_bytes <= size_vram_bytes {
+        return None; // KV cost unknown, or it actually fit — nothing to do.
+    }
+    let overflow = total_bytes - size_vram_bytes;
+    // Round the division up so we cut at least the overflow, never one short.
+    let tokens_to_cut = overflow.div_ceil(kv_bytes_per_token as u64) as usize;
+    let target = round_down_to(
+        current.saturating_sub(tokens_to_cut),
+        OLLAMA_NUM_CTX_ROUNDING,
+    )
+    .max(OLLAMA_MIN_AUTO_NUM_CTX);
+    // Only useful if it actually shrinks the window; otherwise we're weights-bound
+    // or already at the floor and the caller should warn.
+    (target < current).then_some(target)
+}
+
 /// Everything [`resolve_ollama_num_ctx`] needs. Built identically at both call
 /// sites so the effective window stays consistent.
 #[derive(Debug, Clone, Copy, Default)]
@@ -298,6 +330,53 @@ mod tests {
         let got = max_tokens_for_memory(budget, weight, kv).unwrap();
         // usable = 0.85 * 8GiB ≈ 7.3 GB; for_kv ≈ 1.7 GB; /56KB ≈ 30k tokens.
         assert!((28_000..=32_000).contains(&got), "expected ~30k, got {got}");
+    }
+
+    #[test]
+    fn converge_shrinks_to_clear_kv_overflow() {
+        // 10k-token window spilled by ~2 GB of KV (2000 tokens @ 1 MB/token).
+        let new = converge_num_ctx(10_000, 10_000_000_000, 12_000_000_000, 1_000_000)
+            .expect("should shrink");
+        assert!(new < 10_000, "must make progress, got {new}");
+        // ~2000 tokens cut from 10000 → ~8000, rounded down to the 1024 step.
+        assert!((6_000..=8_000).contains(&new), "expected ~7-8k, got {new}");
+    }
+
+    #[test]
+    fn converge_floors_when_overflow_is_weights_bound() {
+        // Overflow worth more tokens than the whole window → can't clear via KV.
+        let new = converge_num_ctx(8_000, 1_000_000_000, 9_000_000_000, 1_000_000);
+        assert_eq!(new, Some(OLLAMA_MIN_AUTO_NUM_CTX));
+    }
+
+    #[test]
+    fn converge_none_when_already_at_floor() {
+        // Already at the floor and still spilling → caller must warn, not loop.
+        let new = converge_num_ctx(
+            OLLAMA_MIN_AUTO_NUM_CTX,
+            1_000_000_000,
+            9_000_000_000,
+            1_000_000,
+        );
+        assert_eq!(new, None);
+    }
+
+    #[test]
+    fn converge_none_when_it_fits_or_kv_unknown() {
+        // Fully resident (total == vram) or under it → nothing to do.
+        assert_eq!(
+            converge_num_ctx(8_000, 6_000_000_000, 6_000_000_000, 40_000),
+            None
+        );
+        assert_eq!(
+            converge_num_ctx(8_000, 6_000_000_000, 5_000_000_000, 40_000),
+            None
+        );
+        // KV cost unknown → can't compute → leave it alone.
+        assert_eq!(
+            converge_num_ctx(8_000, 1_000_000_000, 9_000_000_000, 0),
+            None
+        );
     }
 
     #[test]

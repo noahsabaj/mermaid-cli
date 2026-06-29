@@ -45,6 +45,10 @@ pub struct ContextSizing {
 pub struct ModelPlacement {
     pub size_vram_bytes: u64,
     pub total_bytes: u64,
+    /// Auto-converge target: when the model spilled, the largest `num_ctx` that
+    /// would fit instead — or `None` if it already fits or shrinking can't help
+    /// (weights-bound). Computed against the *measured* footprint.
+    pub suggested_num_ctx: Option<u32>,
 }
 
 /// Provider-facing interface. A `ModelProvider` impl owns whatever
@@ -79,7 +83,8 @@ pub trait ModelProvider: Send + Sync {
     /// returns `None` (unknown / not applicable); Ollama overrides it to probe
     /// `/api/ps`. Awaited only on the effect runtime, *after* a turn (when the
     /// model is resident), so it never blocks the UI.
-    async fn verify_placement(&self) -> Option<ModelPlacement> {
+    async fn verify_placement(&self, current_num_ctx: Option<usize>) -> Option<ModelPlacement> {
+        let _ = current_num_ctx;
         None
     }
 

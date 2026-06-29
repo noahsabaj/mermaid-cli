@@ -110,6 +110,9 @@ pub enum Msg {
         model_id: String,
         size_vram_bytes: u64,
         total_bytes: u64,
+        /// Auto-converge target: largest `num_ctx` that would fit when the model
+        /// spilled, or `None` if it fits / can't be helped by shrinking.
+        suggested_num_ctx: Option<u32>,
     },
     /// The effect runner's estimate of the built-in tool-schema token cost
     /// it appends to every request during dispatch. Not turn-scoped — the

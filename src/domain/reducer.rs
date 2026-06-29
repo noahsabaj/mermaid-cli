@@ -211,7 +211,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     &mut state,
                     &mut cmds,
                     format!(
-                        "{model_id} supports up to {} tokens; Mermaid auto-fit the window to {} to keep it on your GPU. \
+                        "{model_id} supports up to {} tokens; Mermaid auto-fit the window to {} for your GPU. \
                          `/context max` uses the full window; `/context offload on` allows RAM (slower).",
                         format_compact_count(mm),
                         format_compact_count(eff)
@@ -223,6 +223,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             model_id,
             size_vram_bytes,
             total_bytes,
+            suggested_num_ctx,
         } => {
             // Drop a probe that landed after a `/model` switch (it describes the
             // previous model, not the one now active).
@@ -232,24 +233,54 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     total_bytes,
                 };
                 state.runtime.ollama_placement = Some(placement);
-                // Warn once per session when the model spilled out of VRAM while
-                // we were keeping it GPU-only. Describes the observation + both
-                // levers (no causation claim — external VRAM pressure can cause
-                // this too).
-                if placement.offloaded()
-                    && !state.settings.ollama.allow_ram_offload
-                    && state.runtime.offload_warned.insert(model_id)
-                {
-                    let pct = placement.percent_on_cpu();
-                    let model = state.session.model_id.clone();
-                    push_system(
-                        &mut state,
-                        &mut cmds,
-                        format!(
-                            "⚠ ~{pct}% of {model} is running on CPU/RAM, which is much slower. \
-                             Shrink the window with `/context <n>`, or accept RAM with `/context offload on`.",
-                        ),
-                    );
+
+                if placement.offloaded() && !state.settings.ollama.allow_ram_offload {
+                    // Don't auto-resize a window the user explicitly pinned.
+                    let user_pinned = state
+                        .settings
+                        .ollama_num_ctx_per_model
+                        .contains_key(&model_id);
+                    let already = state
+                        .runtime
+                        .ollama_converged_num_ctx
+                        .get(&model_id)
+                        .copied();
+                    // Auto-converge: adopt a new, smaller window that the probe
+                    // says fits (used next turn, re-measured until it stops
+                    // spilling). `None` ⇒ shrinking can't help (weights-bound).
+                    let converge_to = suggested_num_ctx
+                        .filter(|_| !user_pinned)
+                        .filter(|t| already != Some(*t));
+
+                    if let Some(target) = converge_to {
+                        state
+                            .runtime
+                            .ollama_converged_num_ctx
+                            .insert(model_id, target);
+                        let model = state.session.model_id.clone();
+                        push_system(
+                            &mut state,
+                            &mut cmds,
+                            format!(
+                                "Tightened {model}'s context to {} to fit more on your GPU.",
+                                format_compact_count(target as usize)
+                            ),
+                        );
+                    } else if state.runtime.offload_warned.insert(model_id) {
+                        // Can't shrink to fit (weights too big) or the user pinned
+                        // the window — warn once with both levers (no causation
+                        // claim; external VRAM pressure can cause this too).
+                        let pct = placement.percent_on_cpu();
+                        let model = state.session.model_id.clone();
+                        push_system(
+                            &mut state,
+                            &mut cmds,
+                            format!(
+                                "⚠ ~{pct}% of {model} is running on CPU/RAM, which is much slower. \
+                                 Shrink the window with `/context <n>`, or accept RAM with `/context offload on`.",
+                            ),
+                        );
+                    }
                 }
             }
         },
@@ -1325,6 +1356,8 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 },
                 ContextCmd::Auto => {
                     state.settings.ollama_num_ctx_per_model.remove(&model_id);
+                    // Also drop any auto-converged value so it re-fits from scratch.
+                    state.runtime.ollama_converged_num_ctx.remove(&model_id);
                     cmds.push(Cmd::PersistOllamaNumCtxFor {
                         model_id,
                         num_ctx: None,
@@ -1953,7 +1986,16 @@ fn context_text(state: &State) -> String {
             ));
         }
         if let Some(eff) = ctx.effective {
-            let src = ctx.source.map(|s| s.label()).unwrap_or("auto");
+            // An auto-converged value rides the override path internally, but it's
+            // Mermaid's choice (not the user's) — label it honestly.
+            let model = &state.session.model_id;
+            let src = if state.runtime.ollama_converged_num_ctx.contains_key(model)
+                && !state.settings.ollama_num_ctx_per_model.contains_key(model)
+            {
+                "auto (GPU-fit)"
+            } else {
+                ctx.source.map(|s| s.label()).unwrap_or("auto")
+            };
             lines.push(format!(
                 "Active num_ctx: {} ({src})",
                 format_compact_count(eff)
@@ -2965,12 +3007,20 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         temperature,
         max_tokens,
         tools: mcp_tools,
-        // Per-model `/context` override (set via /context <n>/max); None = auto-fit.
+        // Per-model `/context` override (set via /context <n>/max) wins; else the
+        // auto-converged value the `/api/ps` check found fits; else None = auto-fit.
         ollama_num_ctx: state
             .settings
             .ollama_num_ctx_per_model
             .get(&state.session.model_id)
-            .copied(),
+            .copied()
+            .or_else(|| {
+                state
+                    .runtime
+                    .ollama_converged_num_ctx
+                    .get(&state.session.model_id)
+                    .copied()
+            }),
         // Live offload toggle — carry the current setting so `/context offload`
         // applies next turn without rebuilding the (startup-frozen) provider.
         ollama_allow_ram_offload: Some(state.settings.ollama.allow_ram_offload),
@@ -4137,11 +4187,13 @@ mod tests {
         assert_eq!(ctx.effective, Some(12_288));
     }
 
+    // A spill with no fitting smaller window (weights-bound) → the warn path.
     fn placement_msg(model_id: &str, vram: u64, total: u64) -> Msg {
         Msg::OllamaPlacementResolved {
             model_id: model_id.to_string(),
             size_vram_bytes: vram,
             total_bytes: total,
+            suggested_num_ctx: None,
         }
     }
 
@@ -4223,6 +4275,80 @@ mod tests {
         assert_eq!(p(200, 100).percent_on_cpu(), 0);
         // Unknown footprint → 0, not a divide-by-zero.
         assert_eq!(p(0, 0).percent_on_cpu(), 0);
+    }
+
+    fn converge_msg(model_id: &str, vram: u64, total: u64, suggested: u32) -> Msg {
+        Msg::OllamaPlacementResolved {
+            model_id: model_id.to_string(),
+            size_vram_bytes: vram,
+            total_bytes: total,
+            suggested_num_ctx: Some(suggested),
+        }
+    }
+
+    #[test]
+    fn ollama_placement_auto_converges_to_suggested_window() {
+        // Spilled, but a smaller window fits → adopt it (no warning), and
+        // build_chat_request should then send it.
+        let state = fresh_state();
+        let (state, _) = update(
+            state,
+            converge_msg("ollama/test", 6_000_000_000, 8_000_000_000, 8_192),
+        );
+        assert_eq!(
+            state.runtime.ollama_converged_num_ctx.get("ollama/test"),
+            Some(&8_192)
+        );
+        assert_eq!(cpu_warn_count(&state), 0); // converged, not warned
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Tightened"))
+        );
+        assert_eq!(build_chat_request(&state).ollama_num_ctx, Some(8_192));
+    }
+
+    #[test]
+    fn ollama_placement_does_not_converge_when_user_pinned() {
+        // The user explicitly set a window → don't auto-resize it; warn instead.
+        let mut state = fresh_state();
+        state
+            .settings
+            .ollama_num_ctx_per_model
+            .insert("ollama/test".to_string(), 32_768);
+        let (state, _) = update(
+            state,
+            converge_msg("ollama/test", 6_000_000_000, 8_000_000_000, 8_192),
+        );
+        assert!(
+            !state
+                .runtime
+                .ollama_converged_num_ctx
+                .contains_key("ollama/test")
+        );
+        assert_eq!(cpu_warn_count(&state), 1);
+        // Their pinned value still wins.
+        assert_eq!(build_chat_request(&state).ollama_num_ctx, Some(32_768));
+    }
+
+    #[test]
+    fn slash_context_auto_clears_converged_value() {
+        use crate::domain::ContextCmd;
+        let mut state = fresh_state();
+        state
+            .runtime
+            .ollama_converged_num_ctx
+            .insert("ollama/test".to_string(), 8_192);
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Context(ContextCmd::Auto)));
+        assert!(
+            !state
+                .runtime
+                .ollama_converged_num_ctx
+                .contains_key("ollama/test")
+        );
+        assert_eq!(build_chat_request(&state).ollama_num_ctx, None); // back to raw auto-fit
     }
 
     #[test]
@@ -4931,6 +5057,16 @@ mod tests {
         assert!(text.contains("RAM offload: off"));
         // Auto-fit capped well below the model's max → point to the override.
         assert!(text.contains("/context max"));
+
+        // Once auto-converge has picked a fitting window, label it as Mermaid's
+        // choice ("GPU-fit"), not the user's "(override)".
+        state
+            .runtime
+            .ollama_converged_num_ctx
+            .insert("ollama/test".to_string(), 8_192);
+        let text = context_text(&state);
+        assert!(text.contains("auto (GPU-fit)"), "got: {text}");
+        assert!(!text.contains("(override)"));
     }
 
     #[test]

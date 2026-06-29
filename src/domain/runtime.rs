@@ -311,6 +311,12 @@ pub struct RuntimeState {
     /// so the once-per-session warning behaves like the auto-fit hint.
     #[serde(skip)]
     pub offload_warned: HashSet<String>,
+    /// Auto-converge: per-model `num_ctx` that the post-turn `/api/ps` check
+    /// found fits VRAM, keyed by model id. Session-only (not persisted) because
+    /// it depends on whatever else is using VRAM right now; re-derived each
+    /// session. Read by `build_chat_request` below a user override.
+    #[serde(skip)]
+    pub ollama_converged_num_ctx: std::collections::HashMap<String, u32>,
 }
 
 impl RuntimeState {
@@ -324,6 +330,7 @@ impl RuntimeState {
             ollama_placement: None,
             hinted_models: HashSet::new(),
             offload_warned: HashSet::new(),
+            ollama_converged_num_ctx: std::collections::HashMap::new(),
         }
     }
 
