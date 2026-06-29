@@ -225,6 +225,26 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     ),
                 );
             }
+            // Cloud (`:cloud`) models run on Ollama's servers, not the local GPU, so
+            // they use their full advertised window. Note it once per session so the
+            // (correct) large window isn't mistaken for a VRAM mis-fit.
+            if source == Some(crate::models::adapters::ollama_sizing::NumCtxSource::Cloud)
+                && state
+                    .runtime
+                    .hinted_models
+                    .insert(state.session.model_id.clone())
+                && let Some(eff) = effective
+            {
+                let model_id = state.session.model_id.clone();
+                push_system(
+                    &mut state,
+                    &mut cmds,
+                    format!(
+                        "{model_id} runs on Ollama Cloud, not your GPU — using its full {}-token window.",
+                        format_compact_count(eff)
+                    ),
+                );
+            }
         },
         Msg::OllamaPlacementResolved {
             model_id,
