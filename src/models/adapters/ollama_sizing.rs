@@ -363,7 +363,10 @@ mod tests {
         // stays well above the floor → a real, useful shrink.
         let new = converge_num_ctx(16_000, 10_000_000_000, 16_000_000_000, 1_000_000)
             .expect("clearable overflow should shrink");
-        assert!((OLLAMA_MIN_AUTO_NUM_CTX..16_000).contains(&new), "got {new}");
+        assert!(
+            (OLLAMA_MIN_AUTO_NUM_CTX..16_000).contains(&new),
+            "got {new}"
+        );
         // Same overflow on a window only just above the floor can't be cleared
         // without dropping below it → bail.
         assert_eq!(
