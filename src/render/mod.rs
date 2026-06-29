@@ -157,13 +157,11 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             },
             _ => None,
         };
+        // Live, char-based estimate of tokens generated so far (answer + thinking).
+        // Marked estimated (`~`) — the authoritative count lands in the footer
+        // once the turn's `Done` usage arrives.
         let (tokens_display, tokens_estimated) = match &state.turn {
-            TurnState::Generating {
-                tokens,
-                partial_text,
-                ..
-            } if *tokens == 0 && !partial_text.is_empty() => (partial_text.len() / 4, true),
-            TurnState::Generating { tokens, .. } => (*tokens, false),
+            TurnState::Generating { tokens, .. } => (*tokens, true),
             _ => (0, false),
         };
         build_status_lines(
