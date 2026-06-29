@@ -1395,9 +1395,11 @@ async fn dispatch_call_model(
     // `Msg::TurnCancelled` is emitted from `drop_scope` after the
     // turn's `TurnScope` drains. Emitting `UpstreamError` here would
     // commit a "cancelled" message the user didn't ask to see.
+    let mut completed_ok = false;
     match provider.chat(request.clone(), ctx).await {
         Ok(_final_response) => {
             // Success — the final `Done` flowed through the sink.
+            completed_ok = true;
         },
         Err(crate::models::ModelError::Cancelled) => {
             // Silent: `drop_scope` will emit `Msg::TurnCancelled`.
@@ -1447,6 +1449,29 @@ async fn dispatch_call_model(
     }
 
     join_logged(relay, "stream_relay").await;
+
+    // Post-turn (success only): verify the model actually fit VRAM. Skipped when
+    // the user allowed RAM offload (no warning possible) and a no-op for
+    // non-Ollama providers (verify_placement returns None). Off the critical path
+    // — StreamDone is already enqueued, so any warning renders after the answer.
+    if completed_ok
+        && request.ollama_allow_ram_offload != Some(true)
+        && let Some(p) = provider.verify_placement().await
+    {
+        tracing::debug!(
+            size_vram_bytes = p.size_vram_bytes,
+            total_bytes = p.total_bytes,
+            offloaded = p.size_vram_bytes < p.total_bytes,
+            "Ollama placement"
+        );
+        let _ = msg_tx
+            .send(Msg::OllamaPlacementResolved {
+                model_id: request.model_id.clone(),
+                size_vram_bytes: p.size_vram_bytes,
+                total_bytes: p.total_bytes,
+            })
+            .await;
+    }
 }
 
 async fn dispatch_provider_stream(

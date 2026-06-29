@@ -219,6 +219,40 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 );
             }
         },
+        Msg::OllamaPlacementResolved {
+            model_id,
+            size_vram_bytes,
+            total_bytes,
+        } => {
+            // Drop a probe that landed after a `/model` switch (it describes the
+            // previous model, not the one now active).
+            if model_id == state.session.model_id {
+                let placement = crate::domain::runtime::OllamaPlacement {
+                    size_vram_bytes,
+                    total_bytes,
+                };
+                state.runtime.ollama_placement = Some(placement);
+                // Warn once per session when the model spilled out of VRAM while
+                // we were keeping it GPU-only. Describes the observation + both
+                // levers (no causation claim — external VRAM pressure can cause
+                // this too).
+                if placement.offloaded()
+                    && !state.settings.ollama.allow_ram_offload
+                    && state.runtime.offload_warned.insert(model_id)
+                {
+                    let pct = placement.percent_on_cpu();
+                    let model = state.session.model_id.clone();
+                    push_system(
+                        &mut state,
+                        &mut cmds,
+                        format!(
+                            "⚠ ~{pct}% of {model} is running on CPU/RAM, which is much slower. \
+                             Shrink the window with `/context <n>`, or accept RAM with `/context offload on`.",
+                        ),
+                    );
+                }
+            }
+        },
         Msg::CompactionFinished { turn, result } => {
             handle_compaction_finished(&mut state, &mut cmds, turn, result);
         },
@@ -1952,6 +1986,17 @@ fn context_text(state: &State) -> String {
                 "Tip: this model supports up to {} — `/context max` for the full window, or `/context <n>`.",
                 format_compact_count(model_max)
             ));
+        }
+        // Real memory placement once a turn has probed `/api/ps`.
+        if let Some(p) = state.runtime.ollama_placement.as_ref() {
+            if p.offloaded() {
+                lines.push(format!(
+                    "GPU placement: ~{}% on CPU/RAM (slower) — `/context <n>` to shrink or `/context offload on` to accept",
+                    p.percent_on_cpu()
+                ));
+            } else {
+                lines.push("GPU placement: fully on GPU".to_string());
+            }
         }
         lines.push(String::new());
     }
@@ -4090,6 +4135,94 @@ mod tests {
         let ctx = state.runtime.ollama_context.expect("stored");
         assert_eq!(ctx.model_max, Some(262_144));
         assert_eq!(ctx.effective, Some(12_288));
+    }
+
+    fn placement_msg(model_id: &str, vram: u64, total: u64) -> Msg {
+        Msg::OllamaPlacementResolved {
+            model_id: model_id.to_string(),
+            size_vram_bytes: vram,
+            total_bytes: total,
+        }
+    }
+
+    fn cpu_warn_count(state: &State) -> usize {
+        state
+            .session
+            .messages()
+            .iter()
+            .filter(|m| m.role == MessageRole::System && m.content.contains("CPU/RAM"))
+            .count()
+    }
+
+    #[test]
+    fn ollama_placement_stored_and_warns_once_when_offloaded() {
+        let state = fresh_state(); // session model is ollama/test; offload off by default
+        assert!(!state.settings.ollama.allow_ram_offload);
+        let (state, _) = update(
+            state,
+            placement_msg("ollama/test", 6_000_000_000, 8_000_000_000),
+        );
+        let p = state.runtime.ollama_placement.expect("stored");
+        assert!(p.offloaded());
+        assert_eq!(p.percent_on_cpu(), 25);
+        assert_eq!(cpu_warn_count(&state), 1);
+        assert!(state.runtime.offload_warned.contains("ollama/test"));
+        // A second probe for the same model must not warn again.
+        let (state, _) = update(
+            state,
+            placement_msg("ollama/test", 6_000_000_000, 8_000_000_000),
+        );
+        assert_eq!(cpu_warn_count(&state), 1);
+    }
+
+    #[test]
+    fn ollama_placement_no_warn_when_offload_on() {
+        let mut state = fresh_state();
+        state.settings.ollama.allow_ram_offload = true;
+        // Fully on CPU, but the user explicitly accepted RAM → silent.
+        let (state, _) = update(state, placement_msg("ollama/test", 0, 8_000_000_000));
+        assert!(state.runtime.ollama_placement.expect("stored").offloaded());
+        assert_eq!(cpu_warn_count(&state), 0);
+    }
+
+    #[test]
+    fn ollama_placement_no_warn_when_fully_on_gpu() {
+        let state = fresh_state();
+        let (state, _) = update(
+            state,
+            placement_msg("ollama/test", 8_000_000_000, 8_000_000_000),
+        );
+        assert!(!state.runtime.ollama_placement.expect("stored").offloaded());
+        assert_eq!(cpu_warn_count(&state), 0);
+    }
+
+    #[test]
+    fn ollama_placement_ignores_probe_for_other_model() {
+        // A probe that lands after a /model switch (model_id != session model).
+        let state = fresh_state();
+        let (state, _) = update(state, placement_msg("ollama/other", 0, 8_000_000_000));
+        assert!(state.runtime.ollama_placement.is_none());
+        assert!(!state.runtime.offload_warned.contains("ollama/other"));
+        assert_eq!(cpu_warn_count(&state), 0);
+    }
+
+    #[test]
+    fn ollama_placement_offload_math_boundaries() {
+        use crate::domain::runtime::OllamaPlacement;
+        let p = |vram, total| OllamaPlacement {
+            size_vram_bytes: vram,
+            total_bytes: total,
+        };
+        assert!(!p(100, 100).offloaded());
+        assert_eq!(p(100, 100).percent_on_cpu(), 0);
+        assert!(p(0, 100).offloaded());
+        assert_eq!(p(0, 100).percent_on_cpu(), 100);
+        assert_eq!(p(75, 100).percent_on_cpu(), 25);
+        // vram > total can't really happen, but must not panic / underflow.
+        assert!(!p(200, 100).offloaded());
+        assert_eq!(p(200, 100).percent_on_cpu(), 0);
+        // Unknown footprint → 0, not a divide-by-zero.
+        assert_eq!(p(0, 0).percent_on_cpu(), 0);
     }
 
     #[test]
