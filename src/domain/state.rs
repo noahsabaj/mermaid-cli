@@ -529,10 +529,11 @@ pub enum TurnState {
         calls: Vec<PendingToolCall>,
         outcomes: Vec<Option<ToolOutcome>>,
     },
-    /// A manual `/compact` request is summarizing history. Auto
-    /// compaction runs while `Generating` because it is preflight for
-    /// the same user turn; this variant is only for explicit user
-    /// compaction.
+    /// Summarizing history as a step of its own: a manual `/compact`
+    /// (`trigger: Manual`, ends the turn afterwards) or a truncation recovery
+    /// (`trigger: TruncationRecovery`, resumes the run afterwards). Pre-turn auto
+    /// compaction instead runs while `Generating` because it is preflight for the
+    /// same user turn. `trigger` is what the finished/failed handlers key off.
     Compacting {
         id: TurnId,
         started: SystemTime,

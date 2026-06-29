@@ -28,6 +28,9 @@ pub enum CompactionTrigger {
     Manual,
     AutoThreshold,
     ContextLimitRetry,
+    /// A response was truncated because the context window filled mid-turn;
+    /// compact and resume the run (see the reducer's truncation-recovery path).
+    TruncationRecovery,
 }
 
 impl CompactionTrigger {
@@ -36,6 +39,7 @@ impl CompactionTrigger {
             Self::Manual => "manual",
             Self::AutoThreshold => "auto_threshold",
             Self::ContextLimitRetry => "context_limit_retry",
+            Self::TruncationRecovery => "truncation_recovery",
         }
     }
 
@@ -44,6 +48,7 @@ impl CompactionTrigger {
             Self::Manual => "manual",
             Self::AutoThreshold => "automatic",
             Self::ContextLimitRetry => "context-limit retry",
+            Self::TruncationRecovery => "truncation recovery",
         }
     }
 }

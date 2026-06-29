@@ -329,6 +329,12 @@ pub struct RuntimeState {
     /// each model call. The live phase's estimate is added on top at render time.
     #[serde(skip)]
     pub run_committed_tokens: usize,
+    /// Consecutive auto-compact-and-continue recoveries in the current run after a
+    /// context-window truncation. Bounded by `settings.compaction.max_truncation_recoveries`
+    /// (0 = uncapped) and reset whenever the run makes progress, so it caps only
+    /// no-progress thrashing on a too-small window. Session-only.
+    #[serde(skip)]
+    pub truncation_recoveries: u32,
 }
 
 impl RuntimeState {
@@ -345,6 +351,7 @@ impl RuntimeState {
             ollama_converged_num_ctx: std::collections::HashMap::new(),
             run_started: None,
             run_committed_tokens: 0,
+            truncation_recoveries: 0,
         }
     }
 
