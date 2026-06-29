@@ -142,6 +142,9 @@ mod tests {
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
+
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         let cfg = build_model_config(&req);
         assert_eq!(cfg.model, "groq/llama-3.3-70b-versatile");

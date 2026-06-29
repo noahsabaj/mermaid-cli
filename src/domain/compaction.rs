@@ -295,6 +295,8 @@ pub fn build_summary_request(
         temperature: 0.0,
         max_tokens: policy.summary_max_tokens,
         tools: Vec::new(),
+        ollama_num_ctx: base.ollama_num_ctx,
+        ollama_allow_ram_offload: base.ollama_allow_ram_offload,
     }
 }
 
@@ -319,6 +321,8 @@ pub fn build_verification_request(
         temperature: 0.0,
         max_tokens: policy.summary_max_tokens,
         tools: Vec::new(),
+        ollama_num_ctx: base.ollama_num_ctx,
+        ollama_allow_ram_offload: base.ollama_allow_ram_offload,
     }
 }
 
@@ -635,6 +639,8 @@ mod tests {
             temperature: 0.7,
             max_tokens: 4096,
             tools: Vec::new(),
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         }
     }
 

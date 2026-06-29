@@ -92,6 +92,15 @@ pub enum Msg {
         turn: TurnId,
         snapshot: ContextUsageSnapshot,
     },
+    /// Effect runner resolved the provider's context window. For Ollama,
+    /// `model_max` is the probed architectural window and `effective` is the
+    /// auto-fitted/overridden `num_ctx`. Model-level metadata (not turn-scoped),
+    /// so it's never stale-filtered. Drives the `/context` display + quick-fix.
+    ProviderContextResolved {
+        model_max: Option<usize>,
+        effective: Option<usize>,
+        source: Option<crate::models::adapters::ollama_sizing::NumCtxSource>,
+    },
     /// The effect runner's estimate of the built-in tool-schema token cost
     /// it appends to every request during dispatch. Not turn-scoped — the
     /// reducer stores it on `runtime` so `/context` can fold it into its
@@ -355,6 +364,22 @@ pub enum Paste {
     Image { bytes: Vec<u8>, format: String },
 }
 
+/// `/context` subcommands. No-arg shows the window; the rest tune the Ollama
+/// context window (per-model, persisted), mirroring `/reasoning`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextCmd {
+    /// Show the current window + usage (no arg).
+    Show,
+    /// `/context <n>` — set a per-model `num_ctx` override.
+    Set(u32),
+    /// `/context auto` — clear the override, return to auto-fit.
+    Auto,
+    /// `/context max` — use the model's full advertised window.
+    Max,
+    /// `/context offload on|off` — toggle Ollama RAM offload.
+    Offload(bool),
+}
+
 /// Slash commands — a typed surface over what the user typed as
 /// `/<name> [args]`. Parsed in `app::event_source` against the single
 /// `COMMAND_REGISTRY`; unknown commands produce `SlashCmd::Unknown`
@@ -373,7 +398,7 @@ pub enum SlashCmd {
     Load(Option<String>),
     List,
     Usage,
-    Context,
+    Context(ContextCmd),
     Compact(Option<String>),
     /// List saved durable memories.
     Memory,
@@ -453,6 +478,7 @@ impl Msg {
             Msg::StreamReasoning { .. } => MsgKind::StreamReasoning,
             Msg::StreamToolCall { .. } => MsgKind::StreamToolCall,
             Msg::ContextUsageEstimated { .. } => MsgKind::ContextUsageEstimated,
+            Msg::ProviderContextResolved { .. } => MsgKind::ProviderContextResolved,
             Msg::BuiltinToolSchemaTokens(_) => MsgKind::BuiltinToolSchemaTokens,
             Msg::CompactionFinished { .. } => MsgKind::CompactionFinished,
             Msg::CompactionFailed { .. } => MsgKind::CompactionFailed,
@@ -506,6 +532,7 @@ pub enum MsgKind {
     StreamReasoning,
     StreamToolCall,
     ContextUsageEstimated,
+    ProviderContextResolved,
     BuiltinToolSchemaTokens,
     CompactionFinished,
     CompactionFailed,

@@ -219,7 +219,30 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("load") => SlashCmd::Load(arg),
         Some("list") => SlashCmd::List,
         Some("usage") => SlashCmd::Usage,
-        Some("context") => SlashCmd::Context,
+        Some("context") => {
+            use crate::domain::ContextCmd;
+            let a = arg.as_deref().map(str::trim);
+            SlashCmd::Context(match a {
+                None | Some("") => ContextCmd::Show,
+                Some("auto") => ContextCmd::Auto,
+                Some("max") | Some("full") => ContextCmd::Max,
+                Some(s) => {
+                    if let Some(rest) = s.strip_prefix("offload") {
+                        match rest.trim() {
+                            "on" | "true" | "enable" | "yes" => ContextCmd::Offload(true),
+                            "off" | "false" | "disable" | "no" | "" => ContextCmd::Offload(false),
+                            // "offload garbage" → just show.
+                            _ => ContextCmd::Show,
+                        }
+                    } else if let Ok(n) = s.parse::<u32>() {
+                        ContextCmd::Set(n)
+                    } else {
+                        // Unrecognized arg → show (self-documenting report).
+                        ContextCmd::Show
+                    }
+                },
+            })
+        },
         Some("compact") => SlashCmd::Compact(arg),
         Some("memory") => SlashCmd::Memory,
         Some("remember") => SlashCmd::Remember(arg),
@@ -474,8 +497,37 @@ mod tests {
 
     #[test]
     fn parse_slash_usage_and_context() {
+        use crate::domain::ContextCmd;
         assert_eq!(parse_slash_command("usage"), SlashCmd::Usage);
-        assert_eq!(parse_slash_command("context"), SlashCmd::Context);
+        assert_eq!(
+            parse_slash_command("context"),
+            SlashCmd::Context(ContextCmd::Show)
+        );
+        assert_eq!(
+            parse_slash_command("context 65536"),
+            SlashCmd::Context(ContextCmd::Set(65536))
+        );
+        assert_eq!(
+            parse_slash_command("context auto"),
+            SlashCmd::Context(ContextCmd::Auto)
+        );
+        assert_eq!(
+            parse_slash_command("context max"),
+            SlashCmd::Context(ContextCmd::Max)
+        );
+        assert_eq!(
+            parse_slash_command("context offload on"),
+            SlashCmd::Context(ContextCmd::Offload(true))
+        );
+        assert_eq!(
+            parse_slash_command("context offload off"),
+            SlashCmd::Context(ContextCmd::Offload(false))
+        );
+        // Unrecognized arg falls back to the (self-documenting) report.
+        assert_eq!(
+            parse_slash_command("context wat"),
+            SlashCmd::Context(ContextCmd::Show)
+        );
         assert_eq!(parse_slash_command("doctor"), SlashCmd::Doctor);
     }
 

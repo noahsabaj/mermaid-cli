@@ -22,7 +22,7 @@ use crate::models::reasoning::ReasoningLevel;
 
 /// How the effective `num_ctx` was chosen — surfaced in `/context` and the
 /// quick-fix hints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NumCtxSource {
     /// Per-model override set via `/context <n>` / `/context max`.
     Override,
@@ -33,6 +33,24 @@ pub enum NumCtxSource {
     /// Auto, but memory/dimensions couldn't be detected, so the conservative
     /// fallback cap was used.
     AutoFallback,
+}
+
+impl NumCtxSource {
+    /// Human label for `/context` and hints.
+    pub fn label(self) -> &'static str {
+        match self {
+            NumCtxSource::Override => "override",
+            NumCtxSource::GlobalConfig => "config",
+            NumCtxSource::Auto => "auto",
+            NumCtxSource::AutoFallback => "auto (fallback)",
+        }
+    }
+
+    /// Whether the window was auto-fitted (vs an explicit user/config value) —
+    /// drives whether the quick-fix offers to raise it.
+    pub fn is_auto(self) -> bool {
+        matches!(self, NumCtxSource::Auto | NumCtxSource::AutoFallback)
+    }
 }
 
 /// Resolved effective `num_ctx` plus how it was chosen.

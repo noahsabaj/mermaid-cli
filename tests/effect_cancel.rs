@@ -120,6 +120,8 @@ async fn effect_runner_cancels_scope_on_command() {
         temperature: 0.7,
         max_tokens: 4096,
         tools: vec![],
+        ollama_num_ctx: None,
+        ollama_allow_ram_offload: None,
     };
     runner.dispatch(Cmd::CallModel {
         turn: TurnId(1),

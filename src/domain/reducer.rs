@@ -182,6 +182,43 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::BuiltinToolSchemaTokens(tokens) => {
             state.runtime.builtin_tool_schema_tokens = tokens;
         },
+        Msg::ProviderContextResolved {
+            model_max,
+            effective,
+            source,
+            ..
+        } => {
+            state.runtime.ollama_context = Some(crate::domain::runtime::OllamaContextInfo {
+                model_max,
+                effective,
+                source,
+            });
+            // Proactive, once-per-session: if auto-fit capped the window far
+            // below the model's max, explain what happened + how to get more.
+            let big_gap = matches!(
+                (model_max, effective, source),
+                (Some(mm), Some(eff), Some(src)) if src.is_auto() && mm >= eff.saturating_mul(2)
+            );
+            if big_gap
+                && state
+                    .runtime
+                    .hinted_models
+                    .insert(state.session.model_id.clone())
+                && let (Some(mm), Some(eff)) = (model_max, effective)
+            {
+                let model_id = state.session.model_id.clone();
+                push_system(
+                    &mut state,
+                    &mut cmds,
+                    format!(
+                        "{model_id} supports up to {} tokens; Mermaid auto-fit the window to {} to keep it on your GPU. \
+                         `/context max` uses the full window; `/context offload on` allows RAM (slower).",
+                        format_compact_count(mm),
+                        format_compact_count(eff)
+                    ),
+                );
+            }
+        },
         Msg::CompactionFinished { turn, result } => {
             handle_compaction_finished(&mut state, &mut cmds, turn, result);
         },
@@ -1216,11 +1253,107 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             state.session.append(ChatMessage::system(usage_text(state)));
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
-        SlashCmd::Context => {
-            state
-                .session
-                .append(ChatMessage::system(context_text(state)));
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        SlashCmd::Context(cmd) => {
+            use crate::domain::ContextCmd;
+            let model_id = state.session.model_id.clone();
+            let is_ollama = model_id.starts_with("ollama/");
+            match cmd {
+                ContextCmd::Show => {
+                    state
+                        .session
+                        .append(ChatMessage::system(context_text(state)));
+                    cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+                },
+                // The sizing knobs only affect Ollama's num_ctx.
+                _ if !is_ollama => {
+                    push_system(
+                        state,
+                        cmds,
+                        format!(
+                            "/context sizing applies to Ollama models; the active model is {model_id}."
+                        ),
+                    );
+                },
+                ContextCmd::Set(n) => {
+                    state
+                        .settings
+                        .ollama_num_ctx_per_model
+                        .insert(model_id.clone(), n);
+                    cmds.push(Cmd::PersistOllamaNumCtxFor {
+                        model_id,
+                        num_ctx: Some(n),
+                    });
+                    push_system(
+                        state,
+                        cmds,
+                        format!("Context window set to {n} tokens — applies to the next message."),
+                    );
+                },
+                ContextCmd::Auto => {
+                    state.settings.ollama_num_ctx_per_model.remove(&model_id);
+                    cmds.push(Cmd::PersistOllamaNumCtxFor {
+                        model_id,
+                        num_ctx: None,
+                    });
+                    push_system(
+                        state,
+                        cmds,
+                        "Context window back to auto-fit (sized to your GPU's VRAM) — applies to the next message.",
+                    );
+                },
+                ContextCmd::Max => {
+                    match state
+                        .runtime
+                        .ollama_context
+                        .as_ref()
+                        .and_then(|c| c.model_max)
+                    {
+                        Some(max) => {
+                            let max_u32 = max.min(u32::MAX as usize) as u32;
+                            state
+                                .settings
+                                .ollama_num_ctx_per_model
+                                .insert(model_id.clone(), max_u32);
+                            cmds.push(Cmd::PersistOllamaNumCtxFor {
+                                model_id,
+                                num_ctx: Some(max_u32),
+                            });
+                            push_system(
+                                state,
+                                cmds,
+                                format!(
+                                    "Context window set to the model's max ({max} tokens) — applies to the next message. \
+                                     This may exceed VRAM; if it gets slow, enable `/context offload on`."
+                                ),
+                            );
+                        },
+                        None => {
+                            push_system(
+                                state,
+                                cmds,
+                                "Model's max window isn't known yet — send a message first, then `/context max`.",
+                            );
+                        },
+                    }
+                },
+                ContextCmd::Offload(on) => {
+                    state.settings.ollama.allow_ram_offload = on;
+                    cmds.push(Cmd::PersistOllamaOffload(on));
+                    push_system(
+                        state,
+                        cmds,
+                        format!(
+                            "RAM offload {} — applies to the next message. {}",
+                            if on { "enabled" } else { "disabled" },
+                            if on {
+                                "Larger context windows are allowed, but inference may be much slower."
+                            } else {
+                                "Context auto-fits to VRAM to stay fast."
+                            }
+                        ),
+                    );
+                },
+            }
         },
         SlashCmd::Compact(instructions) => {
             handle_manual_compact(state, cmds, instructions);
@@ -1769,6 +1902,60 @@ fn context_text(state: &State) -> String {
     // the verdict/hard-limit lines agree with what dispatch actually decides.
     let next_snapshot = super::state::estimate_context_usage_for_request(&request, max_context)
         .with_additional_tokens(state.runtime.builtin_tool_schema_tokens);
+
+    // Ollama auto-sizing detail (probed on the first turn; `source` is `Some`
+    // only for Ollama). Shows the real window, what we send as num_ctx, the
+    // output budget, and the offload mode — so users can see + tune sizing.
+    if let Some(ctx) = state
+        .runtime
+        .ollama_context
+        .as_ref()
+        .filter(|c| c.source.is_some())
+    {
+        if let Some(model_max) = ctx.model_max {
+            lines.push(format!(
+                "Model max window: {}",
+                format_compact_count(model_max)
+            ));
+        }
+        if let Some(eff) = ctx.effective {
+            let src = ctx.source.map(|s| s.label()).unwrap_or("auto");
+            lines.push(format!(
+                "Active num_ctx: {} ({src})",
+                format_compact_count(eff)
+            ));
+        }
+        let num_predict = crate::models::adapters::ollama_sizing::default_ollama_num_predict(
+            request.max_tokens,
+            request.reasoning,
+            ctx.effective,
+            next_snapshot.used_tokens,
+        );
+        lines.push(format!(
+            "Output budget (num_predict): {}",
+            format_compact_count(num_predict as usize)
+        ));
+        lines.push(format!(
+            "RAM offload: {} (toggle with /context offload on|off)",
+            if state.settings.ollama.allow_ram_offload {
+                "on"
+            } else {
+                "off"
+            }
+        ));
+        // If auto-fit capped well below the model's max, point to the override.
+        if let (Some(model_max), Some(eff), Some(src)) = (ctx.model_max, ctx.effective, ctx.source)
+            && src.is_auto()
+            && model_max > eff
+        {
+            lines.push(format!(
+                "Tip: this model supports up to {} — `/context max` for the full window, or `/context <n>`.",
+                format_compact_count(model_max)
+            ));
+        }
+        lines.push(String::new());
+    }
+
     let policy = CompactionPolicy::default();
     let response_reserve = policy.response_reserve(request.max_tokens);
     let usage_summary = match (next_snapshot.used_percent, next_snapshot.max_tokens) {
@@ -2354,11 +2541,26 @@ fn handle_stream_done(
     // contradictory anyway, so dropping the note in that case is safe.
     if tool_calls.is_empty() {
         match stop_reason {
-            Some(crate::models::FinishReason::Length) => push_system(
-                state,
-                cmds,
-                "⚠ Response truncated — reached the model's max output-token limit.",
-            ),
+            Some(crate::models::FinishReason::Length) => {
+                let mut msg = "⚠ Response truncated — reached the model's max output-token limit."
+                    .to_string();
+                // Ollama quick-fix: if auto-fit capped the window below the
+                // model's max, tell the user exactly how to raise it.
+                if let Some(ctx) = state.runtime.ollama_context.as_ref()
+                    && let (Some(model_max), Some(eff), Some(src)) =
+                        (ctx.model_max, ctx.effective, ctx.source)
+                    && src.is_auto()
+                    && model_max > eff
+                {
+                    msg.push_str(&format!(
+                        " This model supports up to {} but the window is auto-fit to {} for your GPU — \
+                         raise it with `/context max`, or allow RAM with `/context offload on`.",
+                        format_compact_count(model_max),
+                        format_compact_count(eff)
+                    ));
+                }
+                push_system(state, cmds, msg);
+            },
             Some(crate::models::FinishReason::ContentFilter) => push_system(
                 state,
                 cmds,
@@ -2718,6 +2920,15 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         temperature,
         max_tokens,
         tools: mcp_tools,
+        // Per-model `/context` override (set via /context <n>/max); None = auto-fit.
+        ollama_num_ctx: state
+            .settings
+            .ollama_num_ctx_per_model
+            .get(&state.session.model_id)
+            .copied(),
+        // Live offload toggle — carry the current setting so `/context offload`
+        // applies next turn without rebuilding the (startup-frozen) provider.
+        ollama_allow_ram_offload: Some(state.settings.ollama.allow_ram_offload),
     }
 }
 
@@ -3784,6 +3995,104 @@ mod tests {
     }
 
     #[test]
+    fn slash_context_set_persists_per_model() {
+        use crate::domain::ContextCmd;
+        let state = fresh_state();
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Context(ContextCmd::Set(65_536))),
+        );
+        assert_eq!(
+            state.settings.ollama_num_ctx_per_model.get("ollama/test"),
+            Some(&65_536)
+        );
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            Cmd::PersistOllamaNumCtxFor { model_id, num_ctx: Some(65_536) } if model_id == "ollama/test"
+        )));
+    }
+
+    #[test]
+    fn slash_context_auto_clears_override() {
+        use crate::domain::ContextCmd;
+        let mut state = fresh_state();
+        state
+            .settings
+            .ollama_num_ctx_per_model
+            .insert("ollama/test".to_string(), 65_536);
+        let (state, cmds) = update(state, Msg::Slash(SlashCmd::Context(ContextCmd::Auto)));
+        assert!(
+            !state
+                .settings
+                .ollama_num_ctx_per_model
+                .contains_key("ollama/test")
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::PersistOllamaNumCtxFor { num_ctx: None, .. }))
+        );
+    }
+
+    #[test]
+    fn slash_context_offload_toggles_and_persists() {
+        use crate::domain::ContextCmd;
+        let state = fresh_state();
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Context(ContextCmd::Offload(true))),
+        );
+        assert!(state.settings.ollama.allow_ram_offload);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::PersistOllamaOffload(true)))
+        );
+    }
+
+    #[test]
+    fn build_chat_request_carries_per_model_num_ctx() {
+        let mut state = fresh_state();
+        state
+            .settings
+            .ollama_num_ctx_per_model
+            .insert("ollama/test".to_string(), 32_768);
+        let req = build_chat_request(&state);
+        assert_eq!(req.ollama_num_ctx, Some(32_768));
+    }
+
+    #[test]
+    fn build_chat_request_carries_live_offload_setting() {
+        // The provider's config is frozen at startup, so the live offload toggle
+        // must ride on the request to take effect on the next turn.
+        let mut state = fresh_state();
+        assert_eq!(
+            build_chat_request(&state).ollama_allow_ram_offload,
+            Some(false)
+        );
+        state.settings.ollama.allow_ram_offload = true;
+        assert_eq!(
+            build_chat_request(&state).ollama_allow_ram_offload,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn provider_context_resolved_stored_in_runtime() {
+        use crate::models::adapters::ollama_sizing::NumCtxSource;
+        let state = fresh_state();
+        let (state, _) = update(
+            state,
+            Msg::ProviderContextResolved {
+                model_max: Some(262_144),
+                effective: Some(12_288),
+                source: Some(NumCtxSource::Auto),
+            },
+        );
+        let ctx = state.runtime.ollama_context.expect("stored");
+        assert_eq!(ctx.model_max, Some(262_144));
+        assert_eq!(ctx.effective, Some(12_288));
+    }
+
+    #[test]
     fn slash_visible_reasoning_toggles_runtime_ui_state() {
         let state = fresh_state();
         let (state, _) = update(state, Msg::Slash(SlashCmd::VisibleReasoning(None)));
@@ -4466,6 +4775,29 @@ mod tests {
         let after = context_text(&state);
         assert!(after.contains("built-in tool schemas:"));
         assert!(!after.contains("measured on the first model call"));
+    }
+
+    #[test]
+    fn context_text_shows_ollama_window_detail_and_tip() {
+        use crate::domain::runtime::OllamaContextInfo;
+        use crate::models::adapters::ollama_sizing::NumCtxSource;
+        let mut state = fresh_state();
+        // No probe yet → no Ollama window lines.
+        assert!(!context_text(&state).contains("Active num_ctx"));
+
+        state.runtime.ollama_context = Some(OllamaContextInfo {
+            model_max: Some(262_144),
+            effective: Some(12_288),
+            source: Some(NumCtxSource::Auto),
+        });
+        let text = context_text(&state);
+        assert!(text.contains("Model max window"));
+        assert!(text.contains("Active num_ctx"));
+        assert!(text.contains("(auto"));
+        assert!(text.contains("Output budget (num_predict)"));
+        assert!(text.contains("RAM offload: off"));
+        // Auto-fit capped well below the model's max → point to the override.
+        assert!(text.contains("/context max"));
     }
 
     #[test]

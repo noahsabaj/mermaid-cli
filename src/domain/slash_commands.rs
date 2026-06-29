@@ -115,8 +115,8 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
     SlashCommand {
         name: "context",
         aliases: &[],
-        description: "Show current context-window estimate and prompt budget",
-        arg_hint: None,
+        description: "Show context window/budget; set Ollama num_ctx (Ollama auto-fits to VRAM)",
+        arg_hint: Some("[n|auto|max|offload on|off]"),
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {

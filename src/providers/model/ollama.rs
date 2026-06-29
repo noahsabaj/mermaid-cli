@@ -24,7 +24,7 @@ use crate::runtime::{NewProviderProbe, RuntimeStore};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::ModelProvider;
+use super::{ContextSizing, ModelProvider};
 
 /// Ollama adapter fronted by `ModelProvider`.
 pub struct OllamaProvider {
@@ -90,11 +90,20 @@ impl OllamaProvider {
         Some(info)
     }
 
-    /// Assemble the sizing inputs from the probe, host memory, and config. Built
-    /// here and in the effect layer from the same (cached) sources so the
-    /// effective window can't diverge between the request and compaction.
-    async fn num_ctx_inputs(&self, info: &OllamaModelInfo) -> NumCtxInputs {
-        let allow_ram_offload = self.config.ollama.allow_ram_offload;
+    /// Assemble the sizing inputs from the probe, host memory, config, and the
+    /// request's per-model override. Built here and in the effect layer from the
+    /// same (cached) sources so the effective window can't diverge between the
+    /// request and compaction.
+    async fn num_ctx_inputs(
+        &self,
+        info: &OllamaModelInfo,
+        override_num_ctx: Option<u32>,
+        override_offload: Option<bool>,
+    ) -> NumCtxInputs {
+        // Live `/context offload` toggle wins; otherwise the persisted default.
+        // The provider's `config` is frozen at startup (the factory never
+        // rebuilds), so the toggle rides on the request instead of `config`.
+        let allow_ram_offload = override_offload.unwrap_or(self.config.ollama.allow_ram_offload);
         // Only fetch the budget we'll actually use: VRAM when keeping the model
         // on the GPU (default), system RAM when offload is allowed.
         let (vram_bytes, system_ram_bytes) = if allow_ram_offload {
@@ -106,8 +115,7 @@ impl OllamaProvider {
             model_max: info.context_length,
             dims: info.dims,
             model_weight_bytes: info.weight_bytes,
-            // Phase 2 threads a per-model `/context` override here.
-            per_model_override: None,
+            per_model_override: override_num_ctx,
             global_num_ctx: self.config.ollama.num_ctx,
             allow_ram_offload,
             vram_bytes,
@@ -123,17 +131,36 @@ impl ModelProvider for OllamaProvider {
         &self.capabilities
     }
 
-    async fn resolve_context_window(&self) -> Option<usize> {
+    async fn resolve_context_window(&self, request: &ChatRequest) -> ContextSizing {
         let info = self.probe().await.unwrap_or_default();
-        let inputs = self.num_ctx_inputs(&info).await;
-        resolve_ollama_num_ctx(&inputs).map(|r| r.value)
+        let inputs = self
+            .num_ctx_inputs(
+                &info,
+                request.ollama_num_ctx,
+                request.ollama_allow_ram_offload,
+            )
+            .await;
+        let model_max = inputs.model_max;
+        match resolve_ollama_num_ctx(&inputs) {
+            Some(r) => ContextSizing {
+                model_max,
+                effective: Some(r.value),
+                source: Some(r.source),
+            },
+            // No model_max and nothing configured → omit num_ctx (Ollama default).
+            None => ContextSizing {
+                model_max,
+                effective: None,
+                source: None,
+            },
+        }
     }
 
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
         // Resolve the effective window first (cache-first probe). Idempotent with
         // the effect layer's call — both read the same cached probe + memory, so
         // what we send as num_ctx matches what compaction assumes.
-        let effective = self.resolve_context_window().await;
+        let effective = self.resolve_context_window(&request).await.effective;
         let config = build_model_config(&request, &self.config, effective);
         // Ordered relay (F2): the adapter's sync callback pushes into an
         // `UnboundedSender` (synchronous, FIFO). A single relay task drains
@@ -357,6 +384,9 @@ mod tests {
             temperature: 0.3,
             max_tokens: 2048,
             tools: vec![],
+
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         let app_cfg = crate::app::Config::default();
         let cfg = build_model_config(&req, &app_cfg, None);
@@ -387,6 +417,9 @@ mod tests {
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
+
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         let mut app_cfg = crate::app::Config::default();
         app_cfg.ollama.num_gpu = Some(10);
@@ -416,6 +449,9 @@ mod tests {
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
+
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         let cfg = build_model_config(&req, &crate::app::Config::default(), Some(131_072));
         // 4096 + 8192 (Max reserve), plenty of room in a 131072 window.

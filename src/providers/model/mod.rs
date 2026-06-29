@@ -17,10 +17,25 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::domain::{ChatRequest, TurnId};
+use crate::models::adapters::ollama_sizing::NumCtxSource;
 use crate::models::{ModelError, Result, TokenUsage};
 
 use super::capabilities::Capabilities;
 use super::ctx::{FinalResponse, StreamContext, StreamEvent};
+
+/// Resolved context sizing for a turn. For most providers `model_max ==
+/// effective` (the static advertised window). For Ollama they differ:
+/// `model_max` is the probed architectural window, while `effective` is what we
+/// actually enforce as `num_ctx` (auto-fitted to memory, capped, or an
+/// override). Compaction and the status bar use `effective`; "model supports up
+/// to X" uses `model_max`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ContextSizing {
+    pub model_max: Option<usize>,
+    pub effective: Option<usize>,
+    /// How `effective` was chosen (Ollama only). `None` for static/advertised.
+    pub source: Option<NumCtxSource>,
+}
 
 /// Provider-facing interface. A `ModelProvider` impl owns whatever
 /// HTTP client / state it needs and exposes `chat()` — that's the
@@ -35,12 +50,19 @@ pub trait ModelProvider: Send + Sync {
     /// Resolve the *effective* context window for a turn (what the model will
     /// actually enforce). The default returns the static advertised window;
     /// Ollama overrides this to probe the model's real window and auto-fit
-    /// `num_ctx` to host memory. `None` means "let the backend decide".
+    /// `num_ctx` to host memory, honoring the request's per-model
+    /// `ollama_num_ctx` override. `None` means "let the backend decide".
     ///
     /// Awaited only on the effect runtime (never the reducer), so a probe never
     /// blocks the UI.
-    async fn resolve_context_window(&self) -> Option<usize> {
-        self.capabilities().max_context_tokens
+    async fn resolve_context_window(&self, request: &ChatRequest) -> ContextSizing {
+        let _ = request;
+        let max = self.capabilities().max_context_tokens;
+        ContextSizing {
+            model_max: max,
+            effective: max,
+            source: None,
+        }
     }
 
     /// Stream a chat turn. Typed events flow through

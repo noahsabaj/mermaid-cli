@@ -633,6 +633,16 @@ impl EffectRunner {
                     let _ = crate::app::persist_reasoning_for_model(&model_id, level);
                 });
             },
+            Cmd::PersistOllamaNumCtxFor { model_id, num_ctx } => {
+                self.detached.spawn(async move {
+                    let _ = crate::app::persist_ollama_num_ctx_for_model(&model_id, num_ctx);
+                });
+            },
+            Cmd::PersistOllamaOffload(enabled) => {
+                self.detached.spawn(async move {
+                    let _ = crate::app::persist_ollama_allow_ram_offload(enabled);
+                });
+            },
             Cmd::RefreshInstructions => {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
@@ -1262,9 +1272,20 @@ async fn dispatch_call_model(
     // thread); for other providers it's the static advertised window. Using the
     // effective value here is what un-skips auto-compaction for Ollama (which had
     // `NoKnownContextLimit`) and gives the status bar real numbers.
-    let max_context_tokens = provider.resolve_context_window().await.or_else(|| {
+    let sizing = provider.resolve_context_window(&request).await;
+    let max_context_tokens = sizing.effective.or_else(|| {
         crate::domain::runtime::infer_static_context_window_for_model_id(&request.model_id)
     });
+    // Report the resolved window to the reducer for the `/context` display +
+    // truncation quick-fix. Harmless for non-Ollama (source is None → no extra
+    // detail shown).
+    let _ = msg_tx
+        .send(Msg::ProviderContextResolved {
+            model_max: sizing.model_max,
+            effective: sizing.effective,
+            source: sizing.source,
+        })
+        .await;
     let context_snapshot =
         crate::domain::estimate_context_usage_for_request(&request, max_context_tokens);
     let _ = msg_tx
@@ -1621,6 +1642,8 @@ async fn consolidate_memory(
         temperature: 0.0,
         max_tokens: 1024,
         tools: Vec::new(),
+        ollama_num_ctx: None,
+        ollama_allow_ram_offload: None,
     };
 
     let provider = match factory.resolve(&model_id).await {
@@ -2606,6 +2629,9 @@ mod tests {
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
+
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2627,6 +2653,9 @@ mod tests {
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
+
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2701,6 +2730,9 @@ mod tests {
                 temperature: 0.7,
                 max_tokens: 4096,
                 tools: vec![],
+
+                ollama_num_ctx: None,
+                ollama_allow_ram_offload: None,
             },
         });
         assert_eq!(r.scope_count(), 1);
