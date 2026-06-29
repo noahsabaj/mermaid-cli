@@ -101,6 +101,16 @@ pub enum Msg {
         effective: Option<usize>,
         source: Option<crate::models::adapters::ollama_sizing::NumCtxSource>,
     },
+    /// Effect runner verified the loaded model's memory placement after a turn
+    /// (Ollama `/api/ps`). `size_vram_bytes < total_bytes` ⇒ the model spilled
+    /// to CPU/RAM (slow). Model-level metadata (not turn-scoped); `model_id` is
+    /// carried so a probe that lands after a `/model` switch can be dropped.
+    /// Drives the offload warning + `/context` placement line.
+    OllamaPlacementResolved {
+        model_id: String,
+        size_vram_bytes: u64,
+        total_bytes: u64,
+    },
     /// The effect runner's estimate of the built-in tool-schema token cost
     /// it appends to every request during dispatch. Not turn-scoped — the
     /// reducer stores it on `runtime` so `/context` can fold it into its
@@ -479,6 +489,7 @@ impl Msg {
             Msg::StreamToolCall { .. } => MsgKind::StreamToolCall,
             Msg::ContextUsageEstimated { .. } => MsgKind::ContextUsageEstimated,
             Msg::ProviderContextResolved { .. } => MsgKind::ProviderContextResolved,
+            Msg::OllamaPlacementResolved { .. } => MsgKind::OllamaPlacementResolved,
             Msg::BuiltinToolSchemaTokens(_) => MsgKind::BuiltinToolSchemaTokens,
             Msg::CompactionFinished { .. } => MsgKind::CompactionFinished,
             Msg::CompactionFailed { .. } => MsgKind::CompactionFailed,
@@ -533,6 +544,7 @@ pub enum MsgKind {
     StreamToolCall,
     ContextUsageEstimated,
     ProviderContextResolved,
+    OllamaPlacementResolved,
     BuiltinToolSchemaTokens,
     CompactionFinished,
     CompactionFailed,

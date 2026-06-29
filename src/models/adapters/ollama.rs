@@ -217,6 +217,32 @@ impl OllamaAdapter {
             .and_then(|m| m.size)
     }
 
+    /// This model's current memory placement from `/api/ps` as
+    /// `(size_vram, total)` bytes, or `None` if it isn't loaded / Ollama is
+    /// unreachable / either figure is missing. `size_vram < total` means the
+    /// model is split between GPU and CPU/RAM (partial offload → slow). Probed
+    /// after a turn, once the model is resident.
+    pub async fn model_placement(&self) -> Option<(u64, u64)> {
+        let url = format!("{}/api/ps", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(
+                crate::constants::OLLAMA_PROBE_TIMEOUT_SECS,
+            ))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let ps: OllamaPsResponse = resp.json().await.ok()?;
+        ps.models
+            .into_iter()
+            .find(|m| m.name == self.model_name)
+            .and_then(|m| Some((m.size_vram?, m.size?)))
+    }
+
     /// Handle a streaming response, emitting typed `StreamEvent`s through
     /// the optional callback. The legacy text-callback shape is provided
     /// by the `chat()` shim below, which translates these typed events
@@ -700,6 +726,25 @@ struct OllamaShowResponse {
     model_info: serde_json::Value,
 }
 
+/// `/api/ps` response — currently-loaded models and their memory placement.
+/// Extra fields (`digest`, `expires_at`, `details`, …) are ignored.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct OllamaPsResponse {
+    #[serde(default)]
+    pub(crate) models: Vec<OllamaPsModel>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct OllamaPsModel {
+    pub(crate) name: String,
+    /// Total bytes the loaded model occupies (weights + KV + buffers).
+    #[serde(default)]
+    pub(crate) size: Option<u64>,
+    /// Of that, the bytes resident in VRAM. Less than `size` ⇒ partial offload.
+    #[serde(default)]
+    pub(crate) size_vram: Option<u64>,
+}
+
 /// Capabilities probed from `/api/show` (+ `/api/tags` for the weight size),
 /// used to auto-size `num_ctx`. All fields are best-effort and independently
 /// optional. Serialized into the `provider_probes` cache so subsequent sessions
@@ -842,6 +887,34 @@ mod tests {
         push_capped(&mut buf, "tail", &mut truncated, cap);
         assert_eq!(buf.len(), len_after_first);
         assert_eq!(buf.matches(TRUNCATION_MARKER).count(), 1);
+    }
+
+    // --- /api/ps placement parsing (mirrors model_placement's selection) ---
+
+    #[test]
+    fn ps_response_selects_model_and_handles_missing_fields() {
+        // Realistic body: a partially-offloaded model, the target fully on GPU,
+        // one entry missing size_vram, plus extra fields we must ignore.
+        let body = serde_json::json!({
+            "models": [
+                { "name": "other:7b", "size": 8_000_000_000u64, "size_vram": 4_000_000_000u64,
+                  "digest": "abc", "expires_at": "2026-01-01T00:00:00Z" },
+                { "name": "ornith:9b", "size": 6_000_000_000u64, "size_vram": 6_000_000_000u64 },
+                { "name": "nogpu:1b", "size": 1_000_000_000u64 },
+            ]
+        });
+        let ps: super::OllamaPsResponse = serde_json::from_value(body).unwrap();
+        // Same selection model_placement does: find by name, require both bytes.
+        let pick = |name: &str| {
+            ps.models
+                .iter()
+                .find(|m| m.name == name)
+                .and_then(|m| Some((m.size_vram?, m.size?)))
+        };
+        assert_eq!(pick("ornith:9b"), Some((6_000_000_000, 6_000_000_000)));
+        assert_eq!(pick("other:7b"), Some((4_000_000_000, 8_000_000_000)));
+        assert_eq!(pick("nogpu:1b"), None); // missing size_vram → None
+        assert_eq!(pick("absent:1b"), None); // not loaded → None
     }
 
     #[test]

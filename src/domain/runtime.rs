@@ -252,6 +252,33 @@ pub struct OllamaContextInfo {
     pub source: Option<crate::models::adapters::ollama_sizing::NumCtxSource>,
 }
 
+/// Post-turn memory placement of the loaded Ollama model, from `/api/ps`.
+/// `total_bytes` is weights + KV + buffers; `size_vram_bytes` is the part
+/// resident in VRAM. Volatile (changes when the model reloads), so it lives
+/// outside the quasi-static [`OllamaContextInfo`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OllamaPlacement {
+    pub size_vram_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl OllamaPlacement {
+    /// True when the model didn't fully fit VRAM and spilled to CPU/RAM (slow).
+    pub fn offloaded(&self) -> bool {
+        self.size_vram_bytes < self.total_bytes
+    }
+
+    /// Rough percentage of the model running on CPU/RAM (0–100). Integer math;
+    /// `0` when the footprint is unknown or fully resident.
+    pub fn percent_on_cpu(&self) -> u8 {
+        if self.total_bytes == 0 {
+            return 0;
+        }
+        let on_cpu = self.total_bytes.saturating_sub(self.size_vram_bytes);
+        (on_cpu.saturating_mul(100) / self.total_bytes) as u8
+    }
+}
+
 /// Runtime state that is not part of the chat transcript sent to a
 /// model, but is useful for UI, slash commands, and debugging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,10 +299,18 @@ pub struct RuntimeState {
     /// first turn probes it, or for non-Ollama providers).
     #[serde(default)]
     pub ollama_context: Option<OllamaContextInfo>,
+    /// Post-turn `/api/ps` memory placement for the active model (`None` until a
+    /// turn probes it). Volatile, so it's tracked separately from the window.
+    #[serde(default)]
+    pub ollama_placement: Option<OllamaPlacement>,
     /// Models we've already shown the proactive auto-fit hint for this session.
     /// Session-only (not persisted) so the gentle reminder reappears each launch.
     #[serde(skip)]
     pub hinted_models: HashSet<String>,
+    /// Models we've already warned about VRAM offload this session. Session-only,
+    /// so the once-per-session warning behaves like the auto-fit hint.
+    #[serde(skip)]
+    pub offload_warned: HashSet<String>,
 }
 
 impl RuntimeState {
@@ -286,14 +321,18 @@ impl RuntimeState {
             timeline: Vec::new(),
             builtin_tool_schema_tokens: 0,
             ollama_context: None,
+            ollama_placement: None,
             hinted_models: HashSet::new(),
+            offload_warned: HashSet::new(),
         }
     }
 
     pub fn set_model(&mut self, model_id: &str) {
         self.provider_capabilities = ProviderCapabilitySnapshot::from_model_id(model_id);
-        // New model → the resolved window no longer applies; re-probed next turn.
+        // New model → the resolved window + placement no longer apply; re-probed
+        // next turn.
         self.ollama_context = None;
+        self.ollama_placement = None;
         self.timeline.push(RuntimeTimelineEvent {
             kind: RuntimeTimelineKind::Provider,
             message: format!("model set to {}", model_id),

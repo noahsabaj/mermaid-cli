@@ -24,7 +24,7 @@ use crate::runtime::{NewProviderProbe, RuntimeStore};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::{ContextSizing, ModelProvider};
+use super::{ContextSizing, ModelPlacement, ModelProvider};
 
 /// Ollama adapter fronted by `ModelProvider`.
 pub struct OllamaProvider {
@@ -154,6 +154,16 @@ impl ModelProvider for OllamaProvider {
                 source: None,
             },
         }
+    }
+
+    async fn verify_placement(&self) -> Option<ModelPlacement> {
+        let (vram, total) = self.adapter.model_placement().await?;
+        // A zero total means Ollama reported the model but not its footprint —
+        // can't judge placement, so leave it unknown rather than guess.
+        (total > 0).then_some(ModelPlacement {
+            size_vram_bytes: vram,
+            total_bytes: total,
+        })
     }
 
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {

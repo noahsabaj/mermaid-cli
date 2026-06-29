@@ -169,6 +169,16 @@ pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
             "effective": effective,
             "source": source.map(|s| s.label()),
         }),
+        Msg::OllamaPlacementResolved {
+            model_id,
+            size_vram_bytes,
+            total_bytes,
+        } => serde_json::json!({
+            "model_id": model_id,
+            "size_vram_bytes": size_vram_bytes,
+            "total_bytes": total_bytes,
+            "offloaded": size_vram_bytes < total_bytes,
+        }),
         Msg::CompactionFinished { result, .. } => serde_json::json!({
             "id": result.record.id,
             "trigger": result.record.trigger.as_str(),

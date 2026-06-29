@@ -37,6 +37,16 @@ pub struct ContextSizing {
     pub source: Option<NumCtxSource>,
 }
 
+/// Where a loaded model actually sits in memory, from a post-turn probe (Ollama
+/// `/api/ps`). `total_bytes` is weights + KV + buffers; `size_vram_bytes` is the
+/// part resident in VRAM. `size_vram_bytes < total_bytes` means the model spilled
+/// to CPU/RAM (partial offload → slow). Only Ollama reports this.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelPlacement {
+    pub size_vram_bytes: u64,
+    pub total_bytes: u64,
+}
+
 /// Provider-facing interface. A `ModelProvider` impl owns whatever
 /// HTTP client / state it needs and exposes `chat()` — that's the
 /// whole surface.
@@ -63,6 +73,14 @@ pub trait ModelProvider: Send + Sync {
             effective: max,
             source: None,
         }
+    }
+
+    /// Best-effort: where the loaded model currently sits in memory. The default
+    /// returns `None` (unknown / not applicable); Ollama overrides it to probe
+    /// `/api/ps`. Awaited only on the effect runtime, *after* a turn (when the
+    /// model is resident), so it never blocks the UI.
+    async fn verify_placement(&self) -> Option<ModelPlacement> {
+        None
     }
 
     /// Stream a chat turn. Typed events flow through
