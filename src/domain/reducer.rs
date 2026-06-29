@@ -2591,6 +2591,15 @@ fn handle_compaction_failed(
     }
 
     let prefix = match trigger {
+        // A benign no-op (`Info`) — e.g. too little history to summarize — is not a
+        // failure. The user ran `/compact` explicitly, so say plainly there's
+        // nothing to do rather than printing "Compaction failed: Invalid request".
+        CompactionTrigger::Manual if matches!(kind, StatusKind::Info) => {
+            state.session.append(ChatMessage::system(format!(
+                "Nothing to compact — {message}."
+            )));
+            return;
+        },
         CompactionTrigger::Manual => "Compaction failed",
         // Auto-compaction is best-effort preflight: when it can't run (e.g. too
         // little history to compact) Mermaid just proceeds with the un-compacted
@@ -2607,7 +2616,6 @@ fn handle_compaction_failed(
             return;
         },
     };
-    let _ = kind;
     state
         .session
         .append(ChatMessage::system(format!("{}: {}", prefix, message)));
@@ -4307,6 +4315,71 @@ mod tests {
                 .iter()
                 .any(|m| m.content.contains("Response truncated")),
             "a failed recovery falls back to the manual-levers hint, not a raw error"
+        );
+    }
+
+    #[test]
+    fn manual_compaction_skip_shows_calm_note_not_failure() {
+        // A manual /compact with nothing to compact (Info kind) is a benign no-op,
+        // not a failure: show a calm note, never "Compaction failed: Invalid request".
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("x"));
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::Manual,
+        };
+        let (state, _) = update(
+            state,
+            Msg::CompactionFailed {
+                turn: TurnId(7),
+                trigger: CompactionTrigger::Manual,
+                message: "not enough conversation history to summarize".to_string(),
+                kind: StatusKind::Info,
+            },
+        );
+        assert!(matches!(state.turn, TurnState::Idle));
+        let msgs = state.session.messages();
+        assert!(
+            msgs.iter()
+                .any(|m| m.content.contains("Nothing to compact")),
+            "benign skip should show a calm note"
+        );
+        assert!(
+            !msgs.iter().any(|m| m.content.contains("Compaction failed")
+                || m.content.contains("Invalid request")),
+            "benign skip must not read as a failure"
+        );
+    }
+
+    #[test]
+    fn manual_compaction_real_failure_still_says_failed() {
+        // Regression guard: a genuine manual-compaction error (Error kind) still
+        // surfaces as "Compaction failed: …".
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("x"));
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::Manual,
+        };
+        let (state, _) = update(
+            state,
+            Msg::CompactionFailed {
+                turn: TurnId(7),
+                trigger: CompactionTrigger::Manual,
+                message: "compaction produced an empty summary".to_string(),
+                kind: StatusKind::Error,
+            },
+        );
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Compaction failed")),
+            "a real failure should still say so"
         );
     }
 

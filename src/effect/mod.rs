@@ -1299,46 +1299,51 @@ async fn dispatch_call_model(
     let mut compacted_before_stream = false;
     if crate::domain::should_auto_compact(&context_snapshot, &request, policy).is_ok() {
         let compaction = CompactionRequest::auto(request.clone(), CompactionTrigger::AutoThreshold);
-        match run_compaction(
-            Arc::clone(&provider),
-            turn,
-            compaction,
-            context_snapshot.clone(),
-            max_context_tokens,
-            token.clone(),
-        )
-        .await
-        {
-            Ok(result) => {
-                request.messages = result.replacement_messages.clone();
-                compacted_before_stream = true;
-                let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
-            },
-            Err(err) => {
-                // Auto-compaction is best-effort. If it can't reduce the
-                // context — the estimate is roughest exactly at the limit, so
-                // a large preserved tail can read `after >= before` — don't
-                // kill the turn. Log it, surface a soft warning, and proceed
-                // with the original request; the provider's own context limit
-                // is the real gate. (Manual `/compact` keeps its hard error
-                // via `run_compaction`'s reduction guard.)
-                if token.is_cancelled() {
-                    return;
-                }
-                tracing::warn!(
-                    turn = %turn,
-                    error = %err,
-                    "auto-compaction failed; proceeding with the un-compacted request",
-                );
-                let _ = msg_tx
-                    .send(Msg::CompactionFailed {
-                        turn,
-                        trigger: CompactionTrigger::AutoThreshold,
-                        message: err.to_string(),
-                        kind: crate::domain::StatusKind::Warn,
-                    })
-                    .await;
-            },
+        // Best-effort preflight: if there's nothing to compact, proceed
+        // un-compacted (the provider's own context limit is the real gate).
+        if let Ok(prepared) = crate::domain::prepare_compaction(&compaction, max_context_tokens) {
+            match run_compaction(
+                Arc::clone(&provider),
+                turn,
+                compaction,
+                prepared,
+                context_snapshot.clone(),
+                max_context_tokens,
+                token.clone(),
+            )
+            .await
+            {
+                Ok(result) => {
+                    request.messages = result.replacement_messages.clone();
+                    compacted_before_stream = true;
+                    let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
+                },
+                Err(err) => {
+                    // Auto-compaction is best-effort. If it can't reduce the
+                    // context — the estimate is roughest exactly at the limit, so
+                    // a large preserved tail can read `after >= before` — don't
+                    // kill the turn. Log it, surface a soft warning, and proceed
+                    // with the original request; the provider's own context limit
+                    // is the real gate. (Manual `/compact` keeps its hard error
+                    // via `run_compaction`'s reduction guard.)
+                    if token.is_cancelled() {
+                        return;
+                    }
+                    tracing::warn!(
+                        turn = %turn,
+                        error = %err,
+                        "auto-compaction failed; proceeding with the un-compacted request",
+                    );
+                    let _ = msg_tx
+                        .send(Msg::CompactionFailed {
+                            turn,
+                            trigger: CompactionTrigger::AutoThreshold,
+                            message: err.to_string(),
+                            kind: crate::domain::StatusKind::Warn,
+                        })
+                        .await;
+                },
+            }
         }
     }
 
@@ -1411,35 +1416,42 @@ async fn dispatch_call_model(
                     crate::domain::estimate_context_usage_for_request(&request, max_context_tokens);
                 let compaction =
                     CompactionRequest::auto(request.clone(), CompactionTrigger::ContextLimitRetry);
-                match run_compaction(
-                    Arc::clone(&provider),
-                    turn,
-                    compaction,
-                    latest_snapshot,
-                    max_context_tokens,
-                    token.clone(),
-                )
-                .await
+                // Only retry if there's something to compact; otherwise fall
+                // through to surface the original context-limit error.
+                if let Ok(prepared) =
+                    crate::domain::prepare_compaction(&compaction, max_context_tokens)
                 {
-                    Ok(result) => {
-                        let mut retry_request = request;
-                        retry_request.messages = result.replacement_messages.clone();
-                        let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
-                        join_logged(relay, "stream_relay").await;
-                        dispatch_provider_stream(msg_tx, provider, turn, retry_request, token)
-                            .await;
-                        return;
-                    },
-                    Err(compact_err) => {
-                        let _ = msg_tx
-                            .send(Msg::CompactionFailed {
-                                turn,
-                                trigger: CompactionTrigger::ContextLimitRetry,
-                                message: compact_err.to_string(),
-                                kind: crate::domain::StatusKind::Error,
-                            })
-                            .await;
-                    },
+                    match run_compaction(
+                        Arc::clone(&provider),
+                        turn,
+                        compaction,
+                        prepared,
+                        latest_snapshot,
+                        max_context_tokens,
+                        token.clone(),
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            let mut retry_request = request;
+                            retry_request.messages = result.replacement_messages.clone();
+                            let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
+                            join_logged(relay, "stream_relay").await;
+                            dispatch_provider_stream(msg_tx, provider, turn, retry_request, token)
+                                .await;
+                            return;
+                        },
+                        Err(compact_err) => {
+                            let _ = msg_tx
+                                .send(Msg::CompactionFailed {
+                                    turn,
+                                    trigger: CompactionTrigger::ContextLimitRetry,
+                                    message: compact_err.to_string(),
+                                    kind: crate::domain::StatusKind::Error,
+                                })
+                                .await;
+                        },
+                    }
                 }
             }
             let error = classify_error_for_ui(&e);
@@ -1806,10 +1818,29 @@ async fn dispatch_compact_conversation(
         crate::domain::estimate_context_usage_for_request(&request.chat, max_context_tokens);
 
     let trigger = request.trigger;
+    // A benign precondition (e.g. too little history to summarize) is a no-op, not
+    // a failure — surface it as `Info` so the reducer shows a calm note instead of
+    // a "Compaction failed: Invalid request" error. Real failures (model errors,
+    // an empty/non-reducing summary) still flow through `run_compaction` as errors.
+    let prepared = match crate::domain::prepare_compaction(&request, max_context_tokens) {
+        Ok(prepared) => prepared,
+        Err(skip) => {
+            let _ = msg_tx
+                .send(Msg::CompactionFailed {
+                    turn,
+                    trigger,
+                    message: skip.to_string(),
+                    kind: crate::domain::StatusKind::Info,
+                })
+                .await;
+            return;
+        },
+    };
     match run_compaction(
         provider,
         turn,
         request,
+        prepared,
         before_snapshot,
         max_context_tokens,
         token,
@@ -1836,13 +1867,12 @@ async fn run_compaction(
     provider: Arc<dyn ModelProvider>,
     turn: TurnId,
     request: CompactionRequest,
+    prepared: crate::domain::PreparedCompaction,
     before_snapshot: crate::domain::ContextUsageSnapshot,
     max_context_tokens: Option<usize>,
     token: tokio_util::sync::CancellationToken,
 ) -> Result<CompactionResult, ModelError> {
     let started = Instant::now();
-    let prepared = crate::domain::prepare_compaction(&request, max_context_tokens)
-        .map_err(|skip| ModelError::InvalidRequest(skip.to_string()))?;
 
     let summary_request = crate::domain::build_summary_request(
         &request.chat,
