@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The chat transcript scrollbar. The transcript now spans the full pane width
+  (the reserved right-hand gutter column is reclaimed); scrolling is unchanged.
+
 ### Fixed
 
 - **Cloud (`:cloud`) Ollama models now use their full context window.** They run on

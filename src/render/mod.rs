@@ -640,22 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn scrollbar_shows_when_chat_overflows() {
-        let mut s = mock_state();
-        for i in 0..60 {
-            s.session
-                .append(crate::models::ChatMessage::assistant(format!("msg {i}")));
-        }
-        let frame = render_to_string(&s);
-        // ratatui's Scrollbar renders a "█" thumb in the reserved gutter once
-        // the transcript is taller than the viewport.
-        assert!(
-            frame.contains('█'),
-            "a scrollbar thumb should render when the transcript overflows the viewport"
-        );
-    }
-
-    #[test]
     fn committed_message_appears_in_chat_pane() {
         let mut s = mock_state();
         s.session

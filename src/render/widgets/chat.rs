@@ -5,9 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget,
-    },
+    widgets::{Block, Paragraph, StatefulWidget, Widget},
 };
 use rustc_hash::FxHashMap;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -391,14 +389,9 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             h.finish()
         };
 
-        // Reserve the rightmost column as a scrollbar gutter so the bar never
-        // paints over text. All content wrapping/rendering uses `content_area`.
-        let gutter: u16 = if area.width > 4 { 1 } else { 0 };
-        let content_width = area.width.saturating_sub(gutter);
-        let content_area = Rect {
-            width: content_width,
-            ..area
-        };
+        // Content spans the full width — there is no scrollbar gutter.
+        let content_width = area.width;
+        let content_area = area;
 
         // Clear click map for this render pass
         state.image_click_map.clear();
@@ -613,7 +606,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                         ];
 
                         // Always add at least min_gap spaces, plus any extra from word-boundary slack.
-                        // Align the timestamp to the content right edge (before the scrollbar gutter).
+                        // Align the timestamp to the content's right edge.
                         let pad = user_timestamp_padding(
                             role_prefix_width,
                             text_width,
@@ -715,20 +708,6 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             .scroll((scroll_pos, 0));
 
         paragraph.render(content_area, buf);
-
-        // Scrollbar in the reserved gutter — only when the transcript actually
-        // overflows the viewport. Uses ratatui's 0.30 Scrollbar widget.
-        if gutter == 1 && content_height > viewport_height {
-            let mut sb_state = ScrollbarState::new(content_height as usize)
-                .viewport_content_length(viewport_height as usize)
-                .position(scroll_pos as usize);
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .thumb_style(Style::new().fg(self.theme.colors.border.to_color()))
-                .track_style(Style::new().fg(self.theme.colors.text_disabled.to_color()))
-                .render(area, buf, &mut sb_state);
-        }
     }
 }
 
