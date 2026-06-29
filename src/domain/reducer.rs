@@ -245,12 +245,21 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                         .ollama_converged_num_ctx
                         .get(&model_id)
                         .copied();
-                    // Auto-converge: adopt a new, smaller window that the probe
-                    // says fits (used next turn, re-measured until it stops
-                    // spilling). `None` ⇒ shrinking can't help (weights-bound).
+                    // Never shrink below what the conversation already needs: a
+                    // window smaller than the prompt wedges the session (every
+                    // turn truncates). If the fitting window can't hold the
+                    // conversation, keep the larger one and warn instead.
+                    let convo_tokens = crate::domain::compaction::estimate_messages_tokens(
+                        state.session.messages(),
+                    );
+                    // Auto-converge: adopt a new, smaller window the probe says
+                    // fits VRAM — only in auto mode, only if it changed, and only
+                    // if it still holds the conversation. `None` ⇒ shrinking can't
+                    // help (weights-bound), so the model just doesn't fit.
                     let converge_to = suggested_num_ctx
                         .filter(|_| !user_pinned)
-                        .filter(|t| already != Some(*t));
+                        .filter(|t| already != Some(*t))
+                        .filter(|t| *t as usize >= convo_tokens);
 
                     if let Some(target) = converge_to {
                         state
@@ -262,24 +271,29 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                             &mut state,
                             &mut cmds,
                             format!(
-                                "Tightened {model}'s context to {} to fit more on your GPU.",
+                                "Reduced {model}'s context to {} so it fits your GPU.",
                                 format_compact_count(target as usize)
                             ),
                         );
                     } else if state.runtime.offload_warned.insert(model_id) {
-                        // Can't shrink to fit (weights too big) or the user pinned
-                        // the window — warn once with both levers (no causation
-                        // claim; external VRAM pressure can cause this too).
+                        // Warn once. Tailor the advice: a user-pinned window can be
+                        // lowered to help; an auto window that couldn't shrink to
+                        // fit means the model is simply larger than the free VRAM,
+                        // so shrinking won't help — point elsewhere.
                         let pct = placement.percent_on_cpu();
                         let model = state.session.model_id.clone();
-                        push_system(
-                            &mut state,
-                            &mut cmds,
+                        let msg = if user_pinned {
                             format!(
-                                "⚠ ~{pct}% of {model} is running on CPU/RAM, which is much slower. \
-                                 Shrink the window with `/context <n>`, or accept RAM with `/context offload on`.",
-                            ),
-                        );
+                                "~{pct}% of {model} is running on CPU/RAM, which is much slower. \
+                                 Lower the window with `/context <n>`, or accept RAM with `/context offload on`.",
+                            )
+                        } else {
+                            format!(
+                                "~{pct}% of {model} is running on CPU/RAM, which is much slower — \
+                                 it's larger than your free VRAM. Try a smaller model, or accept RAM with `/context offload on`.",
+                            )
+                        };
+                        push_system(&mut state, &mut cmds, msg);
                     }
                 }
             }
@@ -2629,8 +2643,8 @@ fn handle_stream_done(
     if tool_calls.is_empty() {
         match stop_reason {
             Some(crate::models::FinishReason::Length) => {
-                let mut msg = "⚠ Response truncated — reached the model's max output-token limit."
-                    .to_string();
+                let mut msg =
+                    "Response truncated — reached the model's max output-token limit.".to_string();
                 // Ollama quick-fix: if auto-fit capped the window below the
                 // model's max, tell the user exactly how to raise it.
                 if let Some(ctx) = state.runtime.ollama_context.as_ref()
@@ -2651,7 +2665,7 @@ fn handle_stream_done(
             Some(crate::models::FinishReason::ContentFilter) => push_system(
                 state,
                 cmds,
-                "⚠ Response was flagged by the provider's content filter.",
+                "Response was flagged by the provider's content filter.",
             ),
             _ => {},
         }
@@ -4305,7 +4319,7 @@ mod tests {
                 .session
                 .messages()
                 .iter()
-                .any(|m| m.content.contains("Tightened"))
+                .any(|m| m.content.contains("Reduced") && m.content.contains("fits your GPU"))
         );
         assert_eq!(build_chat_request(&state).ollama_num_ctx, Some(8_192));
     }
@@ -4331,6 +4345,29 @@ mod tests {
         assert_eq!(cpu_warn_count(&state), 1);
         // Their pinned value still wins.
         assert_eq!(build_chat_request(&state).ollama_num_ctx, Some(32_768));
+    }
+
+    #[test]
+    fn ollama_placement_never_converges_below_conversation_size() {
+        // A fitting window smaller than the live conversation would wedge the
+        // session (every turn truncates) — keep the larger window and warn.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("word ".repeat(8_000))); // ≫ 4096 tokens
+        let (state, _) = update(
+            state,
+            converge_msg("ollama/test", 6_000_000_000, 8_000_000_000, 4_096),
+        );
+        assert!(
+            !state
+                .runtime
+                .ollama_converged_num_ctx
+                .contains_key("ollama/test"),
+            "must not shrink below the conversation"
+        );
+        assert_eq!(cpu_warn_count(&state), 1);
+        assert_eq!(build_chat_request(&state).ollama_num_ctx, None); // window stays auto-fit
     }
 
     #[test]

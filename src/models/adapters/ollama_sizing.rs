@@ -118,11 +118,16 @@ pub fn max_tokens_for_memory(
 /// overflow (rounded down to a clean step, floored at the usable minimum).
 ///
 /// Works from the *observed* footprint, so it implicitly accounts for compute
-/// buffers and Ollama's own headroom rather than re-estimating them. `None` when
-/// shrinking can't help — the overflow is weights (not KV) so the target stays at
-/// or above `current`, or we're already at the floor — and the caller warns
-/// instead. Always returns a value strictly `< current`, so feeding it back each
-/// turn walks the window down monotonically and terminates at the floor.
+/// buffers and Ollama's own headroom rather than re-estimating them.
+///
+/// Returns `None` when shrinking can't actually make the model fit — crucially,
+/// when even cutting all the way to the floor wouldn't clear the overflow. That
+/// means the spill is the *weights*, not the KV cache, so shrinking the window
+/// would cripple it without fixing anything; the caller must warn instead of
+/// flooring uselessly (a tiny window wedges the session — every turn truncates).
+/// When it does return a value it is strictly `< current` *and* genuinely clears
+/// the overflow, so feeding it back each turn converges to the largest
+/// fully-resident window.
 pub fn converge_num_ctx(
     current: usize,
     size_vram_bytes: u64,
@@ -135,13 +140,14 @@ pub fn converge_num_ctx(
     let overflow = total_bytes - size_vram_bytes;
     // Round the division up so we cut at least the overflow, never one short.
     let tokens_to_cut = overflow.div_ceil(kv_bytes_per_token as u64) as usize;
-    let target = round_down_to(
-        current.saturating_sub(tokens_to_cut),
-        OLLAMA_NUM_CTX_ROUNDING,
-    )
-    .max(OLLAMA_MIN_AUTO_NUM_CTX);
-    // Only useful if it actually shrinks the window; otherwise we're weights-bound
-    // or already at the floor and the caller should warn.
+    let after_cut = current.saturating_sub(tokens_to_cut);
+    // If clearing the overflow would require dropping below the floor, the model
+    // is weights-bound: no window size makes it fit, so don't shrink at all.
+    // Flooring would neither stop the spill nor leave a usable window.
+    if after_cut < OLLAMA_MIN_AUTO_NUM_CTX {
+        return None;
+    }
+    let target = round_down_to(after_cut, OLLAMA_NUM_CTX_ROUNDING).max(OLLAMA_MIN_AUTO_NUM_CTX);
     (target < current).then_some(target)
 }
 
@@ -343,10 +349,30 @@ mod tests {
     }
 
     #[test]
-    fn converge_floors_when_overflow_is_weights_bound() {
-        // Overflow worth more tokens than the whole window → can't clear via KV.
+    fn converge_none_when_overflow_is_weights_bound() {
+        // Overflow worth more tokens than the window has above the floor → even
+        // flooring wouldn't clear it (the spill is weights, not KV). Must NOT
+        // shrink (that would wedge the session); the caller warns instead.
         let new = converge_num_ctx(8_000, 1_000_000_000, 9_000_000_000, 1_000_000);
-        assert_eq!(new, Some(OLLAMA_MIN_AUTO_NUM_CTX));
+        assert_eq!(new, None);
+    }
+
+    #[test]
+    fn converge_some_only_when_shrink_actually_clears_overflow() {
+        // A 16k window spilling by ~6k tokens of KV: cutting to ~10k clears it and
+        // stays well above the floor → a real, useful shrink.
+        let new = converge_num_ctx(16_000, 10_000_000_000, 16_000_000_000, 1_000_000)
+            .expect("clearable overflow should shrink");
+        assert!(
+            (OLLAMA_MIN_AUTO_NUM_CTX..16_000).contains(&new),
+            "got {new}"
+        );
+        // Same overflow on a window only just above the floor can't be cleared
+        // without dropping below it → bail.
+        assert_eq!(
+            converge_num_ctx(5_000, 10_000_000_000, 16_000_000_000, 1_000_000),
+            None
+        );
     }
 
     #[test]

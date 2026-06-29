@@ -258,7 +258,7 @@ async fn drive_child(
     // Signal start to parent.
     let _ = parent_progress
         .send(ProgressEvent::SubagentText(format!(
-            "▶ {} — {}",
+            "{} — {}",
             description,
             prompt.chars().take(80).collect::<String>()
         )))
