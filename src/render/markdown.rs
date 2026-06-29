@@ -14,6 +14,39 @@ struct ListState {
     cont_indent: String,
 }
 
+/// Style the list markers ("• ", "1. ") are emitted with. Shared with
+/// [`line_hanging_indent`] so the indent logic recognizes a marker span without
+/// the two definitions drifting apart.
+fn list_marker_style(theme: &Theme) -> Style {
+    Style::new().fg(theme.colors.text_secondary.to_color())
+}
+
+/// Hanging indent (display cells) for hard-wrapping `line`: the column where the
+/// line's content begins, so a wrapped list item's continuation lines align
+/// under its text (after the marker) instead of snapping back to the flat
+/// message gutter. Counts leading whitespace plus a leading list marker; returns
+/// 0 for ordinary paragraphs and headings.
+pub fn line_hanging_indent(line: &Line, theme: &Theme) -> usize {
+    let marker = list_marker_style(theme);
+    let mut indent = 0usize;
+    for span in &line.spans {
+        let text = span.content.as_ref();
+        let trimmed = text.trim_start_matches(' ');
+        if trimmed.is_empty() {
+            indent += text.width(); // a blank span is part of the leading indent
+            continue;
+        }
+        // First span with real content: count its own leading spaces, and include
+        // the marker glyph itself when this span is the list marker.
+        indent += text.width() - trimmed.width();
+        if span.style == marker {
+            indent += trimmed.width();
+        }
+        break;
+    }
+    indent
+}
+
 /// Parse markdown and convert to theme-styled ratatui Lines.
 ///
 /// Code-block lines are tagged by setting the returned `Line`'s base style
@@ -37,7 +70,7 @@ pub fn parse_markdown(input: &str, theme: &Theme) -> Vec<Line<'static>> {
     let link_style = Style::new()
         .fg(c.info.to_color())
         .add_modifier(Modifier::UNDERLINED);
-    let marker_style = Style::new().fg(c.text_secondary.to_color());
+    let marker_style = list_marker_style(theme);
     let rule_style = Style::new().fg(c.text_disabled.to_color());
     let quote_bar_style = Style::new().fg(c.text_disabled.to_color());
     let quote_text_style = Style::new()
@@ -596,6 +629,42 @@ mod tests {
         assert!(text.contains("H2"));
         assert!(text.contains("H3"));
         assert!(lines.len() >= 3);
+    }
+
+    #[test]
+    fn line_hanging_indent_aligns_under_list_marker() {
+        let theme = Theme::dark();
+        fn find<'a>(lines: &'a [Line<'static>], needle: &str) -> &'a Line<'static> {
+            lines
+                .iter()
+                .find(|l| lines_to_text(std::slice::from_ref(l)).contains(needle))
+                .expect("line present")
+        }
+
+        // Bulleted item: continuations hang under the text after "• "
+        // (2-cell nesting indent + 2-cell marker).
+        let bullet = parse_markdown("- Alpha item", &theme);
+        assert_eq!(
+            line_hanging_indent(find(&bullet, "Alpha"), &theme),
+            4,
+            "bullet: 2 indent + 2 marker"
+        );
+
+        // Numbered item: the marker "1. " is 3 cells wide.
+        let numbered = parse_markdown("1. First item", &theme);
+        assert_eq!(
+            line_hanging_indent(find(&numbered, "First"), &theme),
+            5,
+            "numbered: 2 indent + 3 marker"
+        );
+
+        // Ordinary paragraph: no marker, no leading indent, so no hang.
+        let para = parse_markdown("Just a sentence.", &theme);
+        assert_eq!(
+            line_hanging_indent(find(&para, "sentence"), &theme),
+            0,
+            "paragraph: flush to the gutter"
+        );
     }
 
     #[test]
