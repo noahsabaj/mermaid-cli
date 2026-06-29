@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ollama's servers, not your local GPU, so Mermaid no longer VRAM-clamps them —
   e.g. `minimax-m3:cloud` uses its full ~524k-token window instead of being
   auto-fit down to your GPU (which it never touches). An explicit `/context <n>`
-  still caps it if you want, and a once-per-session note explains the full window.
+  still caps it if you want.
 
 ## [0.12.1] - 2026-06-29
 
