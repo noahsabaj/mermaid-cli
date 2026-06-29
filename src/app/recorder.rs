@@ -173,11 +173,13 @@ pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
             model_id,
             size_vram_bytes,
             total_bytes,
+            suggested_num_ctx,
         } => serde_json::json!({
             "model_id": model_id,
             "size_vram_bytes": size_vram_bytes,
             "total_bytes": total_bytes,
             "offloaded": size_vram_bytes < total_bytes,
+            "suggested_num_ctx": suggested_num_ctx,
         }),
         Msg::CompactionFinished { result, .. } => serde_json::json!({
             "id": result.record.id,

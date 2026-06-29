@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   report the real window instead of "unknown", and auto-compaction works for
   Ollama for the first time (it was silently disabled when the context limit was
   unknown).
+- **Ollama context auto-converges to the real GPU fit.** Auto-fit is an estimate,
+  so Mermaid now checks where the model actually loaded after each turn
+  (`/api/ps`). If it spilled into CPU/RAM while offload is off, Mermaid shrinks
+  `num_ctx` to the largest window that clears the measured overflow and reloads at
+  it next turn, repeating until the model is fully resident on the GPU — or warning
+  you once when even the minimum window can't fit (e.g. the weights alone exceed
+  your free VRAM). `/context` reports the fitted window as `auto (GPU-fit)`, and
+  `/context <n>` / `/context offload on` still override it.
 
 ### Fixed
 

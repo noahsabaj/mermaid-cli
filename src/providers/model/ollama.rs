@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use crate::domain::ChatRequest;
 use crate::models::adapters::ollama::{OllamaAdapter, OllamaModelInfo};
 use crate::models::adapters::ollama_sizing::{
-    NumCtxInputs, default_ollama_num_predict, resolve_ollama_num_ctx,
+    NumCtxInputs, converge_num_ctx, default_ollama_num_predict, kv_bytes_per_token,
+    resolve_ollama_num_ctx,
 };
 use crate::models::{
     BackendConfig, Model, ModelConfig, ModelError, ReasoningChunk, Result, StreamCallback,
@@ -156,13 +157,32 @@ impl ModelProvider for OllamaProvider {
         }
     }
 
-    async fn verify_placement(&self) -> Option<ModelPlacement> {
+    async fn verify_placement(&self, current_num_ctx: Option<usize>) -> Option<ModelPlacement> {
         let (vram, total) = self.adapter.model_placement().await?;
         // A zero total means Ollama reported the model but not its footprint —
         // can't judge placement, so leave it unknown rather than guess.
-        (total > 0).then_some(ModelPlacement {
+        if total == 0 {
+            return None;
+        }
+        // On a spill, compute the largest num_ctx that would fit, from the model's
+        // KV cost (probe dims) and the *measured* overflow — the auto-converge
+        // target. `None` if it already fits or shrinking can't help.
+        let suggested_num_ctx = if vram < total {
+            let info = self.probe().await.unwrap_or_default();
+            current_num_ctx
+                .zip(info.dims)
+                .and_then(|(current, dims)| {
+                    let kv = kv_bytes_per_token(&dims)?;
+                    converge_num_ctx(current, vram, total, kv)
+                })
+                .map(|n| n as u32)
+        } else {
+            None
+        };
+        Some(ModelPlacement {
             size_vram_bytes: vram,
             total_bytes: total,
+            suggested_num_ctx,
         })
     }
 
