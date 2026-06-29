@@ -98,9 +98,10 @@ pub fn build_status_lines(
     let meta = format!(
         "(esc to interrupt{bg_hint} • {}s • {} {}{} tokens)",
         elapsed_secs,
+        // The counter is generated (received) tokens, so it reads downstream even
+        // while tools run — the run total just holds steady between model calls.
         match flow_direction {
-            "downstream" => "↓",
-            "tools" => "tools",
+            "downstream" | "tools" => "↓",
             "compaction" => "compact",
             "cleanup" => "cleanup",
             _ => "↑",

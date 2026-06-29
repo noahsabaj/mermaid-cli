@@ -1236,6 +1236,11 @@ fn handle_submit_prompt(
     // injected data — no inline I/O — so `update()` stays pure and a recorded
     // session replays without re-statting the live filesystem.
     let turn = state.ids.fresh_turn();
+    // Anchor the whole user interaction here. The agentic loop will mint fresh
+    // `TurnId`s for each tool follow-up, but the spinner's elapsed + token
+    // counters track this run start so they don't reset at every step.
+    state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
+    state.runtime.run_committed_tokens = 0;
     state.turn = start_generating(turn, std::time::SystemTime::from(state.now));
     cmds.push(Cmd::CallModel {
         turn,
@@ -2558,7 +2563,11 @@ fn handle_compaction_failed(
 
     let prefix = match trigger {
         CompactionTrigger::Manual => "Compaction failed",
-        CompactionTrigger::AutoThreshold => "Auto-compaction skipped",
+        // Auto-compaction is best-effort preflight: when it can't run (e.g. too
+        // little history to compact) Mermaid just proceeds with the un-compacted
+        // request, so there's nothing for the user to act on. Stay silent rather
+        // than printing a scary "Invalid request" every turn (still logged at WARN).
+        CompactionTrigger::AutoThreshold => return,
         CompactionTrigger::ContextLimitRetry => "Context-limit compaction failed",
     };
     let _ = kind;
@@ -2626,6 +2635,14 @@ fn handle_stream_done(
     };
 
     let (partial_text, partial_reasoning, accumulated_sig, tool_calls) = generating;
+    // Bank this phase's generated tokens into the run total so the spinner's
+    // counter carries across the tool step into the next model call (matches the
+    // live estimate in StreamText/StreamReasoning).
+    state.runtime.run_committed_tokens += (partial_text.len() + partial_reasoning.len()) / 4;
+    // A turn that ends with no text, no reasoning, and no tool calls is a dead
+    // end — the run silently stops and looks broken. Flag it so the user knows to
+    // retry (seen with smaller local models that occasionally return nothing).
+    let empty_response = partial_text.trim().is_empty() && partial_reasoning.trim().is_empty();
     let final_sig = thinking_signature.or(accumulated_sig);
 
     // Commit the assistant message (with any tool calls attached —
@@ -2673,6 +2690,12 @@ fn handle_stream_done(
                 state,
                 cmds,
                 "Response was flagged by the provider's content filter.",
+            ),
+            _ if empty_response => push_system(
+                state,
+                cmds,
+                "The model ended its turn with no output (no text or tool calls). \
+                 Send your message again, or try rephrasing.",
             ),
             _ => {},
         }
@@ -3801,6 +3824,126 @@ mod tests {
         assert_eq!(state.session.messages().len(), 1);
         assert_eq!(state.session.messages()[0].content, "final answer");
         assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    }
+
+    #[test]
+    fn submit_anchors_run_and_resets_token_counter() {
+        let mut state = fresh_state();
+        // Stale values from a previous run must not leak into the new one.
+        state.runtime.run_committed_tokens = 999;
+        state.runtime.run_started = None;
+        let (state, _) = update(
+            state,
+            Msg::SubmitPrompt {
+                text: "hi".to_string(),
+                attachment_ids: vec![],
+            },
+        );
+        assert!(
+            state.runtime.run_started.is_some(),
+            "run anchor set on submit"
+        );
+        assert_eq!(
+            state.runtime.run_committed_tokens, 0,
+            "token counter reset on submit"
+        );
+    }
+
+    #[test]
+    fn run_token_counter_banks_each_phase_across_tool_steps() {
+        // The counter must accumulate, not reset, as each model call completes —
+        // so a multi-step agentic run shows one growing total.
+        let mut state = fresh_state();
+        state.runtime.run_committed_tokens = 100; // earlier phases this run
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: "x".repeat(400),      // ~100 tokens
+            partial_reasoning: "y".repeat(400), // ~100 tokens
+            tokens: 200,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        };
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+        // 100 prior + (400 + 400)/4 = 200 this phase.
+        assert_eq!(state.runtime.run_committed_tokens, 300);
+    }
+
+    #[test]
+    fn stream_done_flags_a_completely_empty_turn() {
+        // No text, no reasoning, no tool calls → the run would silently dead-end.
+        let mut state = fresh_state();
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: String::new(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        };
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.role == MessageRole::System && m.content.contains("no output")),
+            "an empty turn must tell the user instead of silently stopping"
+        );
+    }
+
+    #[test]
+    fn stream_done_does_not_flag_reasoning_only_turn() {
+        // Reasoning-only (hidden) is not "empty" — it renders as "Reasoning
+        // hidden", so the empty-output note must NOT fire.
+        let mut state = fresh_state();
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: String::new(),
+            partial_reasoning: "thinking it through".to_string(),
+            tokens: 0,
+            phase: GenPhase::Thinking,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        };
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+        assert!(
+            !state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("no output")),
+            "reasoning-only turn is not empty"
+        );
     }
 
     #[test]

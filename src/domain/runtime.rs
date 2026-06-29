@@ -317,6 +317,18 @@ pub struct RuntimeState {
     /// session. Read by `build_chat_request` below a user override.
     #[serde(skip)]
     pub ollama_converged_num_ctx: std::collections::HashMap<String, u32>,
+    /// When the current user interaction began. One "turn" in Mermaid is a single
+    /// model call + its tools; an agentic run spans many such turns (each tool
+    /// follow-up mints a fresh `TurnId`). This anchors the spinner's elapsed timer
+    /// to the *whole* run so it doesn't reset to 0 at every tool step. Set on
+    /// submit, read only while generating/executing tools. Session-only.
+    #[serde(skip)]
+    pub run_started: Option<std::time::SystemTime>,
+    /// Estimated tokens generated in *completed* phases of the current run, so the
+    /// spinner's token counter accumulates across tool steps instead of resetting
+    /// each model call. The live phase's estimate is added on top at render time.
+    #[serde(skip)]
+    pub run_committed_tokens: usize,
 }
 
 impl RuntimeState {
@@ -331,6 +343,8 @@ impl RuntimeState {
             hinted_models: HashSet::new(),
             offload_warned: HashSet::new(),
             ollama_converged_num_ctx: std::collections::HashMap::new(),
+            run_started: None,
+            run_committed_tokens: 0,
         }
     }
 
