@@ -129,6 +129,7 @@ impl ModelAutoClassifier {
             temperature: 0.0,
             max_tokens: VET_MAX_TOKENS,
             tools: Vec::new(),
+            ollama_num_ctx: None,
         }
     }
 }

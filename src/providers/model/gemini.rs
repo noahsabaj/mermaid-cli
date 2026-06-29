@@ -129,6 +129,8 @@ mod tests {
             temperature: 0.5,
             max_tokens: 4096,
             tools: vec![],
+
+            ollama_num_ctx: None,
         };
         let cfg = build_model_config(&req);
         assert_eq!(cfg.reasoning, crate::models::ReasoningLevel::High);

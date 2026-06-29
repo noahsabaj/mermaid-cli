@@ -60,6 +60,17 @@ pub struct Config {
     #[serde(default)]
     pub reasoning_per_model: HashMap<String, ReasoningLevel>,
 
+    /// Per-model Ollama `num_ctx` override set via `/context <n>`/`max`. Beats
+    /// auto-fit; cleared by `/context auto`. Keyed by model id.
+    ///
+    /// Example:
+    /// ```toml
+    /// [ollama_num_ctx_per_model]
+    /// "ollama/ornith:9b" = 131072
+    /// ```
+    #[serde(default)]
+    pub ollama_num_ctx_per_model: HashMap<String, u32>,
+
     /// Named model profiles that agents/plugins can request without
     /// hardcoding a concrete provider model. Values are full model IDs.
     /// Example:
@@ -466,6 +477,30 @@ pub fn persist_reasoning_for_model(model_id: &str, level: ReasoningLevel) -> Res
     save_config(&config, None)
 }
 
+/// Persist (or clear) a per-model Ollama `num_ctx` override. `Some(n)` sets it,
+/// `None` removes the entry (returning that model to auto-fit).
+pub fn persist_ollama_num_ctx_for_model(model_id: &str, num_ctx: Option<u32>) -> Result<()> {
+    let mut config = load_config()?;
+    match num_ctx {
+        Some(n) => {
+            config
+                .ollama_num_ctx_per_model
+                .insert(model_id.to_string(), n);
+        },
+        None => {
+            config.ollama_num_ctx_per_model.remove(model_id);
+        },
+    }
+    save_config(&config, None)
+}
+
+/// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
+pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
+    let mut config = load_config()?;
+    config.ollama.allow_ram_offload = enabled;
+    save_config(&config, None)
+}
+
 /// Resolve which model to use: CLI arg > last_used > default_model > any available
 pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyhow::Result<String> {
     if let Some(model) = cli_model {
@@ -637,6 +672,49 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `/context <n>` overrides round-trip through the per-model TOML table, and
+    /// the offload toggle persists on `[ollama]`.
+    #[test]
+    fn save_and_reload_preserves_ollama_context_overrides() {
+        let dir = std::env::temp_dir().join("mermaid_test_config_ollama_ctx");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.ollama_num_ctx_per_model
+            .insert("ollama/ornith:9b".to_string(), 131_072);
+        cfg.ollama.allow_ram_offload = true;
+        cfg.ollama.max_auto_num_ctx = Some(65_536);
+
+        save_config(&cfg, Some(path.clone())).expect("save");
+        let blob = std::fs::read_to_string(&path).expect("read");
+        let loaded: Config = toml::from_str(&blob).expect("parse back");
+
+        assert_eq!(
+            loaded.ollama_num_ctx_per_model.get("ollama/ornith:9b"),
+            Some(&131_072)
+        );
+        assert!(loaded.ollama.allow_ram_offload);
+        assert_eq!(loaded.ollama.max_auto_num_ctx, Some(65_536));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Older configs have neither the per-model num_ctx table nor the new
+    /// `[ollama]` keys; loading must default cleanly (empty map, offload off).
+    #[test]
+    fn config_deserializes_without_ollama_context_keys() {
+        let toml_blob = r#"
+[ollama]
+host = "localhost"
+port = 11434
+"#;
+        let cfg: Config = toml::from_str(toml_blob).expect("parse");
+        assert!(cfg.ollama_num_ctx_per_model.is_empty());
+        assert!(!cfg.ollama.allow_ram_offload);
+        assert_eq!(cfg.ollama.max_auto_num_ctx, None);
     }
 
     /// Configs from before Step 5b don't have a `reasoning_per_model`

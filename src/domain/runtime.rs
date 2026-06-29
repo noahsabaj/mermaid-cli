@@ -5,6 +5,8 @@
 //! goes back into the model, while this module holds the metadata the
 //! UI and future commands can consume without scraping that text.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -239,6 +241,17 @@ pub enum ToolArtifact {
     Log { path: String },
 }
 
+/// The resolved Ollama context window for the active model, reported by the
+/// effect runner after the first turn. Drives the `/context` display and the
+/// truncation quick-fix. `model_max` is the probed architectural window;
+/// `effective` is the `num_ctx` we actually send.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OllamaContextInfo {
+    pub model_max: Option<usize>,
+    pub effective: Option<usize>,
+    pub source: Option<crate::models::adapters::ollama_sizing::NumCtxSource>,
+}
+
 /// Runtime state that is not part of the chat transcript sent to a
 /// model, but is useful for UI, slash commands, and debugging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,6 +268,14 @@ pub struct RuntimeState {
     /// `/context` folds it in to match what dispatch actually decides.
     #[serde(default)]
     pub builtin_tool_schema_tokens: usize,
+    /// Resolved Ollama context window for the active model (`None` until the
+    /// first turn probes it, or for non-Ollama providers).
+    #[serde(default)]
+    pub ollama_context: Option<OllamaContextInfo>,
+    /// Models we've already shown the proactive auto-fit hint for this session.
+    /// Session-only (not persisted) so the gentle reminder reappears each launch.
+    #[serde(skip)]
+    pub hinted_models: HashSet<String>,
 }
 
 impl RuntimeState {
@@ -264,11 +285,15 @@ impl RuntimeState {
             processes: Vec::new(),
             timeline: Vec::new(),
             builtin_tool_schema_tokens: 0,
+            ollama_context: None,
+            hinted_models: HashSet::new(),
         }
     }
 
     pub fn set_model(&mut self, model_id: &str) {
         self.provider_capabilities = ProviderCapabilitySnapshot::from_model_id(model_id);
+        // New model → the resolved window no longer applies; re-probed next turn.
+        self.ollama_context = None;
         self.timeline.push(RuntimeTimelineEvent {
             kind: RuntimeTimelineKind::Provider,
             message: format!("model set to {}", model_id),

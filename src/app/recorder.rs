@@ -159,6 +159,16 @@ pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
                 "tool_count": b.tool_count,
             })),
         }),
+        Msg::ProviderContextResolved {
+            model_max,
+            effective,
+            source,
+            ..
+        } => serde_json::json!({
+            "model_max": model_max,
+            "effective": effective,
+            "source": source.map(|s| s.label()),
+        }),
         Msg::CompactionFinished { result, .. } => serde_json::json!({
             "id": result.record.id,
             "trigger": result.record.trigger.as_str(),
@@ -340,7 +350,9 @@ fn slash_body(cmd: &SlashCmd) -> serde_json::Value {
         SlashCmd::Load(name) => serde_json::json!({"command": "load", "arg": name}),
         SlashCmd::List => serde_json::json!({"command": "list"}),
         SlashCmd::Usage => serde_json::json!({"command": "usage"}),
-        SlashCmd::Context => serde_json::json!({"command": "context"}),
+        SlashCmd::Context(cmd) => {
+            serde_json::json!({"command": "context", "arg": format!("{cmd:?}")})
+        },
         SlashCmd::Compact(instructions) => {
             serde_json::json!({"command": "compact", "arg": instructions})
         },

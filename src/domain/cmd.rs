@@ -119,6 +119,14 @@ pub enum Cmd {
         model_id: String,
         level: ReasoningLevel,
     },
+    /// Persist (or clear, when `num_ctx` is `None`) a per-model Ollama `num_ctx`
+    /// override set via `/context <n>`/`max`/`auto`.
+    PersistOllamaNumCtxFor {
+        model_id: String,
+        num_ctx: Option<u32>,
+    },
+    /// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
+    PersistOllamaOffload(bool),
     /// Re-stat `MERMAID.md` (cheap); emits `Msg::InstructionsChanged`
     /// only when the mtime moved or the file appeared/disappeared.
     RefreshInstructions,
@@ -251,6 +259,12 @@ pub struct ChatRequest {
     /// Tool definitions advertised to the model. Combination of the
     /// built-in tool set + any advertised MCP tools from `McpState`.
     pub tools: Vec<ToolDefinition>,
+    /// Per-model Ollama `num_ctx` override (`/context <n>`/`max`), or `None` to
+    /// auto-fit. The one provider-specific knob that rides on the request, the
+    /// same way `reasoning` does — so a live `/context` change applies on the
+    /// next turn without rebuilding the cached provider. Ignored by non-Ollama
+    /// providers.
+    pub ollama_num_ctx: Option<u32>,
 }
 
 /// Provider-agnostic tool definition sent in the request. Concrete
@@ -296,6 +310,8 @@ impl Cmd {
             Cmd::SaveProcess(_) => "save_process",
             Cmd::PersistLastModel(_) => "persist_last_model",
             Cmd::PersistReasoningFor { .. } => "persist_reasoning_for",
+            Cmd::PersistOllamaNumCtxFor { .. } => "persist_ollama_num_ctx_for",
+            Cmd::PersistOllamaOffload(_) => "persist_ollama_offload",
             Cmd::RefreshInstructions => "refresh_instructions",
             Cmd::RefreshMemory => "refresh_memory",
             Cmd::ListMemory => "list_memory",
@@ -387,6 +403,12 @@ impl Cmd {
             Cmd::PersistReasoningFor { model_id, level } => {
                 format!("persist_reasoning_for({}, {:?})", model_id, level)
             },
+            Cmd::PersistOllamaNumCtxFor { model_id, num_ctx } => {
+                format!("persist_ollama_num_ctx_for({}, {:?})", model_id, num_ctx)
+            },
+            Cmd::PersistOllamaOffload(enabled) => {
+                format!("persist_ollama_offload({})", enabled)
+            },
             Cmd::RefreshInstructions => "refresh_instructions".to_string(),
             Cmd::RefreshMemory => "refresh_memory".to_string(),
             Cmd::ListMemory => "list_memory".to_string(),
@@ -459,6 +481,8 @@ mod tests {
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
+
+            ollama_num_ctx: None,
         };
         assert!(
             Cmd::CallModel {
