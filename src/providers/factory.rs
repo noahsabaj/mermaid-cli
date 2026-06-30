@@ -124,10 +124,11 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
     // 2. Anthropic — bespoke API shape.
     if provider_lc == "anthropic" {
         let user_cfg = config.providers.get("anthropic");
-        let base_url = user_cfg
-            .and_then(|c| c.base_url.clone())
-            .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
-        validate_provider_base_url(&base_url)?;
+        let base_url = resolve_overridable_base_url(
+            "anthropic",
+            user_cfg.and_then(|c| c.base_url.clone()),
+            "https://api.anthropic.com/v1",
+        )?;
         let api_key_env = user_cfg
             .and_then(|c| c.api_key_env.as_deref())
             .unwrap_or("ANTHROPIC_API_KEY");
@@ -139,10 +140,11 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
     // 3. Gemini — GCP AI Studio shape.
     if provider_lc == "gemini" {
         let user_cfg = config.providers.get("gemini");
-        let base_url = user_cfg
-            .and_then(|c| c.base_url.clone())
-            .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
-        validate_provider_base_url(&base_url)?;
+        let base_url = resolve_overridable_base_url(
+            "gemini",
+            user_cfg.and_then(|c| c.base_url.clone()),
+            "https://generativelanguage.googleapis.com/v1beta",
+        )?;
         let api_key = match user_cfg.and_then(|c| c.api_key_env.as_deref()) {
             Some(api_key_env) => require_key("gemini", api_key_env)?,
             None => {
@@ -156,10 +158,11 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
     // 4 + 5. OpenAI-compatible registry or user-custom.
     if let Some(profile) = lookup_provider(&provider_lc) {
         let user_cfg = config.providers.get(&provider_lc);
-        let base_url = user_cfg
-            .and_then(|c| c.base_url.clone())
-            .unwrap_or_else(|| profile.base_url.to_string());
-        validate_provider_base_url(&base_url)?;
+        let base_url = resolve_overridable_base_url(
+            &provider_lc,
+            user_cfg.and_then(|c| c.base_url.clone()),
+            profile.base_url,
+        )?;
         let api_key_env = user_cfg
             .and_then(|c| c.api_key_env.as_deref())
             .unwrap_or(profile.api_key_env);
@@ -239,12 +242,26 @@ pub(crate) fn ollama_backend_config(config: &Config) -> BackendConfig {
     }
 }
 
+/// Process-wide memo of leaked custom-provider profiles, keyed by the
+/// profile-determining inputs (see [`user_profile_to_static`]). Guarantees each
+/// distinct custom provider leaks its `&'static ProviderProfile` at most once.
+static PROFILE_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, &'static crate::models::ProviderProfile>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Convert a user-defined `[providers.<name>]` entry into a `&'static
-/// ProviderProfile`. We need `&'static` because `ProviderProfile`'s
-/// lifetime is tied to the registry constants; we leak a tiny owned
-/// copy so custom providers can participate without redesigning the
-/// profile type. Leaked allocations are bounded by the number of
-/// custom providers (typically 0-3).
+/// ProviderProfile`. `ProviderProfile`'s fields are `&'static` (tied to the
+/// registry constants), so a custom provider needs a leaked, owned copy to
+/// participate without redesigning the profile type.
+///
+/// The leak is memoized (F67). `build_provider` runs once per distinct *model
+/// id*, so without a cache this leaked a fresh profile for every custom
+/// `provider/model` pair — a permanent, per-distinct-model_id growth, not the
+/// "0-3" the old comment claimed. The profile's content depends only on
+/// (provider name, base_url, api_key_env, compat) and NOT on the model, so we
+/// key the cache on exactly those and leak at most once per distinct
+/// combination; repeated resolves (including different models of the same custom
+/// provider) reuse the same `&'static`.
 fn user_profile_to_static(
     name: &str,
     user_cfg: &crate::app::UserProviderConfig,
@@ -252,6 +269,22 @@ fn user_profile_to_static(
     use crate::models::{ProviderProfile, ReasoningExtraction, ReasoningStrategy};
 
     let compat = user_cfg.compat.as_deref().unwrap_or("openai");
+    let base_url = user_cfg.base_url.clone().unwrap_or_default();
+    let api_key_env = user_cfg.api_key_env.clone().unwrap_or_default();
+
+    // Stable key over exactly the fields baked into the profile below. NUL
+    // separates components so distinct inputs can't collide into one key.
+    let cache_key = format!("{name}\u{0}{base_url}\u{0}{api_key_env}\u{0}{compat}");
+
+    let mut cache = PROFILE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(profile) = cache.get(cache_key.as_str()) {
+        // `&'static ProviderProfile` is Copy, so this hands back the same leaked
+        // allocation as the first resolve — no new leak.
+        return Some(*profile);
+    }
+
     let strategy = match compat {
         "openai" => ReasoningStrategy::None,
         "openai-effort" => ReasoningStrategy::Effort,
@@ -261,27 +294,17 @@ fn user_profile_to_static(
 
     let profile = Box::new(ProviderProfile {
         name: Box::leak(name.to_string().into_boxed_str()),
-        base_url: Box::leak(
-            user_cfg
-                .base_url
-                .clone()
-                .unwrap_or_default()
-                .into_boxed_str(),
-        ),
-        api_key_env: Box::leak(
-            user_cfg
-                .api_key_env
-                .clone()
-                .unwrap_or_default()
-                .into_boxed_str(),
-        ),
+        base_url: Box::leak(base_url.into_boxed_str()),
+        api_key_env: Box::leak(api_key_env.into_boxed_str()),
         extra_headers: &[],
         reasoning_strategy: strategy,
         reasoning_extraction: ReasoningExtraction::None,
         max_tokens_param: crate::models::MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
     });
-    Some(Box::leak(profile))
+    let leaked: &'static ProviderProfile = Box::leak(profile);
+    cache.insert(cache_key, leaked);
+    Some(leaked)
 }
 
 /// Validate a provider `base_url` before it's handed an API key. Requires
@@ -312,6 +335,77 @@ fn validate_provider_base_url(url: &str) -> Result<()> {
             "provider base_url '{url}' has unsupported scheme '{other}' (use http or https)"
         ))),
     }
+}
+
+/// Resolve a *built-in* provider's `base_url`, honoring a user override but
+/// hardening it (F66). Built-in providers (anthropic, gemini, and the
+/// registry-backed OpenAI-compatible ones) ship a trusted default endpoint; a
+/// `[providers.<name>] base_url` override redirects that provider's API key to a
+/// host the user chose. The override lives in the user's own config, so we allow
+/// it — but we also:
+///   * validate the scheme via [`validate_provider_base_url`], which already
+///     requires https for any non-loopback host, so an `http://` override can't
+///     leak the key in cleartext (http stays allowed only for
+///     localhost/127.0.0.1/::1 local dev), and
+///   * emit a one-time warning naming the host the key will be sent to, so a
+///     redirect to an unexpected host (e.g. `https://attacker.example`) is
+///     visible rather than silent.
+///
+/// With no override the trusted default is returned unchanged (no warning).
+fn resolve_overridable_base_url(
+    provider: &str,
+    override_url: Option<String>,
+    default_url: &str,
+) -> Result<String> {
+    match override_url {
+        Some(url) => {
+            validate_provider_base_url(&url)?;
+            warn_overridden_provider_host(provider, &url);
+            Ok(url)
+        },
+        None => Ok(default_url.to_string()),
+    }
+}
+
+/// Hosts already warned about (per provider) for a built-in `base_url` override,
+/// so the F66 warning fires once per process rather than on every `resolve`.
+/// Keyed by `"<provider>@<host>"`.
+static WARNED_OVERRIDE_HOSTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Emit a one-time `tracing::warn!` (deduped per provider+host) naming the host a
+/// built-in provider's API key will be sent to because its trusted default
+/// `base_url` was overridden in config (F66).
+fn warn_overridden_provider_host(provider: &str, base_url: &str) {
+    let host = provider_host(base_url);
+    if should_warn_once(&format!("{provider}@{host}")) {
+        tracing::warn!(
+            "built-in provider '{}' base_url overridden in config: the {} API key will be sent to \
+             host '{}' instead of the trusted default endpoint",
+            provider,
+            provider,
+            host
+        );
+    }
+}
+
+/// Host portion of a `base_url` for the override warning, or `"<unknown>"` if it
+/// can't be parsed (the caller already validated it, so this is belt-and-braces).
+fn provider_host(base_url: &str) -> String {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+/// Record `key` in the process-wide warned-set, returning `true` the first time
+/// (i.e. "warn now") and `false` thereafter. Poison-tolerant.
+fn should_warn_once(key: &str) -> bool {
+    let mut warned = WARNED_OVERRIDE_HOSTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    warned.insert(key.to_string())
 }
 
 #[cfg(test)]
@@ -437,6 +531,106 @@ mod tests {
         assert!(
             Arc::ptr_eq(&a, &b),
             "expected one cached provider for casing variants + concurrent resolve"
+        );
+    }
+
+    // F66: a built-in provider's base_url override is hardened — validated for
+    // scheme and otherwise honored (the warning is a side effect we don't assert
+    // here, but the dedup helper is tested separately below).
+    #[test]
+    fn builtin_base_url_override_validated_and_resolved() {
+        // No override → trusted default, unchanged, no validation needed.
+        assert_eq!(
+            resolve_overridable_base_url("anthropic", None, "https://api.anthropic.com/v1")
+                .unwrap(),
+            "https://api.anthropic.com/v1"
+        );
+        // https override is honored (the key would go there — warned, not blocked).
+        assert_eq!(
+            resolve_overridable_base_url(
+                "anthropic",
+                Some("https://proxy.internal/v1".to_string()),
+                "https://api.anthropic.com/v1",
+            )
+            .unwrap(),
+            "https://proxy.internal/v1"
+        );
+        // http override to a NON-loopback host is refused (would leak the key in
+        // cleartext) — the F66 https requirement.
+        assert!(
+            resolve_overridable_base_url(
+                "anthropic",
+                Some("http://attacker.example/v1".to_string()),
+                "https://api.anthropic.com/v1",
+            )
+            .is_err()
+        );
+        // http override to loopback stays allowed for local dev (don't break it).
+        assert!(
+            resolve_overridable_base_url(
+                "openai",
+                Some("http://localhost:8080/v1".to_string()),
+                "https://api.openai.com/v1",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn provider_host_extracts_host_or_unknown() {
+        assert_eq!(
+            provider_host("https://attacker.example/v1"),
+            "attacker.example"
+        );
+        assert_eq!(provider_host("http://127.0.0.1:8080"), "127.0.0.1");
+        assert_eq!(provider_host("not a url"), "<unknown>");
+    }
+
+    #[test]
+    fn override_host_warning_is_deduped() {
+        // The F66 warning must be one-time per key: first call fires, the rest
+        // are suppressed. Use a process-unique key so this test doesn't race the
+        // shared warned-set with any other test.
+        let key = unique_env("MERMAID_FACTORY_WARN_KEY");
+        assert!(should_warn_once(&key), "first warn for a key must fire");
+        assert!(
+            !should_warn_once(&key),
+            "subsequent warns for the same key must be suppressed"
+        );
+    }
+
+    // F67: identical custom-provider inputs must reuse one leaked &'static
+    // profile, and distinct inputs must each leak exactly one — no per-model_id
+    // growth.
+    #[test]
+    fn custom_profile_is_memoized_per_key() {
+        use crate::app::UserProviderConfig;
+        let cfg = UserProviderConfig {
+            base_url: Some("https://api.custom.test/v1".to_string()),
+            api_key_env: Some("CUSTOM_KEY".to_string()),
+            compat: Some("openai".to_string()),
+            ..Default::default()
+        };
+        // Two resolves with identical inputs (as happens for two different models
+        // of the same custom provider) return the SAME leaked pointer.
+        let a = user_profile_to_static("mermaid_test_customx", &cfg).unwrap();
+        let b = user_profile_to_static("mermaid_test_customx", &cfg).unwrap();
+        assert!(
+            std::ptr::eq(a, b),
+            "identical custom-provider inputs must reuse one leaked &'static profile"
+        );
+        assert_eq!(a.base_url, "https://api.custom.test/v1");
+        assert_eq!(a.api_key_env, "CUSTOM_KEY");
+
+        // A different base_url is a different key → a distinct leaked profile.
+        let cfg2 = UserProviderConfig {
+            base_url: Some("https://api.custom.test/v2".to_string()),
+            ..cfg.clone()
+        };
+        let c = user_profile_to_static("mermaid_test_customx", &cfg2).unwrap();
+        assert!(
+            !std::ptr::eq(a, c),
+            "a different base_url must leak a distinct profile"
         );
     }
 }

@@ -137,6 +137,9 @@ impl StdioTransport {
             .stdin
             .take()
             .ok_or_else(|| anyhow!("Failed to capture MCP server stdin"))?;
+        // Wrap stdin now (rather than at the end) so the stdout reader task can
+        // share it and reply to server-initiated requests we don't support (F79).
+        let stdin = Arc::new(Mutex::new(stdin));
         let stdout = child
             .stdout
             .take()
@@ -151,6 +154,7 @@ impl StdioTransport {
 
         // Background task: read stdout for JSON-RPC responses
         let pending_clone = Arc::clone(&pending);
+        let stdin_for_reader = Arc::clone(&stdin);
         let reader_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             loop {
@@ -196,11 +200,35 @@ impl StdioTransport {
                             let _ = sender.send(msg);
                         }
                     }
+                } else if msg.get("method").is_some() {
+                    // Has a `method`: either a server-initiated REQUEST (also
+                    // carries an `id`) or a NOTIFICATION (no `id`). We implement
+                    // neither, but they need different handling.
+                    match msg.get("id") {
+                        // Server request: it BLOCKS until it gets a response. Reply
+                        // with a JSON-RPC "method not supported" error rather than
+                        // dropping it and letting the server stall forever (F79).
+                        Some(id) if !id.is_null() => {
+                            tracing::debug!(
+                                method =
+                                    msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
+                                "MCP: replying method-not-supported to unsupported server request"
+                            );
+                            reply_method_not_supported(&stdin_for_reader, id).await;
+                        },
+                        // Notification: no `id`, no reply expected. Ignore it.
+                        _ => {
+                            tracing::trace!(
+                                method =
+                                    msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
+                                "MCP: ignoring server notification (no reply expected)"
+                            );
+                        },
+                    }
                 } else {
-                    tracing::trace!(
-                        method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
-                        "MCP: ignoring server-initiated message (not a response)"
-                    );
+                    // Neither a response nor a request/notification we recognize
+                    // (e.g. an `id` that isn't a parseable number, with no method).
+                    tracing::trace!("MCP: ignoring unrecognized stdout message");
                 }
             }
 
@@ -230,7 +258,7 @@ impl StdioTransport {
         });
 
         Ok(Self {
-            stdin: Arc::new(Mutex::new(stdin)),
+            stdin,
             pending,
             next_id: AtomicU64::new(1),
             child: Arc::new(Mutex::new(child)),
@@ -459,6 +487,33 @@ fn is_response(msg: &Value) -> bool {
     msg.get("id").and_then(parse_response_id).is_some() && msg.get("method").is_none()
 }
 
+/// Reply to a server-initiated JSON-RPC *request* we don't implement with a
+/// JSON-RPC error, so the server isn't left blocking on a response that would
+/// otherwise never arrive (F79). The request `id` is echoed back verbatim
+/// (number or string), as the spec requires. Best-effort and bounded by
+/// `WRITE_TIMEOUT_SECS`: a write failure or a wedged child just means no reply
+/// gets out, which the reader loop will soon observe as EOF anyway.
+async fn reply_method_not_supported(stdin: &Mutex<tokio::process::ChildStdin>, id: &Value) {
+    // -32601 is the JSON-RPC 2.0 "Method not found" code.
+    let reply = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id.clone(),
+        "error": { "code": -32601, "message": "method not supported" },
+    });
+    let Ok(serialized) = serde_json::to_string(&reply) else {
+        return;
+    };
+    let mut line = serialized;
+    line.push('\n');
+    let mut guard = stdin.lock().await;
+    let _ = timeout(
+        Duration::from_secs(WRITE_TIMEOUT_SECS),
+        guard.write_all(line.as_bytes()),
+    )
+    .await;
+    let _ = timeout(Duration::from_secs(WRITE_TIMEOUT_SECS), guard.flush()).await;
+}
+
 /// Send SIGTERM to `pid` by shelling out to `kill`, mirroring
 /// `runtime::client::kill_pid`. Best-effort: failure (process already gone, or
 /// `kill` missing) is ignored — the caller escalates to SIGKILL next. Positive
@@ -614,6 +669,37 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"declared":"%s","path":"%s","cargo":"%
         assert_eq!(
             res["cargo"], "",
             "a non-allowlisted inherited var must be cleared by env_clear()"
+        );
+    }
+
+    // F79: a server-initiated request (id + method) we don't support must get a
+    // JSON-RPC error reply so the server isn't left blocking. The fake server
+    // reads our ping, emits a server request, then reads our reply and reports —
+    // via the ping response — whether that reply carried the -32601 error code.
+    // The read/write alternation makes ordering deterministic.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn server_initiated_request_gets_method_not_supported_reply() {
+        use super::StdioTransport;
+        use std::collections::HashMap;
+        let script = r#"read ping
+printf '{"jsonrpc":"2.0","id":99,"method":"sampling/createMessage","params":{}}\n'
+read reply
+case "$reply" in
+  *-32601*) printf '{"jsonrpc":"2.0","id":1,"result":{"replied":true}}\n' ;;
+  *) printf '{"jsonrpc":"2.0","id":1,"result":{"replied":false}}\n' ;;
+esac"#;
+        let t = StdioTransport::spawn("sh", &["-c".to_string(), script.to_string()], &HashMap::new())
+            .await
+            .expect("spawn");
+        let res = t
+            .send_request("ping", json!({}))
+            .await
+            .expect("ping response");
+        assert_eq!(
+            res["replied"], true,
+            "transport must reply with a -32601 error to a server-initiated request, \
+             not silently drop it"
         );
     }
 
