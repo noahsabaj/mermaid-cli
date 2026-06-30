@@ -114,6 +114,19 @@ fn map_openai_finish_reason(s: &str) -> FinishReason {
     }
 }
 
+/// F56: whether an OpenAI-compatible stream ended abnormally — it closed before
+/// any `finish_reason` was observed on a choice. The `[DONE]` sentinel is
+/// swallowed upstream by `drain_sse_events`, so a choice's `finish_reason`
+/// (`stop`/`length`/`tool_calls`/`content_filter`) is the only terminal marker
+/// this adapter can see; a conformant Chat Completions stream always carries
+/// one. Its absence means the connection dropped mid-response — returning a
+/// clean `Ok` (with `stop_reason: None`) would be indistinguishable from a real
+/// completion, so the caller surfaces a stream error. A `length` truncation
+/// sets a real `finish_reason`, so it is NOT abnormal and is preserved.
+fn stream_closed_abnormally(stop_reason: Option<&FinishReason>) -> bool {
+    stop_reason.is_none()
+}
+
 /// OpenAI reasoning models (the `o1`/`o3`/`o4` families and `gpt-5`) reject any
 /// non-default `temperature` with a 400, so the request builder omits it for
 /// them (#124). Matches the bare model id (any `provider/` prefix stripped).
@@ -137,6 +150,25 @@ pub struct OpenAICompatAdapter {
     /// Includes both the profile's `extra_headers` and any user overrides.
     extra_headers: HashMap<String, String>,
     capabilities: ModelCapabilities,
+}
+
+/// A random 128-bit `Idempotency-Key`, hex-encoded, for safe retry de-duplication
+/// (#F27). On the (vanishingly rare) OS-RNG failure, fall back to a
+/// process+time value so we still send *a* stable key rather than none.
+fn random_idempotency_key() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        return format!("mermaid-{}-{nanos}", std::process::id());
+    }
+    use std::fmt::Write;
+    bytes.iter().fold(String::with_capacity(32), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 impl OpenAICompatAdapter {
@@ -326,8 +358,21 @@ impl OpenAICompatAdapter {
     /// OpenRouter / etc. when an upstream relay hiccups.
     async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        // A stable idempotency key, generated ONCE and reused across every retry
+        // attempt, lets an OpenAI-compatible endpoint that honors `Idempotency-Key`
+        // (OpenAI, Groq, OpenRouter, …) dedupe a retried POST instead of generating
+        // — and billing — a second completion when a transient 5xx/connection drop
+        // is retried after the server already produced one (#F27). Endpoints that
+        // ignore the header are unaffected. (Anthropic has no documented
+        // equivalent; its retries mirror the official SDK default.)
+        let idempotency_key = random_idempotency_key();
         crate::effect::retry_transient_http(|| async {
-            let mut req = self.client.post(&url).bearer_auth(&self.api_key).json(body);
+            let mut req = self
+                .client
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .header("Idempotency-Key", &idempotency_key)
+                .json(body);
             for (name, value) in &self.extra_headers {
                 req = req.header(name, value);
             }
@@ -627,6 +672,20 @@ impl OpenAICompatAdapter {
                     }
                 }
             }
+        }
+
+        // F56: a stream that ended before any `finish_reason` was dropped
+        // mid-response. Surface a stream error rather than a clean `Ok` (with
+        // `stop_reason: None`) that's indistinguishable from a real completion —
+        // checked before finalizing/emitting tool calls so a dropped connection
+        // doesn't hand back a half-built turn. A `length` truncation set a real
+        // `finish_reason`, so it does NOT trip this and is preserved.
+        if stream_closed_abnormally(stop_reason.as_ref()) {
+            return Err(ModelError::StreamError(format!(
+                "{} stream closed before a terminal finish_reason; the connection \
+                 was likely dropped mid-response",
+                self.profile.name
+            )));
         }
 
         // Flush any pending tag-state bytes (incomplete trailing tags
@@ -1219,6 +1278,18 @@ mod tests {
             map_openai_finish_reason("content_filter"),
             FinishReason::ContentFilter
         );
+    }
+
+    #[test]
+    fn stream_closed_abnormally_distinguishes_drop_from_completion() {
+        // F56: no finish_reason observed → the stream dropped mid-response and
+        // must surface as a stream error, not a clean Ok.
+        assert!(stream_closed_abnormally(None));
+        // A real terminal finish_reason → clean completion.
+        assert!(!stream_closed_abnormally(Some(&FinishReason::Stop)));
+        assert!(!stream_closed_abnormally(Some(&FinishReason::ToolUse)));
+        // CRUCIAL: a `length` truncation is a real finish_reason — NOT abnormal.
+        assert!(!stream_closed_abnormally(Some(&FinishReason::Length)));
     }
 
     #[test]

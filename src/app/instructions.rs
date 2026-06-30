@@ -89,15 +89,64 @@ pub enum ReloadOutcome {
 /// Walk UP from `start` looking for any supported instruction file.
 /// Stops at the first of:
 /// - a directory containing `.git` (the git root)
-/// - `$HOME` (don't search above the user's home)
+/// - the user's home directory (`$HOME`, or `%USERPROFILE%` on Windows)
 /// - filesystem root
 /// - `MAX_WALK_DEPTH` levels (symlink-loop guard)
 ///
 /// Returns all supported instruction files in the nearest matching
 /// directory, in precedence order, or an empty vec if none exist.
 pub fn find_instruction_files(start: &Path) -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    find_instruction_files_bounded(start, home.as_deref())
+    find_instruction_files_bounded(start, home_dir_boundary().as_deref())
+}
+
+/// Resolve the user's home directory to use as the upward-walk boundary.
+///
+/// On Unix this is `$HOME`. On Windows `HOME` is usually unset — the home var is
+/// `%USERPROFILE%` (or `%HOMEDRIVE%%HOMEPATH%`) — so without consulting those the
+/// walk would have no home boundary on Windows and could climb above the user's
+/// profile, relying solely on `.git` / `MAX_WALK_DEPTH` (F63). An empty value is
+/// treated as unset.
+fn home_dir_boundary() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME");
+    #[cfg(windows)]
+    let resolved = pick_home_boundary(
+        home.as_deref(),
+        std::env::var_os("USERPROFILE").as_deref(),
+        std::env::var_os("HOMEDRIVE").as_deref(),
+        std::env::var_os("HOMEPATH").as_deref(),
+    );
+    // Non-Windows: only `$HOME` bounds the walk.
+    #[cfg(not(windows))]
+    let resolved = pick_home_boundary(home.as_deref(), None, None, None);
+    resolved
+}
+
+/// Pick the home boundary from candidate env values in priority order: `HOME`,
+/// then `USERPROFILE`, then `HOMEDRIVE` + `HOMEPATH` (joined). The first present,
+/// non-empty value wins; empty values are ignored. Pure (takes its inputs rather
+/// than reading the environment) so the Windows fallback order is unit-testable
+/// without mutating process-global env (which would race other threads' tests).
+fn pick_home_boundary(
+    home: Option<&std::ffi::OsStr>,
+    userprofile: Option<&std::ffi::OsStr>,
+    homedrive: Option<&std::ffi::OsStr>,
+    homepath: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    fn nonempty(v: Option<&std::ffi::OsStr>) -> Option<&std::ffi::OsStr> {
+        v.filter(|s| !s.is_empty())
+    }
+    if let Some(home) = nonempty(home) {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(profile) = nonempty(userprofile) {
+        return Some(PathBuf::from(profile));
+    }
+    if let (Some(drive), Some(path)) = (nonempty(homedrive), nonempty(homepath)) {
+        let mut combined = drive.to_os_string();
+        combined.push(path);
+        return Some(PathBuf::from(combined));
+    }
+    None
 }
 
 /// Walk implementation with the `$HOME` boundary injected, so tests can
@@ -152,16 +201,28 @@ pub fn load_from_paths(paths: &[PathBuf]) -> Option<LoadedInstructions> {
     let mut latest_mtime = UNIX_EPOCH;
 
     for path in paths {
-        let metadata = std::fs::metadata(path).ok()?;
-        let mtime = metadata.modified().ok()?;
+        // Tolerate a per-file failure: if one path is missing or unreadable
+        // (e.g. MERMAID.md removed in the race between `find_instruction_files`
+        // and here), skip just that file and load the rest, rather than letting
+        // one stat/read failure drop the WHOLE multi-file set (F62). Only when
+        // EVERY file fails does the load return `None` (via `sources.first()?`).
+        let Ok(metadata) = std::fs::metadata(path) else {
+            continue;
+        };
+        let Ok(mtime) = metadata.modified() else {
+            continue;
+        };
         let true_len = metadata.len() as usize;
         // Bounded read: never slurp a giant MERMAID.md whole just to truncate it
         // afterwards (#16). Read one byte past the cap so the combined-body
         // truncation check below still detects an oversized single file; the
         // true on-disk size comes from the stat above, so `byte_len` stays
         // accurate rather than reflecting the capped read.
-        let (bytes, _truncated) =
-            crate::utils::read_file_capped(path, MAX_INSTRUCTIONS_BYTES.saturating_add(1)).ok()?;
+        let Ok((bytes, _truncated)) =
+            crate::utils::read_file_capped(path, MAX_INSTRUCTIONS_BYTES.saturating_add(1))
+        else {
+            continue;
+        };
         let raw = String::from_utf8_lossy(&bytes).into_owned();
         total_byte_len = total_byte_len.saturating_add(true_len);
         if mtime > latest_mtime {
@@ -175,18 +236,9 @@ pub fn load_from_paths(paths: &[PathBuf]) -> Option<LoadedInstructions> {
         bodies.push((path.to_path_buf(), raw));
     }
     let primary = sources.first()?.path.clone();
-    let raw = combine_instruction_bodies(bodies);
+    let sections = label_instruction_bodies(bodies);
     let byte_len = total_byte_len;
-    let (content, truncated) = if raw.len() > MAX_INSTRUCTIONS_BYTES {
-        // Char-boundary-safe truncation. `floor_char_boundary` stabilized
-        // in Rust 1.91.0 — matches the crate MSRV pinned in `Cargo.toml`.
-        let cut = raw.floor_char_boundary(MAX_INSTRUCTIONS_BYTES);
-        let mut clipped = raw[..cut].to_string();
-        clipped.push_str(INSTRUCTIONS_TRUNCATION_MARKER);
-        (clipped, true)
-    } else {
-        (raw, false)
-    };
+    let (content, truncated) = combine_and_cap_sections(sections, MAX_INSTRUCTIONS_BYTES);
     Some(LoadedInstructions {
         path: primary,
         content,
@@ -268,11 +320,15 @@ pub fn refresh(
     }
 }
 
-fn combine_instruction_bodies(bodies: Vec<(PathBuf, String)>) -> String {
-    // Always wrap each file in a labeled header — even a single file — so the
-    // content lands in the system prompt as clearly-bounded project data
-    // rather than blending into trusted system authority (#109). Matches the
-    // memory block's `# Memory` header and the multi-file labeling below.
+/// Separator inserted between labeled instruction sections in the combined body.
+const INSTRUCTION_SECTION_SEPARATOR: &str = "\n\n---\n\n";
+
+/// Wrap each `(path, body)` in a labeled header — even a single file — so the
+/// content lands in the system prompt as clearly-bounded project data rather
+/// than blending into trusted system authority (#109). Returns the labeled
+/// sections in load order: lowest precedence first, highest precedence LAST (so
+/// `MERMAID.md` lands after `AGENTS.md`).
+fn label_instruction_bodies(bodies: Vec<(PathBuf, String)>) -> Vec<String> {
     bodies
         .into_iter()
         .map(|(path, body)| {
@@ -282,8 +338,69 @@ fn combine_instruction_bodies(bodies: Vec<(PathBuf, String)>) -> String {
                 .unwrap_or("instructions");
             format!("# Project Instructions: {}\n\n{}", name, body)
         })
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
+        .collect()
+}
+
+/// Join labeled `sections` into one body capped at `cap` bytes while PRESERVING
+/// the documented "MERMAID.md wins on conflict" contract under the cap (F61).
+///
+/// `sections` is in precedence order, **highest precedence last**. When the
+/// combined body fits, it is returned whole. When it overflows, the
+/// highest-precedence (last) section — `MERMAID.md` — is protected: the
+/// lower-precedence prefix (`AGENTS.md`) is head-truncated to fit, with the
+/// truncation marker at the elision point, so the winner survives intact and
+/// last (so it still overrides on conflict). Only when the winner *alone*
+/// overflows the cap is the winner itself head-clipped (lower-precedence
+/// sections dropped). The old code joined `[AGENTS, MERMAID]` then kept the
+/// HEAD, so a ≥ 40 KB AGENTS.md silently dropped the entire MERMAID.md tail —
+/// letting the lower-priority file win.
+///
+/// Truncation always lands on a UTF-8 char boundary (`floor_char_boundary`,
+/// stabilized in Rust 1.91.0 — matches the crate MSRV in `Cargo.toml`), and the
+/// result never exceeds `cap + INSTRUCTIONS_TRUNCATION_MARKER.len()` bytes.
+fn combine_and_cap_sections(sections: Vec<String>, cap: usize) -> (String, bool) {
+    const SEP: &str = INSTRUCTION_SECTION_SEPARATOR;
+    let marker = INSTRUCTIONS_TRUNCATION_MARKER;
+
+    let full = sections.join(SEP);
+    if full.len() <= cap {
+        return (full, false);
+    }
+    // Over cap. The winner (highest precedence = MERMAID.md) is the last section
+    // and must never be the file that's silently dropped.
+    let Some(winner) = sections.last() else {
+        return (String::new(), false);
+    };
+    // Even the winner alone exceeds the cap: there's no room for any
+    // lower-precedence content. Drop the rest and head-clip the winner — it
+    // still wins, merely truncated.
+    if winner.len() >= cap {
+        let cut = winner.floor_char_boundary(cap);
+        let mut clipped = winner[..cut].to_string();
+        clipped.push_str(marker);
+        return (clipped, true);
+    }
+    // The winner fits whole at the tail. Budget the remaining room for the
+    // lower-precedence prefix and head-truncate it, so the winner stays intact
+    // AND last (so it still overrides on conflict). `earlier_len >= 1` here: a
+    // lone section under the cap would have hit the fast path above.
+    let earlier_len = sections.len() - 1;
+    let earlier_full = sections[..earlier_len].join(SEP);
+    let avail = cap.saturating_sub(winner.len() + SEP.len());
+    let cut = earlier_full.floor_char_boundary(avail);
+    if cut == 0 {
+        // No lower-precedence content survives the budget: keep the winner whole
+        // (dropping the rest) with a trailing marker so the elision is visible.
+        let mut body = winner.clone();
+        body.push_str(marker);
+        return (body, true);
+    }
+    let mut body = String::with_capacity(cut + marker.len() + SEP.len() + winner.len());
+    body.push_str(&earlier_full[..cut]);
+    body.push_str(marker);
+    body.push_str(SEP);
+    body.push_str(winner.as_str());
+    (body, true)
 }
 
 #[cfg(test)]
@@ -512,5 +629,166 @@ mod tests {
         assert!(content.contains("# Project Instructions: MERMAID.md"));
         assert!(content.contains("fresh"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_agents_does_not_drop_mermaid_winner() {
+        // F61: when AGENTS.md alone is huge, head-truncating the COMBINED body
+        // used to drop the entire MERMAID.md tail — silently letting the
+        // lower-priority file "win". MERMAID.md must survive intact and last (so
+        // it still overrides on conflict); AGENTS.md is the file truncated.
+        let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("agents_huge");
+        fs::write(dir.join("AGENTS.md"), "A".repeat(60_000)).unwrap();
+        fs::write(dir.join("MERMAID.md"), "MERMAID_WINS_SENTINEL").unwrap();
+        let loaded =
+            load_from_paths(&[dir.join("AGENTS.md"), dir.join("MERMAID.md")]).expect("load");
+        assert!(loaded.truncated, "combined body exceeds the cap");
+        assert!(
+            loaded.content.contains("MERMAID_WINS_SENTINEL"),
+            "MERMAID.md (the winner) must survive the cap, not be dropped"
+        );
+        assert!(
+            loaded
+                .content
+                .contains("# Project Instructions: MERMAID.md")
+        );
+        assert!(loaded.content.contains(INSTRUCTIONS_TRUNCATION_MARKER));
+        // The winner lands AFTER the elision marker — AGENTS.md was the file
+        // truncated, and MERMAID.md still comes last so it overrides on conflict.
+        let marker_at = loaded.content.find(INSTRUCTIONS_TRUNCATION_MARKER).unwrap();
+        let winner_at = loaded.content.find("MERMAID_WINS_SENTINEL").unwrap();
+        assert!(
+            winner_at > marker_at,
+            "MERMAID.md must come after the truncated AGENTS.md"
+        );
+        // Bounded: never more than the cap plus a single marker.
+        assert!(
+            loaded.content.len() <= MAX_INSTRUCTIONS_BYTES + INSTRUCTIONS_TRUNCATION_MARKER.len()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn combine_and_cap_protects_the_last_section() {
+        // Lower-precedence section is large; the small winner must survive whole
+        // and land last, with the marker at the elision point.
+        let lower = format!("# Project Instructions: AGENTS.md\n\n{}", "L".repeat(200));
+        let winner = "# Project Instructions: MERMAID.md\n\nWIN".to_string();
+        let (body, truncated) = combine_and_cap_sections(vec![lower, winner], 100);
+        assert!(truncated);
+        assert!(body.contains("WIN"), "winner survives the cap");
+        assert!(body.contains(INSTRUCTIONS_TRUNCATION_MARKER));
+        let marker_at = body.find(INSTRUCTIONS_TRUNCATION_MARKER).unwrap();
+        assert!(
+            body.find("WIN").unwrap() > marker_at,
+            "winner stays last so it overrides on conflict"
+        );
+        assert!(body.len() <= 100 + INSTRUCTIONS_TRUNCATION_MARKER.len());
+    }
+
+    #[test]
+    fn combine_and_cap_clips_winner_when_it_alone_overflows() {
+        // When even the winner exceeds the cap, it's head-clipped (not dropped)
+        // and the lower-precedence section is dropped entirely.
+        let lower = "# Project Instructions: AGENTS.md\n\nlower-content".to_string();
+        let winner = format!("# Project Instructions: MERMAID.md\n\n{}", "W".repeat(300));
+        let (body, truncated) = combine_and_cap_sections(vec![lower, winner], 100);
+        assert!(truncated);
+        assert!(body.ends_with(INSTRUCTIONS_TRUNCATION_MARKER));
+        assert_eq!(body.len(), 100 + INSTRUCTIONS_TRUNCATION_MARKER.len());
+        assert!(
+            !body.contains("lower-content"),
+            "no room for the lower-precedence section"
+        );
+    }
+
+    #[test]
+    fn combine_and_cap_passes_through_when_it_fits() {
+        let a = "# Project Instructions: AGENTS.md\n\naye".to_string();
+        let b = "# Project Instructions: MERMAID.md\n\nbee".to_string();
+        let (body, truncated) = combine_and_cap_sections(vec![a, b], 10_000);
+        assert!(!truncated);
+        assert!(body.contains("aye") && body.contains("bee"));
+        assert!(
+            body.find("bee").unwrap() > body.find("aye").unwrap(),
+            "highest-precedence section stays last"
+        );
+    }
+
+    #[test]
+    fn load_from_paths_tolerates_a_missing_file() {
+        // F62: if one path is missing (e.g. MERMAID.md removed in the race
+        // between discovery and load), the present file(s) must still load
+        // rather than the whole multi-file set returning None.
+        let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("partial_load");
+        fs::write(dir.join("AGENTS.md"), "agent rules").unwrap();
+        let missing = dir.join("MERMAID.md"); // never created
+        let loaded = load_from_paths(&[dir.join("AGENTS.md"), missing])
+            .expect("AGENTS.md must still load when MERMAID.md is absent");
+        assert!(loaded.content.contains("# Project Instructions: AGENTS.md"));
+        assert!(loaded.content.contains("agent rules"));
+        assert_eq!(loaded.sources.len(), 1, "only the present file is a source");
+        assert_eq!(loaded.path, dir.join("AGENTS.md"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_from_paths_none_when_all_missing() {
+        let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("all_missing");
+        assert!(
+            load_from_paths(&[dir.join("AGENTS.md"), dir.join("MERMAID.md")]).is_none(),
+            "no present files => None"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pick_home_boundary_resolves_windows_home_vars() {
+        // F63: on Windows `HOME` is usually unset; the home boundary must fall
+        // back to `%USERPROFILE%`, then `%HOMEDRIVE%%HOMEPATH%`. Exercised here
+        // with synthetic values so it's verifiable on every platform.
+        use std::ffi::OsStr;
+        // HOME wins when present.
+        assert_eq!(
+            pick_home_boundary(
+                Some(OsStr::new("/home/me")),
+                Some(OsStr::new("C:\\Users\\me")),
+                None,
+                None
+            ),
+            Some(PathBuf::from("/home/me"))
+        );
+        // No HOME => USERPROFILE (the Windows home var) bounds the walk.
+        assert_eq!(
+            pick_home_boundary(None, Some(OsStr::new("C:\\Users\\me")), None, None),
+            Some(PathBuf::from("C:\\Users\\me"))
+        );
+        // No HOME/USERPROFILE => HOMEDRIVE + HOMEPATH joined.
+        assert_eq!(
+            pick_home_boundary(
+                None,
+                None,
+                Some(OsStr::new("C:")),
+                Some(OsStr::new("\\Users\\me"))
+            ),
+            Some(PathBuf::from("C:\\Users\\me"))
+        );
+        // Empty values are ignored (not a usable boundary).
+        assert_eq!(
+            pick_home_boundary(Some(OsStr::new("")), Some(OsStr::new("")), None, None),
+            None
+        );
+        // HOMEDRIVE without HOMEPATH (and vice-versa) => no boundary.
+        assert_eq!(
+            pick_home_boundary(None, None, Some(OsStr::new("C:")), None),
+            None
+        );
+        assert_eq!(
+            pick_home_boundary(None, None, None, Some(OsStr::new("\\Users\\me"))),
+            None
+        );
     }
 }

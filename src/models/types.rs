@@ -162,13 +162,48 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum MessageRole {
     User,
     Assistant,
     System,
     /// Tool result message (OpenAI-compatible format for function calling)
     Tool,
+}
+
+// F74: version-skew-tolerant deserialize. A conversation written by a NEWER build
+// may carry a `role` string this build doesn't model; the derived `Deserialize`
+// would hard-fail the WHOLE `ConversationHistory` parse, so `--continue` silently
+// skipped the newest session. We instead accept any string and map an unknown
+// role to the neutral `System` so the session still loads and resumes.
+//
+// We deliberately do NOT add a dedicated `MessageRole::Unknown` variant here:
+// `MessageRole` is matched exhaustively by the provider adapters
+// (anthropic/openai_compat/ollama/gemini) and the chat renderer/compaction
+// formatter, all outside this change's allowed file set, and a new variant would
+// fail those `match` arms to compile. Mapping unknown→System keeps the wire
+// format and every existing `match` intact while making the parse tolerant
+// ("treat as a neutral role; don't panic").
+impl<'de> Deserialize<'de> for MessageRole {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "User" => MessageRole::User,
+            "Assistant" => MessageRole::Assistant,
+            "System" => MessageRole::System,
+            "Tool" => MessageRole::Tool,
+            other => {
+                tracing::warn!(
+                    role = %other,
+                    "unknown message role in saved conversation; treating as System (version skew?)"
+                );
+                MessageRole::System
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +215,13 @@ pub enum ChatMessageKind {
     /// A display-only run summary ("Worked for … · used … tokens"). Rendered
     /// dim/italic; excluded from the model context by `build_chat_request`.
     RunSummary,
+    /// F74: a kind written by a NEWER build that this one doesn't model. Mapped
+    /// here by `#[serde(other)]` instead of failing the whole conversation parse;
+    /// it's neither a checkpoint nor a run summary, so every `matches!` site
+    /// treats it like a normal message. (`ChatMessageKind` is never matched
+    /// exhaustively, so adding this variant is compile-safe.)
+    #[serde(other)]
+    Unknown,
 }
 
 /// Why a model stopped generating, normalized across providers.
@@ -409,6 +451,42 @@ mod tests {
         }"#;
         let msg: ChatMessage = serde_json::from_str(pre_step3_json).expect("backward compat");
         assert!(msg.thinking_signature.is_none());
+    }
+
+    #[test]
+    fn unknown_message_role_deserializes_to_system() {
+        // F74: a role string from a newer build must not fail the parse — it maps
+        // to the neutral System role so the conversation still loads (`--continue`
+        // no longer skips the newest session).
+        let role: MessageRole = serde_json::from_str("\"Developer\"").expect("tolerant");
+        assert_eq!(role, MessageRole::System);
+        // Known roles still map correctly.
+        assert_eq!(
+            serde_json::from_str::<MessageRole>("\"Tool\"").unwrap(),
+            MessageRole::Tool
+        );
+    }
+
+    #[test]
+    fn unknown_message_kind_deserializes_to_unknown() {
+        // F74: an unknown ChatMessageKind maps to Unknown via #[serde(other)]
+        // rather than failing the parse; it's treated like a normal message.
+        let kind: ChatMessageKind = serde_json::from_str("\"some_future_kind\"").expect("tolerant");
+        assert_eq!(kind, ChatMessageKind::Unknown);
+        assert_ne!(kind, ChatMessageKind::Normal);
+    }
+
+    #[test]
+    fn chat_message_with_unknown_role_round_trips() {
+        // The whole ChatMessage deserialize succeeds despite an unknown role.
+        let json = r#"{
+            "role": "Developer",
+            "content": "hi",
+            "timestamp": "2026-04-16T12:00:00-04:00"
+        }"#;
+        let msg: ChatMessage = serde_json::from_str(json).expect("tolerant");
+        assert_eq!(msg.role, MessageRole::System);
+        assert_eq!(msg.content, "hi");
     }
 
     #[test]

@@ -161,10 +161,12 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
     let project_root = resolve_restore_root(id, &manifest)?;
 
     // Plan the restore as two ordered phases so a mid-way failure can't leave a
-    // half-applied tree: validate + collect every write and delete first (reading
-    // each snapshot source into memory), then apply all writes — each atomically —
-    // and only then the deletes. On any error we roll the applied ops back
-    // best-effort instead of returning with the project half-restored.
+    // half-applied tree: validate + collect every write and delete first (recording
+    // each snapshot's validated SOURCE PATH, not its bytes — F71), then apply all
+    // writes (each reads one snapshot and writes it atomically) and only then the
+    // deletes. Prior state is moved aside into a staging dir (F72), so on any error
+    // we roll the applied ops back best-effort — including non-empty directories —
+    // instead of returning with the project half-restored.
     let mut writes: Vec<RestoreOp> = Vec::new();
     let mut deletes: Vec<RestoreOp> = Vec::new();
     for file in &manifest.files {
@@ -203,22 +205,39 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
                     continue;
                 },
             };
-            let bytes = std::fs::read(&source).with_context(|| {
-                format!("failed to read checkpoint snapshot {}", source.display())
-            })?;
-            writes.push(RestoreOp::Write { target, bytes });
+            // Defer reading the snapshot until apply time (F71): the planner only
+            // records the validated source PATH, so the restore holds at most one
+            // file in memory at a time instead of every snapshot at once.
+            writes.push(RestoreOp::Write { target, source });
         } else {
             deletes.push(RestoreOp::Delete { target });
         }
     }
 
+    // Stage prior state inside the project root so displaced files/dirs are moved
+    // (rename), not held in memory or deleted outright: same-filesystem keeps the
+    // rename atomic, and a non-empty prior directory survives a rollback (F72). The
+    // fresh, hidden name can't collide with a (already-resolved) restore target.
+    let staging = project_root.join(format!(
+        ".mermaid-restore.{}",
+        crate::storage::fresh_id("restore")
+    ));
+    std::fs::create_dir_all(&staging)
+        .with_context(|| format!("failed to create restore staging dir {}", staging.display()))?;
+
     let mut applied: Vec<PriorState> = Vec::new();
-    if let Err(err) = apply_restore(&writes, &deletes, &mut applied) {
+    if let Err(err) = apply_restore(&writes, &deletes, &staging, &mut applied) {
         rollback_restore(&applied);
+        // Rollback renamed every staged item back out, so staging should now be
+        // empty; remove it only if so (`remove_dir`), never force-deleting prior
+        // data a partial rollback could not restore.
+        let _ = std::fs::remove_dir(&staging);
         return Err(err.context(
             "checkpoint restore failed; changes already applied were rolled back (best-effort)",
         ));
     }
+    // Commit: the restore stuck, so the staged prior copies are now garbage.
+    let _ = std::fs::remove_dir_all(&staging);
     if let Some(action) = manifest.pending_action.as_ref()
         && action.get("tool").is_some()
         && let Ok(store) = RuntimeStore::open_default()
@@ -245,100 +264,116 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
 }
 
 /// One planned restore mutation. All writes are applied (atomically) before any
-/// delete so a failure can't strand the tree in a half-applied state.
+/// delete so a failure can't strand the tree in a half-applied state. A write
+/// carries the validated snapshot SOURCE path (not its bytes); the bytes are read
+/// one file at a time at apply time, so peak memory is bounded by the largest
+/// single file rather than the whole checkpoint (F71).
 enum RestoreOp {
-    Write { target: PathBuf, bytes: Vec<u8> },
+    Write { target: PathBuf, source: PathBuf },
     Delete { target: PathBuf },
 }
 
-/// A target's state before this restore touched it, captured for rollback.
+/// A target's prior state, captured for rollback. The displaced file or directory
+/// subtree (when the target existed) was moved into the staging area via rename,
+/// so rollback restores it by moving it back — no prior bytes are held in memory
+/// and a non-empty directory is preserved in full (F71/F72).
 struct PriorState {
     target: PathBuf,
-    bytes: Option<Vec<u8>>,
-    existed: bool,
-    was_dir: bool,
+    /// Staging path the prior file/dir was renamed to, or `None` if the target did
+    /// not exist before the restore (rollback then just removes what we created).
+    staged: Option<PathBuf>,
 }
 
-fn snapshot_prior(target: &Path) -> PriorState {
-    if target.is_dir() {
-        PriorState {
-            target: target.to_path_buf(),
-            bytes: None,
-            existed: true,
-            was_dir: true,
-        }
-    } else if target.is_file() {
-        PriorState {
-            target: target.to_path_buf(),
-            bytes: std::fs::read(target).ok(),
-            existed: true,
-            was_dir: false,
-        }
-    } else {
-        PriorState {
-            target: target.to_path_buf(),
-            bytes: None,
-            existed: false,
-            was_dir: false,
-        }
+/// Move an existing target (file OR directory subtree) aside into `staging` via
+/// rename, returning the staging path so rollback can move it back. `Ok(None)`
+/// means the target did not exist — nothing to preserve. Rename keeps peak memory
+/// flat: a large file or a whole subtree is moved, never read.
+fn stage_prior(target: &Path, staging: &Path, counter: &mut usize) -> Result<Option<PathBuf>> {
+    if !target.exists() {
+        return Ok(None);
+    }
+    let dest = staging.join(counter.to_string());
+    *counter += 1;
+    std::fs::rename(target, &dest)
+        .with_context(|| format!("failed to stage prior state of {}", target.display()))?;
+    Ok(Some(dest))
+}
+
+/// Remove whatever currently sits at `path` (a freshly written file, or nothing),
+/// tolerating files, directories, and symlinks. `symlink_metadata` does not follow
+/// links, so a symlinked target is unlinked rather than its destination cleared.
+fn remove_path(path: &Path) {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => {
+            let _ = std::fs::remove_dir_all(path);
+        },
+        Ok(_) => {
+            let _ = std::fs::remove_file(path);
+        },
+        Err(_) => {},
     }
 }
 
-/// Apply writes (each via the atomic temp+rename writer) then deletes, recording
-/// each target's prior state into `applied` so the caller can roll back on error.
+/// Apply writes (each via the atomic temp+rename writer) then deletes. Prior state
+/// is moved aside into `staging` (rename) and recorded in `applied` so the caller
+/// can roll back on error. Reads at most one snapshot file into memory at a time
+/// (F71), and preserves a non-empty prior directory across rollback (F72).
 fn apply_restore(
     writes: &[RestoreOp],
     deletes: &[RestoreOp],
+    staging: &Path,
     applied: &mut Vec<PriorState>,
 ) -> Result<()> {
+    let mut counter = 0usize;
     for op in writes {
-        if let RestoreOp::Write { target, bytes } = op {
-            let prior = snapshot_prior(target);
+        if let RestoreOp::Write { target, source } = op {
+            // Read just THIS snapshot (bounded by one file) BEFORE displacing the
+            // target, so a missing/unreadable source fails without moving the prior
+            // file aside (F71).
+            let bytes = std::fs::read(source).with_context(|| {
+                format!("failed to read checkpoint snapshot {}", source.display())
+            })?;
+            let staged = stage_prior(target, staging, &mut counter)?;
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            crate::write_atomic(target, bytes).with_context(|| {
+            crate::write_atomic(target, &bytes).with_context(|| {
                 format!("failed to restore checkpoint file {}", target.display())
             })?;
-            applied.push(prior);
+            applied.push(PriorState {
+                target: target.clone(),
+                staged,
+            });
         }
     }
     for op in deletes {
         if let RestoreOp::Delete { target } = op
             && target.exists()
         {
-            let prior = snapshot_prior(target);
-            if target.is_file() {
-                std::fs::remove_file(target)
-                    .with_context(|| format!("failed to delete {}", target.display()))?;
-            } else if target.is_dir() {
-                std::fs::remove_dir_all(target)
-                    .with_context(|| format!("failed to delete {}", target.display()))?;
-            }
-            applied.push(prior);
+            // Move the prior file/dir aside instead of deleting it outright, so a
+            // later failure can roll a non-empty directory subtree back (F72).
+            let staged = stage_prior(target, staging, &mut counter)?;
+            applied.push(PriorState {
+                target: target.clone(),
+                staged,
+            });
         }
     }
     Ok(())
 }
 
-/// Best-effort undo of the ops in `applied`, newest first. A deleted directory's
-/// contents can't be recovered (only the empty dir is recreated); everything
-/// else is restored from the in-memory snapshot.
+/// Best-effort undo of the ops in `applied`, newest first: remove whatever the
+/// restore put at each target, then move the staged prior file/directory back. A
+/// non-empty prior directory is restored in full because it was moved aside
+/// (rename) rather than deleted (F72).
 fn rollback_restore(applied: &[PriorState]) {
     for prior in applied.iter().rev() {
-        if prior.existed {
-            if prior.was_dir {
-                let _ = std::fs::create_dir_all(&prior.target);
-            } else if let Some(bytes) = &prior.bytes {
-                if let Some(parent) = prior.target.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = crate::write_atomic(&prior.target, bytes);
+        remove_path(&prior.target);
+        if let Some(staged) = &prior.staged {
+            if let Some(parent) = prior.target.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
-        } else if prior.target.is_file() {
-            let _ = std::fs::remove_file(&prior.target);
-        } else if prior.target.is_dir() {
-            let _ = std::fs::remove_dir_all(&prior.target);
+            let _ = std::fs::rename(staged, &prior.target);
         }
     }
 }
@@ -512,6 +547,14 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// (#130): removes `checkpoints/<id>/` whose mtime is past the window so the tree
 /// can't grow without bound, while keeping recent (still-restorable) checkpoints.
 /// Returns the count removed; never fails the caller (a bad entry is skipped).
+///
+/// F23 (RC-F): each pruned directory's DB row is deleted in the same pass.
+/// Storage `gc()` only removes ARCHIVED checkpoint rows, so without this a
+/// never-archived old checkpoint would lose its on-disk directory here while its
+/// row survived — and a later [`restore_checkpoint`] would then fail on the
+/// missing manifest. Deleting the row keeps `checkpoints().list()` and the
+/// on-disk directories in agreement. The store is opened once, best-effort: if it
+/// can't be opened we still GC the directories.
 pub fn gc_old_checkpoint_dirs(retention_days: i64) -> Result<usize> {
     let dir = data_dir()?.join("checkpoints");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -522,6 +565,7 @@ pub fn gc_old_checkpoint_dirs(retention_days: i64) -> Result<usize> {
             retention_days.max(0) as u64 * 86_400,
         ))
         .unwrap_or(std::time::UNIX_EPOCH);
+    let store = RuntimeStore::open_default().ok();
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -535,6 +579,18 @@ pub fn gc_old_checkpoint_dirs(retention_days: i64) -> Result<usize> {
             .unwrap_or(false);
         if too_old && std::fs::remove_dir_all(&path).is_ok() {
             removed += 1;
+            // The directory name IS the checkpoint id — drop the matching DB row
+            // so `restore` can't later resolve a row whose manifest is gone.
+            if let Some(store) = store.as_ref()
+                && let Some(id) = path.file_name().and_then(|name| name.to_str())
+                && let Err(error) = store.checkpoints().delete(id)
+            {
+                tracing::warn!(
+                    id,
+                    error = %error,
+                    "failed to delete DB row for a GC'd checkpoint dir"
+                );
+            }
         }
     }
     Ok(removed)
@@ -665,6 +721,73 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "do not delete");
 
         let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mid_restore_failure_restores_nonempty_prior_directory() {
+        // F72: a restore that displaces a non-empty directory must put the whole
+        // subtree back when a later step fails — not just an empty dir. Drive
+        // `apply_restore` to a real mid-way failure (a write whose snapshot source
+        // is missing) AFTER a directory has been staged, then assert rollback
+        // restored the directory and its contents at every depth.
+        use super::{PriorState, RestoreOp, apply_restore, rollback_restore};
+
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("mermaid_ckpt_dirroll_{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // `victim` is currently a NON-EMPTY directory. The first write replaces
+        // this path with a file, which stages the whole subtree aside.
+        let victim = root.join("victim");
+        std::fs::create_dir_all(victim.join("sub")).unwrap();
+        std::fs::write(victim.join("inner.txt"), "precious").unwrap();
+        std::fs::write(victim.join("sub").join("deep.txt"), "deep").unwrap();
+
+        // A valid snapshot source for the first (successful) write.
+        let src = root.join("snapshot.bin");
+        std::fs::write(&src, "new-content").unwrap();
+
+        let staging = root.join(".staging");
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let writes = vec![
+            RestoreOp::Write {
+                target: victim.clone(),
+                source: src.clone(),
+            },
+            // Second write fails: its snapshot source does not exist, so the read
+            // errors and the whole restore rolls back.
+            RestoreOp::Write {
+                target: root.join("other.txt"),
+                source: root.join("does-not-exist.bin"),
+            },
+        ];
+        let deletes: Vec<RestoreOp> = Vec::new();
+
+        let mut applied: Vec<PriorState> = Vec::new();
+        let result = apply_restore(&writes, &deletes, &staging, &mut applied);
+        assert!(
+            result.is_err(),
+            "a missing snapshot source must fail the restore"
+        );
+
+        rollback_restore(&applied);
+
+        // The non-empty directory must be back, contents intact at every depth.
+        assert!(victim.is_dir(), "prior directory subtree must be restored");
+        assert_eq!(
+            std::fs::read_to_string(victim.join("inner.txt")).unwrap(),
+            "precious"
+        );
+        assert_eq!(
+            std::fs::read_to_string(victim.join("sub").join("deep.txt")).unwrap(),
+            "deep"
+        );
+        // The failed second write must not have left a file behind.
+        assert!(!root.join("other.txt").exists());
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

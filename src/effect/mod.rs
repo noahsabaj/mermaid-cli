@@ -36,6 +36,7 @@ mod middleware;
 mod turn_scope;
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -58,6 +59,13 @@ pub use turn_scope::TurnScope;
 const CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
 const CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// F38: how many recently-cancelled `TurnId`s to remember as tombstones.
+/// Turn ids are strictly monotonic and never reused, so a stray turn-scoped
+/// `Cmd` for a cancelled turn can only ever be a post-cancel straggler that
+/// lands within a few turns of the cancel. A small bounded ring is plenty;
+/// older entries age out so the set never grows across a long session.
+const CANCELLED_TOMBSTONE_CAP: usize = 256;
 
 /// Single channel back to the reducer. `EffectRunner` holds the
 /// sender; every spawned task clones this so it can emit `Msg` as
@@ -83,6 +91,12 @@ pub struct EffectRunner {
     /// runs at the top of every `dispatch` call so the map stays
     /// bounded across long sessions (F12).
     scopes: HashMap<TurnId, TurnScope>,
+    /// F38: bounded tombstone ring of `TurnId`s whose scope has been
+    /// cancelled+dropped. A turn-scoped `Cmd` (`CallModel` / `ExecuteTool` /
+    /// `CompactConversation`) bearing a tombstoned id is dropped in `dispatch`
+    /// instead of resurrecting a fresh, un-cancelled scope through
+    /// `scope_mut`'s `or_insert_with`. Bounded to `CANCELLED_TOMBSTONE_CAP`.
+    cancelled_turns: VecDeque<TurnId>,
     /// Detached work (saves, persists, MCP lifecycle) lives here.
     /// This one set never gets cancelled piecemeal — shutdown drains
     /// it during `EffectRunner::shutdown`.
@@ -121,6 +135,7 @@ impl EffectRunner {
         Self {
             msg_tx,
             scopes: HashMap::new(),
+            cancelled_turns: VecDeque::new(),
             detached: tokio::task::JoinSet::new(),
             workdir,
             providers: None,
@@ -251,6 +266,25 @@ impl EffectRunner {
             .or_insert_with(|| TurnScope::new(turn))
     }
 
+    /// F38: record a cancelled turn in the bounded tombstone ring, evicting the
+    /// oldest id at capacity. Skips duplicates so a re-cancel doesn't churn the
+    /// ring (membership is all `is_tombstoned` checks).
+    fn tombstone_turn(&mut self, turn: TurnId) {
+        if self.cancelled_turns.contains(&turn) {
+            return;
+        }
+        if self.cancelled_turns.len() >= CANCELLED_TOMBSTONE_CAP {
+            self.cancelled_turns.pop_front();
+        }
+        self.cancelled_turns.push_back(turn);
+    }
+
+    /// F38: true iff `turn`'s scope was cancelled (tombstoned). New turn-scoped
+    /// work for such a turn is dropped rather than spinning up a fresh scope.
+    fn is_tombstoned(&self, turn: TurnId) -> bool {
+        self.cancelled_turns.contains(&turn)
+    }
+
     /// Drop the scope for a turn, signalling cancellation to every
     /// child first. Safe to call for non-existent turns.
     ///
@@ -261,6 +295,11 @@ impl EffectRunner {
     /// stick in `Cancelling` — the reducer has no other way to learn
     /// that the abort fully landed.
     fn drop_scope(&mut self, turn: TurnId) {
+        // F38: tombstone this turn so a stray post-cancel turn-scoped Cmd can't
+        // resurrect an un-cancelled scope for it. Recorded for both the live and
+        // already-reaped branches below — once cancelled, a turn is dead either
+        // way (turn ids are monotonic and never reused).
+        self.tombstone_turn(turn);
         if let Some(mut scope) = self.scopes.remove(&turn) {
             scope.cancel();
             let tx = self.msg_tx.clone();
@@ -336,6 +375,24 @@ impl EffectRunner {
         self.reap_empty_scopes();
         tracing::trace!(cmd = %cmd.summary(), "effect: dispatch");
 
+        // F38: refuse to spawn fresh work for a turn we've already cancelled.
+        // Only the scope-spawning variants carry a `scope_turn()`; `CancelScope`
+        // returns `None` here so a re-cancel still reaches `drop_scope` (which
+        // re-emits the terminal `TurnCancelled` the reducer needs). Turn ids are
+        // monotonic and never reused, so a tombstoned id can only be a stray
+        // post-cancel straggler — dropping it stops `scope_mut`'s `or_insert_with`
+        // from resurrecting an un-cancelled scope.
+        if let Some(turn) = cmd.scope_turn()
+            && self.is_tombstoned(turn)
+        {
+            tracing::debug!(
+                cmd = %cmd.summary(),
+                turn = %turn,
+                "effect: dropping turn-scoped cmd for an already-cancelled turn"
+            );
+            return;
+        }
+
         match cmd {
             Cmd::CallModel { turn, mut request } => {
                 let tx = self.msg_tx.clone();
@@ -352,7 +409,18 @@ impl EffectRunner {
                     // reducer's /context preview can fold it into its MCP-only
                     // estimate and agree with what the model actually sees.
                     let builtin_tokens = crate::domain::estimate_tool_schema_tokens(&enriched);
-                    let _ = tx.try_send(Msg::BuiltinToolSchemaTokens(builtin_tokens));
+                    // Best-effort and cosmetic (the /context preview). This is the
+                    // synchronous dispatch path so we can't await; if the bounded
+                    // channel is momentarily full under heavy streaming, log the
+                    // drop rather than swallowing it silently — the estimate just
+                    // stays briefly stale (#F43).
+                    if let Err(e) = tx.try_send(Msg::BuiltinToolSchemaTokens(builtin_tokens)) {
+                        tracing::debug!(
+                            error = %e,
+                            "effect: dropped builtin tool-schema token estimate (channel full); \
+                             /context preview may be briefly stale"
+                        );
+                    }
                     enriched.append(&mut request.tools);
                     request.tools = enriched;
                 }
@@ -410,10 +478,36 @@ impl EffectRunner {
                     enriched.append(&mut request.chat.tools);
                     request.chat.tools = enriched;
                 }
+                // Capture the trigger before `request` moves into the task, so a
+                // panic fallback can still name which compaction failed.
+                let trigger = request.trigger;
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
-                    dispatch_compact_conversation(tx, providers, turn, request, token).await;
+                    use futures::FutureExt;
+                    let fallback_tx = tx.clone();
+                    if std::panic::AssertUnwindSafe(dispatch_compact_conversation(
+                        tx, providers, turn, request, token,
+                    ))
+                    .catch_unwind()
+                    .await
+                    .is_err()
+                    {
+                        // The compaction task panicked. Without a terminal
+                        // `CompactionFinished`/`CompactionFailed`, the reducer
+                        // wedges in `Compacting` until Ctrl+C; emit a failure so
+                        // it can recover, mirroring `CallModel`/`ExecuteTool`
+                        // (#43, F37).
+                        tracing::error!(turn = %turn, "dispatch_compact_conversation panicked");
+                        let _ = fallback_tx
+                            .send(Msg::CompactionFailed {
+                                turn,
+                                trigger,
+                                message: "the compaction task panicked unexpectedly".to_string(),
+                                kind: crate::domain::StatusKind::Error,
+                            })
+                            .await;
+                    }
                 });
             },
             Cmd::ExecuteTool {
@@ -1176,8 +1270,22 @@ impl EffectRunner {
             if let Some(mgr) = crate::mcp::manager_ref::get() {
                 mgr.shutdown().await;
             }
-            for (_, mut scope) in self.scopes.drain() {
-                scope.drain().await;
+            // F42: bound each per-scope drain so one non-cooperative task can't
+            // eat the whole shutdown budget and starve the remaining scopes'
+            // drains (the scopes were all cancelled above, so a well-behaved task
+            // unwinds well within this). On timeout, dropping `scope` aborts its
+            // still-running `JoinSet` members via `TurnScope::drop`.
+            for (id, mut scope) in self.scopes.drain() {
+                if tokio::time::timeout(CANCEL_DRAIN_TIMEOUT, scope.drain())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        turn = %id,
+                        timeout_ms = CANCEL_DRAIN_TIMEOUT.as_millis(),
+                        "shutdown: scope drain timed out; aborting its remaining tasks"
+                    );
+                }
             }
             while let Some(result) = self.detached.join_next().await {
                 if let Err(e) = result
@@ -1213,6 +1321,36 @@ async fn join_logged(handle: tokio::task::JoinHandle<()>, what: &str) {
     {
         tracing::warn!(error = %e, task = what, "effect: sibling relay task panicked");
     }
+}
+
+/// Owns a sibling relay task so it cannot outlive its parent future as a detached
+/// task: if the parent is dropped before it `take()`s the handle for
+/// `join_logged`, the guard aborts the task on drop (#F39). On the normal path the
+/// handle is taken and awaited, so the drop is a no-op. The relay is already
+/// bounded by the turn `CancellationToken`; this makes the "every turn task is
+/// owned" invariant hold structurally rather than only behaviorally.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl AbortOnDrop {
+    fn take(mut self) -> tokio::task::JoinHandle<()> {
+        self.0.take().expect("AbortOnDrop::take called once")
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
+/// `tokio::spawn` a relay, wrapped in an [`AbortOnDrop`] so the parent owns it.
+fn spawn_guarded<F>(fut: F) -> AbortOnDrop
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    AbortOnDrop(Some(tokio::spawn(fut)))
 }
 
 async fn dispatch_call_model(
@@ -1251,7 +1389,18 @@ async fn dispatch_call_model(
         // every turn (#39).
         let model_id = request.model_id.clone();
         let caps = provider.capabilities().clone();
-        tokio::task::spawn_blocking(move || record_provider_capabilities(&model_id, &caps));
+        // Own this telemetry write inside the per-turn task (await it) instead of
+        // a detached `spawn_blocking` whose handle was dropped — so a panic in the
+        // upsert surfaces and shutdown isn't racing an untracked DB write (#F41).
+        // It is a few-ms SQLite upsert before a multi-second model call, so
+        // awaiting it here does not meaningfully stall the turn (the "never stall
+        // dispatch" rule is about the synchronous reducer path, not this task).
+        if let Err(e) =
+            tokio::task::spawn_blocking(move || record_provider_capabilities(&model_id, &caps))
+                .await
+        {
+            tracing::error!(error = %e, "effect: provider-capability telemetry write failed");
+        }
     }
     if !request.tools.is_empty() && !provider.capabilities().supports_tools {
         let _ = msg_tx
@@ -1361,11 +1510,36 @@ async fn dispatch_call_model(
     // run concurrently with `provider.chat` for streaming backpressure.)
     let relay_tx = msg_tx.clone();
     let relay_token = token.clone();
-    let relay = tokio::spawn(async move {
+    let relay = spawn_guarded(async move {
         loop {
             let event = tokio::select! {
                 biased;
-                _ = relay_token.cancelled() => break,
+                _ = relay_token.cancelled() => {
+                    // #F40: a cancel landing right after the provider finished must
+                    // not discard the terminal Done it already enqueued. Drain the
+                    // buffered events and relay only a terminal Done — so the
+                    // just-completed turn's usage is still recorded — while NOT
+                    // painting buffered intermediate text (the turn is cancelled).
+                    // `try_recv` drains the buffer without awaiting more.
+                    while let Ok(buffered) = stream_rx.try_recv() {
+                        if let StreamEvent::Done {
+                            usage,
+                            thinking_signature,
+                            stop_reason,
+                        } = buffered
+                        {
+                            let _ = relay_tx
+                                .send(Msg::StreamDone {
+                                    turn,
+                                    usage,
+                                    thinking_signature,
+                                    stop_reason,
+                                })
+                                .await;
+                        }
+                    }
+                    break;
+                },
                 ev = stream_rx.recv() => match ev {
                     Some(ev) => ev,
                     None => break,
@@ -1437,7 +1611,7 @@ async fn dispatch_call_model(
                             let mut retry_request = request;
                             retry_request.messages = result.replacement_messages.clone();
                             let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
-                            join_logged(relay, "stream_relay").await;
+                            join_logged(relay.take(), "stream_relay").await;
                             dispatch_provider_stream(msg_tx, provider, turn, retry_request, token)
                                 .await;
                             return;
@@ -1461,7 +1635,7 @@ async fn dispatch_call_model(
         },
     }
 
-    join_logged(relay, "stream_relay").await;
+    join_logged(relay.take(), "stream_relay").await;
 
     // Post-turn (success only): verify the model actually fit VRAM. Skipped when
     // the user allowed RAM offload (no warning possible) and a no-op for
@@ -1500,11 +1674,36 @@ async fn dispatch_provider_stream(
     let ctx = StreamContext::new(token.clone(), stream_tx, turn);
     let relay_tx = msg_tx.clone();
     let relay_token = token.clone();
-    let relay = tokio::spawn(async move {
+    let relay = spawn_guarded(async move {
         loop {
             let event = tokio::select! {
                 biased;
-                _ = relay_token.cancelled() => break,
+                _ = relay_token.cancelled() => {
+                    // #F40: a cancel landing right after the provider finished must
+                    // not discard the terminal Done it already enqueued. Drain the
+                    // buffered events and relay only a terminal Done — so the
+                    // just-completed turn's usage is still recorded — while NOT
+                    // painting buffered intermediate text (the turn is cancelled).
+                    // `try_recv` drains the buffer without awaiting more.
+                    while let Ok(buffered) = stream_rx.try_recv() {
+                        if let StreamEvent::Done {
+                            usage,
+                            thinking_signature,
+                            stop_reason,
+                        } = buffered
+                        {
+                            let _ = relay_tx
+                                .send(Msg::StreamDone {
+                                    turn,
+                                    usage,
+                                    thinking_signature,
+                                    stop_reason,
+                                })
+                                .await;
+                        }
+                    }
+                    break;
+                },
                 ev = stream_rx.recv() => match ev {
                     Some(ev) => ev,
                     None => break,
@@ -1542,7 +1741,7 @@ async fn dispatch_provider_stream(
         },
     }
 
-    join_logged(relay, "stream_relay").await;
+    join_logged(relay.take(), "stream_relay").await;
 }
 
 /// Run plugin hooks OFF the async executor. `run_plugin_hooks` is synchronous —
@@ -1734,18 +1933,31 @@ async fn consolidate_memory(
         return;
     }
 
-    // Snapshot the to-be-pruned files first so the prune is reversible.
+    // Snapshot the to-be-pruned files first so the prune is reversible. The
+    // delete below is irreversible, so a failed checkpoint must NOT proceed —
+    // otherwise the report would advertise "Recoverable from the latest
+    // checkpoint" for a prune with no checkpoint behind it (#F69). Abort instead;
+    // nothing has been deleted yet, so no memory is lost.
     let paths: Vec<std::path::PathBuf> = plan
         .prune
         .iter()
         .filter_map(|id| crate::app::memory::find(&workdir, id).map(|e| e.path))
         .collect();
-    if !paths.is_empty() {
-        let _ = crate::runtime::create_checkpoint(
+    if !paths.is_empty()
+        && let Err(e) = crate::runtime::create_checkpoint(
             &workdir,
             &paths,
             Some(serde_json::json!({ "tool": "consolidate_memory", "reason": plan.reason })),
-        );
+        )
+    {
+        let _ = tx
+            .send(Msg::RuntimeText(format!(
+                "Memory consolidation aborted: couldn't checkpoint the {} file{} marked for pruning, so nothing was deleted (no memory lost). Error: {e}",
+                paths.len(),
+                if paths.len() == 1 { "" } else { "s" },
+            )))
+            .await;
+        return;
     }
 
     let mut pruned = Vec::new();
@@ -2139,7 +2351,7 @@ async fn dispatch_execute_tool(
     let (progress_tx, mut progress_rx) = mpsc::channel(16);
     let relay_tx = msg_tx.clone();
     let relay_token = token.clone();
-    let progress_relay = tokio::spawn(async move {
+    let progress_relay = spawn_guarded(async move {
         loop {
             let event = tokio::select! {
                 biased;
@@ -2194,7 +2406,7 @@ async fn dispatch_execute_tool(
     });
     fire_plugin_hooks("after_tool_use", after_payload).await;
     finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
-    join_logged(progress_relay, "tool_progress_relay").await;
+    join_logged(progress_relay.take(), "tool_progress_relay").await;
     let _ = msg_tx
         .send(Msg::ToolFinished {
             turn,
@@ -2797,6 +3009,61 @@ mod tests {
 
         r.dispatch(Cmd::CancelScope(turn));
         assert_eq!(r.scope_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn tombstoned_turn_is_not_resurrected_by_late_scoped_cmd() {
+        // F38: once a turn's scope has been cancelled (dropped + tombstoned), a
+        // stray turn-scoped Cmd bearing the same TurnId must be dropped — not
+        // used to spin up a fresh, un-cancelled scope via `scope_mut`'s
+        // `or_insert_with`. Turn ids are monotonic and never reused, so such a
+        // Cmd can only be a post-cancel straggler.
+        let (mut r, _rx) = runner();
+        let req = || crate::domain::ChatRequest {
+            model_id: "test/m".to_string(),
+            messages: vec![],
+            system_prompt: String::new(),
+            instructions: None,
+            reasoning: crate::models::ReasoningLevel::Medium,
+            temperature: 0.7,
+            max_tokens: 4096,
+            tools: vec![],
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
+        };
+        let turn = TurnId(123);
+
+        r.dispatch(Cmd::CallModel {
+            turn,
+            request: req(),
+        });
+        assert_eq!(r.scope_count(), 1);
+
+        // Cancel: drops the scope and tombstones the turn.
+        r.dispatch(Cmd::CancelScope(turn));
+        assert_eq!(r.scope_count(), 0);
+
+        // A late scoped Cmd for the now-tombstoned turn must be dropped.
+        r.dispatch(Cmd::CallModel {
+            turn,
+            request: req(),
+        });
+        assert_eq!(
+            r.scope_count(),
+            0,
+            "a cancelled turn must not be resurrected by a late scoped Cmd"
+        );
+
+        // A fresh, higher turn id is unaffected by the tombstone.
+        r.dispatch(Cmd::CallModel {
+            turn: TurnId(124),
+            request: req(),
+        });
+        assert_eq!(
+            r.scope_count(),
+            1,
+            "a fresh turn must still create its scope normally"
+        );
     }
 
     #[tokio::test]

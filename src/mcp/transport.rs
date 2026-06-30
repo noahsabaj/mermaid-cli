@@ -27,6 +27,33 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// so we fail fast instead of waiting the full response budget (#37).
 const WRITE_TIMEOUT_SECS: u64 = 10;
 
+/// Minimal, non-secret environment variables passed through to an MCP server
+/// child after `env_clear()`. Deliberately excludes every provider API key /
+/// cloud credential Mermaid holds — only locale, terminal, and path basics
+/// survive (plus the server's own declared `env`, added separately, and any
+/// `LC_*` matched by prefix). See F48.
+#[cfg(not(windows))]
+const SAFE_ENV_PASSTHROUGH: &[&str] = &[
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR",
+];
+#[cfg(windows)]
+const SAFE_ENV_PASSTHROUGH: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "TERM",
+    "TMPDIR",
+    "SYSTEMROOT",
+    "SystemRoot",
+    "APPDATA",
+    "USERPROFILE",
+    "PATHEXT",
+    "COMSPEC",
+];
+
 /// Stdio transport for a single MCP server process.
 ///
 /// Manages the child process lifecycle and provides request/response
@@ -76,6 +103,24 @@ impl StdioTransport {
             // so we never leak MCP server processes.
             .kill_on_drop(true);
 
+        // Don't hand an MCP server child Mermaid's entire environment — that
+        // would leak every provider API key / cloud credential we hold to
+        // third-party (including curated, no-confirmation) server code. Start
+        // from an empty environment and re-add only a minimal, non-secret
+        // allowlist, plus any `LC_*` locale overrides, plus the server's own
+        // declared `env` vars (which intentionally take precedence). See F48.
+        cmd.env_clear();
+        for key in SAFE_ENV_PASSTHROUGH {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
+        for (key, value) in std::env::vars_os() {
+            if key.to_str().is_some_and(|k| k.starts_with("LC_")) {
+                cmd.env(&key, &value);
+            }
+        }
+
         for (key, value) in env {
             cmd.env(key, value);
         }
@@ -93,6 +138,9 @@ impl StdioTransport {
             .stdin
             .take()
             .ok_or_else(|| anyhow!("Failed to capture MCP server stdin"))?;
+        // Wrap stdin now (rather than at the end) so the stdout reader task can
+        // share it and reply to server-initiated requests we don't support (F79).
+        let stdin = Arc::new(Mutex::new(stdin));
         let stdout = child
             .stdout
             .take()
@@ -107,6 +155,7 @@ impl StdioTransport {
 
         // Background task: read stdout for JSON-RPC responses
         let pending_clone = Arc::clone(&pending);
+        let stdin_for_reader = Arc::clone(&stdin);
         let reader_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             loop {
@@ -152,11 +201,33 @@ impl StdioTransport {
                             let _ = sender.send(msg);
                         }
                     }
+                } else if msg.get("method").is_some() {
+                    // Has a `method`: either a server-initiated REQUEST (also
+                    // carries an `id`) or a NOTIFICATION (no `id`). We implement
+                    // neither, but they need different handling.
+                    match msg.get("id") {
+                        // Server request: it BLOCKS until it gets a response. Reply
+                        // with a JSON-RPC "method not supported" error rather than
+                        // dropping it and letting the server stall forever (F79).
+                        Some(id) if !id.is_null() => {
+                            tracing::debug!(
+                                method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
+                                "MCP: replying method-not-supported to unsupported server request"
+                            );
+                            reply_method_not_supported(&stdin_for_reader, id).await;
+                        },
+                        // Notification: no `id`, no reply expected. Ignore it.
+                        _ => {
+                            tracing::trace!(
+                                method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
+                                "MCP: ignoring server notification (no reply expected)"
+                            );
+                        },
+                    }
                 } else {
-                    tracing::trace!(
-                        method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
-                        "MCP: ignoring server-initiated message (not a response)"
-                    );
+                    // Neither a response nor a request/notification we recognize
+                    // (e.g. an `id` that isn't a parseable number, with no method).
+                    tracing::trace!("MCP: ignoring unrecognized stdout message");
                 }
             }
 
@@ -186,7 +257,7 @@ impl StdioTransport {
         });
 
         Ok(Self {
-            stdin: Arc::new(Mutex::new(stdin)),
+            stdin,
             pending,
             next_id: AtomicU64::new(1),
             child: Arc::new(Mutex::new(child)),
@@ -415,6 +486,33 @@ fn is_response(msg: &Value) -> bool {
     msg.get("id").and_then(parse_response_id).is_some() && msg.get("method").is_none()
 }
 
+/// Reply to a server-initiated JSON-RPC *request* we don't implement with a
+/// JSON-RPC error, so the server isn't left blocking on a response that would
+/// otherwise never arrive (F79). The request `id` is echoed back verbatim
+/// (number or string), as the spec requires. Best-effort and bounded by
+/// `WRITE_TIMEOUT_SECS`: a write failure or a wedged child just means no reply
+/// gets out, which the reader loop will soon observe as EOF anyway.
+async fn reply_method_not_supported(stdin: &Mutex<tokio::process::ChildStdin>, id: &Value) {
+    // -32601 is the JSON-RPC 2.0 "Method not found" code.
+    let reply = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id.clone(),
+        "error": { "code": -32601, "message": "method not supported" },
+    });
+    let Ok(serialized) = serde_json::to_string(&reply) else {
+        return;
+    };
+    let mut line = serialized;
+    line.push('\n');
+    let mut guard = stdin.lock().await;
+    let _ = timeout(
+        Duration::from_secs(WRITE_TIMEOUT_SECS),
+        guard.write_all(line.as_bytes()),
+    )
+    .await;
+    let _ = timeout(Duration::from_secs(WRITE_TIMEOUT_SECS), guard.flush()).await;
+}
+
 /// Send SIGTERM to `pid` by shelling out to `kill`, mirroring
 /// `runtime::client::kill_pid`. Best-effort: failure (process already gone, or
 /// `kill` missing) is ignored — the caller escalates to SIGKILL next. Positive
@@ -541,6 +639,71 @@ mod tests {
             "must fail fast via the EOF drain, not wait REQUEST_TIMEOUT_SECS"
         );
         // `t` drops here → kill_on_drop reaps the sleeping child.
+    }
+
+    // F48: the MCP child must NOT inherit Mermaid's whole environment (which
+    // holds every provider API key). The child echoes back, as a JSON-RPC
+    // response, a declared env var (must pass through), whether PATH is present
+    // (allowlisted), and CARGO — a var the parent has under `cargo test` that is
+    // NOT allowlisted, so `env_clear()` must drop it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_env_is_cleared_except_allowlist_and_declared() {
+        use super::StdioTransport;
+        use std::collections::HashMap;
+        let script = r#"read line
+printf '{"jsonrpc":"2.0","id":1,"result":{"declared":"%s","path":"%s","cargo":"%s"}}\n' "$DECLARED_TOKEN" "$([ -n "$PATH" ] && echo yes || echo no)" "$CARGO""#;
+        let mut env = HashMap::new();
+        env.insert("DECLARED_TOKEN".to_string(), "passed-through".to_string());
+
+        let t = StdioTransport::spawn("sh", &["-c".to_string(), script.to_string()], &env)
+            .await
+            .expect("spawn");
+        let res = t.send_request("ping", json!({})).await.expect("response");
+        assert_eq!(
+            res["declared"], "passed-through",
+            "declared env vars must still pass through"
+        );
+        assert_eq!(res["path"], "yes", "PATH must be in the allowlist");
+        assert_eq!(
+            res["cargo"], "",
+            "a non-allowlisted inherited var must be cleared by env_clear()"
+        );
+    }
+
+    // F79: a server-initiated request (id + method) we don't support must get a
+    // JSON-RPC error reply so the server isn't left blocking. The fake server
+    // reads our ping, emits a server request, then reads our reply and reports —
+    // via the ping response — whether that reply carried the -32601 error code.
+    // The read/write alternation makes ordering deterministic.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn server_initiated_request_gets_method_not_supported_reply() {
+        use super::StdioTransport;
+        use std::collections::HashMap;
+        let script = r#"read ping
+printf '{"jsonrpc":"2.0","id":99,"method":"sampling/createMessage","params":{}}\n'
+read reply
+case "$reply" in
+  *-32601*) printf '{"jsonrpc":"2.0","id":1,"result":{"replied":true}}\n' ;;
+  *) printf '{"jsonrpc":"2.0","id":1,"result":{"replied":false}}\n' ;;
+esac"#;
+        let t = StdioTransport::spawn(
+            "sh",
+            &["-c".to_string(), script.to_string()],
+            &HashMap::new(),
+        )
+        .await
+        .expect("spawn");
+        let res = t
+            .send_request("ping", json!({}))
+            .await
+            .expect("ping response");
+        assert_eq!(
+            res["replied"], true,
+            "transport must reply with a -32601 error to a server-initiated request, \
+             not silently drop it"
+        );
     }
 
     // terminate() must deliver a real SIGTERM (signal 15), not SIGKILL (signal 9)

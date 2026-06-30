@@ -47,6 +47,29 @@ pub struct ChatState {
     /// selection can be extracted by display-cell range. Indexed by content
     /// line (the same index the selection uses).
     last_rendered_rows: Vec<String>,
+    /// Memoized full-frame assembly (F31): the wrapped lines and image click
+    /// map produced by the per-message render loop, keyed by a fingerprint of
+    /// every input that determines them (message set, theme, width, reasoning
+    /// toggle, day). An unchanged scrollback reuses this across frames instead
+    /// of re-parsing, re-wrapping, and rebuilding the click map every frame.
+    /// Replaced whenever the fingerprint changes.
+    frame_memo: Option<FrameMemo>,
+}
+
+/// One memoized chat-frame assembly (see `ChatState::frame_memo`). Holds the
+/// lines *before* the per-frame selection highlight (which is selection-
+/// dependent and applied to a clone each frame) plus the image click map, so a
+/// frame whose inputs are unchanged skips the whole per-message render loop
+/// (F31). Cloning is `O(total lines)`, but it replaces the markdown parse +
+/// wrap + click-map rebuild the loop would otherwise redo every frame.
+#[derive(Debug, Clone)]
+struct FrameMemo {
+    /// Fingerprint of the inputs that produced `lines` + `click_map`.
+    key: u64,
+    /// Assembled wrapped lines, before the per-frame selection highlight.
+    lines: Vec<Line<'static>>,
+    /// Image click map captured alongside `lines`.
+    click_map: Vec<(u16, ImageClickTarget)>,
 }
 
 impl ChatState {
@@ -60,6 +83,7 @@ impl ChatState {
             last_chat_area: None,
             selection: None,
             last_rendered_rows: Vec::new(),
+            frame_memo: None,
         }
     }
 
@@ -325,6 +349,15 @@ fn line_plain_text(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
+/// Saturating cast from a `usize` line counter to the `u16` ratatui scroll /
+/// click-map coordinate. A scrollback longer than `u16::MAX` rows clamps to the
+/// last addressable row instead of wrapping the index modulo 65536 (which a
+/// plain `as u16` would do, corrupting both the scroll position and the image
+/// click-map on a very long session) (F32).
+fn clamp_to_u16(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
 /// Apply `hl` (merged onto each span's existing style) to display cells
 /// `[c0, c1)` of `line`, splitting spans at the selection boundaries so the
 /// highlight lands on exactly the selected glyphs.
@@ -440,14 +473,70 @@ fn wrap_assistant_content(
     out
 }
 
+/// `std::fmt::Write` shim that streams a value's formatted bytes straight into
+/// a hasher, so a `Debug`/`Display` value can be folded into a fingerprint
+/// without allocating an intermediate `String`.
+struct HashWrite<'a, H: Hasher>(&'a mut H);
+
+impl<H: Hasher> std::fmt::Write for HashWrite<'_, H> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.write(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// Fingerprint every input that determines the assembled chat lines + image
+/// click map: the message set (role, kind, content, thinking, actions, image
+/// count, timestamp, metadata), the theme identity, the content width, the
+/// reasoning toggle, and today's date — the only clock-dependent input, since a
+/// user timestamp renders as "Today"/"Yesterday"/an absolute date relative to it.
+///
+/// Two frames with the same fingerprint assemble byte-identical lines, so the
+/// result can be memoized across frames (F31). Uses the same 64-bit-hash-keyed
+/// caching the per-message #134 cache already relies on; the complex non-`Hash`
+/// fields (`metadata`, `actions`) are folded in via their `Debug` form so no
+/// rendered field is silently missed.
+fn frame_fingerprint(
+    messages: &[ChatMessage],
+    theme_seed: u64,
+    content_width: u16,
+    show_reasoning: bool,
+) -> u64 {
+    use std::fmt::Write as _;
+    let mut h = rustc_hash::FxHasher::default();
+    theme_seed.hash(&mut h);
+    content_width.hash(&mut h);
+    show_reasoning.hash(&mut h);
+    // The day-relative label ("Today"/"Yesterday"/date) on user timestamps
+    // changes only at midnight; fold today's date in so the memo refreshes then.
+    chrono::Local::now().date_naive().hash(&mut h);
+    messages.len().hash(&mut h);
+    for msg in messages {
+        msg.content.hash(&mut h);
+        msg.thinking.hash(&mut h);
+        // The instant fully determines `format_time(msg.timestamp)`; the
+        // day-relative label is covered by today's date above.
+        msg.timestamp.timestamp().hash(&mut h);
+        msg.images
+            .as_ref()
+            .map_or(0, |imgs| imgs.len())
+            .hash(&mut h);
+        let mut hw = HashWrite(&mut h);
+        let _ = write!(
+            hw,
+            "{:?}|{:?}|{:?}|{:?}",
+            msg.role, msg.kind, msg.metadata, msg.actions
+        );
+    }
+    h.finish()
+}
+
 impl<'a> StatefulWidget for ChatWidget<'a> {
     type State = ChatState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
         // Code-block lines are tagged with this background; computed once so
-        // the per-message render loop and the markdown cache key can use it.
+        // the markdown cache key can use it.
         let code_bg = self.theme.colors.code_background.to_color();
         let theme_seed = {
             let mut h = rustc_hash::FxHasher::default();
@@ -461,263 +550,327 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         let content_width = area.width;
         let content_area = area;
 
-        // Clear click map for this render pass
-        state.image_click_map.clear();
         state.last_chat_area = Some((area.x, area.y, area.width, area.height));
 
-        for (idx, msg) in self.messages.iter().enumerate() {
-            // Skip Tool messages - they're internal to the agent loop and their
-            // content is already displayed inline in the assistant's action blocks
-            if matches!(msg.role, MessageRole::Tool) {
-                continue;
-            }
+        // F31: skip the whole per-message assembly when nothing that affects it
+        // changed. The fingerprint folds in every render input, so a reused
+        // frame is byte-identical to a fresh one. Scrolling and drag-selection
+        // don't touch these inputs, so the common case (a static scrollback)
+        // reuses the memo instead of re-parsing and re-wrapping every message.
+        let frame_key = frame_fingerprint(
+            self.messages,
+            theme_seed,
+            content_width,
+            self.show_reasoning,
+        );
+        // Type is inferred from the map below (the frame_memo struct names the
+        // fields); an explicit annotation would just be a clippy::type_complexity.
+        let memo_hit = state
+            .frame_memo
+            .as_ref()
+            .filter(|m| m.key == frame_key)
+            .map(|m| (m.lines.clone(), m.click_map.clone()));
 
-            if matches!(msg.kind, ChatMessageKind::ContextCheckpoint) {
-                if let Some(event_lines) = render_context_checkpoint_event(msg, self.theme) {
-                    lines.extend(event_lines);
-                    lines.push(Line::from(""));
+        let mut lines = if let Some((cached_lines, cached_click_map)) = memo_hit {
+            // Memo hit: reuse the assembled lines; restore the click map that
+            // was captured alongside them.
+            state.image_click_map = cached_click_map;
+            cached_lines
+        } else {
+            // Memo miss: assemble fresh, then memoize for the next frame.
+            let mut lines: Vec<Line<'static>> = Vec::new();
+
+            // Clear click map for this render pass
+            state.image_click_map.clear();
+
+            for (idx, msg) in self.messages.iter().enumerate() {
+                // Skip Tool messages - they're internal to the agent loop and their
+                // content is already displayed inline in the assistant's action blocks
+                if matches!(msg.role, MessageRole::Tool) {
+                    continue;
                 }
-                continue;
-            }
 
-            // Run summary ("Worked for … · used … tokens"): a muted gray line where
-            // the spinner was — dimmer than the assistant's text (same gray as the
-            // timestamp), not italic. Display-only — excluded from the model context
-            // by build_chat_request, so it never accumulates as conversation.
-            if matches!(msg.kind, ChatMessageKind::RunSummary) {
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", msg.content),
-                    Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)),
-                )));
-                lines.push(Line::from(""));
-                continue;
-            }
+                if matches!(msg.kind, ChatMessageKind::ContextCheckpoint) {
+                    if let Some(event_lines) = render_context_checkpoint_event(msg, self.theme) {
+                        lines.extend(event_lines);
+                        lines.push(Line::from(""));
+                    }
+                    continue;
+                }
 
-            let (role_prefix, role_color) = match msg.role {
-                MessageRole::User => (">", ratatui::style::Color::White),
-                MessageRole::Assistant => ("●", ratatui::style::Color::White),
-                MessageRole::System => ("●", self.theme.colors.system_message.to_color()),
-                MessageRole::Tool => unreachable!("Tool messages filtered above"),
-            };
+                // Run summary ("Worked for … · used … tokens"): a muted gray line where
+                // the spinner was — dimmer than the assistant's text (same gray as the
+                // timestamp), not italic. Display-only — excluded from the model context
+                // by build_chat_request, so it never accumulates as conversation.
+                if matches!(msg.kind, ChatMessageKind::RunSummary) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", msg.content),
+                        Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)),
+                    )));
+                    lines.push(Line::from(""));
+                    continue;
+                }
 
-            if matches!(msg.role, MessageRole::Assistant) {
-                // Render thinking block if present
-                if let Some(ref thinking) = msg.thinking {
-                    // Skip rendering if thinking content is empty or literal "None"
-                    let thinking_trimmed = thinking.trim();
-                    if thinking_trimmed.is_empty()
-                        || thinking_trimmed == "None"
-                        || thinking_trimmed == "none"
-                    {
-                        // Don't render empty/null thinking blocks
-                    } else if self.show_reasoning {
-                        // Add "Thinking..." header in italic and dimmed with grayed white dot
+                let (role_prefix, role_color) = match msg.role {
+                    MessageRole::User => (">", ratatui::style::Color::White),
+                    MessageRole::Assistant => ("●", ratatui::style::Color::White),
+                    MessageRole::System => ("●", self.theme.colors.system_message.to_color()),
+                    MessageRole::Tool => unreachable!("Tool messages filtered above"),
+                };
+
+                if matches!(msg.role, MessageRole::Assistant) {
+                    // Render thinking block if present
+                    if let Some(ref thinking) = msg.thinking {
+                        // Skip rendering if thinking content is empty or literal "None"
+                        let thinking_trimmed = thinking.trim();
+                        if thinking_trimmed.is_empty()
+                            || thinking_trimmed == "None"
+                            || thinking_trimmed == "none"
+                        {
+                            // Don't render empty/null thinking blocks
+                        } else if self.show_reasoning {
+                            // Add "Thinking..." header in italic and dimmed with grayed white dot
+                            lines.push(Line::from(vec![
+                                Span::styled(
+                                    "● ",
+                                    Style::new().fg(ratatui::style::Color::DarkGray),
+                                ),
+                                Span::styled(
+                                    "Thinking...",
+                                    Style::new()
+                                        .fg(self.theme.colors.text_secondary.to_color())
+                                        .italic()
+                                        .dim(),
+                                ),
+                            ]));
+
+                            // Render thinking content with proper wrapping (2-space hanging indent)
+                            let wrapped = wrap_text_with_indent(
+                                thinking,
+                                content_width as usize,
+                                2, // first line indent (2 spaces)
+                                2, // continuation indent (2 spaces)
+                            );
+                            for wrapped_line in wrapped {
+                                lines.push(Line::from(Span::styled(
+                                    wrapped_line,
+                                    Style::new()
+                                        .fg(self.theme.colors.text_secondary.to_color())
+                                        .italic()
+                                        .dim(),
+                                )));
+                            }
+
+                            // Add blank line after thinking block
+                            lines.push(Line::from(""));
+                        } else if msg.content.trim().is_empty() && msg.actions.is_empty() {
+                            // Reasoning is hidden and there's nothing else in this turn —
+                            // skip it entirely rather than render an empty bullet. No
+                            // "reasoning hidden" placeholder: /visible-reasoning controls
+                            // whether the thinking shows, silently.
+                            continue;
+                        }
+                    }
+
+                    // Assistant prose is the bulk of the scrollback. Its wrapped,
+                    // role-prefixed lines are a pure function of (content, theme,
+                    // width) — exactly this key — so cache the WRAPPED output, not
+                    // just the parse: a committed message is then cloned, never
+                    // re-parsed or re-wrapped, each frame (#134). Theme is folded in
+                    // so a theme switch can't serve stale-colored lines; width is in
+                    // the key because tables wrap to the viewport.
+                    let mut hasher = rustc_hash::FxHasher::default();
+                    msg.content.hash(&mut hasher);
+                    theme_seed.hash(&mut hasher);
+                    content_width.hash(&mut hasher);
+                    let cache_key = hasher.finish();
+
+                    let wrapped = if let Some(cached) = self.wrapped_line_cache.get(&cache_key) {
+                        cached.clone()
+                    } else {
+                        let block = wrap_assistant_content(
+                            &msg.content,
+                            content_width,
+                            role_prefix,
+                            role_color,
+                            self.theme,
+                        );
+                        self.wrapped_line_cache.insert(cache_key, block.clone());
+                        if self.wrapped_line_cache.len()
+                            > crate::constants::MARKDOWN_CACHE_MAX_ENTRIES
+                        {
+                            // Evict down to the cap rather than clearing the whole
+                            // cache — a wholesale clear re-rendered every message each
+                            // frame once a conversation exceeded the cap. Keep the
+                            // entry just inserted.
+                            let overflow = self.wrapped_line_cache.len()
+                                - crate::constants::MARKDOWN_CACHE_MAX_ENTRIES;
+                            let stale: Vec<u64> = self
+                                .wrapped_line_cache
+                                .keys()
+                                .copied()
+                                .filter(|&k| k != cache_key)
+                                .take(overflow)
+                                .collect();
+                            for k in stale {
+                                self.wrapped_line_cache.remove(&k);
+                            }
+                        }
+                        block
+                    };
+                    lines.extend(wrapped);
+
+                    // Render all actions at the end of the message
+                    if !msg.actions.is_empty() {
+                        // Add blank line between text content and actions
+                        if !msg.content.trim().is_empty() {
+                            lines.push(Line::from(""));
+                        }
+                        render_actions(
+                            &msg.actions,
+                            &mut lines,
+                            self.theme,
+                            content_width as usize,
+                        );
+                    }
+                } else {
+                    // For User messages: format timestamp and display on right edge
+                    let formatted_timestamp = format_relative_timestamp(msg.timestamp);
+                    // Display cells, not bytes — a CJK/emoji timestamp (or message)
+                    // would otherwise mis-reserve space and push the right-aligned
+                    // timestamp off its column (#104).
+                    let timestamp_width = formatted_timestamp.width();
+                    let min_gap = 3; // minimum spaces between text and timestamp
+
+                    // Content is clean — timestamps are injected at API call time only
+                    let cleaned_content = &msg.content;
+
+                    // Reserve space on the first line for role prefix + gap + timestamp
+                    // so text wraps early enough to not overlap the timestamp
+                    let role_prefix_width = role_prefix.width() + 1; // "You " = prefix + space
+                    let first_line_reserved = role_prefix_width + min_gap + timestamp_width;
+
+                    // Manually wrap the user message with hanging indent (2 spaces)
+                    let wrapped = wrap_text_with_indent(
+                        cleaned_content,
+                        content_width as usize,
+                        first_line_reserved, // reserve space for prefix + gap + timestamp on first line
+                        2,                   // continuation indent
+                    );
+
+                    let band_start = lines.len();
+                    for (line_idx, wrapped_line) in wrapped.iter().enumerate() {
+                        if line_idx == 0 {
+                            // First line: add role prefix and timestamp on right
+                            let text_content = wrapped_line.trim_start(); // Remove the indent we added
+                            let text_width = text_content.width();
+
+                            let mut spans = vec![
+                                Span::styled(
+                                    format!("{} ", role_prefix),
+                                    Style::new().fg(role_color).bold(),
+                                ),
+                                Span::raw(text_content.to_string()),
+                            ];
+
+                            // Always add at least min_gap spaces, plus any extra from word-boundary slack.
+                            // Align the timestamp to the content's right edge.
+                            let pad = user_timestamp_padding(
+                                role_prefix_width,
+                                text_width,
+                                timestamp_width,
+                                min_gap,
+                                content_width as usize,
+                            );
+                            spans.push(Span::raw(" ".repeat(pad)));
+                            spans.push(Span::styled(
+                                formatted_timestamp.clone(),
+                                Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)),
+                            ));
+
+                            lines.push(Line::from(spans));
+                        } else {
+                            // Continuation lines: already have 2-space margin from wrap_text_with_indent
+                            lines.push(Line::from(wrapped_line.clone()));
+                        }
+                    }
+
+                    // Claude-Code-style highlight band: paint a subtle full-width
+                    // background behind every line of the user's submitted prompt. The
+                    // ">" marker, text, and timestamp keep their own foreground colors;
+                    // only the row background is added. Other roles (system notices)
+                    // share this layout but must NOT be highlighted.
+                    if matches!(msg.role, MessageRole::User) {
+                        let user_bg = self.theme.colors.user_message_background.to_color();
+                        let cw = content_width as usize;
+                        for line in &mut lines[band_start..] {
+                            let used: usize = line.spans.iter().map(|s| s.content.width()).sum();
+                            if used < cw {
+                                line.spans.push(Span::raw(" ".repeat(cw - used)));
+                            }
+                            line.style = line.style.bg(user_bg);
+                        }
+                    }
+                }
+
+                // Show image indicators under user and assistant messages.
+                // User images come from clipboard paste (`Attachment`); assistant
+                // images come from tool executions that emitted `ProgressEvent::
+                // Artifact` during their run — screenshot captures, inline
+                // previews from computer-use, etc. Both land in `msg.images` as
+                // base64 strings and render the same way.
+                if matches!(msg.role, MessageRole::User | MessageRole::Assistant)
+                    && let Some(ref images) = msg.images
+                    && !images.is_empty()
+                {
+                    for (i, _) in images.iter().enumerate() {
+                        // Record this line in the click map before pushing.
+                        // `lines.len()` is usize; clamp to the u16 click-map/scroll
+                        // coordinate with a saturating cast at this boundary so a
+                        // scrollback past u16::MAX rows clamps instead of wrapping a
+                        // stale line index into the map (F32).
+                        let content_line = lines.len();
+                        state.image_click_map.push((
+                            clamp_to_u16(content_line),
+                            ImageClickTarget {
+                                message_index: idx,
+                                image_index: i,
+                            },
+                        ));
                         lines.push(Line::from(vec![
-                            Span::styled("● ", Style::new().fg(ratatui::style::Color::DarkGray)),
                             Span::styled(
-                                "Thinking...",
-                                Style::new()
-                                    .fg(self.theme.colors.text_secondary.to_color())
-                                    .italic()
-                                    .dim(),
+                                "  ⎿ ",
+                                Style::new().fg(self.theme.colors.info.to_color()),
+                            ),
+                            Span::styled(
+                                format!("[Image #{}]", i + 1),
+                                Style::new().fg(self.theme.colors.info.to_color()).italic(),
                             ),
                         ]));
-
-                        // Render thinking content with proper wrapping (2-space hanging indent)
-                        let wrapped = wrap_text_with_indent(
-                            thinking,
-                            content_width as usize,
-                            2, // first line indent (2 spaces)
-                            2, // continuation indent (2 spaces)
-                        );
-                        for wrapped_line in wrapped {
-                            lines.push(Line::from(Span::styled(
-                                wrapped_line,
-                                Style::new()
-                                    .fg(self.theme.colors.text_secondary.to_color())
-                                    .italic()
-                                    .dim(),
-                            )));
-                        }
-
-                        // Add blank line after thinking block
-                        lines.push(Line::from(""));
-                    } else if msg.content.trim().is_empty() && msg.actions.is_empty() {
-                        // Reasoning is hidden and there's nothing else in this turn —
-                        // skip it entirely rather than render an empty bullet. No
-                        // "reasoning hidden" placeholder: /visible-reasoning controls
-                        // whether the thinking shows, silently.
-                        continue;
                     }
                 }
 
-                // Assistant prose is the bulk of the scrollback. Its wrapped,
-                // role-prefixed lines are a pure function of (content, theme,
-                // width) — exactly this key — so cache the WRAPPED output, not
-                // just the parse: a committed message is then cloned, never
-                // re-parsed or re-wrapped, each frame (#134). Theme is folded in
-                // so a theme switch can't serve stale-colored lines; width is in
-                // the key because tables wrap to the viewport.
-                let mut hasher = rustc_hash::FxHasher::default();
-                msg.content.hash(&mut hasher);
-                theme_seed.hash(&mut hasher);
-                content_width.hash(&mut hasher);
-                let cache_key = hasher.finish();
-
-                let wrapped = if let Some(cached) = self.wrapped_line_cache.get(&cache_key) {
-                    cached.clone()
-                } else {
-                    let block = wrap_assistant_content(
-                        &msg.content,
-                        content_width,
-                        role_prefix,
-                        role_color,
-                        self.theme,
-                    );
-                    self.wrapped_line_cache.insert(cache_key, block.clone());
-                    if self.wrapped_line_cache.len() > crate::constants::MARKDOWN_CACHE_MAX_ENTRIES
-                    {
-                        // Evict down to the cap rather than clearing the whole
-                        // cache — a wholesale clear re-rendered every message each
-                        // frame once a conversation exceeded the cap. Keep the
-                        // entry just inserted.
-                        let overflow = self.wrapped_line_cache.len()
-                            - crate::constants::MARKDOWN_CACHE_MAX_ENTRIES;
-                        let stale: Vec<u64> = self
-                            .wrapped_line_cache
-                            .keys()
-                            .copied()
-                            .filter(|&k| k != cache_key)
-                            .take(overflow)
-                            .collect();
-                        for k in stale {
-                            self.wrapped_line_cache.remove(&k);
-                        }
-                    }
-                    block
-                };
-                lines.extend(wrapped);
-
-                // Render all actions at the end of the message
-                if !msg.actions.is_empty() {
-                    // Add blank line between text content and actions
-                    if !msg.content.trim().is_empty() {
-                        lines.push(Line::from(""));
-                    }
-                    render_actions(&msg.actions, &mut lines, self.theme, content_width as usize);
-                }
-            } else {
-                // For User messages: format timestamp and display on right edge
-                let formatted_timestamp = format_relative_timestamp(msg.timestamp);
-                // Display cells, not bytes — a CJK/emoji timestamp (or message)
-                // would otherwise mis-reserve space and push the right-aligned
-                // timestamp off its column (#104).
-                let timestamp_width = formatted_timestamp.width();
-                let min_gap = 3; // minimum spaces between text and timestamp
-
-                // Content is clean — timestamps are injected at API call time only
-                let cleaned_content = &msg.content;
-
-                // Reserve space on the first line for role prefix + gap + timestamp
-                // so text wraps early enough to not overlap the timestamp
-                let role_prefix_width = role_prefix.width() + 1; // "You " = prefix + space
-                let first_line_reserved = role_prefix_width + min_gap + timestamp_width;
-
-                // Manually wrap the user message with hanging indent (2 spaces)
-                let wrapped = wrap_text_with_indent(
-                    cleaned_content,
-                    content_width as usize,
-                    first_line_reserved, // reserve space for prefix + gap + timestamp on first line
-                    2,                   // continuation indent
-                );
-
-                let band_start = lines.len();
-                for (line_idx, wrapped_line) in wrapped.iter().enumerate() {
-                    if line_idx == 0 {
-                        // First line: add role prefix and timestamp on right
-                        let text_content = wrapped_line.trim_start(); // Remove the indent we added
-                        let text_width = text_content.width();
-
-                        let mut spans = vec![
-                            Span::styled(
-                                format!("{} ", role_prefix),
-                                Style::new().fg(role_color).bold(),
-                            ),
-                            Span::raw(text_content.to_string()),
-                        ];
-
-                        // Always add at least min_gap spaces, plus any extra from word-boundary slack.
-                        // Align the timestamp to the content's right edge.
-                        let pad = user_timestamp_padding(
-                            role_prefix_width,
-                            text_width,
-                            timestamp_width,
-                            min_gap,
-                            content_width as usize,
-                        );
-                        spans.push(Span::raw(" ".repeat(pad)));
-                        spans.push(Span::styled(
-                            formatted_timestamp.clone(),
-                            Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)),
-                        ));
-
-                        lines.push(Line::from(spans));
-                    } else {
-                        // Continuation lines: already have 2-space margin from wrap_text_with_indent
-                        lines.push(Line::from(wrapped_line.clone()));
-                    }
-                }
-
-                // Claude-Code-style highlight band: paint a subtle full-width
-                // background behind every line of the user's submitted prompt. The
-                // ">" marker, text, and timestamp keep their own foreground colors;
-                // only the row background is added. Other roles (system notices)
-                // share this layout but must NOT be highlighted.
-                if matches!(msg.role, MessageRole::User) {
-                    let user_bg = self.theme.colors.user_message_background.to_color();
-                    let cw = content_width as usize;
-                    for line in &mut lines[band_start..] {
-                        let used: usize = line.spans.iter().map(|s| s.content.width()).sum();
-                        if used < cw {
-                            line.spans.push(Span::raw(" ".repeat(cw - used)));
-                        }
-                        line.style = line.style.bg(user_bg);
-                    }
-                }
+                lines.push(Line::from(""));
             }
 
-            // Show image indicators under user and assistant messages.
-            // User images come from clipboard paste (`Attachment`); assistant
-            // images come from tool executions that emitted `ProgressEvent::
-            // Artifact` during their run — screenshot captures, inline
-            // previews from computer-use, etc. Both land in `msg.images` as
-            // base64 strings and render the same way.
-            if matches!(msg.role, MessageRole::User | MessageRole::Assistant)
-                && let Some(ref images) = msg.images
-                && !images.is_empty()
-            {
-                for (i, _) in images.iter().enumerate() {
-                    // Record this line in the click map before pushing
-                    let content_line = lines.len() as u16;
-                    state.image_click_map.push((
-                        content_line,
-                        ImageClickTarget {
-                            message_index: idx,
-                            image_index: i,
-                        },
-                    ));
-                    lines.push(Line::from(vec![
-                        Span::styled("  ⎿ ", Style::new().fg(self.theme.colors.info.to_color())),
-                        Span::styled(
-                            format!("[Image #{}]", i + 1),
-                            Style::new().fg(self.theme.colors.info.to_color()).italic(),
-                        ),
-                    ]));
-                }
-            }
+            // Capture the plain text of each rendered row for selection
+            // extraction (before the per-frame highlight, which changes only
+            // styling, not text). Recomputed only on a miss: a memo hit means
+            // unchanged content, so the rows from the miss that built the memo
+            // stay valid — this skips an O(total) re-collect every frame (F31).
+            state.last_rendered_rows = lines.iter().map(line_plain_text).collect();
 
-            lines.push(Line::from(""));
-        }
+            // F31: memoize this assembly so an unchanged next frame reuses it
+            // instead of re-running the loop above. Store the lines *before* the
+            // selection highlight (applied per-frame below), so the cache stays
+            // selection-independent.
+            state.frame_memo = Some(FrameMemo {
+                key: frame_key,
+                lines: lines.clone(),
+                click_map: state.image_click_map.clone(),
+            });
+            lines
+        };
 
         // NOTE: The response buffer is NOT rendered during streaming (buffering mode).
         // The response is buffered invisibly and only shown when generation is complete.
@@ -726,10 +879,10 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         //
         // The status line shows progress: "↑ Sending..." → "↓ Streaming..." with timer
 
-        // Capture the plain text of each rendered row for selection
-        // extraction. Done before the highlight pass, which only changes
-        // styling, not text.
-        state.last_rendered_rows = lines.iter().map(line_plain_text).collect();
+        // NOTE: `state.last_rendered_rows` (used by selection extraction) is
+        // refreshed inside the memo-miss branch above, not here — a memo hit
+        // keeps the rows from the miss that built it (content is unchanged on a
+        // hit), so they need not be re-collected every frame (F31).
 
         // Paint the active drag selection (reverse video over the selected
         // cells). Selection lines are content indices, matching `lines`.
@@ -754,11 +907,14 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         }
 
         // NOTE: Wrapping is disabled because we handle it manually with hanging indents
-        // Calculate content height and viewport for proper scroll clamping
-        let content_height = lines.len() as u16;
+        // Calculate content height and viewport for proper scroll clamping.
+        // `lines.len()` is usize; convert to the u16 ratatui scroll type with a
+        // saturating cast so a scrollback longer than u16::MAX rows clamps the
+        // scroll position instead of wrapping it (F32).
+        let content_height = lines.len();
         let viewport_height = area.height;
 
-        let scroll_pos = state.get_scroll_position(content_height, viewport_height);
+        let scroll_pos = state.get_scroll_position(clamp_to_u16(content_height), viewport_height);
         state.last_scroll_position = scroll_pos;
 
         let paragraph = Paragraph::new(lines)
@@ -1114,6 +1270,55 @@ fn format_action_duration(seconds: f64) -> String {
     }
 }
 
+/// Hard-break a single over-long token into the plain-text line accumulator,
+/// splitting at char boundaries (UTF-8-safe, display-cell aware) so a giant
+/// unbroken token (e.g. a 5000-char URL) wraps across lines instead of
+/// overflowing the viewport and being clipped (F33).
+///
+/// Mirrors the accumulation `wrap_text_with_indent` does for normal words:
+/// `current_line`/`current_length` carry the in-progress line (its indent
+/// already pushed into `current_line`, not counted in `current_length`),
+/// finished lines are pushed to `out`, and each new line gets a
+/// `continuation_indent`-space hanging indent. `initial_budget` is the content
+/// width available on the line the token starts on (the caller's per-line
+/// `available_width`); subsequent lines use `width - continuation_indent`.
+fn hard_break_plain_token(
+    token: &str,
+    out: &mut Vec<String>,
+    current_line: &mut String,
+    current_length: &mut usize,
+    width: usize,
+    continuation_indent: usize,
+    initial_budget: usize,
+) {
+    let cont_budget = width.saturating_sub(continuation_indent).max(1);
+    let mut line_budget = initial_budget.max(1);
+
+    // If the current line already holds content, flush it so the token starts
+    // fresh on a continuation line; otherwise break onto the current (indent-
+    // only) line directly.
+    if *current_length > 0 {
+        out.push(std::mem::take(current_line));
+        current_line.push_str(&" ".repeat(continuation_indent));
+        *current_length = 0;
+        line_budget = cont_budget;
+    }
+
+    for ch in token.chars() {
+        let cw = ch.width().unwrap_or(0);
+        // Break before this char if it would overflow and the line already
+        // holds at least one glyph (so a single too-wide glyph never loops).
+        if *current_length + cw > line_budget && *current_length > 0 {
+            out.push(std::mem::take(current_line));
+            current_line.push_str(&" ".repeat(continuation_indent));
+            *current_length = 0;
+            line_budget = cont_budget;
+        }
+        current_line.push(ch);
+        *current_length += cw;
+    }
+}
+
 /// Wrap text with hanging indent support.
 ///
 /// `width`, `first_line_indent`, and `continuation_indent` are all measured
@@ -1164,22 +1369,50 @@ fn wrap_text_with_indent(
             let word_width = word.width();
 
             if word_idx == 0 {
-                // First word always fits on the line
-                current_line.push_str(word);
-                current_length = word_width;
+                if word_width <= available_width {
+                    // First word fits on the line
+                    current_line.push_str(word);
+                    current_length = word_width;
+                } else {
+                    // A single token wider than the whole line (e.g. a long
+                    // URL): hard-break it at width boundaries so it wraps
+                    // instead of overflowing the viewport and being clipped
+                    // (F33).
+                    hard_break_plain_token(
+                        word,
+                        &mut wrapped_lines,
+                        &mut current_line,
+                        &mut current_length,
+                        width,
+                        continuation_indent,
+                        available_width,
+                    );
+                }
             } else if current_length + 1 + word_width <= available_width {
                 // Word fits on current line (the +1 accounts for the
                 // separator space, which is 1 cell)
                 current_line.push(' ');
                 current_line.push_str(word);
                 current_length += 1 + word_width;
-            } else {
+            } else if word_width <= available_width {
                 // Word doesn't fit, start a new line
                 wrapped_lines.push(current_line);
                 current_line = String::with_capacity(width);
                 current_line.push_str(&" ".repeat(continuation_indent));
                 current_line.push_str(word);
                 current_length = word_width;
+            } else {
+                // Over-long token mid-paragraph: flush the current line, then
+                // hard-break the token across continuation lines (F33).
+                hard_break_plain_token(
+                    word,
+                    &mut wrapped_lines,
+                    &mut current_line,
+                    &mut current_length,
+                    width,
+                    continuation_indent,
+                    available_width,
+                );
             }
         }
 
@@ -1190,6 +1423,52 @@ fn wrap_text_with_indent(
     }
 
     wrapped_lines
+}
+
+/// Hard-break a single over-long token into the styled line accumulator,
+/// splitting at char boundaries (UTF-8-safe, display-cell aware) and keeping
+/// `style` on every produced piece, so a giant unbroken token (e.g. a long URL)
+/// wraps across rows instead of overflowing the viewport and being clipped
+/// (F33). The styled counterpart of `hard_break_plain_token`.
+///
+/// `current_line_spans`/`current_line_width` carry the in-progress row;
+/// finished rows are pushed to `result_lines`; each new row opens with a
+/// `continuation_indent`-space span. `line_capacity` is the width budget for
+/// the row the token starts on (the first row counts its leading indent in
+/// `current_line_width`, so its budget is the full `width`); wrapped rows use
+/// `continuation_capacity` (the caller's `available_width`, with the indent in
+/// a separate span and not counted).
+#[allow(clippy::too_many_arguments)]
+fn hard_break_styled_token(
+    token: &str,
+    style: Style,
+    result_lines: &mut Vec<Line<'static>>,
+    current_line_spans: &mut Vec<Span<'static>>,
+    current_line_width: &mut usize,
+    continuation_indent: usize,
+    continuation_capacity: usize,
+    mut line_capacity: usize,
+) {
+    let mut buf = String::new();
+    for ch in token.chars() {
+        let cw = ch.width().unwrap_or(0);
+        // Break before this char if it would overflow and the row already holds
+        // at least one glyph (so a single too-wide glyph never loops).
+        if *current_line_width + cw > line_capacity && *current_line_width > 0 {
+            if !buf.is_empty() {
+                current_line_spans.push(Span::styled(std::mem::take(&mut buf), style));
+            }
+            result_lines.push(Line::from(std::mem::take(current_line_spans)));
+            current_line_spans.push(Span::raw(" ".repeat(continuation_indent)));
+            *current_line_width = 0;
+            line_capacity = continuation_capacity.max(1);
+        }
+        buf.push(ch);
+        *current_line_width += cw;
+    }
+    if !buf.is_empty() {
+        current_line_spans.push(Span::styled(buf, style));
+    }
 }
 
 /// Wrap a styled Line with hanging indent, preserving all span styles
@@ -1259,18 +1538,53 @@ fn wrap_styled_line(
                     current_line_spans.push(Span::raw(" ".repeat(leading_indent)));
                     current_line_width += leading_indent;
                 }
-                current_line_spans.push(Span::styled(word_with_space, span_style));
-                current_line_width += word_width;
+                if word_width <= available_width {
+                    current_line_spans.push(Span::styled(word_with_space, span_style));
+                    current_line_width += word_width;
+                } else {
+                    // A single token wider than the line (e.g. a long URL):
+                    // hard-break it at width boundaries so it wraps instead of
+                    // being clipped by the viewport (F33). The first row may use
+                    // the full `width` (its indent is already counted above);
+                    // continuation rows fall back to `available_width`.
+                    hard_break_styled_token(
+                        word,
+                        span_style,
+                        &mut result_lines,
+                        &mut current_line_spans,
+                        &mut current_line_width,
+                        continuation_indent,
+                        available_width,
+                        width,
+                    );
+                }
             } else if current_line_width + word_width <= available_width {
                 // Word fits on current line
                 current_line_spans.push(Span::styled(word_with_space, span_style));
                 current_line_width += word_width;
-            } else {
+            } else if word.width() <= available_width {
                 // Word doesn't fit - finish current line and start new one
                 result_lines.push(Line::from(current_line_spans));
                 current_line_spans = vec![Span::raw(" ".repeat(continuation_indent))];
                 current_line_spans.push(Span::styled(word.to_string(), span_style));
                 current_line_width = word.width();
+            } else {
+                // Over-long token mid-line: finish the current line, then
+                // hard-break the token across continuation rows (F33), keeping
+                // the span's style on every produced piece.
+                result_lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+                current_line_spans.push(Span::raw(" ".repeat(continuation_indent)));
+                current_line_width = 0;
+                hard_break_styled_token(
+                    word,
+                    span_style,
+                    &mut result_lines,
+                    &mut current_line_spans,
+                    &mut current_line_width,
+                    continuation_indent,
+                    available_width,
+                    available_width,
+                );
             }
         }
     }
@@ -1775,6 +2089,141 @@ mod tests {
             "mixed CJK+ASCII exceeding width should wrap; got {} lines: {:?}",
             wrapped.len(),
             wrapped
+        );
+    }
+
+    #[test]
+    fn clamp_to_u16_saturates_past_u16_max() {
+        // F32: line counters past u16::MAX must clamp to the last addressable
+        // row, never wrap modulo 65536 (which a plain `as u16` would do).
+        assert_eq!(clamp_to_u16(0), 0);
+        assert_eq!(clamp_to_u16(65_535), u16::MAX);
+        assert_eq!(clamp_to_u16(65_536), u16::MAX);
+        assert_eq!(clamp_to_u16(1_000_000), u16::MAX);
+    }
+
+    #[test]
+    fn wrap_text_with_indent_hard_breaks_overlong_token() {
+        // F33: a single unbroken token far wider than the viewport must
+        // hard-break at width boundaries instead of overflowing and being
+        // clipped. No internal spaces, so word-wrapping alone can't split it.
+        let token = "x".repeat(100);
+        let width = 20;
+        let wrapped = wrap_text_with_indent(&token, width, 2, 2);
+        assert!(
+            wrapped.len() >= 5,
+            "a 100-cell token at width 20 must span many rows; got {}",
+            wrapped.len()
+        );
+        for line in &wrapped {
+            assert!(
+                line.chars().count() <= width,
+                "no wrapped row may exceed the width; got {:?} ({} cells)",
+                line,
+                line.chars().count()
+            );
+        }
+        // Stripping each row's hanging indent reconstructs the token intact.
+        let joined: String = wrapped.iter().map(|l| l.trim_start()).collect();
+        assert_eq!(
+            joined, token,
+            "hard-break must preserve the token's content"
+        );
+    }
+
+    #[test]
+    fn wrap_styled_line_hard_breaks_overlong_token() {
+        // F33 (styled path): the same hard-break, preserving each piece's style.
+        let token = "y".repeat(90);
+        let style = Style::new().fg(ratatui::style::Color::Red);
+        let line = Line::from(vec![Span::raw("  "), Span::styled(token.clone(), style)]);
+        let width = 24;
+        let wrapped = wrap_styled_line(line, width, 2);
+        assert!(
+            wrapped.len() >= 4,
+            "must hard-break across rows; got {}",
+            wrapped.len()
+        );
+
+        let mut reconstructed = String::new();
+        for l in &wrapped {
+            let row_cells: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            assert!(
+                row_cells <= width,
+                "row exceeds width: {row_cells} > {width}"
+            );
+            for s in &l.spans {
+                // Skip indent/gutter spans (whitespace only); every content
+                // piece must keep the original red foreground.
+                if s.content.trim().is_empty() {
+                    continue;
+                }
+                assert_eq!(
+                    s.style.fg,
+                    Some(ratatui::style::Color::Red),
+                    "hard-break must preserve the span style"
+                );
+                reconstructed.push_str(s.content.as_ref());
+            }
+        }
+        assert_eq!(reconstructed, token, "hard-break must preserve the token");
+    }
+
+    #[test]
+    fn frame_memo_hit_matches_miss() {
+        // F31: memoizing the assembled frame must be byte-for-byte identical to
+        // re-assembling it. Render the SAME state twice — the first render
+        // populates the frame memo, the second reuses it — and assert the
+        // buffers are equal. Assistant-only messages keep the frame free of the
+        // clock-relative user timestamp, so nothing here is time-dependent.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let theme = Theme::dark();
+        let messages = vec![
+            ChatMessage::assistant(
+                "# Heading\n\nSome **bold** prose long enough that it wraps across \
+                 this narrow viewport more than once.\n\n- a list item that also \
+                 runs past the edge so it wraps\n- second item",
+            ),
+            ChatMessage::assistant("Short follow-up."),
+        ];
+
+        let (width, height): (u16, u16) = (34, 30);
+        let mut cache = FxHashMap::default();
+        let mut state = ChatState::new();
+
+        let render = |state: &mut ChatState, cache: &mut FxHashMap<u64, Vec<Line<'static>>>| {
+            let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+            term.draw(|f| {
+                let widget = ChatWidget {
+                    messages: &messages,
+                    theme: &theme,
+                    wrapped_line_cache: cache,
+                    show_reasoning: true,
+                };
+                f.render_stateful_widget(widget, Rect::new(0, 0, width, height), state);
+            })
+            .unwrap();
+            term.backend().buffer().clone()
+        };
+
+        let miss = render(&mut state, &mut cache);
+        assert!(
+            state.frame_memo.is_some(),
+            "first render must populate the frame memo"
+        );
+        let hit = render(&mut state, &mut cache);
+        assert_eq!(
+            miss, hit,
+            "frame-memo hit must render identically to the miss"
+        );
+        // The rows used for selection extraction are only re-collected on a
+        // miss; assert the hit path left them intact (not cleared/stale) so
+        // copy/selection still works on a reused frame (F31).
+        assert!(
+            !state.last_rendered_rows.is_empty(),
+            "memo hit must preserve last_rendered_rows from the miss"
         );
     }
 }

@@ -256,13 +256,32 @@ impl ToolExecutor for WebFetchTool {
     }
 }
 
+/// Cap on a single `web_fetch` body (#F46). The raw fetch is bounded only by the
+/// 16 MB HTTP body limit, so without this one URL could dump megabytes into model
+/// context. A full page warrants more room than a `web_search` snippet
+/// (`WEB_CONTENT_MAX_CHARS`), so this mirrors web_search's per-call aggregate
+/// budget. Applied as a byte cap; truncation is char-boundary safe.
+const WEB_FETCH_MAX_CHARS: usize = crate::constants::WEB_SEARCH_AGGREGATE_MAX_CHARS;
+
+/// Truncate a fetched page body to `WEB_FETCH_MAX_CHARS` bytes, char-boundary
+/// safe, appending a marker — consistent with how `web_search` bounds the
+/// content it returns (#F46). Borrows when no truncation is needed.
+fn cap_fetch_content(content: &str) -> std::borrow::Cow<'_, str> {
+    if content.len() <= WEB_FETCH_MAX_CHARS {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let cut = content.floor_char_boundary(WEB_FETCH_MAX_CHARS);
+    std::borrow::Cow::Owned(format!("{}\n\n...[content truncated]", &content[..cut]))
+}
+
 fn format_fetch(url: &str, page: &WebFetchResult) -> String {
     let title = if page.title.is_empty() {
         "(no title)"
     } else {
         page.title.as_str()
     };
-    format!("# {}\n\nURL: {}\n\n{}", title, url, page.content)
+    let content = cap_fetch_content(&page.content);
+    format!("# {}\n\nURL: {}\n\n{}", title, url, content)
 }
 
 fn parse_queries(args: &serde_json::Value) -> Result<Vec<(String, usize)>, String> {
@@ -329,13 +348,48 @@ fn validate_fetch_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Cloud-metadata DNS hostnames that resolve (inside the relevant cloud) to a
+/// link-local metadata IP — `169.254.169.254` and friends — but are LEXICALLY
+/// public, so the IP-only `classify_host` waves them through as
+/// [`crate::utils::HostClass::Public`]. We block them by name as well. Matched
+/// after lowercasing + trimming any surrounding `[]` and trailing FQDN dot.
+const METADATA_HOSTNAMES: &[&str] = &[
+    "metadata.google.internal",   // GCP (canonical)
+    "metadata.goog",              // GCP (alternate)
+    "metadata",                   // GCP/Azure short name (http://metadata/ responds)
+    "instance-data",              // AWS (cloud-init alias)
+    "instance-data.ec2.internal", // AWS
+];
+
+/// F57: client-side SSRF denylist for `web_fetch`. This is DEFENSE-IN-DEPTH
+/// ONLY, NOT the authoritative boundary.
+///
+/// `web_fetch` does NOT retrieve the URL from this process. `WebSearchClient::
+/// fetch_url` POSTs the URL to Ollama Cloud's server-side `/api/web_fetch`
+/// endpoint, and Ollama performs the actual fetch. The in-process reqwest
+/// client only ever connects to `ollama.com`. The AUTHORITATIVE SSRF boundary
+/// is therefore SERVER-SIDE (Ollama): a public DNS name that resolves to an
+/// internal address (the DNS-rebinding hole) cannot be closed here — a no-DNS
+/// lexical check can't see where a name resolves, and resolving it locally
+/// wouldn't bind what the remote server independently resolves later anyway.
+///
+/// What we CAN do cheaply, so a model can't trivially aim the server at an
+/// obvious internal target, is reject:
+/// - every non-public IP form via the shared `classify_host` (loopback,
+///   RFC-1918/ULA, link-local incl. `169.254.169.254`, CGNAT, unspecified
+///   `0.0.0.0`/`::`, plus the IPv4-mapped-IPv6 / ULA / link-local-IPv6 / `[::1]`
+///   forms a hand-rolled IPv4 check would miss); and
+/// - the well-known cloud-metadata HOSTNAMES (`metadata.google.internal`, …)
+///   that are lexically public but front a metadata service.
 fn is_blocked_host(host: &str) -> bool {
-    // Block every non-public host (loopback, RFC-1918/ULA, link-local incl.
-    // cloud metadata 169.254.169.254, CGNAT, unspecified). The shared
-    // classifier covers the IPv4-mapped-IPv6 / ULA / link-local-IPv6 / CGNAT
-    // forms a hand-rolled IPv4 check missed. Lexical only: a DNS name resolving
-    // to an internal address can't be caught here (the fetch is performed
-    // server-side by Ollama, not from this process).
+    let normalized = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if METADATA_HOSTNAMES.contains(&normalized.as_str()) {
+        return true;
+    }
     crate::utils::classify_host(host).is_internal()
 }
 
@@ -360,6 +414,13 @@ mod tests {
             "http://[fc00::1]/",
             "http://[fe80::1]/",
             "http://100.100.100.200/",
+            // F57: cloud-metadata hostnames are lexically public (IP-only
+            // classify_host waves them through) but front a metadata service.
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://metadata.goog/",
+            "http://metadata/",
+            "http://instance-data/latest/meta-data/",
+            "https://METADATA.GOOGLE.INTERNAL./",
             "not a url",
         ] {
             assert!(
@@ -377,6 +438,59 @@ mod tests {
                 "expected accept for {good:?}",
             );
         }
+    }
+
+    #[test]
+    fn is_blocked_host_covers_metadata_names_and_ip_forms() {
+        // F57: cloud-metadata HOSTNAMES (lexically public, IP-only
+        // classify_host misses them) are blocked, case/dot-insensitively.
+        for h in [
+            "metadata.google.internal",
+            "metadata.google.internal.", // trailing FQDN dot
+            "Metadata.Google.Internal",  // case-insensitive
+            "metadata.goog",
+            "metadata",
+            "instance-data",
+            "instance-data.ec2.internal",
+        ] {
+            assert!(is_blocked_host(h), "metadata host {h:?} must be blocked");
+        }
+        // Non-public IP forms still go through classify_host (incl. the ones
+        // the task lists as examples that must already be covered).
+        for h in ["0.0.0.0", "::1", "169.254.169.254", "127.0.0.1"] {
+            assert!(is_blocked_host(h), "internal IP {h:?} must be blocked");
+        }
+        // Legitimate public hosts are NOT blocked — including a real `.goog`
+        // domain that merely is not the metadata alias.
+        for h in ["example.com", "docs.rs", "abc.goog", "8.8.8.8"] {
+            assert!(!is_blocked_host(h), "public host {h:?} must be allowed");
+        }
+    }
+
+    #[test]
+    fn format_fetch_caps_long_content() {
+        // F46: a huge page body must be truncated with a marker, not dumped whole.
+        let big = "z".repeat(WEB_FETCH_MAX_CHARS * 2);
+        let page = WebFetchResult {
+            title: "T".to_string(),
+            content: big,
+        };
+        let out = format_fetch("https://example.com", &page);
+        assert!(
+            out.len() < WEB_FETCH_MAX_CHARS + 256,
+            "content must be capped, got {} bytes",
+            out.len()
+        );
+        assert!(out.contains("truncated"), "expected truncation marker");
+
+        // A short page is emitted intact, with no marker.
+        let small = WebFetchResult {
+            title: "T".to_string(),
+            content: "hello world".to_string(),
+        };
+        let out = format_fetch("https://example.com", &small);
+        assert!(out.contains("hello world"));
+        assert!(!out.contains("truncated"));
     }
 
     #[test]

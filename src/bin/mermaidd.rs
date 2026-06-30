@@ -400,11 +400,11 @@ async fn handle_json_command(
             let title = str_field(body, "title")?;
             let project_path = str_field(body, "project_path")?;
             let model_id = str_field(body, "model_id")?;
-            let task = store.tasks().create(mermaid_cli::runtime::NewTask::new(
-                title,
-                project_path,
-                model_id,
-            ))?;
+            // F18 (RC-E): tag daemon-created tasks so the startup reconcile may
+            // recover them — interactive CLI tasks stay un-owned and are spared.
+            let task = store.tasks().create(
+                mermaid_cli::runtime::NewTask::new(title, project_path, model_id).daemon_owned(),
+            )?;
             Ok(serde_json::json!({"ok": true, "task": task}))
         },
         "session_messages" => {
@@ -494,11 +494,17 @@ async fn handle_json_command(
                 _ => mermaid_cli::app::resolve_model_id(None, &config).await?,
             };
             let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
-            let task = store.tasks().create(mermaid_cli::runtime::NewTask::new(
-                task_title_from_prompt(&prompt),
-                project_path.display().to_string(),
-                model_id.clone(),
-            ))?;
+            // F18 (RC-E): this task runs in the daemon process, so tag it
+            // daemon-owned — a crash leaving it `Running` is recovered by the
+            // next startup reconcile (which leaves un-owned CLI tasks alone).
+            let task = store.tasks().create(
+                mermaid_cli::runtime::NewTask::new(
+                    task_title_from_prompt(&prompt),
+                    project_path.display().to_string(),
+                    model_id.clone(),
+                )
+                .daemon_owned(),
+            )?;
             store.tasks().update_status(
                 &task.id,
                 mermaid_cli::runtime::TaskStatus::Running,
@@ -527,55 +533,39 @@ async fn handle_json_command(
                     },
                 )
                 .await;
-                if let Ok(store) = mermaid_cli::runtime::RuntimeStore::open_default() {
-                    match result {
-                        Ok(result) if result.errors.is_empty() => {
-                            let _ = store.tasks().update_status(
-                                &task_id,
-                                mermaid_cli::runtime::TaskStatus::Completed,
-                                Some(&result.response),
-                            );
-                            let _ = mermaid_cli::runtime::run_plugin_hooks(
-                                "task_stop",
-                                &serde_json::json!({
-                                    "id": task_id.clone(),
-                                    "status": "completed",
-                                    "final_report": result.response.clone(),
-                                }),
-                            );
-                        },
-                        Ok(result) => {
-                            let _ = store.tasks().update_status(
-                                &task_id,
-                                mermaid_cli::runtime::TaskStatus::Failed,
-                                Some(&result.errors.join("\n")),
-                            );
-                            let _ = mermaid_cli::runtime::run_plugin_hooks(
-                                "task_stop",
-                                &serde_json::json!({
-                                    "id": task_id.clone(),
-                                    "status": "failed",
-                                    "final_report": result.errors.join("\n"),
-                                }),
-                            );
-                        },
-                        Err(err) => {
-                            let _ = store.tasks().update_status(
-                                &task_id,
-                                mermaid_cli::runtime::TaskStatus::Failed,
-                                Some(&err.to_string()),
-                            );
-                            let _ = mermaid_cli::runtime::run_plugin_hooks(
-                                "task_stop",
-                                &serde_json::json!({
-                                    "id": task_id.clone(),
-                                    "status": "failed",
-                                    "final_report": err.to_string(),
-                                }),
-                            );
-                        },
-                    }
-                }
+                // Map the run outcome to its terminal status + report.
+                let (status, report, hook_status) = match result {
+                    Ok(result) if result.errors.is_empty() => (
+                        mermaid_cli::runtime::TaskStatus::Completed,
+                        result.response,
+                        "completed",
+                    ),
+                    Ok(result) => (
+                        mermaid_cli::runtime::TaskStatus::Failed,
+                        result.errors.join("\n"),
+                        "failed",
+                    ),
+                    Err(err) => (
+                        mermaid_cli::runtime::TaskStatus::Failed,
+                        err.to_string(),
+                        "failed",
+                    ),
+                };
+                // F20: persist the terminal status DURABLY. The old code
+                // `let _`-swallowed this write AND skipped it entirely when the
+                // store failed to open — so a truly-finished task stayed `running`
+                // and the next daemon reconcile flipped it to `failed`, discarding
+                // the real final_report. Retry (reopening the store) and log loudly
+                // so the final status + report survive.
+                persist_terminal_status(&task_id, status, &report).await;
+                let _ = mermaid_cli::runtime::run_plugin_hooks(
+                    "task_stop",
+                    &serde_json::json!({
+                        "id": task_id.clone(),
+                        "status": hook_status,
+                        "final_report": report.clone(),
+                    }),
+                );
             });
 
             Ok(serde_json::json!({"ok": true, "task": task}))
@@ -769,6 +759,43 @@ fn authorize(body: &serde_json::Value) -> Result<bool> {
     };
     store.pairing_tokens().mark_used(&record.id)?;
     Ok(true)
+}
+
+/// Durably persist a task's terminal status + report (F20). The daemon's spawned
+/// run task is the only writer of this final state; if the write is lost the task
+/// is left `running` and the next startup reconcile fails it (discarding the real
+/// report). Retry a few times, reopening the store each attempt, and log loudly
+/// if it still can't be written rather than swallowing the error.
+#[cfg(unix)]
+async fn persist_terminal_status(
+    task_id: &str,
+    status: mermaid_cli::runtime::TaskStatus,
+    report: &str,
+) {
+    const MAX_ATTEMPTS: usize = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match mermaid_cli::runtime::RuntimeStore::open_default() {
+            Ok(store) => match store.tasks().update_status(task_id, status, Some(report)) {
+                Ok(()) => return,
+                Err(error) => tracing::error!(
+                    task_id,
+                    attempt,
+                    error = %error,
+                    "failed to persist terminal task status; retrying"
+                ),
+            },
+            Err(error) => tracing::error!(
+                task_id,
+                attempt,
+                error = %error,
+                "failed to open store to persist terminal task status; retrying"
+            ),
+        }
+    }
+    tracing::error!(
+        task_id,
+        "gave up persisting terminal task status after retries; it may be reconciled as failed on the next daemon restart"
+    );
 }
 
 #[cfg(unix)]

@@ -945,7 +945,7 @@ fn print_task_detail(task: &TaskRecord) {
     if let Some(report) = &task.final_report {
         println!();
         println!("Final report:");
-        println!("{}", report);
+        println!("{}", sanitize_terminal_text(report));
     }
 }
 
@@ -1483,9 +1483,70 @@ fn handle_pair(command: &PairCommand) -> Result<()> {
     Ok(())
 }
 
+/// Strip terminal control sequences from untrusted subprocess output before
+/// printing it to a cooked terminal. Managed-process logs / reports / port
+/// listings are attacker-influenceable (a dev server can emit anything), so a
+/// raw `print!` would let escape sequences execute — OSC-52 clipboard writes,
+/// window-title/prompt rewrites, cursor moves used for spoofing. Keeps `\n` and
+/// `\t`; drops every ESC-introduced sequence (CSI / OSC / DCS / PM / APC / SOS
+/// and simple two-/three-byte forms) and all other C0/C1 control characters
+/// (incl. `\r` and DEL). See F49.
+fn sanitize_terminal_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' | '\t' => out.push(c),
+            '\u{1b}' => match chars.next() {
+                // CSI: ESC '[' params/intermediates then a final byte
+                // (0x40-0x7e), which is also dropped.
+                Some('[') => {
+                    for p in chars.by_ref() {
+                        if ('@'..='~').contains(&p) {
+                            break;
+                        }
+                    }
+                },
+                // String sequences (OSC ']', DCS 'P', PM '^', APC '_', SOS 'X'):
+                // arbitrary body terminated by BEL or ST (ESC '\').
+                Some(']') | Some('P') | Some('^') | Some('_') | Some('X') => {
+                    while let Some(p) = chars.next() {
+                        if p == '\u{07}' {
+                            break;
+                        }
+                        if p == '\u{1b}' {
+                            // ESC here starts ST (ESC '\'); drop the trailing '\'.
+                            let mut peek = chars.clone();
+                            if peek.next() == Some('\\') {
+                                chars = peek;
+                            }
+                            break;
+                        }
+                    }
+                },
+                // Other ESC forms: optional intermediates (0x20-0x2f) then a
+                // final byte; drop them all.
+                Some(mut b) => {
+                    while ('\u{20}'..='\u{2f}').contains(&b) {
+                        match chars.next() {
+                            Some(next) => b = next,
+                            None => break,
+                        }
+                    }
+                },
+                None => {},
+            },
+            // Drop DEL, all other C0 controls (incl. `\r`), and C1 controls.
+            c if (c as u32) < 0x20 || matches!(c as u32, 0x7f..=0x9f) => {},
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn show_logs(id: &str) -> Result<()> {
     let content = RuntimeClient::auto().process_log(id, None)?.content;
-    print!("{}", content);
+    print!("{}", sanitize_terminal_text(&content));
     Ok(())
 }
 
@@ -1509,7 +1570,8 @@ fn open_target(target: &str) -> Result<()> {
 }
 
 fn show_ports() -> Result<()> {
-    print!("{}", RuntimeClient::auto().ports()?.ports);
+    let ports = RuntimeClient::auto().ports()?.ports;
+    print!("{}", sanitize_terminal_text(&ports));
     Ok(())
 }
 
@@ -1668,9 +1730,23 @@ async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Res
         .await?;
 
     let ext = if windows { "ps1" } else { "sh" };
-    let script_path =
-        std::env::temp_dir().join(format!("mermaid-update-{}.{ext}", std::process::id()));
-    std::fs::write(&script_path, script)
+    // Stage the fetched script in the per-user 0700 private temp dir, created
+    // exclusively (O_EXCL → never follows/opens a pre-planted symlink) so a local
+    // attacker can neither redirect the write nor swap the file between write and
+    // exec (#F50). The previous world-readable, predictable
+    // `temp_dir()/mermaid-update-<pid>.<ext>` allowed both a symlink redirect and
+    // a write→exec TOCTOU.
+    let dir = crate::utils::private_temp_dir()
+        .map_err(|e| anyhow!("could not create private temp dir for install script: {e}"))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let script_path = dir.join(format!(
+        "mermaid-update-{}-{nanos}.{ext}",
+        std::process::id()
+    ));
+    stage_install_script(&script_path, script.as_bytes())
         .map_err(|e| anyhow!("could not stage install script: {e}"))?;
 
     let mut cmd = if windows {
@@ -1695,6 +1771,30 @@ async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Res
         bail!("install script exited with {:?}", status.code());
     }
     Ok(())
+}
+
+/// Write the fetched install script to `path`, creating it **exclusively** so a
+/// symlink pre-planted at the path is refused (`O_EXCL` never follows) and the
+/// staged code is owner-only (`0600` file inside the `0700` private dir). This
+/// closes the symlink-redirect and write→exec TOCTOU that the old predictable,
+/// world-readable temp path left open (#F50).
+fn stage_install_script(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)
 }
 
 /// Parse a `[v]MAJOR.MINOR.PATCH[-pre][+build]` string into a comparable tuple.
@@ -2160,6 +2260,31 @@ fn build_pr_argv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_terminal_text_strips_control_sequences() {
+        // Plain text and the allowed whitespace pass through unchanged.
+        assert_eq!(
+            sanitize_terminal_text("hello\tworld\nline two"),
+            "hello\tworld\nline two"
+        );
+        // CSI color sequence is removed, surrounding text kept.
+        assert_eq!(
+            sanitize_terminal_text("\u{1b}[31mRED\u{1b}[0m text"),
+            "RED text"
+        );
+        // OSC-52 clipboard write (BEL-terminated) is removed whole.
+        assert_eq!(
+            sanitize_terminal_text("before\u{1b}]52;c;cGF5bG9hZA==\u{07}after"),
+            "beforeafter"
+        );
+        // OSC window-title rewrite terminated by ST (ESC '\').
+        assert_eq!(sanitize_terminal_text("a\u{1b}]0;pwned\u{1b}\\b"), "ab");
+        // Charset-designation (ESC '(' 'B') drops its final byte too.
+        assert_eq!(sanitize_terminal_text("x\u{1b}(By"), "xy");
+        // Bare CR and a C1 control are dropped; \n is preserved.
+        assert_eq!(sanitize_terminal_text("a\rb\u{9b}c\n"), "abc\n");
+    }
 
     #[test]
     fn version_compare_handles_update_logic() {

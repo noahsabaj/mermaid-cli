@@ -35,6 +35,13 @@ fn defn(name: &str, description: &str, input_schema: serde_json::Value) -> ToolD
     }
 }
 
+/// Aggregate cap for a multi-file `read_file` result (#F45). Each file is
+/// individually bounded at `MAX_RESPONSE_CHARS` by `read_one`, but a batch of up
+/// to `MAX_BATCH_TOOL_ITEMS` files could otherwise sum to ~12.8 MB in a single
+/// tool result — far past any sane model-context budget. This bounds the
+/// combined total; single-file reads are already bounded and unaffected.
+const MAX_READ_AGGREGATE_CHARS: usize = crate::constants::MAX_RESPONSE_CHARS;
+
 /// `read_file` — read one or more files and return their contents
 /// joined with section markers.
 pub struct ReadFileTool;
@@ -114,6 +121,16 @@ impl ToolExecutor for ReadFileTool {
                     }
                 },
             }
+        }
+
+        // F45: bound the COMBINED multi-file result. Each file is already capped
+        // at MAX_RESPONSE_CHARS by read_one, but a batch of files can still sum to
+        // ~12.8 MB in one tool result — past any sane context budget. Only the
+        // multi-file accumulation needs this (single-file output is already
+        // bounded); truncate_content appends a clear "...[truncated]" marker.
+        if paths.len() > 1 && combined.len() > MAX_READ_AGGREGATE_CHARS {
+            combined = crate::utils::truncate_content(&combined, MAX_READ_AGGREGATE_CHARS);
+            any_truncated = true;
         }
 
         let duration_secs = start.elapsed().as_secs_f64();
@@ -543,23 +560,23 @@ impl ToolExecutor for WriteFileTool {
         let display_path = path.to_string();
         let line_count = content.lines().count();
         let byte_count = content.len();
-        let old_content = std::fs::read_to_string(&abs_path).ok();
-        let created = Some(old_content.is_none());
-        let diff = generate_display_diff(old_content.as_deref().unwrap_or(""), content);
         let content = content.to_string();
         let workdir = ctx.workdir.clone();
 
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || write_one_blocking(&workdir, &rel, &content)) => {
+            // The prior-content read (for the display diff) now happens INSIDE
+            // this blocking job and BOUNDED (#F44/RC-L) — never a synchronous
+            // unbounded `read_to_string` on the async worker thread.
+            result = tokio::task::spawn_blocking(move || write_with_diff_blocking(&workdir, &abs_path, &rel, &content)) => {
                 match result {
-                    Ok(Ok(actual_line_count)) => {
+                    Ok(Ok(write)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
                         after_file_mutation(&ctx, "write_file", &display_path);
                         ToolOutcome::success(
-                            format!("Wrote {} ({} lines)", display_path, actual_line_count),
-                            format!("{} {} written", actual_line_count, plural(actual_line_count, "line", "lines")),
+                            format!("Wrote {} ({} lines)", display_path, write.line_count),
+                            format!("{} {} written", write.line_count, plural(write.line_count, "line", "lines")),
                             duration_secs,
                         )
                         .with_metadata(ToolRunMetadata {
@@ -567,12 +584,12 @@ impl ToolExecutor for WriteFileTool {
                                 path: display_path,
                                 line_count,
                                 byte_count,
-                                created,
+                                created: Some(write.created),
                             },
                             line_count: Some(line_count),
                             byte_count: Some(byte_count),
-                            display_diff: Some(diff.display_diff),
-                            diff_truncated: diff.truncated,
+                            display_diff: Some(write.diff.display_diff),
+                            diff_truncated: write.diff.truncated,
                             ..ToolRunMetadata::default()
                         })
                     },
@@ -667,6 +684,55 @@ fn write_one_blocking(workdir: &Path, rel: &Path, content: &str) -> std::io::Res
     }
     crate::runtime::write_atomic_beneath(workdir, rel, content.as_bytes())?;
     Ok(content.lines().count())
+}
+
+struct WriteResult {
+    line_count: usize,
+    created: bool,
+    diff: DisplayDiff,
+}
+
+/// Write `content` and build the display diff against the prior file in ONE
+/// blocking job (#F44/RC-L). The prior content is read BOUNDED via
+/// [`crate::utils::read_file_capped`] — overwriting a multi-gigabyte file must
+/// not slurp it into RAM on the async worker just to render a diff. A prior file
+/// larger than the read cap (or otherwise unreadable) is elided from the diff
+/// rather than read whole.
+fn write_with_diff_blocking(
+    workdir: &Path,
+    abs_path: &Path,
+    rel: &Path,
+    content: &str,
+) -> std::io::Result<WriteResult> {
+    let (old_content, created, elide_diff) =
+        match crate::utils::read_file_capped(abs_path, MAX_FILE_READ_BYTES) {
+            Ok((data, false)) => (String::from_utf8_lossy(&data).into_owned(), false, false),
+            // Existing file is past the read cap — don't pull it all into RAM.
+            Ok((_, true)) => (String::new(), false, true),
+            // Missing file → a fresh create; the diff shows the whole content added.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), true, false),
+            // Any other read error: don't fail the write over a diff preview.
+            Err(_) => (String::new(), false, true),
+        };
+    let diff = if elide_diff {
+        DisplayDiff {
+            display_diff: format!(
+                "[diff preview skipped: existing file exceeds the {}-byte cap]",
+                MAX_FILE_READ_BYTES
+            ),
+            added: 0,
+            removed: 0,
+            truncated: true,
+        }
+    } else {
+        generate_display_diff(&old_content, content)
+    };
+    let line_count = write_one_blocking(workdir, rel, content)?;
+    Ok(WriteResult {
+        line_count,
+        created,
+        diff,
+    })
 }
 
 async fn mutation_policy_outcome(
@@ -974,6 +1040,78 @@ mod tests {
         assert!(output.contains("alpha"));
         assert!(output.contains("=== b.txt ==="));
         assert!(output.contains("beta"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_file_multi_aggregate_is_capped() {
+        // F45: many files in one call can't blow past the aggregate cap. Each
+        // file is under the per-file cap, but their sum exceeds the aggregate.
+        let dir = temp_root("read_aggregate_cap");
+        let chunk = "a".repeat(MAX_READ_AGGREGATE_CHARS * 2 / 3);
+        fs::write(dir.join("a.txt"), &chunk).expect("write a");
+        fs::write(dir.join("b.txt"), &chunk).expect("write b");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"paths": ["a.txt", "b.txt"]}), ctx)
+            .await;
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        let output = outcome.output();
+        assert!(
+            output.len() <= MAX_READ_AGGREGATE_CHARS + 64,
+            "combined must be capped, got {} bytes",
+            output.len()
+        );
+        assert!(
+            output.contains("...[truncated]"),
+            "expected aggregate truncation marker"
+        );
+        match &outcome.metadata.detail {
+            ToolMetadata::ReadFile { truncated, .. } => {
+                assert!(*truncated, "aggregate truncation must set truncated")
+            },
+            other => panic!("expected ReadFile metadata, got {:?}", other),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn write_file_elides_diff_for_oversized_existing_file() {
+        // F44: overwriting a file larger than the read cap must NOT slurp it into
+        // RAM for a diff — the diff is elided with a marker instead.
+        let dir = temp_root("write_oversized_diff");
+        let big = "a".repeat(MAX_FILE_READ_BYTES + 1);
+        fs::write(dir.join("big.txt"), &big).expect("write fixture");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = WriteFileTool
+            .execute(
+                serde_json::json!({"path": "big.txt", "content": "small\n"}),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        let diff = outcome
+            .metadata
+            .display_diff
+            .as_deref()
+            .expect("display diff");
+        assert!(
+            diff.contains("diff preview skipped"),
+            "expected elision marker, got: {diff}"
+        );
+        assert!(
+            outcome.metadata.diff_truncated,
+            "oversized diff must set diff_truncated"
+        );
+        match &outcome.metadata.detail {
+            ToolMetadata::WriteFile { created, .. } => {
+                assert_eq!(*created, Some(false), "existing file is not 'created'")
+            },
+            other => panic!("expected WriteFile metadata, got {:?}", other),
+        }
+        // The file was actually overwritten despite the elided diff.
+        let written = fs::read_to_string(dir.join("big.txt")).expect("read");
+        assert_eq!(written, "small\n");
         let _ = fs::remove_dir_all(&dir);
     }
 

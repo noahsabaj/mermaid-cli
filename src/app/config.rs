@@ -250,7 +250,7 @@ impl Default for ComputerUseConfig {
 /// optional — when matching a built-in registry entry, only the supplied
 /// fields override; the rest fall back to the registry defaults. For
 /// fully custom providers, `base_url` and `api_key_env` are required.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct UserProviderConfig {
     /// Override base URL for `/chat/completions` (None = use built-in
     /// registry default; required for fully custom providers).
@@ -279,7 +279,7 @@ pub struct UserProviderConfig {
 }
 
 /// MCP server configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Command to execute (e.g., "npx", "node", "python")
     pub command: String,
@@ -289,6 +289,49 @@ pub struct McpServerConfig {
     /// Environment variables for the server process
     #[serde(default)]
     pub env: HashMap<String, String>,
+}
+
+/// Mask a header/env map for `Debug`: keys are kept (so you can still see which
+/// vars are set) but values are never rendered — they hold secrets like API keys
+/// and `Authorization` tokens (#F12). A `BTreeMap` keeps the output deterministic.
+fn debug_masked_map(
+    map: &HashMap<String, String>,
+) -> std::collections::BTreeMap<&str, &'static str> {
+    map.keys().map(|k| (k.as_str(), "[REDACTED]")).collect()
+}
+
+// Manual `Debug` for the secret-bearing config structs so a `{:?}` (into
+// tracing, a panic, or an error) cannot dump provider keys / Authorization
+// headers / MCP env secrets. `Config` keeps its derived `Debug`, which now
+// recurses through these redacting impls (#F12).
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerConfig")
+            .field("command", &self.command)
+            // args may carry an inline secret (e.g. `--api-key=sk-...`).
+            .field(
+                "args",
+                &self
+                    .args
+                    .iter()
+                    .map(|a| crate::utils::redact_secrets(a))
+                    .collect::<Vec<_>>(),
+            )
+            .field("env", &debug_masked_map(&self.env))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for UserProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserProviderConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key_env", &self.api_key_env)
+            .field("extra_headers", &debug_masked_map(&self.extra_headers))
+            .field("compat", &self.compat)
+            .field("default_model", &self.default_model)
+            .finish()
+    }
 }
 
 /// Default model settings
@@ -418,7 +461,13 @@ pub fn load_config_or_warn() -> Config {
     match load_config() {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("mermaid: {e:#}");
+            // A TOML parse error renders the offending source line, which can be
+            // a secret-bearing one (`extra_headers`/`env`/`api_key_env`); scrub
+            // credential-shaped content before it reaches stderr (#F13).
+            eprintln!(
+                "mermaid: {}",
+                crate::utils::redact_secrets(&format!("{e:#}"))
+            );
             Config::default()
         },
     }
@@ -455,8 +504,34 @@ pub fn save_config(config: &Config, path: Option<PathBuf>) -> Result<()> {
     };
 
     let toml_string = toml::to_string_pretty(config)?;
-    std::fs::write(&path, toml_string)
-        .with_context(|| format!("Failed to write config to {}", path.display()))?;
+
+    // The config can carry literal secrets — `mcp_servers[].env`,
+    // `mcp_servers[].args`, and `providers[].extra_headers` all accept inline
+    // credential values — so it must not be left world-readable at umask. On
+    // Unix, create it 0600 from the start (and tighten an already-existing
+    // file, whose perms a fresh `mode()` would not touch). Windows uses ACLs;
+    // leave its default.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("Failed to write config to {}", path.display()))?;
+        // `mode()` only applies on create; tighten a pre-existing config too.
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        file.write_all(toml_string.as_bytes())
+            .with_context(|| format!("Failed to write config to {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, toml_string)
+            .with_context(|| format!("Failed to write config to {}", path.display()))?;
+    }
 
     Ok(())
 }
@@ -764,6 +839,27 @@ port = 11434
         let cfg: Config = toml::from_str(toml_blob).expect("backward compat");
         assert!(cfg.reasoning_per_model.is_empty());
         assert!(!cfg.prompt.is_customized());
+    }
+
+    /// Config holds inline-secret-capable fields (`mcp_servers[].env`, `args`,
+    /// `providers[].extra_headers`), so it must be written owner-only rather
+    /// than inheriting a world-readable umask.
+    #[cfg(unix)]
+    #[test]
+    fn save_config_writes_owner_only_perms() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join("mermaid_test_config_perms");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.toml");
+        // Pre-create a world-readable file to prove we also tighten existing.
+        std::fs::write(&path, "stale").expect("seed");
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+
+        save_config(&Config::default(), Some(path.clone())).expect("save");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config must be written owner-only");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

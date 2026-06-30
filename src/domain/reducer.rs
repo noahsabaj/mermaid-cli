@@ -2473,6 +2473,18 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
     };
     match confirm.accept_msg_token {
         super::state::ConfirmationTarget::ClearConversation => {
+            // If a turn was still in flight when the user cleared, cancel its
+            // scope first and reset to `Idle` — mirroring `Msg::ConversationLoaded`
+            // (#2, F34). Without this the orphaned model/tool tasks keep running
+            // (tools keep mutating files after a "clear"), and the still-active
+            // turn's same-id `StreamDone`/`ToolFinished` would pass the stale
+            // filter and commit a stray message into the freshly-cleared
+            // conversation. The cancelled turn's parked approval requests can
+            // never be answered, so drop them too.
+            if let Some(id) = state.turn.id() {
+                cmds.push(Cmd::CancelScope(id));
+                state.pending_approval.clear();
+            }
             // Clear = start a fresh conversation: new ID, new default
             // title, empty history, zero cumulative tokens. Matches
             // user mental model ("wipe everything").
@@ -2484,6 +2496,7 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
             state.session.context_usage = None;
+            state.turn = TurnState::Idle;
             emit_title_if_changed(state, cmds);
         },
     }
@@ -2702,6 +2715,24 @@ fn handle_stream_done(
             pending_tool_calls,
         ),
         other => {
+            // #F40: a StreamDone can arrive for a turn that is already Cancelling
+            // (the provider completed a moment before the user's cancel was
+            // processed). Honor the cancel — the turn is NOT committed — but still
+            // fold the already-billed token usage into the running totals so the
+            // /context accounting stays accurate. Everything else about the late
+            // Done is dropped.
+            if let TurnState::Cancelling { id, .. } = &other
+                && *id == turn
+                && let Some(u) = usage
+            {
+                let totals = TokenUsageTotals::from_usage(&u);
+                state.session.last_token_usage = Some(totals);
+                state.session.cumulative_token_usage.add_assign(totals);
+                state.session.cumulative_tokens = state
+                    .session
+                    .cumulative_tokens
+                    .saturating_add(u.total_tokens);
+            }
             state.turn = other;
             return;
         },
@@ -2980,6 +3011,17 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
         return;
     }
 
+    // F35: if the turn is already being cancelled (the user hit Ctrl+C / Esc),
+    // a late `UpstreamError` from the cancelled provider call is the cancel's
+    // own side-channel, not a real failure. The stale-filter lets a same-id
+    // `Cancelling` turn through, so guard the state explicitly here — mirroring
+    // the `ApprovalRequested` guard (#74). Painting a spurious error line for
+    // the user's own cancel and draining a queued message here would race the
+    // terminal `TurnCancelled` that `drop_scope` emits.
+    if matches!(state.turn, TurnState::Cancelling { .. }) {
+        return;
+    }
+
     // End the current turn. Surface the error through a single
     // channel — the ActionDisplay attached to an empty assistant
     // message. The chat widget paints ActionDisplays as colored
@@ -3156,11 +3198,22 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // server, fully-qualified as `mcp__<server>__<tool>`. The effect
     // runner prepends built-in tools before dispatching, so this
     // vector is the MCP-only portion.
-    let mcp_tools: Vec<crate::domain::ToolDefinition> = state
+    //
+    // `state.mcp.servers` is a `HashMap`, whose iteration order is
+    // randomized per process (`RandomState`). Sort the Ready servers by
+    // name before emitting tools so `ChatRequest.tools` is byte-stable
+    // across runs — byte-reproducible requests keep the provider prompt
+    // cache warm instead of missing on a reshuffled tool list (#F68).
+    // Within a server, `tools` is an ordered `Vec`, so it is already stable.
+    let mut ready_servers: Vec<_> = state
         .mcp
         .servers
         .iter()
         .filter(|(_, entry)| matches!(entry.status, crate::domain::McpServerStatus::Ready))
+        .collect();
+    ready_servers.sort_by(|a, b| a.0.cmp(b.0));
+    let mcp_tools: Vec<crate::domain::ToolDefinition> = ready_servers
+        .into_iter()
         .flat_map(|(server_name, entry)| {
             entry
                 .tools
@@ -3606,6 +3659,92 @@ mod tests {
         let (state, cmds) = update(state, Msg::ConversationLoaded(history));
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::CancelScope(_))));
         assert!(matches!(state.turn, TurnState::Idle));
+    }
+
+    #[test]
+    fn clear_conversation_mid_turn_cancels_scope_and_resets_turn() {
+        // F34: confirming `/clear` while a turn is generating must cancel the
+        // in-flight scope and reset to Idle (mirroring `ConversationLoaded`), so
+        // the orphaned model/tool tasks stop and a stray same-id
+        // `StreamDone`/`ToolFinished` can't commit into the cleared conversation.
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("scratch history"));
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
+        state.confirm = Some(super::super::state::Confirmation {
+            prompt: "Clear conversation history?".to_string(),
+            accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
+        });
+
+        let (state, cmds) = update(state, Msg::ConfirmAccepted);
+
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::CancelScope(TurnId(5)))),
+            "clearing mid-turn must cancel the in-flight scope (F34)"
+        );
+        assert!(
+            matches!(state.turn, TurnState::Idle),
+            "turn must reset to Idle after clear"
+        );
+        assert!(
+            state.session.messages().is_empty(),
+            "clear must wipe to a fresh, empty conversation"
+        );
+    }
+
+    #[test]
+    fn clear_conversation_when_idle_does_not_cancel() {
+        // No in-flight turn → nothing to cancel; clear just wipes the history.
+        let mut state = fresh_state();
+        state.confirm = Some(super::super::state::Confirmation {
+            prompt: "Clear conversation history?".to_string(),
+            accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
+        });
+        let (state, cmds) = update(state, Msg::ConfirmAccepted);
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::CancelScope(_))));
+        assert!(matches!(state.turn, TurnState::Idle));
+    }
+
+    #[test]
+    fn upstream_error_during_cancelling_is_dropped() {
+        // F35: a late `UpstreamError` from a cancelled provider call (same turn
+        // id, state already `Cancelling`) must be a no-op — not paint a spurious
+        // error line for the user's own cancel, and not drain a queued message
+        // early (which would race the terminal `TurnCancelled` from `drop_scope`).
+        let mut state = fresh_state();
+        state.turn = TurnState::Cancelling {
+            id: TurnId(5),
+            since: std::time::SystemTime::now(),
+        };
+        let before_len = state.session.messages().len();
+
+        let (state, cmds) = update(
+            state,
+            Msg::UpstreamError {
+                turn: TurnId(5),
+                error: crate::models::UserFacingError {
+                    summary: "Backend error".to_string(),
+                    message: "connection reset".to_string(),
+                    suggestion: String::new(),
+                    category: crate::models::ErrorCategory::Connection,
+                    recoverable: true,
+                },
+            },
+        );
+
+        assert!(
+            matches!(state.turn, TurnState::Cancelling { id: TurnId(5), .. }),
+            "the turn must stay Cancelling until TurnCancelled lands"
+        );
+        assert_eq!(
+            state.session.messages().len(),
+            before_len,
+            "no error message should be committed for the user's own cancel"
+        );
+        assert!(
+            cmds.is_empty(),
+            "a dropped cancel-side-channel error emits no commands"
+        );
     }
 
     #[test]
@@ -5519,6 +5658,47 @@ mod tests {
             },
         );
         assert_eq!(state.mcp.servers["s1"].status, McpServerStatus::Ready);
+    }
+
+    #[test]
+    fn build_chat_request_orders_mcp_tools_by_server_name() {
+        // #F68: `state.mcp.servers` is a HashMap with per-process randomized
+        // iteration order. `build_chat_request` must sort servers by name so the
+        // emitted `ChatRequest.tools` ordering is deterministic across runs
+        // (byte-reproducible requests / prompt-cache stability).
+        let mut state = fresh_state();
+        state.mcp = McpState::default();
+        for name in ["zeta", "alpha", "mike", "bravo", "delta"] {
+            state.mcp.servers.insert(
+                name.to_string(),
+                McpServerEntry {
+                    config: crate::app::McpServerConfig {
+                        command: "echo".to_string(),
+                        args: vec![],
+                        env: std::collections::HashMap::new(),
+                    },
+                    status: McpServerStatus::Ready,
+                    tools: vec![crate::domain::state::McpToolSpec {
+                        name: "do".to_string(),
+                        description: "d".to_string(),
+                        input_schema: serde_json::json!({}),
+                    }],
+                },
+            );
+        }
+        let request = build_chat_request(&state);
+        let names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "mcp__alpha__do",
+                "mcp__bravo__do",
+                "mcp__delta__do",
+                "mcp__mike__do",
+                "mcp__zeta__do",
+            ],
+            "MCP tools must be ordered by server name regardless of HashMap layout"
+        );
     }
 
     #[test]

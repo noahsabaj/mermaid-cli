@@ -276,11 +276,21 @@ impl ComputerUseDriver {
         let (offset_x, offset_y, kind) =
             dispatch_capture(self.backend, &spec, &temp_str, token).await?;
 
-        let scale_factor = downscale_if_needed(&temp_str, SCREENSHOT_MAX_WIDTH).await?;
+        // F59: dispatch_capture already races cancellation internally, but the
+        // downscale (a slow ImageMagick/ffmpeg subprocess capped at
+        // SCREENSHOT_DOWNSCALE_TIMEOUT_SECS) and the trailing read did not — an Esc
+        // mid-downscale would block until that timeout. Race both against the token
+        // so Esc aborts promptly. On cancel the dropped downscale future runs its
+        // own scaled-file guard, and `_guard` above removes the original temp file.
+        let scale_factor =
+            cancellable(token, downscale_if_needed(&temp_str, SCREENSHOT_MAX_WIDTH)).await?;
 
-        let raw_bytes = tokio::fs::read(&temp_path)
-            .await
-            .context("reading captured screenshot")?;
+        let raw_bytes = cancellable(token, async {
+            tokio::fs::read(&temp_path)
+                .await
+                .context("reading captured screenshot")
+        })
+        .await?;
         let width = read_png_width(&raw_bytes).unwrap_or(0);
         let height = read_png_height(&raw_bytes).unwrap_or(0);
 
@@ -759,6 +769,24 @@ async fn dispatch_capture(
     }
 }
 
+/// Race an arbitrary in-process future against `token.cancelled()`, biased toward
+/// cancellation so an already-signalled Esc wins before the (possibly slow) future
+/// is polled. Mirrors `run_cmd_cancellable`'s cancel arm but for a plain future —
+/// `capture` uses it so the downscale + trailing read abort promptly on Esc rather
+/// than blocking up to `SCREENSHOT_DOWNSCALE_TIMEOUT_SECS` (F59). On cancel the
+/// losing branch's future is dropped, so its own temp guards (e.g. the scaled-file
+/// guard inside `downscale_if_needed`) run as it unwinds.
+async fn cancellable<F, T>(token: &CancellationToken, fut: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => anyhow::bail!("cancelled"),
+        r = fut => r,
+    }
+}
+
 /// Run a `Command` to completion, racing it against cancellation AND a
 /// wall-clock timeout. Relies on `kill_on_drop(true)` reaping the child when the
 /// future is dropped on cancel or timeout.
@@ -871,25 +899,37 @@ async fn parse_monitor_geometry_x11(name: &str) -> Option<(i32, i32, u32, u32)> 
     let out = run_cmd_stdout(Command::new("xrandr").arg("--query"))
         .await
         .ok()?;
-    for line in out.lines() {
-        if !line.contains(" connected") {
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.first() != Some(&name) {
-            continue;
-        }
-        for part in &parts[2..] {
-            if let Some((res, offsets)) = part.split_once('+')
-                && let Some((w, h)) = res.split_once('x')
-            {
-                let width = w.parse::<u32>().ok()?;
-                let height = h.parse::<u32>().ok()?;
-                let mut off = offsets.splitn(2, '+');
-                let x = off.next()?.parse::<i32>().ok()?;
-                let y = off.next()?.parse::<i32>().ok()?;
-                return Some((x, y, width, height));
-            }
+    out.lines()
+        .find_map(|line| parse_xrandr_monitor_line(line, name))
+}
+
+/// Parse one `xrandr --query` line, returning `(x, y, width, height)` when it is
+/// the connected output named `name` and carries a `WxH+X+Y` geometry token.
+/// Pure (no subprocess) so the slice-bounds handling is unit-testable.
+fn parse_xrandr_monitor_line(line: &str, name: &str) -> Option<(i32, i32, u32, u32)> {
+    if !line.contains(" connected") {
+        return None;
+    }
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.first() != Some(&name) {
+        return None;
+    }
+    // F60: `&parts[2..]` panicked ("range start 2 out of range for slice of
+    // length 1") when an xrandr line split into a single token and the
+    // model-supplied `name` equalled it (e.g. name="connected"): the
+    // `parts.first() == Some(&name)` guard passed, then slice start 2 was past the
+    // length-1 slice. `get(2..).unwrap_or(&[])` yields an empty slice for any line
+    // with fewer than 3 tokens, so a short/odd line can never panic.
+    for part in parts.get(2..).unwrap_or(&[]) {
+        if let Some((res, offsets)) = part.split_once('+')
+            && let Some((w, h)) = res.split_once('x')
+        {
+            let width = w.parse::<u32>().ok()?;
+            let height = h.parse::<u32>().ok()?;
+            let mut off = offsets.splitn(2, '+');
+            let x = off.next()?.parse::<i32>().ok()?;
+            let y = off.next()?.parse::<i32>().ok()?;
+            return Some((x, y, width, height));
         }
     }
     None
@@ -929,6 +969,12 @@ async fn downscale_if_needed(path: &str, max_width: u32) -> Result<f64> {
     }
     let scale_factor = original_width as f64 / max_width as f64;
     let scaled = format!("{}.scaled.png", path);
+    // F58: the caller's TempFileGuard only tracks the original temp file, not this
+    // sibling. Guard the scaled file here so every exit path removes it — most
+    // importantly a successful encode followed by a failed `rename(&scaled, path)`,
+    // whose `?` early return previously leaked `{path}.scaled.png`. On the success
+    // path the rename has already moved the file, so this guard's remove no-ops.
+    let _scaled_guard = TempFileGuard(PathBuf::from(&scaled));
     // #97: time-box the encoders + kill_on_drop. The double `Ok(Ok(..))` means a
     // timeout (outer Err) OR a spawn error (inner Err) falls through to the next
     // encoder and finally to the full-resolution fallback below — preserving the
@@ -973,7 +1019,9 @@ async fn downscale_if_needed(path: &str, max_width: u32) -> Result<f64> {
         return Ok(scale_factor);
     }
 
-    let _ = tokio::fs::remove_file(&scaled).await;
+    // `_scaled_guard` (declared above with `scaled`) removes any partial
+    // `.scaled.png` on drop — covering this no-encoder fallback as well as a failed
+    // `rename(&scaled, path)` early return (F58).
     tracing::warn!(
         original_width,
         "neither ImageMagick nor ffmpeg available; sending full-resolution screenshot"
@@ -1118,5 +1166,138 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("timed out"), "got: {err}");
+    }
+
+    // ── F60: xrandr line parsing must never panic on a short/odd line ──
+
+    #[test]
+    fn parse_xrandr_monitor_line_short_line_does_not_panic() {
+        // F60: a line that splits into the single token "connected", with the
+        // model-supplied monitor name also "connected", passed the
+        // `parts.first() == Some(&name)` guard and then panicked on `&parts[2..]`
+        // ("range start 2 out of range for slice of length 1"). Bounds-checked
+        // slicing must yield None instead of panicking.
+        assert_eq!(parse_xrandr_monitor_line(" connected", "connected"), None);
+        // Two tokens (still < 3), name matches: no geometry token, no panic.
+        assert_eq!(
+            parse_xrandr_monitor_line("HDMI-1 connected", "HDMI-1"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_xrandr_monitor_line_parses_geometry_and_skips_others() {
+        let line = "HDMI-1 connected primary 2560x1440+1920+0 \
+                    (normal left inverted right) 597mm x 336mm";
+        assert_eq!(
+            parse_xrandr_monitor_line(line, "HDMI-1"),
+            Some((1920, 0, 2560, 1440))
+        );
+        // Non-matching name -> None.
+        assert_eq!(parse_xrandr_monitor_line(line, "DP-2"), None);
+        // A "disconnected" line is ignored even though it contains "connected" and
+        // its first token matches the requested name.
+        assert_eq!(
+            parse_xrandr_monitor_line("DP-3 disconnected (normal left inverted right)", "DP-3"),
+            None
+        );
+    }
+
+    // ── F58: the scaled temp sibling must never leak ──
+
+    #[test]
+    fn temp_file_guard_removes_scaled_sibling_on_drop() {
+        // F58: a successful encode followed by a failed `rename(&scaled, path)` used
+        // to leak `{path}.scaled.png` because capture's TempFileGuard only tracks
+        // the original temp file. `downscale_if_needed` now wraps the scaled sibling
+        // in its own TempFileGuard; this asserts that guard removes the file on drop
+        // — the mechanism that closes the rename-failure (and fallback) leak paths.
+        let scaled = std::env::temp_dir().join(format!(
+            "mermaid-f58-guard-{}.png.scaled.png",
+            std::process::id()
+        ));
+        std::fs::write(&scaled, b"x").unwrap();
+        assert!(scaled.exists());
+        {
+            let _guard = TempFileGuard(scaled.clone());
+        }
+        assert!(
+            !scaled.exists(),
+            "scaled sibling must be removed when its guard drops"
+        );
+    }
+
+    #[tokio::test]
+    async fn downscale_skips_and_leaves_no_scaled_sibling_when_within_max() {
+        // A capture already within max_width early-returns scale 1.0 and must create
+        // no `.scaled.png` sibling. Encoder-independent (no convert/ffmpeg needed).
+        let path =
+            std::env::temp_dir().join(format!("mermaid-f58-skip-{}.png", std::process::id()));
+        let path_str = path.to_string_lossy().to_string();
+        let _cleanup = TempFileGuard(path.clone());
+        // Minimal PNG header advertising width=16 in the IHDR (bytes 16..20).
+        let mut png = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+        png.extend_from_slice(&[0, 0, 0, 13]); // IHDR chunk length
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&16u32.to_be_bytes()); // width
+        png.extend_from_slice(&16u32.to_be_bytes()); // height
+        png.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth/colour/...
+        std::fs::write(&path, &png).unwrap();
+
+        let scale = downscale_if_needed(&path_str, 1920).await.unwrap();
+        assert_eq!(scale, 1.0);
+        assert!(
+            !std::path::Path::new(&format!("{}.scaled.png", path_str)).exists(),
+            "no scaled sibling for an already-small capture"
+        );
+    }
+
+    // ── F59: the downscale/read race must abort promptly on cancel ──
+
+    #[tokio::test]
+    async fn cancellable_returns_cancelled_when_token_already_cancelled() {
+        // F59: with the token already cancelled, a slow future (stand-in for the
+        // ImageMagick/ffmpeg downscale) must abort at once rather than run to
+        // completion or its timeout.
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let slow = async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok::<(), anyhow::Error>(())
+        };
+        let err = cancellable(&token, slow).await.unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn cancellable_passes_through_result_when_not_cancelled() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let v = cancellable(&token, async { Ok::<u32, anyhow::Error>(7) })
+            .await
+            .unwrap();
+        assert_eq!(v, 7);
+    }
+
+    #[tokio::test]
+    async fn cancellable_aborts_inflight_future_on_cancel() {
+        // Cancel arrives while the future is parked: the biased select wakes on the
+        // token and returns "cancelled" without waiting out the slow future.
+        let token = tokio_util::sync::CancellationToken::new();
+        let t2 = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            t2.cancel();
+        });
+        let slow = async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok::<(), anyhow::Error>(())
+        };
+        let start = std::time::Instant::now();
+        let err = cancellable(&token, slow).await.unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "got: {err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "must abort promptly, not wait out the slow future"
+        );
     }
 }

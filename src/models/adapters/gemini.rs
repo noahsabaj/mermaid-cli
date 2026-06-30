@@ -115,6 +115,19 @@ fn map_gemini_finish_reason(s: &str) -> FinishReason {
     }
 }
 
+/// F56: whether a Gemini stream ended abnormally — it closed before the
+/// terminal `finishReason` was ever observed on a chunk. Gemini ends every
+/// normal stream (including tool-call turns, which report `STOP`) with a
+/// candidate `finishReason`; there is no separate `[DONE]`-style frame, so the
+/// `finishReason` IS the terminal marker. Its absence means the connection
+/// dropped mid-response — surfacing a clean `Ok` (with `stop_reason: None`)
+/// would be indistinguishable from a real completion, so the caller returns a
+/// stream error. A `MAX_TOKENS` truncation sets a real `finishReason`
+/// (`Length`), so it is NOT abnormal and is preserved.
+fn stream_closed_abnormally(finish_reason: Option<&FinishReason>) -> bool {
+    finish_reason.is_none()
+}
+
 /// Translate `ReasoningLevel` to Gemini 2.5's `thinkingBudget` (int
 /// tokens). `-1` means adaptive (Gemini decides up to the model's
 /// ceiling); `0` means disabled. Per-model floors are applied
@@ -553,6 +566,25 @@ impl GeminiAdapter {
             raw: None,
         })?;
 
+        // F52: a prompt-level safety block returns `promptFeedback.blockReason`
+        // with NO candidates. Without this guard the `candidates.into_iter()
+        // .next()` below is `None`, the block is skipped, and we return an empty
+        // `Ok` with `stop_reason: None`. Surface a typed refusal instead — the
+        // candidate-level block (no `content` on a present candidate) is handled
+        // separately further down.
+        if json.candidates.is_empty()
+            && let Some(reason) = json
+                .prompt_feedback
+                .as_ref()
+                .and_then(|pf| pf.block_reason.as_deref())
+        {
+            return Err(ModelError::Backend(BackendError::ProviderError {
+                provider: "gemini".to_string(),
+                code: Some(reason.to_string()),
+                message: format!("Gemini blocked the prompt (blockReason={reason})"),
+            }));
+        }
+
         let mut text_acc = String::new();
         let mut thinking_acc = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -684,6 +716,19 @@ impl GeminiAdapter {
             }
         }
 
+        // F56: a stream that ended before any candidate `finishReason` was
+        // dropped mid-response. Surface a stream error instead of a clean `Ok`
+        // (with `stop_reason: None`) that would be indistinguishable from a real
+        // completion. A `MAX_TOKENS` truncation set a real `finishReason`, so it
+        // does NOT trip this and is preserved.
+        if stream_closed_abnormally(state.finish_reason.as_ref()) {
+            return Err(ModelError::StreamError(
+                "Gemini stream closed before a terminal finishReason; the \
+                 connection was likely dropped mid-response"
+                    .to_string(),
+            ));
+        }
+
         let total_tokens = if state.total_tokens > 0 {
             state.total_tokens
         } else {
@@ -780,6 +825,22 @@ fn process_chunk_payload(
             provider: "gemini".to_string(),
             code: Some(code.to_string()),
             message: msg.to_string(),
+        }));
+    }
+
+    // F52: a prompt-level safety block streams as a chunk carrying
+    // `promptFeedback.blockReason` and NO candidates. The no-parts branch below
+    // would otherwise swallow it as a benign empty success — there's no
+    // candidate `finishReason` to trip its block check. Surface a typed refusal,
+    // matching `decode_non_streaming`.
+    if let Some(reason) = parsed
+        .pointer("/promptFeedback/blockReason")
+        .and_then(|v| v.as_str())
+    {
+        return Err(ModelError::Backend(BackendError::ProviderError {
+            provider: "gemini".to_string(),
+            code: Some(reason.to_string()),
+            message: format!("Gemini blocked the prompt (blockReason={reason})"),
         }));
     }
 
@@ -949,6 +1010,20 @@ struct GeminiResponse {
     candidates: Vec<Candidate>,
     #[serde(default, rename = "usageMetadata")]
     usage_metadata: UsageMetadata,
+    // A prompt-level safety block returns `promptFeedback.blockReason` and NO
+    // candidates (F52). Captured so `decode_non_streaming` can surface a typed
+    // refusal instead of an empty `Ok`.
+    #[serde(default, rename = "promptFeedback")]
+    prompt_feedback: Option<PromptFeedback>,
+}
+
+/// Prompt-level safety feedback. When Gemini blocks the *prompt* itself (rather
+/// than filtering a candidate's output), the response carries this with a
+/// `blockReason` and an empty `candidates` array.
+#[derive(Debug, Deserialize)]
+struct PromptFeedback {
+    #[serde(default, rename = "blockReason")]
+    block_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1072,6 +1147,60 @@ mod tests {
         assert!(gemini_empty_is_benign("FINISH_REASON_UNSPECIFIED"));
         assert!(!gemini_empty_is_benign("SAFETY"));
         assert!(!gemini_empty_is_benign("RECITATION"));
+    }
+
+    #[test]
+    fn prompt_block_response_parses_with_no_candidates() {
+        // F52: a prompt-level block returns `promptFeedback.blockReason` and NO
+        // candidates. The wire type must capture it so `decode_non_streaming`
+        // can surface a refusal instead of an empty Ok.
+        let json = serde_json::json!({
+            "promptFeedback": { "blockReason": "SAFETY" }
+        });
+        let resp: GeminiResponse = serde_json::from_value(json).expect("prompt block parses");
+        assert!(resp.candidates.is_empty());
+        assert_eq!(
+            resp.prompt_feedback
+                .as_ref()
+                .and_then(|pf| pf.block_reason.as_deref()),
+            Some("SAFETY")
+        );
+    }
+
+    #[test]
+    fn stream_prompt_block_surfaces_provider_error() {
+        // F52 (streaming): a chunk carrying `promptFeedback.blockReason` with no
+        // candidates must surface a typed ProviderError, not be swallowed by the
+        // no-parts branch as a silent empty success.
+        let mut state = StreamState::default();
+        let cb: StreamCallback = std::sync::Arc::new(|_ev| {});
+        let payload = r#"{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}}"#;
+        let err = process_chunk_payload(payload, &mut state, &cb, false)
+            .expect_err("prompt block must error");
+        match err {
+            ModelError::Backend(BackendError::ProviderError {
+                provider,
+                code,
+                message,
+            }) => {
+                assert_eq!(provider, "gemini");
+                assert_eq!(code.as_deref(), Some("PROHIBITED_CONTENT"));
+                assert!(message.contains("PROHIBITED_CONTENT"), "{message}");
+            },
+            other => panic!("expected ProviderError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_prompt_feedback_without_block_reason_is_not_an_error() {
+        // A `promptFeedback` block that only echoes safety ratings (no
+        // `blockReason`) must NOT be treated as a block — it co-occurs with real
+        // content on normal responses.
+        let mut state = StreamState::default();
+        let cb: StreamCallback = std::sync::Arc::new(|_ev| {});
+        let payload = r#"{"promptFeedback":{"safetyRatings":[]},"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#;
+        process_chunk_payload(payload, &mut state, &cb, false).expect("benign feedback is ok");
+        assert_eq!(state.text_acc, "hello");
     }
 
     fn test_adapter() -> GeminiAdapter {
@@ -1884,6 +2013,40 @@ mod tests {
         process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
         assert_eq!(state.finish_reason, Some(FinishReason::Length));
         assert_eq!(state.text_acc, "partial");
+    }
+
+    #[test]
+    fn stream_closed_abnormally_when_no_finish_reason_observed() {
+        // F56: content chunks with no finishReason leave the stream incomplete
+        // until a terminal finishReason lands. A drop here must surface as an
+        // error, not a clean Ok indistinguishable from a real completion.
+        let (cb, _events) = record_callback();
+        let mut state = StreamState::default();
+        let chunk =
+            json!({ "candidates": [{ "content": {"parts": [{"text": "partial answer"}]} }] })
+                .to_string();
+        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        assert!(
+            stream_closed_abnormally(state.finish_reason.as_ref()),
+            "no finishReason observed yet → abnormal if the stream ends here"
+        );
+
+        // The terminal chunk carrying STOP completes it.
+        let final_chunk = json!({
+            "candidates": [{ "content": {"parts": [{"text": "."}]}, "finishReason": "STOP" }]
+        })
+        .to_string();
+        process_chunk_payload(&final_chunk, &mut state, &cb, false).unwrap();
+        assert!(!stream_closed_abnormally(state.finish_reason.as_ref()));
+    }
+
+    #[test]
+    fn stream_closed_abnormally_preserves_max_tokens_truncation() {
+        // CRUCIAL: a MAX_TOKENS truncation is a real terminal finishReason
+        // (Length) — it must NOT be misclassified as an abnormal close.
+        assert!(stream_closed_abnormally(None));
+        assert!(!stream_closed_abnormally(Some(&FinishReason::Length)));
+        assert!(!stream_closed_abnormally(Some(&FinishReason::Stop)));
     }
 
     #[test]

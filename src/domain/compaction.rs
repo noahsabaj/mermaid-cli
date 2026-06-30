@@ -253,10 +253,18 @@ pub fn prepare_compaction(
         return Err(CompactionSkip::NothingToCompact);
     }
     // The tail is forwarded verbatim into the next request; scrub any
-    // pre-existing orphan `tool_use` (e.g. a turn cancelled after the model
-    // emitted tool calls but before any result committed) so the unpaired call
-    // can't 400 the provider (#71).
-    drop_orphan_tool_calls(&mut preserved_messages);
+    // pre-existing orphan `tool_use`/`tool_result` so an unpaired block can't
+    // 400 the provider (#71 forward, #F64 reverse). One exception: when the run
+    // is resuming mid-tool (a context-limit retry or truncation recovery), a
+    // genuinely-pending trailing `tool_use` is preserved so the model needn't
+    // re-derive the action from the summary (#F65). A user cancel produces the
+    // same trailing shape but ends the run, so only the resume triggers — where
+    // the awaited `tool_result` really is forthcoming — opt into preserving it.
+    let preserve_pending_tail = matches!(
+        request.trigger,
+        CompactionTrigger::ContextLimitRetry | CompactionTrigger::TruncationRecovery
+    );
+    drop_orphan_tool_calls(&mut preserved_messages, preserve_pending_tail);
 
     let previous_summary = archived_messages
         .iter()
@@ -475,20 +483,49 @@ fn summary_prompt(prepared: &PreparedCompaction, focus: Option<&str>) -> String 
     )
 }
 
-/// Strip assistant `tool_calls` that have no matching `tool_result` later in
-/// `messages` (#71). Compaction preserves a recent tail verbatim; if that tail
-/// inherits a pre-existing orphan — e.g. a turn cancelled after the model
-/// emitted tool calls but before any result committed — forwarding the unpaired
-/// `tool_use` makes providers (Anthropic) reject the next request with a 400.
-/// Drop the orphaned calls (keeping the assistant's text) rather than fabricate
-/// results. A call with no `id` can't be paired, so it's treated as orphaned.
-fn drop_orphan_tool_calls(messages: &mut [ChatMessage]) {
+/// Scrub orphan tool-call/tool-result pairs from the preserved tail so a
+/// forwarded unpaired block can't 400 a provider (Anthropic). Compaction keeps
+/// a recent tail verbatim; if the split inherits a pre-existing orphan, both
+/// directions must be repaired symmetrically:
+///
+///   * Forward (#71): an assistant `tool_use` whose `tool_result` never
+///     committed — e.g. a turn cancelled after the model emitted calls. Drop
+///     the orphaned calls (keeping the assistant's text) rather than fabricate
+///     results. A call with no `id` can't be paired, so it's treated as orphaned.
+///   * Reverse (#F64): a `tool_result` (role=Tool) whose `tool_use` id is no
+///     longer present among the retained messages — e.g. the assistant turn was
+///     archived while its result landed in the tail. Anthropic equally rejects a
+///     `tool_result` with no preceding `tool_use`, so drop the orphaned result.
+///
+/// When `preserve_pending_tail` is set (the run is resuming mid-tool after a
+/// context-limit retry / truncation recovery), a *trailing* assistant `tool_use`
+/// is genuinely pending execution rather than abandoned, so its calls are kept
+/// across the checkpoint and the resumed turn appends the awaited results (#F65).
+/// Only the final message qualifies: anything after an assistant `tool_use` (a
+/// tool result, a follow-up, a user cancel) means it is no longer pending. This
+/// is trigger-gated by the caller because a user cancel yields the same trailing
+/// shape but must still drop — there, the result will never arrive.
+fn drop_orphan_tool_calls(messages: &mut Vec<ChatMessage>, preserve_pending_tail: bool) {
+    let pending_tail = if preserve_pending_tail
+        && messages.last().is_some_and(|m| {
+            m.role == MessageRole::Assistant && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+        }) {
+        Some(messages.len() - 1)
+    } else {
+        None
+    };
+
     let answered: std::collections::HashSet<String> = messages
         .iter()
         .filter(|m| m.role == MessageRole::Tool)
         .filter_map(|m| m.tool_call_id.clone())
         .collect();
-    for m in messages.iter_mut() {
+
+    // Forward (#71): drop unanswered assistant `tool_use`, save a pending tail.
+    for (idx, m) in messages.iter_mut().enumerate() {
+        if Some(idx) == pending_tail {
+            continue;
+        }
         let Some(calls) = m.tool_calls.as_mut() else {
             continue;
         };
@@ -497,6 +534,21 @@ fn drop_orphan_tool_calls(messages: &mut [ChatMessage]) {
             m.tool_calls = None;
         }
     }
+
+    // Reverse (#F64): drop a `tool_result` whose `tool_use` id is no longer
+    // present among the assistant messages retained above (symmetric orphan).
+    let emitted: std::collections::HashSet<String> = messages
+        .iter()
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flat_map(|calls| calls.iter())
+        .filter_map(|c| c.id.clone())
+        .collect();
+    messages.retain(|m| {
+        m.role != MessageRole::Tool
+            || m.tool_call_id
+                .as_deref()
+                .is_some_and(|id| emitted.contains(id))
+    });
 }
 
 fn tail_start_index(messages: &[ChatMessage], policy: CompactionPolicy) -> Option<usize> {
@@ -745,6 +797,97 @@ mod tests {
             .iter()
             .any(|m| m.tool_calls.as_ref().is_some_and(|c| !c.is_empty()));
         assert!(kept, "a tool_call paired with its result must be preserved");
+    }
+
+    #[test]
+    fn prepare_drops_reverse_orphan_tool_result_from_tail() {
+        // The mirror of #71 (#F64): the assistant `tool_use` is archived (split
+        // out of the tail) while its `tool_result` lands in the preserved tail.
+        // A lone `tool_result` with no preceding `tool_use` 400s Anthropic, so it
+        // must be dropped symmetrically.
+        let mut asst = ChatMessage::assistant("calling");
+        asst.tool_calls = Some(vec![tool_call("call_1", "do_thing")]);
+        let messages = vec![
+            ChatMessage::user("one"),
+            asst,
+            ChatMessage::user("two"),
+            ChatMessage::tool("call_1", "do_thing", "result"),
+            ChatMessage::user("three"),
+        ];
+        // Tail keeps the last two user turns ("two".., "three"), so the assistant
+        // tool_use is archived but the tool_result survives into the tail.
+        let request = CompactionRequest::manual(request_with(messages), None);
+        let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
+        assert!(
+            prepared
+                .preserved_messages
+                .iter()
+                .all(|m| m.role != MessageRole::Tool),
+            "an orphan tool_result whose tool_use was archived must be dropped"
+        );
+    }
+
+    #[test]
+    fn prepare_keeps_pending_trailing_tool_use_on_retry() {
+        // #F65: a context-limit retry / truncation recovery compacts mid-tool.
+        // The trailing assistant tool_use is genuinely pending — the run resumes
+        // and appends the result — so its calls must survive compaction.
+        let mut pending = ChatMessage::assistant("calling a tool");
+        pending.tool_calls = Some(vec![tool_call("call_9", "do_thing")]);
+        let messages = vec![
+            ChatMessage::user("one"),
+            ChatMessage::assistant("a1"),
+            ChatMessage::user("two"),
+            ChatMessage::assistant("a2"),
+            ChatMessage::user("three"),
+            pending,
+        ];
+        let request =
+            CompactionRequest::auto(request_with(messages), CompactionTrigger::ContextLimitRetry);
+        let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
+        let last = prepared
+            .preserved_messages
+            .last()
+            .expect("non-empty preserved tail");
+        assert!(
+            last.tool_calls
+                .as_ref()
+                .is_some_and(|c| c.iter().any(|call| call.id.as_deref() == Some("call_9"))),
+            "a pending trailing tool_use must be preserved across a retry compaction"
+        );
+    }
+
+    #[test]
+    fn prepare_drops_trailing_tool_use_on_manual_compaction() {
+        // Same trailing shape, but a manual compaction is not a resume: the tool
+        // is treated as abandoned/cancelled, so the unpaired call is still
+        // scrubbed (#71) — only the assistant's text is kept.
+        let mut pending = ChatMessage::assistant("calling a tool");
+        pending.tool_calls = Some(vec![tool_call("call_9", "do_thing")]);
+        let messages = vec![
+            ChatMessage::user("one"),
+            ChatMessage::assistant("a1"),
+            ChatMessage::user("two"),
+            ChatMessage::assistant("a2"),
+            ChatMessage::user("three"),
+            pending,
+        ];
+        let request = CompactionRequest::manual(request_with(messages), None);
+        let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
+        assert!(
+            !prepared
+                .preserved_messages
+                .iter()
+                .any(|m| m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())),
+            "manual compaction must scrub the trailing orphan tool_use"
+        );
+        assert!(
+            prepared
+                .preserved_messages
+                .iter()
+                .any(|m| m.content == "calling a tool"),
+            "the assistant text is kept even though the orphan call is dropped"
+        );
     }
 
     #[test]

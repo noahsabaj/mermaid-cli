@@ -10,7 +10,22 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-const SCHEMA_VERSION: i32 = 1;
+// Bumped to 3 for the F75 covering indexes (pending-approval and reconcile
+// scans). They are additive, but the bump lets a DB already at v2 re-run the
+// migration once to pick them up. The bump is load-bearing alongside the F17
+// early-return in `init_schema`: a DB at an older version still runs the
+// migration (the idempotent baseline plus any per-version step dispatched by
+// `migrate_within_txn`) exactly once, while an already-current DB skips the
+// write lock entirely.
+//
+// History: v2 added the additive `tasks.owner_kind` column (F18/RC-E).
+const SCHEMA_VERSION: i32 = 3;
+
+/// `tasks.owner_kind` value for a task the daemon runs in-process. Only these are
+/// reset by `reconcile_after_restart`; a `NULL` owner (an interactive CLI run, or
+/// any other creator) is left alone so a live `mermaid` session that shares the
+/// store isn't wrongly failed on daemon startup (F18/RC-E).
+const OWNER_KIND_DAEMON: &str = "daemon";
 
 /// Durable task state. A task is the daemon-level work unit; a chat
 /// transcript is just one artifact linked to it.
@@ -187,6 +202,12 @@ pub struct NewTask {
     pub model_id: String,
     pub priority: TaskPriority,
     pub conversation_id: Option<String>,
+    /// Which kind of process owns this task. `Some("daemon")` (set via
+    /// [`Self::daemon_owned`]) marks a task the daemon runs in-process, so the
+    /// startup reconcile may fail it if a crash left it `Running`. `None` — the
+    /// default, used by interactive CLI runs and any other creator — is left
+    /// untouched by reconcile so a live session isn't clobbered (F18/RC-E).
+    pub owner_kind: Option<String>,
 }
 
 impl NewTask {
@@ -201,7 +222,16 @@ impl NewTask {
             model_id: model_id.into(),
             priority: TaskPriority::Normal,
             conversation_id: None,
+            owner_kind: None,
         }
+    }
+
+    /// Mark this task as daemon-owned (run in the daemon process). Only such
+    /// tasks are reset by [`RuntimeStore::reconcile_after_restart`]; omit it for
+    /// interactive CLI runs so they survive a daemon restart.
+    pub fn daemon_owned(mut self) -> Self {
+        self.owner_kind = Some(OWNER_KIND_DAEMON.to_string());
+        self
     }
 }
 
@@ -525,42 +555,71 @@ impl RuntimeStore {
     /// `approving` claim state (a replay that crashed mid-effect, #118) is reset
     /// to undecided so it reappears as pending and stays re-runnable. Call once
     /// on daemon startup, before serving. Returns `(tasks_reset, claims_released)`.
+    ///
+    /// F18 (RC-E): only **daemon-owned** running tasks are reset. The store is
+    /// shared with interactive `mermaid` CLI runs; their tasks are created with a
+    /// `NULL` `owner_kind` and are LEFT RUNNING here, so a live CLI session isn't
+    /// wrongly flipped to `failed` (with a spurious "interrupted" event) just
+    /// because the daemon restarted. The daemon tags the tasks it runs in-process
+    /// via [`NewTask::daemon_owned`].
     pub fn reconcile_after_restart(&self) -> Result<(usize, usize)> {
         let now = now_rfc3339();
-        let tx = self.conn.unchecked_transaction()?;
-        let running: Vec<String> = {
-            let mut stmt = tx.prepare("SELECT id FROM tasks WHERE status = 'running'")?;
-            let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            ids.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        for id in &running {
-            tx.execute(
-                "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1",
-                params![id, now],
+        // Take the write lock up front with BEGIN IMMEDIATE rather than a DEFERRED
+        // transaction that SELECTs and then upgrades to a write on the first
+        // UPDATE: SQLite fails a read→write lock upgrade with SQLITE_BUSY
+        // *immediately* (busy_timeout does not retry upgrades), so a CLI holding
+        // the write lock at daemon startup would abort recovery. IMMEDIATE instead
+        // waits on busy_timeout for the lock (#F21). Mirrors `init_schema`.
+        self.conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let result = (|| -> Result<(usize, usize)> {
+            let running: Vec<String> = {
+                let mut stmt = self
+                    .conn
+                    .prepare("SELECT id FROM tasks WHERE status = 'running' AND owner_kind = ?1")?;
+                let ids = stmt.query_map([OWNER_KIND_DAEMON], |row| row.get::<_, String>(0))?;
+                ids.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for id in &running {
+                self.conn.execute(
+                    "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1",
+                    params![id, now],
+                )?;
+                self.conn.execute(
+                    "INSERT INTO task_events (task_id, kind, message, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        id,
+                        "interrupted",
+                        "task was running when the daemon restarted; marked failed",
+                        now
+                    ],
+                )?;
+            }
+            let claims_released = self.conn.execute(
+                "UPDATE approvals SET user_decision = NULL WHERE user_decision = 'approving'",
+                [],
             )?;
-            tx.execute(
-                "INSERT INTO task_events (task_id, kind, message, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    id,
-                    "interrupted",
-                    "task was running when the daemon restarted; marked failed",
-                    now
-                ],
-            )?;
+            Ok((running.len(), claims_released))
+        })();
+        match result {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(v)
+            },
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            },
         }
-        let claims_released = tx.execute(
-            "UPDATE approvals SET user_decision = NULL WHERE user_decision = 'approving'",
-            [],
-        )?;
-        tx.commit()?;
-        Ok((running.len(), claims_released))
     }
 
-    /// Best-effort retention GC (#130): prune archived approvals/checkpoints and
-    /// the events of long-finished tasks older than `retention_days`. Deletes
-    /// only archived or terminal-and-old rows — active data is never touched.
-    /// Returns the number of rows removed.
+    /// Best-effort retention GC (#130, F22/RC-F): prune archived
+    /// approvals/checkpoints, the events of long-finished tasks, and the
+    /// high-churn / old terminal rows of the remaining tables, all older than
+    /// `retention_days`. Deletes only archived, finished, or terminal-and-old
+    /// rows — **active data is never touched** (a running task, a still-open tool
+    /// run, a live process, or a recently-updated session all survive). Returns
+    /// the number of rows removed.
     pub fn gc(&self, retention_days: i64) -> Result<u64> {
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
         let tx = self.conn.unchecked_transaction()?;
@@ -580,6 +639,39 @@ impl RuntimeStore {
                    SELECT id FROM tasks
                    WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at < ?1
                )",
+            params![cutoff],
+        )? as u64;
+        // F22 (RC-F): the high-churn growers. `tool_runs` is the fastest — one row
+        // per tool call — so prune FINISHED runs past the window (a still-running
+        // run has a NULL `finished_at` and is kept).
+        removed += tx.execute(
+            "DELETE FROM tool_runs WHERE finished_at IS NOT NULL AND finished_at < ?1",
+            params![cutoff],
+        )? as u64;
+        // Exited processes past the window (a live `running`/`unknown` process is
+        // kept so the dashboard and `stop`/`restart` still see it).
+        removed += tx.execute(
+            "DELETE FROM processes WHERE status = 'exited' AND updated_at < ?1",
+            params![cutoff],
+        )? as u64;
+        // Old compaction history — immutable bookkeeping rows, safe to drop once
+        // past the window.
+        removed += tx.execute(
+            "DELETE FROM compactions WHERE created_at < ?1",
+            params![cutoff],
+        )? as u64;
+        // Sessions untouched for the whole window are treated as finished. Delete
+        // their messages first (so the freed rows are counted) — the FK cascade
+        // would remove them anyway — then the sessions themselves. A session
+        // updated within the window is active and is kept along with all its
+        // messages.
+        removed += tx.execute(
+            "DELETE FROM messages
+             WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?1)",
+            params![cutoff],
+        )? as u64;
+        removed += tx.execute(
+            "DELETE FROM sessions WHERE updated_at < ?1",
             params![cutoff],
         )? as u64;
         tx.commit()?;
@@ -602,6 +694,20 @@ impl RuntimeStore {
             SCHEMA_VERSION
         );
 
+        // F17 (RC-E): the overwhelmingly common case is an already-current DB.
+        // The daemon opens a fresh store per request, and the old code ran
+        // `BEGIN IMMEDIATE` (the write lock) + the full migration + an
+        // unconditional `PRAGMA user_version` write on EVERY open — so even
+        // read-only requests serialized on a single writer and grew the WAL. Once
+        // the stored version already matches, the schema is in place and there is
+        // nothing to migrate or stamp: return before taking any write lock so
+        // concurrent readers never contend. The newer-than-supported gate above
+        // still runs first, so a newer DB is refused, not skipped.
+        if current == SCHEMA_VERSION {
+            return Ok(());
+        }
+
+        // Older (or fresh, version 0) DB only past this point.
         // Create tables + run column migrations exactly once, even when the
         // daemon and CLI open the DB concurrently: BEGIN IMMEDIATE takes the
         // write lock up front, so a racing process blocks on `busy_timeout`
@@ -609,7 +715,7 @@ impl RuntimeStore {
         // double-running an ALTER and failing the open (the old check-then-
         // ALTER `ensure_column` race).
         conn.execute_batch("BEGIN IMMEDIATE;")?;
-        if let Err(error) = self.migrate_within_txn() {
+        if let Err(error) = self.migrate_within_txn(current) {
             let _ = conn.execute_batch("ROLLBACK;");
             return Err(error);
         }
@@ -629,10 +735,11 @@ impl RuntimeStore {
     }
 
     /// Schema creation + column migrations, run inside the `init_schema`
-    /// transaction. Idempotent: `CREATE TABLE IF NOT EXISTS` plus the
-    /// duplicate-tolerant `ensure_column` make a re-run a no-op, so a second
-    /// concurrent opener that wins the lock after us does no harm.
-    fn migrate_within_txn(&self) -> Result<()> {
+    /// transaction for a DB upgrading from `from_version`. Idempotent:
+    /// `CREATE TABLE IF NOT EXISTS` plus the duplicate-tolerant `ensure_column`
+    /// make a re-run a no-op, so a second concurrent opener that wins the lock
+    /// after us does no harm.
+    fn migrate_within_txn(&self, from_version: i32) -> Result<()> {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -665,10 +772,16 @@ impl RuntimeStore {
                 conversation_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                final_report TEXT
+                final_report TEXT,
+                owner_kind TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_project_status
                 ON tasks(project_path, status, updated_at);
+            -- F75: `reconcile_after_restart` filters `status = 'running' AND
+            -- owner_kind = ?`, which the (project_path, ...) index above cannot
+            -- serve (wrong leading column). This covering index does.
+            CREATE INDEX IF NOT EXISTS idx_tasks_status_owner
+                ON tasks(status, owner_kind);
 
             CREATE TABLE IF NOT EXISTS task_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -710,6 +823,12 @@ impl RuntimeStore {
                 archive_reason TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_approvals_task_id ON approvals(task_id);
+            -- F75: `list_pending` scans `user_decision IS NULL ORDER BY
+            -- created_at`. A partial index over only the pending rows stays tiny
+            -- and serves both the filter and the ordering.
+            CREATE INDEX IF NOT EXISTS idx_approvals_pending
+                ON approvals(created_at)
+                WHERE user_decision IS NULL;
 
             CREATE TABLE IF NOT EXISTS processes (
                 id TEXT PRIMARY KEY,
@@ -793,6 +912,10 @@ impl RuntimeStore {
         ensure_column(&self.conn, "approvals", "archive_reason", "TEXT")?;
         ensure_column(&self.conn, "checkpoints", "archived_at", "TEXT")?;
         ensure_column(&self.conn, "checkpoints", "archive_reason", "TEXT")?;
+        // F18 (RC-E): task ownership. Nullable + no backfill — existing rows stay
+        // `NULL` (treated as un-owned, so reconcile leaves them alone), and only
+        // tasks the daemon explicitly marks `daemon` are reset on restart.
+        ensure_column(&self.conn, "tasks", "owner_kind", "TEXT")?;
         // Pairing-token TTL. When the column is first added to an existing DB,
         // backfill live tokens with a 30-day grace window from now rather than
         // expiring them instantly on upgrade. Fresh DBs already have the column
@@ -805,6 +928,39 @@ impl RuntimeStore {
                 params![grace],
             )?;
         }
+
+        // F76: structured per-version migration dispatch. Everything above is the
+        // idempotent ADDITIVE baseline (`CREATE ... IF NOT EXISTS` + `ensure_column`),
+        // always safe to re-run. This loop is the home for FUTURE NON-ADDITIVE
+        // steps — dropping/renaming/transforming a column, rebuilding a table —
+        // that the baseline cannot express: each target version's step runs once,
+        // only when upgrading PAST it, inside this same transaction. Today every
+        // shipped step is additive, so the arms are documented (near-)no-ops, but a
+        // future v4 now has an ordered, versioned place to live instead of
+        // overloading `IF NOT EXISTS`.
+        for target in (from_version + 1)..=SCHEMA_VERSION {
+            match target {
+                // v2 added `tasks.owner_kind` — additive, applied by the baseline.
+                2 => {},
+                // v3: F75 covering indexes — additive, created by the baseline
+                // above; this call is the concrete template for the first real
+                // non-additive change.
+                3 => self.migrate_to_v3()?,
+                // A future v4+ adds its non-additive step here.
+                _ => {},
+            }
+        }
+        Ok(())
+    }
+
+    /// Non-additive migration steps introduced at schema v3. Today v3 only adds
+    /// covering indexes (additive — applied by the idempotent baseline in
+    /// [`Self::migrate_within_txn`]), so this is intentionally a no-op. It exists
+    /// as the concrete template for the first real non-additive change: a step
+    /// that, for example, drops or transforms a column, which
+    /// `CREATE ... IF NOT EXISTS` and `ensure_column` cannot express. Runs inside
+    /// the `init_schema` transaction, exactly once, when a DB upgrades past v2.
+    fn migrate_to_v3(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -900,12 +1056,23 @@ impl MessagesRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// Load a session's messages in chronological order, capped at
+    /// [`MAX_SESSION_MESSAGES`] (F24/RC-F).
+    ///
+    /// A session transcript is otherwise unbounded, and the daemon
+    /// `session_messages` path loads it whole into RAM — a pathological session
+    /// could OOM the daemon. We return the **most recent** `MAX_SESSION_MESSAGES`
+    /// (newest activity is what a viewer wants) but still in ascending `id`
+    /// order, by taking the tail in a subquery and re-sorting it ascending.
     pub fn list_for_session(&self, session_id: &str) -> Result<Vec<MessageRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, role, content_json, created_at
-             FROM messages WHERE session_id = ?1 ORDER BY id ASC",
+            "SELECT id, session_id, role, content_json, created_at FROM (
+                 SELECT id, session_id, role, content_json, created_at
+                 FROM messages WHERE session_id = ?1
+                 ORDER BY id DESC LIMIT ?2
+             ) ORDER BY id ASC",
         )?;
-        let rows = stmt.query_map([session_id], message_from_row)?;
+        let rows = stmt.query_map(params![session_id, MAX_SESSION_MESSAGES], message_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -914,6 +1081,9 @@ impl MessagesRepo<'_> {
 impl TasksRepo<'_> {
     pub fn create(&self, new: NewTask) -> Result<TaskRecord> {
         let now = now_rfc3339();
+        // Owner tag isn't part of the public `TaskRecord`; move it out before the
+        // record consumes the rest of `new`, then persist it on its own column.
+        let owner_kind = new.owner_kind;
         let record = TaskRecord {
             id: fresh_id("task"),
             title: new.title,
@@ -931,8 +1101,8 @@ impl TasksRepo<'_> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO tasks
-             (id, title, status, priority, project_path, model_id, conversation_id, created_at, updated_at, final_report)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (id, title, status, priority, project_path, model_id, conversation_id, created_at, updated_at, final_report, owner_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 record.id,
                 record.title,
@@ -944,6 +1114,7 @@ impl TasksRepo<'_> {
                 record.created_at,
                 record.updated_at,
                 record.final_report,
+                owner_kind,
             ],
         )?;
         tx.execute(
@@ -977,9 +1148,11 @@ impl TasksRepo<'_> {
              ORDER BY updated_at DESC
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map([clamp_limit(limit)], task_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        // F19 (RC-E): skip-and-warn a single undecodable row (e.g. a status enum
+        // a different binary wrote) instead of `collect`ing a `Result` that would
+        // blank the WHOLE tasks panel on one poison row.
+        let rows = stmt.query_map([clamp_limit(limit)], task_from_row_opt)?;
+        collect_tolerant(rows)
     }
 
     pub fn update_status(
@@ -1027,17 +1200,9 @@ impl TasksRepo<'_> {
              WHERE task_id = ?1
              ORDER BY id ASC",
         )?;
-        let rows = stmt.query_map([task_id], |row| {
-            Ok(TaskTimelineEvent {
-                id: row.get("id")?,
-                task_id: row.get("task_id")?,
-                kind: row.get("kind")?,
-                message: row.get("message")?,
-                created_at: row.get("created_at")?,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        // F19 (RC-E): one undecodable event row must not blank the whole timeline.
+        let rows = stmt.query_map([task_id], task_event_from_row_opt)?;
+        collect_tolerant(rows)
     }
 }
 
@@ -1352,9 +1517,10 @@ impl ProcessesRepo<'_> {
              ORDER BY updated_at DESC
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map([clamp_limit(limit)], process_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        // F19 (RC-E): skip-and-warn an undecodable row (e.g. a status enum a
+        // different binary wrote) rather than blanking the whole processes panel.
+        let rows = stmt.query_map([clamp_limit(limit)], process_from_row_opt)?;
+        collect_tolerant(rows)
     }
 }
 
@@ -1405,6 +1571,22 @@ impl CheckpointsRepo<'_> {
         )?;
         anyhow::ensure!(changed > 0, "checkpoint not found: {}", id);
         Ok(())
+    }
+
+    /// Delete a checkpoint row outright. Returns whether a row was removed.
+    ///
+    /// F23 (RC-F): coordinates the on-disk checkpoint-dir GC
+    /// ([`crate::checkpoint::gc_old_checkpoint_dirs`]) with the DB. The dir GC
+    /// prunes by mtime regardless of archive state, while storage [`Self`] /
+    /// `gc()` only removes ARCHIVED checkpoint rows — so a never-archived old
+    /// checkpoint would lose its directory while its row survived, and a later
+    /// `restore_checkpoint` would fail on the missing manifest. The dir GC now
+    /// calls this so `list()` and the on-disk dirs stay in agreement.
+    pub fn delete(&self, id: &str) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM checkpoints WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
     }
 
     pub fn list(&self, limit: usize) -> Result<Vec<CheckpointRecord>> {
@@ -1998,6 +2180,79 @@ fn pairing_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairingTokenRec
     })
 }
 
+fn task_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskTimelineEvent> {
+    Ok(TaskTimelineEvent {
+        id: row.get("id")?,
+        task_id: row.get("task_id")?,
+        kind: row.get("kind")?,
+        message: row.get("message")?,
+        created_at: row.get("created_at")?,
+    })
+}
+
+/// Whether a row error is a per-row DECODE failure — a value a different binary
+/// wrote that this build can't parse: an unknown enum
+/// ([`rusqlite::Error::FromSqlConversionFailure`], how `task_from_row` /
+/// `process_from_row` surface an unknown status) or a column type mismatch
+/// ([`rusqlite::Error::InvalidColumnType`]). F19 (RC-E): the list/events paths
+/// skip-and-warn on these so one poison row can't blank an entire panel, while a
+/// genuine infrastructure error (a locked DB, a dropped column) still propagates.
+fn is_row_decode_error(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::FromSqlConversionFailure(..) | rusqlite::Error::InvalidColumnType(..)
+    )
+}
+
+/// Tolerant [`task_from_row`]: `Ok(None)` (with a warning) for a row this build
+/// can't decode, so [`TasksRepo::list`] skips it instead of failing the list.
+fn task_from_row_opt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<TaskRecord>> {
+    match task_from_row(row) {
+        Ok(record) => Ok(Some(record)),
+        Err(err) if is_row_decode_error(&err) => {
+            tracing::warn!(error = %err, "skipping task row this build can't decode (version skew?)");
+            Ok(None)
+        },
+        Err(err) => Err(err),
+    }
+}
+
+/// Tolerant [`process_from_row`] — see [`task_from_row_opt`].
+fn process_from_row_opt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<ProcessRecord>> {
+    match process_from_row(row) {
+        Ok(record) => Ok(Some(record)),
+        Err(err) if is_row_decode_error(&err) => {
+            tracing::warn!(error = %err, "skipping process row this build can't decode (version skew?)");
+            Ok(None)
+        },
+        Err(err) => Err(err),
+    }
+}
+
+/// Tolerant [`task_event_from_row`] — see [`task_from_row_opt`].
+fn task_event_from_row_opt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<TaskTimelineEvent>> {
+    match task_event_from_row(row) {
+        Ok(record) => Ok(Some(record)),
+        Err(err) if is_row_decode_error(&err) => {
+            tracing::warn!(error = %err, "skipping task event row this build can't decode");
+            Ok(None)
+        },
+        Err(err) => Err(err),
+    }
+}
+
+/// Collect rows from a tolerant decoder (one that yields `Ok(None)` for a
+/// skipped poison row), dropping the `None`s and propagating any real error.
+fn collect_tolerant<T>(rows: impl Iterator<Item = rusqlite::Result<Option<T>>>) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    for row in rows {
+        if let Some(item) = row? {
+            out.push(item);
+        }
+    }
+    Ok(out)
+}
+
 fn enum_from_sql_error(
     column: &'static str,
     value: String,
@@ -2083,6 +2338,13 @@ const MAX_QUERY_LIMIT: usize = 10_000;
 fn clamp_limit(limit: usize) -> i64 {
     limit.min(MAX_QUERY_LIMIT) as i64
 }
+
+/// Upper bound on the rows [`MessagesRepo::list_for_session`] returns (F24/RC-F).
+/// A session transcript is unbounded and the daemon `session_messages` path loads
+/// it whole into RAM; this caps the worst-case load at the most recent N messages
+/// so one pathological session can't OOM the daemon. 5000 turns is far beyond any
+/// real interactive session yet bounds memory.
+const MAX_SESSION_MESSAGES: i64 = 5_000;
 
 pub(crate) fn fresh_id(prefix: &str) -> String {
     // In-process monotonic counter: two ids minted in the same nanosecond (a
@@ -2209,6 +2471,105 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    fn explain_query_plan(conn: &Connection, sql: &str) -> String {
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("prepare EXPLAIN QUERY PLAN");
+        // Column 3 of an EQP row is the human-readable `detail` (e.g.
+        // "SEARCH approvals USING INDEX idx_approvals_pending ...").
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("eqp query")
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .expect("eqp rows");
+        rows.join("\n")
+    }
+
+    #[test]
+    fn pending_and_reconcile_scans_use_indexes() {
+        // F75: the pending-approval scan and the reconcile scan must hit their
+        // covering indexes rather than full-table scans.
+        let path = temp_db("scan_indexes");
+        let store = RuntimeStore::open(&path).expect("open");
+
+        let index_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN ('idx_approvals_pending', 'idx_tasks_status_owner')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 2, "F75 indexes must be created");
+
+        // `list_pending`'s scan must use the partial pending index (it also serves
+        // the ORDER BY created_at, so no separate sort).
+        let plan = explain_query_plan(
+            &store.conn,
+            "SELECT id FROM approvals WHERE user_decision IS NULL ORDER BY created_at DESC",
+        );
+        assert!(
+            plan.contains("idx_approvals_pending"),
+            "pending scan must use idx_approvals_pending; plan was:\n{plan}"
+        );
+
+        // `reconcile_after_restart`'s scan must use the (status, owner_kind) index.
+        let plan = explain_query_plan(
+            &store.conn,
+            "SELECT id FROM tasks WHERE status = 'running' AND owner_kind = 'daemon'",
+        );
+        assert!(
+            plan.contains("idx_tasks_status_owner"),
+            "reconcile scan must use idx_tasks_status_owner; plan was:\n{plan}"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn upgrades_from_v2_to_current_and_adds_indexes() {
+        // F75/F76: a DB stamped at the previous schema version must migrate forward
+        // on the next open — re-run the idempotent baseline, pick up the F75
+        // indexes, and stamp the current version — exercising the per-version
+        // dispatch (`from_version = 2` runs the v3 step).
+        let path = temp_db("upgrade_v2");
+        {
+            let store = RuntimeStore::open(&path).expect("first open");
+            // Simulate an older v2 DB: drop the new indexes and roll the stamp back.
+            store
+                .conn
+                .execute_batch(
+                    "DROP INDEX IF EXISTS idx_approvals_pending;
+                     DROP INDEX IF EXISTS idx_tasks_status_owner;
+                     PRAGMA user_version = 2;",
+                )
+                .expect("downgrade to v2");
+        }
+        let store = RuntimeStore::open(&path).expect("reopen must migrate forward");
+        let version: i32 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let index_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN ('idx_approvals_pending', 'idx_tasks_status_owner')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            index_count, 2,
+            "forward migration must recreate the F75 indexes"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -2722,13 +3083,13 @@ mod tests {
 
     #[test]
     fn reconcile_after_restart_recovers_running_tasks_and_claims() {
-        // #120/#118: a Running task and an 'approving' claim left by a crashed
-        // daemon are recovered on the next startup.
+        // #120/#118: a daemon-owned Running task and an 'approving' claim left by a
+        // crashed daemon are recovered on the next startup.
         let path = temp_db("reconcile");
         let store = RuntimeStore::open(&path).expect("open store");
         let task = store
             .tasks()
-            .create(NewTask::new("t", "/repo", "m"))
+            .create(NewTask::new("t", "/repo", "m").daemon_owned())
             .expect("create task");
         store
             .tasks()
@@ -2752,6 +3113,56 @@ mod tests {
                 .user_decision
                 .is_none(),
             "a released claim is undecided and re-runnable"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reconcile_after_restart_spares_non_daemon_running_tasks() {
+        // F18 (RC-E): a Running task NOT owned by the daemon (an interactive CLI
+        // run sharing the store, owner_kind = NULL) must survive a daemon restart
+        // — not be flipped to Failed with a spurious "interrupted" event.
+        let path = temp_db("reconcile_spare_cli");
+        let store = RuntimeStore::open(&path).expect("open store");
+
+        let cli = store
+            .tasks()
+            .create(NewTask::new("cli run", "/repo", "m")) // no .daemon_owned()
+            .expect("create cli task");
+        store
+            .tasks()
+            .update_status(&cli.id, TaskStatus::Running, None)
+            .expect("mark cli running");
+        let daemon = store
+            .tasks()
+            .create(NewTask::new("daemon run", "/repo", "m").daemon_owned())
+            .expect("create daemon task");
+        store
+            .tasks()
+            .update_status(&daemon.id, TaskStatus::Running, None)
+            .expect("mark daemon running");
+
+        let (tasks, _claims) = store.reconcile_after_restart().expect("reconcile");
+        assert_eq!(tasks, 1, "only the daemon-owned task is reset");
+        assert_eq!(
+            store.tasks().get(&cli.id).unwrap().unwrap().status,
+            TaskStatus::Running,
+            "a live CLI task must NOT be clobbered by the daemon's reconcile"
+        );
+        assert_eq!(
+            store.tasks().get(&daemon.id).unwrap().unwrap().status,
+            TaskStatus::Failed,
+            "a stranded daemon task is still recovered"
+        );
+        // The spared CLI task gets no "interrupted" event.
+        assert!(
+            !store
+                .tasks()
+                .events(&cli.id)
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == "interrupted"),
+            "the spared task must not receive a spurious interrupted event"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -2786,6 +3197,313 @@ mod tests {
         assert!(
             store.approvals().get(&keep.id).unwrap().is_some(),
             "active row kept"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn gc_prunes_high_churn_and_old_terminal_rows_but_keeps_active() {
+        // F22 (RC-F): GC prunes finished tool_runs, exited processes, old
+        // compactions, and stale sessions/messages past the window — never active
+        // data (a running tool_run, a live process, a fresh session).
+        let path = temp_db("gc_high_churn");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let old = "2000-01-01T00:00:00+00:00";
+
+        // Stale session + message (deleted) vs active session + message (kept).
+        let stale_session = store
+            .sessions()
+            .upsert(NewSession {
+                id: Some("stale".to_string()),
+                project_path: "/repo".to_string(),
+                model_id: "m".to_string(),
+                title: None,
+                conversation_path: None,
+                total_tokens: None,
+            })
+            .expect("stale session");
+        store
+            .messages()
+            .add(NewMessage {
+                session_id: stale_session.id.clone(),
+                role: "user".to_string(),
+                content_json: "{}".to_string(),
+            })
+            .expect("stale message");
+        let active_session = store
+            .sessions()
+            .upsert(NewSession {
+                id: Some("active".to_string()),
+                project_path: "/repo".to_string(),
+                model_id: "m".to_string(),
+                title: None,
+                conversation_path: None,
+                total_tokens: None,
+            })
+            .expect("active session");
+        store
+            .messages()
+            .add(NewMessage {
+                session_id: active_session.id.clone(),
+                role: "user".to_string(),
+                content_json: "{}".to_string(),
+            })
+            .expect("active message");
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
+                params![stale_session.id, old],
+            )
+            .unwrap();
+
+        // Finished (old) tool_run deleted; running tool_run kept.
+        store
+            .tool_runs()
+            .start(NewToolRun {
+                id: Some("tr-finished".to_string()),
+                task_id: None,
+                turn_id: None,
+                call_id: None,
+                tool_name: "x".to_string(),
+                args_json: None,
+            })
+            .expect("start finished tr");
+        store
+            .tool_runs()
+            .finish("tr-finished", "success", None)
+            .expect("finish tr");
+        store
+            .conn
+            .execute(
+                "UPDATE tool_runs SET finished_at = ?2 WHERE id = ?1",
+                params!["tr-finished", old],
+            )
+            .unwrap();
+        store
+            .tool_runs()
+            .start(NewToolRun {
+                id: Some("tr-running".to_string()),
+                task_id: None,
+                turn_id: None,
+                call_id: None,
+                tool_name: "x".to_string(),
+                args_json: None,
+            })
+            .expect("start running tr");
+
+        // Exited (old) process deleted; running process kept.
+        let exited = store
+            .processes()
+            .upsert(NewProcess {
+                id: Some("p-exited".to_string()),
+                task_id: None,
+                pid: 1,
+                command: "c".to_string(),
+                cwd: None,
+                log_path: None,
+                detected_url: None,
+                status: ProcessStatus::Exited,
+                health: None,
+            })
+            .expect("exited process");
+        store
+            .conn
+            .execute(
+                "UPDATE processes SET updated_at = ?2 WHERE id = ?1",
+                params![exited.id, old],
+            )
+            .unwrap();
+        let running_proc = store
+            .processes()
+            .upsert(NewProcess {
+                id: Some("p-running".to_string()),
+                task_id: None,
+                pid: 2,
+                command: "c".to_string(),
+                cwd: None,
+                log_path: None,
+                detected_url: None,
+                status: ProcessStatus::Running,
+                health: None,
+            })
+            .expect("running process");
+
+        // Old compaction deleted.
+        let comp = store
+            .compactions()
+            .create(NewCompaction {
+                id: Some("comp-old".to_string()),
+                task_id: None,
+                session_id: None,
+                source_token_estimate: None,
+                summary_token_count: None,
+                preserved_turns: None,
+                archive_path: None,
+                verification_status: None,
+            })
+            .expect("compaction");
+        store
+            .conn
+            .execute(
+                "UPDATE compactions SET created_at = ?2 WHERE id = ?1",
+                params![comp.id, old],
+            )
+            .unwrap();
+
+        let removed = store.gc(30).expect("gc");
+        assert!(removed >= 5, "stale rows pruned (got {removed})");
+        assert!(
+            store.sessions().get(&stale_session.id).unwrap().is_none(),
+            "stale session gone"
+        );
+        assert!(
+            store
+                .messages()
+                .list_for_session(&stale_session.id)
+                .unwrap()
+                .is_empty(),
+            "stale messages gone"
+        );
+        assert!(
+            store.sessions().get(&active_session.id).unwrap().is_some(),
+            "active session kept"
+        );
+        assert_eq!(
+            store
+                .messages()
+                .list_for_session(&active_session.id)
+                .unwrap()
+                .len(),
+            1,
+            "active message kept"
+        );
+        assert!(
+            store.tool_runs().get("tr-finished").unwrap().is_none(),
+            "old finished tool_run gone"
+        );
+        assert!(
+            store.tool_runs().get("tr-running").unwrap().is_some(),
+            "running tool_run kept"
+        );
+        assert!(
+            store.processes().get(&exited.id).unwrap().is_none(),
+            "old exited process gone"
+        );
+        assert!(
+            store.processes().get(&running_proc.id).unwrap().is_some(),
+            "running process kept"
+        );
+        assert!(
+            store.compactions().get(&comp.id).unwrap().is_none(),
+            "old compaction gone"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn task_list_skips_undecodable_status_row() {
+        // F19 (RC-E): a task row whose status enum this build can't decode (a
+        // different binary wrote it) is skipped, not allowed to blank the list.
+        let path = temp_db("poison_task");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let good = store
+            .tasks()
+            .create(NewTask::new("good", "/repo", "m"))
+            .expect("create good task");
+        store
+            .conn
+            .execute(
+                "INSERT INTO tasks
+                 (id, title, status, priority, project_path, model_id, created_at, updated_at)
+                 VALUES ('poison', 't', 'from_the_future', 'normal', '/repo', 'm', ?1, ?1)",
+                params![now_rfc3339()],
+            )
+            .unwrap();
+        let listed = store.tasks().list(50).expect("list");
+        assert_eq!(
+            listed.len(),
+            1,
+            "the poison row is skipped, the good row remains"
+        );
+        assert_eq!(listed[0].id, good.id);
+        // The strict get() path still surfaces the poison row as an error.
+        assert!(store.tasks().get("poison").is_err(), "get() stays strict");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn checkpoint_delete_removes_row() {
+        // F23 (RC-F): the on-disk dir GC drops a checkpoint's DB row so list()
+        // and the on-disk dirs stay in agreement.
+        let path = temp_db("ckpt_delete");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let ckpt = store
+            .checkpoints()
+            .create(NewCheckpoint {
+                id: Some("ckpt-1".to_string()),
+                task_id: None,
+                project_path: "/repo".to_string(),
+                snapshot_path: "/data/checkpoints/ckpt-1".to_string(),
+                changed_files_json: "[]".to_string(),
+                pending_action_json: None,
+                approval_id: None,
+            })
+            .expect("create checkpoint");
+        assert!(store.checkpoints().get(&ckpt.id).unwrap().is_some());
+        assert!(store.checkpoints().delete(&ckpt.id).unwrap(), "row deleted");
+        assert!(
+            store.checkpoints().get(&ckpt.id).unwrap().is_none(),
+            "row gone"
+        );
+        assert!(
+            !store.checkpoints().delete(&ckpt.id).unwrap(),
+            "second delete is a no-op"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn list_for_session_caps_at_max_and_keeps_ascending_order() {
+        // F24 (RC-F): a huge session is bounded — list_for_session returns at most
+        // MAX_SESSION_MESSAGES, the most recent ones, in ascending id order.
+        let path = temp_db("session_cap");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let session = store
+            .sessions()
+            .upsert(NewSession {
+                id: Some("big".to_string()),
+                project_path: "/repo".to_string(),
+                model_id: "m".to_string(),
+                title: None,
+                conversation_path: None,
+                total_tokens: None,
+            })
+            .expect("session");
+        let total = MAX_SESSION_MESSAGES + 10;
+        let now = now_rfc3339();
+        let tx = store.conn.unchecked_transaction().unwrap();
+        for i in 0..total {
+            tx.execute(
+                "INSERT INTO messages (session_id, role, content_json, created_at)
+                 VALUES (?1, 'user', ?2, ?3)",
+                params![session.id, format!("{{\"n\":{i}}}"), now],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let listed = store
+            .messages()
+            .list_for_session(&session.id)
+            .expect("list");
+        assert_eq!(
+            listed.len() as i64,
+            MAX_SESSION_MESSAGES,
+            "capped at the max"
+        );
+        assert!(
+            listed.windows(2).all(|w| w[0].id < w[1].id),
+            "ascending id order preserved across the capped tail"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
