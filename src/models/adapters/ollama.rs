@@ -1490,7 +1490,9 @@ mod tests {
             done_reason: Some("stop".to_string()),
         };
         OllamaAdapter::process_stream_chunk(&done_chunk, None, &mut acc);
-        let usage = acc.usage().expect("usage present after a done chunk with counts");
+        let usage = acc
+            .usage()
+            .expect("usage present after a done chunk with counts");
         assert_eq!(usage.prompt_tokens, 120);
         assert_eq!(usage.completion_tokens, 8);
         assert_eq!(usage.total_tokens, 128);
@@ -1537,7 +1539,10 @@ mod tests {
             done_reason: Some("stop".to_string()),
         };
         OllamaAdapter::process_stream_chunk(&done_chunk, None, &mut acc);
-        assert!(!acc.closed_abnormally(), "a `done` chunk completes the stream");
+        assert!(
+            !acc.closed_abnormally(),
+            "a `done` chunk completes the stream"
+        );
     }
 
     #[test]
@@ -1594,9 +1599,10 @@ mod tests {
     fn stream_frame_normal_chunk_still_parses() {
         // The error-frame guard must not disturb a normal content frame.
         use super::parse_ollama_stream_frame;
-        let chunk =
-            parse_ollama_stream_frame(r#"{"message":{"role":"assistant","content":"hello"},"done":false}"#)
-                .expect("normal frame parses");
+        let chunk = parse_ollama_stream_frame(
+            r#"{"message":{"role":"assistant","content":"hello"},"done":false}"#,
+        )
+        .expect("normal frame parses");
         assert_eq!(chunk.message.content, "hello");
         assert!(!chunk.done);
     }

@@ -509,8 +509,12 @@ async fn launch_background_process(
     // `: > "$log"` / output redirects to a victim file (#F15), and the captured
     // output stays owner-readable on top of the 0700 private dir (#F14). The
     // launcher then truncates this regular file in place, preserving its perms.
-    create_log_file_blocking(log_path)
-        .map_err(|e| format!("failed to create background log {}: {e}", log_path.display()))?;
+    create_log_file_blocking(log_path).map_err(|e| {
+        format!(
+            "failed to create background log {}: {e}",
+            log_path.display()
+        )
+    })?;
     let mut launcher = Command::new("sh");
     launcher
         .arg("-c")

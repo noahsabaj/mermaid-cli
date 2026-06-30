@@ -602,7 +602,10 @@ mod tests {
             !raw.contains("sk-abcdefghijklmnop1234"),
             "tag secret leaked: {raw}"
         );
-        assert!(raw.contains("[REDACTED]"), "expected redaction marker: {raw}");
+        assert!(
+            raw.contains("[REDACTED]"),
+            "expected redaction marker: {raw}"
+        );
         // The credential must not survive in the on-disk filename either.
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         assert!(

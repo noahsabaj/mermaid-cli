@@ -155,8 +155,7 @@ mod tests {
 
     #[test]
     fn sweep_preserves_fresh_in_flight_temps() {
-        let dir =
-            std::env::temp_dir().join(format!("mermaid_atomic_fresh_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mermaid_atomic_fresh_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::create_dir_all(&dir);
 

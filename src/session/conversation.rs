@@ -748,10 +748,8 @@ mod tests {
         // this build doesn't model. It must still load — the unknown role maps to
         // a neutral System message — so `--continue` doesn't silently skip the
         // newest session (the prior behavior, when the whole parse hard-failed).
-        let dir = std::env::temp_dir().join(format!(
-            "mermaid_conv_role_skew_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("mermaid_conv_role_skew_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
@@ -774,11 +772,7 @@ mod tests {
                 "total_tokens": null
             }}"#
         );
-        fs::write(
-            manager.conversations_dir().join(format!("{id}.json")),
-            json,
-        )
-        .unwrap();
+        fs::write(manager.conversations_dir().join(format!("{id}.json")), json).unwrap();
 
         let loaded = manager
             .load_conversation(id)
@@ -846,10 +840,8 @@ mod tests {
         // edits. The optimistic-concurrency guard must detect the concurrent
         // write and preserve our copy in a `.conflict` sibling instead of
         // clobbering the other writer's file.
-        let dir = std::env::temp_dir().join(format!(
-            "mermaid_conv_conflict_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("mermaid_conv_conflict_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
@@ -909,10 +901,8 @@ mod tests {
     fn save_conversation_repeated_self_saves_do_not_conflict() {
         // The guard must not false-positive on a single process's OWN repeated
         // saves (the hot path rewrites the file after nearly every message).
-        let dir = std::env::temp_dir().join(format!(
-            "mermaid_conv_self_save_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("mermaid_conv_self_save_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 

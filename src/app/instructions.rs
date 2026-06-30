@@ -656,10 +656,7 @@ mod tests {
         assert!(loaded.content.contains(INSTRUCTIONS_TRUNCATION_MARKER));
         // The winner lands AFTER the elision marker — AGENTS.md was the file
         // truncated, and MERMAID.md still comes last so it overrides on conflict.
-        let marker_at = loaded
-            .content
-            .find(INSTRUCTIONS_TRUNCATION_MARKER)
-            .unwrap();
+        let marker_at = loaded.content.find(INSTRUCTIONS_TRUNCATION_MARKER).unwrap();
         let winner_at = loaded.content.find("MERMAID_WINS_SENTINEL").unwrap();
         assert!(
             winner_at > marker_at,
@@ -667,8 +664,7 @@ mod tests {
         );
         // Bounded: never more than the cap plus a single marker.
         assert!(
-            loaded.content.len()
-                <= MAX_INSTRUCTIONS_BYTES + INSTRUCTIONS_TRUNCATION_MARKER.len()
+            loaded.content.len() <= MAX_INSTRUCTIONS_BYTES + INSTRUCTIONS_TRUNCATION_MARKER.len()
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -731,11 +727,7 @@ mod tests {
         let missing = dir.join("MERMAID.md"); // never created
         let loaded = load_from_paths(&[dir.join("AGENTS.md"), missing])
             .expect("AGENTS.md must still load when MERMAID.md is absent");
-        assert!(
-            loaded
-                .content
-                .contains("# Project Instructions: AGENTS.md")
-        );
+        assert!(loaded.content.contains("# Project Instructions: AGENTS.md"));
         assert!(loaded.content.contains("agent rules"));
         assert_eq!(loaded.sources.len(), 1, "only the present file is a source");
         assert_eq!(loaded.path, dir.join("AGENTS.md"));

@@ -1742,7 +1742,10 @@ async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Res
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    let script_path = dir.join(format!("mermaid-update-{}-{nanos}.{ext}", std::process::id()));
+    let script_path = dir.join(format!(
+        "mermaid-update-{}-{nanos}.{ext}",
+        std::process::id()
+    ));
     stage_install_script(&script_path, script.as_bytes())
         .map_err(|e| anyhow!("could not stage install script: {e}"))?;
 
@@ -2276,10 +2279,7 @@ mod tests {
             "beforeafter"
         );
         // OSC window-title rewrite terminated by ST (ESC '\').
-        assert_eq!(
-            sanitize_terminal_text("a\u{1b}]0;pwned\u{1b}\\b"),
-            "ab"
-        );
+        assert_eq!(sanitize_terminal_text("a\u{1b}]0;pwned\u{1b}\\b"), "ab");
         // Charset-designation (ESC '(' 'B') drops its final byte too.
         assert_eq!(sanitize_terminal_text("x\u{1b}(By"), "xy");
         // Bare CR and a C1 control are dropped; \n is preserved.

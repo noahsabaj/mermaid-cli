@@ -380,14 +380,11 @@ impl RuntimeClient {
 
     pub fn stop_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
         // Non-idempotent: `terminate_tree` must not fire twice (RC-G/F25).
-        self.action_authed_non_idempotent(
-            json!({"command": "stop_process", "id": id}),
-            |service| {
-                service
-                    .stop_process(id)
-                    .map(|item| RuntimeOne { ok: true, item })
-            },
-        )
+        self.action_authed_non_idempotent(json!({"command": "stop_process", "id": id}), |service| {
+            service
+                .stop_process(id)
+                .map(|item| RuntimeOne { ok: true, item })
+        })
     }
 
     pub fn restart_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
@@ -561,13 +558,7 @@ impl RuntimeClient {
         }
     }
 
-    fn action_inner<T, F>(
-        &self,
-        body: Value,
-        authed: bool,
-        idempotent: bool,
-        local: F,
-    ) -> Result<T>
+    fn action_inner<T, F>(&self, body: Value, authed: bool, idempotent: bool, local: F) -> Result<T>
     where
         T: DeserializeOwned,
         F: FnOnce(&RuntimeService) -> Result<T>,
@@ -1450,7 +1441,9 @@ mod tests {
         let broken = anyhow::Error::from(IoError::from(ErrorKind::BrokenPipe));
         assert!(!daemon_failure_is_pre_send(&broken));
         // A daemon-level `ok:false` error definitely reached the daemon.
-        assert!(!daemon_failure_is_pre_send(&anyhow::anyhow!("stop_process failed")));
+        assert!(!daemon_failure_is_pre_send(&anyhow::anyhow!(
+            "stop_process failed"
+        )));
     }
 
     #[test]

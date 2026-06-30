@@ -573,9 +573,9 @@ impl RuntimeStore {
         self.conn.execute_batch("BEGIN IMMEDIATE;")?;
         let result = (|| -> Result<(usize, usize)> {
             let running: Vec<String> = {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id FROM tasks WHERE status = 'running' AND owner_kind = ?1",
-                )?;
+                let mut stmt = self
+                    .conn
+                    .prepare("SELECT id FROM tasks WHERE status = 'running' AND owner_kind = ?1")?;
                 let ids = stmt.query_map([OWNER_KIND_DAEMON], |row| row.get::<_, String>(0))?;
                 ids.collect::<rusqlite::Result<Vec<_>>>()?
             };
@@ -2230,9 +2230,7 @@ fn process_from_row_opt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Proc
 }
 
 /// Tolerant [`task_event_from_row`] — see [`task_from_row_opt`].
-fn task_event_from_row_opt(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<Option<TaskTimelineEvent>> {
+fn task_event_from_row_opt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<TaskTimelineEvent>> {
     match task_event_from_row(row) {
         Ok(record) => Ok(Some(record)),
         Err(err) if is_row_decode_error(&err) => {
@@ -2245,9 +2243,7 @@ fn task_event_from_row_opt(
 
 /// Collect rows from a tolerant decoder (one that yields `Ok(None)` for a
 /// skipped poison row), dropping the `None`s and propagating any real error.
-fn collect_tolerant<T>(
-    rows: impl Iterator<Item = rusqlite::Result<Option<T>>>,
-) -> Result<Vec<T>> {
+fn collect_tolerant<T>(rows: impl Iterator<Item = rusqlite::Result<Option<T>>>) -> Result<Vec<T>> {
     let mut out = Vec::new();
     for row in rows {
         if let Some(item) = row? {

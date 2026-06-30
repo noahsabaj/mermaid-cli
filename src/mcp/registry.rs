@@ -521,10 +521,7 @@ pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
     if let Some(entry) = lookup(name) {
         println!("Found: {} ({})", entry.package, entry.description);
         if !confirm_registry_launch(entry.package, entry.command, assume_yes)? {
-            bail!(
-                "Cancelled: did not confirm running '{}'.",
-                entry.package
-            );
+            bail!("Cancelled: did not confirm running '{}'.", entry.package);
         }
         return Ok(ResolvedServer {
             command: entry.command.to_string(),

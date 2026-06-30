@@ -1352,7 +1352,10 @@ mod tests {
         assert!(!stream_closed_abnormally(false, Some(&FinishReason::Stop)));
         // CRUCIAL: a max_tokens truncation arrives as a real stop_reason
         // (Length) — it must NOT be misclassified as an abnormal close.
-        assert!(!stream_closed_abnormally(false, Some(&FinishReason::Length)));
+        assert!(!stream_closed_abnormally(
+            false,
+            Some(&FinishReason::Length)
+        ));
         // Defensive: a message_stop frame is terminal even with no stop_reason.
         assert!(!stream_closed_abnormally(true, None));
     }

@@ -1179,7 +1179,10 @@ mod tests {
         // slicing must yield None instead of panicking.
         assert_eq!(parse_xrandr_monitor_line(" connected", "connected"), None);
         // Two tokens (still < 3), name matches: no geometry token, no panic.
-        assert_eq!(parse_xrandr_monitor_line("HDMI-1 connected", "HDMI-1"), None);
+        assert_eq!(
+            parse_xrandr_monitor_line("HDMI-1 connected", "HDMI-1"),
+            None
+        );
     }
 
     #[test]
@@ -1228,10 +1231,8 @@ mod tests {
     async fn downscale_skips_and_leaves_no_scaled_sibling_when_within_max() {
         // A capture already within max_width early-returns scale 1.0 and must create
         // no `.scaled.png` sibling. Encoder-independent (no convert/ffmpeg needed).
-        let path = std::env::temp_dir().join(format!(
-            "mermaid-f58-skip-{}.png",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("mermaid-f58-skip-{}.png", std::process::id()));
         let path_str = path.to_string_lossy().to_string();
         let _cleanup = TempFileGuard(path.clone());
         // Minimal PNG header advertising width=16 in the IHDR (bytes 16..20).

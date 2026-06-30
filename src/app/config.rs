@@ -464,7 +464,10 @@ pub fn load_config_or_warn() -> Config {
             // A TOML parse error renders the offending source line, which can be
             // a secret-bearing one (`extra_headers`/`env`/`api_key_env`); scrub
             // credential-shaped content before it reaches stderr (#F13).
-            eprintln!("mermaid: {}", crate::utils::redact_secrets(&format!("{e:#}")));
+            eprintln!(
+                "mermaid: {}",
+                crate::utils::redact_secrets(&format!("{e:#}"))
+            );
             Config::default()
         },
     }

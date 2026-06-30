@@ -1396,7 +1396,8 @@ async fn dispatch_call_model(
         // awaiting it here does not meaningfully stall the turn (the "never stall
         // dispatch" rule is about the synchronous reducer path, not this task).
         if let Err(e) =
-            tokio::task::spawn_blocking(move || record_provider_capabilities(&model_id, &caps)).await
+            tokio::task::spawn_blocking(move || record_provider_capabilities(&model_id, &caps))
+                .await
         {
             tracing::error!(error = %e, "effect: provider-capability telemetry write failed");
         }

@@ -33,8 +33,9 @@ const WRITE_TIMEOUT_SECS: u64 = 10;
 /// survive (plus the server's own declared `env`, added separately, and any
 /// `LC_*` matched by prefix). See F48.
 #[cfg(not(windows))]
-const SAFE_ENV_PASSTHROUGH: &[&str] =
-    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR"];
+const SAFE_ENV_PASSTHROUGH: &[&str] = &[
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR",
+];
 #[cfg(windows)]
 const SAFE_ENV_PASSTHROUGH: &[&str] = &[
     "PATH",
@@ -210,8 +211,7 @@ impl StdioTransport {
                         // dropping it and letting the server stall forever (F79).
                         Some(id) if !id.is_null() => {
                             tracing::debug!(
-                                method =
-                                    msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
+                                method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
                                 "MCP: replying method-not-supported to unsupported server request"
                             );
                             reply_method_not_supported(&stdin_for_reader, id).await;
@@ -219,8 +219,7 @@ impl StdioTransport {
                         // Notification: no `id`, no reply expected. Ignore it.
                         _ => {
                             tracing::trace!(
-                                method =
-                                    msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
+                                method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
                                 "MCP: ignoring server notification (no reply expected)"
                             );
                         },
@@ -689,9 +688,13 @@ case "$reply" in
   *-32601*) printf '{"jsonrpc":"2.0","id":1,"result":{"replied":true}}\n' ;;
   *) printf '{"jsonrpc":"2.0","id":1,"result":{"replied":false}}\n' ;;
 esac"#;
-        let t = StdioTransport::spawn("sh", &["-c".to_string(), script.to_string()], &HashMap::new())
-            .await
-            .expect("spawn");
+        let t = StdioTransport::spawn(
+            "sh",
+            &["-c".to_string(), script.to_string()],
+            &HashMap::new(),
+        )
+        .await
+        .expect("spawn");
         let res = t
             .send_request("ping", json!({}))
             .await

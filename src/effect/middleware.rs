@@ -202,7 +202,10 @@ mod tests {
 
     /// Like `fake_response`, but the response carries a `Retry-After` header
     /// (delta-seconds form) so we can exercise the F26 5xx + Retry-After path.
-    async fn fake_response_with_retry_after(status: u16, retry_after_secs: u64) -> reqwest::Response {
+    async fn fake_response_with_retry_after(
+        status: u16,
+        retry_after_secs: u64,
+    ) -> reqwest::Response {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
 

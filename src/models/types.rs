@@ -471,8 +471,7 @@ mod tests {
     fn unknown_message_kind_deserializes_to_unknown() {
         // F74: an unknown ChatMessageKind maps to Unknown via #[serde(other)]
         // rather than failing the parse; it's treated like a normal message.
-        let kind: ChatMessageKind =
-            serde_json::from_str("\"some_future_kind\"").expect("tolerant");
+        let kind: ChatMessageKind = serde_json::from_str("\"some_future_kind\"").expect("tolerant");
         assert_eq!(kind, ChatMessageKind::Unknown);
         assert_ne!(kind, ChatMessageKind::Normal);
     }

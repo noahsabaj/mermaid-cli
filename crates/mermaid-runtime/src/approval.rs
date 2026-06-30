@@ -193,7 +193,10 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
                 crate::pathguard::create_dir_all_beneath(&workdir, parent)?;
             }
             crate::pathguard::write_atomic_beneath(&workdir, &rel, content.as_bytes())?;
-            Ok(format!("replayed write_file {}", workdir.join(&rel).display()))
+            Ok(format!(
+                "replayed write_file {}",
+                workdir.join(&rel).display()
+            ))
         },
         "edit_file" => {
             let path = string_arg(args, "path")?;
@@ -201,19 +204,28 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
             let new = string_arg(args, "new_string")?;
             let rel = crate::pathguard::relative_within(&workdir, path)?;
             replay_edit(&workdir, &rel, old, new)?;
-            Ok(format!("replayed edit_file {}", workdir.join(&rel).display()))
+            Ok(format!(
+                "replayed edit_file {}",
+                workdir.join(&rel).display()
+            ))
         },
         "delete_file" => {
             let path = string_arg(args, "path")?;
             let rel = crate::pathguard::relative_within(&workdir, path)?;
             crate::pathguard::remove_file_beneath(&workdir, &rel)?;
-            Ok(format!("replayed delete_file {}", workdir.join(&rel).display()))
+            Ok(format!(
+                "replayed delete_file {}",
+                workdir.join(&rel).display()
+            ))
         },
         "create_directory" => {
             let path = string_arg(args, "path")?;
             let rel = crate::pathguard::relative_within(&workdir, path)?;
             crate::pathguard::create_dir_all_beneath(&workdir, &rel)?;
-            Ok(format!("replayed create_directory {}", workdir.join(&rel).display()))
+            Ok(format!(
+                "replayed create_directory {}",
+                workdir.join(&rel).display()
+            ))
         },
         other => anyhow::bail!("approval replay does not support tool `{other}`"),
     }
@@ -383,7 +395,8 @@ mod tests {
     /// refused on replay rather than executed verbatim.
     #[test]
     fn replay_execute_command_refuses_destructive() {
-        let root = std::env::temp_dir().join(format!("mermaid_replay_destr_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("mermaid_replay_destr_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let action = serde_json::json!({

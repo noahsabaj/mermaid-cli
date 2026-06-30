@@ -2727,8 +2727,10 @@ fn handle_stream_done(
                 let totals = TokenUsageTotals::from_usage(&u);
                 state.session.last_token_usage = Some(totals);
                 state.session.cumulative_token_usage.add_assign(totals);
-                state.session.cumulative_tokens =
-                    state.session.cumulative_tokens.saturating_add(u.total_tokens);
+                state.session.cumulative_tokens = state
+                    .session
+                    .cumulative_tokens
+                    .saturating_add(u.total_tokens);
             }
             state.turn = other;
             return;
@@ -3738,7 +3740,10 @@ mod tests {
             before_len,
             "no error message should be committed for the user's own cancel"
         );
-        assert!(cmds.is_empty(), "a dropped cancel-side-channel error emits no commands");
+        assert!(
+            cmds.is_empty(),
+            "a dropped cancel-side-channel error emits no commands"
+        );
     }
 
     #[test]

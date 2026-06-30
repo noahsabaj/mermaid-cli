@@ -508,8 +508,7 @@ fn summary_prompt(prepared: &PreparedCompaction, focus: Option<&str>) -> String 
 fn drop_orphan_tool_calls(messages: &mut Vec<ChatMessage>, preserve_pending_tail: bool) {
     let pending_tail = if preserve_pending_tail
         && messages.last().is_some_and(|m| {
-            m.role == MessageRole::Assistant
-                && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+            m.role == MessageRole::Assistant && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
         }) {
         Some(messages.len() - 1)
     } else {
