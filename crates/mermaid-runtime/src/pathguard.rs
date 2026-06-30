@@ -72,6 +72,21 @@ pub(crate) fn contain_within_canonical(root: &Path, raw: &str) -> Result<PathBuf
     Ok(lexical)
 }
 
+/// Root-relative, lexically-normalized form of `raw`, erroring if it escapes
+/// `root`. This is the `rel` argument for the confined `*_beneath` helpers:
+/// they resolve it under a directory fd for `root` with `RESOLVE_BENEATH`, so a
+/// swapped-in symlink can't redirect the operation outside `root`. Used by
+/// [`crate::approval`] so the replay path gets the same symlink-safe confinement
+/// the live tool path has, instead of by-path `std::fs` that follows symlinks.
+pub(crate) fn relative_within(root: &Path, raw: &str) -> Result<PathBuf> {
+    let abs = contain_within(root, raw)?;
+    let root_norm = normalize_lexical(root);
+    let rel = abs
+        .strip_prefix(&root_norm)
+        .map_err(|_| anyhow::anyhow!("path escapes the project root: {raw}"))?;
+    Ok(rel.to_path_buf())
+}
+
 /// Collapse `.` and `..` components lexically (no filesystem access, no symlink
 /// resolution).
 fn normalize_lexical(path: &Path) -> PathBuf {

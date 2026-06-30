@@ -4,7 +4,6 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::pathguard::contain_within;
 use crate::{ApprovalRecord, RuntimeStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,37 +175,45 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
         .unwrap_or(std::env::current_dir()?);
     let args = action.get("args").unwrap_or(action);
 
+    // The stored path comes from (potentially tampered) replay state, so confine
+    // every effect with the symlink-safe `*_beneath` helpers — the SAME
+    // kernel-confined (`openat2(RESOLVE_BENEATH)`) path the live filesystem tools
+    // use — rather than by-path `std::fs`, which follows an in-repo symlink out
+    // of the root (#F4/#F5). `relative_within` rejects an escaping path and names
+    // it relative to `workdir`, which the helpers resolve beneath a `workdir` fd.
     match tool {
         "execute_command" => replay_execute_command(args, &workdir),
         "write_file" => {
             let path = string_arg(args, "path")?;
             let content = string_arg(args, "content")?;
-            let target = contain_within(&workdir, path)?;
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)?;
+            let rel = crate::pathguard::relative_within(&workdir, path)?;
+            if let Some(parent) = rel.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                crate::pathguard::create_dir_all_beneath(&workdir, parent)?;
             }
-            std::fs::write(&target, content)?;
-            Ok(format!("replayed write_file {}", target.display()))
+            crate::pathguard::write_atomic_beneath(&workdir, &rel, content.as_bytes())?;
+            Ok(format!("replayed write_file {}", workdir.join(&rel).display()))
         },
         "edit_file" => {
             let path = string_arg(args, "path")?;
             let old = string_arg(args, "old_string")?;
             let new = string_arg(args, "new_string")?;
-            let target = contain_within(&workdir, path)?;
-            replay_edit(&target, old, new)?;
-            Ok(format!("replayed edit_file {}", target.display()))
+            let rel = crate::pathguard::relative_within(&workdir, path)?;
+            replay_edit(&workdir, &rel, old, new)?;
+            Ok(format!("replayed edit_file {}", workdir.join(&rel).display()))
         },
         "delete_file" => {
             let path = string_arg(args, "path")?;
-            let target = contain_within(&workdir, path)?;
-            std::fs::remove_file(&target)?;
-            Ok(format!("replayed delete_file {}", target.display()))
+            let rel = crate::pathguard::relative_within(&workdir, path)?;
+            crate::pathguard::remove_file_beneath(&workdir, &rel)?;
+            Ok(format!("replayed delete_file {}", workdir.join(&rel).display()))
         },
         "create_directory" => {
             let path = string_arg(args, "path")?;
-            let target = contain_within(&workdir, path)?;
-            std::fs::create_dir_all(&target)?;
-            Ok(format!("replayed create_directory {}", target.display()))
+            let rel = crate::pathguard::relative_within(&workdir, path)?;
+            crate::pathguard::create_dir_all_beneath(&workdir, &rel)?;
+            Ok(format!("replayed create_directory {}", workdir.join(&rel).display()))
         },
         other => anyhow::bail!("approval replay does not support tool `{other}`"),
     }
@@ -242,12 +249,23 @@ fn scrub_secret_env(cmd: &mut Command) {
 
 fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<String> {
     let command = string_arg(args, "command")?;
+    // Re-apply the destructive hard-deny on replay. The command was approved by a
+    // human originally, but `pending_action_json` is stored, tamperable state; a
+    // doctored record must not turn `approve` into arbitrary destructive exec
+    // (#F7). Destructive shapes are hard-denied (never merely "ask"), so a
+    // legitimate pending approval can't be destructive in the first place.
+    anyhow::ensure!(
+        !crate::policy::is_destructive_command(command),
+        "approval replay refused: the stored command is classified destructive \
+         (possible tampered approval record)"
+    );
     // Confine the replay cwd to the recorded workdir. The command itself is an
     // already-approved shell string (replayed verbatim), but a tampered
-    // `working_dir` must not let the replay escape the project root — this
-    // mirrors the containment the write/edit/delete arms already apply.
+    // `working_dir` must not let the replay escape the project root. Use the
+    // canonical (symlink-resolving) check so a symlinked working_dir whose real
+    // target is outside the root is rejected, not just a lexical `..` (#F6).
     let effective_dir = match args.get("working_dir").and_then(|value| value.as_str()) {
-        Some(dir) => contain_within(workdir, dir)?,
+        Some(dir) => crate::pathguard::contain_within_canonical(workdir, dir)?,
         None => workdir.to_path_buf(),
     };
     let mode = args
@@ -288,15 +306,25 @@ fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<St
     ))
 }
 
-fn replay_edit(path: &Path, old_string: &str, new_string: &str) -> Result<()> {
-    let current = std::fs::read_to_string(path)?;
+fn replay_edit(root: &Path, rel: &Path, old_string: &str, new_string: &str) -> Result<()> {
+    // Read AND write through the confined fd helpers so a symlinked leaf inside
+    // the root can neither leak an outside file's contents nor have the rewrite
+    // redirected onto it (#F5).
+    let mut current = String::new();
+    {
+        use std::io::Read;
+        let mut file =
+            crate::pathguard::open_beneath(root, rel, crate::pathguard::OpenIntent::Read)?;
+        file.read_to_string(&mut current)?;
+    }
     let count = current.matches(old_string).count();
     anyhow::ensure!(count > 0, "old_string not found during approval replay");
     anyhow::ensure!(
         count == 1,
         "old_string appears {count} times during approval replay"
     );
-    std::fs::write(path, current.replacen(old_string, new_string, 1))?;
+    let updated = current.replacen(old_string, new_string, 1);
+    crate::pathguard::write_atomic_beneath(root, rel, updated.as_bytes())?;
     Ok(())
 }
 
@@ -313,7 +341,61 @@ mod tests {
     #[test]
     fn replay_path_rejects_parent_escape() {
         let root = std::env::temp_dir().join("mermaid_replay_root");
-        assert!(contain_within(&root, "../escape").is_err());
+        assert!(crate::pathguard::relative_within(&root, "../escape").is_err());
+    }
+
+    /// RC-B: a write replayed through an in-repo symlink that escapes the root
+    /// must be refused, and nothing may be written outside. The live tool path
+    /// already had this guarantee via the `*_beneath` helpers; the replay path
+    /// now shares it instead of following the symlink with by-path `std::fs`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replay_write_refuses_escaping_symlink() {
+        let root =
+            std::env::temp_dir().join(format!("mermaid_replay_symlink_{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("mermaid_replay_outside_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        // Plant a symlink inside the root that redirects outside it.
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let action = serde_json::json!({
+            "tool": "write_file",
+            "workdir": root,
+            "args": {"path": "escape/evil.txt", "content": "pwned"}
+        });
+        assert!(
+            replay_pending_action(&action).is_err(),
+            "a write through an escaping symlink must be refused"
+        );
+        assert!(
+            !outside.join("evil.txt").exists(),
+            "nothing may be written outside the root"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// RC-B/#F7: a tampered pending record whose command is destructive must be
+    /// refused on replay rather than executed verbatim.
+    #[test]
+    fn replay_execute_command_refuses_destructive() {
+        let root = std::env::temp_dir().join(format!("mermaid_replay_destr_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let action = serde_json::json!({
+            "tool": "execute_command",
+            "workdir": root,
+            "args": {"command": "rm -rf /"}
+        });
+        assert!(
+            replay_pending_action(&action).is_err(),
+            "a destructive stored command must be refused on replay"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
