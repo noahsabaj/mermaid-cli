@@ -1,3 +1,9 @@
+<div align="center">
+
+<img src="docs/assets/readme-hero.png" alt="Mermaid — your local-first AI pair programmer" width="100%">
+
+</div>
+
 # Mermaid
 
 An open-source AI coding assistant with computer use for the terminal. Multi-provider — Ollama (local), Anthropic, Gemini, OpenAI, Groq, OpenRouter, and any OpenAI-compatible endpoint — with native tool calling, subagents, computer-use tools, and a clean TUI.
