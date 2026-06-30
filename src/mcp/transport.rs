@@ -27,6 +27,32 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// so we fail fast instead of waiting the full response budget (#37).
 const WRITE_TIMEOUT_SECS: u64 = 10;
 
+/// Minimal, non-secret environment variables passed through to an MCP server
+/// child after `env_clear()`. Deliberately excludes every provider API key /
+/// cloud credential Mermaid holds — only locale, terminal, and path basics
+/// survive (plus the server's own declared `env`, added separately, and any
+/// `LC_*` matched by prefix). See F48.
+#[cfg(not(windows))]
+const SAFE_ENV_PASSTHROUGH: &[&str] =
+    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR"];
+#[cfg(windows)]
+const SAFE_ENV_PASSTHROUGH: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "TERM",
+    "TMPDIR",
+    "SYSTEMROOT",
+    "SystemRoot",
+    "APPDATA",
+    "USERPROFILE",
+    "PATHEXT",
+    "COMSPEC",
+];
+
 /// Stdio transport for a single MCP server process.
 ///
 /// Manages the child process lifecycle and provides request/response
@@ -75,6 +101,24 @@ impl StdioTransport {
             // for the normal path; this is just a belt-and-braces fallback
             // so we never leak MCP server processes.
             .kill_on_drop(true);
+
+        // Don't hand an MCP server child Mermaid's entire environment — that
+        // would leak every provider API key / cloud credential we hold to
+        // third-party (including curated, no-confirmation) server code. Start
+        // from an empty environment and re-add only a minimal, non-secret
+        // allowlist, plus any `LC_*` locale overrides, plus the server's own
+        // declared `env` vars (which intentionally take precedence). See F48.
+        cmd.env_clear();
+        for key in SAFE_ENV_PASSTHROUGH {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
+        for (key, value) in std::env::vars_os() {
+            if key.to_str().is_some_and(|k| k.starts_with("LC_")) {
+                cmd.env(&key, &value);
+            }
+        }
 
         for (key, value) in env {
             cmd.env(key, value);
@@ -541,6 +585,36 @@ mod tests {
             "must fail fast via the EOF drain, not wait REQUEST_TIMEOUT_SECS"
         );
         // `t` drops here → kill_on_drop reaps the sleeping child.
+    }
+
+    // F48: the MCP child must NOT inherit Mermaid's whole environment (which
+    // holds every provider API key). The child echoes back, as a JSON-RPC
+    // response, a declared env var (must pass through), whether PATH is present
+    // (allowlisted), and CARGO — a var the parent has under `cargo test` that is
+    // NOT allowlisted, so `env_clear()` must drop it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_env_is_cleared_except_allowlist_and_declared() {
+        use super::StdioTransport;
+        use std::collections::HashMap;
+        let script = r#"read line
+printf '{"jsonrpc":"2.0","id":1,"result":{"declared":"%s","path":"%s","cargo":"%s"}}\n' "$DECLARED_TOKEN" "$([ -n "$PATH" ] && echo yes || echo no)" "$CARGO""#;
+        let mut env = HashMap::new();
+        env.insert("DECLARED_TOKEN".to_string(), "passed-through".to_string());
+
+        let t = StdioTransport::spawn("sh", &["-c".to_string(), script.to_string()], &env)
+            .await
+            .expect("spawn");
+        let res = t.send_request("ping", json!({})).await.expect("response");
+        assert_eq!(
+            res["declared"], "passed-through",
+            "declared env vars must still pass through"
+        );
+        assert_eq!(res["path"], "yes", "PATH must be in the allowlist");
+        assert_eq!(
+            res["cargo"], "",
+            "a non-allowlisted inherited var must be cleared by env_clear()"
+        );
     }
 
     // terminate() must deliver a real SIGTERM (signal 15), not SIGKILL (signal 9)

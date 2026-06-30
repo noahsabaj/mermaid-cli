@@ -455,8 +455,34 @@ pub fn save_config(config: &Config, path: Option<PathBuf>) -> Result<()> {
     };
 
     let toml_string = toml::to_string_pretty(config)?;
-    std::fs::write(&path, toml_string)
-        .with_context(|| format!("Failed to write config to {}", path.display()))?;
+
+    // The config can carry literal secrets — `mcp_servers[].env`,
+    // `mcp_servers[].args`, and `providers[].extra_headers` all accept inline
+    // credential values — so it must not be left world-readable at umask. On
+    // Unix, create it 0600 from the start (and tighten an already-existing
+    // file, whose perms a fresh `mode()` would not touch). Windows uses ACLs;
+    // leave its default.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("Failed to write config to {}", path.display()))?;
+        // `mode()` only applies on create; tighten a pre-existing config too.
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        file.write_all(toml_string.as_bytes())
+            .with_context(|| format!("Failed to write config to {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, toml_string)
+            .with_context(|| format!("Failed to write config to {}", path.display()))?;
+    }
 
     Ok(())
 }
@@ -764,6 +790,27 @@ port = 11434
         let cfg: Config = toml::from_str(toml_blob).expect("backward compat");
         assert!(cfg.reasoning_per_model.is_empty());
         assert!(!cfg.prompt.is_customized());
+    }
+
+    /// Config holds inline-secret-capable fields (`mcp_servers[].env`, `args`,
+    /// `providers[].extra_headers`), so it must be written owner-only rather
+    /// than inheriting a world-readable umask.
+    #[cfg(unix)]
+    #[test]
+    fn save_config_writes_owner_only_perms() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join("mermaid_test_config_perms");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.toml");
+        // Pre-create a world-readable file to prove we also tighten existing.
+        std::fs::write(&path, "stale").expect("seed");
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+
+        save_config(&Config::default(), Some(path.clone())).expect("save");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config must be written owner-only");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

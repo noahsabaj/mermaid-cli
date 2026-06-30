@@ -44,8 +44,58 @@ static SECRET_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| 
         (p(r#"\bgh[pousr]_[A-Za-z0-9]{20,}\b"#), "[REDACTED]"),     // GitHub tokens
         (p(r#"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"#), "[REDACTED]"),   // Slack
         (p(r#"\bAIza[0-9A-Za-z._\-]{20,}\b"#), "[REDACTED]"),       // Google API key
+        (p(r#"\bgsk_[A-Za-z0-9]{20,}\b"#), "[REDACTED]"),           // Groq
+        (p(r#"\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b"#), "[REDACTED]"), // Stripe
+        // Generic JWT (header.payload.signature, base64url segments).
+        (
+            p(r#"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"#),
+            "[REDACTED]",
+        ),
+        // PEM private-key header (the armored block that follows is the key).
+        (p(r#"-----BEGIN [A-Z ]*PRIVATE KEY-----"#), "[REDACTED]"),
+        // URL-embedded credentials: scheme://user:password@host → scrub password.
+        (p(r#"(://[^/:@\s]+:)[^/@\s]{3,}@"#), "${1}[REDACTED]@"),
     ]
 });
+
+/// Minimum String-value length under a credential-named JSON key before we
+/// redact it, so a benign short value like `{"key":"id"}` isn't scrubbed.
+const MIN_CREDENTIAL_VALUE_LEN: usize = 6;
+
+/// Bare JSON object key names that designate a credential but contain no longer
+/// token like `API_KEY`/`SECRET` (those are caught by [`CRED_KEY_TOKEN`]).
+/// Matched case-insensitively against the *whole* key so a value can't hide
+/// behind a `{"key": …}` / `{"authorization": …}` field.
+const BARE_CREDENTIAL_KEYS: &[&str] = &[
+    "key",
+    "authorization",
+    "auth",
+    "password",
+    "token",
+    "secret",
+    "apikey",
+];
+
+/// Strong credential token any part of a JSON key name may contain (`api_key`,
+/// `aws_secret_access_key`, `refresh_token`, …). Mirrors the `NAME[:=]VALUE`
+/// name pattern in [`SECRET_PATTERNS`].
+static CRED_KEY_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:API[_-]?KEY|APIKEY|SECRET|TOKEN|PASSWORD|PASSWD|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIALS?)",
+    )
+    .expect("static redaction regex must compile")
+});
+
+/// True when a JSON object key *names* a credential — either it contains a
+/// strong token ([`CRED_KEY_TOKEN`]) or it's one of the bare field names
+/// ([`BARE_CREDENTIAL_KEYS`]). Used by [`redact_json`] so a credential carried
+/// as a structured field with an opaque value is still scrubbed.
+fn key_names_credential(key: &str) -> bool {
+    CRED_KEY_TOKEN.is_match(key)
+        || BARE_CREDENTIAL_KEYS
+            .iter()
+            .any(|bare| key.eq_ignore_ascii_case(bare))
+}
 
 /// Replace credential-shaped substrings of `input` with `[REDACTED]`.
 pub fn redact_secrets(input: &str) -> String {
@@ -69,7 +119,24 @@ pub fn redact_json(value: &mut serde_json::Value) {
             }
         },
         serde_json::Value::Array(items) => items.iter_mut().for_each(redact_json),
-        serde_json::Value::Object(map) => map.values_mut().for_each(redact_json),
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                // Key-name-aware redaction (root cause): a credential carried as a
+                // structured field with an opaque value — `{"api_key":"gsk_…"}`,
+                // `{"key":"<token>"}` — matches no value-shape pattern, and the
+                // `NAME[:=]VALUE` regex can't span two JSON nodes. So when the KEY
+                // names a credential, scrub a non-trivial String value outright,
+                // regardless of its shape. Other keys recurse via `redact_secrets`.
+                if key_names_credential(key)
+                    && let serde_json::Value::String(s) = val
+                    && s.len() >= MIN_CREDENTIAL_VALUE_LEN
+                {
+                    *s = "[REDACTED]".to_string();
+                    continue;
+                }
+                redact_json(val);
+            }
+        },
         _ => {},
     }
 }
@@ -127,6 +194,57 @@ mod tests {
         ] {
             assert_eq!(redact_secrets(ok), ok, "should not redact: {ok}");
         }
+    }
+
+    #[test]
+    fn redacts_new_value_prefixes() {
+        assert_eq!(
+            redact_secrets("groq gsk_abcdefghijklmnopqrstuvwxyz0123"),
+            "groq [REDACTED]"
+        );
+        assert_eq!(
+            redact_secrets("stripe sk_live_abcdefghijklmnop1234"),
+            "stripe [REDACTED]"
+        );
+        // JWT: three base64url segments.
+        assert_eq!(
+            redact_secrets(
+                "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpM"
+            ),
+            "token [REDACTED]"
+        );
+        // PEM private-key header.
+        assert_eq!(
+            redact_secrets("-----BEGIN RSA PRIVATE KEY-----"),
+            "[REDACTED]"
+        );
+        // URL-embedded credentials: only the password portion is scrubbed.
+        assert_eq!(
+            redact_secrets("postgres://admin:s3cr3tpass@db.example.com/app"),
+            "postgres://admin:[REDACTED]@db.example.com/app"
+        );
+    }
+
+    #[test]
+    fn redact_json_scrubs_credential_keyed_values_regardless_of_shape() {
+        // The Groq key's opaque value matches no prefix, but the `api_key` key
+        // name forces redaction (the root-cause fix).
+        let mut v = serde_json::json!({
+            "api_key": "gsk_opaquevalue123456",
+            "authorization": "OpaqueBearerLikeValue",
+            "key": "id",
+            "name": "hello",
+            "nested": { "Secret-Token": "another-opaque-credential" },
+        });
+        redact_json(&mut v);
+        assert_eq!(v["api_key"], "[REDACTED]");
+        assert_eq!(v["authorization"], "[REDACTED]");
+        // Short benign value under a credential key is left alone.
+        assert_eq!(v["key"], "id");
+        // Non-credential key with benign value is untouched.
+        assert_eq!(v["name"], "hello");
+        // Recurses into nested objects, matching credential keys there too.
+        assert_eq!(v["nested"]["Secret-Token"], "[REDACTED]");
     }
 
     #[test]
