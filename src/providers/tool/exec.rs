@@ -5,9 +5,11 @@
 //!
 //!   1. Reducer emits `Cmd::CancelScope(turn)`.
 //!   2. Effect runner cancels the turn's scope token.
-//!   3. This tool's select! branch fires, the `Command` is dropped,
-//!      `kill_on_drop(true)` reaps the child, and `ToolOutcome::
-//!      Cancelled` flows back to the reducer.
+//!   3. `run_command`'s cancel branch fires, `terminate_tree` SIGKILLs
+//!      the child's whole process group, the driver is aborted, and
+//!      `ToolOutcome::Cancelled` flows back to the reducer. (The child
+//!      is deliberately NOT `kill_on_drop`, so a Ctrl+B-detached
+//!      command survives a clean shutdown — see the spawn site.)
 //!
 //! End-to-end latency: microseconds plus whatever it takes `SIGKILL`
 //! to arrive. No polling loop to "forget" to include.
@@ -248,10 +250,16 @@ impl ToolExecutor for ExecuteCommandTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // `kill_on_drop` reaps the direct shell child; the cancel branch in
-            // `run_command` additionally tree-kills the process group, so a
-            // forked grandchild (e.g. `sh -c "server &"`) isn't orphaned.
-            .kill_on_drop(true);
+            // NOT kill-on-drop: the cancel and timeout arms of `run_command`
+            // explicitly `terminate_tree` the whole process group (the direct
+            // shell is its group leader, so any forked grandchild dies too), so
+            // no drop-time backstop is needed on those paths. Crucially, leaving
+            // the child un-armed lets a Ctrl+B-detached command survive a clean
+            // Mermaid shutdown: the orphaned driver task that still owns this
+            // `Child` is aborted at runtime teardown, and a `kill_on_drop(true)`
+            // child would then be SIGKILLed despite `mode=background` semantics
+            // — inconsistent with a truly backgrounded process (#F16).
+            .kill_on_drop(false);
 
         // Unix: lead a new process group so cancel can signal the whole group.
         // (Windows kills the tree by pid via `taskkill /T`, no group needed.)
@@ -496,6 +504,13 @@ async fn launch_background_process(
     workdir: &Path,
     log_path: &Path,
 ) -> Result<u32, String> {
+    // Pre-create the log owner-only with O_EXCL BEFORE the launcher runs, so a
+    // symlink pre-planted at the predictable path can't redirect the script's
+    // `: > "$log"` / output redirects to a victim file (#F15), and the captured
+    // output stays owner-readable on top of the 0700 private dir (#F14). The
+    // launcher then truncates this regular file in place, preserving its perms.
+    create_log_file_blocking(log_path)
+        .map_err(|e| format!("failed to create background log {}: {e}", log_path.display()))?;
     let mut launcher = Command::new("sh");
     launcher
         .arg("-c")
@@ -694,12 +709,50 @@ async fn process_running(pid: u32) -> bool {
 // Ctrl+B-detached cleanup, and the daemon's `/stop`/`/restart`. It kills the
 // process group (catching grandchildren), not just the direct pid.
 
+/// Build a unique, hard-to-predict path for a command's tee log inside the
+/// per-user `0700` private temp dir (#F14). Command stdout/stderr is tee'd here
+/// and can contain secrets (`cat .env`, `gh auth token`), so it must NOT land in
+/// the world-readable shared system temp dir. Falls back to the system temp dir
+/// only if the private dir can't be created — the owner-only + `O_EXCL` create
+/// at the use-site (`create_log_file_blocking`) still applies there.
 fn background_log_path() -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    std::env::temp_dir().join(format!("mermaid-bg-{}-{}.log", std::process::id(), nanos))
+    let name = format!("mermaid-bg-{}-{}.log", std::process::id(), nanos);
+    match crate::utils::private_temp_dir() {
+        Ok(dir) => dir.join(name),
+        Err(_) => std::env::temp_dir().join(name),
+    }
+}
+
+/// Create (exclusively) the tee log at `path`. On Unix the file is owner-only
+/// (`0600`) and opened `O_CREAT | O_EXCL` (via `create_new`): per POSIX that
+/// refuses to open — and refuses to follow — a symlink someone pre-planted at
+/// the predictable name, so the log write can't be redirected to a victim file
+/// (#F15). The `0600` mode keeps the captured stdout/stderr owner-readable on
+/// top of the `0700` private dir (#F14).
+#[cfg(unix)]
+fn create_log_file_blocking(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// Create the foreground tee log, returning a `tokio` handle. Unix uses the
+/// hardened owner-only + `O_EXCL` create above; other platforms fall back to a
+/// plain create (the log already lives in the private dir). Best-effort: `None`
+/// means "no tee log", which only costs `/logs` tail-ability, not correctness.
+fn create_tee_log_blocking(path: &Path) -> Option<tokio::fs::File> {
+    #[cfg(unix)]
+    let std_file = create_log_file_blocking(path).ok();
+    #[cfg(not(unix))]
+    let std_file = std::fs::File::create(path).ok();
+    std_file.map(tokio::fs::File::from_std)
 }
 
 struct CommandMetadataInput {
@@ -965,11 +1018,10 @@ async fn run_command(
 
     // Tee combined output to a log file so that, if the user backgrounds the
     // command (Ctrl+B), it stays tail-able via /logs. Removed on normal exit.
+    // Lives in the 0700 private temp dir, created owner-only + O_EXCL (#F14/#F15).
     let log_path = background_log_path();
-    let log = tokio::fs::File::create(&log_path)
-        .await
-        .ok()
-        .map(|f| std::sync::Arc::new(tokio::sync::Mutex::new(f)));
+    let log =
+        create_tee_log_blocking(&log_path).map(|f| std::sync::Arc::new(tokio::sync::Mutex::new(f)));
 
     let cap = crate::constants::MAX_TOOL_OUTPUT_BYTES;
     let stdout_task = tokio::spawn(read_capped(
@@ -1109,6 +1161,33 @@ mod tests {
             written.len()
         );
         assert!(String::from_utf8_lossy(&written).contains("log truncated"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tee_log_created_owner_only_and_refuses_existing() {
+        // #F14/#F15: the tee log (which can capture secret-bearing stdout) must
+        // be owner-only, and the O_EXCL create must refuse a pre-existing path —
+        // the same guard that refuses to follow a symlink planted at the
+        // predictable name.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("mermaid_loghard_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bg.log");
+        let _ = std::fs::remove_file(&path);
+
+        let file = create_log_file_blocking(&path).expect("first create succeeds");
+        drop(file);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "tee log must be owner-only, got {mode:o}");
+
+        // O_EXCL: a second create at the same path (e.g. an attacker-planted
+        // symlink/file) is refused rather than followed/truncated.
+        assert!(
+            create_log_file_blocking(&path).is_err(),
+            "O_EXCL must refuse an existing path"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

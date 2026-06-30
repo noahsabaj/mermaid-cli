@@ -256,13 +256,32 @@ impl ToolExecutor for WebFetchTool {
     }
 }
 
+/// Cap on a single `web_fetch` body (#F46). The raw fetch is bounded only by the
+/// 16 MB HTTP body limit, so without this one URL could dump megabytes into model
+/// context. A full page warrants more room than a `web_search` snippet
+/// (`WEB_CONTENT_MAX_CHARS`), so this mirrors web_search's per-call aggregate
+/// budget. Applied as a byte cap; truncation is char-boundary safe.
+const WEB_FETCH_MAX_CHARS: usize = crate::constants::WEB_SEARCH_AGGREGATE_MAX_CHARS;
+
+/// Truncate a fetched page body to `WEB_FETCH_MAX_CHARS` bytes, char-boundary
+/// safe, appending a marker — consistent with how `web_search` bounds the
+/// content it returns (#F46). Borrows when no truncation is needed.
+fn cap_fetch_content(content: &str) -> std::borrow::Cow<'_, str> {
+    if content.len() <= WEB_FETCH_MAX_CHARS {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let cut = content.floor_char_boundary(WEB_FETCH_MAX_CHARS);
+    std::borrow::Cow::Owned(format!("{}\n\n...[content truncated]", &content[..cut]))
+}
+
 fn format_fetch(url: &str, page: &WebFetchResult) -> String {
     let title = if page.title.is_empty() {
         "(no title)"
     } else {
         page.title.as_str()
     };
-    format!("# {}\n\nURL: {}\n\n{}", title, url, page.content)
+    let content = cap_fetch_content(&page.content);
+    format!("# {}\n\nURL: {}\n\n{}", title, url, content)
 }
 
 fn parse_queries(args: &serde_json::Value) -> Result<Vec<(String, usize)>, String> {
@@ -377,6 +396,32 @@ mod tests {
                 "expected accept for {good:?}",
             );
         }
+    }
+
+    #[test]
+    fn format_fetch_caps_long_content() {
+        // F46: a huge page body must be truncated with a marker, not dumped whole.
+        let big = "z".repeat(WEB_FETCH_MAX_CHARS * 2);
+        let page = WebFetchResult {
+            title: "T".to_string(),
+            content: big,
+        };
+        let out = format_fetch("https://example.com", &page);
+        assert!(
+            out.len() < WEB_FETCH_MAX_CHARS + 256,
+            "content must be capped, got {} bytes",
+            out.len()
+        );
+        assert!(out.contains("truncated"), "expected truncation marker");
+
+        // A short page is emitted intact, with no marker.
+        let small = WebFetchResult {
+            title: "T".to_string(),
+            content: "hello world".to_string(),
+        };
+        let out = format_fetch("https://example.com", &small);
+        assert!(out.contains("hello world"));
+        assert!(!out.contains("truncated"));
     }
 
     #[test]
