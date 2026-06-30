@@ -76,10 +76,14 @@ pub enum Cmd {
         intent: Option<String>,
     },
     /// Cancel every task in the given turn's `TurnScope`. After the
-    /// scope drains, the runner emits a `Msg::StreamDone` (with a
-    /// synthetic "cancelled" marker in usage, or a batch of
-    /// `ToolFinished { outcome: Cancelled }` for tools already running)
-    /// so the reducer can transition back to `Idle`.
+    /// scope's `JoinSet` drains (bounded by a ~2s timeout), the runner
+    /// emits a single `Msg::TurnCancelled(turn)` — that, not
+    /// `Msg::StreamDone`, is the terminal event that lets the reducer
+    /// transition `Cancelling → Idle`. A same-id `Msg::StreamDone` that
+    /// races the drain does NOT end the turn: `handle_stream_done` only
+    /// acts on a `Generating` turn and restores the prior state
+    /// (`Cancelling`) otherwise, so `TurnCancelled` stays the one
+    /// terminal signal for a cancel.
     CancelScope(TurnId),
     /// Ctrl+B: signal the turn's scope to BACKGROUND (not cancel) its running
     /// work. The scope's background token fires; detachable tools (execute_
@@ -363,6 +367,27 @@ impl Cmd {
             self,
             Cmd::CallModel { .. } | Cmd::CompactConversation { .. } | Cmd::ExecuteTool { .. }
         )
+    }
+
+    /// The `TurnId` of the scope this command would spawn fresh work
+    /// *into*. Only the scope-spawning variants return `Some` (the same
+    /// set as `is_turn_scoped`); the scope-control variants
+    /// (`CancelScope` / `BackgroundScope`) act on an existing scope
+    /// rather than populating one with new work, so they return `None`.
+    ///
+    /// The effect runner uses this to refuse spawning fresh work for a
+    /// turn it has already cancelled (tombstoned) — a stray post-cancel
+    /// `CallModel`/`ExecuteTool`/`CompactConversation` would otherwise
+    /// resurrect an un-cancelled scope via `scope_mut`'s `or_insert_with`
+    /// (F38). `CancelScope` must keep working on a tombstoned turn, which
+    /// is exactly why it is excluded here.
+    pub fn scope_turn(&self) -> Option<TurnId> {
+        match self {
+            Cmd::CallModel { turn, .. }
+            | Cmd::CompactConversation { turn, .. }
+            | Cmd::ExecuteTool { turn, .. } => Some(*turn),
+            _ => None,
+        }
     }
 
     /// For traces + the `--record` file — some `Cmd` payloads are huge

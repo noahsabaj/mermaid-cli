@@ -36,6 +36,7 @@ mod middleware;
 mod turn_scope;
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -58,6 +59,13 @@ pub use turn_scope::TurnScope;
 const CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
 const CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// F38: how many recently-cancelled `TurnId`s to remember as tombstones.
+/// Turn ids are strictly monotonic and never reused, so a stray turn-scoped
+/// `Cmd` for a cancelled turn can only ever be a post-cancel straggler that
+/// lands within a few turns of the cancel. A small bounded ring is plenty;
+/// older entries age out so the set never grows across a long session.
+const CANCELLED_TOMBSTONE_CAP: usize = 256;
 
 /// Single channel back to the reducer. `EffectRunner` holds the
 /// sender; every spawned task clones this so it can emit `Msg` as
@@ -83,6 +91,12 @@ pub struct EffectRunner {
     /// runs at the top of every `dispatch` call so the map stays
     /// bounded across long sessions (F12).
     scopes: HashMap<TurnId, TurnScope>,
+    /// F38: bounded tombstone ring of `TurnId`s whose scope has been
+    /// cancelled+dropped. A turn-scoped `Cmd` (`CallModel` / `ExecuteTool` /
+    /// `CompactConversation`) bearing a tombstoned id is dropped in `dispatch`
+    /// instead of resurrecting a fresh, un-cancelled scope through
+    /// `scope_mut`'s `or_insert_with`. Bounded to `CANCELLED_TOMBSTONE_CAP`.
+    cancelled_turns: VecDeque<TurnId>,
     /// Detached work (saves, persists, MCP lifecycle) lives here.
     /// This one set never gets cancelled piecemeal — shutdown drains
     /// it during `EffectRunner::shutdown`.
@@ -121,6 +135,7 @@ impl EffectRunner {
         Self {
             msg_tx,
             scopes: HashMap::new(),
+            cancelled_turns: VecDeque::new(),
             detached: tokio::task::JoinSet::new(),
             workdir,
             providers: None,
@@ -251,6 +266,25 @@ impl EffectRunner {
             .or_insert_with(|| TurnScope::new(turn))
     }
 
+    /// F38: record a cancelled turn in the bounded tombstone ring, evicting the
+    /// oldest id at capacity. Skips duplicates so a re-cancel doesn't churn the
+    /// ring (membership is all `is_tombstoned` checks).
+    fn tombstone_turn(&mut self, turn: TurnId) {
+        if self.cancelled_turns.contains(&turn) {
+            return;
+        }
+        if self.cancelled_turns.len() >= CANCELLED_TOMBSTONE_CAP {
+            self.cancelled_turns.pop_front();
+        }
+        self.cancelled_turns.push_back(turn);
+    }
+
+    /// F38: true iff `turn`'s scope was cancelled (tombstoned). New turn-scoped
+    /// work for such a turn is dropped rather than spinning up a fresh scope.
+    fn is_tombstoned(&self, turn: TurnId) -> bool {
+        self.cancelled_turns.contains(&turn)
+    }
+
     /// Drop the scope for a turn, signalling cancellation to every
     /// child first. Safe to call for non-existent turns.
     ///
@@ -261,6 +295,11 @@ impl EffectRunner {
     /// stick in `Cancelling` — the reducer has no other way to learn
     /// that the abort fully landed.
     fn drop_scope(&mut self, turn: TurnId) {
+        // F38: tombstone this turn so a stray post-cancel turn-scoped Cmd can't
+        // resurrect an un-cancelled scope for it. Recorded for both the live and
+        // already-reaped branches below — once cancelled, a turn is dead either
+        // way (turn ids are monotonic and never reused).
+        self.tombstone_turn(turn);
         if let Some(mut scope) = self.scopes.remove(&turn) {
             scope.cancel();
             let tx = self.msg_tx.clone();
@@ -336,6 +375,24 @@ impl EffectRunner {
         self.reap_empty_scopes();
         tracing::trace!(cmd = %cmd.summary(), "effect: dispatch");
 
+        // F38: refuse to spawn fresh work for a turn we've already cancelled.
+        // Only the scope-spawning variants carry a `scope_turn()`; `CancelScope`
+        // returns `None` here so a re-cancel still reaches `drop_scope` (which
+        // re-emits the terminal `TurnCancelled` the reducer needs). Turn ids are
+        // monotonic and never reused, so a tombstoned id can only be a stray
+        // post-cancel straggler — dropping it stops `scope_mut`'s `or_insert_with`
+        // from resurrecting an un-cancelled scope.
+        if let Some(turn) = cmd.scope_turn()
+            && self.is_tombstoned(turn)
+        {
+            tracing::debug!(
+                cmd = %cmd.summary(),
+                turn = %turn,
+                "effect: dropping turn-scoped cmd for an already-cancelled turn"
+            );
+            return;
+        }
+
         match cmd {
             Cmd::CallModel { turn, mut request } => {
                 let tx = self.msg_tx.clone();
@@ -410,10 +467,36 @@ impl EffectRunner {
                     enriched.append(&mut request.chat.tools);
                     request.chat.tools = enriched;
                 }
+                // Capture the trigger before `request` moves into the task, so a
+                // panic fallback can still name which compaction failed.
+                let trigger = request.trigger;
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
-                    dispatch_compact_conversation(tx, providers, turn, request, token).await;
+                    use futures::FutureExt;
+                    let fallback_tx = tx.clone();
+                    if std::panic::AssertUnwindSafe(dispatch_compact_conversation(
+                        tx, providers, turn, request, token,
+                    ))
+                    .catch_unwind()
+                    .await
+                    .is_err()
+                    {
+                        // The compaction task panicked. Without a terminal
+                        // `CompactionFinished`/`CompactionFailed`, the reducer
+                        // wedges in `Compacting` until Ctrl+C; emit a failure so
+                        // it can recover, mirroring `CallModel`/`ExecuteTool`
+                        // (#43, F37).
+                        tracing::error!(turn = %turn, "dispatch_compact_conversation panicked");
+                        let _ = fallback_tx
+                            .send(Msg::CompactionFailed {
+                                turn,
+                                trigger,
+                                message: "the compaction task panicked unexpectedly".to_string(),
+                                kind: crate::domain::StatusKind::Error,
+                            })
+                            .await;
+                    }
                 });
             },
             Cmd::ExecuteTool {
@@ -1176,8 +1259,22 @@ impl EffectRunner {
             if let Some(mgr) = crate::mcp::manager_ref::get() {
                 mgr.shutdown().await;
             }
-            for (_, mut scope) in self.scopes.drain() {
-                scope.drain().await;
+            // F42: bound each per-scope drain so one non-cooperative task can't
+            // eat the whole shutdown budget and starve the remaining scopes'
+            // drains (the scopes were all cancelled above, so a well-behaved task
+            // unwinds well within this). On timeout, dropping `scope` aborts its
+            // still-running `JoinSet` members via `TurnScope::drop`.
+            for (id, mut scope) in self.scopes.drain() {
+                if tokio::time::timeout(CANCEL_DRAIN_TIMEOUT, scope.drain())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        turn = %id,
+                        timeout_ms = CANCEL_DRAIN_TIMEOUT.as_millis(),
+                        "shutdown: scope drain timed out; aborting its remaining tasks"
+                    );
+                }
             }
             while let Some(result) = self.detached.join_next().await {
                 if let Err(e) = result
@@ -2797,6 +2894,61 @@ mod tests {
 
         r.dispatch(Cmd::CancelScope(turn));
         assert_eq!(r.scope_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn tombstoned_turn_is_not_resurrected_by_late_scoped_cmd() {
+        // F38: once a turn's scope has been cancelled (dropped + tombstoned), a
+        // stray turn-scoped Cmd bearing the same TurnId must be dropped — not
+        // used to spin up a fresh, un-cancelled scope via `scope_mut`'s
+        // `or_insert_with`. Turn ids are monotonic and never reused, so such a
+        // Cmd can only be a post-cancel straggler.
+        let (mut r, _rx) = runner();
+        let req = || crate::domain::ChatRequest {
+            model_id: "test/m".to_string(),
+            messages: vec![],
+            system_prompt: String::new(),
+            instructions: None,
+            reasoning: crate::models::ReasoningLevel::Medium,
+            temperature: 0.7,
+            max_tokens: 4096,
+            tools: vec![],
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
+        };
+        let turn = TurnId(123);
+
+        r.dispatch(Cmd::CallModel {
+            turn,
+            request: req(),
+        });
+        assert_eq!(r.scope_count(), 1);
+
+        // Cancel: drops the scope and tombstones the turn.
+        r.dispatch(Cmd::CancelScope(turn));
+        assert_eq!(r.scope_count(), 0);
+
+        // A late scoped Cmd for the now-tombstoned turn must be dropped.
+        r.dispatch(Cmd::CallModel {
+            turn,
+            request: req(),
+        });
+        assert_eq!(
+            r.scope_count(),
+            0,
+            "a cancelled turn must not be resurrected by a late scoped Cmd"
+        );
+
+        // A fresh, higher turn id is unaffected by the tombstone.
+        r.dispatch(Cmd::CallModel {
+            turn: TurnId(124),
+            request: req(),
+        });
+        assert_eq!(
+            r.scope_count(),
+            1,
+            "a fresh turn must still create its scope normally"
+        );
     }
 
     #[tokio::test]
