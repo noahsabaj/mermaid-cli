@@ -379,19 +379,28 @@ impl RuntimeClient {
     }
 
     pub fn stop_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
-        self.action_authed(json!({"command": "stop_process", "id": id}), |service| {
-            service
-                .stop_process(id)
-                .map(|item| RuntimeOne { ok: true, item })
-        })
+        // Non-idempotent: `terminate_tree` must not fire twice (RC-G/F25).
+        self.action_authed_non_idempotent(
+            json!({"command": "stop_process", "id": id}),
+            |service| {
+                service
+                    .stop_process(id)
+                    .map(|item| RuntimeOne { ok: true, item })
+            },
+        )
     }
 
     pub fn restart_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
-        self.action_authed(json!({"command": "restart_process", "id": id}), |service| {
-            service
-                .restart_process(id)
-                .map(|item| RuntimeOne { ok: true, item })
-        })
+        // Non-idempotent: kills then respawns — a duplicate run double-signals
+        // (possibly a since-reused PID) and can spawn two servers (RC-G/F25).
+        self.action_authed_non_idempotent(
+            json!({"command": "restart_process", "id": id}),
+            |service| {
+                service
+                    .restart_process(id)
+                    .map(|item| RuntimeOne { ok: true, item })
+            },
+        )
     }
 
     pub fn open_process(&self, id: &str) -> Result<RuntimeProcessOpen> {
@@ -405,7 +414,9 @@ impl RuntimeClient {
     }
 
     pub fn approve(&self, id: &str) -> Result<RuntimeApprovalDecision> {
-        self.action_authed(json!({"command": "approve", "id": id}), |_service| {
+        // Non-idempotent: replays the approved action, so a duplicate run could
+        // execute that side effect twice (RC-G/F25).
+        self.action_authed_non_idempotent(json!({"command": "approve", "id": id}), |_service| {
             RuntimeService::approval_decision(approve_and_replay(id)?)
         })
     }
@@ -417,7 +428,9 @@ impl RuntimeClient {
     }
 
     pub fn restore_checkpoint(&self, id: &str) -> Result<RuntimeCheckpointRestore> {
-        self.action_authed(
+        // Non-idempotent: rewrites working-tree files from the snapshot — a
+        // duplicate run could clobber edits made between the two runs (RC-G/F25).
+        self.action_authed_non_idempotent(
             json!({"command": "restore_checkpoint", "id": id}),
             |_service| {
                 Ok(RuntimeCheckpointRestore {
@@ -490,7 +503,7 @@ impl RuntimeClient {
         T: DeserializeOwned,
         F: FnOnce(&RuntimeService) -> Result<T>,
     {
-        self.action_inner(body, false, local)
+        self.action_inner(body, false, true, local)
     }
 
     fn action_authed<T, F>(&self, body: Value, local: F) -> Result<T>
@@ -498,7 +511,21 @@ impl RuntimeClient {
         T: DeserializeOwned,
         F: FnOnce(&RuntimeService) -> Result<T>,
     {
-        self.action_inner(body, true, local)
+        self.action_inner(body, true, true, local)
+    }
+
+    /// Like [`Self::action_authed`], but for a NON-idempotent side effect
+    /// (`stop`/`restart`/`approve`/`restore`). RC-G/F25: under `PreferDaemon` a
+    /// local fallback *re-runs* the action, which is only safe when the daemon
+    /// never received the request (a pre-send connection failure). On a
+    /// post-send or ambiguous failure the daemon MAY have already executed it,
+    /// so we surface an error instead of risking a duplicate side effect.
+    fn action_authed_non_idempotent<T, F>(&self, body: Value, local: F) -> Result<T>
+    where
+        T: DeserializeOwned,
+        F: FnOnce(&RuntimeService) -> Result<T>,
+    {
+        self.action_inner(body, true, false, local)
     }
 
     fn read_inner<T, F>(&self, body: Value, authed: bool, local: F) -> Result<RuntimeRead<T>>
@@ -534,7 +561,13 @@ impl RuntimeClient {
         }
     }
 
-    fn action_inner<T, F>(&self, body: Value, authed: bool, local: F) -> Result<T>
+    fn action_inner<T, F>(
+        &self,
+        body: Value,
+        authed: bool,
+        idempotent: bool,
+        local: F,
+    ) -> Result<T>
     where
         T: DeserializeOwned,
         F: FnOnce(&RuntimeService) -> Result<T>,
@@ -546,7 +579,25 @@ impl RuntimeClient {
             RuntimeClientMode::DaemonOnly => self.request_daemon(body, authed),
             RuntimeClientMode::PreferDaemon => match self.request_daemon(body, authed) {
                 Ok(value) => Ok(value),
-                Err(_) => RuntimeService::open_default().and_then(|service| local(&service)),
+                Err(err) => {
+                    // RC-G/F25: an idempotent or read-only action falls back to
+                    // a local run freely. A non-idempotent one falls back ONLY
+                    // when the failure is a pre-send connection failure (the
+                    // request never reached the daemon); otherwise the daemon
+                    // may have already executed it and re-running locally would
+                    // double-fire the side effect (e.g. a second
+                    // `terminate_tree` on a since-reused PID). Conservative
+                    // default: treat any non-connect failure as "may have run".
+                    if idempotent || daemon_failure_is_pre_send(&err) {
+                        RuntimeService::open_default().and_then(|service| local(&service))
+                    } else {
+                        Err(err.context(
+                            "daemon request failed after the action may have already run; \
+                             not re-running it locally to avoid a duplicate side effect — \
+                             retry once the daemon is reachable",
+                        ))
+                    }
+                },
             },
         }
     }
@@ -1258,6 +1309,42 @@ fn is_runtime_hygiene_approval(
     }
 }
 
+/// Whether a daemon-request failure happened *before* the request reached the
+/// daemon — i.e. the Unix-socket `connect()` itself failed (daemon not running,
+/// socket missing, or connection refused), so the action was never delivered
+/// and is safe to re-run locally (RC-G/F25).
+///
+/// `request_daemon_text` wraps ONLY the `UnixStream::connect` error (with a
+/// "failed to connect to …" context) and propagates post-connect write/read I/O
+/// failures bare; a lost reply from a daemon that crashed *after* executing the
+/// action surfaces as a JSON-parse error, never an I/O error. The connect-phase
+/// `io::ErrorKind`s below (`NotFound`/`ConnectionRefused`/`PermissionDenied`)
+/// are therefore unreachable from a post-send failure on this transport, so
+/// matching them is a precise "never reached the daemon" signal. Everything else
+/// — post-connect write/read I/O errors, empty/invalid-JSON replies, or a
+/// daemon-level `ok:false` — is treated conservatively as "the action may have
+/// already run". On platforms without Unix-socket IPC the transport bails before
+/// connecting, so the request provably never reached a daemon → always pre-send.
+fn daemon_failure_is_pre_send(err: &anyhow::Error) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        true
+    }
+    #[cfg(unix)]
+    {
+        match err.downcast_ref::<std::io::Error>() {
+            Some(io) => matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::PermissionDenied
+            ),
+            None => false,
+        }
+    }
+}
+
 /// Best-effort synchronous liveness check for a pid. The runtime client is sync,
 /// so it can't reuse the async `process_running` in `providers::tool::exec`.
 fn pid_alive(pid: u32) -> bool {
@@ -1333,6 +1420,37 @@ mod tests {
         let _ = child.wait();
         std::thread::sleep(std::time::Duration::from_millis(250));
         assert!(!pid_alive(pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_failure_pre_send_only_for_connect_kinds() {
+        // F25: distinguish "never reached the daemon" (safe to re-run locally)
+        // from "may have already run" (must not re-run a non-idempotent action).
+        use anyhow::Context as _;
+        use std::io::{Error as IoError, ErrorKind};
+
+        // Connect-phase failures — the request never left the socket. These are
+        // wrapped exactly as `request_daemon_text` wraps its connect error.
+        let refused: anyhow::Error = Err::<(), _>(IoError::from(ErrorKind::ConnectionRefused))
+            .with_context(|| "failed to connect to /run/mermaidd.sock".to_string())
+            .unwrap_err();
+        assert!(daemon_failure_is_pre_send(&refused));
+        let missing: anyhow::Error = Err::<(), _>(IoError::from(ErrorKind::NotFound))
+            .with_context(|| "failed to connect to /run/mermaidd.sock".to_string())
+            .unwrap_err();
+        assert!(daemon_failure_is_pre_send(&missing));
+
+        // A lost reply from a daemon that crashed AFTER executing surfaces as a
+        // JSON-parse error — ambiguous, may have run.
+        assert!(!daemon_failure_is_pre_send(&anyhow::anyhow!(
+            "daemon returned invalid JSON"
+        )));
+        // A post-connect write failure (broken pipe) is ambiguous — may have run.
+        let broken = anyhow::Error::from(IoError::from(ErrorKind::BrokenPipe));
+        assert!(!daemon_failure_is_pre_send(&broken));
+        // A daemon-level `ok:false` error definitely reached the daemon.
+        assert!(!daemon_failure_is_pre_send(&anyhow::anyhow!("stop_process failed")));
     }
 
     #[test]

@@ -553,6 +553,25 @@ impl GeminiAdapter {
             raw: None,
         })?;
 
+        // F52: a prompt-level safety block returns `promptFeedback.blockReason`
+        // with NO candidates. Without this guard the `candidates.into_iter()
+        // .next()` below is `None`, the block is skipped, and we return an empty
+        // `Ok` with `stop_reason: None`. Surface a typed refusal instead — the
+        // candidate-level block (no `content` on a present candidate) is handled
+        // separately further down.
+        if json.candidates.is_empty()
+            && let Some(reason) = json
+                .prompt_feedback
+                .as_ref()
+                .and_then(|pf| pf.block_reason.as_deref())
+        {
+            return Err(ModelError::Backend(BackendError::ProviderError {
+                provider: "gemini".to_string(),
+                code: Some(reason.to_string()),
+                message: format!("Gemini blocked the prompt (blockReason={reason})"),
+            }));
+        }
+
         let mut text_acc = String::new();
         let mut thinking_acc = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -783,6 +802,22 @@ fn process_chunk_payload(
         }));
     }
 
+    // F52: a prompt-level safety block streams as a chunk carrying
+    // `promptFeedback.blockReason` and NO candidates. The no-parts branch below
+    // would otherwise swallow it as a benign empty success — there's no
+    // candidate `finishReason` to trip its block check. Surface a typed refusal,
+    // matching `decode_non_streaming`.
+    if let Some(reason) = parsed
+        .pointer("/promptFeedback/blockReason")
+        .and_then(|v| v.as_str())
+    {
+        return Err(ModelError::Backend(BackendError::ProviderError {
+            provider: "gemini".to_string(),
+            code: Some(reason.to_string()),
+            message: format!("Gemini blocked the prompt (blockReason={reason})"),
+        }));
+    }
+
     // Usage: any chunk may carry it; the last chunk is final.
     if let Some(usage) = parsed.get("usageMetadata") {
         state.saw_usage = true;
@@ -949,6 +984,20 @@ struct GeminiResponse {
     candidates: Vec<Candidate>,
     #[serde(default, rename = "usageMetadata")]
     usage_metadata: UsageMetadata,
+    // A prompt-level safety block returns `promptFeedback.blockReason` and NO
+    // candidates (F52). Captured so `decode_non_streaming` can surface a typed
+    // refusal instead of an empty `Ok`.
+    #[serde(default, rename = "promptFeedback")]
+    prompt_feedback: Option<PromptFeedback>,
+}
+
+/// Prompt-level safety feedback. When Gemini blocks the *prompt* itself (rather
+/// than filtering a candidate's output), the response carries this with a
+/// `blockReason` and an empty `candidates` array.
+#[derive(Debug, Deserialize)]
+struct PromptFeedback {
+    #[serde(default, rename = "blockReason")]
+    block_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1072,6 +1121,60 @@ mod tests {
         assert!(gemini_empty_is_benign("FINISH_REASON_UNSPECIFIED"));
         assert!(!gemini_empty_is_benign("SAFETY"));
         assert!(!gemini_empty_is_benign("RECITATION"));
+    }
+
+    #[test]
+    fn prompt_block_response_parses_with_no_candidates() {
+        // F52: a prompt-level block returns `promptFeedback.blockReason` and NO
+        // candidates. The wire type must capture it so `decode_non_streaming`
+        // can surface a refusal instead of an empty Ok.
+        let json = serde_json::json!({
+            "promptFeedback": { "blockReason": "SAFETY" }
+        });
+        let resp: GeminiResponse = serde_json::from_value(json).expect("prompt block parses");
+        assert!(resp.candidates.is_empty());
+        assert_eq!(
+            resp.prompt_feedback
+                .as_ref()
+                .and_then(|pf| pf.block_reason.as_deref()),
+            Some("SAFETY")
+        );
+    }
+
+    #[test]
+    fn stream_prompt_block_surfaces_provider_error() {
+        // F52 (streaming): a chunk carrying `promptFeedback.blockReason` with no
+        // candidates must surface a typed ProviderError, not be swallowed by the
+        // no-parts branch as a silent empty success.
+        let mut state = StreamState::default();
+        let cb: StreamCallback = std::sync::Arc::new(|_ev| {});
+        let payload = r#"{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}}"#;
+        let err = process_chunk_payload(payload, &mut state, &cb, false)
+            .expect_err("prompt block must error");
+        match err {
+            ModelError::Backend(BackendError::ProviderError {
+                provider,
+                code,
+                message,
+            }) => {
+                assert_eq!(provider, "gemini");
+                assert_eq!(code.as_deref(), Some("PROHIBITED_CONTENT"));
+                assert!(message.contains("PROHIBITED_CONTENT"), "{message}");
+            },
+            other => panic!("expected ProviderError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_prompt_feedback_without_block_reason_is_not_an_error() {
+        // A `promptFeedback` block that only echoes safety ratings (no
+        // `blockReason`) must NOT be treated as a block — it co-occurs with real
+        // content on normal responses.
+        let mut state = StreamState::default();
+        let cb: StreamCallback = std::sync::Arc::new(|_ev| {});
+        let payload = r#"{"promptFeedback":{"safetyRatings":[]},"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#;
+        process_chunk_payload(payload, &mut state, &cb, false).expect("benign feedback is ok");
+        assert_eq!(state.text_acc, "hello");
     }
 
     fn test_adapter() -> GeminiAdapter {

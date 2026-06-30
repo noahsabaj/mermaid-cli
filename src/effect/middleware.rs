@@ -58,9 +58,13 @@ where
         let result = build_and_send().await;
         let transience = classify(&result);
 
-        // A server-provided `Retry-After` (429) is the authoritative wait —
-        // read it while we still hold the response.
-        let retry_after_ms = if transience.reason() == "http_429" {
+        // A server-provided `Retry-After` is the authoritative wait for ANY
+        // retryable status — a 503 (or other 5xx) can carry it just like a 429,
+        // and must be honored rather than retried sooner under our own backoff
+        // (F26). Read it while we still hold the response; a connection-failure
+        // error carries no response, so `.ok()` yields `None` and we fall back
+        // to the jittered backoff below.
+        let retry_after_ms = if transience.is_transient() {
             result
                 .as_ref()
                 .ok()
@@ -194,6 +198,76 @@ mod tests {
 
         let url = format!("http://{}/x", addr);
         reqwest::get(url).await.expect("send")
+    }
+
+    /// Like `fake_response`, but the response carries a `Retry-After` header
+    /// (delta-seconds form) so we can exercise the F26 5xx + Retry-After path.
+    async fn fake_response_with_retry_after(status: u16, retry_after_secs: u64) -> reqwest::Response {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let body = format!(
+                    "HTTP/1.1 {status} X\r\nRetry-After: {retry_after_secs}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(body.as_bytes()).await;
+            }
+        });
+
+        let url = format!("http://{}/x", addr);
+        reqwest::get(url).await.expect("send")
+    }
+
+    #[test]
+    fn parse_retry_after_handles_integer_seconds_and_ignores_dates() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("2"));
+        assert_eq!(parse_retry_after_ms(&headers), Some(2_000));
+        // The rare HTTP-date form is not parsed (delta-seconds only) → None.
+        let mut dated = HeaderMap::new();
+        dated.insert(
+            RETRY_AFTER,
+            HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT"),
+        );
+        assert_eq!(parse_retry_after_ms(&dated), None);
+        // Absent header → None.
+        assert_eq!(parse_retry_after_ms(&HeaderMap::new()), None);
+    }
+
+    #[tokio::test]
+    async fn honors_retry_after_on_503() {
+        // F26: a 503 carrying `Retry-After` must drive the wait, not the
+        // (shorter) jittered exponential backoff. `Retry-After: 1` ⇒ the retry
+        // sleeps ~1000ms; the attempt-1 backoff alone is jitter(500) ∈
+        // [400,600]ms, so an elapsed ≥ 850ms proves the header was honored.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cc = Arc::clone(&calls);
+        let start = std::time::Instant::now();
+        let result = retry_transient_http_with(RetryPolicy { max_attempts: 2 }, &mut move || {
+            let c = Arc::clone(&cc);
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Ok(fake_response_with_retry_after(503, 1).await)
+                } else {
+                    Ok(fake_response(200).await)
+                }
+            }
+        })
+        .await;
+        let elapsed = start.elapsed();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status().as_u16(), 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            elapsed >= Duration::from_millis(850),
+            "expected Retry-After (1s) to drive the 503 wait, waited only {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]
