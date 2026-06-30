@@ -1323,6 +1323,36 @@ async fn join_logged(handle: tokio::task::JoinHandle<()>, what: &str) {
     }
 }
 
+/// Owns a sibling relay task so it cannot outlive its parent future as a detached
+/// task: if the parent is dropped before it `take()`s the handle for
+/// `join_logged`, the guard aborts the task on drop (#F39). On the normal path the
+/// handle is taken and awaited, so the drop is a no-op. The relay is already
+/// bounded by the turn `CancellationToken`; this makes the "every turn task is
+/// owned" invariant hold structurally rather than only behaviorally.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl AbortOnDrop {
+    fn take(mut self) -> tokio::task::JoinHandle<()> {
+        self.0.take().expect("AbortOnDrop::take called once")
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
+/// `tokio::spawn` a relay, wrapped in an [`AbortOnDrop`] so the parent owns it.
+fn spawn_guarded<F>(fut: F) -> AbortOnDrop
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    AbortOnDrop(Some(tokio::spawn(fut)))
+}
+
 async fn dispatch_call_model(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
@@ -1479,11 +1509,36 @@ async fn dispatch_call_model(
     // run concurrently with `provider.chat` for streaming backpressure.)
     let relay_tx = msg_tx.clone();
     let relay_token = token.clone();
-    let relay = tokio::spawn(async move {
+    let relay = spawn_guarded(async move {
         loop {
             let event = tokio::select! {
                 biased;
-                _ = relay_token.cancelled() => break,
+                _ = relay_token.cancelled() => {
+                    // #F40: a cancel landing right after the provider finished must
+                    // not discard the terminal Done it already enqueued. Drain the
+                    // buffered events and relay only a terminal Done — so the
+                    // just-completed turn's usage is still recorded — while NOT
+                    // painting buffered intermediate text (the turn is cancelled).
+                    // `try_recv` drains the buffer without awaiting more.
+                    while let Ok(buffered) = stream_rx.try_recv() {
+                        if let StreamEvent::Done {
+                            usage,
+                            thinking_signature,
+                            stop_reason,
+                        } = buffered
+                        {
+                            let _ = relay_tx
+                                .send(Msg::StreamDone {
+                                    turn,
+                                    usage,
+                                    thinking_signature,
+                                    stop_reason,
+                                })
+                                .await;
+                        }
+                    }
+                    break;
+                },
                 ev = stream_rx.recv() => match ev {
                     Some(ev) => ev,
                     None => break,
@@ -1555,7 +1610,7 @@ async fn dispatch_call_model(
                             let mut retry_request = request;
                             retry_request.messages = result.replacement_messages.clone();
                             let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
-                            join_logged(relay, "stream_relay").await;
+                            join_logged(relay.take(), "stream_relay").await;
                             dispatch_provider_stream(msg_tx, provider, turn, retry_request, token)
                                 .await;
                             return;
@@ -1579,7 +1634,7 @@ async fn dispatch_call_model(
         },
     }
 
-    join_logged(relay, "stream_relay").await;
+    join_logged(relay.take(), "stream_relay").await;
 
     // Post-turn (success only): verify the model actually fit VRAM. Skipped when
     // the user allowed RAM offload (no warning possible) and a no-op for
@@ -1618,11 +1673,36 @@ async fn dispatch_provider_stream(
     let ctx = StreamContext::new(token.clone(), stream_tx, turn);
     let relay_tx = msg_tx.clone();
     let relay_token = token.clone();
-    let relay = tokio::spawn(async move {
+    let relay = spawn_guarded(async move {
         loop {
             let event = tokio::select! {
                 biased;
-                _ = relay_token.cancelled() => break,
+                _ = relay_token.cancelled() => {
+                    // #F40: a cancel landing right after the provider finished must
+                    // not discard the terminal Done it already enqueued. Drain the
+                    // buffered events and relay only a terminal Done — so the
+                    // just-completed turn's usage is still recorded — while NOT
+                    // painting buffered intermediate text (the turn is cancelled).
+                    // `try_recv` drains the buffer without awaiting more.
+                    while let Ok(buffered) = stream_rx.try_recv() {
+                        if let StreamEvent::Done {
+                            usage,
+                            thinking_signature,
+                            stop_reason,
+                        } = buffered
+                        {
+                            let _ = relay_tx
+                                .send(Msg::StreamDone {
+                                    turn,
+                                    usage,
+                                    thinking_signature,
+                                    stop_reason,
+                                })
+                                .await;
+                        }
+                    }
+                    break;
+                },
                 ev = stream_rx.recv() => match ev {
                     Some(ev) => ev,
                     None => break,
@@ -1660,7 +1740,7 @@ async fn dispatch_provider_stream(
         },
     }
 
-    join_logged(relay, "stream_relay").await;
+    join_logged(relay.take(), "stream_relay").await;
 }
 
 /// Run plugin hooks OFF the async executor. `run_plugin_hooks` is synchronous —
@@ -1852,18 +1932,31 @@ async fn consolidate_memory(
         return;
     }
 
-    // Snapshot the to-be-pruned files first so the prune is reversible.
+    // Snapshot the to-be-pruned files first so the prune is reversible. The
+    // delete below is irreversible, so a failed checkpoint must NOT proceed —
+    // otherwise the report would advertise "Recoverable from the latest
+    // checkpoint" for a prune with no checkpoint behind it (#F69). Abort instead;
+    // nothing has been deleted yet, so no memory is lost.
     let paths: Vec<std::path::PathBuf> = plan
         .prune
         .iter()
         .filter_map(|id| crate::app::memory::find(&workdir, id).map(|e| e.path))
         .collect();
-    if !paths.is_empty() {
-        let _ = crate::runtime::create_checkpoint(
+    if !paths.is_empty()
+        && let Err(e) = crate::runtime::create_checkpoint(
             &workdir,
             &paths,
             Some(serde_json::json!({ "tool": "consolidate_memory", "reason": plan.reason })),
-        );
+        )
+    {
+        let _ = tx
+            .send(Msg::RuntimeText(format!(
+                "Memory consolidation aborted: couldn't checkpoint the {} file{} marked for pruning, so nothing was deleted (no memory lost). Error: {e}",
+                paths.len(),
+                if paths.len() == 1 { "" } else { "s" },
+            )))
+            .await;
+        return;
     }
 
     let mut pruned = Vec::new();
@@ -2257,7 +2350,7 @@ async fn dispatch_execute_tool(
     let (progress_tx, mut progress_rx) = mpsc::channel(16);
     let relay_tx = msg_tx.clone();
     let relay_token = token.clone();
-    let progress_relay = tokio::spawn(async move {
+    let progress_relay = spawn_guarded(async move {
         loop {
             let event = tokio::select! {
                 biased;
@@ -2312,7 +2405,7 @@ async fn dispatch_execute_tool(
     });
     fire_plugin_hooks("after_tool_use", after_payload).await;
     finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
-    join_logged(progress_relay, "tool_progress_relay").await;
+    join_logged(progress_relay.take(), "tool_progress_relay").await;
     let _ = msg_tx
         .send(Msg::ToolFinished {
             turn,

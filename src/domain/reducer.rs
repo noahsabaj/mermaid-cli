@@ -2715,6 +2715,21 @@ fn handle_stream_done(
             pending_tool_calls,
         ),
         other => {
+            // #F40: a StreamDone can arrive for a turn that is already Cancelling
+            // (the provider completed a moment before the user's cancel was
+            // processed). Honor the cancel — the turn is NOT committed — but still
+            // fold the already-billed token usage into the running totals so the
+            // /context accounting stays accurate. Everything else about the late
+            // Done is dropped.
+            if matches!(other, TurnState::Cancelling { .. })
+                && let Some(u) = usage
+            {
+                let totals = TokenUsageTotals::from_usage(&u);
+                state.session.last_token_usage = Some(totals);
+                state.session.cumulative_token_usage.add_assign(totals);
+                state.session.cumulative_tokens =
+                    state.session.cumulative_tokens.saturating_add(u.total_tokens);
+            }
             state.turn = other;
             return;
         },
@@ -3180,11 +3195,22 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // server, fully-qualified as `mcp__<server>__<tool>`. The effect
     // runner prepends built-in tools before dispatching, so this
     // vector is the MCP-only portion.
-    let mcp_tools: Vec<crate::domain::ToolDefinition> = state
+    //
+    // `state.mcp.servers` is a `HashMap`, whose iteration order is
+    // randomized per process (`RandomState`). Sort the Ready servers by
+    // name before emitting tools so `ChatRequest.tools` is byte-stable
+    // across runs — byte-reproducible requests keep the provider prompt
+    // cache warm instead of missing on a reshuffled tool list (#F68).
+    // Within a server, `tools` is an ordered `Vec`, so it is already stable.
+    let mut ready_servers: Vec<_> = state
         .mcp
         .servers
         .iter()
         .filter(|(_, entry)| matches!(entry.status, crate::domain::McpServerStatus::Ready))
+        .collect();
+    ready_servers.sort_by(|a, b| a.0.cmp(b.0));
+    let mcp_tools: Vec<crate::domain::ToolDefinition> = ready_servers
+        .into_iter()
         .flat_map(|(server_name, entry)| {
             entry
                 .tools
@@ -5626,6 +5652,47 @@ mod tests {
             },
         );
         assert_eq!(state.mcp.servers["s1"].status, McpServerStatus::Ready);
+    }
+
+    #[test]
+    fn build_chat_request_orders_mcp_tools_by_server_name() {
+        // #F68: `state.mcp.servers` is a HashMap with per-process randomized
+        // iteration order. `build_chat_request` must sort servers by name so the
+        // emitted `ChatRequest.tools` ordering is deterministic across runs
+        // (byte-reproducible requests / prompt-cache stability).
+        let mut state = fresh_state();
+        state.mcp = McpState::default();
+        for name in ["zeta", "alpha", "mike", "bravo", "delta"] {
+            state.mcp.servers.insert(
+                name.to_string(),
+                McpServerEntry {
+                    config: crate::app::McpServerConfig {
+                        command: "echo".to_string(),
+                        args: vec![],
+                        env: std::collections::HashMap::new(),
+                    },
+                    status: McpServerStatus::Ready,
+                    tools: vec![crate::domain::state::McpToolSpec {
+                        name: "do".to_string(),
+                        description: "d".to_string(),
+                        input_schema: serde_json::json!({}),
+                    }],
+                },
+            );
+        }
+        let request = build_chat_request(&state);
+        let names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "mcp__alpha__do",
+                "mcp__bravo__do",
+                "mcp__delta__do",
+                "mcp__mike__do",
+                "mcp__zeta__do",
+            ],
+            "MCP tools must be ordered by server name regardless of HashMap layout"
+        );
     }
 
     #[test]
