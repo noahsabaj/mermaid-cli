@@ -409,7 +409,18 @@ impl EffectRunner {
                     // reducer's /context preview can fold it into its MCP-only
                     // estimate and agree with what the model actually sees.
                     let builtin_tokens = crate::domain::estimate_tool_schema_tokens(&enriched);
-                    let _ = tx.try_send(Msg::BuiltinToolSchemaTokens(builtin_tokens));
+                    // Best-effort and cosmetic (the /context preview). This is the
+                    // synchronous dispatch path so we can't await; if the bounded
+                    // channel is momentarily full under heavy streaming, log the
+                    // drop rather than swallowing it silently — the estimate just
+                    // stays briefly stale (#F43).
+                    if let Err(e) = tx.try_send(Msg::BuiltinToolSchemaTokens(builtin_tokens)) {
+                        tracing::debug!(
+                            error = %e,
+                            "effect: dropped builtin tool-schema token estimate (channel full); \
+                             /context preview may be briefly stale"
+                        );
+                    }
                     enriched.append(&mut request.tools);
                     request.tools = enriched;
                 }
@@ -1348,7 +1359,17 @@ async fn dispatch_call_model(
         // every turn (#39).
         let model_id = request.model_id.clone();
         let caps = provider.capabilities().clone();
-        tokio::task::spawn_blocking(move || record_provider_capabilities(&model_id, &caps));
+        // Own this telemetry write inside the per-turn task (await it) instead of
+        // a detached `spawn_blocking` whose handle was dropped — so a panic in the
+        // upsert surfaces and shutdown isn't racing an untracked DB write (#F41).
+        // It is a few-ms SQLite upsert before a multi-second model call, so
+        // awaiting it here does not meaningfully stall the turn (the "never stall
+        // dispatch" rule is about the synchronous reducer path, not this task).
+        if let Err(e) =
+            tokio::task::spawn_blocking(move || record_provider_capabilities(&model_id, &caps)).await
+        {
+            tracing::error!(error = %e, "effect: provider-capability telemetry write failed");
+        }
     }
     if !request.tools.is_empty() && !provider.capabilities().supports_tools {
         let _ = msg_tx

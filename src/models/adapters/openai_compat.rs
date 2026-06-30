@@ -139,6 +139,25 @@ pub struct OpenAICompatAdapter {
     capabilities: ModelCapabilities,
 }
 
+/// A random 128-bit `Idempotency-Key`, hex-encoded, for safe retry de-duplication
+/// (#F27). On the (vanishingly rare) OS-RNG failure, fall back to a
+/// process+time value so we still send *a* stable key rather than none.
+fn random_idempotency_key() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        return format!("mermaid-{}-{nanos}", std::process::id());
+    }
+    use std::fmt::Write;
+    bytes.iter().fold(String::with_capacity(32), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
 impl OpenAICompatAdapter {
     /// Create a new adapter. `base_url` is the resolved URL (registry
     /// default OR user override); `api_key` is already resolved (caller
@@ -326,8 +345,21 @@ impl OpenAICompatAdapter {
     /// OpenRouter / etc. when an upstream relay hiccups.
     async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        // A stable idempotency key, generated ONCE and reused across every retry
+        // attempt, lets an OpenAI-compatible endpoint that honors `Idempotency-Key`
+        // (OpenAI, Groq, OpenRouter, …) dedupe a retried POST instead of generating
+        // — and billing — a second completion when a transient 5xx/connection drop
+        // is retried after the server already produced one (#F27). Endpoints that
+        // ignore the header are unaffected. (Anthropic has no documented
+        // equivalent; its retries mirror the official SDK default.)
+        let idempotency_key = random_idempotency_key();
         crate::effect::retry_transient_http(|| async {
-            let mut req = self.client.post(&url).bearer_auth(&self.api_key).json(body);
+            let mut req = self
+                .client
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .header("Idempotency-Key", &idempotency_key)
+                .json(body);
             for (name, value) in &self.extra_headers {
                 req = req.header(name, value);
             }

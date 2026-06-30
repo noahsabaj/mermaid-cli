@@ -559,36 +559,53 @@ impl RuntimeStore {
     /// via [`NewTask::daemon_owned`].
     pub fn reconcile_after_restart(&self) -> Result<(usize, usize)> {
         let now = now_rfc3339();
-        let tx = self.conn.unchecked_transaction()?;
-        let running: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM tasks WHERE status = 'running' AND owner_kind = ?1",
+        // Take the write lock up front with BEGIN IMMEDIATE rather than a DEFERRED
+        // transaction that SELECTs and then upgrades to a write on the first
+        // UPDATE: SQLite fails a read→write lock upgrade with SQLITE_BUSY
+        // *immediately* (busy_timeout does not retry upgrades), so a CLI holding
+        // the write lock at daemon startup would abort recovery. IMMEDIATE instead
+        // waits on busy_timeout for the lock (#F21). Mirrors `init_schema`.
+        self.conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let result = (|| -> Result<(usize, usize)> {
+            let running: Vec<String> = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id FROM tasks WHERE status = 'running' AND owner_kind = ?1",
+                )?;
+                let ids = stmt.query_map([OWNER_KIND_DAEMON], |row| row.get::<_, String>(0))?;
+                ids.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for id in &running {
+                self.conn.execute(
+                    "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1",
+                    params![id, now],
+                )?;
+                self.conn.execute(
+                    "INSERT INTO task_events (task_id, kind, message, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        id,
+                        "interrupted",
+                        "task was running when the daemon restarted; marked failed",
+                        now
+                    ],
+                )?;
+            }
+            let claims_released = self.conn.execute(
+                "UPDATE approvals SET user_decision = NULL WHERE user_decision = 'approving'",
+                [],
             )?;
-            let ids = stmt.query_map([OWNER_KIND_DAEMON], |row| row.get::<_, String>(0))?;
-            ids.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        for id in &running {
-            tx.execute(
-                "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1",
-                params![id, now],
-            )?;
-            tx.execute(
-                "INSERT INTO task_events (task_id, kind, message, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    id,
-                    "interrupted",
-                    "task was running when the daemon restarted; marked failed",
-                    now
-                ],
-            )?;
+            Ok((running.len(), claims_released))
+        })();
+        match result {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(v)
+            },
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            },
         }
-        let claims_released = tx.execute(
-            "UPDATE approvals SET user_decision = NULL WHERE user_decision = 'approving'",
-            [],
-        )?;
-        tx.commit()?;
-        Ok((running.len(), claims_released))
     }
 
     /// Best-effort retention GC (#130, F22/RC-F): prune archived
