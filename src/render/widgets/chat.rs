@@ -14,7 +14,7 @@ use crate::domain::{ActionDetails, ActionDisplay, ActionResult, format_compact_c
 use crate::models::ChatMessageKind;
 use crate::models::{ChatMessage, MessageRole};
 use crate::render::diff::{DiffLineKind, parse_diff_line};
-use crate::render::markdown::{MarkdownLine, parse_markdown};
+use crate::render::markdown::parse_markdown;
 use crate::render::theme::Theme;
 use crate::utils::format_relative_timestamp;
 
@@ -367,9 +367,77 @@ impl Default for ChatState {
 pub struct ChatWidget<'a> {
     pub messages: &'a [ChatMessage],
     pub theme: &'a Theme,
-    /// Shared markdown parse cache: content hash → parsed lines.
-    pub markdown_cache: &'a mut FxHashMap<u64, Vec<MarkdownLine>>,
+    /// Shared render cache: `(content, theme, width)` hash → fully wrapped,
+    /// role-prefixed assistant lines. Caching the WRAPPED output (not just the
+    /// markdown parse) keeps a committed message from being re-parsed *and*
+    /// re-wrapped every frame — it's cloned from here instead (#134).
+    pub wrapped_line_cache: &'a mut FxHashMap<u64, Vec<Line<'static>>>,
     pub show_reasoning: bool,
+}
+
+/// Render assistant message content (markdown) into wrapped, role-prefixed
+/// display lines.
+///
+/// Pure in its inputs — `(content, width, role prefix/color, theme)` — which is
+/// exactly what lets the result be cached per message and reused across frames
+/// without re-parsing or re-wrapping (#134). The cache key folds in content,
+/// theme, and width; role prefix/color are constant on this (assistant-only)
+/// path, so they need not be keyed.
+fn wrap_assistant_content(
+    content: &str,
+    content_width: u16,
+    role_prefix: &str,
+    role_color: ratatui::style::Color,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    // Markdown content sits after the 2-cell message gutter.
+    let md_width = (content_width as usize).saturating_sub(2);
+    let parsed = parse_markdown(content, theme, md_width);
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for (line_idx, parsed_line) in parsed.into_iter().enumerate() {
+        // Code-block lines are tagged with the code background on their base
+        // style (see markdown::parse_markdown). They're pre-formatted: don't
+        // word-wrap (that collapses indentation) — let the Paragraph clip
+        // overflow instead.
+        let preformatted = parsed_line.preformatted;
+        let base_style = parsed_line.line.style;
+
+        // Continuation indent for wrapping: the 2-cell message gutter every line
+        // carries, plus this line's own content-start column so a wrapped list
+        // item's continuations hang under its text (after the marker) instead of
+        // snapping back to the gutter.
+        let continuation = if preformatted {
+            2
+        } else {
+            2 + crate::render::markdown::line_hanging_indent(&parsed_line.line, theme)
+        };
+
+        // Add role indicator to first line or 2-space margin to others.
+        let mut spans = if line_idx == 0 {
+            vec![Span::styled(
+                format!("{} ", role_prefix),
+                Style::new().fg(role_color).bold(),
+            )]
+        } else {
+            vec![Span::raw("  ")]
+        };
+        spans.extend(parsed_line.line.spans);
+        let new_line = Line::from(spans).style(base_style);
+
+        if preformatted {
+            // Code: hard-wrap preserving indentation (don't word-collapse) so
+            // wide lines stay readable.
+            out.extend(wrap_preformatted(new_line, content_width as usize, 2));
+        } else {
+            out.extend(wrap_styled_line(
+                new_line,
+                content_width as usize,
+                continuation,
+            ));
+        }
+    }
+    out
 }
 
 impl<'a> StatefulWidget for ChatWidget<'a> {
@@ -483,90 +551,52 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     }
                 }
 
-                // With tool calling, message content is just text (no embedded action blocks)
-                // Use cached parsed markdown when available (avoids re-parsing
-                // every frame). The theme is folded into the key so a theme
-                // switch can't serve stale-colored cached lines.
+                // Assistant prose is the bulk of the scrollback. Its wrapped,
+                // role-prefixed lines are a pure function of (content, theme,
+                // width) — exactly this key — so cache the WRAPPED output, not
+                // just the parse: a committed message is then cloned, never
+                // re-parsed or re-wrapped, each frame (#134). Theme is folded in
+                // so a theme switch can't serve stale-colored lines; width is in
+                // the key because tables wrap to the viewport.
                 let mut hasher = rustc_hash::FxHasher::default();
                 msg.content.hash(&mut hasher);
                 theme_seed.hash(&mut hasher);
-                // Width is part of the key: tables are wrapped to the viewport, so
-                // the same markdown yields different lines at different widths.
                 content_width.hash(&mut hasher);
                 let cache_key = hasher.finish();
-                let parsed_lines = if let Some(cached) = self.markdown_cache.get(&cache_key) {
+
+                let wrapped = if let Some(cached) = self.wrapped_line_cache.get(&cache_key) {
                     cached.clone()
                 } else {
-                    // Markdown content sits after the 2-cell message gutter.
-                    let md_width = (content_width as usize).saturating_sub(2);
-                    let parsed = parse_markdown(&msg.content, self.theme, md_width);
-                    self.markdown_cache.insert(cache_key, parsed.clone());
-                    if self.markdown_cache.len() > crate::constants::MARKDOWN_CACHE_MAX_ENTRIES {
+                    let block = wrap_assistant_content(
+                        &msg.content,
+                        content_width,
+                        role_prefix,
+                        role_color,
+                        self.theme,
+                    );
+                    self.wrapped_line_cache.insert(cache_key, block.clone());
+                    if self.wrapped_line_cache.len() > crate::constants::MARKDOWN_CACHE_MAX_ENTRIES
+                    {
                         // Evict down to the cap rather than clearing the whole
-                        // cache — a wholesale clear re-parsed every message each
+                        // cache — a wholesale clear re-rendered every message each
                         // frame once a conversation exceeded the cap. Keep the
                         // entry just inserted.
-                        let overflow = self.markdown_cache.len()
+                        let overflow = self.wrapped_line_cache.len()
                             - crate::constants::MARKDOWN_CACHE_MAX_ENTRIES;
                         let stale: Vec<u64> = self
-                            .markdown_cache
+                            .wrapped_line_cache
                             .keys()
                             .copied()
                             .filter(|&k| k != cache_key)
                             .take(overflow)
                             .collect();
                         for k in stale {
-                            self.markdown_cache.remove(&k);
+                            self.wrapped_line_cache.remove(&k);
                         }
                     }
-                    parsed
+                    block
                 };
-
-                for (line_idx, parsed_line) in parsed_lines.into_iter().enumerate() {
-                    // Code-block lines are tagged with the code background on
-                    // their base style (see markdown::parse_markdown). They're
-                    // pre-formatted: don't word-wrap (that collapses
-                    // indentation) — let the Paragraph clip overflow instead.
-                    let preformatted = parsed_line.preformatted;
-                    let base_style = parsed_line.line.style;
-
-                    // Continuation indent for wrapping: the 2-cell message gutter
-                    // every line carries, plus this line's own content-start column
-                    // so a wrapped list item's continuations hang under its text
-                    // (after the marker) instead of snapping back to the gutter.
-                    let continuation = if preformatted {
-                        2
-                    } else {
-                        2 + crate::render::markdown::line_hanging_indent(
-                            &parsed_line.line,
-                            self.theme,
-                        )
-                    };
-
-                    // Add role indicator to first line or 2-space margin to others.
-                    let mut spans = if line_idx == 0 {
-                        vec![Span::styled(
-                            format!("{} ", role_prefix),
-                            Style::new().fg(role_color).bold(),
-                        )]
-                    } else {
-                        vec![Span::raw("  ")]
-                    };
-                    spans.extend(parsed_line.line.spans);
-                    let new_line = Line::from(spans).style(base_style);
-
-                    if preformatted {
-                        // Code: hard-wrap preserving indentation (don't
-                        // word-collapse) so wide lines stay readable.
-                        lines.extend(wrap_preformatted(new_line, content_width as usize, 2));
-                    } else {
-                        lines.extend(wrap_styled_line(
-                            new_line,
-                            content_width as usize,
-                            continuation,
-                        ));
-                    }
-                }
+                lines.extend(wrapped);
 
                 // Render all actions at the end of the message
                 if !msg.actions.is_empty() {
@@ -1323,6 +1353,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn wrapped_line_cache_hit_matches_cache_miss() {
+        // #134: caching the WRAPPED assistant lines must be byte-for-byte
+        // identical to wrapping fresh. Render the same messages through a shared
+        // cache — first call misses (populates), second hits — and assert the
+        // two frame buffers are equal; then prove a cold cache renders the same
+        // frame as the warm one. Assistant-only messages keep the frame free of
+        // the time-relative user timestamp, so nothing here is clock-dependent.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let theme = Theme::dark();
+        let messages = vec![
+            ChatMessage::assistant(
+                "# Heading\n\nSome **bold** prose long enough that it has to wrap \
+                 across this narrow viewport more than once.\n\n\
+                 - a list item that also keeps going past the edge so it wraps too\n\
+                 - second item\n\n```rust\nfn a_very_long_preformatted_code_line_that_overflows() {}\n```",
+            ),
+            ChatMessage::assistant("Short follow-up paragraph."),
+        ];
+
+        let (width, height): (u16, u16) = (40, 40);
+        let render_once = |cache: &mut FxHashMap<u64, Vec<Line<'static>>>| {
+            let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut state = ChatState::new();
+            term.draw(|f| {
+                let widget = ChatWidget {
+                    messages: &messages,
+                    theme: &theme,
+                    wrapped_line_cache: cache,
+                    show_reasoning: true,
+                };
+                f.render_stateful_widget(widget, Rect::new(0, 0, width, height), &mut state);
+            })
+            .unwrap();
+            term.backend().buffer().clone()
+        };
+
+        let mut shared = FxHashMap::default();
+        let miss = render_once(&mut shared);
+        assert!(!shared.is_empty(), "first render must populate the cache");
+        let hit = render_once(&mut shared);
+        assert_eq!(miss, hit, "cache hit must render identically to cache miss");
+
+        let mut cold_cache = FxHashMap::default();
+        let cold = render_once(&mut cold_cache);
+        assert_eq!(hit, cold, "warm-cache frame must equal a cold-cache frame");
     }
 
     #[test]

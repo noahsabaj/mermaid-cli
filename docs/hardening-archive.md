@@ -122,8 +122,10 @@ end-to-end headless against `ollama/minimax-m3:cloud`):
 - **Render** — #135 `build_live_messages` uses `state.now` (purity restored) and
   returns `Cow` (no idle-frame transcript clone); #136 wide tables shrink to fit a
   narrow viewport; #140 the dead `layout.rs` was removed; #134 the per-frame
-  double-clone and markdown-cache thrash were eliminated (the full per-message
-  line cache is deferred — see BACKLOG.md).
+  double-clone and markdown-cache thrash were eliminated, and the `ChatWidget`
+  cache now holds the fully wrapped (not just parsed) assistant lines so a
+  committed message is never re-parsed or re-wrapped per frame — proven
+  output-identical by a cache-hit-vs-miss buffer test.
 - **Exec / computer-use / MCP** — #126 the on-disk tee log is capped at 64 MiB;
   #127 computer-use backends are wall-clock bounded; #139 MCP validation runs the
   graceful shutdown on the error path.
