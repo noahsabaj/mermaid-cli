@@ -148,21 +148,59 @@ enum ThinkingFormat {
     Legacy,
 }
 
-/// Pick the thinking-config shape this Claude model accepts. Defaults to
-/// `Legacy` for unknown models because legacy works on the broader set
-/// of models — only Opus 4.7 outright rejects it. If a user picks an
-/// unrecognized newer model and gets a 400, the API's error message
-/// will tell them to switch formats.
-fn thinking_format_for(model: &str) -> ThinkingFormat {
+/// True for the 4.6+ "adaptive thinking" line — these models require
+/// `thinking: {type: "adaptive"}` and REJECT legacy `budget_tokens` with a
+/// 400 (Fable 5 / Opus 4.8 / 4.7), or have it deprecated (Opus 4.6 /
+/// Sonnet 4.6). Covers Opus 4.6/4.7/4.8, Sonnet 4.6, Fable 5, and Mythos.
+fn is_adaptive_thinking_model(model: &str) -> bool {
     let m = model.to_lowercase();
-    if m.starts_with("claude-opus-4-7")
+    m.starts_with("claude-opus-4-6")
+        || m.starts_with("claude-opus-4-7")
+        || m.starts_with("claude-opus-4-8")
         || m.starts_with("claude-sonnet-4-6")
-        || m.starts_with("claude-opus-4-6")
-    {
+        || m.starts_with("claude-fable-5")
+        || m.starts_with("claude-mythos")
+}
+
+/// Pick the thinking-config shape this Claude model accepts. The 4.6+ line
+/// uses adaptive; the 4.5 family (Sonnet 4.5 / Opus 4.5 / Haiku 4.5) uses
+/// legacy `budget_tokens`. Defaults to `Legacy` for genuinely unknown models —
+/// if a future model rejects legacy, the API's 400 names the fix, and this
+/// table should be extended when that model is added (the previous version of
+/// this table predated Opus 4.8 / Fable 5 and wrongly sent them legacy → 400).
+fn thinking_format_for(model: &str) -> ThinkingFormat {
+    if is_adaptive_thinking_model(model) {
         ThinkingFormat::Adaptive
     } else {
         ThinkingFormat::Legacy
     }
+}
+
+/// Whether this model still accepts a top-level `temperature`. The 4.6+
+/// adaptive line removed sampling params: `temperature`/`top_p`/`top_k` return
+/// a 400 on Opus 4.7/4.8, Fable 5, and Mythos. Opus 4.6 / Sonnet 4.6 / the 4.5
+/// family still accept it. Sending temperature to a model that rejects it fails
+/// every request, so gate the emission rather than send it unconditionally.
+fn supports_temperature(model: &str) -> bool {
+    let m = model.to_lowercase();
+    !(m.starts_with("claude-opus-4-7")
+        || m.starts_with("claude-opus-4-8")
+        || m.starts_with("claude-fable-5")
+        || m.starts_with("claude-mythos"))
+}
+
+/// Whether this model accepts `output_config.effort` at all. Per the effort
+/// doc it's Fable 5, Opus 4.5/4.6/4.7/4.8, Sonnet 4.6, and Mythos; it ERRORS on
+/// Sonnet 4.5 / Haiku 4.5 and older, so those must get no effort field.
+fn supports_effort(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.starts_with("claude-opus-4-5")
+        || m.starts_with("claude-opus-4-6")
+        || m.starts_with("claude-opus-4-7")
+        || m.starts_with("claude-opus-4-8")
+        || m.starts_with("claude-sonnet-4-6")
+        || m.starts_with("claude-fable-5")
+        || m.starts_with("claude-mythos")
 }
 
 /// Translate `ReasoningLevel` to a legacy `budget_tokens` value, clamped
@@ -200,16 +238,22 @@ fn legacy_budget_for(level: ReasoningLevel, max_tokens: usize) -> Option<u32> {
 /// case-insensitive and prefix-based.
 fn supports_max_effort(model: &str) -> bool {
     let m = model.to_lowercase();
-    m.starts_with("claude-opus-4-7")
-        || m.starts_with("claude-opus-4-6")
+    m.starts_with("claude-opus-4-6")
+        || m.starts_with("claude-opus-4-7")
+        || m.starts_with("claude-opus-4-8")
         || m.starts_with("claude-sonnet-4-6")
+        || m.starts_with("claude-fable-5")
         || m.starts_with("claude-mythos")
 }
 
-/// Models that accept `effort: "xhigh"` — Opus 4.7 only per the docs.
-/// Sending `xhigh` anywhere else would 400.
+/// Models that accept `effort: "xhigh"` — added on Opus 4.7 and carried to
+/// Opus 4.8, Fable 5, and Mythos. Sending `xhigh` elsewhere would 400.
 fn supports_xhigh_effort(model: &str) -> bool {
-    model.to_lowercase().starts_with("claude-opus-4-7")
+    let m = model.to_lowercase();
+    m.starts_with("claude-opus-4-7")
+        || m.starts_with("claude-opus-4-8")
+        || m.starts_with("claude-fable-5")
+        || m.starts_with("claude-mythos")
 }
 
 /// Translate `ReasoningLevel` to Anthropic's `effort` string. The
@@ -231,6 +275,11 @@ fn supports_xhigh_effort(model: &str) -> bool {
 /// to `"max"`. The user picked something below max; delivering max
 /// would over-spend their intent.
 fn adaptive_effort_for(level: ReasoningLevel, model: &str) -> Option<&'static str> {
+    // Models that don't accept `effort` at all (Sonnet 4.5 / Haiku 4.5 / older)
+    // must get no effort field — sending one 400s the request.
+    if !supports_effort(model) {
+        return None;
+    }
     match level {
         ReasoningLevel::None => None,
         ReasoningLevel::Minimal | ReasoningLevel::Low => Some("low"),
@@ -538,9 +587,13 @@ impl AnthropicAdapter {
 
         // Temperature: Anthropic accepts 0.0..=1.0 (NOT 0..=2 like OpenAI).
         // Clamp defensively so a user with `temperature = 1.5` in their
-        // config doesn't get a 400.
-        let temp = config.temperature.clamp(0.0, 1.0);
-        body["temperature"] = json!(temp);
+        // config doesn't get a 400. The 4.6+ adaptive line removed sampling
+        // params entirely (Opus 4.7/4.8, Fable 5, Mythos) — sending any
+        // temperature there is itself a 400, so only emit it where accepted.
+        if supports_temperature(&self.model_name) {
+            let temp = config.temperature.clamp(0.0, 1.0);
+            body["temperature"] = json!(temp);
+        }
 
         // Tools come from `config.tools` (OpenAI-compat shape,
         // populated by the provider wrapper). Translate to Anthropic
@@ -1321,6 +1374,15 @@ mod tests {
             thinking_format_for("claude-opus-4-6"),
             ThinkingFormat::Adaptive
         );
+        // Current models that the old table misclassified as Legacy → 400.
+        assert_eq!(
+            thinking_format_for("claude-opus-4-8"),
+            ThinkingFormat::Adaptive
+        );
+        assert_eq!(
+            thinking_format_for("claude-fable-5"),
+            ThinkingFormat::Adaptive
+        );
         assert_eq!(
             thinking_format_for("claude-sonnet-4-5"),
             ThinkingFormat::Legacy
@@ -1407,26 +1469,37 @@ mod tests {
         );
     }
 
-    /// 4.5-family models don't accept `max` per the April 2026 effort
-    /// doc table. `Max` must snap to `high` to avoid a 400.
+    /// Effort gating on the 4.5 family (RC-H). Sonnet 4.5 / Haiku 4.5 don't
+    /// accept the `effort` parameter at all — it 400s — so they must get no
+    /// effort field (`None`). Opus 4.5 accepts effort but not `max`, so `Max`
+    /// and `XHigh` snap down to `high`.
     #[test]
     fn adaptive_effort_gates_max_on_4_5_family() {
-        for m in ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"] {
+        for m in ["claude-sonnet-4-5", "claude-haiku-4-5"] {
             assert_eq!(
                 adaptive_effort_for(ReasoningLevel::Max, m),
-                Some("high"),
-                "model {} should snap Max → high (no max effort support)",
+                None,
+                "model {} does not support the effort parameter at all",
                 m
             );
-            // XHigh on 4.5-family snaps directly to high (neither xhigh
-            // nor max is supported).
             assert_eq!(
                 adaptive_effort_for(ReasoningLevel::XHigh, m),
-                Some("high"),
-                "model {} should snap XHigh → high",
+                None,
+                "model {} does not support the effort parameter at all",
                 m
             );
         }
+        // Opus 4.5: supports effort but not `max` → snap down to `high`.
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::Max, "claude-opus-4-5"),
+            Some("high"),
+            "Opus 4.5 should snap Max → high (no max effort support)"
+        );
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::XHigh, "claude-opus-4-5"),
+            Some("high"),
+            "Opus 4.5 should snap XHigh → high"
+        );
     }
 
     // --- Tool translation ---
@@ -1676,9 +1749,10 @@ mod tests {
         assert!(body["thinking"].get("budget_tokens").is_none());
     }
 
-    /// Step 5c: legacy thinking models (Sonnet 4.5, Opus 4.5, Haiku
-    /// 4.5) ALSO get `output_config.effort` set. Effort is a separate
-    /// knob from thinking format per the official `effort` doc.
+    /// Sonnet 4.5 uses legacy `budget_tokens` thinking AND must NOT receive an
+    /// `effort` field — the effort parameter 400s on Sonnet 4.5 / Haiku 4.5
+    /// (RC-H: the old code sent effort to every model, including these). A
+    /// temperature is still accepted here.
     #[test]
     fn build_request_body_uses_legacy_for_sonnet_4_5() {
         let adapter = AnthropicAdapter::new(
@@ -1696,9 +1770,41 @@ mod tests {
         let body = adapter.build_request_body(&messages, &config);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 4096);
-        // Effort applies to legacy models too (Step 5c fix — was missing
-        // before because effort was bundled with the adaptive branch).
-        assert_eq!(body["output_config"]["effort"], "medium");
+        // Effort is NOT supported on Sonnet 4.5 — emitting it would 400.
+        assert!(
+            body.get("output_config").is_none(),
+            "Sonnet 4.5 must not get an effort field"
+        );
+        // Sampling params are still accepted on the 4.5 family.
+        assert!(body.get("temperature").is_some());
+    }
+
+    /// RC-H: Opus 4.8 / Fable 5 are on the 4.6+ adaptive line — adaptive
+    /// thinking, effort in output_config, and NO temperature (it 400s there).
+    #[test]
+    fn build_request_body_adaptive_no_temperature_for_opus_4_8() {
+        let adapter = AnthropicAdapter::new(
+            "k".to_string(),
+            "claude-opus-4-8".to_string(),
+            "https://api.anthropic.com/v1".to_string(),
+        )
+        .unwrap();
+        let messages = vec![ChatMessage::user("Hi")];
+        let config = ModelConfig {
+            reasoning: ReasoningLevel::High,
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&messages, &config);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(
+            body["thinking"].get("budget_tokens").is_none(),
+            "Opus 4.8 rejects legacy budget_tokens"
+        );
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert!(
+            body.get("temperature").is_none(),
+            "Opus 4.8 rejects a top-level temperature"
+        );
     }
 
     #[test]
@@ -1758,13 +1864,14 @@ mod tests {
         assert_eq!(body["output_config"]["effort"], "max");
     }
 
-    /// 4.5-family models don't accept `max` effort per the docs. The
-    /// adapter gate snaps Max (and XHigh) to `high` to avoid a 400.
+    /// Opus 4.5 accepts `effort` but not `max`, so the adapter snaps Max to
+    /// `high` to avoid a 400. (Sonnet 4.5 / Haiku 4.5 get no effort field at
+    /// all — covered by `build_request_body_uses_legacy_for_sonnet_4_5`.)
     #[test]
-    fn build_request_body_snaps_max_to_high_on_sonnet_4_5() {
+    fn build_request_body_snaps_max_to_high_on_opus_4_5() {
         let adapter = AnthropicAdapter::new(
             "k".to_string(),
-            "claude-sonnet-4-5".to_string(),
+            "claude-opus-4-5".to_string(),
             "https://api.anthropic.com/v1".to_string(),
         )
         .unwrap();
@@ -1777,7 +1884,7 @@ mod tests {
         let body = adapter.build_request_body(&messages, &config);
         assert_eq!(
             body["output_config"]["effort"], "high",
-            "Sonnet 4.5 should snap Max → high (no max effort support)"
+            "Opus 4.5 should snap Max → high (no max effort support)"
         );
     }
 
