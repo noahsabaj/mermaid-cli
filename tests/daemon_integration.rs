@@ -245,7 +245,7 @@ fn daemon_startup_reconciles_running_task_and_gcs_old_archived_row() {
         let store = RuntimeStore::open(&db).expect("open store for seeding");
         let task = store
             .tasks()
-            .create(NewTask::new("stuck task", "/tmp/project", "test/model"))
+            .create(NewTask::new("stuck task", "/tmp/project", "test/model").daemon_owned())
             .expect("create task");
         store
             .tasks()

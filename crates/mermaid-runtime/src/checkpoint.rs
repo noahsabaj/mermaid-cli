@@ -512,6 +512,14 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// (#130): removes `checkpoints/<id>/` whose mtime is past the window so the tree
 /// can't grow without bound, while keeping recent (still-restorable) checkpoints.
 /// Returns the count removed; never fails the caller (a bad entry is skipped).
+///
+/// F23 (RC-F): each pruned directory's DB row is deleted in the same pass.
+/// Storage `gc()` only removes ARCHIVED checkpoint rows, so without this a
+/// never-archived old checkpoint would lose its on-disk directory here while its
+/// row survived — and a later [`restore_checkpoint`] would then fail on the
+/// missing manifest. Deleting the row keeps `checkpoints().list()` and the
+/// on-disk directories in agreement. The store is opened once, best-effort: if it
+/// can't be opened we still GC the directories.
 pub fn gc_old_checkpoint_dirs(retention_days: i64) -> Result<usize> {
     let dir = data_dir()?.join("checkpoints");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -522,6 +530,7 @@ pub fn gc_old_checkpoint_dirs(retention_days: i64) -> Result<usize> {
             retention_days.max(0) as u64 * 86_400,
         ))
         .unwrap_or(std::time::UNIX_EPOCH);
+    let store = RuntimeStore::open_default().ok();
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -535,6 +544,18 @@ pub fn gc_old_checkpoint_dirs(retention_days: i64) -> Result<usize> {
             .unwrap_or(false);
         if too_old && std::fs::remove_dir_all(&path).is_ok() {
             removed += 1;
+            // The directory name IS the checkpoint id — drop the matching DB row
+            // so `restore` can't later resolve a row whose manifest is gone.
+            if let Some(store) = store.as_ref()
+                && let Some(id) = path.file_name().and_then(|name| name.to_str())
+                && let Err(error) = store.checkpoints().delete(id)
+            {
+                tracing::warn!(
+                    id,
+                    error = %error,
+                    "failed to delete DB row for a GC'd checkpoint dir"
+                );
+            }
         }
     }
     Ok(removed)

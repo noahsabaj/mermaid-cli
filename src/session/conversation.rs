@@ -644,6 +644,64 @@ mod tests {
     }
 
     #[test]
+    fn load_conversation_tolerates_unknown_message_role() {
+        // F74: a conversation written by a NEWER build may carry a MessageRole
+        // this build doesn't model. It must still load — the unknown role maps to
+        // a neutral System message — so `--continue` doesn't silently skip the
+        // newest session (the prior behavior, when the whole parse hard-failed).
+        let dir = std::env::temp_dir().join(format!(
+            "mermaid_conv_role_skew_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+
+        let id = "20260101_120000_001";
+        let json = format!(
+            r#"{{
+                "id": "{id}",
+                "title": "skew",
+                "messages": [
+                    {{
+                        "role": "Developer",
+                        "content": "from a newer build",
+                        "timestamp": "2026-01-01T12:00:00-04:00"
+                    }}
+                ],
+                "model_name": "m",
+                "project_path": "/tmp",
+                "created_at": "2026-01-01T12:00:00-04:00",
+                "updated_at": "2026-01-01T12:00:00-04:00",
+                "total_tokens": null
+            }}"#
+        );
+        fs::write(
+            manager.conversations_dir().join(format!("{id}.json")),
+            json,
+        )
+        .unwrap();
+
+        let loaded = manager
+            .load_conversation(id)
+            .expect("must load despite an unknown role");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(
+            loaded.messages[0].role,
+            MessageRole::System,
+            "an unknown role becomes a neutral System message"
+        );
+
+        // And `--continue`'s newest-valid picker returns it instead of skipping.
+        let last = manager
+            .load_last_conversation()
+            .unwrap()
+            .expect("the newest session must load");
+        assert_eq!(last.id, id);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_delete_conversation() {
         let dir = std::env::temp_dir().join("mermaid_test_conv_delete");
         let _ = fs::remove_dir_all(&dir);
