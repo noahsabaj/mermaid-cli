@@ -354,6 +354,36 @@ fn confirm_untrusted_package(package: &str, command: &str, assume_yes: bool) -> 
     Ok(is_affirmative(input.trim()))
 }
 
+/// Confirm before fetching+running a *curated* registry package (#F51). Even a
+/// trusted entry pulls the LATEST release from npm/PyPI on every launch and runs
+/// it with the user's privileges, so a compromised upstream release would
+/// execute without notice — "in the registry" is not "pinned to audited code".
+/// Surface the exact command and require consent; `assume_yes` (`--yes`) bypasses
+/// for scripted use, and a non-interactive session without it fails closed.
+/// (Version pinning would remove the always-latest risk outright, but the
+/// built-in entries carry no pinned versions to launch.)
+fn confirm_registry_launch(package: &str, command: &str, assume_yes: bool) -> Result<bool> {
+    if assume_yes {
+        return Ok(true);
+    }
+    if should_refuse_noninteractive(io::stdin().is_terminal(), assume_yes) {
+        bail!(
+            "Refusing to fetch and run '{package}' via `{command} {package}` non-interactively: it \
+             installs and executes the latest release from a third-party registry with your \
+             privileges. Re-run in an interactive terminal to confirm, or pass --yes to allow it."
+        );
+    }
+    print!(
+        "About to fetch and run the latest '{package}' via `{command} {package}`.\n\
+         This installs and executes third-party code with your privileges (a compromised release \
+         would run too). Continue? [y/N]: "
+    );
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(is_affirmative(input.trim()))
+}
+
 /// Step C: Search npm registry for MCP server packages.
 ///
 /// Query-param encoding is handled by `reqwest::Url::parse_with_params`,
@@ -422,9 +452,17 @@ async fn search_npm(client: &reqwest::Client, name: &str) -> Result<Option<(Stri
 /// returned, because configuring it leads to executing it via `npx -y` (#10).
 /// `assume_yes` (from `--yes`) is an explicit opt-in for non-interactive use.
 pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
-    // Step A: Built-in registry — curated/trusted, no confirmation needed.
+    // Step A: Built-in registry — curated, but still fetches+runs the latest
+    // third-party release, so require informed consent (bypassable with --yes)
+    // rather than executing it silently (#F51).
     if let Some(entry) = lookup(name) {
         println!("Found: {} ({})", entry.package, entry.description);
+        if !confirm_registry_launch(entry.package, entry.command, assume_yes)? {
+            bail!(
+                "Cancelled: did not confirm running '{}'.",
+                entry.package
+            );
+        }
         return Ok(ResolvedServer {
             command: entry.command.to_string(),
             package: entry.package.to_string(),
@@ -595,11 +633,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_registry_name_needs_no_network_or_confirmation() {
-        // A trusted built-in entry resolves via lookup() alone — no HTTP, no
-        // prompt — so the untrusted-package gate never fires for curated entries.
-        let resolved = resolve("context7", false).await.expect("registry resolve");
+    async fn resolve_registry_name_needs_no_network() {
+        // A trusted built-in entry resolves via lookup() alone — no HTTP. With
+        // `--yes` the curated-launch consent gate is bypassed, so this exercises
+        // the no-network path without prompting (#F51).
+        let resolved = resolve("context7", true).await.expect("registry resolve");
         assert_eq!(resolved.command, "npx");
         assert_eq!(resolved.package, "@upstash/context7-mcp");
+    }
+
+    #[tokio::test]
+    async fn resolve_registry_name_fails_closed_without_consent() {
+        // #F51: a curated entry now requires consent before its latest release is
+        // fetched and run. Non-interactively (test stdin is not a TTY) and without
+        // `--yes`, resolution must refuse rather than silently execute it.
+        assert!(
+            resolve("context7", false).await.is_err(),
+            "curated launch must fail closed without consent",
+        );
     }
 }

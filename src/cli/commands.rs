@@ -1730,9 +1730,20 @@ async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Res
         .await?;
 
     let ext = if windows { "ps1" } else { "sh" };
-    let script_path =
-        std::env::temp_dir().join(format!("mermaid-update-{}.{ext}", std::process::id()));
-    std::fs::write(&script_path, script)
+    // Stage the fetched script in the per-user 0700 private temp dir, created
+    // exclusively (O_EXCL → never follows/opens a pre-planted symlink) so a local
+    // attacker can neither redirect the write nor swap the file between write and
+    // exec (#F50). The previous world-readable, predictable
+    // `temp_dir()/mermaid-update-<pid>.<ext>` allowed both a symlink redirect and
+    // a write→exec TOCTOU.
+    let dir = crate::utils::private_temp_dir()
+        .map_err(|e| anyhow!("could not create private temp dir for install script: {e}"))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let script_path = dir.join(format!("mermaid-update-{}-{nanos}.{ext}", std::process::id()));
+    stage_install_script(&script_path, script.as_bytes())
         .map_err(|e| anyhow!("could not stage install script: {e}"))?;
 
     let mut cmd = if windows {
@@ -1757,6 +1768,30 @@ async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Res
         bail!("install script exited with {:?}", status.code());
     }
     Ok(())
+}
+
+/// Write the fetched install script to `path`, creating it **exclusively** so a
+/// symlink pre-planted at the path is refused (`O_EXCL` never follows) and the
+/// staged code is owner-only (`0600` file inside the `0700` private dir). This
+/// closes the symlink-redirect and write→exec TOCTOU that the old predictable,
+/// world-readable temp path left open (#F50).
+fn stage_install_script(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)
 }
 
 /// Parse a `[v]MAJOR.MINOR.PATCH[-pre][+build]` string into a comparable tuple.
