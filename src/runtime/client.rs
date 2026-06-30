@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -912,7 +914,9 @@ impl RuntimeService {
             .processes()
             .get(id)?
             .with_context(|| format!("process not found: {}", id))?;
-        kill_pid(process.pid).with_context(|| format!("failed to stop pid {}", process.pid))?;
+        // Best-effort group kill (SIGTERM → grace → SIGKILL) so workers the dev
+        // server forked die with it; then mark the row stopped regardless.
+        crate::utils::terminate_tree_blocking(process.pid, crate::utils::Grace::Graceful);
         self.store.processes().upsert(NewProcess {
             id: Some(process.id.clone()),
             task_id: process.task_id.clone(),
@@ -940,7 +944,7 @@ impl RuntimeService {
             "refusing to restart process {id}: command flagged destructive: {:?}",
             process.command
         );
-        let _ = kill_pid(process.pid);
+        crate::utils::terminate_tree_blocking(process.pid, crate::utils::Grace::Graceful);
         // Wait (bounded) for the old PID to actually exit before respawning —
         // the kill above is fire-and-forget (async signal / taskkill), so an
         // immediate respawn can race the old process for its listening port.
@@ -958,6 +962,11 @@ impl RuntimeService {
         }
         let mut command = Command::new("sh");
         command.arg("-c").arg(&process.command);
+        // Lead a new process group so `/stop`/`/restart` can group-kill the
+        // whole tree (the dev server plus any worker it forks), matching the
+        // foreground exec path. Windows kills the tree by pid via taskkill /T.
+        #[cfg(unix)]
+        command.process_group(0);
         if let Some(cwd) = process.cwd.as_deref() {
             command.current_dir(cwd);
         }
@@ -1247,17 +1256,6 @@ fn is_runtime_hygiene_approval(
         Some(checkpoint_id) => test_checkpoint_ids.contains(checkpoint_id),
         None => true,
     }
-}
-
-fn kill_pid(pid: u32) -> Result<()> {
-    if cfg!(windows) {
-        Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status()?;
-    } else {
-        Command::new("kill").arg(pid.to_string()).status()?;
-    }
-    Ok(())
 }
 
 /// Best-effort synchronous liveness check for a pid. The runtime client is sync,

@@ -653,18 +653,19 @@ async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<(String, bool)> 
 }
 
 /// Write `content` to `rel` beneath `workdir` through the symlink-confined
-/// opener, creating parent dirs the same way. The bytes land on the inode the
-/// kernel resolved under `RESOLVE_BENEATH`, so a parent dir swapped for an
-/// escaping symlink after the path check can't redirect the write (#77).
+/// *atomic* writer, creating parent dirs the same confined way. The bytes are
+/// written to a temp and `renameat`-swapped over the target, all beneath the
+/// directory fd the kernel resolved under `RESOLVE_BENEATH`: a parent dir
+/// swapped for an escaping symlink can't redirect the write (#77), and a
+/// crash/kill/disk-full mid-write leaves the previous file intact rather than a
+/// truncated or half-written one.
 fn write_one_blocking(workdir: &Path, rel: &Path, content: &str) -> std::io::Result<usize> {
     if let Some(parent) = rel.parent()
         && !parent.as_os_str().is_empty()
     {
         crate::runtime::create_dir_all_beneath(workdir, parent)?;
     }
-    let mut file =
-        crate::runtime::open_beneath(workdir, rel, crate::runtime::OpenIntent::WriteTruncate)?;
-    std::io::Write::write_all(&mut file, content.as_bytes())?;
+    crate::runtime::write_atomic_beneath(workdir, rel, content.as_bytes())?;
     Ok(content.lines().count())
 }
 
@@ -723,9 +724,10 @@ struct EditResult {
 }
 
 /// Read-modify-write `rel` beneath `workdir` entirely through the
-/// symlink-confined opener, so both the read and the write bind to the inode the
-/// kernel resolved under `RESOLVE_BENEATH` — a swapped-in symlink can't redirect
-/// either half (#77).
+/// symlink-confined helpers, so both halves bind to the inode the kernel
+/// resolved under `RESOLVE_BENEATH` — a swapped-in symlink can't redirect either
+/// (#77). The write is atomic (temp + `renameat`), so an interrupted edit leaves
+/// the ORIGINAL file intact rather than a truncated one.
 fn edit_blocking(
     workdir: &Path,
     rel: &Path,
@@ -753,9 +755,7 @@ fn edit_blocking(
     }
     let updated = current.replacen(old_string, new_string, 1);
     let diff = generate_display_diff(&current, &updated);
-    let mut file =
-        crate::runtime::open_beneath(workdir, rel, crate::runtime::OpenIntent::WriteTruncate)?;
-    std::io::Write::write_all(&mut file, updated.as_bytes())?;
+    crate::runtime::write_atomic_beneath(workdir, rel, updated.as_bytes())?;
     Ok(EditResult {
         replacements: 1,
         display_diff: diff.display_diff,

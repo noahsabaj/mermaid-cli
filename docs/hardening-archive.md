@@ -2,8 +2,10 @@
 
 Documented history of the architectural + security review that produced **116
 findings** (`#1`–`#116`) grouped under 7 root causes, and how every one was
-resolved. **All 116 are closed.** This file is a historical record — there is no
-open work here; the live backlog is [`BACKLOG.md`](BACKLOG.md) (currently empty).
+resolved. **All 116 are closed.** A **second review (2026-06-29)** then added
+`#117`–`#142`; its **6 root causes plus the non-atomic-mutation pattern are
+resolved** and recorded in the next section, while the remaining non-root-cause
+items stay open in [`BACKLOG.md`](BACKLOG.md).
 
 The root causes and two sweep-ins were fixed across the Axis hardening PRs
 (GitHub PRs #64–#68 — not to be confused with findings #64/#68 below); the four
@@ -16,6 +18,78 @@ shell)**.
 - **Findings:** 116 · **Resolved:** 116 · **Open:** 0
 - **Severity legend:** `HIGH` exploitable / data-loss · `MED` correctness or
   availability · `LOW`/`INFO` hardening, cosmetics, or by-design risk confirmed.
+
+---
+
+## Second review (2026-06-29) — root-cause hardening (`#117`–`#142`)
+
+A follow-up architecture + security review (multi-agent, adversarially verified)
+surfaced 26 findings. The **6 root causes plus the non-atomic-mutation pattern**
+were fixed in this batch and are recorded here; the individual non-root-cause
+findings remain in [`BACKLOG.md`](BACKLOG.md). Each fix shipped with regression
+tests; `cargo test`, `clippy -D warnings`, and `rustfmt` are clean.
+
+**RC-1 — Unix process termination was decentralized; only the Esc path killed the
+process group.** A single `terminate_tree(pid, Grace)` primitive
+(`src/utils/proc.rs`; Unix signals the group `-pid` *and* the bare pid, SIGTERM →
+400 ms → SIGKILL, or immediate SIGKILL; Windows `taskkill /T /F`) now backs every
+termination site. The foreground **timeout no longer leaks the process tree**: it
+moved *inside* `run_command`'s `select!` as a `TimedOut` arm that tree-kills then
+aborts the driver (it previously only built an error string and dropped a detached
+task that kept the child alive — `exec.rs`). `/stop` and `/restart` group-kill via
+`terminate_tree_blocking` and now spawn managed processes as group leaders
+(`process_group(0)`), and Ctrl+B background launches use `setsid`, so the group
+kill reaches grandchildren (`client.rs`, `exec.rs`).
+
+**RC-2 — shell risk was classified by argv0 alone, ignoring write/exec-bearing
+arguments** (`policy.rs`). `find` left the read-only set and is now
+argument-aware (`-exec`/`-execdir`/`-ok`/`-okdir` ⇒ Process; `-delete`/`-fprint*`/
+`-fls` ⇒ ShellMutation); `sort -o`/`--output` ⇒ ShellMutation; `config`/`branch`/
+`tag` were removed from `GIT_READ_ONLY` (they mutate). These no longer auto-run in
+`read_only`/`auto` — closing the worst finding, where `find . -exec …` /
+`find / -delete` ran in read_only and auto-ran with no classifier or checkpoint.
+
+**RC-3 — the destructive-root hard-deny was exact-string matching over a
+pre-lowercased command** (`policy.rs` `is_dangerous_root`). It now normalizes a
+trailing `/*`, `/.`, `/` and `${VAR}`→`$VAR` before matching and drops the dead
+uppercase `$HOME`/`${HOME}` arms, so `rm -rf ${HOME}`, `/etc/`, `/usr/*` are
+caught. Deliberately exact-match-after-normalization (not prefix-match) so a
+legitimate `rm -rf /home/<user>/…/node_modules` isn't pulled into the
+un-overridable deny. The fork-bomb check was generalized from the literal `:`
+name to any `name(){ … name|name& … }` (`is_fork_bomb`).
+
+**RC-4 — the gate/classifier only vetted the arguments `action_detail` formatted**
+(`policy_gate.rs`, `auto_classifier.rs`). `action_detail` now surfaces the real
+`web_search` queries and the subagent `prompt`, so the classifier and the human
+approval modal see the actual content (was just a label → silent
+exfiltration-via-query). The classifier's no-command/path fallback is now fenced
+in `BEGIN/END UNTRUSTED ACTION` markers, and the injection pre-filter scans the
+`summary` too — closing the unfenced/unfiltered subagent-description path.
+
+**RC-5 — the schema was re-applied inline on every open with a dead version
+guard** (`storage.rs`). `init_schema` now reads `user_version` *first* and bails
+when it exceeds `SCHEMA_VERSION` (the guard was dead — the version was clobbered
+before the check, so an older binary silently operated a newer DB); creation +
+migration run inside `BEGIN IMMEDIATE`/`COMMIT` (serializing the daemon/CLI
+`ensure_column` race), `ensure_column` is duplicate-column tolerant, and the
+version is stamped only after a successful migration. The paired `tasks().create`
+(task + event) and `update_status` (update + event) writes are now atomic
+transactions.
+
+**RC-6 — effect-output messages without a `TurnId` bypassed the stale filter**
+(`reducer.rs`, `msg.rs`, `effect/mod.rs`). `ProviderContextResolved` now carries
+and is guarded by `model_id` (mirroring `OllamaPlacementResolved`), so a context
+probe that lands after a `/model` switch no longer overwrites the new model's
+window.
+
+**Atomicity — the agent wrote the user's files non-atomically while protecting its
+own state.** A confined atomic writer `write_atomic_beneath` (`pathguard.rs`:
+`openat2(RESOLVE_BENEATH)` temp → fsync → `renameat` within the same parent fd,
+preserving the destination's mode) now backs `write_file` and `edit_file`
+(`filesystem.rs`) — a crash/kill/disk-full mid-write leaves the prior file intact
+instead of truncated, and the `#77` symlink confinement is preserved.
+`restore_checkpoint` (`checkpoint.rs`) stages writes-before-deletes with per-file
+atomic writes and best-effort rollback. (DB write atomicity is RC-5.)
 
 ---
 

@@ -458,8 +458,14 @@ impl RuntimeStore {
         // serializes writers gracefully.
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .context("failed to set SQLite busy_timeout")?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-            .context("failed to enable SQLite WAL mode")?;
+        // `foreign_keys` is connection-scoped and can only be toggled in
+        // autocommit mode, so it lives here (per connection) rather than inside
+        // the now-transactional `init_schema` migration, where a PRAGMA
+        // foreign_keys would be a silent no-op.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+        )
+        .context("failed to set SQLite connection PRAGMAs")?;
         let store = Self { conn, path };
         store.init_schema()?;
         Ok(store)
@@ -514,10 +520,54 @@ impl RuntimeStore {
     }
 
     fn init_schema(&self) -> Result<()> {
+        let conn = &self.conn;
+        // Forward-compat gate: read the stored schema version BEFORE writing
+        // anything. A DB written by a newer mermaid (higher `user_version`)
+        // must be refused, not silently down-labeled. The old code stamped
+        // `PRAGMA user_version = 1` inside the CREATE script — before this
+        // check — so the guard was dead and an older binary would happily
+        // operate (and corrupt) a newer DB.
+        let current: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        anyhow::ensure!(
+            current <= SCHEMA_VERSION,
+            "runtime DB schema version {} is newer than this build supports ({}); upgrade mermaid",
+            current,
+            SCHEMA_VERSION
+        );
+
+        // Create tables + run column migrations exactly once, even when the
+        // daemon and CLI open the DB concurrently: BEGIN IMMEDIATE takes the
+        // write lock up front, so a racing process blocks on `busy_timeout`
+        // and, once we commit, sees the schema already in place instead of
+        // double-running an ALTER and failing the open (the old check-then-
+        // ALTER `ensure_column` race).
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        if let Err(error) = self.migrate_within_txn() {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(error);
+        }
+        conn.execute_batch("COMMIT;")?;
+
+        // Stamp the version only after a successful migration — never before
+        // the gate above.
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        anyhow::ensure!(
+            version == SCHEMA_VERSION,
+            "unsupported runtime DB schema version {} (expected {})",
+            version,
+            SCHEMA_VERSION
+        );
+        Ok(())
+    }
+
+    /// Schema creation + column migrations, run inside the `init_schema`
+    /// transaction. Idempotent: `CREATE TABLE IF NOT EXISTS` plus the
+    /// duplicate-tolerant `ensure_column` make a re-run a no-op, so a second
+    /// concurrent opener that wins the lock after us does no harm.
+    fn migrate_within_txn(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
-            PRAGMA foreign_keys = ON;
-
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 project_path TEXT NOT NULL,
@@ -668,8 +718,6 @@ impl RuntimeStore {
             );
             CREATE INDEX IF NOT EXISTS idx_pairing_tokens_enabled
                 ON pairing_tokens(enabled, created_at);
-
-            PRAGMA user_version = 1;
             "#,
         )?;
 
@@ -690,16 +738,6 @@ impl RuntimeStore {
                 params![grace],
             )?;
         }
-
-        let version: i32 = self
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        anyhow::ensure!(
-            version == SCHEMA_VERSION,
-            "unsupported runtime DB schema version {} (expected {})",
-            version,
-            SCHEMA_VERSION
-        );
         Ok(())
     }
 }
@@ -821,7 +859,10 @@ impl TasksRepo<'_> {
             updated_at: now.clone(),
             final_report: None,
         };
-        self.conn.execute(
+        // The task row and its initial event are one logical write — commit
+        // them atomically so a crash between can't leave an event-less task.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO tasks
              (id, title, status, priority, project_path, model_id, conversation_id, created_at, updated_at, final_report)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -838,7 +879,12 @@ impl TasksRepo<'_> {
                 record.final_report,
             ],
         )?;
-        self.add_event(&record.id, "task_created", "task created")?;
+        tx.execute(
+            "INSERT INTO task_events (task_id, kind, message, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![record.id, "task_created", "task created", now],
+        )?;
+        tx.commit()?;
         self.get(&record.id)?
             .context("task was inserted but could not be reloaded")
     }
@@ -876,17 +922,25 @@ impl TasksRepo<'_> {
         final_report: Option<&str>,
     ) -> Result<()> {
         let now = now_rfc3339();
-        self.conn.execute(
+        // Status update + its event are one logical write.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "UPDATE tasks
              SET status = ?2, updated_at = ?3, final_report = COALESCE(?4, final_report)
              WHERE id = ?1",
             params![id, status.as_str(), now, final_report],
         )?;
-        self.add_event(
-            id,
-            "status_changed",
-            &format!("status changed to {}", status),
+        tx.execute(
+            "INSERT INTO task_events (task_id, kind, message, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                id,
+                "status_changed",
+                format!("status changed to {status}"),
+                now
+            ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1650,11 +1704,18 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str)
             return Ok(false);
         }
     }
-    conn.execute(
+    // Tolerate a concurrent opener that added the column between our
+    // `table_info` check and this ALTER. SQLite reports that as a "duplicate
+    // column name" schema error (not SQLITE_BUSY, so `busy_timeout` can't retry
+    // it); treat it as already-present rather than failing the whole store open.
+    match conn.execute(
         &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
         [],
-    )?;
-    Ok(true)
+    ) {
+        Ok(_) => Ok(true),
+        Err(error) if error.to_string().contains("duplicate column") => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub fn data_dir() -> Result<PathBuf> {
@@ -1963,6 +2024,63 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn rejects_newer_schema_version() {
+        // Forward-compat gate: a DB stamped with a newer schema must be
+        // refused, not silently down-labeled and operated on (RC-5).
+        let path = temp_db("newer_schema");
+        {
+            let store = RuntimeStore::open(&path).expect("first open");
+            store
+                .conn
+                .execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1))
+                .expect("bump version");
+        }
+        // `RuntimeStore` isn't `Debug`, so match rather than `expect_err`.
+        let err = match RuntimeStore::open(&path) {
+            Ok(_) => panic!("must refuse a newer DB"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("newer than this build"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn init_schema_is_idempotent_across_opens() {
+        // Re-opening the same DB re-runs `init_schema`; it must succeed (the
+        // create script and `ensure_column` are idempotent) and keep the
+        // version stamped.
+        let path = temp_db("idempotent_schema");
+        let _ = RuntimeStore::open(&path).expect("first open");
+        let store = RuntimeStore::open(&path).expect("second open must succeed");
+        let version: i32 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn task_create_commits_task_and_event_atomically() {
+        // The task row and its `task_created` event commit in one transaction.
+        let path = temp_db("task_txn");
+        let store = RuntimeStore::open(&path).expect("open");
+        let task = store
+            .tasks()
+            .create(NewTask::new("do a thing", "/repo", "anthropic/claude"))
+            .expect("create task");
+        let events = store.tasks().events(&task.id).expect("events");
+        assert!(
+            events.iter().any(|e| e.kind == "task_created"),
+            "the task_created event must commit with the task row"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

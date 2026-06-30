@@ -1281,6 +1281,7 @@ async fn dispatch_call_model(
     // detail shown).
     let _ = msg_tx
         .send(Msg::ProviderContextResolved {
+            model_id: request.model_id.clone(),
             model_max: sizing.model_max,
             effective: sizing.effective,
             source: sizing.source,

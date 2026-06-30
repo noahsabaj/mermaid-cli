@@ -152,16 +152,41 @@ pub fn remove_file_beneath(root: &Path, rel: &Path) -> io::Result<()> {
     fallback::remove_file(root, rel)
 }
 
+/// Atomically write `bytes` to `root`-relative `rel` without ever traversing out
+/// of `root`. The temp file is created and `renameat`-swapped beneath the *same*
+/// confined directory fd as the destination (Linux `openat2(RESOLVE_BENEATH)`),
+/// so a parent dir swapped for an escaping symlink after a path check can't
+/// redirect the write (#77), AND a crash/kill/disk-full mid-write leaves the
+/// previous file intact instead of a truncated one — `open_beneath` +
+/// `WriteTruncate` gives the first guarantee but not the second. Falls back to
+/// `contain_within_canonical` + by-path [`crate::write_atomic`] on non-Linux /
+/// pre-`openat2` kernels (the same best-effort posture as the other helpers).
+pub fn write_atomic_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        match linux::write_atomic_beneath(root, rel, bytes) {
+            Err(e) if e == rustix::io::Errno::NOSYS => {},
+            other => return other.map_err(io::Error::from),
+        }
+    }
+    fallback::write_atomic(root, rel, bytes)
+}
+
 /// Linux `openat2(RESOLVE_BENEATH)` implementation. Each fn returns
 /// `Err(Errno::NOSYS)` on a kernel that predates `openat2` (5.6) so the public
 /// wrapper can fall back.
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fs::File;
+    use std::io::Write;
     use std::path::{Component, Path};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use rustix::fd::OwnedFd;
-    use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, mkdirat, open, openat2, unlinkat};
+    use rustix::fs::{
+        AtFlags, Mode, OFlags, ResolveFlags, fchmod, mkdirat, open, openat2, renameat, statat,
+        unlinkat,
+    };
     use rustix::io::Errno;
 
     use super::OpenIntent;
@@ -230,6 +255,88 @@ mod linux {
         };
         unlinkat(&parent_fd, Path::new(leaf), AtFlags::empty())
     }
+
+    /// Confined atomic write: create a temp beneath the target's parent under
+    /// `RESOLVE_BENEATH`, write+fsync it, then `renameat` it over the target — so
+    /// the bytes hit the same inode the kernel confined (a swapped-in symlink
+    /// can't redirect them) and a crash/kill mid-write leaves the previous file
+    /// intact (the rename is atomic).
+    pub(super) fn write_atomic_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> Result<(), Errno> {
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let root_fd = open_dir(root)?;
+        let leaf = rel.file_name().ok_or(Errno::INVAL)?;
+        let parent = rel.parent().unwrap_or_else(|| Path::new(""));
+        let parent_fd = if parent.as_os_str().is_empty() {
+            root_fd
+        } else {
+            open_subdir(&root_fd, parent)?
+        };
+
+        let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_name = format!(".mermaid.{}.{}.tmp", std::process::id(), n);
+        let tmp_path = Path::new(&tmp_name);
+
+        // Preserve the destination's existing permission bits. The replaced
+        // `open_beneath(WriteTruncate)` kept them (O_TRUNC doesn't touch an
+        // existing file's mode), so without this an `edit_file` on a `0o755`
+        // script or a `0o600` secret would silently reset it to `0o644`. A fresh
+        // file keeps the `0o644` default. Statted under the confined parent fd.
+        let existing_mode = statat(&parent_fd, Path::new(leaf), AtFlags::empty())
+            .ok()
+            .map(|st| st.st_mode & 0o7777);
+
+        // Create the temp exclusively, beneath the confined parent.
+        let fd = openat2(
+            &parent_fd,
+            tmp_path,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o644),
+            ResolveFlags::BENEATH,
+        )?;
+
+        // Match the destination's prior mode when replacing an existing file
+        // (fchmod isn't subject to umask, so the bits are exact).
+        if let Some(mode) = existing_mode {
+            let _ = fchmod(&fd, Mode::from_raw_mode(mode));
+        }
+
+        // Write + fsync the data; on any IO failure, unlink the temp so we don't
+        // leak it, mapping the error back into an `Errno`.
+        let written = (|| -> std::io::Result<()> {
+            let mut file = File::from(fd);
+            file.write_all(bytes)?;
+            file.sync_all()
+        })();
+        if let Err(e) = written {
+            let _ = unlinkat(&parent_fd, tmp_path, AtFlags::empty());
+            return Err(io_to_errno(e));
+        }
+
+        // Atomic swap within the confined parent dir.
+        if let Err(e) = renameat(&parent_fd, tmp_path, &parent_fd, Path::new(leaf)) {
+            let _ = unlinkat(&parent_fd, tmp_path, AtFlags::empty());
+            return Err(e);
+        }
+
+        // Best-effort durability of the rename (the directory entry itself).
+        if let Ok(dir) = openat2(
+            &parent_fd,
+            Path::new("."),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH,
+        ) {
+            let _ = File::from(dir).sync_all();
+        }
+        Ok(())
+    }
+
+    /// Map a std IO error to the nearest `Errno` so the confined writer can share
+    /// the `NOSYS`-fallback dispatch shape of its sibling helpers.
+    fn io_to_errno(e: std::io::Error) -> Errno {
+        Errno::from_io_error(&e).unwrap_or(Errno::IO)
+    }
 }
 
 /// Best-effort fallback used on non-Linux targets and pre-`openat2` kernels:
@@ -280,6 +387,11 @@ mod fallback {
     pub(super) fn remove_file(root: &Path, rel: &Path) -> io::Result<()> {
         let path = validated(root, rel)?;
         std::fs::remove_file(&path)
+    }
+
+    pub(super) fn write_atomic(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
+        let path = validated(root, rel)?;
+        crate::write_atomic(&path, bytes)
     }
 }
 
@@ -456,5 +568,85 @@ mod confined_tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn write_atomic_beneath_roundtrips_and_replaces_without_temp_residue() {
+        let root = unique_dir("atomic_rw");
+        create_dir_all_beneath(&root, Path::new("sub")).unwrap();
+        write_atomic_beneath(&root, Path::new("sub/file.txt"), b"first").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("sub/file.txt")).unwrap(),
+            "first"
+        );
+        // Overwriting is an atomic swap, not a truncate-in-place.
+        write_atomic_beneath(&root, Path::new("sub/file.txt"), b"second").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("sub/file.txt")).unwrap(),
+            "second"
+        );
+        // No `.tmp` sibling left behind.
+        let leftovers = std::fs::read_dir(root.join("sub"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0, "atomic write must not leak a temp file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_atomic_beneath_preserves_existing_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = unique_dir("atomic_mode");
+        let rel = Path::new("script.sh");
+        write_atomic_beneath(&root, rel, b"#!/bin/sh\n").unwrap();
+        // Make it executable, then rewrite it: the atomic swap must keep 0o755
+        // rather than resetting to the temp's 0o644 (an edit_file on a script
+        // must not strip the executable bit).
+        std::fs::set_permissions(
+            root.join("script.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        write_atomic_beneath(&root, rel, b"#!/bin/sh\necho hi\n").unwrap();
+        let mode = std::fs::metadata(root.join("script.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "atomic write must preserve the executable bit");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_atomic_beneath_refuses_write_through_escaping_symlink() {
+        let root = unique_dir("atomic_escape_root");
+        let outside = unique_dir("atomic_escape_outside");
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let res = write_atomic_beneath(&root, Path::new("escape/evil.txt"), b"x");
+        assert!(
+            res.is_err(),
+            "atomic write through escaping symlink must be refused"
+        );
+        assert!(!outside.join("evil.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn write_atomic_beneath_follows_in_tree_symlink() {
+        let root = unique_dir("atomic_intree");
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+
+        write_atomic_beneath(&root, Path::new("link/file.txt"), b"via-symlink").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("real/file.txt")).unwrap(),
+            "via-symlink"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

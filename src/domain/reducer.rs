@@ -187,43 +187,50 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             }
         },
         Msg::BuiltinToolSchemaTokens(tokens) => {
+            // Model-level metadata (the schema cost dispatch appends to every
+            // request), not turn-scoped — intentionally not stale-filtered.
             state.runtime.builtin_tool_schema_tokens = tokens;
         },
         Msg::ProviderContextResolved {
+            model_id,
             model_max,
             effective,
             source,
-            ..
         } => {
-            state.runtime.ollama_context = Some(crate::domain::runtime::OllamaContextInfo {
-                model_max,
-                effective,
-                source,
-            });
-            // Proactive, once-per-session: if auto-fit capped the window far
-            // below the model's max, explain what happened + how to get more.
-            let big_gap = matches!(
-                (model_max, effective, source),
-                (Some(mm), Some(eff), Some(src)) if src.is_auto() && mm >= eff.saturating_mul(2)
-            );
-            if big_gap
-                && state
-                    .runtime
-                    .hinted_models
-                    .insert(state.session.model_id.clone())
-                && let (Some(mm), Some(eff)) = (model_max, effective)
-            {
-                let model_id = state.session.model_id.clone();
-                push_system(
-                    &mut state,
-                    &mut cmds,
-                    format!(
-                        "{model_id} supports up to {} tokens; Mermaid auto-fit the window to {} for your GPU. \
-                         `/context max` uses the full window; `/context offload on` allows RAM (slower).",
-                        format_compact_count(mm),
-                        format_compact_count(eff)
-                    ),
+            // Drop a probe that landed after a `/model` switch (it describes the
+            // previous model, not the one now active) — mirrors
+            // OllamaPlacementResolved.
+            if model_id == state.session.model_id {
+                state.runtime.ollama_context = Some(crate::domain::runtime::OllamaContextInfo {
+                    model_max,
+                    effective,
+                    source,
+                });
+                // Proactive, once-per-session: if auto-fit capped the window far
+                // below the model's max, explain what happened + how to get more.
+                let big_gap = matches!(
+                    (model_max, effective, source),
+                    (Some(mm), Some(eff), Some(src)) if src.is_auto() && mm >= eff.saturating_mul(2)
                 );
+                if big_gap
+                    && state
+                        .runtime
+                        .hinted_models
+                        .insert(state.session.model_id.clone())
+                    && let (Some(mm), Some(eff)) = (model_max, effective)
+                {
+                    let model_id = state.session.model_id.clone();
+                    push_system(
+                        &mut state,
+                        &mut cmds,
+                        format!(
+                            "{model_id} supports up to {} tokens; Mermaid auto-fit the window to {} for your GPU. \
+                             `/context max` uses the full window; `/context offload on` allows RAM (slower).",
+                            format_compact_count(mm),
+                            format_compact_count(eff)
+                        ),
+                    );
+                }
             }
         },
         Msg::OllamaPlacementResolved {
@@ -4884,6 +4891,7 @@ mod tests {
         let (state, _) = update(
             state,
             Msg::ProviderContextResolved {
+                model_id: "ollama/test".to_string(),
                 model_max: Some(262_144),
                 effective: Some(12_288),
                 source: Some(NumCtxSource::Auto),
@@ -4892,6 +4900,24 @@ mod tests {
         let ctx = state.runtime.ollama_context.expect("stored");
         assert_eq!(ctx.model_max, Some(262_144));
         assert_eq!(ctx.effective, Some(12_288));
+    }
+
+    #[test]
+    fn provider_context_resolved_ignores_probe_for_other_model() {
+        // A window probe that lands after a /model switch (model_id != session
+        // model) must not overwrite the active model's context window.
+        use crate::models::adapters::ollama_sizing::NumCtxSource;
+        let state = fresh_state();
+        let (state, _) = update(
+            state,
+            Msg::ProviderContextResolved {
+                model_id: "ollama/other".to_string(),
+                model_max: Some(262_144),
+                effective: Some(12_288),
+                source: Some(NumCtxSource::Auto),
+            },
+        );
+        assert!(state.runtime.ollama_context.is_none());
     }
 
     // A spill with no fitting smaller window (weights-bound) → the warn path.
