@@ -853,6 +853,13 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 lines.push(Line::from(""));
             }
 
+            // Capture the plain text of each rendered row for selection
+            // extraction (before the per-frame highlight, which changes only
+            // styling, not text). Recomputed only on a miss: a memo hit means
+            // unchanged content, so the rows from the miss that built the memo
+            // stay valid — this skips an O(total) re-collect every frame (F31).
+            state.last_rendered_rows = lines.iter().map(line_plain_text).collect();
+
             // F31: memoize this assembly so an unchanged next frame reuses it
             // instead of re-running the loop above. Store the lines *before* the
             // selection highlight (applied per-frame below), so the cache stays
@@ -872,10 +879,10 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         //
         // The status line shows progress: "↑ Sending..." → "↓ Streaming..." with timer
 
-        // Capture the plain text of each rendered row for selection
-        // extraction. Done before the highlight pass, which only changes
-        // styling, not text.
-        state.last_rendered_rows = lines.iter().map(line_plain_text).collect();
+        // NOTE: `state.last_rendered_rows` (used by selection extraction) is
+        // refreshed inside the memo-miss branch above, not here — a memo hit
+        // keeps the rows from the miss that built it (content is unchanged on a
+        // hit), so they need not be re-collected every frame (F31).
 
         // Paint the active drag selection (reverse video over the selected
         // cells). Selection lines are content indices, matching `lines`.
@@ -2210,6 +2217,13 @@ mod tests {
         assert_eq!(
             miss, hit,
             "frame-memo hit must render identically to the miss"
+        );
+        // The rows used for selection extraction are only re-collected on a
+        // miss; assert the hit path left them intact (not cleared/stale) so
+        // copy/selection still works on a reused frame (F31).
+        assert!(
+            !state.last_rendered_rows.is_empty(),
+            "memo hit must preserve last_rendered_rows from the miss"
         );
     }
 }
