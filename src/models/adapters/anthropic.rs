@@ -93,6 +93,19 @@ fn map_anthropic_stop_reason(s: &str) -> FinishReason {
     }
 }
 
+/// F56: whether an Anthropic stream ended abnormally — the connection closed
+/// before ANY terminal frame was observed. A normal stream ends with a
+/// `message_stop` event, preceded by a `message_delta` that carries the
+/// terminal `stop_reason`. If NEITHER was seen the turn is truncated, not
+/// complete; surfacing a clean `Ok` (with `stop_reason: None`) here would be
+/// indistinguishable from a real completion, so the caller returns a stream
+/// error instead. A `max_tokens` truncation is NOT abnormal — it arrives as a
+/// real `stop_reason` (`Length`), so it's preserved and the runtime's
+/// compact-and-continue path still fires.
+fn stream_closed_abnormally(saw_message_stop: bool, stop_reason: Option<&FinishReason>) -> bool {
+    !saw_message_stop && stop_reason.is_none()
+}
+
 /// Finalize one completed (or interrupted) content block into the response
 /// accumulators. Shared by the `content_block_stop` handler and the post-loop
 /// drain, so a block that never received its stop event (a mid-message cutoff)
@@ -826,6 +839,10 @@ impl AnthropicAdapter {
         let mut cache_creation_tokens: usize = 0;
         let mut cache_read_tokens: usize = 0;
         let mut stop_reason: Option<FinishReason> = None;
+        // F56: set when the terminal `message_stop` frame is observed, so an
+        // abnormal close (connection dropped before any terminal frame) can be
+        // told apart from a clean completion after the loop.
+        let mut saw_message_stop = false;
         // Per-block-index accumulators. Anthropic emits content_block_*
         // events tagged with an `index` field; multiple blocks (text +
         // thinking + tool_use) interleave, so we track each by index.
@@ -1017,11 +1034,13 @@ impl AnthropicAdapter {
                         }
                     },
                     "message_stop" => {
-                        // Stream complete. Break the OUTER stream loop, not just
+                        // Stream complete — record the terminal frame (F56)
+                        // before breaking. Break the OUTER stream loop, not just
                         // this SSE-event `for` — otherwise the adapter keeps
                         // awaiting `stream.next()` until the connection actually
                         // closes, which can stall on a kept-alive/proxied body
                         // (#138). The `Done` event is emitted below after the loop.
+                        saw_message_stop = true;
                         break 'stream;
                     },
                     "error" => {
@@ -1050,10 +1069,28 @@ impl AnthropicAdapter {
             }
         }
 
-        // The stream may end without a `message_stop` (e.g. a proxy sends
-        // `Connection: close` mid-message). Finalize any blocks still open so a
-        // fully-streamed `tool_use` or text block isn't silently dropped — the
-        // agent would otherwise "forget" the tool call and return an empty Ok.
+        // F56: tell a genuinely abnormal close (the connection dropped before
+        // ANY terminal frame) apart from a clean completion. If we saw neither
+        // `message_stop` nor a `message_delta` `stop_reason`, the turn is
+        // truncated — returning a clean `Ok` (with `stop_reason: None`) would be
+        // indistinguishable from a real completion, and the open-block drain
+        // below would even hand back partial content as if finished. Surface a
+        // stream error instead. A `max_tokens` truncation set a real
+        // `stop_reason`, so it does NOT trip this and is preserved.
+        if stream_closed_abnormally(saw_message_stop, stop_reason.as_ref()) {
+            return Err(ModelError::StreamError(
+                "Anthropic stream closed before any terminal frame (message_stop / \
+                 message_delta stop_reason); the connection was likely dropped \
+                 mid-response"
+                    .to_string(),
+            ));
+        }
+
+        // The stream may end without a `message_stop` but WITH a `message_delta`
+        // `stop_reason` (e.g. a proxy sends `Connection: close` after the final
+        // delta). That's a complete turn missing only its framing event, so
+        // finalize any blocks still open — a fully-streamed `tool_use` or text
+        // block isn't silently dropped, and the agent doesn't "forget" the call.
         if !blocks.is_empty() {
             tracing::warn!(
                 open_blocks = blocks.len(),
@@ -1300,6 +1337,24 @@ mod tests {
             map_anthropic_stop_reason("refusal"),
             FinishReason::ContentFilter
         );
+    }
+
+    #[test]
+    fn stream_closed_abnormally_distinguishes_drop_from_completion() {
+        // F56: closed before ANY terminal frame (no message_stop, no
+        // message_delta stop_reason) → abnormal, surfaced as a stream error.
+        assert!(stream_closed_abnormally(false, None));
+        // Clean completion: message_stop observed.
+        assert!(!stream_closed_abnormally(true, Some(&FinishReason::Stop)));
+        // Dropped after message_delta (stop_reason set) but before message_stop:
+        // we have the real finish reason, so it's complete — NOT abnormal (the
+        // open-block drain then recovers any fully-streamed tool_use/text).
+        assert!(!stream_closed_abnormally(false, Some(&FinishReason::Stop)));
+        // CRUCIAL: a max_tokens truncation arrives as a real stop_reason
+        // (Length) — it must NOT be misclassified as an abnormal close.
+        assert!(!stream_closed_abnormally(false, Some(&FinishReason::Length)));
+        // Defensive: a message_stop frame is terminal even with no stop_reason.
+        assert!(!stream_closed_abnormally(true, None));
     }
 
     #[test]

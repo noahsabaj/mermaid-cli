@@ -49,6 +49,14 @@ struct StreamAccumulator {
     /// Ollama's `done_reason` from the terminal chunk, mapped to a
     /// `FinishReason` for the final `ModelResponse` instead of `None` (#13).
     done_reason: Option<String>,
+    /// True once Ollama's terminal `done` chunk has been observed (F56). The
+    /// `done` chunk is the authoritative terminal frame; a stream that ends
+    /// without it was dropped mid-response. Tracked SEPARATELY from `done_reason`
+    /// on purpose: the context-full truncation arrives as a real `done` chunk
+    /// (with `done_reason: "length"`), so keying the abnormal-close check off
+    /// `saw_done` keeps that legitimate `Ok + FinishReason::Length` truncation
+    /// from being misclassified as a stream error.
+    saw_done: bool,
     /// True once `content` OR `thinking` has been truncated to the size cap.
     /// Once set, further chunks are silently dropped — both from the
     /// accumulator AND from typed-event emission. Prevents a runaway model
@@ -66,6 +74,17 @@ impl StreamAccumulator {
             let total = self.prompt_tokens.saturating_add(self.completion_tokens);
             TokenUsage::provider(self.prompt_tokens, self.completion_tokens, total)
         })
+    }
+
+    /// F56: whether the stream closed abnormally — it ended before Ollama's
+    /// terminal `done` chunk was ever observed (a connection dropped
+    /// mid-response). Returning a clean `Ok` here would be indistinguishable
+    /// from a real completion. Keyed off `saw_done` (the terminal frame), NOT
+    /// `done_reason`, so a context-full truncation — a real `done` chunk whose
+    /// `done_reason` is `"length"`, surfaced as `Ok + FinishReason::Length` for
+    /// the runtime's compact-and-continue — is NOT misclassified as an error.
+    fn closed_abnormally(&self) -> bool {
+        !self.saw_done
     }
 }
 
@@ -350,6 +369,7 @@ impl OllamaAdapter {
             completion_tokens: 0,
             saw_usage: false,
             done_reason: None,
+            saw_done: false,
             truncated: false,
         };
 
@@ -386,6 +406,20 @@ impl OllamaAdapter {
 
                 Self::process_stream_chunk(&json_chunk, callback.as_ref(), &mut acc);
             }
+        }
+
+        // F56: a stream that ended before Ollama's terminal `done` chunk was
+        // dropped mid-response. Surface it as a stream error instead of a clean
+        // `Ok` that's indistinguishable from a real completion. Keyed off the
+        // `done` frame (not `done_reason`), so a context-full truncation — a
+        // real `done` with `done_reason: "length"`, recovered via
+        // compact-and-continue — is preserved, not misclassified.
+        if acc.closed_abnormally() {
+            return Err(ModelError::StreamError(
+                "Ollama stream closed before the terminal `done` chunk; the \
+                 connection was likely dropped mid-response"
+                    .to_string(),
+            ));
         }
 
         // `None` when the stream never reported eval counts, so the reducer keeps
@@ -489,6 +523,9 @@ impl OllamaAdapter {
         // is set only when a real eval count arrives, so a stream cut before
         // `done` reports `None` usage instead of zero (F54).
         if json_chunk.done {
+            // F56: the terminal frame arrived — the stream completed normally
+            // (even when `done_reason`/eval counts are absent).
+            acc.saw_done = true;
             if let Some(count) = json_chunk.prompt_eval_count {
                 acc.prompt_tokens = count;
                 acc.saw_usage = true;
@@ -1370,6 +1407,7 @@ mod tests {
             completion_tokens: 0,
             saw_usage: false,
             done_reason: None,
+            saw_done: false,
             truncated: false,
         };
         let chunk = OllamaStreamChunk {
@@ -1408,6 +1446,7 @@ mod tests {
             completion_tokens: 0,
             saw_usage: false,
             done_reason: None,
+            saw_done: false,
             truncated: false,
         }
     }
@@ -1455,6 +1494,81 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 120);
         assert_eq!(usage.completion_tokens, 8);
         assert_eq!(usage.total_tokens, 128);
+    }
+
+    #[test]
+    fn closed_abnormally_until_terminal_done_chunk_seen() {
+        // F56: a stream is abnormal until Ollama's terminal `done` chunk lands.
+        use super::{OllamaMessage, OllamaStreamChunk};
+        let mut acc = empty_accumulator();
+        // Fresh / before any frame → abnormal (nothing terminal observed yet).
+        assert!(acc.closed_abnormally());
+
+        // A content delta (done: false) is NOT the terminal frame.
+        let content_chunk = OllamaStreamChunk {
+            message: OllamaMessage {
+                role: "assistant".to_string(),
+                content: "partial".to_string(),
+                thinking: None,
+                tool_calls: None,
+            },
+            done: false,
+            prompt_eval_count: None,
+            eval_count: None,
+            done_reason: None,
+        };
+        OllamaAdapter::process_stream_chunk(&content_chunk, None, &mut acc);
+        assert!(
+            acc.closed_abnormally(),
+            "a stream cut before `done` must be flagged abnormal"
+        );
+
+        // The terminal `done` chunk flips it to a clean completion.
+        let done_chunk = OllamaStreamChunk {
+            message: OllamaMessage {
+                role: "assistant".to_string(),
+                content: String::new(),
+                thinking: None,
+                tool_calls: None,
+            },
+            done: true,
+            prompt_eval_count: Some(10),
+            eval_count: Some(2),
+            done_reason: Some("stop".to_string()),
+        };
+        OllamaAdapter::process_stream_chunk(&done_chunk, None, &mut acc);
+        assert!(!acc.closed_abnormally(), "a `done` chunk completes the stream");
+    }
+
+    #[test]
+    fn context_full_length_truncation_is_not_abnormal() {
+        // CRUCIAL truncation-recovery guard: Ollama signals context-full as a
+        // CLEAN terminal `done` chunk with `done_reason: "length"`. It must NOT
+        // be misclassified as an abnormal close — `saw_done` is set, so the
+        // adapter returns Ok with FinishReason::Length for compact-and-continue.
+        use super::{FinishReason, OllamaMessage, OllamaStreamChunk, map_ollama_done_reason};
+        let mut acc = empty_accumulator();
+        let length_done = OllamaStreamChunk {
+            message: OllamaMessage {
+                role: "assistant".to_string(),
+                content: "...".to_string(),
+                thinking: None,
+                tool_calls: None,
+            },
+            done: true,
+            prompt_eval_count: Some(4096),
+            eval_count: Some(512),
+            done_reason: Some("length".to_string()),
+        };
+        OllamaAdapter::process_stream_chunk(&length_done, None, &mut acc);
+        assert!(
+            !acc.closed_abnormally(),
+            "context-full Length truncation has a real `done` frame — not abnormal"
+        );
+        assert_eq!(
+            acc.done_reason.as_deref().map(map_ollama_done_reason),
+            Some(FinishReason::Length)
+        );
     }
 
     #[test]

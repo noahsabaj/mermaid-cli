@@ -115,6 +115,19 @@ fn map_gemini_finish_reason(s: &str) -> FinishReason {
     }
 }
 
+/// F56: whether a Gemini stream ended abnormally — it closed before the
+/// terminal `finishReason` was ever observed on a chunk. Gemini ends every
+/// normal stream (including tool-call turns, which report `STOP`) with a
+/// candidate `finishReason`; there is no separate `[DONE]`-style frame, so the
+/// `finishReason` IS the terminal marker. Its absence means the connection
+/// dropped mid-response — surfacing a clean `Ok` (with `stop_reason: None`)
+/// would be indistinguishable from a real completion, so the caller returns a
+/// stream error. A `MAX_TOKENS` truncation sets a real `finishReason`
+/// (`Length`), so it is NOT abnormal and is preserved.
+fn stream_closed_abnormally(finish_reason: Option<&FinishReason>) -> bool {
+    finish_reason.is_none()
+}
+
 /// Translate `ReasoningLevel` to Gemini 2.5's `thinkingBudget` (int
 /// tokens). `-1` means adaptive (Gemini decides up to the model's
 /// ceiling); `0` means disabled. Per-model floors are applied
@@ -701,6 +714,19 @@ impl GeminiAdapter {
             for payload in drain_sse_events(&mut buf) {
                 process_chunk_payload(&payload, &mut state, &callback, hide_reasoning_trace)?;
             }
+        }
+
+        // F56: a stream that ended before any candidate `finishReason` was
+        // dropped mid-response. Surface a stream error instead of a clean `Ok`
+        // (with `stop_reason: None`) that would be indistinguishable from a real
+        // completion. A `MAX_TOKENS` truncation set a real `finishReason`, so it
+        // does NOT trip this and is preserved.
+        if stream_closed_abnormally(state.finish_reason.as_ref()) {
+            return Err(ModelError::StreamError(
+                "Gemini stream closed before a terminal finishReason; the \
+                 connection was likely dropped mid-response"
+                    .to_string(),
+            ));
         }
 
         let total_tokens = if state.total_tokens > 0 {
@@ -1987,6 +2013,40 @@ mod tests {
         process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
         assert_eq!(state.finish_reason, Some(FinishReason::Length));
         assert_eq!(state.text_acc, "partial");
+    }
+
+    #[test]
+    fn stream_closed_abnormally_when_no_finish_reason_observed() {
+        // F56: content chunks with no finishReason leave the stream incomplete
+        // until a terminal finishReason lands. A drop here must surface as an
+        // error, not a clean Ok indistinguishable from a real completion.
+        let (cb, _events) = record_callback();
+        let mut state = StreamState::default();
+        let chunk =
+            json!({ "candidates": [{ "content": {"parts": [{"text": "partial answer"}]} }] })
+                .to_string();
+        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        assert!(
+            stream_closed_abnormally(state.finish_reason.as_ref()),
+            "no finishReason observed yet → abnormal if the stream ends here"
+        );
+
+        // The terminal chunk carrying STOP completes it.
+        let final_chunk = json!({
+            "candidates": [{ "content": {"parts": [{"text": "."}]}, "finishReason": "STOP" }]
+        })
+        .to_string();
+        process_chunk_payload(&final_chunk, &mut state, &cb, false).unwrap();
+        assert!(!stream_closed_abnormally(state.finish_reason.as_ref()));
+    }
+
+    #[test]
+    fn stream_closed_abnormally_preserves_max_tokens_truncation() {
+        // CRUCIAL: a MAX_TOKENS truncation is a real terminal finishReason
+        // (Length) — it must NOT be misclassified as an abnormal close.
+        assert!(stream_closed_abnormally(None));
+        assert!(!stream_closed_abnormally(Some(&FinishReason::Length)));
+        assert!(!stream_closed_abnormally(Some(&FinishReason::Stop)));
     }
 
     #[test]

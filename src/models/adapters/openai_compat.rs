@@ -114,6 +114,19 @@ fn map_openai_finish_reason(s: &str) -> FinishReason {
     }
 }
 
+/// F56: whether an OpenAI-compatible stream ended abnormally — it closed before
+/// any `finish_reason` was observed on a choice. The `[DONE]` sentinel is
+/// swallowed upstream by `drain_sse_events`, so a choice's `finish_reason`
+/// (`stop`/`length`/`tool_calls`/`content_filter`) is the only terminal marker
+/// this adapter can see; a conformant Chat Completions stream always carries
+/// one. Its absence means the connection dropped mid-response — returning a
+/// clean `Ok` (with `stop_reason: None`) would be indistinguishable from a real
+/// completion, so the caller surfaces a stream error. A `length` truncation
+/// sets a real `finish_reason`, so it is NOT abnormal and is preserved.
+fn stream_closed_abnormally(stop_reason: Option<&FinishReason>) -> bool {
+    stop_reason.is_none()
+}
+
 /// OpenAI reasoning models (the `o1`/`o3`/`o4` families and `gpt-5`) reject any
 /// non-default `temperature` with a 400, so the request builder omits it for
 /// them (#124). Matches the bare model id (any `provider/` prefix stripped).
@@ -659,6 +672,20 @@ impl OpenAICompatAdapter {
                     }
                 }
             }
+        }
+
+        // F56: a stream that ended before any `finish_reason` was dropped
+        // mid-response. Surface a stream error rather than a clean `Ok` (with
+        // `stop_reason: None`) that's indistinguishable from a real completion —
+        // checked before finalizing/emitting tool calls so a dropped connection
+        // doesn't hand back a half-built turn. A `length` truncation set a real
+        // `finish_reason`, so it does NOT trip this and is preserved.
+        if stream_closed_abnormally(stop_reason.as_ref()) {
+            return Err(ModelError::StreamError(format!(
+                "{} stream closed before a terminal finish_reason; the connection \
+                 was likely dropped mid-response",
+                self.profile.name
+            )));
         }
 
         // Flush any pending tag-state bytes (incomplete trailing tags
@@ -1251,6 +1278,18 @@ mod tests {
             map_openai_finish_reason("content_filter"),
             FinishReason::ContentFilter
         );
+    }
+
+    #[test]
+    fn stream_closed_abnormally_distinguishes_drop_from_completion() {
+        // F56: no finish_reason observed → the stream dropped mid-response and
+        // must surface as a stream error, not a clean Ok.
+        assert!(stream_closed_abnormally(None));
+        // A real terminal finish_reason → clean completion.
+        assert!(!stream_closed_abnormally(Some(&FinishReason::Stop)));
+        assert!(!stream_closed_abnormally(Some(&FinishReason::ToolUse)));
+        // CRUCIAL: a `length` truncation is a real finish_reason — NOT abnormal.
+        assert!(!stream_closed_abnormally(Some(&FinishReason::Length)));
     }
 
     #[test]
