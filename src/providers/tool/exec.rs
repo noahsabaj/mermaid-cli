@@ -235,8 +235,9 @@ impl ToolExecutor for ExecuteCommandTool {
         let start = Instant::now();
         let progress = ctx.progress.clone();
 
-        // Spawn + wait. The select! below races three outcomes:
-        // subprocess exit, timeout, cancel.
+        // Spawn + wait. `run_command`'s select races four outcomes: subprocess
+        // exit, timeout, Esc-cancel, and Ctrl+B detach — the timeout and cancel
+        // arms both tree-kill before returning.
         let mut cmd = Command::new(if cfg!(target_os = "windows") {
             "cmd"
         } else {
@@ -260,12 +261,72 @@ impl ToolExecutor for ExecuteCommandTool {
         cmd.current_dir(&effective_workdir);
         scrub_secret_env(&mut cmd);
 
-        let run_fut = run_command(cmd, progress, ctx.token.clone(), ctx.background.clone());
-        let timeout_fut = tokio::time::sleep(Duration::from_secs(timeout_secs));
-
-        let outcome = tokio::select! {
-            biased;
-            _ = timeout_fut => {
+        // The timeout now lives INSIDE `run_command`'s select (alongside the
+        // Esc-cancel and Ctrl+B arms), so a timed-out command is tree-killed and
+        // its driver aborted before we return — the old outer `select!` dropped
+        // the future and leaked the process tree.
+        let outcome = match run_command(
+            cmd,
+            progress,
+            ctx.token.clone(),
+            ctx.background.clone(),
+            Duration::from_secs(timeout_secs),
+        )
+        .await
+        {
+            Ok(CommandRunResult::Completed(run)) => {
+                let duration_secs = start.elapsed().as_secs_f64();
+                let output_len = run.output.len();
+                ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
+                    .with_metadata(command_metadata(CommandMetadataInput {
+                        command: command.clone(),
+                        working_dir: Some(effective_workdir.display().to_string()),
+                        exit_code: run.exit_code,
+                        timed_out: false,
+                        background: false,
+                        stdout_lines: run.stdout_lines,
+                        stderr_lines: run.stderr_lines,
+                        detected_urls: all_urls(&run.output),
+                        pid: None,
+                        log_path: None,
+                        byte_count: Some(output_len),
+                    }))
+            },
+            Ok(CommandRunResult::Detached { pid, log_path }) => {
+                // Ctrl+B moved this command to the background.
+                let duration_secs = start.elapsed().as_secs_f64();
+                let log_path_str = log_path.display().to_string();
+                let output = format!(
+                    "Moved to background.\nPID: {pid}\nLog: {log_path_str}\nManage it with /processes, /logs {pid}, /stop {pid}."
+                );
+                let process = ManagedProcess {
+                    id: format!("bg-{pid}"),
+                    pid,
+                    command: command.to_string(),
+                    cwd: Some(effective_workdir.display().to_string()),
+                    log_path: log_path_str.clone(),
+                    detected_url: None,
+                    status: ManagedProcessStatus::Running,
+                };
+                let mut metadata = command_metadata(CommandMetadataInput {
+                    command: command.to_string(),
+                    working_dir: Some(effective_workdir.display().to_string()),
+                    exit_code: None,
+                    timed_out: false,
+                    background: true,
+                    stdout_lines: 0,
+                    stderr_lines: 0,
+                    detected_urls: Vec::new(),
+                    pid: Some(pid),
+                    log_path: Some(log_path_str),
+                    byte_count: Some(output.len()),
+                });
+                metadata.process = Some(process);
+                ToolOutcome::success(output, "moved to background", duration_secs)
+                    .with_metadata(metadata)
+            },
+            Ok(CommandRunResult::Cancelled) => ToolOutcome::cancelled(),
+            Ok(CommandRunResult::TimedOut) => {
                 let message = format!(
                     "Command timed out after {} seconds and was killed. \
                      For dev servers, GUI apps, or other long-running commands, call execute_command with mode=\"background\".",
@@ -288,80 +349,23 @@ impl ToolExecutor for ExecuteCommandTool {
                     },
                 ))
             },
-            result = run_fut => match result {
-                Ok(CommandRunResult::Completed(run)) => {
-                    let duration_secs = start.elapsed().as_secs_f64();
-                    let output_len = run.output.len();
-                    ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
-                        .with_metadata(command_metadata(
-                            CommandMetadataInput {
-                                command: command.clone(),
-                                working_dir: Some(effective_workdir.display().to_string()),
-                                exit_code: run.exit_code,
-                                timed_out: false,
-                                background: false,
-                                stdout_lines: run.stdout_lines,
-                                stderr_lines: run.stderr_lines,
-                                detected_urls: all_urls(&run.output),
-                                pid: None,
-                                log_path: None,
-                                byte_count: Some(output_len),
-                            },
-                        ))
-                },
-                Ok(CommandRunResult::Detached { pid, log_path }) => {
-                    // Ctrl+B moved this command to the background.
-                    let duration_secs = start.elapsed().as_secs_f64();
-                    let log_path_str = log_path.display().to_string();
-                    let output = format!(
-                        "Moved to background.\nPID: {pid}\nLog: {log_path_str}\nManage it with /processes, /logs {pid}, /stop {pid}."
-                    );
-                    let process = ManagedProcess {
-                        id: format!("bg-{pid}"),
-                        pid,
-                        command: command.to_string(),
-                        cwd: Some(effective_workdir.display().to_string()),
-                        log_path: log_path_str.clone(),
-                        detected_url: None,
-                        status: ManagedProcessStatus::Running,
-                    };
-                    let mut metadata = command_metadata(CommandMetadataInput {
-                        command: command.to_string(),
+            Err(e) => {
+                let duration_secs = start.elapsed().as_secs_f64();
+                ToolOutcome::error(format!("Command failed: {}", e), duration_secs).with_metadata(
+                    command_metadata(CommandMetadataInput {
+                        command: command.clone(),
                         working_dir: Some(effective_workdir.display().to_string()),
                         exit_code: None,
                         timed_out: false,
-                        background: true,
+                        background: false,
                         stdout_lines: 0,
                         stderr_lines: 0,
                         detected_urls: Vec::new(),
-                        pid: Some(pid),
-                        log_path: Some(log_path_str),
-                        byte_count: Some(output.len()),
-                    });
-                    metadata.process = Some(process);
-                    ToolOutcome::success(output, "moved to background", duration_secs)
-                        .with_metadata(metadata)
-                },
-                Ok(CommandRunResult::Cancelled) => ToolOutcome::cancelled(),
-                Err(e) => {
-                    let duration_secs = start.elapsed().as_secs_f64();
-                    ToolOutcome::error(format!("Command failed: {}", e), duration_secs)
-                        .with_metadata(command_metadata(
-                            CommandMetadataInput {
-                                command: command.clone(),
-                                working_dir: Some(effective_workdir.display().to_string()),
-                                exit_code: None,
-                                timed_out: false,
-                                background: false,
-                                stdout_lines: 0,
-                                stderr_lines: 0,
-                                detected_urls: Vec::new(),
-                                pid: None,
-                                log_path: None,
-                                byte_count: None,
-                            },
-                        ))
-                },
+                        pid: None,
+                        log_path: None,
+                        byte_count: None,
+                    }),
+                )
             },
         };
         let _ = crate::runtime::run_plugin_hooks(
@@ -413,7 +417,7 @@ async fn run_background_command(
         {
             Ok(startup) => startup,
             Err(BackgroundWaitError::Cancelled) => {
-                let _ = kill_background_process(pid).await;
+                crate::utils::terminate_tree(pid, crate::utils::Grace::Graceful).await;
                 return ToolOutcome::cancelled();
             },
             Err(BackgroundWaitError::ExitedEarly(log_excerpt)) => {
@@ -496,10 +500,19 @@ async fn launch_background_process(
     launcher
         .arg("-c")
         .arg(
+            // `setsid` (when present) makes the backgrounded command a new
+            // session/process-group leader, so its pid (`$!`) IS its group id and
+            // `terminate_tree` can later group-kill the whole subtree rather than
+            // orphaning grandchildren. Falls back to `nohup` on hosts without
+            // setsid (e.g. stock macOS), where the bare-pid kill still applies.
             r#"log=$MERMAID_BG_LOG
 cmd=$MERMAID_BG_COMMAND
 : > "$log" || exit 125
-nohup sh -c "$cmd" > "$log" 2>&1 < /dev/null &
+if command -v setsid >/dev/null 2>&1; then
+  setsid sh -c "$cmd" > "$log" 2>&1 < /dev/null &
+else
+  nohup sh -c "$cmd" > "$log" 2>&1 < /dev/null &
+fi
 printf '%s\n' "$!""#,
         )
         .env("MERMAID_BG_LOG", log_path)
@@ -676,57 +689,10 @@ async fn process_running(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(target_os = "windows"))]
-async fn kill_background_process(pid: u32) -> std::io::Result<()> {
-    let _ = Command::new("kill")
-        .arg(pid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await?;
-    Ok(())
-}
-
-/// Kill a foreground child AND its descendants on cancel. Windows: `taskkill
-/// /T` walks the process tree. Unix: the foreground child is spawned as a
-/// process-group leader (`process_group(0)`), so killing the negative pid hits
-/// the whole group — catching a grandchild the bare `kill_on_drop` would orphan.
-#[cfg(target_os = "windows")]
-async fn kill_process_tree(pid: u32) {
-    let _ = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
-}
-
-#[cfg(not(target_os = "windows"))]
-async fn kill_process_tree(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
-}
-
-/// Windows: `taskkill /T` kills the whole tree (a `cmd /C` wrapper spawns the
-/// real child), `/F` forces it.
-#[cfg(target_os = "windows")]
-async fn kill_background_process(pid: u32) -> std::io::Result<()> {
-    let _ = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await?;
-    Ok(())
-}
+// Process-tree termination lives in `crate::utils::terminate_tree` — the single
+// primitive shared by the Esc-cancel path, the foreground timeout, the
+// Ctrl+B-detached cleanup, and the daemon's `/stop`/`/restart`. It kills the
+// process group (catching grandchildren), not just the direct pid.
 
 fn background_log_path() -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -840,11 +806,14 @@ struct CommandRunOutput {
 }
 
 /// Result of driving a foreground command: ran to completion, was detached
-/// (Ctrl+B), or was cancelled (the turn token fired and we killed the tree).
+/// (Ctrl+B), was cancelled (the turn token fired), or hit its timeout. The
+/// cancelled and timed-out arms both tree-kill the process group and abort the
+/// driver before returning, so neither can leak the child.
 enum CommandRunResult {
     Completed(CommandRunOutput),
     Detached { pid: u32, log_path: PathBuf },
     Cancelled,
+    TimedOut,
 }
 
 /// Names that must never be inherited by a spawned command. Provider API
@@ -906,24 +875,45 @@ fn is_secret_env_name(name: &str) -> bool {
 /// newline-less command can't exhaust memory. Bytes are accumulated raw and
 /// decoded once at the end (lossy) so a multibyte char split across reads is
 /// not corrupted by the cap. Returns `(text, truncated)`.
+/// On-disk cap for the per-stream tee log (#126). The in-memory buffer is
+/// capped at `MAX_TOOL_OUTPUT_BYTES`; the log may grow larger (it stays
+/// tail-able for a backgrounded process) but must not be unbounded — a command
+/// spewing gigabytes would otherwise fill the temp dir.
+const TEE_LOG_CAP_BYTES: usize = 64 * 1024 * 1024;
+
 async fn read_capped<R: AsyncRead + Unpin>(
     mut reader: R,
     cap: usize,
+    log_cap: usize,
     progress: Option<tokio::sync::mpsc::Sender<ProgressEvent>>,
     log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 ) -> (String, bool) {
     let mut buf = [0u8; 8192];
     let mut bytes: Vec<u8> = Vec::new();
     let mut truncated = false;
+    let mut logged: usize = 0;
+    let mut log_capped = false;
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
                 // Tee raw bytes to the shared log file so a backgrounded
-                // (Ctrl+B) process stays tail-able via /logs.
-                if let Some(file) = &log {
+                // (Ctrl+B) process stays tail-able via /logs — bounded at
+                // `TEE_LOG_CAP_BYTES` so a runaway command can't fill the disk
+                // (#126). Once capped we write a one-time marker and stop.
+                if let Some(file) = &log
+                    && !log_capped
+                {
                     let mut f = file.lock().await;
-                    let _ = f.write_all(&buf[..n]).await;
+                    if logged + n <= log_cap {
+                        let _ = f.write_all(&buf[..n]).await;
+                        logged += n;
+                    } else {
+                        let remaining = log_cap - logged;
+                        let _ = f.write_all(&buf[..remaining]).await;
+                        let _ = f.write_all(b"\n...[log truncated]...\n").await;
+                        log_capped = true;
+                    }
                     let _ = f.flush().await;
                 }
                 if let Some(tx) = &progress {
@@ -959,6 +949,7 @@ async fn run_command(
     progress: tokio::sync::mpsc::Sender<ProgressEvent>,
     token: tokio_util::sync::CancellationToken,
     background: tokio_util::sync::CancellationToken,
+    timeout: Duration,
 ) -> std::io::Result<CommandRunResult> {
     let mut child = cmd.spawn()?;
     let pid = child.id();
@@ -984,10 +975,17 @@ async fn run_command(
     let stdout_task = tokio::spawn(read_capped(
         stdout,
         cap,
+        TEE_LOG_CAP_BYTES,
         Some(progress.clone()),
         log.clone(),
     ));
-    let stderr_task = tokio::spawn(read_capped(stderr, cap, None, log.clone()));
+    let stderr_task = tokio::spawn(read_capped(
+        stderr,
+        cap,
+        TEE_LOG_CAP_BYTES,
+        None,
+        log.clone(),
+    ));
 
     // A driver task owns the child + drain tasks and runs to completion no
     // matter what. On normal exit it ships the result back. If we detach, we
@@ -1000,6 +998,8 @@ async fn run_command(
         let status = child.wait().await;
         let _ = done_tx.send((output, errors, status));
     });
+
+    let timeout_fut = tokio::time::sleep(timeout);
 
     tokio::select! {
         biased;
@@ -1014,7 +1014,7 @@ async fn run_command(
             // the child (and any grandchild it forked) alive until it exited on
             // its own. Kill the whole tree/group, abort the driver, drop the log.
             if let Some(p) = pid {
-                kill_process_tree(p).await;
+                crate::utils::terminate_tree(p, crate::utils::Grace::Immediate).await;
             }
             // This is the one deliberate `JoinHandle::abort` in the codebase.
             // `driver` is a raw (non-scoped) `tokio::spawn` because it must be
@@ -1054,6 +1054,19 @@ async fn run_command(
                 stderr_lines,
             }))
         }
+        _ = timeout_fut => {
+            // Foreground timeout: same teardown as Esc. The old outer-`select!`
+            // form dropped the `run_command` future on timeout, which only
+            // DETACHED the spawned `driver` that owns the Child — so the whole
+            // tree leaked despite the "was killed" message. Tree-kill the group,
+            // abort the driver, drop the tee log, then report TimedOut.
+            if let Some(p) = pid {
+                crate::utils::terminate_tree(p, crate::utils::Grace::Immediate).await;
+            }
+            driver.abort();
+            let _ = tokio::fs::remove_file(&log_path).await;
+            Ok(CommandRunResult::TimedOut)
+        }
     }
 }
 
@@ -1075,6 +1088,29 @@ mod tests {
     use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn tee_log_is_capped() {
+        // #126: the on-disk tee log must be bounded so a command spewing
+        // gigabytes can't fill the temp dir, even though the in-memory buffer is
+        // already capped.
+        let dir = std::env::temp_dir().join(format!("mermaid_teelog_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("log.txt");
+        let file = tokio::fs::File::create(&path).await.unwrap();
+        let log = std::sync::Arc::new(tokio::sync::Mutex::new(file));
+        // 4000 bytes of output, on-disk log capped at 16.
+        let data = vec![b'x'; 4000];
+        let _ = read_capped(&data[..], 1_000_000, 16, None, Some(log)).await;
+        let written = std::fs::read(&path).unwrap();
+        assert!(
+            written.len() < 200,
+            "log must be capped near 16 bytes + marker, got {}",
+            written.len()
+        );
+        assert!(String::from_utf8_lossy(&written).contains("log truncated"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn secret_env_name_denylist_covers_common_carriers() {
@@ -1231,6 +1267,54 @@ mod tests {
         assert!(output.contains("mode=\"background\""));
     }
 
+    /// RC-1 regression: a foreground command that forks a grandchild must have
+    /// its WHOLE process group reaped on timeout, not just the shell. The old
+    /// outer-`select!` form dropped the driver future on timeout, which only
+    /// detached the task owning the `Child`, leaking the tree.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn timeout_kills_process_tree() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), std::env::temp_dir());
+        // The grandchild records its own pid, then sleeps far past the timeout.
+        let marker =
+            std::env::temp_dir().join(format!("mermaid_timeout_pgid_{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let command = format!(
+            "sh -c 'echo $$ > {}; sleep 30' & sleep 30",
+            marker.display()
+        );
+        let outcome = ExecuteCommandTool
+            .execute(serde_json::json!({ "command": command, "timeout": 1 }), ctx)
+            .await;
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+
+        // Read the grandchild pid the command recorded (poll briefly in case the
+        // write lands a touch after spawn).
+        let mut pid = None;
+        for _ in 0..30 {
+            if let Ok(s) = std::fs::read_to_string(&marker)
+                && let Ok(p) = s.trim().parse::<u32>()
+            {
+                pid = Some(p);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let pid = pid.expect("grandchild never recorded its pid");
+
+        // It must be dead — poll to let SIGKILL + reparent/reap settle.
+        let mut alive = true;
+        for _ in 0..40 {
+            if !process_running(pid).await {
+                alive = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = std::fs::remove_file(&marker);
+        assert!(!alive, "grandchild pid {pid} leaked past the timeout");
+    }
+
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn background_mode_returns_pid_log_and_detected_url() {
@@ -1297,7 +1381,7 @@ mod tests {
 
         // Clean up the detached process (and its child ping) via the tree kill.
         if let Some(pid) = parse_pid(&output) {
-            let _ = kill_background_process(pid).await;
+            crate::utils::terminate_tree(pid, crate::utils::Grace::Graceful).await;
         }
     }
 
@@ -1341,7 +1425,7 @@ mod tests {
 
         // Clean up the still-running detached process (tree kill).
         if let Some(p) = process {
-            let _ = kill_background_process(p.pid).await;
+            crate::utils::terminate_tree(p.pid, crate::utils::Grace::Graceful).await;
         }
     }
 

@@ -94,9 +94,12 @@ pub enum Msg {
     },
     /// Effect runner resolved the provider's context window. For Ollama,
     /// `model_max` is the probed architectural window and `effective` is the
-    /// auto-fitted/overridden `num_ctx`. Model-level metadata (not turn-scoped),
-    /// so it's never stale-filtered. Drives the `/context` display + quick-fix.
+    /// auto-fitted/overridden `num_ctx`. Model-level metadata (not turn-scoped);
+    /// `model_id` is carried so a probe that lands after a `/model` switch can
+    /// be dropped instead of overwriting the new model's window. Drives the
+    /// `/context` display + quick-fix.
     ProviderContextResolved {
+        model_id: String,
         model_max: Option<usize>,
         effective: Option<usize>,
         source: Option<crate::models::adapters::ollama_sizing::NumCtxSource>,

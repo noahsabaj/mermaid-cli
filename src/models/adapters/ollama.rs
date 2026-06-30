@@ -72,6 +72,11 @@ pub struct OllamaAdapter {
     base_url: String,
     model_name: String,
     capabilities: ModelCapabilities,
+    /// Whether the model advertises the `thinking` capability via `/api/show`.
+    /// Probed lazily on the first chat and cached, so `new` stays network-free.
+    /// `None` until resolved; recent Ollama 400s a `think` field sent to a
+    /// non-thinking model, so the send is gated on this (#122).
+    thinking_cap: tokio::sync::OnceCell<bool>,
 }
 
 /// True if the given model name is a gpt-oss variant. Matching is
@@ -90,7 +95,15 @@ fn is_gpt_oss(model_name: &str) -> bool {
 /// Sending a bool to gpt-oss silently uses the default effort; sending a
 /// string to non-gpt-oss models 400s. This dispatch picks the right shape
 /// by inspecting the model name.
-fn think_for_ollama(model_name: &str, level: ReasoningLevel) -> serde_json::Value {
+/// `supports_thinking` is the model's advertised `thinking` capability (probed
+/// lazily); `None` from the call site means "send as before" (unknown). Returns
+/// `None` when no `think` field should be sent at all — a non-thinking model
+/// 400s on a stray `think` (#122).
+fn think_for_ollama(
+    model_name: &str,
+    level: ReasoningLevel,
+    supports_thinking: bool,
+) -> Option<serde_json::Value> {
     if is_gpt_oss(model_name) {
         let effort = match level {
             // gpt-oss can't truly disable thinking. `None` collapses to
@@ -100,10 +113,13 @@ fn think_for_ollama(model_name: &str, level: ReasoningLevel) -> serde_json::Valu
             ReasoningLevel::Medium => "medium",
             ReasoningLevel::High | ReasoningLevel::Max | ReasoningLevel::XHigh => "high",
         };
-        serde_json::Value::String(effort.to_string())
-    } else {
-        serde_json::Value::Bool(level != ReasoningLevel::None)
+        return Some(serde_json::Value::String(effort.to_string()));
     }
+    if !supports_thinking {
+        // Model advertised no `thinking` capability — omit the field entirely.
+        return None;
+    }
+    Some(serde_json::Value::Bool(level != ReasoningLevel::None))
 }
 
 impl OllamaAdapter {
@@ -153,7 +169,48 @@ impl OllamaAdapter {
             base_url,
             model_name: model_name.to_string(),
             capabilities,
+            thinking_cap: tokio::sync::OnceCell::new(),
         })
+    }
+
+    /// Whether this model supports `think`. Probes `/api/show` `capabilities`
+    /// once and caches the answer. Recent Ollama returns a non-empty
+    /// `capabilities` array; if it lacks `thinking` we must NOT send `think`
+    /// (it 400s). A probe failure or an empty/absent array (older Ollama, which
+    /// tolerates a stray `think`) is treated as "unknown" → keep the prior
+    /// send-`think` behavior and don't cache, so a transient blip retries.
+    async fn thinking_supported(&self) -> bool {
+        *self
+            .thinking_cap
+            .get_or_try_init(|| async {
+                match self.probe_capabilities().await {
+                    Some(caps) if !caps.is_empty() => Ok(caps.iter().any(|c| c == "thinking")),
+                    _ => Err(()),
+                }
+            })
+            .await
+            .unwrap_or(&true)
+    }
+
+    /// Best-effort `/api/show` probe for the model's advertised `capabilities`
+    /// array (e.g. `["completion", "tools", "thinking"]`). `None` on any error.
+    async fn probe_capabilities(&self) -> Option<Vec<String>> {
+        let url = format!("{}/api/show", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&json!({ "model": self.model_name }))
+            .timeout(std::time::Duration::from_secs(
+                crate::constants::OLLAMA_PROBE_TIMEOUT_SECS,
+            ))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let show: OllamaShowResponse = resp.json().await.ok()?;
+        Some(show.capabilities)
     }
 
     /// Probe `/api/show` for the model's real context window + architecture
@@ -440,6 +497,7 @@ impl OllamaAdapter {
         messages: &[ChatMessage],
         config: &ModelConfig,
         stream: bool,
+        supports_thinking: bool,
     ) -> serde_json::Value {
         let ollama_opts = config.ollama_options();
 
@@ -510,13 +568,18 @@ impl OllamaAdapter {
             "tools": &tools,
         });
 
-        // `think` parameter: most Ollama models accept `think: bool`,
-        // but gpt-oss requires a string enum (`"low"|"medium"|"high"`).
-        // `think_for_ollama` picks the right shape per model.
-        request_body["think"] = think_for_ollama(&self.model_name, config.reasoning);
+        // `think` parameter: most Ollama models accept `think: bool`, gpt-oss
+        // requires a string enum, and a model that doesn't advertise `thinking`
+        // must not receive the field at all (it 400s). `think_for_ollama`
+        // returns `None` in that last case so the key is omitted (#122).
+        if let Some(think) = think_for_ollama(&self.model_name, config.reasoning, supports_thinking)
+        {
+            request_body["think"] = think;
+        }
         tracing::debug!(
-            "think reasoning={:?} shape={}",
+            "think reasoning={:?} supports_thinking={} shape={}",
             config.reasoning,
+            supports_thinking,
             if is_gpt_oss(&self.model_name) {
                 "string"
             } else {
@@ -667,7 +730,8 @@ impl Model for OllamaAdapter {
         callback: Option<StreamCallback>,
     ) -> Result<ModelResponse> {
         let stream = callback.is_some();
-        let request_body = self.build_request_body(messages, config, stream);
+        let supports_thinking = self.thinking_supported().await;
+        let request_body = self.build_request_body(messages, config, stream, supports_thinking);
         let response = self.send_chat(&request_body).await?;
 
         if stream {
@@ -724,6 +788,10 @@ pub(crate) struct OllamaModel {
 struct OllamaShowResponse {
     #[serde(default)]
     model_info: serde_json::Value,
+    /// Advertised capabilities (`completion`, `tools`, `thinking`, `vision`, …).
+    /// Absent on older Ollama; used to gate the `think` field (#122).
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 /// `/api/ps` response — currently-loaded models and their memory placement.
@@ -1024,7 +1092,7 @@ mod tests {
         };
         let messages = vec![ChatMessage::user("hi")];
 
-        let body = adapter.build_request_body(&messages, &config, false);
+        let body = adapter.build_request_body(&messages, &config, false, true);
         assert_eq!(body["think"], serde_json::json!(false));
     }
 
@@ -1037,7 +1105,7 @@ mod tests {
         };
         let messages = vec![ChatMessage::user("hi")];
 
-        let body = adapter.build_request_body(&messages, &config, false);
+        let body = adapter.build_request_body(&messages, &config, false, true);
         assert_eq!(body["think"], serde_json::json!(true));
     }
 
@@ -1050,8 +1118,27 @@ mod tests {
         };
         let messages = vec![ChatMessage::user("hi")];
 
-        let body = adapter.build_request_body(&messages, &config, false);
+        let body = adapter.build_request_body(&messages, &config, false, true);
         assert_eq!(body["think"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn ollama_request_body_omits_think_when_unsupported() {
+        // #122: a model that doesn't advertise the `thinking` capability must
+        // not receive a `think` field at all — recent Ollama 400s on it.
+        let adapter = make_adapter().await;
+        let config = ModelConfig {
+            reasoning: ReasoningLevel::High,
+            ..Default::default()
+        };
+        let messages = vec![ChatMessage::user("hi")];
+
+        let body = adapter.build_request_body(&messages, &config, false, false);
+        assert!(
+            body.get("think").is_none(),
+            "think must be omitted for a non-thinking model, got {:?}",
+            body.get("think")
+        );
     }
 
     #[tokio::test]
@@ -1061,7 +1148,7 @@ mod tests {
         config.set_backend_option("ollama".into(), "num_ctx".into(), "32768".into());
         config.set_backend_option("ollama".into(), "num_predict".into(), "8192".into());
 
-        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false);
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false, true);
         assert_eq!(body["options"]["num_ctx"], serde_json::json!(32768));
         assert_eq!(body["options"]["num_predict"], serde_json::json!(8192));
     }
@@ -1070,7 +1157,7 @@ mod tests {
     async fn ollama_request_body_omits_sizing_when_unset() {
         let adapter = make_adapter().await;
         let config = ModelConfig::default();
-        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false);
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false, true);
         // Unset → omitted entirely so Ollama uses its own defaults.
         assert!(body["options"].get("num_ctx").is_none());
         assert!(body["options"].get("num_predict").is_none());
@@ -1166,7 +1253,7 @@ mod tests {
             reasoning: ReasoningLevel::None,
             ..Default::default()
         };
-        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false);
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false, true);
         // gpt-oss can't truly disable; None collapses to "low".
         assert_eq!(body["think"], serde_json::json!("low"));
     }
@@ -1178,7 +1265,7 @@ mod tests {
             reasoning: ReasoningLevel::Medium,
             ..Default::default()
         };
-        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false);
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false, true);
         assert_eq!(body["think"], serde_json::json!("medium"));
     }
 
@@ -1189,7 +1276,7 @@ mod tests {
             reasoning: ReasoningLevel::Max,
             ..Default::default()
         };
-        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false);
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false, true);
         // Max / High / XHigh all snap to the gpt-oss top tier "high".
         assert_eq!(body["think"], serde_json::json!("high"));
     }
@@ -1201,7 +1288,7 @@ mod tests {
             reasoning: ReasoningLevel::XHigh,
             ..Default::default()
         };
-        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false);
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false, true);
         assert_eq!(body["think"], serde_json::json!("high"));
     }
 
@@ -1276,7 +1363,7 @@ mod tests {
         };
         let messages = vec![ChatMessage::user("hi")];
 
-        let body = adapter.build_request_body(&messages, &config, false);
+        let body = adapter.build_request_body(&messages, &config, false, true);
         let messages_arr = body["messages"].as_array().expect("messages array");
         assert_eq!(messages_arr[0]["role"], "system");
         let content = messages_arr[0]["content"].as_str().unwrap();

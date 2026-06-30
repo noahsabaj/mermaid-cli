@@ -778,7 +778,7 @@ impl AnthropicAdapter {
         // thinking + tool_use) interleave, so we track each by index.
         let mut blocks: HashMap<usize, BlockAccumulator> = HashMap::new();
 
-        while let Some(chunk_result) = stream.next().await {
+        'stream: while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| ModelError::StreamError(e.to_string()))?;
             // Bound SSE reassembly: a server that streams bytes but never emits
             // the `\n\n` event separator would otherwise grow `buf` without
@@ -964,9 +964,12 @@ impl AnthropicAdapter {
                         }
                     },
                     "message_stop" => {
-                        // Stream complete. The `Done` event is emitted
-                        // unconditionally below after the loop.
-                        break;
+                        // Stream complete. Break the OUTER stream loop, not just
+                        // this SSE-event `for` — otherwise the adapter keeps
+                        // awaiting `stream.next()` until the connection actually
+                        // closes, which can stall on a kept-alive/proxied body
+                        // (#138). The `Done` event is emitted below after the loop.
+                        break 'stream;
                     },
                     "error" => {
                         let err_type = parsed

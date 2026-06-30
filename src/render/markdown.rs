@@ -391,22 +391,27 @@ fn render_table(
     }
 
     // Borders/padding cost: leading "| " (2) + " | " (3) per column. If the table
-    // is wider than the viewport, shrink the widest columns (each floored at 3)
-    // until it fits; cell text is then wrapped within the budgeted width.
+    // is wider than the viewport, shrink the widest columns until it fits; cell
+    // text is then wrapped within the budgeted width. Columns shrink all the way
+    // to a 1-cell minimum on a narrow terminal (no `num_cols * 3` budget floor),
+    // so a many-column table fits instead of overflowing and clipping at the edge.
+    // (In the extreme where the per-column border overhead alone exceeds the
+    // width — more columns than the terminal has cells — nothing fits in-budget
+    // and the terminal clips the row; that's unavoidable without dropping columns.)
     let overhead = 2 + 3 * num_cols;
     if col_widths.iter().sum::<usize>() + overhead > width {
-        let budget = width.saturating_sub(overhead).max(num_cols * 3);
+        let budget = width.saturating_sub(overhead);
         let mut total: usize = col_widths.iter().sum();
         while total > budget {
             let widest = (0..num_cols)
-                .filter(|&i| col_widths[i] > 3)
+                .filter(|&i| col_widths[i] > 1)
                 .max_by_key(|&i| col_widths[i]);
             match widest {
                 Some(i) => {
                     col_widths[i] -= 1;
                     total -= 1;
                 },
-                None => break, // every column already at the floor
+                None => break, // every column already at the 1-cell floor
             }
         }
     }
@@ -758,6 +763,22 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn wide_table_fits_narrow_viewport() {
+        // #136: a 3-column table whose natural width far exceeds a narrow
+        // viewport must shrink to fit, not overflow and clip at the edge.
+        let width = 16;
+        let lines = parse_markdown(
+            "| aaaa | bbbb | cccc |\n|---|---|---|\n| aaaaaaaa | bbbbbbbb | cccccccc |\n",
+            &Theme::dark(),
+            width,
+        );
+        for ml in &lines {
+            let w: usize = ml.line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(w <= width, "table row width {w} exceeds viewport {width}");
+        }
     }
 
     #[test]

@@ -44,7 +44,9 @@ pub fn create_checkpoint_for_task(
     pending_action: Option<serde_json::Value>,
     task_id: Option<String>,
 ) -> Result<CheckpointManifest> {
-    let id = fresh_checkpoint_id();
+    // Collision-hardened id (salt+seq+nanos) — the old time-only id could repeat
+    // within a coarse-clock tick and overwrite a prior checkpoint's files (#117).
+    let id = crate::storage::fresh_id("checkpoint");
     let root = data_dir()?.join("checkpoints").join(&id);
     let files_dir = root.join("files");
     std::fs::create_dir_all(&files_dir)
@@ -108,8 +110,11 @@ pub fn create_checkpoint_for_task(
     crate::write_atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
 
     if let Ok(store) = RuntimeStore::open_default() {
-        let _ = store.checkpoints().create(NewCheckpoint {
-            id: Some(id),
+        // Don't swallow the insert error (#117): a failed insert means the
+        // manifest+files are on disk but the DB has no row, so a later restore
+        // can't find them. Roll the on-disk checkpoint back and surface it.
+        if let Err(error) = store.checkpoints().create(NewCheckpoint {
+            id: Some(id.clone()),
             task_id,
             project_path: manifest.project_path.clone(),
             snapshot_path: root.display().to_string(),
@@ -120,7 +125,11 @@ pub fn create_checkpoint_for_task(
                 .map(serde_json::to_string)
                 .transpose()?,
             approval_id: None,
-        });
+        }) {
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(error)
+                .with_context(|| format!("failed to record checkpoint {id} in the runtime DB"));
+        }
     }
 
     let _ = crate::run_plugin_hooks(
@@ -150,12 +159,20 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
     // The confinement root must be a trusted, sane project directory — never a
     // value the (tamperable) manifest can redirect to `/` or a system dir.
     let project_root = resolve_restore_root(id, &manifest)?;
+
+    // Plan the restore as two ordered phases so a mid-way failure can't leave a
+    // half-applied tree: validate + collect every write and delete first (reading
+    // each snapshot source into memory), then apply all writes — each atomically —
+    // and only then the deletes. On any error we roll the applied ops back
+    // best-effort instead of returning with the project half-restored.
+    let mut writes: Vec<RestoreOp> = Vec::new();
+    let mut deletes: Vec<RestoreOp> = Vec::new();
     for file in &manifest.files {
         // The manifest is on-disk state a tampered or shared checkpoint could
         // have rewritten. Confine every restore target to the recorded project
         // root — rejecting absolute paths, `..` escapes, AND symlinks planted
-        // inside the root — before any copy/create/delete. Anything that
-        // doesn't resolve inside the root is skipped, not run.
+        // inside the root. Anything that doesn't resolve inside the root is
+        // skipped, not run.
         let target = match contain_within_canonical(&project_root, &file.path) {
             Ok(target) => target,
             Err(err) => {
@@ -174,8 +191,7 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
                 .context("checkpoint file missing snapshot_relpath")?;
             // The snapshot source is also a manifest-supplied string; confine it
             // to this checkpoint's own directory so a crafted `snapshot_relpath`
-            // (`../../etc/passwd`) can't read an arbitrary file as the copy
-            // source.
+            // (`../../etc/passwd`) can't read an arbitrary file as the source.
             let source = match contain_within(&ckpt_dir, rel) {
                 Ok(source) => source,
                 Err(err) => {
@@ -187,23 +203,21 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
                     continue;
                 },
             };
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::copy(&source, &target).with_context(|| {
-                format!(
-                    "failed to restore checkpoint file {} -> {}",
-                    source.display(),
-                    target.display()
-                )
+            let bytes = std::fs::read(&source).with_context(|| {
+                format!("failed to read checkpoint snapshot {}", source.display())
             })?;
-        } else if target.exists() {
-            if target.is_file() {
-                std::fs::remove_file(&target)?;
-            } else if target.is_dir() {
-                std::fs::remove_dir_all(&target)?;
-            }
+            writes.push(RestoreOp::Write { target, bytes });
+        } else {
+            deletes.push(RestoreOp::Delete { target });
         }
+    }
+
+    let mut applied: Vec<PriorState> = Vec::new();
+    if let Err(err) = apply_restore(&writes, &deletes, &mut applied) {
+        rollback_restore(&applied);
+        return Err(err.context(
+            "checkpoint restore failed; changes already applied were rolled back (best-effort)",
+        ));
     }
     if let Some(action) = manifest.pending_action.as_ref()
         && action.get("tool").is_some()
@@ -228,6 +242,105 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
         }
     }
     Ok(manifest)
+}
+
+/// One planned restore mutation. All writes are applied (atomically) before any
+/// delete so a failure can't strand the tree in a half-applied state.
+enum RestoreOp {
+    Write { target: PathBuf, bytes: Vec<u8> },
+    Delete { target: PathBuf },
+}
+
+/// A target's state before this restore touched it, captured for rollback.
+struct PriorState {
+    target: PathBuf,
+    bytes: Option<Vec<u8>>,
+    existed: bool,
+    was_dir: bool,
+}
+
+fn snapshot_prior(target: &Path) -> PriorState {
+    if target.is_dir() {
+        PriorState {
+            target: target.to_path_buf(),
+            bytes: None,
+            existed: true,
+            was_dir: true,
+        }
+    } else if target.is_file() {
+        PriorState {
+            target: target.to_path_buf(),
+            bytes: std::fs::read(target).ok(),
+            existed: true,
+            was_dir: false,
+        }
+    } else {
+        PriorState {
+            target: target.to_path_buf(),
+            bytes: None,
+            existed: false,
+            was_dir: false,
+        }
+    }
+}
+
+/// Apply writes (each via the atomic temp+rename writer) then deletes, recording
+/// each target's prior state into `applied` so the caller can roll back on error.
+fn apply_restore(
+    writes: &[RestoreOp],
+    deletes: &[RestoreOp],
+    applied: &mut Vec<PriorState>,
+) -> Result<()> {
+    for op in writes {
+        if let RestoreOp::Write { target, bytes } = op {
+            let prior = snapshot_prior(target);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            crate::write_atomic(target, bytes).with_context(|| {
+                format!("failed to restore checkpoint file {}", target.display())
+            })?;
+            applied.push(prior);
+        }
+    }
+    for op in deletes {
+        if let RestoreOp::Delete { target } = op
+            && target.exists()
+        {
+            let prior = snapshot_prior(target);
+            if target.is_file() {
+                std::fs::remove_file(target)
+                    .with_context(|| format!("failed to delete {}", target.display()))?;
+            } else if target.is_dir() {
+                std::fs::remove_dir_all(target)
+                    .with_context(|| format!("failed to delete {}", target.display()))?;
+            }
+            applied.push(prior);
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort undo of the ops in `applied`, newest first. A deleted directory's
+/// contents can't be recovered (only the empty dir is recreated); everything
+/// else is restored from the in-memory snapshot.
+fn rollback_restore(applied: &[PriorState]) {
+    for prior in applied.iter().rev() {
+        if prior.existed {
+            if prior.was_dir {
+                let _ = std::fs::create_dir_all(&prior.target);
+            } else if let Some(bytes) = &prior.bytes {
+                if let Some(parent) = prior.target.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = crate::write_atomic(&prior.target, bytes);
+            }
+        } else if prior.target.is_file() {
+            let _ = std::fs::remove_file(&prior.target);
+        } else if prior.target.is_dir() {
+            let _ = std::fs::remove_dir_all(&prior.target);
+        }
+    }
 }
 
 /// Resolve the trusted project root a checkpoint may restore into. Prefer the
@@ -395,12 +508,36 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-fn fresh_checkpoint_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    format!("checkpoint-{nanos:x}")
+/// Best-effort GC of on-disk checkpoint directories older than `retention_days`
+/// (#130): removes `checkpoints/<id>/` whose mtime is past the window so the tree
+/// can't grow without bound, while keeping recent (still-restorable) checkpoints.
+/// Returns the count removed; never fails the caller (a bad entry is skipped).
+pub fn gc_old_checkpoint_dirs(retention_days: i64) -> Result<usize> {
+    let dir = data_dir()?.join("checkpoints");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(0);
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(
+            retention_days.max(0) as u64 * 86_400,
+        ))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let too_old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|mtime| mtime < cutoff)
+            .unwrap_or(false);
+        if too_old && std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

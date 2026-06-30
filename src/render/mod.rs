@@ -15,7 +15,6 @@
 //! reducer outcomes or persisted state.
 
 pub mod diff;
-pub mod layout;
 pub mod markdown;
 pub mod theme;
 pub mod widgets;
@@ -276,10 +275,9 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         horizontal: 1,
         vertical: 0,
     });
-    let committed = state.session.messages().to_vec();
-    let live_messages = build_live_messages(&committed, &state.turn);
+    let live_messages = build_live_messages(state.session.messages(), &state.turn, state.now);
     let chat_widget = ChatWidget {
-        messages: &live_messages,
+        messages: live_messages.as_ref(),
         theme: &rstate.theme,
         markdown_cache: &mut rstate.markdown_cache,
         show_reasoning: state.ui.show_reasoning,
@@ -430,11 +428,14 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
 /// Merge the committed message log with any in-flight partial
 /// content from `TurnState::Generating`. The chat widget renders
 /// this as a single stream.
-fn build_live_messages(
-    committed: &[crate::models::ChatMessage],
+fn build_live_messages<'a>(
+    committed: &'a [crate::models::ChatMessage],
     turn: &TurnState,
-) -> Vec<crate::models::ChatMessage> {
-    let mut out = committed.to_vec();
+    now: chrono::DateTime<chrono::Local>,
+) -> std::borrow::Cow<'a, [crate::models::ChatMessage]> {
+    // Idle / no-partial frames borrow the committed log directly — no per-frame
+    // clone of the whole transcript. Only an in-flight partial forces an owned
+    // copy (committed + the one live assistant message).
     if let TurnState::Generating {
         partial_text,
         partial_reasoning,
@@ -450,7 +451,9 @@ fn build_live_messages(
         let msg = crate::models::ChatMessage {
             role: crate::models::MessageRole::Assistant,
             content: partial_text.clone(),
-            timestamp: chrono::Local::now(),
+            // `state.now` (stamped each tick) keeps render a pure function of
+            // State — never read the wall clock here.
+            timestamp: now,
             kind: crate::models::ChatMessageKind::Normal,
             metadata: None,
             actions: Vec::new(),
@@ -461,9 +464,12 @@ fn build_live_messages(
             tool_name: None,
             thinking_signature: None,
         };
+        let mut out = committed.to_vec();
         out.push(msg);
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(committed)
     }
-    out
 }
 
 /// Future hook: consult `ProviderFactory` for per-model capabilities.
@@ -517,6 +523,39 @@ mod tests {
             .draw(|f| render(state, &mut rstate, f))
             .expect("draw");
         terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn build_live_messages_borrows_idle_and_stamps_partial_with_injected_now() {
+        use crate::domain::{GenPhase, TurnId};
+        use crate::models::ChatMessage;
+        use std::borrow::Cow;
+        use std::time::SystemTime;
+
+        let committed = vec![ChatMessage::user("hi")];
+        let now = chrono::Local::now();
+
+        // Idle frames borrow the committed log unchanged — no per-frame clone.
+        let idle = build_live_messages(&committed, &TurnState::Idle, now);
+        assert!(matches!(idle, Cow::Borrowed(_)));
+        assert_eq!(idle.len(), 1);
+
+        // A generating partial yields an owned copy whose live message is stamped
+        // from the injected `now`, never the wall clock (render purity, #135).
+        let turn = TurnState::Generating {
+            id: TurnId(1),
+            started: SystemTime::now(),
+            partial_text: "draft".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Sending,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        };
+        let live = build_live_messages(&committed, &turn, now);
+        assert!(matches!(live, Cow::Owned(_)));
+        assert_eq!(live.len(), 2);
+        assert_eq!(live[1].timestamp, now);
     }
 
     #[test]

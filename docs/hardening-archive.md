@@ -2,8 +2,10 @@
 
 Documented history of the architectural + security review that produced **116
 findings** (`#1`–`#116`) grouped under 7 root causes, and how every one was
-resolved. **All 116 are closed.** This file is a historical record — there is no
-open work here; the live backlog is [`BACKLOG.md`](BACKLOG.md) (currently empty).
+resolved. **All 116 are closed.** A **second review (2026-06-29)** then added
+`#117`–`#142`; its **6 root causes plus the non-atomic-mutation pattern are
+resolved** and recorded in the next section, while the remaining non-root-cause
+items stay open in [`BACKLOG.md`](BACKLOG.md).
 
 The root causes and two sweep-ins were fixed across the Axis hardening PRs
 (GitHub PRs #64–#68 — not to be confused with findings #64/#68 below); the four
@@ -16,6 +18,120 @@ shell)**.
 - **Findings:** 116 · **Resolved:** 116 · **Open:** 0
 - **Severity legend:** `HIGH` exploitable / data-loss · `MED` correctness or
   availability · `LOW`/`INFO` hardening, cosmetics, or by-design risk confirmed.
+
+---
+
+## Second review (2026-06-29) — root-cause hardening (`#117`–`#142`)
+
+A follow-up architecture + security review (multi-agent, adversarially verified)
+surfaced 26 findings. The **6 root causes plus the non-atomic-mutation pattern**
+were fixed in this batch and are recorded here; the individual non-root-cause
+findings remain in [`BACKLOG.md`](BACKLOG.md). Each fix shipped with regression
+tests; `cargo test`, `clippy -D warnings`, and `rustfmt` are clean.
+
+**RC-1 — Unix process termination was decentralized; only the Esc path killed the
+process group.** A single `terminate_tree(pid, Grace)` primitive
+(`src/utils/proc.rs`; Unix signals the group `-pid` *and* the bare pid, SIGTERM →
+400 ms → SIGKILL, or immediate SIGKILL; Windows `taskkill /T /F`) now backs every
+termination site. The foreground **timeout no longer leaks the process tree**: it
+moved *inside* `run_command`'s `select!` as a `TimedOut` arm that tree-kills then
+aborts the driver (it previously only built an error string and dropped a detached
+task that kept the child alive — `exec.rs`). `/stop` and `/restart` group-kill via
+`terminate_tree_blocking` and now spawn managed processes as group leaders
+(`process_group(0)`), and Ctrl+B background launches use `setsid`, so the group
+kill reaches grandchildren (`client.rs`, `exec.rs`).
+
+**RC-2 — shell risk was classified by argv0 alone, ignoring write/exec-bearing
+arguments** (`policy.rs`). `find` left the read-only set and is now
+argument-aware (`-exec`/`-execdir`/`-ok`/`-okdir` ⇒ Process; `-delete`/`-fprint*`/
+`-fls` ⇒ ShellMutation); `sort -o`/`--output` ⇒ ShellMutation; `config`/`branch`/
+`tag` were removed from `GIT_READ_ONLY` (they mutate). These no longer auto-run in
+`read_only`/`auto` — closing the worst finding, where `find . -exec …` /
+`find / -delete` ran in read_only and auto-ran with no classifier or checkpoint.
+
+**RC-3 — the destructive-root hard-deny was exact-string matching over a
+pre-lowercased command** (`policy.rs` `is_dangerous_root`). It now normalizes a
+trailing `/*`, `/.`, `/` and `${VAR}`→`$VAR` before matching and drops the dead
+uppercase `$HOME`/`${HOME}` arms, so `rm -rf ${HOME}`, `/etc/`, `/usr/*` are
+caught. Deliberately exact-match-after-normalization (not prefix-match) so a
+legitimate `rm -rf /home/<user>/…/node_modules` isn't pulled into the
+un-overridable deny. The fork-bomb check was generalized from the literal `:`
+name to any `name(){ … name|name& … }` (`is_fork_bomb`).
+
+**RC-4 — the gate/classifier only vetted the arguments `action_detail` formatted**
+(`policy_gate.rs`, `auto_classifier.rs`). `action_detail` now surfaces the real
+`web_search` queries and the subagent `prompt`, so the classifier and the human
+approval modal see the actual content (was just a label → silent
+exfiltration-via-query). The classifier's no-command/path fallback is now fenced
+in `BEGIN/END UNTRUSTED ACTION` markers, and the injection pre-filter scans the
+`summary` too — closing the unfenced/unfiltered subagent-description path.
+
+**RC-5 — the schema was re-applied inline on every open with a dead version
+guard** (`storage.rs`). `init_schema` now reads `user_version` *first* and bails
+when it exceeds `SCHEMA_VERSION` (the guard was dead — the version was clobbered
+before the check, so an older binary silently operated a newer DB); creation +
+migration run inside `BEGIN IMMEDIATE`/`COMMIT` (serializing the daemon/CLI
+`ensure_column` race), `ensure_column` is duplicate-column tolerant, and the
+version is stamped only after a successful migration. The paired `tasks().create`
+(task + event) and `update_status` (update + event) writes are now atomic
+transactions.
+
+**RC-6 — effect-output messages without a `TurnId` bypassed the stale filter**
+(`reducer.rs`, `msg.rs`, `effect/mod.rs`). `ProviderContextResolved` now carries
+and is guarded by `model_id` (mirroring `OllamaPlacementResolved`), so a context
+probe that lands after a `/model` switch no longer overwrites the new model's
+window.
+
+**Atomicity — the agent wrote the user's files non-atomically while protecting its
+own state.** A confined atomic writer `write_atomic_beneath` (`pathguard.rs`:
+`openat2(RESOLVE_BENEATH)` temp → fsync → `renameat` within the same parent fd,
+preserving the destination's mode) now backs `write_file` and `edit_file`
+(`filesystem.rs`) — a crash/kill/disk-full mid-write leaves the prior file intact
+instead of truncated, and the `#77` symlink confinement is preserved.
+`restore_checkpoint` (`checkpoint.rs`) stages writes-before-deletes with per-file
+atomic writes and best-effort rollback. (DB write atomicity is RC-5.)
+
+### Second-review individual findings (`#117`–`#142`)
+
+Beyond the root causes above, the 26 individual findings were resolved (each with
+regression tests; build / `clippy -D warnings` / `rustfmt` clean; validated
+end-to-end headless against `ollama/minimax-m3:cloud`):
+
+- **Providers** — #122 Ollama `think` is gated on a cached `/api/show` thinking
+  capability probe (omit when unsupported; preserve + retry on probe failure);
+  #123 openai-compat tolerates a usage-only final chunk (`choices` defaulted) and
+  surfaces a mid-stream `{"error"}` frame as a typed error; #124 temperature is
+  omitted for o-series/gpt-5; #125 a stream with no usage frame returns `None`
+  (preserving the char-estimate) instead of zeros; #137 Gemini stops
+  double-counting cached input tokens; #138 Anthropic `message_stop` breaks the
+  outer stream loop.
+- **Daemon / persistence** — #117 checkpoint ids use the collision-hardened
+  `fresh_id` and the insert error is propagated (no silent disk/DB divergence);
+  #118 approvals are claimed atomically (`UPDATE … WHERE user_decision IS NULL`)
+  before the un-rollback-able effect, released on error, recovered on restart;
+  #120 a startup reconcile resets tasks stranded `Running` and stale claims; #128
+  query limits are clamped (no negative-LIMIT wrap); #129 conversation loads are
+  size-capped; #130 a startup GC prunes archived/old-terminal rows + orphaned
+  checkpoint dirs (never active data); #131 a daemon-lifetime advisory `flock`
+  closes the socket-startup TOCTOU.
+- **Safety / recorder** — #119 a `PolicyOverride` on the Memory category now
+  applies (override block moved above the memory short-circuit, still below the
+  destructive hard-deny); #132 recordings are written `0600` with a one-time
+  cleartext warning; #141 the injection pre-filter normalizes text and covers more
+  reviewer-directed markers.
+- **Render** — #135 `build_live_messages` uses `state.now` (purity restored) and
+  returns `Cow` (no idle-frame transcript clone); #136 wide tables shrink to fit a
+  narrow viewport; #140 the dead `layout.rs` was removed; #134 the per-frame
+  double-clone and markdown-cache thrash were eliminated (the full per-message
+  line cache is deferred — see BACKLOG.md).
+- **Exec / computer-use / MCP** — #126 the on-disk tee log is capped at 64 MiB;
+  #127 computer-use backends are wall-clock bounded; #139 MCP validation runs the
+  graceful shutdown on the error path.
+- **Domain** — #121 a provider error drains the queued-message FIFO (no
+  out-of-order replay); #133 `RuntimeState.timeline` is bounded to 200 events.
+- **#142** (non-Linux fallback TOCTOU) is by design — `openat2(RESOLVE_BENEATH)`
+  closes it on Linux — and now emits a one-time operator warning when the fallback
+  is used.
 
 ---
 

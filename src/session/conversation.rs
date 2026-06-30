@@ -23,6 +23,29 @@ fn validate_conversation_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Upper bound on a conversation file we'll read into memory (#129). A giant or
+/// hostile `.mermaid/conversations/*.json` (or one with an enormous `content`)
+/// would otherwise OOM the process — `--continue` walks every file. 64 MiB is
+/// far above any real transcript yet bounds the worst case.
+const MAX_CONVERSATION_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read a conversation file with the [`MAX_CONVERSATION_BYTES`] cap enforced
+/// *before* the bytes are pulled into RAM.
+fn read_conversation_capped(path: &Path) -> std::io::Result<String> {
+    let len = fs::metadata(path)?.len();
+    if len > MAX_CONVERSATION_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "conversation file {} is {len} bytes, over the {} MiB cap",
+                path.display(),
+                MAX_CONVERSATION_BYTES / (1024 * 1024)
+            ),
+        ));
+    }
+    fs::read_to_string(path)
+}
+
 /// Marker left in a message's text when its screenshot bytes are dropped on save.
 const SCREENSHOT_ELIDED_MARKER: &str = "\n[screenshot not persisted]";
 
@@ -264,7 +287,7 @@ impl ConversationManager {
         let filename = format!("{}.json", id);
         let path = self.conversations_dir.join(filename);
 
-        let json = fs::read_to_string(path)?;
+        let json = read_conversation_capped(&path)?;
         let conversation: ConversationHistory = serde_json::from_str(&json)?;
         // The file name was validated, but the deserialized `id` (which drives
         // later saves) is independent on-disk state — validate it too.
@@ -296,8 +319,8 @@ impl ConversationManager {
         candidates.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
 
         for (_, path) in candidates {
-            let Ok(json) = fs::read_to_string(&path) else {
-                tracing::warn!(path = %path.display(), "skipping unreadable conversation file");
+            let Ok(json) = read_conversation_capped(&path) else {
+                tracing::warn!(path = %path.display(), "skipping unreadable or oversized conversation file");
                 continue;
             };
             let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json) else {
@@ -324,7 +347,7 @@ impl ConversationManager {
             for entry in entries.flatten() {
                 if let Some(ext) = entry.path().extension()
                     && ext == "json"
-                    && let Ok(json) = fs::read_to_string(entry.path())
+                    && let Ok(json) = read_conversation_capped(&entry.path())
                     && let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json)
                 {
                     conversations.push(conv);
@@ -632,6 +655,29 @@ mod tests {
 
         manager.delete_conversation(&conv.id).unwrap();
         assert_eq!(manager.list_conversations().unwrap().len(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_conversation_capped_refuses_oversized_file() {
+        // #129: a file over the cap is refused before it's read into RAM. Use a
+        // sparse file so the test stays fast and doesn't actually write 64 MiB.
+        let dir = std::env::temp_dir().join(format!("mermaid_conv_cap_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let small = dir.join("small.json");
+        fs::write(&small, b"{}").unwrap();
+        assert!(read_conversation_capped(&small).is_ok());
+
+        let big = dir.join("big.json");
+        let f = fs::File::create(&big).unwrap();
+        f.set_len(MAX_CONVERSATION_BYTES + 1).unwrap();
+        assert!(
+            read_conversation_capped(&big).is_err(),
+            "a file over the cap must be refused, not slurped into memory"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

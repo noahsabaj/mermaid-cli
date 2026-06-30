@@ -600,19 +600,26 @@ impl GeminiAdapter {
             }
         }
 
-        let prompt_tokens = json.usage_metadata.prompt_token_count.unwrap_or(0);
+        let raw_prompt_tokens = json.usage_metadata.prompt_token_count.unwrap_or(0);
+        let cached_tokens = json.usage_metadata.cached_content_token_count.unwrap_or(0);
+        // Gemini's promptTokenCount INCLUDES cachedContentTokenCount; subtract it
+        // so the input breakdown (fresh prompt + cached) isn't double-counted
+        // (#137), matching openai_compat's token_usage_from_wire.
+        let prompt_tokens = raw_prompt_tokens.saturating_sub(cached_tokens);
         let completion_tokens = json.usage_metadata.candidates_token_count.unwrap_or(0);
         let reasoning_tokens = json.usage_metadata.thoughts_token_count.unwrap_or(0);
         let usage = TokenUsage::provider(
             prompt_tokens,
             completion_tokens,
             json.usage_metadata.total_token_count.unwrap_or_else(|| {
-                prompt_tokens
+                // The total uses the FULL prompt (incl. cached), not the de-duped
+                // breakdown component.
+                raw_prompt_tokens
                     .saturating_add(completion_tokens)
                     .saturating_add(reasoning_tokens)
             }),
         )
-        .with_cached_input(json.usage_metadata.cached_content_token_count.unwrap_or(0))
+        .with_cached_input(cached_tokens)
         .with_reasoning_output(reasoning_tokens);
 
         Ok(ModelResponse {
@@ -688,13 +695,11 @@ impl GeminiAdapter {
         // F3: wrapper emits the authoritative `Done`. See
         // adapters/anthropic.rs for rationale.
 
+        let usage = state.usage(total_tokens);
+
         Ok(ModelResponse {
             content: state.text_acc,
-            usage: Some(
-                TokenUsage::provider(state.prompt_tokens, state.completion_tokens, total_tokens)
-                    .with_cached_input(state.cached_input_tokens)
-                    .with_reasoning_output(state.reasoning_output_tokens),
-            ),
+            usage,
             model_name: self.model_name.clone(),
             stop_reason: state.finish_reason,
             thinking: if state.thinking_acc.is_empty() {
@@ -726,7 +731,25 @@ struct StreamState {
     cached_input_tokens: usize,
     reasoning_output_tokens: usize,
     total_tokens: usize,
+    /// Set once a `usageMetadata` block is seen, so a stream that never reports
+    /// usage returns `None` instead of a misleading zero (#125).
+    saw_usage: bool,
     finish_reason: Option<FinishReason>,
+}
+
+impl StreamState {
+    /// Build the response usage. `None` when no `usageMetadata` arrived (#125),
+    /// so the reducer keeps its estimate rather than resetting to zero. The
+    /// fresh-prompt component subtracts cached, which Gemini folds into
+    /// `promptTokenCount`, so the input breakdown isn't double-counted (#137).
+    fn usage(&self, total_tokens: usize) -> Option<TokenUsage> {
+        self.saw_usage.then(|| {
+            let fresh_prompt = self.prompt_tokens.saturating_sub(self.cached_input_tokens);
+            TokenUsage::provider(fresh_prompt, self.completion_tokens, total_tokens)
+                .with_cached_input(self.cached_input_tokens)
+                .with_reasoning_output(self.reasoning_output_tokens)
+        })
+    }
 }
 
 /// Process one SSE event payload (already JSON-decoded). Mutates `state`
@@ -762,6 +785,7 @@ fn process_chunk_payload(
 
     // Usage: any chunk may carry it; the last chunk is final.
     if let Some(usage) = parsed.get("usageMetadata") {
+        state.saw_usage = true;
         if let Some(p) = usage.get("promptTokenCount").and_then(|v| v.as_u64()) {
             state.prompt_tokens = p as usize;
         }
@@ -1643,6 +1667,45 @@ mod tests {
         assert_eq!(count_text(&evts), 2);
         assert_eq!(count_reasoning(&evts), 0);
         assert_eq!(count_tool_calls(&evts), 0);
+    }
+
+    #[test]
+    fn stream_usage_is_none_without_usage_metadata() {
+        // #125: a stream that never carried a `usageMetadata` block yields None,
+        // so the reducer keeps its char/4 estimate instead of resetting to zero.
+        let (cb, _events) = record_callback();
+        let mut state = StreamState::default();
+        let chunk =
+            json!({ "candidates": [{ "content": {"parts": [{"text": "hi"}]} }] }).to_string();
+        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        assert!(!state.saw_usage);
+        assert!(state.usage(0).is_none());
+    }
+
+    #[test]
+    fn stream_usage_does_not_double_count_cached_input() {
+        // #137: Gemini folds cached tokens into promptTokenCount; the input
+        // breakdown must not add them a second time.
+        let (cb, _events) = record_callback();
+        let mut state = StreamState::default();
+        let chunk = json!({
+            "candidates": [{ "content": {"parts": [{"text": "hi"}]} }],
+            "usageMetadata": {
+                "promptTokenCount": 1000,
+                "cachedContentTokenCount": 300,
+                "candidatesTokenCount": 50,
+                "totalTokenCount": 1050
+            }
+        })
+        .to_string();
+        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        assert!(state.saw_usage);
+        let usage = state.usage(1050).expect("usage present");
+        assert_eq!(
+            usage.input_total_tokens(),
+            1000,
+            "cached input must not be double-counted"
+        );
     }
 
     #[test]
