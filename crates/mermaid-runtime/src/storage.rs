@@ -2115,6 +2115,10 @@ pub(crate) fn fresh_id(prefix: &str) -> String {
 /// exits/crashes, so a dead holder never wedges the lock the way an `O_EXCL`
 /// pidfile would. Holding it across the socket probe → unlink → bind closes that
 /// TOCTOU: two daemons can't both decide a stale socket is theirs to rebind.
+///
+/// Unix-only: it backs the `#[cfg(unix)]` daemon singleton and relies on
+/// `flock`, which `rustix` exposes only on Unix targets.
+#[cfg(unix)]
 pub fn try_exclusive_lock(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use rustix::fs::{FlockOperation, flock};
     // A lockfile's content is irrelevant — only the flock matters — so don't

@@ -44,5 +44,8 @@ pub use storage::{
     PairingTokenRecord, PairingTokensRepo, PluginInstallRecord, PluginsRepo, ProcessRecord,
     ProcessStatus, ProcessesRepo, ProviderProbeRecord, ProviderProbesRepo, RuntimeStore,
     SessionRecord, SessionsRepo, TaskPriority, TaskRecord, TaskStatus, TaskTimelineEvent,
-    TasksRepo, ToolRunRecord, ToolRunsRepo, data_dir, try_exclusive_lock,
+    TasksRepo, ToolRunRecord, ToolRunsRepo, data_dir,
 };
+// Unix-only: backs the `#[cfg(unix)]` daemon singleton via `flock`.
+#[cfg(unix)]
+pub use storage::try_exclusive_lock;
