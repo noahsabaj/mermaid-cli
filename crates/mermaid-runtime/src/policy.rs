@@ -710,7 +710,13 @@ fn collapse_parent_refs(p: &str) -> String {
             "" | "." => {},
             ".." => {
                 if stack.is_empty() || matches!(stack.last(), Some(&"..")) {
-                    stack.push("..");
+                    // For an absolute path, `..` at root stays at root (the shell
+                    // can't go above `/`), so drop it — otherwise `/etc/../../..`
+                    // would leave a stray `..` and dodge the root check. Relative
+                    // paths keep the leading `..` (it's meaningful).
+                    if !absolute {
+                        stack.push("..");
+                    }
                 } else {
                     stack.pop();
                 }
@@ -849,6 +855,15 @@ fn classify_shell_command_depth(command: &str, depth: u8) -> RiskClass {
             for body in extract_substitutions(&segment) {
                 worst = shell_max(worst, classify_shell_command_depth(&body, depth + 1));
             }
+        } else if !extract_substitutions(&segment).is_empty() {
+            // At the recursion cap with substitutions still nested below, we can no
+            // longer prove the hidden payload is benign — so fail SAFE instead of
+            // riding the (possibly ReadOnly) outer classification. Forcing at least
+            // ShellMutation means a deeply-nested `$(…$(rm -rf /)…)` can never
+            // auto-run in read_only/auto; it routes to deny / approval / classify.
+            // (Backstop: `contains_destructive_pattern` above already fails safe on
+            // deep nesting, but this keeps the classifier independently sound.)
+            worst = shell_max(worst, RiskClass::ShellMutation);
         }
     }
     worst
@@ -893,9 +908,11 @@ fn is_dangerous_root(arg: &str) -> bool {
     let normalized = a.replace("${", "$").replace('}', "");
     // Collapse interior `..` so `/etc/../etc` can't disguise `/etc` (#F3).
     let collapsed = collapse_parent_refs(&normalized);
-    let a = collapsed.as_str();
+    // Strip a trailing slash so a path that collapses to bare `/` via interior
+    // `..` (e.g. `/etc/..` → `/`) reduces to "" and trips the root check (#F3).
+    let a = collapsed.strip_suffix('/').unwrap_or(&collapsed);
     if a.is_empty() {
-        // Was `/`, `/*`, or `/.` — the filesystem root.
+        // Was `/`, `/*`, `/.`, or collapsed to the filesystem root.
         return true;
     }
     if matches!(
@@ -1111,12 +1128,15 @@ fn destructive_with_depth(command: &str, depth: u8) -> bool {
         // `bash -c "rm -rf /"` can't smuggle a destructive command past the
         // tokenizer. Bounded depth guards crafted nesting.
         if SHELL_INTERPRETERS.contains(&head)
-            && depth < 3
             && let Some(pos) = rest.iter().position(|a| a == "-c")
             && let Some(script) = rest.get(pos + 1)
-            && destructive_with_depth(script, depth + 1)
         {
-            return true;
+            // At the depth cap we can no longer inspect the script, so fail SAFE:
+            // an un-analyzable nested `-c` (e.g. `bash -c "bash -c …rm -rf /…"`)
+            // is treated as destructive rather than benign.
+            if depth >= 3 || destructive_with_depth(script, depth + 1) {
+                return true;
+            }
         }
     }
     // Redirect / `tee` to a sensitive target (cron, dotfiles, ssh, system dirs).
@@ -1156,6 +1176,13 @@ fn destructive_with_depth(command: &str, depth: u8) -> bool {
                 return true;
             }
         }
+    } else if !extract_substitutions(&lower).is_empty() {
+        // At the recursion cap with substitutions still nested below: an
+        // un-inspected `$(…)` could hide `rm -rf /`. The hard-deny runs in every
+        // mode (incl. full_access) and backs the approval-replay re-check, so it
+        // fails SAFE here — an un-analyzable deep nest is treated as destructive
+        // rather than slipping the catastrophic-command gate.
+        return true;
     }
     false
 }
@@ -1471,12 +1498,61 @@ mod tests {
     }
 
     #[test]
+    fn deeply_nested_destructive_fails_safe_not_auto_run() {
+        // #C1 depth-cap fail-open: a destructive payload nested past the recursion
+        // caps must NOT ride a benign outer head (`echo`/`bash`) into a ReadOnly /
+        // auto-run classification. Both the classifier and the hard-deny fail SAFE
+        // at the cap, so "too deep to analyze" is treated as dangerous, not benign.
+        let mut subst = String::from("rm -rf /");
+        let mut shell_c = String::from("rm -rf /");
+        for _ in 0..12 {
+            subst = format!("echo $({subst})");
+            shell_c = format!("bash -c {shell_c:?}");
+        }
+        for cmd in [subst.as_str(), shell_c.as_str()] {
+            assert!(
+                super::is_destructive_command(cmd),
+                "deeply-nested destructive command must be hard-denied: {cmd:?}",
+            );
+            assert_ne!(
+                super::classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "deeply-nested destructive command must not classify ReadOnly: {cmd:?}",
+            );
+            for mode in [SafetyMode::ReadOnly, SafetyMode::Auto] {
+                assert!(
+                    !matches!(
+                        PolicyEngine::new(mode).decide(&shell(cmd)),
+                        PolicyDecision::Allow { .. }
+                    ),
+                    "{mode:?} must not auto-allow {cmd:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shallow_benign_nesting_is_not_over_blocked() {
+        // The fail-safe must not over-escalate ordinary shallow nesting: a benign
+        // read-only command a few levels deep still classifies ReadOnly and is not
+        // hard-denied.
+        let cmd = "echo $(echo $(echo hi))";
+        assert_eq!(super::classify_shell_command(cmd), RiskClass::ReadOnly);
+        assert!(!super::is_destructive_command(cmd));
+    }
+
+    #[test]
     fn ifs_and_interior_dotdot_evasions_are_hard_denied() {
         // #F2/#F3: `${IFS}` word-glue and interior `..` must not evade the deny.
         for cmd in [
             "rm${IFS}-rf${IFS}/",
             "rm -rf /etc/../etc",
             "rm -rf /usr/local/../../etc",
+            // #M1: interior `..` that collapses all the way to `/` (the path is
+            // `rm -rf /`), incl. `..` walking above root, must still hard-deny.
+            "rm -rf /etc/..",
+            "rm -rf /var/..",
+            "rm -rf /a/b/../../..",
         ] {
             let decision = PolicyEngine::new(SafetyMode::FullAccess).decide(&shell(cmd));
             assert!(

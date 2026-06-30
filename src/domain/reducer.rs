@@ -2721,7 +2721,8 @@ fn handle_stream_done(
             // fold the already-billed token usage into the running totals so the
             // /context accounting stays accurate. Everything else about the late
             // Done is dropped.
-            if matches!(other, TurnState::Cancelling { .. })
+            if let TurnState::Cancelling { id, .. } = &other
+                && *id == turn
                 && let Some(u) = usage
             {
                 let totals = TokenUsageTotals::from_usage(&u);
