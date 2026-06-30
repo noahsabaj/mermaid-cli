@@ -91,6 +91,48 @@ instead of truncated, and the `#77` symlink confinement is preserved.
 `restore_checkpoint` (`checkpoint.rs`) stages writes-before-deletes with per-file
 atomic writes and best-effort rollback. (DB write atomicity is RC-5.)
 
+### Second-review individual findings (`#117`–`#142`)
+
+Beyond the root causes above, the 26 individual findings were resolved (each with
+regression tests; build / `clippy -D warnings` / `rustfmt` clean; validated
+end-to-end headless against `ollama/minimax-m3:cloud`):
+
+- **Providers** — #122 Ollama `think` is gated on a cached `/api/show` thinking
+  capability probe (omit when unsupported; preserve + retry on probe failure);
+  #123 openai-compat tolerates a usage-only final chunk (`choices` defaulted) and
+  surfaces a mid-stream `{"error"}` frame as a typed error; #124 temperature is
+  omitted for o-series/gpt-5; #125 a stream with no usage frame returns `None`
+  (preserving the char-estimate) instead of zeros; #137 Gemini stops
+  double-counting cached input tokens; #138 Anthropic `message_stop` breaks the
+  outer stream loop.
+- **Daemon / persistence** — #117 checkpoint ids use the collision-hardened
+  `fresh_id` and the insert error is propagated (no silent disk/DB divergence);
+  #118 approvals are claimed atomically (`UPDATE … WHERE user_decision IS NULL`)
+  before the un-rollback-able effect, released on error, recovered on restart;
+  #120 a startup reconcile resets tasks stranded `Running` and stale claims; #128
+  query limits are clamped (no negative-LIMIT wrap); #129 conversation loads are
+  size-capped; #130 a startup GC prunes archived/old-terminal rows + orphaned
+  checkpoint dirs (never active data); #131 a daemon-lifetime advisory `flock`
+  closes the socket-startup TOCTOU.
+- **Safety / recorder** — #119 a `PolicyOverride` on the Memory category now
+  applies (override block moved above the memory short-circuit, still below the
+  destructive hard-deny); #132 recordings are written `0600` with a one-time
+  cleartext warning; #141 the injection pre-filter normalizes text and covers more
+  reviewer-directed markers.
+- **Render** — #135 `build_live_messages` uses `state.now` (purity restored) and
+  returns `Cow` (no idle-frame transcript clone); #136 wide tables shrink to fit a
+  narrow viewport; #140 the dead `layout.rs` was removed; #134 the per-frame
+  double-clone and markdown-cache thrash were eliminated (the full per-message
+  line cache is deferred — see BACKLOG.md).
+- **Exec / computer-use / MCP** — #126 the on-disk tee log is capped at 64 MiB;
+  #127 computer-use backends are wall-clock bounded; #139 MCP validation runs the
+  graceful shutdown on the error path.
+- **Domain** — #121 a provider error drains the queued-message FIFO (no
+  out-of-order replay); #133 `RuntimeState.timeline` is bounded to 200 events.
+- **#142** (non-Linux fallback TOCTOU) is by design — `openat2(RESOLVE_BENEATH)`
+  closes it on Linux — and now emits a one-time operator warning when the fallback
+  is used.
+
 ---
 
 ## Resolved by group

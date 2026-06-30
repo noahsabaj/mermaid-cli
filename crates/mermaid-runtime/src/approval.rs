@@ -43,9 +43,33 @@ pub(crate) fn approve_and_replay_with(
         "approval {id} cannot be replayed (already decided or archived)"
     );
 
+    // Claim atomically so two concurrent `approve <id>` calls can't both run the
+    // un-rollback-able effect (#118): exactly one wins the claim and proceeds.
+    // Any failure before the final mark releases the claim, keeping the action
+    // re-runnable — preserving the effect-before-mark crash-safety of #62.
+    anyhow::ensure!(
+        store.approvals().claim(id)?,
+        "approval {id} is already being applied by a concurrent approve"
+    );
+    match replay_after_claim(store, id, &approval) {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            let _ = store.approvals().release_claim(id);
+            Err(error)
+        },
+    }
+}
+
+/// Run a claimed approval's pending action and finalize it. The caller holds the
+/// `approving` claim and releases it if this returns `Err`.
+fn replay_after_claim(
+    store: &RuntimeStore,
+    id: &str,
+    approval: &ApprovalRecord,
+) -> Result<ApprovalReplayResult> {
     let Some(raw_action) = approval.pending_action_json.as_deref() else {
         // Nothing to replay: just record the decision (no effect to order around).
-        store.approvals().decide(id, "approved")?;
+        store.approvals().finalize_claimed(id, "approved")?;
         let approval = store.approvals().get(id)?;
         return Ok(ApprovalReplayResult {
             approval,
@@ -59,7 +83,7 @@ pub(crate) fn approve_and_replay_with(
     // 1) Effect first — the un-rollback-able fs write / process spawn.
     let summary = replay_pending_action(&action)?;
     // 2) Mark approved last — only now is "approved" both true and durable.
-    store.approvals().decide(id, "approved")?;
+    store.approvals().finalize_claimed(id, "approved")?;
     let approval = store
         .approvals()
         .get(id)?

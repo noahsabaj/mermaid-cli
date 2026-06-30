@@ -114,6 +114,14 @@ fn map_openai_finish_reason(s: &str) -> FinishReason {
     }
 }
 
+/// OpenAI reasoning models (the `o1`/`o3`/`o4` families and `gpt-5`) reject any
+/// non-default `temperature` with a 400, so the request builder omits it for
+/// them (#124). Matches the bare model id (any `provider/` prefix stripped).
+fn is_reasoning_model(model_name: &str) -> bool {
+    let m = model_name.rsplit('/').next().unwrap_or(model_name);
+    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-5")
+}
+
 /// OpenAI-compatible model adapter.
 ///
 /// Constructed via `OpenAICompatAdapter::new` from `providers::factory::ProviderFactory` once the
@@ -252,9 +260,13 @@ impl OpenAICompatAdapter {
             "model": self.model_name,
             "messages": json_messages,
             "stream": stream,
-            // Clamp to OpenAI's accepted 0..=2 (a stale config value otherwise 400s).
-            "temperature": config.temperature.clamp(0.0, 2.0),
         });
+        // OpenAI o-series / gpt-5 reasoning models reject any non-default
+        // `temperature` with a 400, so it's sent only for models that accept it
+        // (#124). Clamp to the accepted 0..=2 (a stale config value otherwise 400s).
+        if !is_reasoning_model(&self.model_name) {
+            body["temperature"] = json!(config.temperature.clamp(0.0, 2.0));
+        }
 
         if stream {
             body["stream_options"] = json!({ "include_usage": true });
@@ -449,12 +461,11 @@ impl OpenAICompatAdapter {
         let mut thinking_acc = String::new();
         let mut tool_calls_partial: Vec<PartialToolCall> = Vec::new();
         let mut truncated = false;
-        let mut prompt_tokens = 0usize;
-        let mut completion_tokens = 0usize;
-        let mut total_tokens = None;
         let mut stop_reason: Option<FinishReason> = None;
-        // #12: the full token breakdown (cached-input + reasoning) from the last
-        // usage chunk; the scalar fields above are the fallback when absent.
+        // The full token breakdown (cached-input + reasoning) from the last usage
+        // frame. Stays `None` until a usage frame arrives, so a stream that never
+        // reports usage returns `None` (the reducer then keeps its estimate)
+        // rather than a misleading zero (#125).
         let mut usage_acc: Option<TokenUsage> = None;
         // For providers that emit `<think>...</think>` inline in
         // `delta.content`, route the content channel through this state
@@ -482,7 +493,40 @@ impl OpenAICompatAdapter {
             buf.extend_from_slice(&chunk);
 
             for payload in drain_sse_events(&mut buf) {
-                let parsed: ChatCompletionChunk = match serde_json::from_str(&payload) {
+                // A mid-stream error frame (common on OpenRouter) is an
+                // `{"error": ...}` object, not a chat chunk. Surface it as a
+                // typed provider error instead of the confusing "missing field
+                // choices" parse failure (#123) — mirrors the Gemini path.
+                let value: serde_json::Value = match serde_json::from_str(&payload) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(ModelError::ParseError {
+                            message: format!(
+                                "Failed to parse {} stream chunk: {}",
+                                self.profile.name, e
+                            ),
+                            raw: Some(payload),
+                        });
+                    },
+                };
+                if let Some(err) = value.get("error") {
+                    let code = err.get("code").and_then(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    });
+                    let message = err
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("stream error")
+                        .to_string();
+                    return Err(ModelError::Backend(BackendError::ProviderError {
+                        provider: self.profile.name.to_string(),
+                        code,
+                        message,
+                    }));
+                }
+                let parsed: ChatCompletionChunk = match serde_json::from_value(value) {
                     Ok(v) => v,
                     Err(e) => {
                         return Err(ModelError::ParseError {
@@ -496,14 +540,9 @@ impl OpenAICompatAdapter {
                 };
 
                 if let Some(usage) = parsed.usage {
-                    prompt_tokens = usage.prompt_tokens.unwrap_or(prompt_tokens);
-                    completion_tokens = usage.completion_tokens.unwrap_or(completion_tokens);
-                    if let Some(total) = usage.total_tokens {
-                        total_tokens = Some(total);
-                    }
-                    // #12: capture the cached-input + reasoning breakdown the
-                    // scalars above drop, via the same converter the non-stream
-                    // path uses.
+                    // #12: capture the cached-input + reasoning breakdown via the
+                    // same converter the non-stream path uses. The last usage
+                    // frame wins.
                     usage_acc = Some(token_usage_from_wire(usage));
                 }
 
@@ -629,8 +668,6 @@ impl OpenAICompatAdapter {
             }
         }
 
-        let total_tokens =
-            total_tokens.unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
         // F3: wrapper emits the authoritative `Done` from the returned
         // `ModelResponse`. See adapters/anthropic.rs for rationale.
 
@@ -660,9 +697,9 @@ impl OpenAICompatAdapter {
 
         Ok(ModelResponse {
             content: content_acc,
-            usage: Some(usage_acc.unwrap_or_else(|| {
-                TokenUsage::provider(prompt_tokens, completion_tokens, total_tokens)
-            })),
+            // `None` when the stream never reported usage, so the reducer keeps
+            // its char/4 estimate instead of resetting the gauge to zero (#125).
+            usage: usage_acc,
             model_name: self.model_name.clone(),
             stop_reason,
             thinking,
@@ -811,6 +848,10 @@ struct ResponseMessage {
 /// Streaming response chunk (one SSE event payload).
 #[derive(Debug, Deserialize)]
 struct ChatCompletionChunk {
+    // A final usage-only frame (and some providers' keep-alives) carry no
+    // `choices`; default to empty so it parses instead of 400-ing the stream
+    // with "missing field choices" (#123).
+    #[serde(default)]
     choices: Vec<StreamingChoice>,
     #[serde(default)]
     usage: Option<UsageWire>,
@@ -1226,6 +1267,39 @@ mod tests {
     }
 
     #[test]
+    fn chat_completion_chunk_parses_usage_only_frame() {
+        // #123: a final usage-only frame carries no `choices`; with the field
+        // defaulted it must parse instead of failing "missing field choices".
+        let chunk: ChatCompletionChunk = serde_json::from_str(
+            r#"{"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
+        )
+        .expect("usage-only frame must parse");
+        assert!(chunk.choices.is_empty());
+        assert!(chunk.usage.is_some());
+    }
+
+    #[test]
+    fn is_reasoning_model_matches_o_series_and_gpt5() {
+        for m in [
+            "o1",
+            "o1-mini",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+            "gpt-5",
+            "gpt-5-mini",
+        ] {
+            assert!(is_reasoning_model(m), "{m} should be a reasoning model");
+        }
+        for m in ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "chatgpt-4o-latest"] {
+            assert!(
+                !is_reasoning_model(m),
+                "{m} should not be a reasoning model"
+            );
+        }
+    }
+
+    #[test]
     fn token_usage_from_wire_preserves_authoritative_total() {
         let usage = token_usage_from_wire(UsageWire {
             prompt_tokens: Some(100),
@@ -1388,7 +1462,9 @@ mod tests {
     }
 
     #[test]
-    fn build_request_body_includes_tools_and_temperature() {
+    fn build_request_body_includes_tools_and_omits_temperature_for_reasoning() {
+        // gpt-5-mini is a reasoning model: tools still pass through, but
+        // `temperature` must be omitted — OpenAI 400s on it (#124).
         let adapter = test_adapter();
         let messages = vec![ChatMessage::user("hi")];
         // v7: tools come from config (populated by the provider
@@ -1411,6 +1487,26 @@ mod tests {
         let body = adapter.build_request_body(&messages, &config, true);
         assert!(body["tools"].is_array());
         assert_eq!(body["tools"].as_array().unwrap().len(), 5);
+        assert!(
+            body.get("temperature").is_none(),
+            "a reasoning model must omit temperature, got {:?}",
+            body.get("temperature")
+        );
+    }
+
+    #[test]
+    fn build_request_body_includes_temperature_for_non_reasoning_model() {
+        // A non-reasoning model (gpt-4o) still receives `temperature` (#124).
+        let adapter = OpenAICompatAdapter::new(
+            test_profile(),
+            "https://api.openai.com/v1".to_string(),
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            HashMap::new(),
+        )
+        .expect("adapter constructs");
+        let config = ModelConfig::default();
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false);
         assert_eq!(body["temperature"], config.temperature);
     }
 

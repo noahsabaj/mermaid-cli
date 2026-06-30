@@ -519,6 +519,73 @@ impl RuntimeStore {
         PairingTokensRepo { conn: &self.conn }
     }
 
+    /// Recover state stranded by a previous daemon's crash/stop (#120, #118).
+    /// A `Running` task's worker died with the daemon, so it can never finish —
+    /// mark it `failed` with an event. An approval left in the transient
+    /// `approving` claim state (a replay that crashed mid-effect, #118) is reset
+    /// to undecided so it reappears as pending and stays re-runnable. Call once
+    /// on daemon startup, before serving. Returns `(tasks_reset, claims_released)`.
+    pub fn reconcile_after_restart(&self) -> Result<(usize, usize)> {
+        let now = now_rfc3339();
+        let tx = self.conn.unchecked_transaction()?;
+        let running: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM tasks WHERE status = 'running'")?;
+            let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            ids.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for id in &running {
+            tx.execute(
+                "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1",
+                params![id, now],
+            )?;
+            tx.execute(
+                "INSERT INTO task_events (task_id, kind, message, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    id,
+                    "interrupted",
+                    "task was running when the daemon restarted; marked failed",
+                    now
+                ],
+            )?;
+        }
+        let claims_released = tx.execute(
+            "UPDATE approvals SET user_decision = NULL WHERE user_decision = 'approving'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok((running.len(), claims_released))
+    }
+
+    /// Best-effort retention GC (#130): prune archived approvals/checkpoints and
+    /// the events of long-finished tasks older than `retention_days`. Deletes
+    /// only archived or terminal-and-old rows — active data is never touched.
+    /// Returns the number of rows removed.
+    pub fn gc(&self, retention_days: i64) -> Result<u64> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
+        let tx = self.conn.unchecked_transaction()?;
+        let mut removed = 0u64;
+        removed += tx.execute(
+            "DELETE FROM approvals WHERE archived_at IS NOT NULL AND archived_at < ?1",
+            params![cutoff],
+        )? as u64;
+        removed += tx.execute(
+            "DELETE FROM checkpoints WHERE archived_at IS NOT NULL AND archived_at < ?1",
+            params![cutoff],
+        )? as u64;
+        removed += tx.execute(
+            "DELETE FROM task_events
+             WHERE created_at < ?1
+               AND task_id IN (
+                   SELECT id FROM tasks
+                   WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at < ?1
+               )",
+            params![cutoff],
+        )? as u64;
+        tx.commit()?;
+        Ok(removed)
+    }
+
     fn init_schema(&self) -> Result<()> {
         let conn = &self.conn;
         // Forward-compat gate: read the stored schema version BEFORE writing
@@ -799,7 +866,7 @@ impl SessionsRepo<'_> {
                     created_at, updated_at, total_tokens
              FROM sessions ORDER BY updated_at DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map([limit as i64], session_from_row)?;
+        let rows = stmt.query_map([clamp_limit(limit)], session_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -910,7 +977,7 @@ impl TasksRepo<'_> {
              ORDER BY updated_at DESC
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map([limit as i64], task_from_row)?;
+        let rows = stmt.query_map([clamp_limit(limit)], task_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -1029,7 +1096,7 @@ impl ToolRunsRepo<'_> {
                     output_json, started_at, finished_at
              FROM tool_runs ORDER BY started_at DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map([limit as i64], tool_run_from_row)?;
+        let rows = stmt.query_map([clamp_limit(limit)], tool_run_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -1115,6 +1182,47 @@ impl ApprovalsRepo<'_> {
         Ok(())
     }
 
+    /// Atomically claim an undecided approval for replay (#118). Sets
+    /// `user_decision='approving'` only when it is currently NULL and
+    /// un-archived, and reports whether THIS caller won the claim. Two concurrent
+    /// `approve <id>` calls race this single UPDATE; exactly one sees
+    /// `rows_affected == 1` and runs the un-rollback-able effect, the other sees
+    /// `false` and bails — so the effect can't fire twice. A claim that crashes
+    /// before finalizing is reset to NULL by the daemon's startup reconcile.
+    pub fn claim(&self, id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE approvals
+             SET user_decision = 'approving'
+             WHERE id = ?1 AND user_decision IS NULL AND archived_at IS NULL",
+            params![id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Release a claim taken by [`Self::claim`] back to undecided, so the action
+    /// stays re-runnable after the replay effect failed.
+    pub fn release_claim(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE approvals SET user_decision = NULL
+             WHERE id = ?1 AND user_decision = 'approving'",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Finalize a claimed approval's decision (the `approving` → terminal-value
+    /// transition that [`Self::decide`]'s `WHERE user_decision IS NULL` can't make).
+    pub fn finalize_claimed(&self, id: &str, user_decision: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE approvals
+             SET user_decision = ?2, decided_at = ?3
+             WHERE id = ?1 AND user_decision = 'approving'",
+            params![id, user_decision, now_rfc3339()],
+        )?;
+        anyhow::ensure!(changed > 0, "approval {} was not in the claimed state", id);
+        Ok(())
+    }
+
     pub fn list_pending(&self) -> Result<Vec<ApprovalRecord>> {
         self.list_pending_with_archived(false)
     }
@@ -1132,7 +1240,7 @@ impl ApprovalsRepo<'_> {
              ORDER BY created_at DESC
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map([limit as i64], approval_from_row)?;
+        let rows = stmt.query_map([clamp_limit(limit)], approval_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -1244,7 +1352,7 @@ impl ProcessesRepo<'_> {
              ORDER BY updated_at DESC
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map([limit as i64], process_from_row)?;
+        let rows = stmt.query_map([clamp_limit(limit)], process_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -1322,7 +1430,7 @@ impl CheckpointsRepo<'_> {
                     pending_action_json, approval_id, created_at, archived_at, archive_reason
              FROM checkpoints {archived_filter} ORDER BY created_at DESC LIMIT ?1"
         ))?;
-        let rows = stmt.query_map([limit as i64], checkpoint_from_row)?;
+        let rows = stmt.query_map([clamp_limit(limit)], checkpoint_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -1409,7 +1517,7 @@ impl CompactionsRepo<'_> {
                     preserved_turns, archive_path, verification_status, created_at
              FROM compactions ORDER BY created_at DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map([limit as i64], compaction_from_row)?;
+        let rows = stmt.query_map([clamp_limit(limit)], compaction_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -1966,7 +2074,17 @@ fn is_expired(expires_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> b
     }
 }
 
-fn fresh_id(prefix: &str) -> String {
+/// Upper bound on any `LIMIT` we bind. A caller-supplied `limit` (e.g. a daemon
+/// request body's `limit`) can be a huge `u64` that, cast straight to `i64`,
+/// wraps negative — and SQLite reads a negative `LIMIT` as *unbounded*, so the
+/// query returns every row (#128). Clamp at the `usize` level before the cast.
+const MAX_QUERY_LIMIT: usize = 10_000;
+
+fn clamp_limit(limit: usize) -> i64 {
+    limit.min(MAX_QUERY_LIMIT) as i64
+}
+
+pub(crate) fn fresh_id(prefix: &str) -> String {
     // In-process monotonic counter: two ids minted in the same nanosecond (a
     // coarse clock, or a clock stepping backward) can never be equal, so the
     // `ON CONFLICT(id) DO UPDATE` upserts can't silently overwrite an unrelated
@@ -1988,6 +2106,29 @@ fn fresh_id(prefix: &str) -> String {
         .unwrap_or_default();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}-{nanos:x}-{salt:x}-{seq:x}")
+}
+
+/// Acquire an exclusive, auto-released advisory lock on `path` — a process
+/// singleton guard for the daemon (#131). Returns the held `File` on success
+/// (keep it alive to hold the lock), or `None` if another process already holds
+/// it. `flock` releases automatically when the file is dropped OR the process
+/// exits/crashes, so a dead holder never wedges the lock the way an `O_EXCL`
+/// pidfile would. Holding it across the socket probe → unlink → bind closes that
+/// TOCTOU: two daemons can't both decide a stale socket is theirs to rebind.
+pub fn try_exclusive_lock(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    use rustix::fs::{FlockOperation, flock};
+    // A lockfile's content is irrelevant — only the flock matters — so don't
+    // truncate (avoids a needless write and any truncate/lock ordering race).
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(Some(file)),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
@@ -2507,6 +2648,141 @@ mod tests {
         assert!(ensure_column(&store.conn, "approvals; DROP", "x", "TEXT").is_err());
         assert!(ensure_column(&store.conn, "approvals", "x-y", "TEXT").is_err());
         assert!(ensure_column(&store.conn, "approvals", "x", "TEXT; DROP").is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn clamp_limit_never_binds_negative() {
+        // #128: a huge `limit` must clamp, not wrap to a negative i64 (which
+        // SQLite reads as unbounded).
+        assert_eq!(clamp_limit(10), 10);
+        assert_eq!(clamp_limit(usize::MAX), MAX_QUERY_LIMIT as i64);
+        assert!(clamp_limit(usize::MAX) > 0);
+    }
+
+    fn make_approval(store: &RuntimeStore, action: &str) -> ApprovalRecord {
+        store
+            .approvals()
+            .create(NewApproval {
+                task_id: None,
+                proposed_action: action.to_string(),
+                risk_classification: "shell_mutation".to_string(),
+                policy_decision: "ask".to_string(),
+                args_summary: None,
+                checkpoint_id: None,
+                pending_action_json: None,
+            })
+            .expect("create approval")
+    }
+
+    #[test]
+    fn approval_claim_is_single_winner_releasable_and_finalizable() {
+        // #118: exactly one concurrent claim wins; a released claim re-claims; a
+        // finalized one is decided and unclaimable.
+        let path = temp_db("approval_claim");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let a = make_approval(&store, "write_file a");
+
+        assert!(store.approvals().claim(&a.id).unwrap(), "first claim wins");
+        assert!(
+            !store.approvals().claim(&a.id).unwrap(),
+            "second claim loses"
+        );
+
+        store.approvals().release_claim(&a.id).unwrap();
+        assert!(
+            store.approvals().claim(&a.id).unwrap(),
+            "a released claim is re-claimable (effect-failed path)"
+        );
+
+        store
+            .approvals()
+            .finalize_claimed(&a.id, "approved")
+            .unwrap();
+        assert_eq!(
+            store
+                .approvals()
+                .get(&a.id)
+                .unwrap()
+                .unwrap()
+                .user_decision
+                .as_deref(),
+            Some("approved")
+        );
+        assert!(
+            !store.approvals().claim(&a.id).unwrap(),
+            "a decided approval cannot be claimed"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reconcile_after_restart_recovers_running_tasks_and_claims() {
+        // #120/#118: a Running task and an 'approving' claim left by a crashed
+        // daemon are recovered on the next startup.
+        let path = temp_db("reconcile");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let task = store
+            .tasks()
+            .create(NewTask::new("t", "/repo", "m"))
+            .expect("create task");
+        store
+            .tasks()
+            .update_status(&task.id, TaskStatus::Running, None)
+            .expect("mark running");
+        let appr = make_approval(&store, "git push");
+        assert!(store.approvals().claim(&appr.id).unwrap());
+
+        let (tasks, claims) = store.reconcile_after_restart().expect("reconcile");
+        assert_eq!((tasks, claims), (1, 1));
+        assert_eq!(
+            store.tasks().get(&task.id).unwrap().unwrap().status,
+            TaskStatus::Failed
+        );
+        assert!(
+            store
+                .approvals()
+                .get(&appr.id)
+                .unwrap()
+                .unwrap()
+                .user_decision
+                .is_none(),
+            "a released claim is undecided and re-runnable"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn gc_prunes_old_archived_but_keeps_active() {
+        // #130: GC removes archived rows past the retention window, never active
+        // ones.
+        let path = temp_db("gc");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let keep = make_approval(&store, "active");
+        let gone = make_approval(&store, "old archived");
+        store
+            .approvals()
+            .archive(std::slice::from_ref(&gone.id), "test")
+            .expect("archive");
+        // Backdate the archive far past the window.
+        store
+            .conn
+            .execute(
+                "UPDATE approvals SET archived_at = ?2 WHERE id = ?1",
+                params![gone.id, "2000-01-01T00:00:00+00:00"],
+            )
+            .unwrap();
+
+        let removed = store.gc(30).expect("gc");
+        assert!(removed >= 1, "the old archived approval should be pruned");
+        assert!(
+            store.approvals().get(&gone.id).unwrap().is_none(),
+            "old archived row removed"
+        );
+        assert!(
+            store.approvals().get(&keep.id).unwrap().is_some(),
+            "active row kept"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

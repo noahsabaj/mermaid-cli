@@ -44,6 +44,11 @@ fn classify_args<I: IntoIterator<Item = String>>(args: I) -> CliAction {
     }
 }
 
+/// Retention window for the startup GC (#130): archived approvals/checkpoints,
+/// the events of long-finished tasks, and on-disk checkpoint dirs older than this
+/// are pruned. Generous so nothing recently useful is dropped.
+const RUNTIME_RETENTION_DAYS: i64 = 30;
+
 #[cfg(unix)]
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -76,6 +81,48 @@ async fn main() -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("failed to lock data dir {} to 0700", data_dir.display()))?;
+    }
+
+    // Singleton guard (#131): hold an advisory flock for the daemon's whole
+    // lifetime so two concurrent starts can't race the connect-probe → unlink →
+    // bind dance below (one would unlink the other's fresh socket). flock
+    // auto-releases on process exit/crash, so a dead daemon never wedges it.
+    let lock_path = data_dir.join("mermaidd.lock");
+    let _daemon_lock = match mermaid_cli::runtime::try_exclusive_lock(&lock_path)
+        .with_context(|| format!("failed to open daemon lock {}", lock_path.display()))?
+    {
+        Some(file) => file,
+        None => anyhow::bail!(
+            "another mermaidd is starting or running (lock held on {}) — use `mermaid daemon restart`",
+            lock_path.display()
+        ),
+    };
+
+    // Only the lock holder reaches here, so this runs once per live daemon:
+    // recover state a previous daemon left stranded by crashing (#120, #118) and
+    // prune old runtime rows + checkpoint dirs (#130). All best-effort.
+    if let Ok(store) = mermaid_cli::runtime::RuntimeStore::open_default() {
+        match store.reconcile_after_restart() {
+            Ok((tasks, claims)) if tasks + claims > 0 => {
+                tracing::info!(
+                    tasks,
+                    claims,
+                    "reconciled state stranded by a previous daemon"
+                );
+            },
+            Ok(_) => {},
+            Err(error) => tracing::warn!(error = %error, "startup reconcile failed"),
+        }
+        match store.gc(RUNTIME_RETENTION_DAYS) {
+            Ok(removed) if removed > 0 => tracing::info!(removed, "gc pruned old runtime rows"),
+            Ok(_) => {},
+            Err(error) => tracing::warn!(error = %error, "startup gc failed"),
+        }
+    }
+    if let Ok(removed) = mermaid_cli::runtime::gc_old_checkpoint_dirs(RUNTIME_RETENTION_DAYS)
+        && removed > 0
+    {
+        tracing::info!(removed, "gc removed old checkpoint directories");
     }
 
     if socket_path.exists() {

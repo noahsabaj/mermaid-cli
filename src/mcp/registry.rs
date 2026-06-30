@@ -257,15 +257,24 @@ pub async fn validate_server(
 
     let mut client = McpClient::new(transport);
 
-    tokio::time::timeout(Duration::from_secs(60), async {
+    let result = tokio::time::timeout(Duration::from_secs(60), async {
         client.initialize().await?;
         let tools = client.list_tools().await?;
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-        client.shutdown().await;
         Ok::<Vec<String>, anyhow::Error>(tool_names)
     })
-    .await
-    .map_err(|_| anyhow!("Server initialization timed out (60s)"))?
+    .await;
+
+    // Gracefully shut the validation child down on EVERY path — success, an
+    // initialize/list_tools error, or the timeout — instead of only on success.
+    // The old `?` short-circuit skipped this and fell back to `kill_on_drop`,
+    // bypassing the close-stdin -> SIGTERM -> SIGKILL escalation (#139).
+    client.shutdown().await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => Err(anyhow!("Server initialization timed out (60s)")),
+    }
 }
 
 /// The npm package-name conventions tried for an unknown server name. Pure (no

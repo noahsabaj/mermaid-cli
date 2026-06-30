@@ -232,6 +232,20 @@ impl PolicyEngine {
             };
         }
 
+        // A user-configured override wins over the built-in defaults — including
+        // the memory short-circuit below — so an operator can tighten (or relax)
+        // any category. Only the hard-denied destructive pattern above outranks
+        // it. (This block previously sat *after* the memory return, so a
+        // `PolicyOverride{ category: Memory, .. }` was silently ignored — #119.)
+        if let Some(decision) = self
+            .overrides
+            .iter()
+            .find(|override_rule| override_matches(override_rule, request))
+            .map(|override_rule| override_decision(override_rule, risk))
+        {
+            return decision;
+        }
+
         // Durable memory is agent-owned and ungated in every mode except
         // read-only. This sits ahead of the mode match so an `Ask`-mode write
         // never pops the inline approval modal — the design wants memory to
@@ -249,15 +263,6 @@ impl PolicyEngine {
                     checkpoint: false,
                 },
             };
-        }
-
-        if let Some(decision) = self
-            .overrides
-            .iter()
-            .find(|override_rule| override_matches(override_rule, request))
-            .map(|override_rule| override_decision(override_rule, risk))
-        {
-            return decision;
         }
 
         match self.mode {
@@ -1114,6 +1119,41 @@ mod tests {
         assert!(matches!(
             PolicyEngine::new(SafetyMode::ReadOnly).decide(&req()),
             PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn memory_override_is_applied() {
+        // #119: a user override targeting the Memory category must take effect.
+        // It previously sat behind the memory short-circuit and was ignored, so
+        // memory writes could only be stopped by read-only.
+        let req = || ActionRequest::new("memory", ToolCategory::Memory, "memory remember");
+        let deny_memory = || PolicyOverride {
+            category: Some(ToolCategory::Memory),
+            decision: PolicyOverrideDecision::Deny,
+            ..PolicyOverride::default()
+        };
+        for mode in [SafetyMode::Ask, SafetyMode::Auto, SafetyMode::FullAccess] {
+            assert!(
+                matches!(
+                    PolicyEngine::new(mode)
+                        .with_overrides(vec![deny_memory()])
+                        .decide(&req()),
+                    PolicyDecision::Deny { .. }
+                ),
+                "a Deny override must block memory in {mode:?}",
+            );
+        }
+        // And an Ask override escalates it to a prompt instead of auto-allowing.
+        assert!(matches!(
+            PolicyEngine::new(SafetyMode::Auto)
+                .with_overrides(vec![PolicyOverride {
+                    category: Some(ToolCategory::Memory),
+                    decision: PolicyOverrideDecision::Ask,
+                    ..PolicyOverride::default()
+                }])
+                .decide(&req()),
+            PolicyDecision::Ask { .. }
         ));
     }
 

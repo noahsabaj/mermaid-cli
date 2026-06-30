@@ -44,7 +44,9 @@ pub fn create_checkpoint_for_task(
     pending_action: Option<serde_json::Value>,
     task_id: Option<String>,
 ) -> Result<CheckpointManifest> {
-    let id = fresh_checkpoint_id();
+    // Collision-hardened id (salt+seq+nanos) — the old time-only id could repeat
+    // within a coarse-clock tick and overwrite a prior checkpoint's files (#117).
+    let id = crate::storage::fresh_id("checkpoint");
     let root = data_dir()?.join("checkpoints").join(&id);
     let files_dir = root.join("files");
     std::fs::create_dir_all(&files_dir)
@@ -108,8 +110,11 @@ pub fn create_checkpoint_for_task(
     crate::write_atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
 
     if let Ok(store) = RuntimeStore::open_default() {
-        let _ = store.checkpoints().create(NewCheckpoint {
-            id: Some(id),
+        // Don't swallow the insert error (#117): a failed insert means the
+        // manifest+files are on disk but the DB has no row, so a later restore
+        // can't find them. Roll the on-disk checkpoint back and surface it.
+        if let Err(error) = store.checkpoints().create(NewCheckpoint {
+            id: Some(id.clone()),
             task_id,
             project_path: manifest.project_path.clone(),
             snapshot_path: root.display().to_string(),
@@ -120,7 +125,11 @@ pub fn create_checkpoint_for_task(
                 .map(serde_json::to_string)
                 .transpose()?,
             approval_id: None,
-        });
+        }) {
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(error)
+                .with_context(|| format!("failed to record checkpoint {id} in the runtime DB"));
+        }
     }
 
     let _ = crate::run_plugin_hooks(
@@ -499,12 +508,36 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-fn fresh_checkpoint_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    format!("checkpoint-{nanos:x}")
+/// Best-effort GC of on-disk checkpoint directories older than `retention_days`
+/// (#130): removes `checkpoints/<id>/` whose mtime is past the window so the tree
+/// can't grow without bound, while keeping recent (still-restorable) checkpoints.
+/// Returns the count removed; never fails the caller (a bad entry is skipped).
+pub fn gc_old_checkpoint_dirs(retention_days: i64) -> Result<usize> {
+    let dir = data_dir()?.join("checkpoints");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(0);
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(
+            retention_days.max(0) as u64 * 86_400,
+        ))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let too_old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|mtime| mtime < cutoff)
+            .unwrap_or(false);
+        if too_old && std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

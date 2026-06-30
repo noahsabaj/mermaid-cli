@@ -19,7 +19,7 @@ pub use atomic::write_atomic;
 pub use approval::{ApprovalReplayResult, approve_and_replay, deny_approval};
 pub use checkpoint::{
     CheckpointFile, CheckpointManifest, create_checkpoint, create_checkpoint_for_task,
-    restore_checkpoint,
+    gc_old_checkpoint_dirs, restore_checkpoint,
 };
 pub use daemon::{
     DEFAULT_PAIRING_TTL_DAYS, clamp_pairing_ttl_days, daemon_socket_path, generate_pairing_token,
@@ -44,5 +44,5 @@ pub use storage::{
     PairingTokenRecord, PairingTokensRepo, PluginInstallRecord, PluginsRepo, ProcessRecord,
     ProcessStatus, ProcessesRepo, ProviderProbeRecord, ProviderProbesRepo, RuntimeStore,
     SessionRecord, SessionsRepo, TaskPriority, TaskRecord, TaskStatus, TaskTimelineEvent,
-    TasksRepo, ToolRunRecord, ToolRunsRepo, data_dir,
+    TasksRepo, ToolRunRecord, ToolRunsRepo, data_dir, try_exclusive_lock,
 };

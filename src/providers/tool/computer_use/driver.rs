@@ -759,17 +759,37 @@ async fn dispatch_capture(
     }
 }
 
-/// Run a `Command` to completion, racing it against cancellation.
-/// Relies on `kill_on_drop(true)` reaping the child when the future
-/// is dropped on cancel.
+/// Run a `Command` to completion, racing it against cancellation AND a
+/// wall-clock timeout. Relies on `kill_on_drop(true)` reaping the child when the
+/// future is dropped on cancel or timeout.
 pub(crate) async fn run_cmd_cancellable(
     cmd: &mut Command,
     token: &CancellationToken,
+) -> Result<()> {
+    run_cmd_cancellable_with_timeout(
+        cmd,
+        token,
+        std::time::Duration::from_secs(crate::constants::COMPUTER_USE_CMD_TIMEOUT_SECS),
+    )
+    .await
+}
+
+/// `run_cmd_cancellable` with an explicit timeout (extracted so the bound is
+/// testable with a tiny duration). Without the timeout a wedged backend (a dead
+/// `ydotoold` socket, a hung X server, a blocking permission dialog) would hang
+/// the tool until the user pressed Esc (#127).
+async fn run_cmd_cancellable_with_timeout(
+    cmd: &mut Command,
+    token: &CancellationToken,
+    timeout: std::time::Duration,
 ) -> Result<()> {
     cmd.kill_on_drop(true);
     tokio::select! {
         biased;
         _ = token.cancelled() => anyhow::bail!("cancelled"),
+        _ = tokio::time::sleep(timeout) => {
+            anyhow::bail!("subprocess timed out after {:?}", timeout)
+        }
         res = cmd.output() => {
             let out = res.context("subprocess spawn")?;
             if !out.status.success() {
@@ -1080,5 +1100,23 @@ mod tests {
         let mut cmd = Command::new("echo");
         cmd.arg("hi");
         assert_eq!(run_cmd_stdout(&mut cmd).await.unwrap().trim(), "hi");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_cmd_cancellable_times_out_on_wedged_backend() {
+        // #127: a wedged capture/input backend must not hang the tool until Esc;
+        // the timeout fires, drops the future (kill_on_drop reaps it), and bails.
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut cmd = Command::new("sleep");
+        cmd.arg("5");
+        let err = run_cmd_cancellable_with_timeout(
+            &mut cmd,
+            &token,
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
     }
 }

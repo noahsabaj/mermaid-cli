@@ -2549,12 +2549,7 @@ fn handle_compaction_finished(
             // tail of `handle_stream_done` / `handle_turn_cancelled` (#73). A
             // message the user typed during `/compact` would otherwise sit in the
             // FIFO until some later turn happened to end.
-            if let Some(next) = state.ui.queued_messages.pop_front() {
-                state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
-                    text: next.text,
-                    attachment_ids: next.attachment_ids,
-                });
-            }
+            drain_next_queued_message(state);
         },
         Outcome::Recovery => {
             // Resume the run with the compacted context so the model can finish the
@@ -2592,6 +2587,9 @@ fn handle_compaction_failed(
     match state.turn {
         TurnState::Compacting { id, .. } if id == turn => {
             state.turn = TurnState::Idle;
+            // This is the one arm that ends the turn; drain a queued message so
+            // it isn't stranded (the Generating arm leaves the stream live).
+            drain_next_queued_message(state);
         },
         TurnState::Generating { id, .. } if id == turn => {},
         _ => return,
@@ -2897,15 +2895,7 @@ fn handle_stream_done(
     }
 
     // No tool calls — turn ends here. Drain the queued-message FIFO.
-    // The follow-up goes through `pending_msgs` so the outer
-    // `update()` re-enters cleanly — preserves stale-filter
-    // semantics instead of inline-invoking.
-    if let Some(next) = state.ui.queued_messages.pop_front() {
-        state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
-            text: next.text,
-            attachment_ids: next.attachment_ids,
-        });
-    }
+    drain_next_queued_message(state);
 }
 
 /// Handle `Msg::OpenImageAt { message_index, image_index }`. Resolves
@@ -2955,12 +2945,7 @@ fn handle_turn_cancelled(state: &mut State, turn: TurnId) {
     match state.turn {
         TurnState::Cancelling { id, .. } if id == turn => {
             state.turn = TurnState::Idle;
-            if let Some(next) = state.ui.queued_messages.pop_front() {
-                state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
-                    text: next.text,
-                    attachment_ids: next.attachment_ids,
-                });
-            }
+            drain_next_queued_message(state);
         },
         _ => {
             // Stream already completed / already idle / stale id —
@@ -2969,6 +2954,20 @@ fn handle_turn_cancelled(state: &mut State, turn: TurnId) {
             // benign race where the scope drained after a successful
             // StreamDone committed normally.
         },
+    }
+}
+
+/// Drain one message from the queued-message FIFO when a turn ends. The
+/// follow-up is re-injected through `pending_msgs` so the outer `update()`
+/// re-enters cleanly (preserving stale-filter semantics) rather than
+/// inline-invoking a new turn. Shared by the stream-done, cancelled, and
+/// upstream-error turn-end paths so a queued message is never stranded.
+fn drain_next_queued_message(state: &mut State) {
+    if let Some(next) = state.ui.queued_messages.pop_front() {
+        state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
+            text: next.text,
+            attachment_ids: next.attachment_ids,
+        });
     }
 }
 
@@ -3017,6 +3016,11 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
         thinking_signature: None,
     };
     state.session.append(msg);
+
+    // A provider error ends the turn just like a normal completion — drain the
+    // queued-message FIFO so a message the user typed mid-turn isn't stranded
+    // until their next manual submit (it would otherwise run out of order).
+    drain_next_queued_message(state);
 }
 
 /// Route a typed `ProgressEvent`.
@@ -4632,6 +4636,55 @@ mod tests {
         assert_eq!(m.content, "");
         assert_eq!(m.actions.len(), 1);
         assert_eq!(m.actions[0].target, "Server error");
+    }
+
+    #[test]
+    fn upstream_error_drains_queued_message() {
+        // A provider error ends the turn; a message the user queued mid-turn
+        // must be submitted, not stranded until the next manual prompt (#121).
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
+        state
+            .ui
+            .queued_messages
+            .push_back(super::super::state::QueuedMessage {
+                text: "queued during turn".to_string(),
+                attachment_ids: Vec::new(),
+            });
+        let err = crate::models::UserFacingError {
+            summary: "Server error".to_string(),
+            message: "500 internal".to_string(),
+            suggestion: "retry".to_string(),
+            category: crate::models::ErrorCategory::Temporary,
+            recoverable: true,
+        };
+        let (state, cmds) = update(
+            state,
+            Msg::UpstreamError {
+                turn: TurnId(1),
+                error: err,
+            },
+        );
+        // The queued message was submitted: a fresh turn is generating with a
+        // CallModel, and the FIFO is empty.
+        assert!(matches!(state.turn, TurnState::Generating { .. }));
+        assert!(cmds.iter().any(|cmd| matches!(cmd, Cmd::CallModel { .. })));
+        assert!(state.ui.queued_messages.is_empty());
+        // Both the error line and the now-submitted queued message are present.
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.actions.iter().any(|a| a.target == "Server error"))
+        );
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content == "queued during turn")
+        );
     }
 
     #[test]

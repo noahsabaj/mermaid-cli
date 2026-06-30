@@ -502,8 +502,22 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     let parsed = parse_markdown(&msg.content, self.theme, md_width);
                     self.markdown_cache.insert(cache_key, parsed.clone());
                     if self.markdown_cache.len() > crate::constants::MARKDOWN_CACHE_MAX_ENTRIES {
-                        self.markdown_cache.clear();
-                        self.markdown_cache.insert(cache_key, parsed.clone());
+                        // Evict down to the cap rather than clearing the whole
+                        // cache — a wholesale clear re-parsed every message each
+                        // frame once a conversation exceeded the cap. Keep the
+                        // entry just inserted.
+                        let overflow = self.markdown_cache.len()
+                            - crate::constants::MARKDOWN_CACHE_MAX_ENTRIES;
+                        let stale: Vec<u64> = self
+                            .markdown_cache
+                            .keys()
+                            .copied()
+                            .filter(|&k| k != cache_key)
+                            .take(overflow)
+                            .collect();
+                        for k in stale {
+                            self.markdown_cache.remove(&k);
+                        }
                     }
                     parsed
                 };

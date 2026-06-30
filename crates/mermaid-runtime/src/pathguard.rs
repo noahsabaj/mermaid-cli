@@ -356,10 +356,30 @@ mod fallback {
     use std::fs::{File, OpenOptions};
     use std::io;
     use std::path::{Path, PathBuf};
+    use std::sync::Once;
 
     use super::{OpenIntent, contain_within_canonical};
 
+    /// Warn once per process that the kernel-confined `openat2(RESOLVE_BENEATH)`
+    /// path is unavailable (non-Linux target or pre-5.6 kernel), so confinement
+    /// falls back to the lexical/canonical check plus a by-path operation — which
+    /// leaves the documented check-then-use symlink TOCTOU window (#142). This is
+    /// by design: closing it here would mean hand-rolled per-component symlink
+    /// inspection, exactly the fragile logic `openat2` exists to replace. The warn
+    /// makes the residual visible to operators on those platforms.
+    fn warn_fallback_once() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            tracing::warn!(
+                "path confinement is using the by-path fallback (no openat2 \
+                 RESOLVE_BENEATH on this platform/kernel); a check-then-use symlink \
+                 TOCTOU window remains for in-workspace writes/deletes"
+            );
+        });
+    }
+
     fn validated(root: &Path, rel: &Path) -> io::Result<PathBuf> {
+        warn_fallback_once();
         let rel_str = rel
             .to_str()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-UTF-8 path"))?;

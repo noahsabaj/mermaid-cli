@@ -355,23 +355,38 @@ impl RuntimeState {
         }
     }
 
+    /// Cap on `timeline` length. It's a recent-activity log for `/runtime` and
+    /// the serialized snapshot, not an audit trail, so the oldest events are
+    /// trimmed — otherwise it grows monotonically for the session's life (and
+    /// it's `#[serde(default)]`, so it would also bloat every saved snapshot).
+    const MAX_TIMELINE_EVENTS: usize = 200;
+
+    /// Append a timeline event, trimming the oldest so the log stays bounded.
+    fn push_timeline(&mut self, kind: RuntimeTimelineKind, message: String) {
+        self.timeline.push(RuntimeTimelineEvent { kind, message });
+        let len = self.timeline.len();
+        if len > Self::MAX_TIMELINE_EVENTS {
+            self.timeline.drain(0..len - Self::MAX_TIMELINE_EVENTS);
+        }
+    }
+
     pub fn set_model(&mut self, model_id: &str) {
         self.provider_capabilities = ProviderCapabilitySnapshot::from_model_id(model_id);
         // New model → the resolved window + placement no longer apply; re-probed
         // next turn.
         self.ollama_context = None;
         self.ollama_placement = None;
-        self.timeline.push(RuntimeTimelineEvent {
-            kind: RuntimeTimelineKind::Provider,
-            message: format!("model set to {}", model_id),
-        });
+        self.push_timeline(
+            RuntimeTimelineKind::Provider,
+            format!("model set to {}", model_id),
+        );
     }
 
     pub fn record_signal(&mut self, signal: RuntimeSignal) {
-        self.timeline.push(RuntimeTimelineEvent {
-            kind: RuntimeTimelineKind::Signal,
-            message: format!("received {}", signal.as_str()),
-        });
+        self.push_timeline(
+            RuntimeTimelineKind::Signal,
+            format!("received {}", signal.as_str()),
+        );
     }
 
     pub fn register_process(&mut self, process: ManagedProcess) {
@@ -380,15 +395,36 @@ impl RuntimeState {
         } else {
             self.processes.push(process.clone());
         }
-        self.timeline.push(RuntimeTimelineEvent {
-            kind: RuntimeTimelineKind::Process,
-            message: format!("registered process {} ({})", process.pid, process.command),
-        });
+        self.push_timeline(
+            RuntimeTimelineKind::Process,
+            format!("registered process {} ({})", process.pid, process.command),
+        );
     }
 }
 
 impl Default for RuntimeState {
     fn default() -> Self {
         Self::new("ollama/unknown")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeline_is_bounded_and_keeps_most_recent() {
+        let mut rt = RuntimeState::new("ollama/test");
+        // `new` may seed an initial event; push well past the cap and confirm
+        // the log is trimmed to the most recent window rather than growing.
+        for _ in 0..(RuntimeState::MAX_TIMELINE_EVENTS + 50) {
+            rt.record_signal(RuntimeSignal::Interrupt);
+        }
+        assert_eq!(rt.timeline.len(), RuntimeState::MAX_TIMELINE_EVENTS);
+        // The newest event is retained (front-trim keeps the tail).
+        assert_eq!(
+            rt.timeline.last().map(|e| e.message.as_str()),
+            Some("received interrupt")
+        );
     }
 }

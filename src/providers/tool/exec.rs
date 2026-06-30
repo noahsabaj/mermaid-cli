@@ -875,24 +875,45 @@ fn is_secret_env_name(name: &str) -> bool {
 /// newline-less command can't exhaust memory. Bytes are accumulated raw and
 /// decoded once at the end (lossy) so a multibyte char split across reads is
 /// not corrupted by the cap. Returns `(text, truncated)`.
+/// On-disk cap for the per-stream tee log (#126). The in-memory buffer is
+/// capped at `MAX_TOOL_OUTPUT_BYTES`; the log may grow larger (it stays
+/// tail-able for a backgrounded process) but must not be unbounded — a command
+/// spewing gigabytes would otherwise fill the temp dir.
+const TEE_LOG_CAP_BYTES: usize = 64 * 1024 * 1024;
+
 async fn read_capped<R: AsyncRead + Unpin>(
     mut reader: R,
     cap: usize,
+    log_cap: usize,
     progress: Option<tokio::sync::mpsc::Sender<ProgressEvent>>,
     log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 ) -> (String, bool) {
     let mut buf = [0u8; 8192];
     let mut bytes: Vec<u8> = Vec::new();
     let mut truncated = false;
+    let mut logged: usize = 0;
+    let mut log_capped = false;
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
                 // Tee raw bytes to the shared log file so a backgrounded
-                // (Ctrl+B) process stays tail-able via /logs.
-                if let Some(file) = &log {
+                // (Ctrl+B) process stays tail-able via /logs — bounded at
+                // `TEE_LOG_CAP_BYTES` so a runaway command can't fill the disk
+                // (#126). Once capped we write a one-time marker and stop.
+                if let Some(file) = &log
+                    && !log_capped
+                {
                     let mut f = file.lock().await;
-                    let _ = f.write_all(&buf[..n]).await;
+                    if logged + n <= log_cap {
+                        let _ = f.write_all(&buf[..n]).await;
+                        logged += n;
+                    } else {
+                        let remaining = log_cap - logged;
+                        let _ = f.write_all(&buf[..remaining]).await;
+                        let _ = f.write_all(b"\n...[log truncated]...\n").await;
+                        log_capped = true;
+                    }
                     let _ = f.flush().await;
                 }
                 if let Some(tx) = &progress {
@@ -954,10 +975,17 @@ async fn run_command(
     let stdout_task = tokio::spawn(read_capped(
         stdout,
         cap,
+        TEE_LOG_CAP_BYTES,
         Some(progress.clone()),
         log.clone(),
     ));
-    let stderr_task = tokio::spawn(read_capped(stderr, cap, None, log.clone()));
+    let stderr_task = tokio::spawn(read_capped(
+        stderr,
+        cap,
+        TEE_LOG_CAP_BYTES,
+        None,
+        log.clone(),
+    ));
 
     // A driver task owns the child + drain tasks and runs to completion no
     // matter what. On normal exit it ships the result back. If we detach, we
@@ -1060,6 +1088,29 @@ mod tests {
     use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn tee_log_is_capped() {
+        // #126: the on-disk tee log must be bounded so a command spewing
+        // gigabytes can't fill the temp dir, even though the in-memory buffer is
+        // already capped.
+        let dir = std::env::temp_dir().join(format!("mermaid_teelog_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("log.txt");
+        let file = tokio::fs::File::create(&path).await.unwrap();
+        let log = std::sync::Arc::new(tokio::sync::Mutex::new(file));
+        // 4000 bytes of output, on-disk log capped at 16.
+        let data = vec![b'x'; 4000];
+        let _ = read_capped(&data[..], 1_000_000, 16, None, Some(log)).await;
+        let written = std::fs::read(&path).unwrap();
+        assert!(
+            written.len() < 200,
+            "log must be capped near 16 bytes + marker, got {}",
+            written.len()
+        );
+        assert!(String::from_utf8_lossy(&written).contains("log truncated"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn secret_env_name_denylist_covers_common_carriers() {

@@ -43,11 +43,32 @@ impl Recorder {
     /// Open `path` for append. Creates the file if it doesn't exist.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true);
+        // A recording stores the full conversation — prompts, model output, and
+        // tool results (e.g. a `read_file` of a private doc) — in cleartext;
+        // only credential-shaped strings are scrubbed. Create it owner-only so a
+        // shared temp/cwd doesn't leak it (#132).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts
             .open(&path)
             .with_context(|| format!("open {} for recording", path.display()))?;
+        // `mode` only applies on create; tighten an existing recording too.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        tracing::warn!(
+            path = %path.display(),
+            "session recording is ON: this file stores prompts, model output, and \
+             tool results (including file contents) in cleartext; only \
+             credential-shaped strings are redacted",
+        );
         Ok(Self {
             writer: BufWriter::new(file),
             path,
@@ -523,6 +544,20 @@ mod tests {
         let dir = std::env::temp_dir().join("mermaid_recorder_tests");
         let _ = std::fs::create_dir_all(&dir);
         dir.join(name)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recording_file_is_owner_only() {
+        // #132: recordings hold cleartext prompts/output/file-contents, so they
+        // must be created 0600 rather than inheriting a world-readable umask.
+        use std::os::unix::fs::PermissionsExt;
+        let path = tmpfile("perms.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let _ = Recorder::open(&path).expect("open");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "recording must be created owner-only");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
