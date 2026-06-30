@@ -30,6 +30,14 @@ Both review batches are resolved; the full history lives in
 
 ## Documented residuals (by design — not open defects)
 
+Both were explicitly reviewed and **accepted as-is** (2026-06-29). The
+higher-value alternatives were weighed and declined: for `#141`, strengthening
+the real classifier boundary (fenced prompt / fail-safe parse) rather than the
+denylist; for `#142`, a portable per-component `O_NOFOLLOW` descent. In each case
+the primary boundary/platform is already solid and the residual is either
+inherent (a denylist can't catch paraphrase) or narrow and non-primary (a local
+symlink race on non-Linux hosts), so the cost/benefit didn't favor investing.
+
 - **#141 — by design.** The Auto-classifier injection pre-filter was hardened
   (whitespace/zero-width normalization + more reviewer-directed markers) but is
   inherently incomplete; the fenced untrusted-action prompt and the fail-safe
