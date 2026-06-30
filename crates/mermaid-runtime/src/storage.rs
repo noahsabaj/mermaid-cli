@@ -10,11 +10,16 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-// Bumped to 2 for the additive `tasks.owner_kind` column (F18/RC-E). The bump is
-// load-bearing alongside the F17 early-return in `init_schema`: a DB already at
-// an older version still runs the migration (and thus `ensure_column`) exactly
-// once, while an already-current DB skips the write lock entirely.
-const SCHEMA_VERSION: i32 = 2;
+// Bumped to 3 for the F75 covering indexes (pending-approval and reconcile
+// scans). They are additive, but the bump lets a DB already at v2 re-run the
+// migration once to pick them up. The bump is load-bearing alongside the F17
+// early-return in `init_schema`: a DB at an older version still runs the
+// migration (the idempotent baseline plus any per-version step dispatched by
+// `migrate_within_txn`) exactly once, while an already-current DB skips the
+// write lock entirely.
+//
+// History: v2 added the additive `tasks.owner_kind` column (F18/RC-E).
+const SCHEMA_VERSION: i32 = 3;
 
 /// `tasks.owner_kind` value for a task the daemon runs in-process. Only these are
 /// reset by `reconcile_after_restart`; a `NULL` owner (an interactive CLI run, or
@@ -710,7 +715,7 @@ impl RuntimeStore {
         // double-running an ALTER and failing the open (the old check-then-
         // ALTER `ensure_column` race).
         conn.execute_batch("BEGIN IMMEDIATE;")?;
-        if let Err(error) = self.migrate_within_txn() {
+        if let Err(error) = self.migrate_within_txn(current) {
             let _ = conn.execute_batch("ROLLBACK;");
             return Err(error);
         }
@@ -730,10 +735,11 @@ impl RuntimeStore {
     }
 
     /// Schema creation + column migrations, run inside the `init_schema`
-    /// transaction. Idempotent: `CREATE TABLE IF NOT EXISTS` plus the
-    /// duplicate-tolerant `ensure_column` make a re-run a no-op, so a second
-    /// concurrent opener that wins the lock after us does no harm.
-    fn migrate_within_txn(&self) -> Result<()> {
+    /// transaction for a DB upgrading from `from_version`. Idempotent:
+    /// `CREATE TABLE IF NOT EXISTS` plus the duplicate-tolerant `ensure_column`
+    /// make a re-run a no-op, so a second concurrent opener that wins the lock
+    /// after us does no harm.
+    fn migrate_within_txn(&self, from_version: i32) -> Result<()> {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -771,6 +777,11 @@ impl RuntimeStore {
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_project_status
                 ON tasks(project_path, status, updated_at);
+            -- F75: `reconcile_after_restart` filters `status = 'running' AND
+            -- owner_kind = ?`, which the (project_path, ...) index above cannot
+            -- serve (wrong leading column). This covering index does.
+            CREATE INDEX IF NOT EXISTS idx_tasks_status_owner
+                ON tasks(status, owner_kind);
 
             CREATE TABLE IF NOT EXISTS task_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -812,6 +823,12 @@ impl RuntimeStore {
                 archive_reason TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_approvals_task_id ON approvals(task_id);
+            -- F75: `list_pending` scans `user_decision IS NULL ORDER BY
+            -- created_at`. A partial index over only the pending rows stays tiny
+            -- and serves both the filter and the ordering.
+            CREATE INDEX IF NOT EXISTS idx_approvals_pending
+                ON approvals(created_at)
+                WHERE user_decision IS NULL;
 
             CREATE TABLE IF NOT EXISTS processes (
                 id TEXT PRIMARY KEY,
@@ -911,6 +928,39 @@ impl RuntimeStore {
                 params![grace],
             )?;
         }
+
+        // F76: structured per-version migration dispatch. Everything above is the
+        // idempotent ADDITIVE baseline (`CREATE ... IF NOT EXISTS` + `ensure_column`),
+        // always safe to re-run. This loop is the home for FUTURE NON-ADDITIVE
+        // steps — dropping/renaming/transforming a column, rebuilding a table —
+        // that the baseline cannot express: each target version's step runs once,
+        // only when upgrading PAST it, inside this same transaction. Today every
+        // shipped step is additive, so the arms are documented (near-)no-ops, but a
+        // future v4 now has an ordered, versioned place to live instead of
+        // overloading `IF NOT EXISTS`.
+        for target in (from_version + 1)..=SCHEMA_VERSION {
+            match target {
+                // v2 added `tasks.owner_kind` — additive, applied by the baseline.
+                2 => {},
+                // v3: F75 covering indexes — additive, created by the baseline
+                // above; this call is the concrete template for the first real
+                // non-additive change.
+                3 => self.migrate_to_v3()?,
+                // A future v4+ adds its non-additive step here.
+                _ => {},
+            }
+        }
+        Ok(())
+    }
+
+    /// Non-additive migration steps introduced at schema v3. Today v3 only adds
+    /// covering indexes (additive — applied by the idempotent baseline in
+    /// [`Self::migrate_within_txn`]), so this is intentionally a no-op. It exists
+    /// as the concrete template for the first real non-additive change: a step
+    /// that, for example, drops or transforms a column, which
+    /// `CREATE ... IF NOT EXISTS` and `ensure_column` cannot express. Runs inside
+    /// the `init_schema` transaction, exactly once, when a DB upgrades past v2.
+    fn migrate_to_v3(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -2425,6 +2475,105 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    fn explain_query_plan(conn: &Connection, sql: &str) -> String {
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("prepare EXPLAIN QUERY PLAN");
+        // Column 3 of an EQP row is the human-readable `detail` (e.g.
+        // "SEARCH approvals USING INDEX idx_approvals_pending ...").
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("eqp query")
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .expect("eqp rows");
+        rows.join("\n")
+    }
+
+    #[test]
+    fn pending_and_reconcile_scans_use_indexes() {
+        // F75: the pending-approval scan and the reconcile scan must hit their
+        // covering indexes rather than full-table scans.
+        let path = temp_db("scan_indexes");
+        let store = RuntimeStore::open(&path).expect("open");
+
+        let index_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN ('idx_approvals_pending', 'idx_tasks_status_owner')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 2, "F75 indexes must be created");
+
+        // `list_pending`'s scan must use the partial pending index (it also serves
+        // the ORDER BY created_at, so no separate sort).
+        let plan = explain_query_plan(
+            &store.conn,
+            "SELECT id FROM approvals WHERE user_decision IS NULL ORDER BY created_at DESC",
+        );
+        assert!(
+            plan.contains("idx_approvals_pending"),
+            "pending scan must use idx_approvals_pending; plan was:\n{plan}"
+        );
+
+        // `reconcile_after_restart`'s scan must use the (status, owner_kind) index.
+        let plan = explain_query_plan(
+            &store.conn,
+            "SELECT id FROM tasks WHERE status = 'running' AND owner_kind = 'daemon'",
+        );
+        assert!(
+            plan.contains("idx_tasks_status_owner"),
+            "reconcile scan must use idx_tasks_status_owner; plan was:\n{plan}"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn upgrades_from_v2_to_current_and_adds_indexes() {
+        // F75/F76: a DB stamped at the previous schema version must migrate forward
+        // on the next open — re-run the idempotent baseline, pick up the F75
+        // indexes, and stamp the current version — exercising the per-version
+        // dispatch (`from_version = 2` runs the v3 step).
+        let path = temp_db("upgrade_v2");
+        {
+            let store = RuntimeStore::open(&path).expect("first open");
+            // Simulate an older v2 DB: drop the new indexes and roll the stamp back.
+            store
+                .conn
+                .execute_batch(
+                    "DROP INDEX IF EXISTS idx_approvals_pending;
+                     DROP INDEX IF EXISTS idx_tasks_status_owner;
+                     PRAGMA user_version = 2;",
+                )
+                .expect("downgrade to v2");
+        }
+        let store = RuntimeStore::open(&path).expect("reopen must migrate forward");
+        let version: i32 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let index_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN ('idx_approvals_pending', 'idx_tasks_status_owner')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            index_count, 2,
+            "forward migration must recreate the F75 indexes"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
