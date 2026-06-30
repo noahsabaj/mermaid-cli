@@ -36,12 +36,15 @@ use widgets::{
 /// to `render()` per frame.
 ///
 /// Contents are pure memoization + UI affordances (scroll position,
-/// markdown cache, theme choice). Nothing here affects what the
+/// wrapped-line cache, theme choice). Nothing here affects what the
 /// reducer sees or what ends up on disk — the cache can be dropped
 /// and rebuilt from `&State` at any time.
 pub struct RenderCache {
     pub chat: ChatState,
-    pub markdown_cache: FxHashMap<u64, Vec<crate::render::markdown::MarkdownLine>>,
+    /// Per-message render cache: `(content, theme, width)` hash → fully wrapped,
+    /// role-prefixed assistant lines, so committed messages aren't re-parsed or
+    /// re-wrapped every frame (#134).
+    pub wrapped_line_cache: FxHashMap<u64, Vec<ratatui::text::Line<'static>>>,
     pub theme: theme::Theme,
     /// Host + user for the status bar's `user@host:cwd` line, read once at
     /// startup so `StatusWidget::render` doesn't hit the environment on every
@@ -58,7 +61,7 @@ impl Default for RenderCache {
     fn default() -> Self {
         Self {
             chat: ChatState::new(),
-            markdown_cache: FxHashMap::default(),
+            wrapped_line_cache: FxHashMap::default(),
             theme: theme::Theme::dark(),
             hostname: std::env::var("HOSTNAME")
                 .or_else(|_| std::env::var("HOST"))
@@ -279,7 +282,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     let chat_widget = ChatWidget {
         messages: live_messages.as_ref(),
         theme: &rstate.theme,
-        markdown_cache: &mut rstate.markdown_cache,
+        wrapped_line_cache: &mut rstate.wrapped_line_cache,
         show_reasoning: state.ui.show_reasoning,
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut rstate.chat);

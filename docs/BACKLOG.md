@@ -11,20 +11,25 @@ Both review batches are resolved; the full history lives in
   end-to-end headless against `ollama/minimax-m3:cloud` (read-only, and an
   edit-then-run-tests agentic task).
 
-- **Status:** 0 open defects · 3 documented residuals (below)
+- **Status:** 0 open defects · 2 documented residuals (both by design, below)
 - **Last updated:** 2026-06-29
 
 ---
 
-## Documented residuals (by design / deferred — not open defects)
+## Resolved since
 
-- **#134 — deferred optimization.** The per-frame transcript double-clone and the
-  markdown-cache thrash are fixed (`Cow` borrow on idle frames + bounded cache
-  eviction). What remains is a pure optimization: caching the wrapped/stringified
-  lines per committed message so the whole scrollback isn't re-wrapped each frame.
-  Deferred because it reworks `last_rendered_rows` (load-bearing for scroll/click
-  math) and must not alter rendered output — a focused change for later, not a
-  correctness bug.
+- **#134 — render-cache optimization (done).** The `ChatWidget` cache now stores
+  the fully **wrapped**, role-prefixed assistant lines (keyed on
+  `(content, theme, width)`), not just the markdown parse — so a committed message
+  is cloned from cache, never re-parsed or re-wrapped, each frame. This was the
+  remaining per-frame "re-wrap the whole scrollback" cost. The load-bearing
+  `last_rendered_rows` / click-map assembly was deliberately left untouched (the
+  risk the residual flagged); the wrapped block is a pure function of its key, and
+  a regression test asserts the cache-hit frame is byte-for-byte identical to a
+  cache-miss / cold-cache frame.
+
+## Documented residuals (by design — not open defects)
+
 - **#141 — by design.** The Auto-classifier injection pre-filter was hardened
   (whitespace/zero-width normalization + more reviewer-directed markers) but is
   inherently incomplete; the fenced untrusted-action prompt and the fail-safe
