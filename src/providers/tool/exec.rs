@@ -1060,10 +1060,24 @@ async fn run_command(
     tokio::select! {
         biased;
         _ = background.cancelled() => {
-            // Ctrl+B: detach. Dropping `driver`'s JoinHandle does NOT abort the
-            // task — it runs on, keeping the child alive and the log filling.
-            drop(driver);
-            Ok(CommandRunResult::Detached { pid: pid.unwrap_or(0), log_path })
+            match pid {
+                // Ctrl+B: detach. Dropping `driver`'s JoinHandle does NOT abort
+                // the task — it runs on, keeping the child alive and the log
+                // filling.
+                Some(pid) => {
+                    drop(driver);
+                    Ok(CommandRunResult::Detached { pid, log_path })
+                }
+                // No OS pid means the child was already polled to completion —
+                // there is nothing left to background. Report cancellation
+                // rather than minting a phantom `bg-0` process that a later
+                // `/stop` could mis-signal.
+                None => {
+                    driver.abort();
+                    let _ = tokio::fs::remove_file(&log_path).await;
+                    Ok(CommandRunResult::Cancelled)
+                }
+            }
         }
         _ = token.cancelled() => {
             // Turn cancelled (Esc): the detached `driver` would otherwise keep
