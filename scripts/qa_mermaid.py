@@ -24,11 +24,17 @@ from typing import Callable, Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-# Generic, env-overridable default — no developer-specific hardcoded path (#116).
-# Set MERMAID_QA_TEST_ENV to use a custom location (which must contain a
-# QA_MARKER file; see the marker check in `prepare_test_env`).
+# The built-in QA root — the ONE path the harness trusts to reset without a
+# marker, because it owns it. This is deliberately NOT env-overridable: the
+# `guard_test_env` marker check anchors on it, so folding the env var in here
+# would let `MERMAID_QA_TEST_ENV=~/anything` masquerade as the trusted default
+# and bypass the guard entirely.
+BUILTIN_TEST_ENV = (Path.home() / ".cache" / "mermaid-qa" / "test-env").resolve()
+# The effective default: the env override if set, else the built-in root. Any
+# path other than BUILTIN_TEST_ENV must carry a QA_MARKER file (see
+# `guard_test_env`), including an env-supplied one.
 DEFAULT_TEST_ENV = Path(
-    os.environ.get("MERMAID_QA_TEST_ENV") or Path.home() / ".cache" / "mermaid-qa" / "test-env"
+    os.environ.get("MERMAID_QA_TEST_ENV") or BUILTIN_TEST_ENV
 ).resolve()
 DEFAULT_MODEL = "minimax-m2.7:cloud"
 QA_MARKER = ".mermaid-qa-root"
@@ -227,7 +233,15 @@ def main() -> int:
 
 
 def guard_test_env(test_env: Path) -> None:
-    """Refuse dangerous reset targets."""
+    """Refuse dangerous reset targets.
+
+    Only the built-in cache root (`BUILTIN_TEST_ENV`) may be reset without a
+    marker — the harness created it. EVERY other target, whether it arrived via
+    `--test-env` or `MERMAID_QA_TEST_ENV`, must carry a `QA_MARKER` file. The
+    anchor is the built-in constant, NOT `DEFAULT_TEST_ENV`, because the latter
+    folds in the env var and would compare equal to an env-supplied path —
+    silently disarming the guard.
+    """
     home = Path.home().resolve()
     forbidden = {
         Path("/").resolve(),
@@ -239,15 +253,11 @@ def guard_test_env(test_env: Path) -> None:
         raise QaFailure("test-env path is empty")
     if test_env in forbidden:
         raise QaFailure(f"refusing to use dangerous test-env path: {test_env}")
-    if test_env != DEFAULT_TEST_ENV:
-        marker = test_env / QA_MARKER
-        if not marker.exists():
-            raise QaFailure(
-                f"custom test-env {test_env} is not initialized; "
-                f"create {marker} first if this path is intentional"
-            )
-    if test_env.parent != DEFAULT_TEST_ENV.parent and not (test_env / QA_MARKER).exists():
-        raise QaFailure(f"refusing unmarked QA root outside {DEFAULT_TEST_ENV.parent}: {test_env}")
+    if test_env != BUILTIN_TEST_ENV and not (test_env / QA_MARKER).exists():
+        raise QaFailure(
+            f"refusing to reset unmarked test-env {test_env}; "
+            f"create {test_env / QA_MARKER} first if this path is intentional"
+        )
 
 
 def reset_test_env(test_env: Path, wipe_runs: bool) -> None:

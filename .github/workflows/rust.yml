@@ -36,7 +36,10 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        # `--workspace` so the `mermaid-runtime` crate (safety classifier,
+        # approvals store) is linted too — a bare `cargo clippy` only covers the
+        # root package and silently skipped it.
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   # Build and test on multiple Rust versions and OS
   test:
@@ -66,10 +69,13 @@ jobs:
           key: ${{ matrix.os }}-${{ matrix.rust }}
 
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --workspace --verbose
 
       - name: Run tests
-        run: cargo test --verbose
+        # `--workspace` so the `mermaid-runtime` crate's tests (safety classifier,
+        # approvals store) actually run in CI — a bare `cargo test` only covers
+        # the root package.
+        run: cargo test --workspace --verbose
 
       # Only check documentation on stable Linux
       - name: Check documentation

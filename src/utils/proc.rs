@@ -32,9 +32,22 @@ pub enum Grace {
 /// How long `Graceful` waits between SIGTERM and the SIGKILL backstop.
 const GRACE_PERIOD: Duration = Duration::from_millis(400);
 
+/// pids 0 and 1 are never legitimate teardown targets. On Unix we signal the
+/// *process group* `-pid`, so `kill -KILL -- -0` hits our OWN process group
+/// (mermaid self-terminates) and `-1` fans out to every process we may signal.
+/// Real managed children always have pid > 1; anything at or below 1 is a
+/// phantom (e.g. a `ManagedProcess` that ever recorded pid 0) and must be a
+/// no-op so a stray `/stop` can't take the app — or the box — down with it.
+fn is_signalable(pid: u32) -> bool {
+    pid > 1
+}
+
 /// Terminate `pid`'s process tree (async). Safe to call on a pid that has
 /// already exited — signals are best-effort and every error is swallowed.
 pub async fn terminate_tree(pid: u32, grace: Grace) {
+    if !is_signalable(pid) {
+        return;
+    }
     #[cfg(not(target_os = "windows"))]
     {
         if grace == Grace::Graceful {
@@ -53,6 +66,9 @@ pub async fn terminate_tree(pid: u32, grace: Grace) {
 /// Blocking sibling for sync call sites (the daemon's `/stop` / `/restart` run
 /// off a sync runtime client and can't await).
 pub fn terminate_tree_blocking(pid: u32, grace: Grace) {
+    if !is_signalable(pid) {
+        return;
+    }
     #[cfg(not(target_os = "windows"))]
     {
         if grace == Grace::Graceful {
@@ -108,4 +124,35 @@ fn taskkill_tree_blocking(pid: u32) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pids_0_and_1_are_never_signalable() {
+        // The dangerous shapes: `-0` is our own process group, `-1` is every
+        // signalable process. Neither may ever reach a real `kill`.
+        assert!(!is_signalable(0));
+        assert!(!is_signalable(1));
+    }
+
+    #[test]
+    fn real_pids_are_signalable() {
+        assert!(is_signalable(2));
+        assert!(is_signalable(1234));
+        assert!(is_signalable(u32::MAX));
+    }
+
+    #[tokio::test]
+    async fn terminate_tree_is_a_noop_for_unsafe_pids() {
+        // Must return promptly without shelling out to `kill` — the guard runs
+        // before any process spawn. (If it did signal, it would target our own
+        // group; the test process surviving is the assertion.)
+        terminate_tree(0, Grace::Immediate).await;
+        terminate_tree(1, Grace::Graceful).await;
+        terminate_tree_blocking(0, Grace::Immediate);
+        terminate_tree_blocking(1, Grace::Graceful);
+    }
 }
