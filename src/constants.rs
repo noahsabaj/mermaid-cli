@@ -121,6 +121,11 @@ pub const MAX_MCP_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Max bytes in a single daemon control-command line. Commands are short JSON
 /// control messages; anything larger is malformed or hostile.
 pub const MAX_DAEMON_COMMAND_BYTES: usize = 1024 * 1024;
+/// Wall-clock ceiling on a single daemon control connection. A client that
+/// opens a connection and never sends a complete command line would otherwise
+/// park the handler task (and hold its fd) forever; bound it so a slow or stuck
+/// peer can't leak connections toward fd exhaustion.
+pub const DAEMON_CONNECTION_TIMEOUT_SECS: u64 = 30;
 /// Max bytes accumulated in an SSE reassembly buffer without a complete event
 /// boundary. A provider that streams bytes but never emits the `\n\n` event
 /// separator would otherwise grow the buffer unbounded.

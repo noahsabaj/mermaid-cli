@@ -442,8 +442,24 @@ fn snapshot_shadow_git(
     )?;
 
     for file in files {
-        let shadow_path = worktree.join(&file.path);
-        let project_path = project_root.join(&file.path);
+        // `file.path` is the project-root-relative display path for in-tree
+        // files, but an ABSOLUTE path for anything `strip_prefix(project_root)`
+        // couldn't relativize (a file outside the project, a canonicalization
+        // mismatch). `Path::join` with an absolute (or `..`-laden) component
+        // escapes the worktree — `worktree.join("/etc/passwd") == "/etc/passwd"`
+        // — and then `fs::copy(project_path, shadow_path)` below would be
+        // `fs::copy(p, p)`, which truncates the real file to zero (std opens the
+        // destination with truncate before reading the identical source), or the
+        // `remove_dir_all` branch would delete a real directory. Only sync entries
+        // that stay confined under the worktree; out-of-tree files are still
+        // captured by the sanitized `files/` copy + manifest, and restore is
+        // independently path-confined.
+        let rel = Path::new(&file.path);
+        if rel.is_absolute() || rel.components().any(|c| c == Component::ParentDir) {
+            continue;
+        }
+        let shadow_path = worktree.join(rel);
+        let project_path = project_root.join(rel);
         if file.existed && project_path.is_file() {
             if let Some(parent) = shadow_path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -789,5 +805,36 @@ mod tests {
         assert!(!root.join("other.txt").exists());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shadow_git_ignores_absolute_paths_and_cannot_truncate_real_files() {
+        // A manifest entry whose `path` stayed ABSOLUTE (a file outside the
+        // project root) must never be synced into the shadow worktree:
+        // `worktree.join("/abs")` escapes to the real path, and the copy would
+        // then `fs::copy(p, p)` — truncating the real file to zero. Guard it.
+        let tmp = std::env::temp_dir().join(format!(
+            "mermaid_shadow_abs_{}",
+            crate::storage::fresh_id("t")
+        ));
+        let project_root = tmp.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let sentinel = tmp.join("outside.txt");
+        std::fs::write(&sentinel, "PRECIOUS").unwrap();
+
+        let files = vec![CheckpointFile {
+            path: sentinel.display().to_string(), // absolute → must be skipped
+            existed: true,
+            snapshot_relpath: None,
+        }];
+        // Best-effort (returns Err if git is unavailable); either way it must
+        // never touch the out-of-tree sentinel.
+        let _ = super::snapshot_shadow_git(&project_root, &files, "test-cp");
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "PRECIOUS",
+            "shadow-git sync must not truncate a real out-of-tree file",
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

