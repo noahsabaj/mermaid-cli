@@ -123,7 +123,7 @@ pub fn write_plugin_lockfile() -> Result<PathBuf> {
 
 pub fn run_plugin_hooks(event: &str, payload: &serde_json::Value) -> Result<()> {
     let store = RuntimeStore::open_default()?;
-    let payload_bytes = serde_json::to_string(payload)?.into_bytes();
+    let payload_bytes = std::sync::Arc::new(serde_json::to_string(payload)?.into_bytes());
     for plugin in store.plugins().list()? {
         // The enabled flag is the trust boundary: a plugin runs native hook
         // code only after an explicit `plugin enable`. Declared capabilities are
@@ -172,10 +172,19 @@ pub fn run_plugin_hooks(event: &str, payload: &serde_json::Value) -> Result<()> 
                     continue; // isolate: one bad hook must not abort the rest
                 },
             };
-            // Write the payload, then DROP stdin so the hook sees EOF. Without
-            // this, a hook that reads stdin-to-EOF blocks the wait forever.
+            // Write the payload on a detached thread, then let stdin drop so the
+            // hook sees EOF. Two failure modes are bounded here: a hook that
+            // reads stdin-to-EOF (the drop unblocks it), AND a hook that never
+            // reads stdin while the payload exceeds the pipe buffer (~64 KiB;
+            // checkpoint payloads embed the full file list) — a synchronous
+            // `write_all` would block forever there, and the timeout below only
+            // bounds the WAIT. The thread unblocks when the child exits or is
+            // killed on timeout (closing the pipe), so we never join it.
             if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(&payload_bytes);
+                let payload = std::sync::Arc::clone(&payload_bytes);
+                std::thread::spawn(move || {
+                    let _ = stdin.write_all(&payload);
+                });
             }
             wait_hook_bounded(&mut child, &plugin.name, &hook, HOOK_TIMEOUT);
         }

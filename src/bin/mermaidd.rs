@@ -169,7 +169,18 @@ async fn main() -> Result<()> {
         .uid();
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        // A transient accept error (EMFILE under fd pressure, a peer that
+        // vanished mid-handshake) must NOT take the whole daemon down — the old
+        // `?` propagated it out of `main`. Log, brief-pause on error to avoid a
+        // hot spin, and keep serving.
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(err) => {
+                tracing::warn!(error = %err, "mermaidd unix accept failed; continuing");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            },
+        };
         match stream.peer_cred() {
             Ok(cred) if uid_allowed(cred.uid(), owner_uid) => {},
             Ok(cred) => {
@@ -186,8 +197,16 @@ async fn main() -> Result<()> {
             },
         }
         tokio::spawn(async move {
-            if let Err(err) = handle_stream(stream).await {
-                tracing::warn!(error = %err, "mermaidd client failed");
+            // Bound the whole connection: a client that connects but never sends
+            // a complete command line would otherwise hold this task and its fd
+            // indefinitely.
+            let timeout = std::time::Duration::from_secs(
+                mermaid_cli::constants::DAEMON_CONNECTION_TIMEOUT_SECS,
+            );
+            match tokio::time::timeout(timeout, handle_stream(stream)).await {
+                Ok(Ok(())) => {},
+                Ok(Err(err)) => tracing::warn!(error = %err, "mermaidd client failed"),
+                Err(_) => tracing::warn!("mermaidd client timed out; dropping connection"),
             }
         });
     }
@@ -238,8 +257,19 @@ async fn maybe_spawn_tcp_listener() {
                     match listener.accept().await {
                         Ok((stream, _)) => {
                             tokio::spawn(async move {
-                                if let Err(err) = handle_remote_stream(stream).await {
-                                    tracing::warn!(error = %err, "mermaidd tcp client failed");
+                                let timeout = std::time::Duration::from_secs(
+                                    mermaid_cli::constants::DAEMON_CONNECTION_TIMEOUT_SECS,
+                                );
+                                match tokio::time::timeout(timeout, handle_remote_stream(stream))
+                                    .await
+                                {
+                                    Ok(Ok(())) => {},
+                                    Ok(Err(err)) => {
+                                        tracing::warn!(error = %err, "mermaidd tcp client failed")
+                                    },
+                                    Err(_) => tracing::warn!(
+                                        "mermaidd tcp client timed out; dropping connection"
+                                    ),
                                 }
                             });
                         },
@@ -318,53 +348,28 @@ async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json:
         }));
     }
 
-    let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+    // Only `health` (liveness + DB path, no sensitive rows) is served in the
+    // plaintext form. The plaintext DATA commands used to serve tasks, sessions,
+    // snapshots, etc. with NO auth — bypassing the #21 pairing-token gate that
+    // the JSON `runtime_*` reads enforce, so any same-UID process could read
+    // session messages and full DB snapshots straight off the socket. Nothing in
+    // the repo speaks plaintext (every client sends JSON, including `health`), so
+    // these are removed outright rather than gated. Everything sensitive now goes
+    // through the token-checked JSON path only.
     match command {
-        "" | "health" => Ok(serde_json::json!({
-            "ok": true,
-            "service": "mermaidd",
-            "database": store.path().display().to_string(),
-        })),
-        "tasks" => Ok(serde_json::json!({
-            "ok": true,
-            "tasks": store.tasks().list(50)?,
-        })),
-        "sessions" => Ok(serde_json::json!({
-            "ok": true,
-            "sessions": store.sessions().list(50)?,
-        })),
-        "processes" => Ok(serde_json::json!({
-            "ok": true,
-            "processes": store.processes().list(50)?,
-        })),
-        "approvals" => Ok(serde_json::json!({
-            "ok": true,
-            "approvals": store.approvals().list_pending()?,
-        })),
-        "tool_runs" => Ok(serde_json::json!({
-            "ok": true,
-            "tool_runs": store.tool_runs().list(100)?,
-        })),
-        "checkpoints" => Ok(serde_json::json!({
-            "ok": true,
-            "checkpoints": store.checkpoints().list(50)?,
-        })),
-        "plugins" => Ok(serde_json::json!({
-            "ok": true,
-            "plugins": store.plugins().list()?,
-        })),
-        // NOTE: there is deliberately no `pairings` command. Listing token
-        // hashes + labels over the socket exposed them to any same-UID process;
-        // pairing-token inspection now goes through the owner-only `mermaid pair
-        // list` CLI, which reads the store directly.
-        "snapshot" => Ok(serde_json::to_value(
-            mermaid_cli::runtime::RuntimeService::from_store(store).snapshot()?,
-        )?),
+        "" | "health" => {
+            let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "service": "mermaidd",
+                "database": store.path().display().to_string(),
+            }))
+        },
         other => Ok(serde_json::json!({
             "ok": false,
             "error": format!("unknown command: {}", other),
-            "commands": ["health", "sessions", "tasks", "processes", "approvals", "tool_runs", "checkpoints", "plugins", "snapshot"],
-            "json_commands": ["create_task", "run", "update_task", "session_messages", "runtime_snapshot", "runtime_dashboard", "runtime_diagnostics", "runtime_hygiene_preview", "runtime_hygiene_archive", "runtime_task_detail", "runtime_approval_detail", "runtime_checkpoint_detail", "runtime_tasks", "runtime_processes", "runtime_approvals", "runtime_tool_runs", "runtime_checkpoints", "runtime_plugins", "logs", "stop_process", "restart_process", "open_process", "ports", "restore_checkpoint", "approve", "deny", "plugin_preview", "plugin_install", "set_plugin_enabled", "model_info", "set_safety_mode", "pair"],
+            "commands": ["health"],
+            "json_commands": ["create_task", "run", "update_task", "session_messages", "snapshot", "runtime_snapshot", "runtime_dashboard", "runtime_diagnostics", "runtime_hygiene_preview", "runtime_hygiene_archive", "runtime_task_detail", "runtime_approval_detail", "runtime_checkpoint_detail", "runtime_tasks", "runtime_processes", "runtime_approvals", "runtime_tool_runs", "runtime_checkpoints", "runtime_plugins", "logs", "stop_process", "restart_process", "open_process", "ports", "restore_checkpoint", "approve", "deny", "plugin_preview", "plugin_install", "set_plugin_enabled", "model_info", "set_safety_mode", "pair"],
         })),
     }
 }
