@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-30
+
+### Security
+
+- **Fixed a critical sandbox bypass.** A destructive command hidden inside a
+  command substitution (`$(…)` / backticks / `<(…)`), or obfuscated with `${IFS}`
+  word-splitting or interior `..`, could be classified as read-only and auto-run
+  with no approval in `read_only`, `ask`, and `auto` modes. The policy gate now
+  recurses into substitutions and normalizes these forms, and fails safe when a
+  command is nested too deep to fully analyze — so a hidden `rm -rf /` can no
+  longer ride a benign-looking outer command. The gate is shell-aware end to end,
+  so flag reordering, glued operators, and quoting can't downgrade a command's risk.
+- Approval replay is confined through the same symlink-safe path checks
+  (`openat2`) as the live path, and re-verifies a command isn't destructive before
+  re-running it.
+- Secrets are redacted more thoroughly (key-name-aware, more token formats), the
+  config file is written `0600`, MCP child processes start from a clean
+  environment, and terminal escape sequences in tool output are neutralized.
+- MCP: package names are validated (no argument injection via a leading dash),
+  and a provider `base_url` override that would send your API key to a
+  non-loopback host must use HTTPS and warns you which host will receive the key.
+
+### Fixed
+
+- **A stalled turn no longer ends the run silently.** When the model spends a turn
+  "thinking" but produces no reply and no actions, Mermaid auto-retries the
+  request once (nudging the model) instead of leaving you at a finished timer with
+  no output; if it's still empty, you get a clear hint instead of silence.
+- An abnormally-closed model stream is surfaced as an error instead of being
+  mistaken for a complete (empty) response — across all providers.
+- Project instructions: `MERMAID.md` keeps its precedence even when the combined
+  `AGENTS.md` + `MERMAID.md` exceed the size cap, a single unreadable instruction
+  file no longer drops the others, and Windows home-directory resolution is fixed.
+- Checkpoint restore is memory-bounded (one file at a time) and rollback is
+  crash-safe — a failed restore can be rolled back in full, including non-empty
+  directory subtrees.
+- Assorted robustness fixes: idempotent daemon fallbacks, ownership-scoped task
+  reconciliation (won't clobber a live session's task), deterministic MCP tool
+  ordering, and per-model provider capability handling for current models.
+
 ## [0.12.2] - 2026-06-29
 
 ### Added
