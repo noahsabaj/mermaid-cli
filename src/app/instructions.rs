@@ -320,6 +320,25 @@ pub fn refresh(
     }
 }
 
+/// Load project instructions + the durable memory index for a one-shot,
+/// watcher-less run (`mermaid run` and subagents). The interactive TUI gets
+/// these from the config watcher's first poll; the headless and subagent
+/// drivers have no watcher, so they must load synchronously before the first
+/// model call — otherwise the request goes out with no MERMAID.md/AGENTS.md and
+/// no memory index, which is exactly the context `mermaid doctor` reports as
+/// loaded.
+pub fn load_project_context(
+    cwd: &Path,
+    mem_cfg: &crate::app::MemoryConfig,
+) -> (
+    Option<LoadedInstructions>,
+    Option<crate::app::memory::LoadedMemory>,
+) {
+    let (instructions, _) = refresh(None, cwd);
+    let (memory, _) = crate::app::memory::refresh(None, cwd, mem_cfg);
+    (instructions, memory)
+}
+
 /// Separator inserted between labeled instruction sections in the combined body.
 const INSTRUCTION_SECTION_SEPARATOR: &str = "\n\n---\n\n";
 
@@ -628,6 +647,24 @@ mod tests {
         let content = after.unwrap().content;
         assert!(content.contains("# Project Instructions: MERMAID.md"));
         assert!(content.contains("fresh"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_project_context_loads_instructions_synchronously() {
+        // The one-shot paths (headless `mermaid run`, subagents) call this
+        // instead of relying on the config watcher, so it must surface MERMAID.md
+        // immediately — the bug was that headless runs saw no instructions at all.
+        let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("project_context");
+        fs::create_dir(dir.join(".git")).unwrap();
+        fs::write(dir.join("MERMAID.md"), "sync-loaded instructions").unwrap();
+        let (instructions, _memory) =
+            load_project_context(&dir, &crate::app::MemoryConfig::default());
+        let content = instructions
+            .expect("instructions must load synchronously")
+            .content;
+        assert!(content.contains("sync-loaded instructions"));
         let _ = fs::remove_dir_all(&dir);
     }
 

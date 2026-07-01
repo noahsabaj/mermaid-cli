@@ -24,7 +24,7 @@
 //! model streaming (`CallModel` → `ModelProvider::chat`), tool
 //! execution (`ExecuteTool` → `ToolExecutor::execute`), persistence
 //! (`SaveConversation`, `LoadConversation`, `PersistLastModel`,
-//! `PersistReasoningFor`, `RefreshInstructions`), MCP lifecycle
+//! `PersistReasoningFor`), MCP lifecycle
 //! (`InitMcpServers`, `StopMcpServer`), local side-effects
 //! (`WriteImageToTemp`, `OpenInSystem`, `PullOllamaModel`,
 //! `SetTerminalTitle`, `DismissStatusAfter`). Cancellation flows
@@ -735,23 +735,6 @@ impl EffectRunner {
             Cmd::PersistOllamaOffload(enabled) => {
                 self.detached.spawn(async move {
                     let _ = crate::app::persist_ollama_allow_ram_offload(enabled);
-                });
-            },
-            Cmd::RefreshInstructions => {
-                let tx = self.msg_tx.clone();
-                let workdir = self.workdir.clone();
-                self.detached.spawn(async move {
-                    let (loaded, _outcome) = crate::app::instructions::refresh(None, &workdir);
-                    let _ = tx.send(Msg::InstructionsChanged(loaded)).await;
-                });
-            },
-            Cmd::RefreshMemory => {
-                let tx = self.msg_tx.clone();
-                let workdir = self.workdir.clone();
-                self.detached.spawn(async move {
-                    let cfg = crate::app::load_config().unwrap_or_default().memory;
-                    let (loaded, _) = crate::app::memory::refresh(None, &workdir, &cfg);
-                    let _ = tx.send(Msg::MemoryChanged(loaded)).await;
                 });
             },
             Cmd::ListMemory => {
