@@ -240,14 +240,64 @@ impl OpenAICompatAdapter {
                 MessageRole::System => "system",
                 MessageRole::Tool => "tool",
             };
-            let mut json_msg = json!({
-                "role": role,
-                "content": msg.content
-            });
-            if msg.role == MessageRole::Assistant
-                && let Some(ref tool_calls) = msg.tool_calls
+            let mut json_msg = json!({ "role": role });
+            // Vision: a user message carrying images uses OpenAI's content-array
+            // shape (a text part plus one `image_url` part per image, as a
+            // base64 data URL). Previously images were dropped silently, so
+            // vision models saw nothing. Non-user roles / no images use a plain
+            // string content. Assistant-attached artifacts (screenshots) are not
+            // sent — OpenAI rejects images in assistant turns — matching the
+            // Anthropic adapter, which also only sends images on user messages.
+            if msg.role == MessageRole::User
+                && msg.images.as_ref().is_some_and(|images| !images.is_empty())
             {
-                json_msg["tool_calls"] = json!(tool_calls);
+                let mut parts: Vec<Value> = Vec::new();
+                if !msg.content.is_empty() {
+                    parts.push(json!({ "type": "text", "text": msg.content }));
+                }
+                for data in msg.images.iter().flatten() {
+                    // Default media type png — matches Mermaid's clipboard output;
+                    // an unsupported format surfaces a clear 4xx from the API.
+                    parts.push(json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:image/png;base64,{data}") },
+                    }));
+                }
+                json_msg["content"] = json!(parts);
+            } else {
+                json_msg["content"] = json!(msg.content);
+            }
+            if msg.role == MessageRole::Assistant
+                && let Some(tool_calls) = msg.tool_calls.as_ref().filter(|tc| !tc.is_empty())
+            {
+                // OpenAI requires each assistant tool call to carry `id`, a
+                // literal `"type": "function"`, and `function.arguments` as a
+                // JSON-ENCODED STRING. Serializing the internal `ToolCall` struct
+                // directly produced `arguments` as an object and omitted `type`,
+                // which strict endpoints (OpenAI, Groq) 400 on the next turn of a
+                // tool loop.
+                let wire: Vec<Value> = tool_calls
+                    .iter()
+                    .map(|tc| {
+                        let arguments = match &tc.function.arguments {
+                            // Already a raw JSON string (e.g. an unparseable-args
+                            // fallback) — pass through rather than double-encode.
+                            Value::String(s) => s.clone(),
+                            other => {
+                                serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string())
+                            },
+                        };
+                        json!({
+                            "id": tc.id.clone().unwrap_or_default(),
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": arguments,
+                            },
+                        })
+                    })
+                    .collect();
+                json_msg["tool_calls"] = json!(wire);
             }
             // OpenAI tool result messages: `role: "tool"`, `tool_call_id`,
             // and `name` (the tool name). Identical to Ollama's shape
@@ -259,14 +309,6 @@ impl OpenAICompatAdapter {
                 if let Some(ref tool_name) = msg.tool_name {
                     json_msg["name"] = json!(tool_name);
                 }
-            }
-            if let Some(ref images) = msg.images
-                && !images.is_empty()
-            {
-                // OpenAI vision shape uses `content` as an array of
-                // typed parts. Step 2 doesn't ship vision (no provider
-                // in the v1 registry advertises it); skip silently.
-                let _ = images;
             }
             json_messages.push(json_msg);
         }
@@ -1494,6 +1536,81 @@ mod tests {
         assert!(body["messages"].is_array());
         // Default reasoning is Medium → Effort strategy emits the field.
         assert_eq!(body["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn build_request_body_serializes_tool_calls_in_openai_shape() {
+        // A replayed assistant tool call must carry `type: "function"` and
+        // `function.arguments` as a JSON-ENCODED STRING. Serializing the internal
+        // ToolCall struct directly emitted an object with no `type`, which strict
+        // endpoints (OpenAI, Groq) 400 on the next turn of a tool loop.
+        let adapter = test_adapter();
+        let tc = crate::models::tool_call::ToolCall {
+            id: Some("call_abc".to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "src/main.rs"}),
+            },
+        };
+        let messages = vec![ChatMessage::assistant("").with_tool_calls(vec![tc])];
+        let body = adapter.build_request_body(&messages, &ModelConfig::default(), false);
+        let msgs = body["messages"].as_array().unwrap();
+        let assistant = msgs
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant message present");
+        let call = &assistant["tool_calls"][0];
+        assert_eq!(call["type"], "function");
+        assert_eq!(call["id"], "call_abc");
+        assert_eq!(call["function"]["name"], "read_file");
+        let args = call["function"]["arguments"]
+            .as_str()
+            .expect("arguments must be a JSON-encoded string, not an object");
+        assert!(args.contains("\"path\"") && args.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn build_request_body_wires_user_images_as_vision_parts() {
+        // Images on a user message must reach vision models as OpenAI content
+        // parts — they were silently dropped before.
+        let adapter = test_adapter();
+        let messages =
+            vec![ChatMessage::user("what is this").with_images(vec!["BASE64DATA".to_string()])];
+        let body = adapter.build_request_body(&messages, &ModelConfig::default(), false);
+        let msgs = body["messages"].as_array().unwrap();
+        let user = msgs
+            .iter()
+            .find(|m| m["role"] == "user")
+            .expect("user message present");
+        let parts = user["content"]
+            .as_array()
+            .expect("content must be an array when images are present");
+        assert!(
+            parts
+                .iter()
+                .any(|p| p["type"] == "text" && p["text"] == "what is this")
+        );
+        let image = parts
+            .iter()
+            .find(|p| p["type"] == "image_url")
+            .expect("an image_url part");
+        assert_eq!(
+            image["image_url"]["url"],
+            "data:image/png;base64,BASE64DATA"
+        );
+    }
+
+    #[test]
+    fn build_request_body_plain_user_message_keeps_string_content() {
+        // The common path (no images) must still serialize `content` as a plain
+        // string, not an array.
+        let adapter = test_adapter();
+        let body =
+            adapter.build_request_body(&[ChatMessage::user("hi")], &ModelConfig::default(), false);
+        let msgs = body["messages"].as_array().unwrap();
+        let user = msgs.iter().find(|m| m["role"] == "user").unwrap();
+        assert!(user["content"].is_string());
+        assert_eq!(user["content"], "hi");
     }
 
     #[test]
