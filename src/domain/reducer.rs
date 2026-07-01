@@ -1248,8 +1248,10 @@ fn handle_submit_prompt(
     // counters track this run start so they don't reset at every step.
     state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
     state.runtime.run_committed_tokens = 0;
-    // Fresh run — clear the truncation-recovery guard from any prior run.
+    // Fresh run — clear the truncation-recovery and empty-turn guards from any
+    // prior run so this intent gets a full retry budget.
     state.runtime.truncation_recoveries = 0;
+    state.runtime.empty_continuations = 0;
     state.turn = start_generating(turn, std::time::SystemTime::from(state.now));
     cmds.push(Cmd::CallModel {
         turn,
@@ -2689,6 +2691,12 @@ fn truncation_hint(state: &State) -> String {
     msg
 }
 
+/// Per-run cap on automatic retries of a turn that produced no visible output.
+/// One nudged re-attempt recovers the common case (a reasoning-heavy model that
+/// stalled without replying) without letting a persistently-empty model loop and
+/// burn tokens; past the cap the run stops with a hint.
+const MAX_EMPTY_CONTINUATIONS: u32 = 1;
+
 fn handle_stream_done(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
@@ -2743,23 +2751,50 @@ fn handle_stream_done(
     // counter carries across the tool step into the next model call (matches the
     // live estimate in StreamText/StreamReasoning).
     state.runtime.run_committed_tokens += (partial_text.len() + partial_reasoning.len()) / 4;
-    // A turn that ends with no text, no reasoning, and no tool calls is a dead
-    // end — the run silently stops and looks broken. Flag it so the user knows to
-    // retry (seen with smaller local models that occasionally return nothing).
-    let empty_response = partial_text.trim().is_empty() && partial_reasoning.trim().is_empty();
+
+    // A turn that produced no assistant *text* and no tool calls is a dead end for
+    // the user — even when the model spent the turn "thinking" (reasoning is
+    // hidden and non-actionable). This is a real failure mode at high reasoning
+    // effort / with small local models: the model reasons at length, then stops
+    // without a reply or any action, and the run goes silent. (The old guard also
+    // required reasoning to be empty, so a reasoning-heavy stall slipped through.)
+    let no_visible_output = partial_text.trim().is_empty() && tool_calls.is_empty();
+    // A normal stop — not a window-full truncation (compaction-recovered below)
+    // or a content-filter block (terminal); those have their own handling.
+    let normal_stop = !matches!(
+        stop_reason,
+        Some(crate::models::FinishReason::Length)
+            | Some(crate::models::FinishReason::ContentFilter)
+    );
+    // Recover a stalled turn by re-issuing the model call (tail below) so it
+    // actually produces its reply/actions, bounded per-run so a persistently-empty
+    // model can't loop forever. Decided up front so the empty assistant turn is
+    // left uncommitted — keeping history clean for a faithful re-attempt.
+    let auto_retry_empty = no_visible_output
+        && normal_stop
+        && state.runtime.empty_continuations < MAX_EMPTY_CONTINUATIONS;
+    // The empty-turn guard counts only *consecutive* no-output turns: any turn
+    // that makes progress (text or tool calls) resets it.
+    if !no_visible_output {
+        state.runtime.empty_continuations = 0;
+    }
+
     let final_sig = thinking_signature.or(accumulated_sig);
 
-    // Commit the assistant message (with any tool calls attached —
-    // the adapter will serialize them into the next conversation
-    // turn).
-    let msg = commit_assistant_message(
-        partial_text,
-        partial_reasoning,
-        tool_calls.clone(),
-        final_sig,
-        state.now,
-    );
-    state.session.append(msg);
+    // Commit the assistant message (with any tool calls attached — the adapter
+    // serializes them into the next conversation turn), unless it's an empty turn
+    // we're about to retry: leaving it out keeps history clean so the re-attempt
+    // isn't seeded with an empty assistant message.
+    if !auto_retry_empty {
+        let msg = commit_assistant_message(
+            partial_text,
+            partial_reasoning,
+            tool_calls.clone(),
+            final_sig,
+            state.now,
+        );
+        state.session.append(msg);
+    }
 
     // A bare length-truncation (no tool calls) is the recoverable case below; any
     // other ending means the run made progress, so reset the recovery guard — it
@@ -2781,7 +2816,7 @@ fn handle_stream_done(
     // between the assistant's `tool_calls` and their results breaks provider
     // pairing → 400 (#72). A Length/ContentFilter stop *with* tool calls is
     // contradictory anyway, so dropping the note in that case is safe.
-    if tool_calls.is_empty() {
+    if tool_calls.is_empty() && !auto_retry_empty {
         match stop_reason {
             Some(crate::models::FinishReason::Length) => {
                 // The window filled mid-turn. If there's history to compact and
@@ -2806,11 +2841,12 @@ fn handle_stream_done(
                 cmds,
                 "Response was flagged by the provider's content filter.",
             ),
-            _ if empty_response => push_system(
+            _ if no_visible_output => push_system(
                 state,
                 cmds,
-                "The model ended its turn with no output (no text or tool calls). \
-                 Send your message again, or try rephrasing.",
+                "The model ended its turn with no reply or action (it produced only \
+                 internal reasoning). Send a message to continue, or rephrase your \
+                 request.",
             ),
             _ => {},
         }
@@ -2902,6 +2938,29 @@ fn handle_stream_done(
                 build_chat_request(state),
                 CompactionTrigger::TruncationRecovery,
             ),
+        });
+        return;
+    }
+
+    // Stalled-turn recovery: the model produced no reply and no action on a normal
+    // stop. Rather than ending the run silently, re-issue the model call so it
+    // completes the work it skipped (bounded by MAX_EMPTY_CONTINUATIONS, decided
+    // above). The system note both tells the user what's happening and, since it
+    // rides in the next request, nudges the model to actually respond. Returning
+    // here keeps the run alive instead of dropping to the run-summary tail.
+    if auto_retry_empty {
+        state.runtime.empty_continuations += 1;
+        push_system(
+            state,
+            cmds,
+            "The last turn produced no reply or action — continuing. Provide your \
+             response or take the next step.",
+        );
+        let next_turn = state.ids.fresh_turn();
+        state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
+        cmds.push(Cmd::CallModel {
+            turn: next_turn,
+            request: build_chat_request(state),
         });
         return;
     }
@@ -4223,8 +4282,11 @@ mod tests {
     }
 
     #[test]
-    fn stream_done_flags_a_completely_empty_turn() {
-        // No text, no reasoning, no tool calls → the run would silently dead-end.
+    fn stream_done_completely_empty_turn_auto_retries() {
+        // No text, no reasoning, no tool calls → previously a silent dead-end (or a
+        // bare hint). Now it auto-retries the model call (bounded), same as a
+        // reasoning-heavy stall — the "no visible output" test doesn't hinge on
+        // whether the model happened to emit hidden reasoning.
         let mut state = fresh_state();
         state.turn = TurnState::Generating {
             id: TurnId(5),
@@ -4236,7 +4298,7 @@ mod tests {
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
         };
-        let (state, _) = update(
+        let (state, cmds) = update(
             state,
             Msg::StreamDone {
                 turn: TurnId(5),
@@ -4245,15 +4307,12 @@ mod tests {
                 stop_reason: None,
             },
         );
-        assert!(matches!(state.turn, TurnState::Idle));
         assert!(
-            state
-                .session
-                .messages()
-                .iter()
-                .any(|m| m.role == MessageRole::System && m.content.contains("no output")),
-            "an empty turn must tell the user instead of silently stopping"
+            cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+            "a completely empty turn must re-issue the model call, not dead-end"
         );
+        assert!(matches!(state.turn, TurnState::Generating { .. }));
+        assert_eq!(state.runtime.empty_continuations, 1);
     }
 
     #[test]
@@ -4666,6 +4725,128 @@ mod tests {
             state.session.context_usage.as_ref().unwrap().used_tokens,
             150
         );
+    }
+
+    #[test]
+    fn stream_done_empty_output_with_reasoning_auto_retries() {
+        // The reported bug: a reasoning-heavy turn that produced no text and no
+        // tool calls must NOT end the run silently — it auto-retries the model
+        // call (bounded), without committing an empty assistant message.
+        let mut state = fresh_state();
+        state.runtime.run_started = Some(std::time::SystemTime::now());
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: String::new(),
+            partial_reasoning: "internal thinking ".repeat(50),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        };
+
+        let (state, cmds) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: Some(crate::models::TokenUsage::provider(100, 0, 100)),
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+            "a stalled (no-output) turn must re-issue the model call"
+        );
+        assert!(
+            matches!(state.turn, TurnState::Generating { .. }),
+            "run should continue in a fresh Generating turn"
+        );
+        assert_eq!(state.runtime.empty_continuations, 1);
+        assert!(
+            !state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.role == MessageRole::Assistant && m.content.trim().is_empty()),
+            "must not commit an empty assistant message"
+        );
+        // The tokens the stalled turn spent are still accounted for.
+        assert_eq!(state.session.cumulative_tokens, 100);
+    }
+
+    #[test]
+    fn stream_done_empty_output_past_cap_hints_and_ends() {
+        // Once the per-run retry budget is spent, a still-empty turn stops the run
+        // with a clear hint instead of looping forever.
+        let mut state = fresh_state();
+        state.runtime.run_started = Some(std::time::SystemTime::now());
+        state.runtime.empty_continuations = super::MAX_EMPTY_CONTINUATIONS;
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: String::new(),
+            partial_reasoning: "thinking".to_string(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        };
+
+        let (state, cmds) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+            "past the cap the run must not keep retrying"
+        );
+        assert!(matches!(state.turn, TurnState::Idle), "run ends");
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("no reply or action")),
+            "should surface the no-output hint"
+        );
+    }
+
+    #[test]
+    fn stream_done_with_output_resets_empty_continuation_guard() {
+        // A turn that makes progress clears the guard so a later stall in the same
+        // run gets a full retry budget again.
+        let mut state = fresh_state();
+        state.runtime.empty_continuations = 1;
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: "here is the answer".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+        };
+
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+
+        assert_eq!(state.runtime.empty_continuations, 0);
     }
 
     #[test]

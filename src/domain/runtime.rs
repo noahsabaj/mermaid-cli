@@ -335,6 +335,13 @@ pub struct RuntimeState {
     /// no-progress thrashing on a too-small window. Session-only.
     #[serde(skip)]
     pub truncation_recoveries: u32,
+    /// Consecutive turns in the current run that produced no visible output (no
+    /// assistant text and no tool calls) — even if the model spent the turn on
+    /// hidden reasoning. Under `MAX_EMPTY_CONTINUATIONS` the run auto-retries the
+    /// model call so a stalled turn isn't left silent; at the cap it stops with a
+    /// hint. Reset on a fresh run and whenever a turn makes progress. Session-only.
+    #[serde(skip)]
+    pub empty_continuations: u32,
 }
 
 impl RuntimeState {
@@ -352,6 +359,7 @@ impl RuntimeState {
             run_started: None,
             run_committed_tokens: 0,
             truncation_recoveries: 0,
+            empty_continuations: 0,
         }
     }
 
