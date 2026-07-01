@@ -183,6 +183,16 @@ impl ToolExecutor for SubagentTool {
         // silently escalate; non-replayable tools fail closed (see #3).
         let mut child_state = State::new(config.clone(), cwd.clone(), model_id);
         child_state.session.safety_mode = ctx.safety_mode;
+        // Load project instructions + the memory index synchronously, before the
+        // child is driven. Dispatching RefreshInstructions/RefreshMemory as
+        // effects (as this used to) races the child's FIRST model call — which
+        // is emitted synchronously from the seed prompt — so the opening call
+        // went out blind. The child has no config watcher either, so this is the
+        // only load.
+        let (instructions, memory) =
+            crate::app::instructions::load_project_context(&cwd, &config.memory);
+        child_state.instructions = instructions;
+        child_state.memory = memory;
 
         let child_tools = build_child_registry(self.spawner.providers.clone());
 
@@ -264,9 +274,10 @@ async fn drive_child(
         )))
         .await;
 
-    // Project instructions + memory — same as the root interactive path.
-    runner.dispatch(crate::domain::Cmd::RefreshInstructions);
-    runner.dispatch(crate::domain::Cmd::RefreshMemory);
+    // Project instructions + memory are loaded synchronously into `state` before
+    // `drive_child` is called (see `execute`), so the child's first model call
+    // sees them — no RefreshInstructions/RefreshMemory dispatch here, which would
+    // race that first call.
 
     // Seed the child turn.
     let seed = Msg::SubmitPrompt {

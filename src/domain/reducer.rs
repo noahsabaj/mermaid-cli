@@ -4192,12 +4192,9 @@ mod tests {
         let (state, cmds) = update(state, msg);
         assert!(matches!(state.turn, TurnState::Generating { .. }));
         // CallModel only — instructions/memory freshness comes from the config
-        // watcher (#45), so submit neither refreshes inline nor emits a Cmd.
+        // watcher (#45) in the TUI and a synchronous load in the one-shot paths,
+        // so submit never refreshes inline.
         assert!(cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
-        assert!(
-            !cmds.iter().any(|c| matches!(c, Cmd::RefreshInstructions)),
-            "submit must not emit a refresh Cmd; the watcher keeps config fresh (#45)",
-        );
         // user message committed
         assert_eq!(state.session.messages().len(), 1);
         assert_eq!(state.session.messages()[0].content, "hi there");

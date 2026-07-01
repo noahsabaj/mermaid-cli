@@ -80,15 +80,21 @@ pub async fn run_non_interactive_with(
         EffectRunner::pair_from_with_task(cwd.clone(), providers, tools, opts.task_id.clone());
     runner = runner.without_terminal_title();
 
-    let mut state = State::new(config.clone(), cwd, model_id);
+    let mut state = State::new(config.clone(), cwd.clone(), model_id);
     let mut lifecycle = RuntimeLifecycle::new();
 
-    // Bootstrap effects (MCP init) before the first prompt. The
-    // instructions refresh used to dispatch here too, but F8 moved it
-    // inline into `handle_submit_prompt` (synchronous stat + optional
-    // small read) so the very first call actually sees the current
-    // MERMAID.md — previously the dispatch race meant run #1 missed
-    // edits and only run #2 picked them up.
+    // Load project instructions + the memory index synchronously. The
+    // interactive TUI gets these from the config watcher's first poll
+    // (`run.rs`), which the headless driver never spawns — so without this the
+    // model call would go out with no MERMAID.md/AGENTS.md and no memory, while
+    // `mermaid doctor` reports them loaded. `build_chat_request` reads them off
+    // `state`, so they must be in place before the seed below.
+    let (instructions, memory) =
+        crate::app::instructions::load_project_context(&cwd, &config.memory);
+    state.instructions = instructions;
+    state.memory = memory;
+
+    // Bootstrap effects (MCP init) before the first prompt.
     //
     // Skip MCP init when `--no-execute` — MCP tools would advertise
     // through the registry we just emptied, so spinning up their

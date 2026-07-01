@@ -131,11 +131,6 @@ pub enum Cmd {
     },
     /// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
     PersistOllamaOffload(bool),
-    /// Re-stat `MERMAID.md` (cheap); emits `Msg::InstructionsChanged`
-    /// only when the mtime moved or the file appeared/disappeared.
-    RefreshInstructions,
-    /// Re-scan the memory directories (cheap); emits `Msg::MemoryChanged`.
-    RefreshMemory,
     /// List saved memories; emits `Msg::RuntimeText` with the rendered list.
     ListMemory,
     /// Save free-text to private memory; emits `Msg::MemoryChanged` + status.
@@ -322,8 +317,6 @@ impl Cmd {
             Cmd::PersistReasoningFor { .. } => "persist_reasoning_for",
             Cmd::PersistOllamaNumCtxFor { .. } => "persist_ollama_num_ctx_for",
             Cmd::PersistOllamaOffload(_) => "persist_ollama_offload",
-            Cmd::RefreshInstructions => "refresh_instructions",
-            Cmd::RefreshMemory => "refresh_memory",
             Cmd::ListMemory => "list_memory",
             Cmd::RememberMemory { .. } => "remember_memory",
             Cmd::ForgetMemory { .. } => "forget_memory",
@@ -440,8 +433,6 @@ impl Cmd {
             Cmd::PersistOllamaOffload(enabled) => {
                 format!("persist_ollama_offload({})", enabled)
             },
-            Cmd::RefreshInstructions => "refresh_instructions".to_string(),
-            Cmd::RefreshMemory => "refresh_memory".to_string(),
             Cmd::ListMemory => "list_memory".to_string(),
             Cmd::RememberMemory { .. } => "remember_memory".to_string(),
             Cmd::ForgetMemory { .. } => "forget_memory".to_string(),
@@ -527,14 +518,12 @@ mod tests {
             !Cmd::SaveConversation(ConversationHistory::new("/p".to_string(), "m".to_string()))
                 .is_turn_scoped()
         );
-        assert!(!Cmd::RefreshInstructions.is_turn_scoped());
         assert!(!Cmd::Exit.is_turn_scoped());
     }
 
     #[test]
     fn cmd_tags_are_stable() {
         assert_eq!(Cmd::Exit.tag(), "exit");
-        assert_eq!(Cmd::RefreshInstructions.tag(), "refresh_instructions");
         assert_eq!(Cmd::CancelScope(TurnId(1)).tag(), "cancel_scope");
     }
 
