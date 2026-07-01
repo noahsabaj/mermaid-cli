@@ -476,6 +476,10 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 cmds.push(Cmd::CancelScope(id));
                 state.pending_approval.clear();
             }
+            // Messages queued against the *previous* conversation must not
+            // auto-submit into the one being loaded — drop them (mirrors the
+            // `pending_approval` clear above).
+            state.ui.queued_messages.clear();
             state.session.conversation = history;
             state.turn = TurnState::Idle;
             state.ui.mode = UiMode::EditingInput;
@@ -1755,7 +1759,30 @@ fn visible_reasoning_value(arg: Option<&str>, current: bool) -> Result<bool, &'s
 /// scrollable transcript instead of flashing in the spinner's row. The zone
 /// above the input is reserved for the generation spinner alone.
 fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) {
-    state.session.append(ChatMessage::system(text.into()));
+    // While tools are mid-flight the trailing message is the committed
+    // `assistant(tool_calls)` whose `tool` results haven't landed yet. Appending
+    // a system note *after* it wedges a message between the `tool_use` and its
+    // `tool_result` — which OpenAI- and Ollama-shaped providers reject on the
+    // next request (Anthropic and Gemini happen to drop mid-history system
+    // messages, but we can't lean on that for every backend). Insert the note
+    // just *before* that assistant message so the pair stays adjacent; as a
+    // bonus the assistant message stays last, so in-flight tool actions/images
+    // still attach to it. Anywhere else, plain append.
+    let messages = &state.session.conversation.messages;
+    let would_split = matches!(state.turn, TurnState::ExecutingTools { .. })
+        && messages
+            .last()
+            .is_some_and(|m| m.role == MessageRole::Assistant && m.tool_calls.is_some());
+    if would_split {
+        let pos = messages.len() - 1;
+        state
+            .session
+            .conversation
+            .messages
+            .insert(pos, ChatMessage::system(text.into()));
+    } else {
+        state.session.append(ChatMessage::system(text.into()));
+    }
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
 }
 
@@ -2413,6 +2440,36 @@ fn format_scaled(value: usize, divisor: usize, suffix: &str) -> String {
     }
 }
 
+/// When a turn is aborted while its tools are mid-flight, the `assistant`
+/// message carrying the `tool_calls` is already committed to history but the
+/// matching `tool` result messages never will be. Left as-is, the next request
+/// sends `tool_use` blocks with no `tool_result` and providers (Anthropic in
+/// particular) reject it with a 400. Commit a `cancelled` placeholder result
+/// for every outstanding call so history stays well-formed — the same repair
+/// compaction performs for orphaned tool calls (#71), applied to the live
+/// cancel/quit paths. Leaves `state.turn` untouched for any non-`ExecutingTools`
+/// state; the caller sets the real target state afterwards.
+fn seal_orphaned_tool_calls(state: &mut State) {
+    match std::mem::replace(&mut state.turn, TurnState::Idle) {
+        TurnState::ExecutingTools {
+            calls, outcomes, ..
+        } => {
+            let sealed: Vec<ToolOutcome> = outcomes
+                .into_iter()
+                .map(|o| o.unwrap_or_else(ToolOutcome::cancelled))
+                .collect();
+            for m in tool_result_messages(&calls, sealed) {
+                state.session.append(m);
+            }
+            // turn is now `Idle`; caller decides the next state.
+        },
+        other => {
+            // Not mid-tools — restore the state we took.
+            state.turn = other;
+        },
+    }
+}
+
 fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
     let Some(id) = state.turn.id() else {
         return;
@@ -2425,6 +2482,9 @@ fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
     // The cancelled turn's tool tasks are aborted; their parked approval
     // requests can never be answered, so drop any queued prompts.
     state.pending_approval.clear();
+    // If tools were mid-flight, close the tool_use/tool_result pairing before
+    // leaving `ExecutingTools`, or the next request would be malformed.
+    seal_orphaned_tool_calls(state);
     state.turn = TurnState::Cancelling {
         id,
         since: std::time::SystemTime::from(state.now),
@@ -2465,6 +2525,10 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
         );
         state.session.append(msg);
     }
+    // Quitting mid-tool-execution: seal the orphaned `tool_calls` with cancelled
+    // placeholders so the saved history a later `--continue` reloads isn't a
+    // malformed `assistant(tool_calls)` with no results.
+    seal_orphaned_tool_calls(state);
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
     cmds.push(Cmd::Exit);
 }
@@ -2487,6 +2551,9 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
                 cmds.push(Cmd::CancelScope(id));
                 state.pending_approval.clear();
             }
+            // A message queued mid-turn belonged to the conversation being
+            // wiped — don't let it auto-submit into the fresh one.
+            state.ui.queued_messages.clear();
             // Clear = start a fresh conversation: new ID, new default
             // title, empty history, zero cumulative tokens. Matches
             // user mental model ("wipe everything").
@@ -3762,6 +3829,146 @@ mod tests {
         let (state, cmds) = update(state, Msg::ConfirmAccepted);
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::CancelScope(_))));
         assert!(matches!(state.turn, TurnState::Idle));
+    }
+
+    /// Build an `ExecutingTools` state with one outstanding call plus the
+    /// committed `assistant(tool_calls)` that a real turn leaves as the trailing
+    /// message before the tool results land.
+    fn executing_tools_with_committed_call(turn: TurnId) -> State {
+        let mut state = fresh_state();
+        let source = crate::models::tool_call::ToolCall {
+            id: Some("call-1".to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "foo"}),
+            },
+        };
+        let call = PendingToolCall {
+            call_id: super::super::ids::ToolCallId(1),
+            source: source.clone(),
+        };
+        state
+            .session
+            .append(ChatMessage::assistant("running a tool").with_tool_calls(vec![source]));
+        state.turn = start_executing_tools(turn, vec![call], std::time::SystemTime::now());
+        state
+    }
+
+    #[test]
+    fn cancel_mid_tools_seals_orphaned_tool_calls() {
+        // Cancelling while tools run left the committed `assistant(tool_calls)`
+        // without matching `tool` results — the next request then 400s on
+        // Anthropic ("tool_use without tool_result"). The cancel path must now
+        // seal every outstanding call with a cancelled placeholder.
+        let state = executing_tools_with_committed_call(TurnId(7));
+        let (state, _cmds) = update(state, Msg::CancelTurn);
+        // History is well-formed the moment we leave ExecutingTools.
+        let last = state.session.messages().last().expect("a message");
+        assert_eq!(
+            last.role,
+            MessageRole::Tool,
+            "the orphaned tool_call must be sealed with a tool result"
+        );
+        assert_eq!(last.tool_call_id.as_deref(), Some("call-1"));
+        assert!(matches!(state.turn, TurnState::Cancelling { .. }));
+
+        // The terminal TurnCancelled still closes the turn out to Idle.
+        let (state, _cmds) = update(state, Msg::TurnCancelled(TurnId(7)));
+        assert!(matches!(state.turn, TurnState::Idle));
+    }
+
+    #[test]
+    fn quit_mid_tools_seals_orphaned_tool_calls_before_saving() {
+        // Same hazard on the quit path: the saved history a later `--continue`
+        // reloads must not be a dangling `assistant(tool_calls)`.
+        let state = executing_tools_with_committed_call(TurnId(7));
+        let (state, cmds) = update(state, Msg::Quit);
+        assert!(state.should_exit);
+        let last = state.session.messages().last().expect("a message");
+        assert_eq!(last.role, MessageRole::Tool);
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    }
+
+    #[test]
+    fn system_note_during_tools_does_not_split_tool_pair() {
+        // A system note appended between `assistant(tool_calls)` and its results
+        // wedges a message into the tool_use/tool_result pair, which OpenAI- and
+        // Ollama-shaped providers reject. `push_system` must insert it *before*
+        // the trailing assistant message instead, keeping the pair adjacent and
+        // the assistant message last (so tool actions still attach to it).
+        let mut state = executing_tools_with_committed_call(TurnId(7));
+        let mut cmds = Vec::new();
+        push_system(&mut state, &mut cmds, "an MCP server errored mid-turn");
+
+        let msgs = state.session.messages();
+        let last = msgs.last().expect("a message");
+        assert_eq!(
+            last.role,
+            MessageRole::Assistant,
+            "the assistant(tool_calls) must stay last so results follow it directly"
+        );
+        assert!(last.tool_calls.is_some());
+        let prev = &msgs[msgs.len() - 2];
+        assert_eq!(prev.role, MessageRole::System);
+        assert!(prev.content.contains("MCP server errored"));
+    }
+
+    #[test]
+    fn system_note_when_idle_appends_normally() {
+        // Outside ExecutingTools the note is a plain append (no trailing
+        // tool-call message to protect).
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("hi"));
+        let mut cmds = Vec::new();
+        push_system(&mut state, &mut cmds, "just a note");
+        let last = state.session.messages().last().expect("a message");
+        assert_eq!(last.role, MessageRole::System);
+        assert!(last.content.contains("just a note"));
+    }
+
+    #[test]
+    fn load_conversation_drops_queued_messages() {
+        // A message queued against the previous conversation must not survive a
+        // `/load` and auto-submit into the loaded one.
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
+        state
+            .ui
+            .queued_messages
+            .push_back(super::super::state::QueuedMessage {
+                text: "stale queued prompt".to_string(),
+                attachment_ids: Vec::new(),
+            });
+        let history = fresh_state().session.conversation.clone();
+        let (state, _cmds) = update(state, Msg::ConversationLoaded(history));
+        assert!(
+            state.ui.queued_messages.is_empty(),
+            "queued messages must be dropped on /load"
+        );
+    }
+
+    #[test]
+    fn clear_conversation_drops_queued_messages() {
+        // Same for `/clear`: a mid-turn queued message belonged to the wiped
+        // conversation and must not auto-submit into the fresh one.
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
+        state
+            .ui
+            .queued_messages
+            .push_back(super::super::state::QueuedMessage {
+                text: "stale queued prompt".to_string(),
+                attachment_ids: Vec::new(),
+            });
+        state.confirm = Some(super::super::state::Confirmation {
+            prompt: "Clear conversation history?".to_string(),
+            accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
+        });
+        let (state, _cmds) = update(state, Msg::ConfirmAccepted);
+        assert!(
+            state.ui.queued_messages.is_empty(),
+            "queued messages must be dropped on /clear"
+        );
     }
 
     #[test]
