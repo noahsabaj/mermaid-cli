@@ -1,6 +1,6 @@
 [package]
 name = "mermaid-cli"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2024"
 default-run = "mermaid"
 # `str::floor_char_boundary` (used in several places for UTF-8-safe slicing)
@@ -74,7 +74,7 @@ bytes = "1.11"
 rusqlite = { version = "0.40", features = ["bundled"] }
 getrandom = "0.4"
 sha2 = "0.11"
-mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.14.0" }
+mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.14.1" }
 
 # Additional utilities
 regex = "1.12"
