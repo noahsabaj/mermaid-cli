@@ -2531,7 +2531,10 @@ fn mcp_startup_msg(name: &str, started: bool, tools: Vec<crate::domain::McpToolS
 ///
 /// `tokio::task::spawn_blocking` is the right primitive: `clipboard::
 /// has_image` / `read_image_bytes` / `read_text` shell out to xclip /
-/// wl-paste / pngpaste / PowerShell, all of which block synchronously.
+/// wl-paste / pngpaste / PowerShell, all of which block synchronously —
+/// bounded, since every clipboard subprocess runs under a kill-on-timeout
+/// deadline, so a hung helper returns an error here instead of pinning
+/// this blocking thread forever.
 async fn dispatch_read_clipboard(tx: MsgSender) {
     use crate::domain::Paste;
 
