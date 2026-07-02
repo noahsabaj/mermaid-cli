@@ -1,38 +1,14 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use std::collections::VecDeque;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
-use super::GenerationStatus;
+use super::{GenerationStatus, truncate_to_cells};
 use crate::domain::QueuedMessage;
 use crate::render::theme::Theme;
 
 /// How many queued-message rows to show under the spinner before stopping.
 const MAX_QUEUED_ROWS: usize = 5;
-
-/// Truncate `s` to `width` display cells, appending `…` when it doesn't fit.
-/// Cell-accurate (CJK/emoji safe) so the result never exceeds `width`.
-fn truncate_to_cells(s: &str, width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= width {
-        return s.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let budget = width - 1; // leave a cell for the ellipsis
-    let mut out = String::new();
-    let mut w = 0usize;
-    for ch in s.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if w + cw > budget {
-            break;
-        }
-        out.push(ch);
-        w += cw;
-    }
-    out.push('…');
-    out
-}
 
 /// Build the status-line rows: a generation/tool spinner followed by one row
 /// per queued message.

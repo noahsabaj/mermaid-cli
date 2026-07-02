@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
+use super::truncate_to_cells;
 use crate::render::theme::Theme;
 
 pub struct ApprovalModalWidget<'a> {
@@ -35,7 +36,7 @@ impl<'a> Widget for ApprovalModalWidget<'a> {
         let mut lines: Vec<Line<'_>> = Vec::new();
         for raw in self.body.lines() {
             lines.push(Line::from(Span::styled(
-                truncate(raw, inner_width),
+                truncate_to_cells(raw, inner_width),
                 Style::default().fg(Color::White),
             )));
         }
@@ -54,14 +55,5 @@ impl<'a> Widget for ApprovalModalWidget<'a> {
             lines.push(Line::from(Span::styled(format!("  {}", opt), style)));
         }
         Paragraph::new(lines).block(block).render(area, buf);
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut = s.floor_char_boundary(max);
-        format!("{}…", &s[..cut])
     }
 }

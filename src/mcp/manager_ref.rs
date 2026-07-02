@@ -78,8 +78,17 @@ pub fn is_ready() -> bool {
 /// Await init completion. Returns immediately when `is_ready()`.
 /// Otherwise parks on `MCP_READY_NOTIFY`.
 pub async fn wait_ready() {
+    // Enroll the waiter BEFORE checking readiness. `mark_init_complete` calls
+    // `notify_waiters()`, which wakes only already-registered waiters and stores
+    // no permit — so the naive "check is_ready(); then .notified().await" loses a
+    // wakeup that lands between the two, leaving the waiter parked until its
+    // caller's timeout. `Notified::enable()` registers without awaiting, closing
+    // the window.
+    let notified = MCP_READY_NOTIFY.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
     if is_ready() {
         return;
     }
-    MCP_READY_NOTIFY.notified().await;
+    notified.await;
 }

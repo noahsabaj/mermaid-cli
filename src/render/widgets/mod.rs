@@ -22,6 +22,34 @@ pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
 pub use status_line::build_status_lines;
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Truncate `s` to `width` display cells, appending `…` when it doesn't fit.
+/// Cell-accurate (CJK/emoji safe) so the result never exceeds `width` — unlike a
+/// `chars().count()` guard + byte-index cut, which under-counts wide glyphs (48
+/// CJK chars = 96 cells slips through) and slices on a byte boundary.
+pub(super) fn truncate_to_cells(s: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= width {
+        return s.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let budget = width - 1; // leave a cell for the ellipsis
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
 /// Local-to-render-layer generation phase enum. The compose function
 /// converts from `domain::TurnState` + `domain::GenPhase` into one of
 /// these four states; widgets render off this local view so they
@@ -68,5 +96,43 @@ impl GenerationStatus {
             TurnState::Compacting { .. } => GenerationStatus::Compacting,
             TurnState::Cancelling { .. } => GenerationStatus::Cancelling,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_to_cells;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn fits_within_width_returns_unchanged() {
+        assert_eq!(truncate_to_cells("hello", 10), "hello");
+        assert_eq!(truncate_to_cells("hello", 5), "hello");
+    }
+
+    #[test]
+    fn ascii_truncates_with_ellipsis_within_budget() {
+        let out = truncate_to_cells("hello world", 5);
+        assert_eq!(out, "hell…");
+        assert!(UnicodeWidthStr::width(out.as_str()) <= 5);
+    }
+
+    #[test]
+    fn wide_glyphs_never_exceed_budget() {
+        // Each CJK char is 2 cells. The old `chars().count()` guard let a
+        // 48-char (96-cell) title slip through a "48" budget and overflow its
+        // row; cell-accurate truncation caps the display width.
+        let cjk = "你好世界你好世界"; // 8 chars = 16 cells
+        let out = truncate_to_cells(cjk, 6);
+        assert!(
+            UnicodeWidthStr::width(out.as_str()) <= 6,
+            "width exceeded budget: {out:?}"
+        );
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn zero_width_is_empty() {
+        assert_eq!(truncate_to_cells("anything", 0), "");
     }
 }

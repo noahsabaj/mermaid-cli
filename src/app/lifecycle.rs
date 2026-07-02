@@ -35,8 +35,17 @@ impl Default for RuntimeLifecycle {
 fn spawn_signal_tasks(tx: mpsc::UnboundedSender<RuntimeSignal>) {
     let ctrl_c_tx = tx.clone();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = ctrl_c_tx.send(RuntimeSignal::Interrupt);
+        // Loop, not one-shot: a second Ctrl+C during a stalled shutdown must
+        // still be delivered (the old task exited after the first signal, so a
+        // wedged MCP-drain window made Ctrl+C appear dead). `ctrl_c()` re-arms on
+        // each await; stop only if registration fails or the receiver is gone.
+        loop {
+            if tokio::signal::ctrl_c().await.is_err() {
+                break;
+            }
+            if ctrl_c_tx.send(RuntimeSignal::Interrupt).is_err() {
+                break; // app shutting down; nobody left to receive.
+            }
         }
     });
 
@@ -49,18 +58,22 @@ fn spawn_unix_signal_tasks(tx: mpsc::UnboundedSender<RuntimeSignal>) {
 
     let terminate_tx = tx.clone();
     tokio::spawn(async move {
-        if let Ok(mut sigterm) = signal(SignalKind::terminate())
-            && sigterm.recv().await.is_some()
-        {
-            let _ = terminate_tx.send(RuntimeSignal::Terminate);
+        if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+            while sigterm.recv().await.is_some() {
+                if terminate_tx.send(RuntimeSignal::Terminate).is_err() {
+                    break;
+                }
+            }
         }
     });
 
     tokio::spawn(async move {
-        if let Ok(mut sighup) = signal(SignalKind::hangup())
-            && sighup.recv().await.is_some()
-        {
-            let _ = tx.send(RuntimeSignal::Hangup);
+        if let Ok(mut sighup) = signal(SignalKind::hangup()) {
+            while sighup.recv().await.is_some() {
+                if tx.send(RuntimeSignal::Hangup).is_err() {
+                    break;
+                }
+            }
         }
     });
 }

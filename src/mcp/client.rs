@@ -134,38 +134,55 @@ impl McpClient {
         Ok(server_info)
     }
 
-    /// Discover all tools available from this server.
+    /// Discover all tools available from this server, following `nextCursor`
+    /// pagination so a server that pages its tool list isn't silently truncated
+    /// to page one. Bounded by a page cap so a server that echoes a stuck cursor
+    /// can't loop forever.
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>> {
-        let result = self.transport.send_request("tools/list", json!({})).await?;
-
-        let tools_array = result
-            .get("tools")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| anyhow!("MCP tools/list response missing 'tools' array"))?;
-
+        const MAX_PAGES: usize = 100;
         let mut tools = Vec::new();
-        for tool in tools_array {
-            let name = tool
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let description = tool
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let input_schema = tool
-                .get("inputSchema")
-                .cloned()
-                .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
+        let mut cursor: Option<String> = None;
 
-            if !name.is_empty() {
-                tools.push(McpToolDef {
-                    name,
-                    description,
-                    input_schema,
-                });
+        for _ in 0..MAX_PAGES {
+            let params = match &cursor {
+                Some(c) => json!({ "cursor": c }),
+                None => json!({}),
+            };
+            let result = self.transport.send_request("tools/list", params).await?;
+
+            let tools_array = result
+                .get("tools")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow!("MCP tools/list response missing 'tools' array"))?;
+
+            for tool in tools_array {
+                let name = tool
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let description = tool
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input_schema = tool
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
+
+                if !name.is_empty() {
+                    tools.push(McpToolDef {
+                        name,
+                        description,
+                        input_schema,
+                    });
+                }
+            }
+
+            match result.get("nextCursor").and_then(|v| v.as_str()) {
+                Some(next) if !next.is_empty() => cursor = Some(next.to_string()),
+                _ => break,
             }
         }
 
@@ -179,7 +196,14 @@ impl McpClient {
             "arguments": arguments,
         });
 
-        let result = self.transport.send_request("tools/call", params).await?;
+        let result = self
+            .transport
+            .send_request_with_timeout(
+                "tools/call",
+                params,
+                StdioTransport::tool_call_timeout_secs(),
+            )
+            .await?;
 
         let is_error = result
             .get("isError")

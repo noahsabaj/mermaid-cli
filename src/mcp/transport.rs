@@ -17,8 +17,15 @@ use tokio::time::{Duration, timeout};
 use crate::constants::MAX_MCP_FRAME_BYTES;
 use crate::utils::{CappedLine, read_line_capped};
 
-/// Default timeout for JSON-RPC request/response round-trips
+/// Default timeout for JSON-RPC request/response round-trips (discovery,
+/// initialize, ping — all fast control calls).
 const REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Timeout for a `tools/call` round-trip. Tool invocations do real work —
+/// browser automation, web research, large builds — so the fast-control 30s
+/// budget spuriously killed legitimate long-running tools. This is the ceiling;
+/// the turn's own cancellation still aborts a genuinely stuck call sooner.
+const TOOL_CALL_TIMEOUT_SECS: u64 = 300;
 
 /// Timeout for a single stdin write+flush. Separate from (and shorter than)
 /// `REQUEST_TIMEOUT_SECS`: this bounds local pipe backpressure — a child that
@@ -265,8 +272,28 @@ impl StdioTransport {
         })
     }
 
-    /// Send a JSON-RPC request and wait for the response.
+    /// Send a JSON-RPC request and wait for the response under the default
+    /// control-call timeout (`REQUEST_TIMEOUT_SECS`).
     pub async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
+        self.send_request_with_timeout(method, params, REQUEST_TIMEOUT_SECS)
+            .await
+    }
+
+    /// The response-wait budget a `tools/call` should use — longer than the
+    /// fast-control default because tool work (browser automation, research,
+    /// builds) legitimately takes minutes.
+    pub fn tool_call_timeout_secs() -> u64 {
+        TOOL_CALL_TIMEOUT_SECS
+    }
+
+    /// Like [`send_request`], but with an explicit response-wait budget. Used by
+    /// `tools/call`, whose work can legitimately outrun the fast-control budget.
+    pub async fn send_request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        response_timeout_secs: u64,
+    ) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let request = serde_json::json!({
@@ -342,7 +369,7 @@ impl StdioTransport {
         // Wait for the response, removing the pending entry on EVERY non-success
         // exit (timeout or channel-closed) so it can't leak. On success the
         // reader task has already removed it.
-        let response = match timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), rx).await {
+        let response = match timeout(Duration::from_secs(response_timeout_secs), rx).await {
             Ok(Ok(value)) => value,
             Ok(Err(_)) => {
                 self.pending.lock().await.remove(&id);
@@ -352,7 +379,7 @@ impl StdioTransport {
                 self.pending.lock().await.remove(&id);
                 return Err(anyhow!(
                     "MCP request timed out after {}s: {}",
-                    REQUEST_TIMEOUT_SECS,
+                    response_timeout_secs,
                     method
                 ));
             },
