@@ -32,6 +32,28 @@ impl SafetyMode {
             _ => None,
         }
     }
+
+    /// Permissiveness rank for combining modes: read_only is strictest,
+    /// full_access loosest.
+    fn permissiveness(self) -> u8 {
+        match self {
+            SafetyMode::ReadOnly => 0,
+            SafetyMode::Ask => 1,
+            SafetyMode::Auto => 2,
+            SafetyMode::FullAccess => 3,
+        }
+    }
+
+    /// The stricter of two modes. Used to apply an agent type's safety
+    /// ceiling to a session's live mode — a ceiling can only tighten what
+    /// the parent already allows, never loosen it.
+    pub fn least_permissive(a: SafetyMode, b: SafetyMode) -> SafetyMode {
+        if a.permissiveness() <= b.permissiveness() {
+            a
+        } else {
+            b
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1453,6 +1475,24 @@ pub fn is_destructive_command(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::*;
+
+    #[test]
+    fn least_permissive_picks_the_stricter_mode() {
+        use SafetyMode::*;
+        // A ceiling can only tighten: whichever side is stricter wins.
+        assert_eq!(SafetyMode::least_permissive(FullAccess, ReadOnly), ReadOnly);
+        assert_eq!(SafetyMode::least_permissive(ReadOnly, FullAccess), ReadOnly);
+        assert_eq!(SafetyMode::least_permissive(Ask, Auto), Ask);
+        assert_eq!(SafetyMode::least_permissive(Auto, Ask), Ask);
+        // Identity: combining a mode with itself changes nothing.
+        for m in [ReadOnly, Ask, Auto, FullAccess] {
+            assert_eq!(SafetyMode::least_permissive(m, m), m);
+        }
+        // A FullAccess ceiling is a no-op for every live mode.
+        for m in [ReadOnly, Ask, Auto, FullAccess] {
+            assert_eq!(SafetyMode::least_permissive(m, FullAccess), m);
+        }
+    }
 
     #[test]
     fn read_only_mode_denies_mutation() {

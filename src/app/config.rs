@@ -103,6 +103,11 @@ pub struct Config {
     #[serde(default)]
     pub computer_use: ComputerUseConfig,
 
+    /// Subagent (`agent` tool) settings: drive timeout and user-defined
+    /// agent types.
+    #[serde(default)]
+    pub agents: AgentsConfig,
+
     /// Runtime-only prompt customizations supplied by CLI flags. These are
     /// deliberately skipped when saving config so one-off agent personas do
     /// not pollute the user's persistent Mermaid settings.
@@ -244,6 +249,57 @@ impl Default for ComputerUseConfig {
             auto_screenshot: true,
         }
     }
+}
+
+/// Subagent (`agent` tool) settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// Hard ceiling on one subagent drive's wall-clock runtime, in seconds.
+    /// `0` falls back to the built-in default (1200 = 20 minutes).
+    pub timeout_secs: u64,
+    /// User-defined agent types for the `agent` tool's `type` arg, keyed by
+    /// type name. A custom name shadows a built-in (`general`, `explore`),
+    /// so `[agents.types.explore]` retunes the built-in Explore.
+    /// ```toml
+    /// [agents.types.scout]
+    /// tools = ["read_file", "execute_command"]  # omit for the full child set
+    /// safety = "read_only"    # ceiling — the child never runs looser
+    /// preamble = "You are a scout: find and report, fast."
+    /// model = "ollama/qwen3:8b"  # default model; per-call `model` arg wins
+    /// ```
+    pub types: HashMap<String, AgentTypeConfig>,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 1200,
+            types: HashMap::new(),
+        }
+    }
+}
+
+/// One user-defined agent type (see [`AgentsConfig::types`]). Every field is
+/// optional; an empty table behaves like the built-in `general` type.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentTypeConfig {
+    /// Tool names the child registry is filtered to. Valid names:
+    /// `read_file`, `write_file`, `edit_file`, `delete_file`,
+    /// `create_directory`, `execute_command`, `web_search`, `web_fetch`,
+    /// `mcp`. Omit for the full child set.
+    pub tools: Option<Vec<String>>,
+    /// Safety ceiling (canonical mode name: `read_only`/`ask`/`auto`/
+    /// `full_access`). The child runs at the LESS permissive of the parent's
+    /// live mode and this ceiling.
+    pub safety: Option<String>,
+    /// Extra system-prompt block appended after the child's subagent
+    /// contract.
+    pub preamble: Option<String>,
+    /// Default model id for this type (e.g. `"ollama/qwen3:8b"`); a per-call
+    /// `model` arg wins over it.
+    pub model: Option<String>,
 }
 
 /// User-supplied OpenAI-compatible provider configuration. All fields are
@@ -697,6 +753,36 @@ mod tests {
         let back: ModelSettings = toml::from_str(&toml_blob).expect("deserialize");
         assert_eq!(back.reasoning, ReasoningLevel::High);
         assert_eq!(back.name, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn agents_config_defaults_and_parses_custom_types() {
+        // Absent section → defaults (20-minute timeout, no custom types).
+        let config: Config = toml::from_str("").expect("empty config parses");
+        assert_eq!(config.agents.timeout_secs, 1200);
+        assert!(config.agents.types.is_empty());
+
+        let config: Config = toml::from_str(
+            r#"
+[agents]
+timeout_secs = 300
+
+[agents.types.scout]
+tools = ["read_file", "execute_command"]
+safety = "read_only"
+preamble = "You are a scout."
+model = "ollama/qwen3:8b"
+"#,
+        )
+        .expect("agents section parses");
+        assert_eq!(config.agents.timeout_secs, 300);
+        let scout = &config.agents.types["scout"];
+        assert_eq!(
+            scout.tools.as_deref(),
+            Some(&["read_file".to_string(), "execute_command".to_string()][..])
+        );
+        assert_eq!(scout.safety.as_deref(), Some("read_only"));
+        assert_eq!(scout.model.as_deref(), Some("ollama/qwen3:8b"));
     }
 
     #[test]

@@ -139,6 +139,7 @@ impl State {
                 cumulative_token_usage: TokenUsageTotals::default(),
                 context_usage: None,
                 is_subagent: false,
+                agent_preamble: None,
             },
             turn: TurnState::Idle,
             ui: UiState {
@@ -486,6 +487,10 @@ pub struct Session {
     /// contract (final message = the report returned to the parent) when
     /// set. Never true for a user-facing session.
     pub is_subagent: bool,
+    /// Agent-type system-prompt block (e.g. the Explore type's "read-only
+    /// reconnaissance" charter), appended after the subagent contract.
+    /// Only ever `Some` on subagent sessions.
+    pub agent_preamble: Option<String>,
 }
 
 impl Session {

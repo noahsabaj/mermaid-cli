@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent types for the `agent` tool. Built-in `general` (full tool access at
+  your safety mode) and `explore` (read-only reconnaissance: reads +
+  read-only commands, cannot mutate regardless of the parent's mode), plus
+  user-defined types under `[agents.types]` in config — each a tool filter, a
+  safety ceiling (the child runs at the *less* permissive of the parent's
+  live mode and the ceiling, so a type can only tighten), a system-prompt
+  preamble, and an optional default model. A custom name shadows a built-in,
+  so `[agents.types.explore]` retunes the built-in. Pick a type with the
+  tool's new `type` arg.
+- Per-call subagent model override: the `agent` tool's new `model` arg (and a
+  type's `model` default) runs a child on a different model than the parent —
+  e.g. a cheap/fast model for search-and-summarize fan-out, the session model
+  for synthesis. Priority: per-call `model` > type default > session model.
+- Subagent continuation handles. Every `agent` result ends with an
+  `[agent_id: …]` trailer; passing that id back as the new `agent_id` arg
+  restores the child's conversation context and seeds the prompt as its next
+  message, so a follow-up reuses what the child already learned instead of
+  re-exploring. The most recent children (bounded cache) are retained;
+  timed-out and errored children are kept too, so "continue aN: what did you
+  find so far?" works.
+- Configurable subagent timeout via `[agents] timeout_secs` (default 1200 =
+  20 minutes), replacing the previously hard-coded ceiling.
 - Live subagent visibility: while an `agent` call runs, the status line now
   shows the child's current activity ("Running tools: Agent explore crates ·
   read_file…") instead of an opaque spinner — the child's tool starts/finishes
