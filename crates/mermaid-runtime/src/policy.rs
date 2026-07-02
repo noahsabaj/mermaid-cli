@@ -471,6 +471,49 @@ const READ_ONLY_BINARIES: &[&str] = &[
     "true",
     "false",
     "test",
+    "[",
+    // Text tools that read stdin/args and write only to stdout (a `>` redirect
+    // is caught separately). Adding these removes read_only false positives
+    // reported after v0.14.0.
+    "nl",
+    "tac",
+    "rev",
+    "comm",
+    "join",
+    "paste",
+    "fold",
+    "fmt",
+    "expand",
+    "unexpand",
+    // Binary / file inspection — read-only (NOT `strip`, which edits in place;
+    // NOT `ldd`, which can execute the inspected binary).
+    "xxd",
+    "od",
+    "hexdump",
+    "strings",
+    "nm",
+    "objdump",
+    "readelf",
+    "size",
+    // More checksum families (siblings of the md5/sha1/sha256 already listed).
+    "sha224sum",
+    "sha384sum",
+    "sha512sum",
+    "b2sum",
+    // Read-only process / system inspection (NOT `kill`, `nice`, etc.).
+    "ps",
+    "groups",
+    "logname",
+    "arch",
+    "nproc",
+    "uptime",
+    "free",
+    "vmstat",
+    "lscpu",
+    "lsblk",
+    "lsusb",
+    "lspci",
+    "tty",
 ];
 
 /// `git` subcommands that only read repository state. Deliberately excludes
@@ -839,6 +882,17 @@ fn classify_head(head: &str, segment: &[String]) -> RiskClass {
     if head == "sort" && sort_writes_file(segment) {
         return RiskClass::ShellMutation;
     }
+    // `yq -i` / `--inplace` rewrites the file in place — a mutation the argv0
+    // read-only rating would otherwise auto-run (`jq` has no such flag, so it
+    // stays read-only). Same shape as the `sort -o` guard above.
+    if head == "yq" && segment_has_flag(segment, 'i', "inplace") {
+        return RiskClass::ShellMutation;
+    }
+    // `date -s` / `--set` sets the system clock — a control action, not the
+    // read that displaying a date (`date`, `date +%s`, `date -d …`) is.
+    if head == "date" && segment_has_flag(segment, 's', "set") {
+        return RiskClass::ShellMutation;
+    }
     if PROCESS_BINARIES.contains(&head) {
         return RiskClass::Process;
     }
@@ -1077,6 +1131,24 @@ fn is_fork_bomb(nospace: &str) -> bool {
         search = def_at + 3;
     }
     false
+}
+
+/// True if `segment` (past argv0) carries a specific flag in any spelling:
+/// `--<long>` (incl. `--<long>=value`), or a single-dash bundle containing the
+/// short char (`-i`, `-Pi`). Used to catch the one write flag on an otherwise
+/// read-only tool (`yq -i`, `date -s`) without a bespoke scan per tool.
+fn segment_has_flag(segment: &[String], short: char, long: &str) -> bool {
+    segment.iter().skip(1).any(|t| {
+        if let Some(rest) = t.strip_prefix("--") {
+            rest == long || rest.split('=').next() == Some(long)
+        } else if let Some(bundle) = t.strip_prefix('-') {
+            !bundle.is_empty()
+                && bundle.chars().all(|c| c.is_ascii_alphanumeric())
+                && bundle.contains(short)
+        } else {
+            false
+        }
+    })
 }
 
 /// True if any token is a short flag (`-rf`) or long flag (`--recursive`)
@@ -1870,6 +1942,118 @@ mod tests {
             super::classify_shell_command("sudo -u web somethingunknown"),
             RiskClass::ShellMutation
         );
+    }
+
+    #[test]
+    fn inplace_edit_flags_are_mutations_not_reads() {
+        // Classifier audit: `yq`/`date` are read-only by argv0 but each has one
+        // flag that mutates. Before the guard these auto-ran in read_only/auto
+        // (a bypass) because the argv0 rating won.
+        for cmd in [
+            "yq -i '.a=1' f.yaml",
+            "yq eval -i '.a=1' f.yaml",
+            "yq --inplace '.a=1' f.yaml",
+            "date -s '2020-01-01'",
+            "date --set '2020-01-01'",
+        ] {
+            assert_eq!(
+                super::classify_shell_command(cmd),
+                RiskClass::ShellMutation,
+                "in-place/set flag must classify as a mutation: {cmd}"
+            );
+        }
+        // …but the read-only invocations of the same tools stay read-only.
+        for cmd in [
+            "yq . f.yaml",
+            "yq eval '.a' f.yaml",
+            "date",
+            "date +%s",
+            "date -d yesterday",
+        ] {
+            assert_eq!(
+                super::classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "read-only invocation must stay read-only: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn audited_read_only_tools_classify_as_reads() {
+        // Classifier audit: pure-read inspection/text/system tools that were
+        // missing from the allowlist and so blocked in read_only (user-report
+        // class). Every one reads only (a `>` redirect is caught separately).
+        for cmd in [
+            "ps aux",
+            "xxd f",
+            "od -c f",
+            "hexdump -C f",
+            "strings bin",
+            "nm bin",
+            "objdump -d bin",
+            "readelf -h bin",
+            "nl f",
+            "tac f",
+            "rev f",
+            "comm a b",
+            "paste a b",
+            "join a b",
+            "fold -w80 f",
+            "fmt f",
+            "expand f",
+            "groups",
+            "arch",
+            "nproc",
+            "uptime",
+            "free -h",
+            "tty",
+            "sha512sum f",
+            "b2sum f",
+            "[ -f x ]",
+        ] {
+            assert_eq!(
+                super::classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "audited read-only tool must classify as a read: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_control_group_mutations_still_blocked() {
+        // Classifier audit control group: confirm the additions above didn't
+        // widen anything — representative mutations across every risk lane
+        // must NOT be read-only.
+        for cmd in [
+            "rm f",
+            "mv a b",
+            "cp a b",
+            "chmod +x f",
+            "chown u f",
+            "kill 1",
+            "sed -i s/a/b/ f",
+            "dd if=a of=b",
+            "truncate -s0 f",
+            "ln -s a b",
+            "touch f",
+            "mkdir d",
+            "sort -o out f",
+            "git commit -m x",
+            "git checkout .",
+            "git config x y",
+            "git branch -D main",
+            "npm install",
+            "cargo build",
+            "python x.py",
+            "curl http://x",
+            "find . -delete",
+        ] {
+            assert_ne!(
+                super::classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "mutation must never classify as read-only: {cmd}"
+            );
+        }
     }
 
     #[test]
