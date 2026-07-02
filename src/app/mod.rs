@@ -8,6 +8,7 @@ pub mod instructions;
 pub mod lifecycle;
 pub mod memory;
 pub mod recorder;
+pub mod replay;
 pub mod run;
 pub mod run_non_interactive;
 pub mod terminal;
@@ -21,7 +22,10 @@ pub use config::{
 };
 pub use event_source::{event_to_msg, parse_slash_command};
 pub use lifecycle::RuntimeLifecycle;
-pub use recorder::{Recorder, record_msg_body};
+pub use recorder::{
+    RECORDING_FORMAT_VERSION, RecordLine, Recorder, Replay, ReplayEntry, SessionHeader,
+};
+pub use replay::{ReplayReport, replay_recording, run_replay};
 pub use run::{InteractiveOptions, run_interactive_with};
 pub use run_non_interactive::{RunOptions, RunResult, format_result, run_non_interactive_with};
 pub use terminal::TerminalGuard;

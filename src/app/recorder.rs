@@ -1,39 +1,72 @@
 //! `--record` / `--replay` support.
 //!
 //! The Elm/MVU architecture makes deterministic replay nearly free:
-//! if you capture every `Msg` the reducer sees, you can reconstruct
-//! the exact final `State` by folding over that log. This module
-//! implements both sides.
+//! `update(State, Msg)` is a pure function of its inputs (the wall clock is
+//! injected as `state.now`), so capturing every `Msg` the reducer sees —
+//! plus the clock value it was reduced under — lets `--replay` reconstruct
+//! the exact final `State` by folding over the log.
 //!
-//! Wire format: one JSON object per line (JSONL). Each object is
-//! `{ts, kind, body}`:
-//!   - `ts`: RFC3339 timestamp (for debugging, not replay).
-//!   - `kind`: `MsgKind` variant tag (matches `Msg::kind().into()`).
-//!   - `body`: best-effort structured payload from `record_msg_body`.
+//! Wire format (version 1), one JSON object per line (JSONL):
+//!   - Line 1 — [`SessionHeader`]: everything replay needs to rebuild the
+//!     initial `State` (format version, startup clock, model, cwd, the full
+//!     `Config`, and any `--continue` seed conversation). Self-contained: a
+//!     recording replays without reading the machine's live config.
+//!   - Every later line — [`ReplayEntry`] `{ts, kind, turn, msg}`:
+//!     - `ts`: the exact `state.now` the reducer saw for this input. The
+//!       driver stamps one clock per tick and shares it between the
+//!       recording and the reducer, so replay reproduces the fold bit-exactly.
+//!     - `kind` / `turn`: denormalized copies of `Msg::kind()` /
+//!       `Msg::turn_id()` for grepping a log by hand; replay reads `msg`.
+//!     - `msg`: the full `Msg`, serde-serialized (externally tagged). Binary
+//!       payloads (pasted images, tool artifacts) ride as base64 and replay
+//!       bit-exactly; new `Msg` variants round-trip automatically.
 //!
-//! Not every `Msg` field is safely serializable today — raw image
-//! bytes in `Paste::Image`, for example. Unsupported payloads are
-//! marked with `"recordable": false` and compact metadata. Replay is
-//! a best-effort reconstruction.
-//!
-//! For C6 this ships the on-disk shape + a `Recorder` type that
-//! writes; replay reading is available but opt-in (serialize
-//! support is wired on a subset of Msg variants that don't carry
-//! binary payloads). C9 rounds out coverage with the parity
-//! harness.
+//! Two deliberate divergences from live state, both security-driven:
+//!   - Credential-shaped strings are redacted before hitting disk (#17), so
+//!     a session where a secret crossed the reducer replays the *redacted*
+//!     transcript. Replay is deterministic with respect to the log — folding
+//!     the same log twice always produces identical state — and identical to
+//!     the live session whenever no redaction fired.
+//!   - The copied-selection payload (`Msg::CopySelection`) is recorded as a
+//!     placeholder: the text is already in the transcript, can be huge, and
+//!     the reducer ignores it (the payload only feeds a clipboard `Cmd`).
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use chrono::Local;
+use chrono::{DateTime, Local};
+use serde::{Deserialize, Serialize};
 
-use crate::domain::{KeyCode, Msg, MsgKind, Paste, SlashCmd, ToolOutcome, TurnId};
-use crate::providers::{ProgressEvent, SubagentPhase};
+use crate::app::Config;
+use crate::domain::Msg;
+use crate::session::ConversationHistory;
 
-/// Append-only recorder. Writes one JSONL line per `Msg` the main
-/// loop chooses to log.
+/// Bumped when the wire shape changes incompatibly. Replay refuses logs
+/// written by a different version rather than folding garbage.
+pub const RECORDING_FORMAT_VERSION: u32 = 1;
+
+/// First line of every recording: everything `--replay` needs to rebuild the
+/// session's initial `State` without touching the live machine's config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionHeader {
+    pub format: u32,
+    /// Startup clock — seeds `State::new`'s injected `now`, which derives the
+    /// initial conversation id/title.
+    pub ts: DateTime<Local>,
+    pub model_id: String,
+    pub cwd: PathBuf,
+    /// Full config snapshot (redacted). `State::new` derives MCP seeding and
+    /// per-model reasoning from it.
+    pub config: Config,
+    /// `--continue` / `--sessions` seed applied before the first frame.
+    #[serde(default)]
+    pub seed_conversation: Option<ConversationHistory>,
+}
+
+/// Append-only recorder. Writes the session header once, then one JSONL
+/// line per `Msg` the main loop feeds the reducer.
 pub struct Recorder {
     writer: BufWriter<File>,
 }
@@ -73,25 +106,42 @@ impl Recorder {
         })
     }
 
-    /// Record a single `MsgKind` + optional body JSON. Meant for the
-    /// narrow subset of variants that survive round-trip. Full
-    /// Msg-graph coverage comes in C9.
-    pub fn record_kind(
-        &mut self,
-        kind: MsgKind,
-        turn: Option<TurnId>,
-        mut body: serde_json::Value,
-    ) -> Result<()> {
+    /// Write the session header. Called once, before the first `record_msg`,
+    /// and flushed immediately — a replay of a crashed session should still
+    /// find a parseable header.
+    pub fn record_header(&mut self, header: &SessionHeader) -> Result<()> {
+        let mut value = serde_json::to_value(header).context("serialize session header")?;
+        crate::utils::redact_json(&mut value);
+        writeln!(self.writer, "{}", value).context("write header line")?;
+        self.flush()
+    }
+
+    /// Record one reducer input. `now` must be the same value the driver
+    /// stamps into `state.now` for this tick — that identity is what makes
+    /// the recorded `ts` a faithful replay clock.
+    pub fn record_msg(&mut self, now: DateTime<Local>, msg: &Msg) -> Result<()> {
+        // The copied selection is already visible in the transcript and the
+        // reducer never reads the payload (it only feeds `Cmd::CopyToClipboard`),
+        // so persist a placeholder instead of duplicating potentially-huge text.
+        let sanitized;
+        let msg = match msg {
+            Msg::CopySelection(text) => {
+                sanitized = Msg::CopySelection(format!("[{} chars]", text.chars().count()));
+                &sanitized
+            },
+            other => other,
+        };
+        let mut body = serde_json::to_value(msg).context("serialize msg")?;
         // Single redaction choke point: scrub credential-shaped strings out of
         // every recorded payload before it hits disk. A `read_file .env` result,
         // a pasted token, or an API error echoing a key would otherwise be
         // persisted in cleartext in the `--record` log (#17).
         crate::utils::redact_json(&mut body);
         let entry = serde_json::json!({
-            "ts": Local::now().to_rfc3339(),
-            "kind": format!("{:?}", kind),
-            "turn": turn.map(|t| t.0),
-            "body": body,
+            "ts": now,
+            "kind": format!("{:?}", msg.kind()),
+            "turn": msg.turn_id().map(|t| t.0),
+            "msg": body,
         });
         writeln!(self.writer, "{}", entry).context("write jsonl line")?;
         Ok(())
@@ -108,423 +158,123 @@ impl Drop for Recorder {
     }
 }
 
-/// Compact, best-effort JSON body for a reducer `Msg`.
-///
-/// This deliberately records useful payloads without claiming the full
-/// `Msg` graph can round-trip through serde today. Runtime-only or
-/// binary-heavy variants are marked explicitly so replay tooling can
-/// decide how to handle them.
-pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
-    match msg {
-        Msg::Key(key) => serde_json::json!({
-            "code": key_code_body(key.code),
-            "modifiers": {
-                "ctrl": key.modifiers.ctrl,
-                "alt": key.modifiers.alt,
-                "shift": key.modifiers.shift,
-            },
-        }),
-        Msg::Paste(Paste::Text(text)) => serde_json::json!({
-            "type": "text",
-            "text": text,
-        }),
-        Msg::Paste(Paste::Image { bytes, format }) => serde_json::json!({
-            "recordable": false,
-            "reason": "binary paste image omitted",
-            "type": "image",
-            "format": format,
-            "size_bytes": bytes.len(),
-        }),
-        Msg::SubmitPrompt {
-            text,
-            attachment_ids,
-        } => serde_json::json!({
-            "text": text,
-            "attachment_ids": attachment_ids,
-        }),
-        Msg::Slash(cmd) => slash_body(cmd),
-        Msg::CancelTurn => serde_json::json!({}),
-        Msg::ConfirmAccepted => serde_json::json!({"accepted": true}),
-        Msg::ConfirmDeclined => serde_json::json!({"accepted": false}),
-        Msg::Quit => serde_json::json!({}),
-        Msg::RuntimeSignal(signal) => serde_json::json!({
-            "signal": signal.as_str(),
-        }),
-        Msg::StreamText { chunk, .. } => serde_json::json!({"chunk": chunk}),
-        Msg::StreamReasoning { chunk, .. } => serde_json::json!({
-            "text": chunk.text,
-            "signature": chunk.signature,
-        }),
-        Msg::StreamToolCall { call, .. } => serde_json::to_value(call)
-            .unwrap_or_else(|_| unsupported("tool call was not serializable")),
-        Msg::BuiltinToolSchemaTokens(tokens) => serde_json::json!({"tokens": tokens}),
-        Msg::ContextUsageEstimated { snapshot, .. } => serde_json::json!({
-            "used_tokens": snapshot.used_tokens,
-            "max_tokens": snapshot.max_tokens,
-            "remaining_tokens": snapshot.remaining_tokens,
-            "used_percent": snapshot.used_percent,
-            "source": format!("{:?}", snapshot.source),
-            "breakdown": snapshot.breakdown.as_ref().map(|b| serde_json::json!({
-                "system_tokens": b.system_tokens,
-                "instructions_tokens": b.instructions_tokens,
-                "message_tokens": b.message_tokens,
-                "tool_schema_tokens": b.tool_schema_tokens,
-                "image_count": b.image_count,
-                "message_count": b.message_count,
-                "tool_count": b.tool_count,
-            })),
-        }),
-        Msg::ProviderContextResolved {
-            model_max,
-            effective,
-            source,
-            ..
-        } => serde_json::json!({
-            "model_max": model_max,
-            "effective": effective,
-            "source": source.map(|s| s.label()),
-        }),
-        Msg::OllamaPlacementResolved {
-            model_id,
-            size_vram_bytes,
-            total_bytes,
-            suggested_num_ctx,
-        } => serde_json::json!({
-            "model_id": model_id,
-            "size_vram_bytes": size_vram_bytes,
-            "total_bytes": total_bytes,
-            "offloaded": size_vram_bytes < total_bytes,
-            "suggested_num_ctx": suggested_num_ctx,
-        }),
-        Msg::CompactionFinished { result, .. } => serde_json::json!({
-            "id": result.record.id,
-            "trigger": result.record.trigger.as_str(),
-            "before_tokens": result.record.before_tokens,
-            "after_tokens": result.record.after_tokens,
-            "archived_message_count": result.record.archived_message_count,
-            "preserved_message_count": result.record.preserved_message_count,
-            "duration_secs": result.record.duration_secs,
-        }),
-        Msg::CompactionFailed {
-            trigger,
-            message,
-            kind,
-            ..
-        } => serde_json::json!({
-            "trigger": trigger.as_str(),
-            "message": message,
-            "kind": format!("{:?}", kind),
-        }),
-        Msg::StreamDone {
-            usage,
-            thinking_signature,
-            ..
-        } => serde_json::json!({
-            "usage": usage.as_ref().map(|u| serde_json::json!({
-                "prompt_tokens": u.prompt_tokens,
-                "completion_tokens": u.completion_tokens,
-                "total_tokens": u.total_tokens,
-                "cached_input_tokens": u.cached_input_tokens,
-                "cache_creation_input_tokens": u.cache_creation_input_tokens,
-                "reasoning_output_tokens": u.reasoning_output_tokens,
-                "source": format!("{:?}", u.source),
-            })),
-            "thinking_signature": thinking_signature,
-        }),
-        Msg::UpstreamError { error, .. } => serde_json::to_value(error)
-            .unwrap_or_else(|_| unsupported("upstream error was not serializable")),
-        Msg::TurnCancelled(_) => serde_json::json!({}),
-        Msg::ToolStarted { call_id, .. } => serde_json::json!({"call_id": call_id.0}),
-        Msg::ToolProgress { call_id, event, .. } => serde_json::json!({
-            "call_id": call_id.0,
-            "event": progress_body(event),
-        }),
-        Msg::ToolFinished {
-            call_id, outcome, ..
-        } => serde_json::json!({
-            "call_id": call_id.0,
-            "outcome": outcome_body(outcome),
-        }),
-        Msg::ApprovalRequested {
-            call_id,
-            tool,
-            risk,
-            ..
-        } => serde_json::json!({
-            "call_id": call_id.0,
-            "tool": tool,
-            "risk": risk,
-        }),
-        Msg::McpServerReady { name, tools } => serde_json::json!({
-            "name": name,
-            "tools": tools.iter().map(|tool| serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-            })).collect::<Vec<_>>(),
-        }),
-        Msg::McpServerErrored { name, reason } => serde_json::json!({
-            "name": name,
-            "reason": reason,
-        }),
-        Msg::McpServerStopped { name } => serde_json::json!({"name": name}),
-        Msg::InstructionsChanged(loaded) => match loaded {
-            Some(loaded) => serde_json::json!({
-                "path": loaded.path,
-                "byte_len": loaded.byte_len,
-                "truncated": loaded.truncated,
-            }),
-            None => serde_json::json!({"path": null}),
-        },
-        Msg::MemoryChanged(loaded) => match loaded {
-            Some(loaded) => serde_json::json!({
-                "entries": loaded.entries.len(),
-                "truncated": loaded.truncated,
-            }),
-            None => serde_json::json!({"entries": 0}),
-        },
-        Msg::SessionSaved => serde_json::json!({}),
-        Msg::ConversationLoaded(history) => serde_json::json!({
-            "id": history.id,
-            "message_count": history.messages.len(),
-            "title": history.title,
-        }),
-        Msg::ConversationsListed(summaries) => serde_json::json!({
-            "count": summaries.len(),
-            "ids": summaries.iter().map(|summary| summary.id.as_str()).collect::<Vec<_>>(),
-        }),
-        Msg::RuntimeTasksListed(tasks) => serde_json::json!({
-            "count": tasks.len(),
-            "ids": tasks.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
-        }),
-        Msg::RuntimeTaskLoaded { task, events } => serde_json::json!({
-            "id": task.as_ref().map(|task| task.id.as_str()),
-            "found": task.is_some(),
-            "event_count": events.len(),
-        }),
-        Msg::RuntimeProcessesListed(processes) => serde_json::json!({
-            "count": processes.len(),
-            "ids": processes.iter().map(|process| process.id.as_str()).collect::<Vec<_>>(),
-        }),
-        Msg::RuntimeText(text) => serde_json::json!({"chars": text.len()}),
-        Msg::RuntimeApprovalsListed(approvals) => serde_json::json!({
-            "count": approvals.len(),
-            "ids": approvals.iter().map(|approval| approval.id.as_str()).collect::<Vec<_>>(),
-        }),
-        Msg::RuntimeCheckpointsListed(checkpoints) => serde_json::json!({
-            "count": checkpoints.len(),
-            "ids": checkpoints.iter().map(|checkpoint| checkpoint.id.as_str()).collect::<Vec<_>>(),
-        }),
-        Msg::RuntimePluginsListed(plugins) => serde_json::json!({
-            "count": plugins.len(),
-            "ids": plugins.iter().map(|plugin| plugin.id.as_str()).collect::<Vec<_>>(),
-        }),
-        Msg::ModelPullFinished { model } => serde_json::json!({"model": model}),
-        Msg::ModelPullProgress(line) => serde_json::json!({"line": line}),
-        Msg::Tick => serde_json::json!({}),
-        Msg::Resize { width, height } => serde_json::json!({
-            "width": width,
-            "height": height,
-        }),
-        Msg::TransientStatus { text } => serde_json::json!({
-            "text": text,
-        }),
-        Msg::MouseScroll { delta } => serde_json::json!({"delta": delta}),
-        Msg::OpenImageAt {
-            message_index,
-            image_index,
-        } => serde_json::json!({
-            "message_index": message_index,
-            "image_index": image_index,
-        }),
-        // Record only the selection length — the copied text doesn't affect
-        // reducer State (it just emits a clipboard Cmd) and may be large/sensitive.
-        Msg::CopySelection(text) => serde_json::json!({ "len": text.chars().count() }),
+/// Parsed JSONL entry. Fields mirror what [`Recorder::record_msg`] writes.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReplayEntry {
+    pub ts: DateTime<Local>,
+    pub kind: String,
+    pub turn: Option<u64>,
+    pub msg: serde_json::Value,
+}
+
+impl ReplayEntry {
+    /// Reconstruct the reducer input. The error names the recorded `kind` so
+    /// a replay report can say what it skipped (e.g. a variant this build
+    /// doesn't know because the log came from a newer mermaid).
+    pub fn to_msg(&self) -> Result<Msg> {
+        serde_json::from_value(self.msg.clone())
+            .with_context(|| format!("reconstruct recorded {} msg", self.kind))
     }
 }
 
-fn key_code_body(code: KeyCode) -> serde_json::Value {
-    match code {
-        KeyCode::Char(c) => serde_json::json!({"char": c.to_string()}),
-        KeyCode::F(n) => serde_json::json!({"f": n}),
-        other => serde_json::json!(format!("{:?}", other)),
-    }
+/// One classified line of a recording, after the leading header.
+#[derive(Debug)]
+pub enum RecordLine {
+    /// A normal `{ts, kind, turn, msg}` entry.
+    Entry(ReplayEntry),
+    /// Another session header: `Recorder::open` appends, so a reused
+    /// `--record` path holds multiple sessions back to back. Replay folds
+    /// the first session and stops here.
+    Header(Box<SessionHeader>),
+    /// Neither an entry nor a header — corrupt or truncated write.
+    Malformed { raw: String, error: String },
 }
 
-fn slash_body(cmd: &SlashCmd) -> serde_json::Value {
-    match cmd {
-        SlashCmd::Model(model) => serde_json::json!({"command": "model", "arg": model}),
-        SlashCmd::Reasoning(level) => serde_json::json!({
-            "command": "reasoning",
-            "arg": level.map(|level| level.as_str()),
-        }),
-        SlashCmd::VisibleReasoning(arg) => {
-            serde_json::json!({"command": "visible-reasoning", "arg": arg})
-        },
-        SlashCmd::Safety(mode) => serde_json::json!({
-            "command": "safety",
-            "arg": mode.map(|m| m.as_str()),
-        }),
-        SlashCmd::Clear => serde_json::json!({"command": "clear"}),
-        SlashCmd::Save(name) => serde_json::json!({"command": "save", "arg": name}),
-        SlashCmd::Load(name) => serde_json::json!({"command": "load", "arg": name}),
-        SlashCmd::List => serde_json::json!({"command": "list"}),
-        SlashCmd::Usage => serde_json::json!({"command": "usage"}),
-        SlashCmd::Context(cmd) => {
-            serde_json::json!({"command": "context", "arg": format!("{cmd:?}")})
-        },
-        SlashCmd::Compact(instructions) => {
-            serde_json::json!({"command": "compact", "arg": instructions})
-        },
-        SlashCmd::Memory => serde_json::json!({"command": "memory"}),
-        SlashCmd::Remember(text) => serde_json::json!({"command": "remember", "arg": text}),
-        SlashCmd::Forget(id) => serde_json::json!({"command": "forget", "arg": id}),
-        SlashCmd::ConsolidateMemory => serde_json::json!({"command": "consolidate-memory"}),
-        SlashCmd::Doctor => serde_json::json!({"command": "doctor"}),
-        SlashCmd::Tasks => serde_json::json!({"command": "tasks"}),
-        SlashCmd::Task(id) => serde_json::json!({"command": "task", "arg": id}),
-        SlashCmd::Pause(id) => serde_json::json!({"command": "pause", "arg": id}),
-        SlashCmd::Resume(id) => serde_json::json!({"command": "resume", "arg": id}),
-        SlashCmd::Cancel(id) => serde_json::json!({"command": "cancel", "arg": id}),
-        SlashCmd::Handoff(id) => serde_json::json!({"command": "handoff", "arg": id}),
-        SlashCmd::Report(id) => serde_json::json!({"command": "report", "arg": id}),
-        SlashCmd::Processes => serde_json::json!({"command": "processes"}),
-        SlashCmd::Logs(id) => serde_json::json!({"command": "logs", "arg": id}),
-        SlashCmd::Stop(id) => serde_json::json!({"command": "stop", "arg": id}),
-        SlashCmd::Restart(id) => serde_json::json!({"command": "restart", "arg": id}),
-        SlashCmd::Open(target) => serde_json::json!({"command": "open", "arg": target}),
-        SlashCmd::Ports => serde_json::json!({"command": "ports"}),
-        SlashCmd::Approvals => serde_json::json!({"command": "approvals"}),
-        SlashCmd::Approve(id) => serde_json::json!({"command": "approve", "arg": id}),
-        SlashCmd::Deny(id) => serde_json::json!({"command": "deny", "arg": id}),
-        SlashCmd::Checkpoint(paths) => serde_json::json!({"command": "checkpoint", "arg": paths}),
-        SlashCmd::Checkpoints => serde_json::json!({"command": "checkpoints"}),
-        SlashCmd::Restore(id) => serde_json::json!({"command": "restore", "arg": id}),
-        SlashCmd::ModelInfo(model) => serde_json::json!({"command": "model-info", "arg": model}),
-        SlashCmd::Plugins => serde_json::json!({"command": "plugins"}),
-        SlashCmd::CloudSetup => serde_json::json!({"command": "cloud-setup"}),
-        SlashCmd::Help => serde_json::json!({"command": "help"}),
-        SlashCmd::Quit => serde_json::json!({"command": "quit"}),
-        SlashCmd::Unknown(name) => serde_json::json!({"command": "unknown", "name": name}),
-    }
-}
-
-fn progress_body(event: &ProgressEvent) -> serde_json::Value {
-    match event {
-        ProgressEvent::Output(text) => serde_json::json!({"type": "output", "text": text}),
-        ProgressEvent::Status(text) => serde_json::json!({"type": "status", "text": text}),
-        ProgressEvent::Bytes { done, total } => serde_json::json!({
-            "type": "bytes",
-            "done": done,
-            "total": total,
-        }),
-        ProgressEvent::Artifact {
-            mime,
-            data,
-            caption,
-        } => serde_json::json!({
-            "recordable": false,
-            "type": "artifact",
-            "mime": mime,
-            "caption": caption,
-            "size_bytes": data.len(),
-        }),
-        ProgressEvent::SubagentToolCall {
-            child_call_id,
-            tool_name,
-            phase,
-        } => serde_json::json!({
-            "type": "subagent_tool_call",
-            "child_call_id": child_call_id.0,
-            "tool_name": tool_name,
-            "phase": subagent_phase(*phase),
-        }),
-        ProgressEvent::SubagentText(text) => {
-            serde_json::json!({"type": "subagent_text", "text": text})
-        },
-    }
-}
-
-fn subagent_phase(phase: SubagentPhase) -> &'static str {
-    match phase {
-        SubagentPhase::Started => "started",
-        SubagentPhase::Finished => "finished",
-        SubagentPhase::Errored => "errored",
-    }
-}
-
-fn outcome_body(outcome: &ToolOutcome) -> serde_json::Value {
-    serde_json::json!({
-        "status": match outcome.status {
-            crate::domain::ToolStatus::Success => "success",
-            crate::domain::ToolStatus::Error => "error",
-            crate::domain::ToolStatus::Cancelled => "cancelled",
-        },
-        "summary": outcome.summary,
-        "model_content": outcome.model_content,
-        "error": outcome.error,
-        "image_count": outcome.images().map(|images| images.len()).unwrap_or(0),
-        "duration_secs": outcome.duration_secs,
-        "metadata": outcome.metadata,
-        "artifacts": outcome.artifacts,
-    })
-}
-
-fn unsupported(reason: &str) -> serde_json::Value {
-    serde_json::json!({
-        "recordable": false,
-        "reason": reason,
-    })
-}
-
-/// Read a JSONL log back. Iterates one line at a time so a huge
-/// replay doesn't allocate the whole file upfront.
+/// Read a recording back. Yields one classified [`RecordLine`] at a time so
+/// a huge log doesn't allocate the whole file upfront.
+#[derive(Debug)]
 pub struct Replay {
     lines: std::io::Lines<BufReader<File>>,
 }
 
 impl Replay {
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+    /// Open a recording and parse its leading [`SessionHeader`]. Refuses
+    /// files without one (pre-v1 logs) and format versions this build
+    /// doesn't understand.
+    pub fn open(path: impl Into<PathBuf>) -> Result<(SessionHeader, Self)> {
         let path = path.into();
         let file =
             File::open(&path).with_context(|| format!("open {} for replay", path.display()))?;
-        Ok(Self {
-            lines: BufReader::new(file).lines(),
-        })
+        let mut lines = BufReader::new(file).lines();
+        let first = lines
+            .next()
+            .context("recording is empty — no session header")?
+            .context("read session header line")?;
+        let header: SessionHeader = serde_json::from_str(&first).context(
+            "recording has no parseable session header — \
+             was it written by an older mermaid or truncated at byte 0?",
+        )?;
+        anyhow::ensure!(
+            header.format == RECORDING_FORMAT_VERSION,
+            "recording format {} is not supported (this build reads format {})",
+            header.format,
+            RECORDING_FORMAT_VERSION,
+        );
+        Ok((header, Self { lines }))
     }
 }
 
 impl Iterator for Replay {
-    type Item = Result<ReplayEntry>;
+    type Item = std::io::Result<RecordLine>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let line = self.lines.next()?;
-        Some(match line {
-            Ok(raw) => serde_json::from_str::<ReplayEntry>(&raw)
-                .with_context(|| format!("parse replay line: {}", raw)),
-            Err(e) => Err(anyhow::Error::from(e)),
-        })
+        let raw = match self.lines.next()? {
+            Ok(raw) => raw,
+            Err(e) => return Some(Err(e)),
+        };
+        // Entries are the overwhelmingly common case; a header mid-file marks
+        // the start of an appended second session.
+        let line = match serde_json::from_str::<ReplayEntry>(&raw) {
+            Ok(entry) => RecordLine::Entry(entry),
+            Err(entry_err) => match serde_json::from_str::<SessionHeader>(&raw) {
+                Ok(header) => RecordLine::Header(Box::new(header)),
+                Err(_) => RecordLine::Malformed {
+                    raw,
+                    error: entry_err.to_string(),
+                },
+            },
+        };
+        Some(Ok(line))
     }
-}
-
-/// Parsed JSONL entry. Fields mirror what `Recorder::record_kind`
-/// writes.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct ReplayEntry {
-    pub ts: String,
-    pub kind: String,
-    pub turn: Option<u64>,
-    pub body: serde_json::Value,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{MsgKind, Paste, TurnId};
 
     fn tmpfile(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("mermaid_recorder_tests");
         let _ = std::fs::create_dir_all(&dir);
         dir.join(name)
+    }
+
+    fn test_header(ts: DateTime<Local>) -> SessionHeader {
+        SessionHeader {
+            format: RECORDING_FORMAT_VERSION,
+            ts,
+            model_id: "ollama/test".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            config: Config::default(),
+            seed_conversation: None,
+        }
+    }
+
+    fn fixed_ts() -> DateTime<Local> {
+        // A fixed instant so assertions are stable.
+        chrono::DateTime::parse_from_rfc3339("2026-07-02T12:00:00.123+00:00")
+            .unwrap()
+            .with_timezone(&Local)
     }
 
     #[cfg(unix)]
@@ -545,51 +295,77 @@ mod tests {
     fn record_and_replay_roundtrip() {
         let path = tmpfile("roundtrip.jsonl");
         let _ = std::fs::remove_file(&path);
+        let ts = fixed_ts();
 
         {
             let mut r = Recorder::open(&path).expect("open");
-            r.record_kind(MsgKind::Tick, None, serde_json::json!({}))
-                .expect("record");
-            r.record_kind(
-                MsgKind::SubmitPrompt,
-                None,
-                serde_json::json!({"text": "hello"}),
+            r.record_header(&test_header(ts)).expect("header");
+            r.record_msg(ts, &Msg::Tick).expect("record");
+            r.record_msg(
+                ts,
+                &Msg::SubmitPrompt {
+                    text: "hello".to_string(),
+                    attachment_ids: vec![3, 9],
+                },
             )
             .expect("record");
-            r.record_kind(
-                MsgKind::StreamText,
-                Some(TurnId(7)),
-                serde_json::json!({"chunk": "partial"}),
+            r.record_msg(
+                ts,
+                &Msg::StreamText {
+                    turn: TurnId(7),
+                    chunk: "partial".to_string(),
+                },
             )
             .expect("record");
             r.flush().expect("flush");
         }
 
-        let replay = Replay::open(&path).expect("open replay");
-        let entries: Vec<_> = replay.collect::<Result<_>>().expect("all parse");
-        assert_eq!(entries.len(), 3);
+        let (header, replay) = Replay::open(&path).expect("open replay");
+        assert_eq!(header.model_id, "ollama/test");
+        assert_eq!(header.ts, ts);
+
+        let lines: Vec<_> = replay.collect::<std::io::Result<_>>().expect("read all");
+        assert_eq!(lines.len(), 3);
+        let entries: Vec<&ReplayEntry> = lines
+            .iter()
+            .map(|l| match l {
+                RecordLine::Entry(e) => e,
+                other => panic!("expected entry, got {other:?}"),
+            })
+            .collect();
         assert_eq!(entries[0].kind, "Tick");
-        assert_eq!(entries[1].body["text"], "hello");
+        assert!(matches!(entries[0].to_msg().unwrap(), Msg::Tick));
+        match entries[1].to_msg().unwrap() {
+            Msg::SubmitPrompt {
+                text,
+                attachment_ids,
+            } => {
+                assert_eq!(text, "hello");
+                assert_eq!(attachment_ids, vec![3, 9]);
+            },
+            other => panic!("expected SubmitPrompt, got {other:?}"),
+        }
         assert_eq!(entries[2].turn, Some(7));
+        assert_eq!(entries[2].ts, ts);
 
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn record_kind_redacts_secrets_in_body() {
+    fn record_msg_redacts_secrets_in_body() {
         // A recorded payload carrying a credential (e.g. a `read_file .env`
         // result or an API error echoing a key) must hit disk scrubbed (#17).
         let path = tmpfile("redact.jsonl");
         let _ = std::fs::remove_file(&path);
         {
             let mut r = Recorder::open(&path).expect("open");
-            r.record_kind(
-                MsgKind::StreamText,
-                None,
-                serde_json::json!({
-                    "chunk": "OPENAI_API_KEY=sk-abcdefghijklmnop1234",
-                    "nested": ["Authorization: Bearer abcdef123456ghijkl"],
-                }),
+            r.record_header(&test_header(fixed_ts())).expect("header");
+            r.record_msg(
+                fixed_ts(),
+                &Msg::StreamText {
+                    turn: TurnId(1),
+                    chunk: "OPENAI_API_KEY=sk-abcdefghijklmnop1234".to_string(),
+                },
             )
             .expect("record");
             r.flush().expect("flush");
@@ -601,103 +377,462 @@ mod tests {
             "raw secret leaked: {raw}"
         );
         assert!(
-            !raw.contains("abcdef123456ghijkl"),
-            "bearer token leaked: {raw}"
-        );
-        assert!(
             raw.contains("[REDACTED]"),
             "expected redaction marker: {raw}"
         );
 
-        let replay = Replay::open(&path).expect("replay");
-        let entries: Vec<_> = replay.collect::<Result<_>>().expect("all parse");
-        assert_eq!(entries[0].body["chunk"], "OPENAI_API_KEY=[REDACTED]");
-        assert_eq!(
-            entries[0].body["nested"][0],
-            "Authorization: Bearer [REDACTED]"
-        );
+        let (_, mut replay) = Replay::open(&path).expect("replay");
+        let line = replay.next().expect("one line").expect("io ok");
+        let RecordLine::Entry(entry) = line else {
+            panic!("expected entry");
+        };
+        match entry.to_msg().unwrap() {
+            Msg::StreamText { chunk, .. } => {
+                assert_eq!(chunk, "OPENAI_API_KEY=[REDACTED]");
+            },
+            other => panic!("expected StreamText, got {other:?}"),
+        }
 
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn replay_parses_malformed_line_as_err() {
-        let path = tmpfile("bad.jsonl");
-        std::fs::write(&path, "not-json\n").expect("write");
-        let mut replay = Replay::open(&path).expect("open");
-        let first = replay.next().expect("first entry");
-        assert!(first.is_err());
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn record_creates_file_on_open() {
-        let path = tmpfile("creates.jsonl");
-        let _ = std::fs::remove_file(&path);
-        assert!(!path.exists());
-        let _ = Recorder::open(&path).expect("open");
-        assert!(path.exists());
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn record_append_preserves_existing_lines() {
-        let path = tmpfile("append.jsonl");
+    fn copy_selection_is_recorded_as_placeholder() {
+        let path = tmpfile("copysel.jsonl");
         let _ = std::fs::remove_file(&path);
         {
             let mut r = Recorder::open(&path).expect("open");
-            r.record_kind(MsgKind::Tick, None, serde_json::json!({}))
-                .expect("record");
+            r.record_header(&test_header(fixed_ts())).expect("header");
+            r.record_msg(
+                fixed_ts(),
+                &Msg::CopySelection("secret transcript".to_string()),
+            )
+            .expect("record");
         }
-        {
-            let mut r = Recorder::open(&path).expect("reopen");
-            r.record_kind(MsgKind::Quit, None, serde_json::json!({}))
-                .expect("record");
-        }
-        let replay = Replay::open(&path).expect("replay");
-        let entries: Vec<_> = replay.collect::<Result<_>>().expect("all parse");
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].kind, "Tick");
-        assert_eq!(entries[1].kind, "Quit");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        assert!(!raw.contains("secret transcript"));
+        assert!(raw.contains("[17 chars]"));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn record_msg_body_submit_prompt_keeps_text_and_attachments() {
-        let body = record_msg_body(&crate::domain::Msg::SubmitPrompt {
-            text: "explain main.rs".to_string(),
-            attachment_ids: vec![3, 9],
-        });
-        assert_eq!(body["text"], "explain main.rs");
-        assert_eq!(body["attachment_ids"][0], 3);
-        assert_eq!(body["attachment_ids"][1], 9);
+    fn image_paste_round_trips_as_base64() {
+        let path = tmpfile("imgpaste.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let bytes = vec![0u8, 1, 2, 250, 255, 128];
+        {
+            let mut r = Recorder::open(&path).expect("open");
+            r.record_header(&test_header(fixed_ts())).expect("header");
+            r.record_msg(
+                fixed_ts(),
+                &Msg::Paste(Paste::Image {
+                    bytes: bytes.clone(),
+                    format: "png".to_string(),
+                }),
+            )
+            .expect("record");
+        }
+        let (_, mut replay) = Replay::open(&path).expect("replay");
+        let RecordLine::Entry(entry) = replay.next().unwrap().unwrap() else {
+            panic!("expected entry");
+        };
+        match entry.to_msg().unwrap() {
+            Msg::Paste(Paste::Image {
+                bytes: back,
+                format,
+            }) => {
+                assert_eq!(back, bytes, "image bytes must replay bit-exactly");
+                assert_eq!(format, "png");
+            },
+            other => panic!("expected image paste, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn record_msg_body_slash_model_keeps_command_and_arg() {
-        let body = record_msg_body(&crate::domain::Msg::Slash(crate::domain::SlashCmd::Model(
-            Some("anthropic/opus".to_string()),
-        )));
-        assert_eq!(body["command"], "model");
-        assert_eq!(body["arg"], "anthropic/opus");
+    fn replay_refuses_headerless_recording() {
+        let path = tmpfile("headerless.jsonl");
+        std::fs::write(
+            &path,
+            "{\"ts\":\"2026-07-02T12:00:00Z\",\"kind\":\"Tick\",\"turn\":null,\"msg\":\"Tick\"}\n",
+        )
+        .expect("write");
+        let err = Replay::open(&path).expect_err("must refuse");
+        assert!(err.to_string().contains("session header"), "got: {err:#}");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn record_msg_body_runtime_signal_keeps_signal_name() {
-        let body = record_msg_body(&crate::domain::Msg::RuntimeSignal(
-            crate::domain::RuntimeSignal::Terminate,
-        ));
-        assert_eq!(body["signal"], "terminate");
+    fn replay_classifies_appended_second_session_header() {
+        // `Recorder::open` appends, so reusing a --record path produces
+        // back-to-back sessions. The reader must surface the second header
+        // as a typed line, not a parse error.
+        let path = tmpfile("twosessions.jsonl");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut r = Recorder::open(&path).expect("open");
+            r.record_header(&test_header(fixed_ts())).expect("header");
+            r.record_msg(fixed_ts(), &Msg::Tick).expect("record");
+        }
+        {
+            let mut r = Recorder::open(&path).expect("reopen");
+            r.record_header(&test_header(fixed_ts())).expect("header2");
+            r.record_msg(fixed_ts(), &Msg::Quit).expect("record");
+        }
+        let (_, replay) = Replay::open(&path).expect("replay");
+        let lines: Vec<_> = replay.collect::<std::io::Result<_>>().expect("read");
+        assert_eq!(lines.len(), 3);
+        assert!(matches!(lines[0], RecordLine::Entry(_)));
+        assert!(matches!(lines[1], RecordLine::Header(_)));
+        assert!(matches!(lines[2], RecordLine::Entry(_)));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn record_msg_body_marks_binary_paste_image_unrecordable() {
-        let body = record_msg_body(&crate::domain::Msg::Paste(crate::domain::Paste::Image {
-            bytes: vec![1, 2, 3],
-            format: "png".to_string(),
-        }));
-        assert_eq!(body["recordable"], false);
-        assert_eq!(body["type"], "image");
-        assert_eq!(body["size_bytes"], 3);
+    fn replay_classifies_malformed_line() {
+        let path = tmpfile("bad.jsonl");
+        let header = serde_json::to_string(&test_header(fixed_ts())).unwrap();
+        std::fs::write(&path, format!("{header}\nnot-json\n")).expect("write");
+        let (_, mut replay) = Replay::open(&path).expect("open");
+        let line = replay.next().expect("line").expect("io ok");
+        assert!(matches!(line, RecordLine::Malformed { .. }));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn every_msg_kind_has_a_round_trip_sample() {
+        // Parity guard: each `MsgKind` gets at least one representative
+        // sample that must survive serialize → deserialize exactly. The
+        // `covered` match is exhaustive over `MsgKind`, so adding a Msg
+        // variant without extending the samples is a compile error here.
+        use crate::domain::{
+            ApprovalKind, ContextUsageSnapshot, Key, KeyCode, KeyMods, PromptTokenBreakdown,
+            RuntimeSignal, SlashCmd, StatusKind, ToolCallId, ToolOutcome,
+        };
+        use crate::models::ReasoningChunk;
+
+        fn covered(kind: MsgKind) -> bool {
+            match kind {
+                MsgKind::Key
+                | MsgKind::Paste
+                | MsgKind::SubmitPrompt
+                | MsgKind::Slash
+                | MsgKind::CancelTurn
+                | MsgKind::Confirm
+                | MsgKind::Quit
+                | MsgKind::RuntimeSignal
+                | MsgKind::StreamText
+                | MsgKind::StreamReasoning
+                | MsgKind::StreamToolCall
+                | MsgKind::ContextUsageEstimated
+                | MsgKind::ProviderContextResolved
+                | MsgKind::OllamaPlacementResolved
+                | MsgKind::BuiltinToolSchemaTokens
+                | MsgKind::CompactionFinished
+                | MsgKind::CompactionFailed
+                | MsgKind::StreamDone
+                | MsgKind::UpstreamError
+                | MsgKind::ToolStarted
+                | MsgKind::ToolProgress
+                | MsgKind::ToolFinished
+                | MsgKind::ApprovalRequested
+                | MsgKind::TurnCancelled
+                | MsgKind::Mcp
+                | MsgKind::InstructionsChanged
+                | MsgKind::MemoryChanged
+                | MsgKind::SessionSaved
+                | MsgKind::ConversationLoaded
+                | MsgKind::ConversationsListed
+                | MsgKind::RuntimeStore
+                | MsgKind::ModelPullFinished
+                | MsgKind::ModelPullProgress
+                | MsgKind::Tick
+                | MsgKind::Resize
+                | MsgKind::MouseScroll
+                | MsgKind::OpenImageAt
+                | MsgKind::TransientStatus
+                | MsgKind::CopySelection => true,
+            }
+        }
+
+        let samples: Vec<Msg> = vec![
+            Msg::Key(Key {
+                code: KeyCode::Char('x'),
+                modifiers: KeyMods::ctrl(),
+            }),
+            Msg::Key(Key {
+                code: KeyCode::PageUp,
+                modifiers: KeyMods::NONE,
+            }),
+            Msg::Paste(Paste::Text("pasted".to_string())),
+            Msg::Paste(Paste::Image {
+                bytes: vec![9, 8, 7],
+                format: "png".to_string(),
+            }),
+            Msg::SubmitPrompt {
+                text: "prompt".to_string(),
+                attachment_ids: vec![1],
+            },
+            Msg::Slash(SlashCmd::Model(Some("anthropic/opus".to_string()))),
+            Msg::Slash(SlashCmd::Compact(None)),
+            Msg::CancelTurn,
+            Msg::ConfirmAccepted,
+            Msg::ConfirmDeclined,
+            Msg::Quit,
+            Msg::RuntimeSignal(RuntimeSignal::Terminate),
+            Msg::StreamText {
+                turn: TurnId(1),
+                chunk: "chunk".to_string(),
+            },
+            Msg::StreamReasoning {
+                turn: TurnId(1),
+                chunk: ReasoningChunk {
+                    text: "thinking".to_string(),
+                    signature: Some("sig".to_string()),
+                },
+            },
+            Msg::StreamToolCall {
+                turn: TurnId(1),
+                call: crate::models::tool_call::ToolCall {
+                    id: Some("call_1".to_string()),
+                    function: crate::models::tool_call::FunctionCall {
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "src/main.rs"}),
+                    },
+                },
+            },
+            Msg::ContextUsageEstimated {
+                turn: TurnId(1),
+                snapshot: ContextUsageSnapshot::from_estimate(
+                    PromptTokenBreakdown {
+                        system_tokens: 10,
+                        instructions_tokens: 5,
+                        message_tokens: 20,
+                        tool_schema_tokens: 30,
+                        image_count: 0,
+                        message_count: 2,
+                        tool_count: 3,
+                    },
+                    Some(128_000),
+                ),
+            },
+            Msg::ProviderContextResolved {
+                model_id: "m".to_string(),
+                model_max: Some(131_072),
+                effective: Some(32_768),
+                source: None,
+            },
+            Msg::OllamaPlacementResolved {
+                model_id: "m".to_string(),
+                size_vram_bytes: 1,
+                total_bytes: 2,
+                suggested_num_ctx: Some(8192),
+            },
+            Msg::BuiltinToolSchemaTokens(1234),
+            Msg::CompactionFailed {
+                turn: TurnId(2),
+                trigger: crate::domain::CompactionTrigger::Manual,
+                message: "nothing to do".to_string(),
+                kind: StatusKind::Info,
+            },
+            Msg::CompactionFinished {
+                turn: TurnId(2),
+                result: crate::domain::CompactionResult {
+                    record: crate::domain::CompactionRecord {
+                        id: "c1".to_string(),
+                        trigger: crate::domain::CompactionTrigger::Manual,
+                        created_at: fixed_ts(),
+                        before_tokens: 1000,
+                        after_tokens: 100,
+                        archived_message_count: 8,
+                        preserved_message_count: 2,
+                        summary_tokens: 90,
+                        duration_secs: 1.5,
+                        verified: true,
+                        verification_error: None,
+                        focus: None,
+                        archive_path: None,
+                    },
+                    replacement_messages: vec![crate::models::ChatMessage::system("checkpoint")],
+                    archived_messages: vec![crate::models::ChatMessage::user("old")],
+                    before_snapshot: ContextUsageSnapshot::from_estimate(
+                        PromptTokenBreakdown::default(),
+                        Some(128_000),
+                    ),
+                    after_snapshot: ContextUsageSnapshot::from_estimate(
+                        PromptTokenBreakdown::default(),
+                        Some(128_000),
+                    ),
+                    usage: None,
+                },
+            },
+            Msg::UpstreamError {
+                turn: TurnId(1),
+                error: crate::models::UserFacingError {
+                    summary: "Rate limited".to_string(),
+                    message: "429 too many requests".to_string(),
+                    suggestion: "retry in a moment".to_string(),
+                    category: crate::models::ErrorCategory::Temporary,
+                    recoverable: true,
+                },
+            },
+            Msg::StreamDone {
+                turn: TurnId(1),
+                usage: Some(crate::models::TokenUsage::provider(10, 5, 15)),
+                thinking_signature: None,
+                stop_reason: Some(crate::models::FinishReason::Stop),
+            },
+            Msg::TurnCancelled(TurnId(3)),
+            Msg::ToolStarted {
+                turn: TurnId(1),
+                call_id: ToolCallId(1),
+            },
+            Msg::ToolProgress {
+                turn: TurnId(1),
+                call_id: ToolCallId(1),
+                event: crate::providers::ProgressEvent::Artifact {
+                    mime: "image/png".to_string(),
+                    data: vec![1, 2, 3],
+                    caption: Some("shot".to_string()),
+                },
+            },
+            Msg::ToolFinished {
+                turn: TurnId(1),
+                call_id: ToolCallId(1),
+                outcome: ToolOutcome::success("out", "read 3 lines", 0.5),
+            },
+            Msg::ApprovalRequested {
+                turn: TurnId(1),
+                call_id: ToolCallId(2),
+                tool: "execute_command".to_string(),
+                risk: "destructive".to_string(),
+                kind: ApprovalKind::Shell,
+                prompt: "rm -rf build".to_string(),
+                allowlist_scope: "exact".to_string(),
+            },
+            Msg::McpServerReady {
+                name: "srv".to_string(),
+                tools: vec![crate::domain::McpToolSpec {
+                    name: "t".to_string(),
+                    description: "d".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            Msg::McpServerErrored {
+                name: "srv".to_string(),
+                reason: "exit 1".to_string(),
+            },
+            Msg::McpServerStopped {
+                name: "srv".to_string(),
+            },
+            Msg::InstructionsChanged(None),
+            Msg::MemoryChanged(None),
+            Msg::SessionSaved,
+            Msg::ConversationLoaded(ConversationHistory::new(
+                "/p".to_string(),
+                "m".to_string(),
+                fixed_ts(),
+            )),
+            Msg::ConversationsListed(vec![crate::domain::ConversationSummary {
+                id: "20260702_120000_123".to_string(),
+                title: "t".to_string(),
+                message_count: 1,
+                updated_at: "2026-07-02".to_string(),
+            }]),
+            Msg::RuntimeText("daemon says hi".to_string()),
+            Msg::RuntimeTasksListed(Vec::new()),
+            Msg::RuntimeTaskLoaded {
+                task: None,
+                events: Vec::new(),
+            },
+            Msg::RuntimeProcessesListed(Vec::new()),
+            Msg::RuntimeApprovalsListed(Vec::new()),
+            Msg::RuntimeCheckpointsListed(Vec::new()),
+            Msg::RuntimePluginsListed(Vec::new()),
+            Msg::ModelPullFinished {
+                model: "qwen3".to_string(),
+            },
+            Msg::ModelPullProgress("pulling 42%".to_string()),
+            Msg::Tick,
+            Msg::Resize {
+                width: 120,
+                height: 40,
+            },
+            Msg::TransientStatus {
+                text: "saved".to_string(),
+            },
+            Msg::MouseScroll { delta: -3 },
+            Msg::OpenImageAt {
+                message_index: 4,
+                image_index: 0,
+            },
+            Msg::CopySelection("copied".to_string()),
+        ];
+
+        // Every MsgKind must appear in the sample set. `covered` is the
+        // compile-time guard (exhaustive match breaks when Msg grows); this
+        // list is the runtime completeness check against the samples.
+        let seen: Vec<MsgKind> = samples.iter().map(|m| m.kind()).collect();
+        let missing: Vec<String> = [
+            MsgKind::Key,
+            MsgKind::Paste,
+            MsgKind::SubmitPrompt,
+            MsgKind::Slash,
+            MsgKind::CancelTurn,
+            MsgKind::Confirm,
+            MsgKind::Quit,
+            MsgKind::RuntimeSignal,
+            MsgKind::StreamText,
+            MsgKind::StreamReasoning,
+            MsgKind::StreamToolCall,
+            MsgKind::ContextUsageEstimated,
+            MsgKind::ProviderContextResolved,
+            MsgKind::OllamaPlacementResolved,
+            MsgKind::BuiltinToolSchemaTokens,
+            MsgKind::CompactionFinished,
+            MsgKind::CompactionFailed,
+            MsgKind::StreamDone,
+            MsgKind::UpstreamError,
+            MsgKind::ToolStarted,
+            MsgKind::ToolProgress,
+            MsgKind::ToolFinished,
+            MsgKind::ApprovalRequested,
+            MsgKind::TurnCancelled,
+            MsgKind::Mcp,
+            MsgKind::InstructionsChanged,
+            MsgKind::MemoryChanged,
+            MsgKind::SessionSaved,
+            MsgKind::ConversationLoaded,
+            MsgKind::ConversationsListed,
+            MsgKind::RuntimeStore,
+            MsgKind::ModelPullFinished,
+            MsgKind::ModelPullProgress,
+            MsgKind::Tick,
+            MsgKind::Resize,
+            MsgKind::MouseScroll,
+            MsgKind::OpenImageAt,
+            MsgKind::TransientStatus,
+            MsgKind::CopySelection,
+        ]
+        .iter()
+        .filter(|k| covered(**k) && !seen.contains(k))
+        .map(|k| format!("{k:?}"))
+        .collect();
+        assert!(
+            missing.is_empty(),
+            "MsgKinds without a round-trip sample: {missing:?}"
+        );
+
+        // …and every sample must survive the round trip bit-exactly.
+        for msg in &samples {
+            let value = serde_json::to_value(msg).expect("serialize");
+            let back: Msg = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("deserialize {value}: {e}"));
+            assert_eq!(
+                format!("{msg:?}"),
+                format!("{back:?}"),
+                "round trip changed the msg"
+            );
+        }
     }
 }

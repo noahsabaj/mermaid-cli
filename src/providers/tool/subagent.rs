@@ -181,7 +181,8 @@ impl ToolExecutor for SubagentTool {
         // delegating risky work to a subagent. The child runs headless (no
         // approval broker), so in `ask` its mutations block/await rather than
         // silently escalate; non-replayable tools fail closed (see #3).
-        let mut child_state = State::new(config.clone(), cwd.clone(), model_id);
+        let mut child_state =
+            State::new(config.clone(), cwd.clone(), model_id, chrono::Local::now());
         child_state.session.safety_mode = ctx.safety_mode;
         // Load project instructions + the memory index synchronously, before the
         // child is driven. Dispatching RefreshInstructions/RefreshMemory as
@@ -503,7 +504,12 @@ mod tests {
         use crate::runtime::SafetyMode;
         let mut config = crate::app::Config::default();
         config.safety.mode = SafetyMode::FullAccess; // static config default
-        let mut child_state = State::new(config, PathBuf::from("/tmp"), "ollama/test".to_string());
+        let mut child_state = State::new(
+            config,
+            PathBuf::from("/tmp"),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
         // The bug source: State::new picks up the config default…
         assert_eq!(child_state.session.safety_mode, SafetyMode::FullAccess);
         // …and the fix: the parent's live ctx.safety_mode overrides it.

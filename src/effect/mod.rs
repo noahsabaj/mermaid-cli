@@ -2698,7 +2698,11 @@ mod tests {
     async fn dispatch_save_emits_session_saved() {
         let (mut r, mut rx) = runner();
         r.dispatch(Cmd::SaveConversation(
-            crate::session::ConversationHistory::new("/p".to_string(), "m".to_string()),
+            crate::session::ConversationHistory::new(
+                "/p".to_string(),
+                "m".to_string(),
+                chrono::Local::now(),
+            ),
         ));
         let msg = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
@@ -2968,7 +2972,11 @@ mod tests {
         let (mut r, _rx) = runner();
         for _ in 0..5 {
             r.dispatch(Cmd::SaveConversation(
-                crate::session::ConversationHistory::new("/p".to_string(), "m".to_string()),
+                crate::session::ConversationHistory::new(
+                    "/p".to_string(),
+                    "m".to_string(),
+                    chrono::Local::now(),
+                ),
             ));
         }
         // Shutdown waits for all five to complete (should be instant).

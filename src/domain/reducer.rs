@@ -498,42 +498,43 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::RuntimeTasksListed(tasks) => {
             state
                 .session
-                .append(ChatMessage::system(tasks_text(&tasks)));
+                .append(ChatMessage::system(tasks_text(&tasks)), state.now);
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         Msg::RuntimeTaskLoaded { task, events } => {
-            state.session.append(ChatMessage::system(task_detail_text(
-                task.as_ref(),
-                &events,
-            )));
+            state.session.append(
+                ChatMessage::system(task_detail_text(task.as_ref(), &events)),
+                state.now,
+            );
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         Msg::RuntimeProcessesListed(processes) => {
             state
                 .session
-                .append(ChatMessage::system(processes_text(&processes)));
+                .append(ChatMessage::system(processes_text(&processes)), state.now);
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         Msg::RuntimeText(text) => {
-            state.session.append(ChatMessage::system(text));
+            state.session.append(ChatMessage::system(text), state.now);
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         Msg::RuntimeApprovalsListed(approvals) => {
             state
                 .session
-                .append(ChatMessage::system(approvals_text(&approvals)));
+                .append(ChatMessage::system(approvals_text(&approvals)), state.now);
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         Msg::RuntimeCheckpointsListed(checkpoints) => {
-            state
-                .session
-                .append(ChatMessage::system(checkpoints_text(&checkpoints)));
+            state.session.append(
+                ChatMessage::system(checkpoints_text(&checkpoints)),
+                state.now,
+            );
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         Msg::RuntimePluginsListed(plugins) => {
             state
                 .session
-                .append(ChatMessage::system(plugins_text(&plugins)));
+                .append(ChatMessage::system(plugins_text(&plugins)), state.now);
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         Msg::ModelPullFinished { model } => {
@@ -1225,7 +1226,7 @@ fn handle_submit_prompt(
     if !images.is_empty() {
         user_msg = user_msg.with_images(images);
     }
-    state.session.append(user_msg);
+    state.session.append(user_msg, state.now);
     state.session.conversation.add_to_input_history(text);
     state.ui.input_buffer.clear();
 
@@ -1347,7 +1348,9 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::ListConversations);
         },
         SlashCmd::Usage => {
-            state.session.append(ChatMessage::system(usage_text(state)));
+            state
+                .session
+                .append(ChatMessage::system(usage_text(state)), state.now);
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         SlashCmd::Context(cmd) => {
@@ -1358,7 +1361,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 ContextCmd::Show => {
                     state
                         .session
-                        .append(ChatMessage::system(context_text(state)));
+                        .append(ChatMessage::system(context_text(state)), state.now);
                     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
                 },
                 // The sizing knobs only affect Ollama's num_ctx.
@@ -1484,7 +1487,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::Doctor => {
             state
                 .session
-                .append(ChatMessage::system(doctor_text(state)));
+                .append(ChatMessage::system(doctor_text(state)), state.now);
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         SlashCmd::Tasks => {
@@ -1539,7 +1542,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 context_text(state),
                 usage_text(state)
             );
-            state.session.append(ChatMessage::system(text));
+            state.session.append(ChatMessage::system(text), state.now);
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         SlashCmd::Report(None) => {
@@ -1548,7 +1551,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 context_text(state),
                 usage_text(state)
             );
-            state.session.append(ChatMessage::system(text));
+            state.session.append(ChatMessage::system(text), state.now);
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         SlashCmd::Processes => {
@@ -1642,7 +1645,9 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             );
         },
         SlashCmd::Help => {
-            state.session.append(ChatMessage::system(help_text()));
+            state
+                .session
+                .append(ChatMessage::system(help_text()), state.now);
             cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
         },
         SlashCmd::Quit => {
@@ -1692,7 +1697,9 @@ fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) 
             .messages
             .insert(pos, ChatMessage::system(text.into()));
     } else {
-        state.session.append(ChatMessage::system(text.into()));
+        state
+            .session
+            .append(ChatMessage::system(text.into()), state.now);
     }
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
 }
@@ -2332,7 +2339,7 @@ fn seal_orphaned_tool_calls(state: &mut State) {
                 .map(|o| o.unwrap_or_else(ToolOutcome::cancelled))
                 .collect();
             for m in tool_result_messages(&calls, sealed) {
-                state.session.append(m);
+                state.session.append(m, state.now);
             }
             // turn is now `Idle`; caller decides the next state.
         },
@@ -2396,7 +2403,7 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
             sig,
             now,
         );
-        state.session.append(msg);
+        state.session.append(msg, state.now);
     }
     // Quitting mid-tool-execution: seal the orphaned `tool_calls` with cancelled
     // placeholders so the saved history a later `--continue` reloads isn't a
@@ -2433,7 +2440,7 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             let project_path = state.session.conversation.project_path.clone();
             let model_name = state.session.conversation.model_name.clone();
             state.session.conversation =
-                crate::session::ConversationHistory::new(project_path, model_name);
+                crate::session::ConversationHistory::new(project_path, model_name, state.now);
             state.session.cumulative_tokens = 0;
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
@@ -2483,8 +2490,11 @@ fn handle_compaction_finished(
     state
         .session
         .conversation
-        .replace_messages(result.replacement_messages);
-    state.session.conversation.add_compaction(record.clone());
+        .replace_messages(result.replacement_messages, state.now);
+    state
+        .session
+        .conversation
+        .add_compaction(record.clone(), state.now);
     state.session.context_usage = Some(result.after_snapshot);
 
     if let Some(usage) = result.usage {
@@ -2555,9 +2565,10 @@ fn handle_compaction_failed(
         // failure. The user ran `/compact` explicitly, so say plainly there's
         // nothing to do rather than printing "Compaction failed: Invalid request".
         CompactionTrigger::Manual if matches!(kind, StatusKind::Info) => {
-            state.session.append(ChatMessage::system(format!(
-                "Nothing to compact — {message}."
-            )));
+            state.session.append(
+                ChatMessage::system(format!("Nothing to compact — {message}.")),
+                state.now,
+            );
             return;
         },
         CompactionTrigger::Manual => "Compaction failed",
@@ -2572,13 +2583,14 @@ fn handle_compaction_failed(
         // manual levers instead of the raw "did not reduce" error or a retry loop.
         CompactionTrigger::TruncationRecovery => {
             let hint = truncation_hint(state);
-            state.session.append(ChatMessage::system(hint));
+            state.session.append(ChatMessage::system(hint), state.now);
             return;
         },
     };
-    state
-        .session
-        .append(ChatMessage::system(format!("{}: {}", prefix, message)));
+    state.session.append(
+        ChatMessage::system(format!("{}: {}", prefix, message)),
+        state.now,
+    );
 }
 
 fn handle_stream_tool_call(
@@ -2733,7 +2745,7 @@ fn handle_stream_done(
             final_sig,
             state.now,
         );
-        state.session.append(msg);
+        state.session.append(msg, state.now);
     }
 
     // A bare length-truncation (no tool calls) is the recoverable case below; any
@@ -2920,7 +2932,9 @@ fn handle_stream_done(
             super::transition::format_run_duration(elapsed),
             format_compact_count(state.runtime.run_committed_tokens),
         );
-        state.session.append(ChatMessage::run_summary(summary));
+        state
+            .session
+            .append(ChatMessage::run_summary(summary), state.now);
         cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
     }
 
@@ -3051,7 +3065,7 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
         tool_name: None,
         thinking_signature: None,
     };
-    state.session.append(msg);
+    state.session.append(msg, state.now);
 
     // A provider error ends the turn just like a normal completion — drain the
     // queued-message FIFO so a message the user typed mid-turn isn't stranded
@@ -3142,7 +3156,7 @@ fn handle_tool_finished(
         // the follow-up model call.
         let tool_msgs = tool_result_messages(&calls, completed_outcomes);
         for m in tool_msgs {
-            state.session.append(m);
+            state.session.append(m, state.now);
         }
         let next_turn = state.ids.fresh_turn();
         state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
@@ -3327,6 +3341,7 @@ mod tests {
             Config::default(),
             PathBuf::from("/tmp/project"),
             "ollama/test".to_string(),
+            chrono::Local::now(),
         )
     }
 
@@ -3585,9 +3600,10 @@ mod tests {
         let mut state = fresh_state();
         let image =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"image bytes");
-        state
-            .session
-            .append(ChatMessage::assistant("image").with_images(vec![image]));
+        state.session.append(
+            ChatMessage::assistant("image").with_images(vec![image]),
+            state.now,
+        );
 
         let (_, cmds) = update(
             state,
@@ -3658,7 +3674,9 @@ mod tests {
         // the orphaned model/tool tasks stop and a stray same-id
         // `StreamDone`/`ToolFinished` can't commit into the cleared conversation.
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("scratch history"));
+        state
+            .session
+            .append(ChatMessage::user("scratch history"), state.now);
         state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
         state.confirm = Some(super::super::state::Confirmation {
             prompt: "Clear conversation history?".to_string(),
@@ -3711,9 +3729,10 @@ mod tests {
             call_id: super::super::ids::ToolCallId(1),
             source: source.clone(),
         };
-        state
-            .session
-            .append(ChatMessage::assistant("running a tool").with_tool_calls(vec![source]));
+        state.session.append(
+            ChatMessage::assistant("running a tool").with_tool_calls(vec![source]),
+            state.now,
+        );
         state.turn = start_executing_tools(turn, vec![call], std::time::SystemTime::now());
         state
     }
@@ -3782,7 +3801,7 @@ mod tests {
         // Outside ExecutingTools the note is a plain append (no trailing
         // tool-call message to protect).
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("hi"));
+        state.session.append(ChatMessage::user("hi"), state.now);
         let mut cmds = Vec::new();
         push_system(&mut state, &mut cmds, "just a note");
         let last = state.session.messages().last().expect("a message");
@@ -4303,10 +4322,11 @@ mod tests {
     #[test]
     fn build_chat_request_excludes_run_summaries() {
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("hello"));
-        state
-            .session
-            .append(ChatMessage::run_summary("Worked for 5s · used 100 tokens"));
+        state.session.append(ChatMessage::user("hello"), state.now);
+        state.session.append(
+            ChatMessage::run_summary("Worked for 5s · used 100 tokens"),
+            state.now,
+        );
         let req = build_chat_request(&state);
         assert!(
             !req.messages
@@ -4444,10 +4464,12 @@ mod tests {
     #[test]
     fn length_truncation_recovers_by_compacting_and_continuing() {
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("build a site"));
         state
             .session
-            .append(ChatMessage::assistant("ok, writing files"));
+            .append(ChatMessage::user("build a site"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("ok, writing files"), state.now);
         state.turn = truncating_turn("let me fix the");
         let (state, cmds) = update(state, length_done());
 
@@ -4487,8 +4509,12 @@ mod tests {
     #[test]
     fn length_truncation_at_cap_stops_with_hint() {
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("build a site"));
-        state.session.append(ChatMessage::assistant("ok"));
+        state
+            .session
+            .append(ChatMessage::user("build a site"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("ok"), state.now);
         // Already at the default cap of consecutive recoveries.
         state.runtime.truncation_recoveries =
             state.settings.compaction.max_truncation_recoveries as u32;
@@ -4515,8 +4541,8 @@ mod tests {
     #[test]
     fn length_truncation_uncapped_keeps_recovering() {
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("x"));
-        state.session.append(ChatMessage::assistant("y"));
+        state.session.append(ChatMessage::user("x"), state.now);
+        state.session.append(ChatMessage::assistant("y"), state.now);
         state.settings.compaction.max_truncation_recoveries = 0; // uncapped
         state.runtime.truncation_recoveries = 99; // would exceed any finite cap
         state.turn = truncating_turn("z");
@@ -4611,7 +4637,9 @@ mod tests {
     #[test]
     fn finished_truncation_recovery_resumes_the_run() {
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("original prompt"));
+        state
+            .session
+            .append(ChatMessage::user("original prompt"), state.now);
         state.turn = TurnState::Compacting {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
@@ -4640,7 +4668,9 @@ mod tests {
     fn finished_manual_compaction_still_goes_idle() {
         // Regression guard: only TruncationRecovery resumes; manual /compact ends.
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("original prompt"));
+        state
+            .session
+            .append(ChatMessage::user("original prompt"), state.now);
         state.turn = TurnState::Compacting {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
@@ -4662,7 +4692,7 @@ mod tests {
     #[test]
     fn failed_truncation_recovery_stops_with_hint() {
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("x"));
+        state.session.append(ChatMessage::user("x"), state.now);
         state.turn = TurnState::Compacting {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
@@ -4693,7 +4723,7 @@ mod tests {
         // A manual /compact with nothing to compact (Info kind) is a benign no-op,
         // not a failure: show a calm note, never "Compaction failed: Invalid request".
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("x"));
+        state.session.append(ChatMessage::user("x"), state.now);
         state.turn = TurnState::Compacting {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
@@ -4727,7 +4757,7 @@ mod tests {
         // Regression guard: a genuine manual-compaction error (Error kind) still
         // surfaces as "Compaction failed: …".
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("x"));
+        state.session.append(ChatMessage::user("x"), state.now);
         state.turn = TurnState::Compacting {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
@@ -4961,7 +4991,7 @@ mod tests {
     fn context_text_explains_auto_compaction_policy() {
         let mut state = fresh_state();
         state.runtime.provider_capabilities.max_context_tokens = Some(8_000);
-        state.session.append(ChatMessage::user("hello"));
+        state.session.append(ChatMessage::user("hello"), state.now);
 
         let text = context_text(&state);
 
@@ -5514,7 +5544,7 @@ mod tests {
         let mut state = fresh_state();
         state
             .session
-            .append(ChatMessage::user("word ".repeat(8_000))); // ≫ 4096 tokens
+            .append(ChatMessage::user("word ".repeat(8_000)), state.now); // ≫ 4096 tokens
         let (state, _) = update(
             state,
             converge_msg("ollama/test", 6_000_000_000, 8_000_000_000, 4_096),
@@ -5859,8 +5889,10 @@ mod tests {
     #[test]
     fn confirm_accepted_for_clear_wipes_messages() {
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("one"));
-        state.session.append(ChatMessage::assistant("two"));
+        state.session.append(ChatMessage::user("one"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("two"), state.now);
         state.confirm = Some(super::super::state::Confirmation {
             prompt: "Clear conversation history?".to_string(),
             accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
@@ -5873,7 +5905,7 @@ mod tests {
     #[test]
     fn confirm_declined_clears_without_action() {
         let mut state = fresh_state();
-        state.session.append(ChatMessage::user("kept"));
+        state.session.append(ChatMessage::user("kept"), state.now);
         state.confirm = Some(super::super::state::Confirmation {
             prompt: "Clear conversation history?".to_string(),
             accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
@@ -6003,7 +6035,9 @@ mod tests {
         // The reducer looks up the "last assistant message" to attach
         // an ActionDisplay — plant one so the lookup doesn't silently
         // no-op in this test.
-        state.session.append(ChatMessage::assistant("tools follow"));
+        state
+            .session
+            .append(ChatMessage::assistant("tools follow"), state.now);
 
         let (state, cmds) = update(
             state,
@@ -6215,7 +6249,9 @@ mod tests {
             },
         };
         state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
-        state.session.append(ChatMessage::assistant("tools follow"));
+        state
+            .session
+            .append(ChatMessage::assistant("tools follow"), state.now);
 
         // Ctrl+B → BackgroundScope; reducer stays in ExecutingTools.
         let (state, cmds) = update(
@@ -6321,7 +6357,9 @@ mod tests {
             },
         };
         state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
-        state.session.append(ChatMessage::assistant("tools follow"));
+        state
+            .session
+            .append(ChatMessage::assistant("tools follow"), state.now);
 
         let (state, _) = update(
             state,
@@ -6385,7 +6423,9 @@ mod tests {
             },
         ];
         state.turn = start_executing_tools(TurnId(3), calls, std::time::SystemTime::now());
-        state.session.append(ChatMessage::assistant("tools follow"));
+        state
+            .session
+            .append(ChatMessage::assistant("tools follow"), state.now);
 
         let (state, cmds) = update(
             state,

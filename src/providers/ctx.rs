@@ -185,7 +185,7 @@ impl ExecContext {
 /// subprocess output, long-running download status, multimodal
 /// artifacts like inline screenshots, and nested activity from
 /// subagents).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ProgressEvent {
     /// Partial stdout/stderr chunk.
     Output(String),
@@ -200,6 +200,7 @@ pub enum ProgressEvent {
     /// message; anything else lands on the status line as a label.
     Artifact {
         mime: String,
+        #[serde(with = "crate::utils::serde_base64")]
         data: Vec<u8>,
         caption: Option<String>,
     },
@@ -219,7 +220,7 @@ pub enum ProgressEvent {
 }
 
 /// Phase a subagent tool-call is in, from the parent's perspective.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SubagentPhase {
     Started,
     Finished,

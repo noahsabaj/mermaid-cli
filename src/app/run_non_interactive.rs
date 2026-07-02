@@ -69,7 +69,7 @@ pub async fn run_non_interactive_with(
         EffectRunner::pair_from_with_task(cwd.clone(), providers, tools, opts.task_id.clone());
     runner = runner.without_terminal_title();
 
-    let mut state = State::new(config.clone(), cwd.clone(), model_id);
+    let mut state = State::new(config.clone(), cwd.clone(), model_id, chrono::Local::now());
     let mut lifecycle = RuntimeLifecycle::new();
 
     // Load project instructions + the memory index synchronously. The

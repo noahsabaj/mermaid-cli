@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--replay <file>` — deterministic session replay.** A `--record` log now
+  replays back through the pure reducer: `mermaid --replay session.jsonl`
+  reconstructs the session headless (no model calls, no tool execution, no
+  config reads — the log embeds its own config snapshot) and prints the
+  transcript plus a determinism verdict. Every replay folds the log twice and
+  exits non-zero if the folds diverge, making it a standing canary for
+  reducer purity bugs.
+- Recording format v1: recordings now start with a self-contained session
+  header (config, model, cwd, `--continue` seed) and store every reducer
+  input as a full serde round-trip — pasted images and tool artifacts ride
+  as base64 and replay bit-exactly. Older (headerless, lossy) recordings are
+  not readable; re-record with this version.
+
+### Changed
+
+- The reducer is now fully clock-pure: conversation mutations (message
+  commits, compaction records, `/clear`'s fresh conversation id) derive
+  every timestamp from the injected per-tick clock instead of reading the
+  wall clock mid-update. Same recorded log in, same state out — the property
+  `--replay` verifies and `tests/replay_determinism.rs` pins in CI.
+
 ### Fixed
 
 - Clipboard operations can no longer hang Mermaid. Every clipboard subprocess

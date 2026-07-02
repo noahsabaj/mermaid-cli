@@ -154,7 +154,7 @@ pub struct CompactionArchive {
     pub messages: Vec<ChatMessage>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompactionResult {
     pub record: CompactionRecord,
     pub replacement_messages: Vec<ChatMessage>,

@@ -19,6 +19,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logger(cli.verbose);
 
+    // `--replay` is fully self-contained (the recording embeds its config
+    // snapshot), so it dispatches before any config/model resolution. A
+    // non-deterministic fold is a reducer purity bug — exit non-zero so CI
+    // and scripts can catch it.
+    if let Some(path) = cli.replay.as_ref() {
+        let deterministic = mermaid_cli::app::run_replay(path)?;
+        if !deterministic {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // Handle stand-alone subcommands first (init, list, status, add,
     // remove, mcp, version). Returns Ok(true) when the subcommand
     // handled the invocation and we should exit.
