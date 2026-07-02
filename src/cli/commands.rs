@@ -638,9 +638,14 @@ fn run_qa_compact_smoke(
     requested_turns: usize,
 ) -> Result<QaCompactSmokeReport> {
     let turns = requested_turns.max(3);
-    let mut state = State::new(config.clone(), cwd.to_path_buf(), qa_model_id(config));
+    let mut state = State::new(
+        config.clone(),
+        cwd.to_path_buf(),
+        qa_model_id(config),
+        chrono::Local::now(),
+    );
     for message in synthetic_compaction_messages(turns) {
-        state.session.append(message);
+        state.session.append(message, state.now);
     }
 
     let (state_after_slash, compact_cmds) = update(

@@ -34,7 +34,7 @@ const MAX_MEMORY_FILE_BYTES: usize = 64_000;
 /// Where a memory lives. The *directory* is authoritative; the frontmatter
 /// `scope` field is advisory/portable metadata so a hand-moved file is still
 /// classified by its location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemoryScope {
     Global,
     ProjectPrivate,
@@ -64,7 +64,7 @@ impl MemoryScope {
 /// One memory file's index entry. Deliberately holds no body — the full fact
 /// is read on demand via `read_file` on `path`, keeping the always-loaded
 /// snapshot small.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryEntry {
     pub name: String,
     pub description: String,
@@ -74,7 +74,7 @@ pub struct MemoryEntry {
 }
 
 /// Snapshot of all loaded memory across scopes plus the rendered index block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoadedMemory {
     pub entries: Vec<MemoryEntry>,
     /// Pre-rendered `# Memory` block injected into the prompt (capped).

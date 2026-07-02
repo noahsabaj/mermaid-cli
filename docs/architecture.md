@@ -49,7 +49,7 @@ src/
 │   ├── event_source.rs crossterm Event → Msg
 │   ├── lifecycle.rs    SIGINT/SIGTERM/SIGHUP → Msg
 │   ├── terminal.rs     TerminalGuard (panic-safe teardown)
-│   └── recorder.rs     --record (JSONL capture; Replay is the read-back API)
+│   └── recorder.rs     --record (JSONL capture; header + serde Msg round-trip)
 │
 └── render/     — pure view, fn(&State, &mut RenderCache, &mut Frame)
     ├── mod.rs          render() entrypoint + layout math
@@ -110,11 +110,14 @@ loop {
 }
 ```
 
-The `state.now = Local::now()` stamp is the one place the loop reads the wall
-clock; `update` and the `transition` helpers read `state.now` instead of calling
-the clock themselves. That keeps the reducer a pure function of `(State, Msg)`
-and makes `--replay` a faithful fold — a replay driver stamps each recorded
-entry's `ts` here instead of the live clock (see Cause 3 / `replay_debugging.md`).
+The `state.now = now` stamp is the one place the loop reads the wall clock —
+one read per tick, shared with the recorder so a recorded entry's `ts` IS the
+clock the reducer saw. `update`, the `transition` helpers, and every
+conversation mutation (`Session::append` stamps commit timestamps from it)
+read `state.now` instead of calling the clock themselves. That keeps the
+reducer a pure function of `(State, Msg)` and makes `--replay` a faithful
+fold — the replay driver stamps each recorded entry's `ts` here instead of
+the live clock (see Cause 3 / `replay_debugging.md`).
 
 That's the whole thing. There is no second runtime. There are no observer callbacks. The render is pure — it takes `&State`, paints into ratatui, mutates nothing.
 
@@ -128,9 +131,9 @@ See [`docs/adding_providers.md`](adding_providers.md). tl;dr: implement `ModelPr
 
 See [`docs/adding_tools.md`](adding_tools.md). tl;dr: implement `ToolExecutor` for a unit struct, register it in `ToolRegistry::default` (or a custom registry). One file; cancellation and progress come automatically from `ExecContext`.
 
-## Debugging with --record
+## Debugging with --record / --replay
 
-See [`docs/replay_debugging.md`](replay_debugging.md). Event sourcing is nearly free in an MVU architecture: `--record` captures every `Msg` the reducer sees as JSONL, and `app::recorder::Replay` reads it back as a straight fold. There is no `--replay` CLI subcommand yet — the reader is the programmatic entry point.
+See [`docs/replay_debugging.md`](replay_debugging.md). Event sourcing is nearly free in an MVU architecture: `--record` captures every `Msg` the reducer sees as JSONL (plus a self-contained session header), and `mermaid --replay <file>` folds it back through the pure reducer — headless, effect-free — printing the reconstructed transcript and a determinism verdict (the log is folded twice; divergence means a reducer purity bug and exits 1). `app::replay::replay_recording` is the programmatic entry point.
 
 ## Migration status
 

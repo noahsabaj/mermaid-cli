@@ -485,6 +485,7 @@ mod tests {
             Config::default(),
             PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
+            chrono::Local::now(),
         )
     }
 
@@ -553,7 +554,7 @@ mod tests {
     fn user_prompt_renders_with_highlight_band() {
         let mut s = mock_state();
         s.session
-            .append(crate::models::ChatMessage::user("hello there"));
+            .append(crate::models::ChatMessage::user("hello there"), s.now);
         let buf = render_to_buffer(&s);
         let band_bg = crate::render::theme::Theme::dark()
             .colors
@@ -659,10 +660,10 @@ mod tests {
         let mut s = mock_state();
         let mut first_msg = crate::models::ChatMessage::assistant("first visible answer");
         first_msg.thinking = Some("first private chain of thought".to_string());
-        s.session.append(first_msg);
+        s.session.append(first_msg, s.now);
         let mut second_msg = crate::models::ChatMessage::assistant("second visible answer");
         second_msg.thinking = Some("second private chain of thought".to_string());
-        s.session.append(second_msg);
+        s.session.append(second_msg, s.now);
         let frame = render_to_string(&s);
         // Hidden reasoning is collapsed silently — no placeholder line.
         assert!(!frame.contains("Reasoning hidden"));
@@ -691,7 +692,7 @@ mod tests {
             duration_seconds: Some(0.015),
             metadata: None,
         });
-        s.session.append(msg);
+        s.session.append(msg, s.now);
         let frame = render_to_string(&s);
         assert!(
             !frame.contains("Reasoning hidden"),
@@ -706,8 +707,10 @@ mod tests {
     #[test]
     fn committed_message_appears_in_chat_pane() {
         let mut s = mock_state();
-        s.session
-            .append(crate::models::ChatMessage::user("unique-user-token-xyz"));
+        s.session.append(
+            crate::models::ChatMessage::user("unique-user-token-xyz"),
+            s.now,
+        );
         let frame = render_to_string(&s);
         assert!(frame.contains("unique-user-token-xyz"));
     }

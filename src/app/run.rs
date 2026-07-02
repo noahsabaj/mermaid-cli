@@ -27,7 +27,7 @@ use tokio::time::{Duration, interval};
 use crate::app::Config;
 use crate::app::event_source::coalesce_key_burst;
 use crate::app::lifecycle::RuntimeLifecycle;
-use crate::app::recorder::{Recorder, record_msg_body};
+use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder, SessionHeader};
 use crate::app::terminal::TerminalGuard;
 use crate::domain::{Cmd, Msg, RuntimeSignal, State, update};
 use crate::effect::EffectRunner;
@@ -60,14 +60,30 @@ pub async fn run_interactive_with(
     model_id: String,
     mut opts: InteractiveOptions,
 ) -> Result<()> {
-    let mut state = State::new(config.clone(), cwd.clone(), model_id);
-    if let Some(history) = opts.seed_conversation.take() {
-        // `--continue` / `--sessions` seed: replace the fresh
-        // conversation with the loaded history. Title already reflects
-        // the saved session, so re-dispatch the terminal title once.
-        let title = history.title.clone();
-        state.session.conversation = history;
-        state.ui.last_title_dispatched = Some(title);
+    // One startup clock read, shared by `State::new` and the recording
+    // header: replay seeds `State::new` with the recorded value and gets the
+    // same initial conversation id/title.
+    let startup_now = chrono::Local::now();
+    let mut state = State::new(config.clone(), cwd.clone(), model_id.clone(), startup_now);
+    let seed = opts.seed_conversation.take();
+    if let Some(r) = opts.recorder.as_mut() {
+        // The header makes a recording self-contained: `--replay` rebuilds
+        // the initial State from it (config, model, cwd, seed) without
+        // reading this machine's live config. Written before the first Msg
+        // so even a crashed session leaves a parseable log.
+        r.record_header(&SessionHeader {
+            format: RECORDING_FORMAT_VERSION,
+            ts: startup_now,
+            model_id: model_id.clone(),
+            cwd: cwd.clone(),
+            config: config.clone(),
+            seed_conversation: seed.clone(),
+        })?;
+    }
+    if let Some(history) = seed {
+        // `--continue` / `--sessions` seed — shared with `--replay` via
+        // `State::seed_conversation` so both build the same starting state.
+        state.seed_conversation(history);
     }
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
     let tools = ToolRegistry::build(
@@ -247,19 +263,20 @@ pub async fn run_interactive_with(
 
         let Some(msg) = msg else { continue };
 
+        // Inject the wall clock as data (Cause 3): one stamp per tick, shared
+        // by the recording and the reducer. The recorded `ts` IS the
+        // `state.now` this Msg was reduced under, so `--replay` folds the
+        // same log by stamping each entry's `ts` here and recomputes the
+        // exact same states.
+        let now = chrono::Local::now();
+
         // Optional recording: one JSONL line per Msg, before the
         // reducer runs so the log captures even no-op inputs.
         if let Some(r) = recorder.as_mut() {
-            let body = record_msg_body(&msg);
-            let _ = r.record_kind(msg.kind(), msg.turn_id(), body);
+            let _ = r.record_msg(now, &msg);
         }
 
-        // Inject the wall clock as data (Cause 3): stamp `state.now` once per
-        // tick so `update` and the `transition` helpers read it instead of
-        // calling `Local::now()` / `SystemTime::now()`. This keeps the reducer
-        // a pure function of `(State, Msg)` — a replay driver folds the same
-        // log by stamping each recorded entry's `ts` here instead.
-        state.now = chrono::Local::now();
+        state.now = now;
         let (new_state, cmds) = update(state, msg);
         state = new_state;
         for cmd in cmds {

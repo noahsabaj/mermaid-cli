@@ -29,7 +29,7 @@ const MAX_WALK_DEPTH: usize = 32;
 
 /// One loaded instruction file inside a combined project-instructions
 /// snapshot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InstructionSource {
     pub path: PathBuf,
     pub mtime: SystemTime,
@@ -39,7 +39,7 @@ pub struct InstructionSource {
 /// One-shot snapshot of loaded project instructions. Stored on `App` and
 /// `NonInteractiveRunner` so the per-turn auto-reload check has
 /// something to compare against.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoadedInstructions {
     /// Primary absolute path the content was read from. Kept for
     /// compatibility with older renderer/status code; `sources`

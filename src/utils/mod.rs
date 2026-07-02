@@ -15,6 +15,7 @@ mod private_tmp;
 mod proc;
 mod redact;
 mod retry;
+pub mod serde_base64;
 mod sse;
 mod text;
 mod timestamp;

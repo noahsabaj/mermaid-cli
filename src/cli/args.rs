@@ -40,6 +40,12 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub record: Option<PathBuf>,
 
+    /// Replay a `--record` log through the pure reducer: print the
+    /// reconstructed session and a determinism verdict. Headless — no model
+    /// calls, no tool execution, no config reads (the log is self-contained).
+    #[arg(long, value_name = "FILE", conflicts_with = "record")]
+    pub replay: Option<PathBuf>,
+
     /// Replace Mermaid's default system prompt for this invocation
     #[arg(long, global = true, conflicts_with = "system_prompt_file")]
     pub system_prompt: Option<String>,

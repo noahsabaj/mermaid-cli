@@ -508,8 +508,12 @@ mod tests {
             .is_turn_scoped()
         );
         assert!(
-            !Cmd::SaveConversation(ConversationHistory::new("/p".to_string(), "m".to_string()))
-                .is_turn_scoped()
+            !Cmd::SaveConversation(ConversationHistory::new(
+                "/p".to_string(),
+                "m".to_string(),
+                chrono::Local::now()
+            ))
+            .is_turn_scoped()
         );
         assert!(!Cmd::Exit.is_turn_scoped());
     }

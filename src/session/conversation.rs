@@ -102,9 +102,14 @@ pub struct ConversationHistory {
 }
 
 impl ConversationHistory {
-    /// Create a new conversation history
-    pub fn new(project_path: String, model_name: String) -> Self {
-        let now = Local::now();
+    /// Create a new conversation history.
+    ///
+    /// `now` is injected rather than read from the wall clock because this
+    /// runs inside the pure reducer (`/clear` mints a fresh conversation, and
+    /// `State::new` mints the initial one): the id and title are a
+    /// deterministic function of the caller's clock, so `--replay` reproduces
+    /// them exactly.
+    pub fn new(project_path: String, model_name: String, now: DateTime<Local>) -> Self {
         // Include subsecond precision to avoid ID collisions within the same second
         let id = format!("{}", now.format("%Y%m%d_%H%M%S_%3f"));
         Self {
@@ -121,25 +126,34 @@ impl ConversationHistory {
         }
     }
 
-    /// Add messages to the conversation
-    pub fn add_messages(&mut self, messages: &[ChatMessage]) {
+    /// Add messages to the conversation. `now` is the caller's injected
+    /// clock (`state.now` inside the reducer) — mutation methods never read
+    /// the wall clock themselves so `update()` stays a pure function.
+    pub fn add_messages(&mut self, messages: &[ChatMessage], now: DateTime<Local>) {
         self.messages.extend_from_slice(messages);
-        self.updated_at = Local::now();
+        self.updated_at = now;
         self.update_title();
     }
 
     /// Replace the model-visible message log without deriving a new title.
     /// Used by context compaction: the original title still describes the
-    /// session better than the generated checkpoint.
-    pub fn replace_messages(&mut self, messages: Vec<ChatMessage>) {
+    /// session better than the generated checkpoint. The messages keep their
+    /// own timestamps (they rode in on the `Msg` payload); only `updated_at`
+    /// is stamped, from the injected clock.
+    pub fn replace_messages(&mut self, messages: Vec<ChatMessage>, now: DateTime<Local>) {
         self.messages = messages;
-        self.updated_at = Local::now();
+        self.updated_at = now;
     }
 
-    /// Record a completed context compaction.
-    pub fn add_compaction(&mut self, record: crate::domain::CompactionRecord) {
+    /// Record a completed context compaction. `now` injected — see
+    /// [`Self::add_messages`].
+    pub fn add_compaction(
+        &mut self,
+        record: crate::domain::CompactionRecord,
+        now: DateTime<Local>,
+    ) {
         self.compactions.push(record);
-        self.updated_at = Local::now();
+        self.updated_at = now;
     }
 
     /// Add input to history (with deduplication of consecutive identical inputs)
@@ -530,7 +544,7 @@ mod tests {
     fn saved_conversation_json_has_no_screenshot_bytes() {
         let dir = std::env::temp_dir().join("mermaid_strip_test");
         let _ = fs::create_dir_all(&dir);
-        let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into());
+        let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into(), Local::now());
         conv.messages = vec![
             ChatMessage::user("u").with_images(vec!["USERIMG".to_string()]),
             ChatMessage::assistant("a").with_images(vec!["SHOTBYTES".to_string()]),
@@ -557,7 +571,8 @@ mod tests {
 
     #[test]
     fn test_new_conversation_has_session_title() {
-        let conv = ConversationHistory::new("/tmp/project".into(), "test-model".into());
+        let conv =
+            ConversationHistory::new("/tmp/project".into(), "test-model".into(), Local::now());
         assert!(conv.title.starts_with("Session "));
         assert_eq!(conv.model_name, "test-model");
         assert_eq!(conv.project_path, "/tmp/project");
@@ -566,31 +581,31 @@ mod tests {
 
     #[test]
     fn test_title_updates_from_first_user_message() {
-        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
-        conv.add_messages(&[ChatMessage::user("Fix the login bug")]);
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        conv.add_messages(&[ChatMessage::user("Fix the login bug")], Local::now());
         assert_eq!(conv.title, "Fix the login bug");
     }
 
     #[test]
     fn test_title_truncated_at_60_chars() {
-        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         let long_msg = "a".repeat(100);
-        conv.add_messages(&[ChatMessage::user(long_msg)]);
+        conv.add_messages(&[ChatMessage::user(long_msg)], Local::now());
         assert!(conv.title.ends_with("..."));
         assert!(conv.title.len() <= 64); // 60 chars + "..."
     }
 
     #[test]
     fn test_title_set_only_once() {
-        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
-        conv.add_messages(&[ChatMessage::user("First message")]);
-        conv.add_messages(&[ChatMessage::user("Second message")]);
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        conv.add_messages(&[ChatMessage::user("First message")], Local::now());
+        conv.add_messages(&[ChatMessage::user("Second message")], Local::now());
         assert_eq!(conv.title, "First message");
     }
 
     #[test]
     fn test_input_history_deduplication() {
-        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         conv.add_to_input_history("hello".into());
         conv.add_to_input_history("hello".into()); // duplicate
         conv.add_to_input_history("world".into());
@@ -599,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_input_history_skips_empty() {
-        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         conv.add_to_input_history("".into());
         conv.add_to_input_history("   ".into());
         assert_eq!(conv.input_history.len(), 0);
@@ -607,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_input_history_capped_at_100() {
-        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         for i in 0..110 {
             conv.add_to_input_history(format!("msg{}", i));
         }
@@ -621,8 +636,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let mut conv = ConversationHistory::new("/tmp".into(), "model".into());
-        conv.add_messages(&[ChatMessage::user("test message")]);
+        let mut conv = ConversationHistory::new("/tmp".into(), "model".into(), Local::now());
+        conv.add_messages(&[ChatMessage::user("test message")], Local::now());
         conv.add_to_input_history("test message".into());
 
         manager.save_conversation(&conv).unwrap();
@@ -642,9 +657,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let conv1 = ConversationHistory::new("/tmp".into(), "m".into());
+        let conv1 = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let conv2 = ConversationHistory::new("/tmp".into(), "m".into());
+        let conv2 = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
 
         manager.save_conversation(&conv1).unwrap();
         manager.save_conversation(&conv2).unwrap();
@@ -666,7 +681,7 @@ mod tests {
 
         assert!(manager.load_last_conversation().unwrap().is_none());
 
-        let conv = ConversationHistory::new("/tmp".into(), "m".into());
+        let conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         manager.save_conversation(&conv).unwrap();
 
         let last = manager.load_last_conversation().unwrap().unwrap();
@@ -685,15 +700,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let conv1 = ConversationHistory::new("/tmp".into(), "m".into());
+        let conv1 = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         manager.save_conversation(&conv1).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        let conv2 = ConversationHistory::new("/tmp".into(), "m".into());
+        let conv2 = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         manager.save_conversation(&conv2).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        let conv3 = ConversationHistory::new("/tmp".into(), "m".into());
+        let conv3 = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         manager.save_conversation(&conv3).unwrap();
 
         let last = manager.load_last_conversation().unwrap().unwrap();
@@ -711,7 +726,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let good = ConversationHistory::new("/tmp".into(), "m".into());
+        let good = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         manager.save_conversation(&good).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
 
@@ -800,7 +815,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let conv = ConversationHistory::new("/tmp".into(), "m".into());
+        let conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         manager.save_conversation(&conv).unwrap();
         assert_eq!(manager.list_conversations().unwrap().len(), 1);
 
@@ -845,8 +860,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
-        conv.add_messages(&[ChatMessage::user("ours")]);
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        conv.add_messages(&[ChatMessage::user("ours")], Local::now());
         manager.save_conversation(&conv).unwrap();
         let main = manager
             .conversations_dir()
@@ -856,7 +871,10 @@ mod tests {
         // appends, and saves — growing the file. This is the concurrent writer.
         let other = ConversationManager::new(&dir).unwrap();
         let mut their_conv = other.load_conversation(&conv.id).unwrap();
-        their_conv.add_messages(&[ChatMessage::user("theirs - extra content here")]);
+        their_conv.add_messages(
+            &[ChatMessage::user("theirs - extra content here")],
+            Local::now(),
+        );
         other.save_conversation(&their_conv).unwrap();
 
         // Our next save still holds the pre-concurrent baseline, so it must NOT
@@ -906,10 +924,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let mut conv = ConversationHistory::new("/tmp".into(), "m".into());
-        conv.add_messages(&[ChatMessage::user("first")]);
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        conv.add_messages(&[ChatMessage::user("first")], Local::now());
         manager.save_conversation(&conv).unwrap();
-        conv.add_messages(&[ChatMessage::user("second")]);
+        conv.add_messages(&[ChatMessage::user("second")], Local::now());
         manager.save_conversation(&conv).unwrap();
 
         let conflicts = fs::read_dir(manager.conversations_dir())

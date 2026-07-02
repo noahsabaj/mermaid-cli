@@ -90,10 +90,15 @@ pub struct State {
 
 impl State {
     /// Build a fresh state tied to a specific model + project dir.
-    /// Nothing about this touches the filesystem or tokio — pure.
-    pub fn new(settings: Config, cwd: PathBuf, model_id: String) -> Self {
+    ///
+    /// Pure given its inputs: `now` seeds the injected clock and derives the
+    /// initial conversation's id/title, so `--replay` reconstructs the same
+    /// starting state from a recorded header. (The one environment read left
+    /// is `env::temp_dir()` — stable within a machine, and only feeds paste
+    /// scratch paths.) Nothing here touches the filesystem or tokio.
+    pub fn new(settings: Config, cwd: PathBuf, model_id: String, now: DateTime<Local>) -> Self {
         let project_path = cwd.display().to_string();
-        let conversation = ConversationHistory::new(project_path, model_id.clone());
+        let conversation = ConversationHistory::new(project_path, model_id.clone(), now);
         let initial_title = conversation.title.clone();
         // F5: seed `mcp.servers` from the user's configured MCP
         // servers with `Starting` status. Previously the map started
@@ -150,12 +155,22 @@ impl State {
             pending_approval: VecDeque::new(),
             runtime,
             should_exit: false,
-            // Seed the injected clock so a freshly-built State is usable before
-            // the driver's first per-tick stamp. The driver overwrites this on
-            // every iteration (Cause 3); the reducer never reads the wall clock
-            // directly.
-            now: Local::now(),
+            // Seed the injected clock from the caller (live: startup wall
+            // clock; replay: the recorded header's ts). The driver overwrites
+            // this on every iteration (Cause 3); the reducer never reads the
+            // wall clock directly.
+            now,
         }
+    }
+
+    /// Apply a `--continue` / `--sessions` seed: replace the fresh
+    /// conversation with the loaded history and re-dispatch the terminal
+    /// title once. Shared by the live driver and `--replay` so both
+    /// construct the same starting state by definition.
+    pub fn seed_conversation(&mut self, history: ConversationHistory) {
+        let title = history.title.clone();
+        self.session.conversation = history;
+        self.ui.last_title_dispatched = Some(title);
     }
 
     /// True iff the reducer is currently mid-turn. UI uses this for
@@ -230,7 +245,7 @@ impl TokenUsageTotals {
 
 /// Approximate request-context breakdown used before provider usage
 /// arrives. These numbers are diagnostic estimates, not billing facts.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PromptTokenBreakdown {
     pub system_tokens: usize,
     pub instructions_tokens: usize,
@@ -252,7 +267,7 @@ impl PromptTokenBreakdown {
 
 /// The model-visible context for the latest request. This is separate
 /// from cumulative session usage, which is an API/accounting total.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContextUsageSnapshot {
     pub used_tokens: usize,
     pub max_tokens: Option<usize>,
@@ -477,9 +492,16 @@ impl Session {
 
     /// Append a committed assistant/user/tool message. Mutation happens
     /// through here so the reducer has one chokepoint to update the
-    /// conversation's `updated_at` and derived title. Pure — no I/O.
-    pub fn append(&mut self, msg: ChatMessage) {
-        self.conversation.add_messages(&[msg]);
+    /// conversation's `updated_at` and derived title.
+    ///
+    /// `now` is the reducer's injected clock (`state.now`). It stamps both
+    /// the message's commit timestamp and `updated_at` — the wall-clock
+    /// stamp `ChatMessage::new` put on the message at construction is
+    /// deliberately overwritten with the deterministic one, so `update()`
+    /// is a pure function and `--replay` recommits identical messages.
+    pub fn append(&mut self, mut msg: ChatMessage, now: DateTime<Local>) {
+        msg.timestamp = now;
+        self.conversation.add_messages(&[msg], now);
     }
 }
 
@@ -599,7 +621,7 @@ pub struct PendingToolCall {
 /// follow-up tool message. Everything else is Mermaid-owned
 /// structure for rendering, replay, process tracking, and timeline
 /// inspection.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolOutcome {
     pub status: ToolStatus,
     pub summary: String,
@@ -818,7 +840,7 @@ pub enum UiMode {
 
 /// Summary row for the conversation picker. Produced by
 /// `Cmd::ListConversations` → `Msg::ConversationsListed`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConversationSummary {
     pub id: String,
     pub title: String,
@@ -882,7 +904,7 @@ pub enum McpServerStatus {
 /// reducer doesn't need the full schema; the effect layer uses the
 /// server name + tool name to route, and the reducer uses the
 /// description for palette display.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct McpToolSpec {
     pub name: String,
     pub description: String,
@@ -936,7 +958,7 @@ pub enum ApprovalChoice {
 /// Category of the gated action — drives the prompt's label. Mirrors the
 /// runtime `ToolCategory` but lives in `domain` so the pure reducer needn't
 /// depend on `providers`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ApprovalKind {
     Shell,
     FileMutation,
@@ -950,7 +972,7 @@ pub enum ApprovalKind {
 /// Severity carried on `Msg::CompactionFailed`. The compaction-failed handler
 /// uses it to distinguish a benign no-op (`Info`, e.g. too little history to
 /// compact) from a real failure worth surfacing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StatusKind {
     Info,
     Warn,
@@ -984,6 +1006,7 @@ mod tests {
             Config::default(),
             PathBuf::from("/tmp/project"),
             "ollama/test".to_string(),
+            chrono::Local::now(),
         )
     }
 
@@ -1047,7 +1070,7 @@ mod tests {
     #[test]
     fn session_append_records_message() {
         let mut s = mock_state();
-        s.session.append(ChatMessage::user("hi"));
+        s.session.append(ChatMessage::user("hi"), s.now);
         assert_eq!(s.session.messages().len(), 1);
         assert_eq!(s.session.messages()[0].content, "hi");
     }

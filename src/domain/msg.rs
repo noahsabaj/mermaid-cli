@@ -19,6 +19,8 @@
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::app::McpServerConfig;
 use crate::app::instructions::LoadedInstructions;
 use crate::models::tool_call::ToolCall as ModelToolCall;
@@ -39,7 +41,13 @@ use super::{CompactionResult, CompactionTrigger};
 /// variant is a deliberate act that forces every reducer arm to
 /// consider it at compile time (the reducer's match is NOT
 /// `_ =>` — see `reducer.rs`).
-#[derive(Debug, Clone)]
+///
+/// Serde derives exist for `--record` / `--replay`: every `Msg` the driver
+/// feeds the reducer is serialized to one JSONL line, and replay folds the
+/// deserialized stream back through `update()`. New variants round-trip
+/// automatically via the externally-tagged representation — no per-variant
+/// recording code to keep in sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum Msg {
     // ── User intent ─────────────────────────────────────────────────
@@ -304,13 +312,13 @@ pub enum Msg {
 /// Bare key event — deliberately smaller than crossterm's `KeyEvent`
 /// so the reducer doesn't depend on crossterm. The app event source
 /// does the conversion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Key {
     pub code: KeyCode,
     pub modifiers: KeyMods,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyCode {
     Char(char),
     Enter,
@@ -332,7 +340,7 @@ pub enum KeyCode {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct KeyMods {
     pub ctrl: bool,
     pub alt: bool,
@@ -365,16 +373,22 @@ impl KeyMods {
     }
 }
 
-/// Paste payload. Images come in as raw bytes; text as UTF-8.
-#[derive(Debug, Clone)]
+/// Paste payload. Images come in as raw bytes; text as UTF-8. Image bytes
+/// serialize as base64 so a recorded session replays pasted images
+/// bit-exactly without a numbers-array blowup in the JSONL line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Paste {
     Text(String),
-    Image { bytes: Vec<u8>, format: String },
+    Image {
+        #[serde(with = "crate::utils::serde_base64")]
+        bytes: Vec<u8>,
+        format: String,
+    },
 }
 
 /// `/context` subcommands. No-arg shows the window; the rest tune the Ollama
 /// context window (per-model, persisted), mirroring `/reasoning`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextCmd {
     /// Show the current window + usage (no arg).
     Show,
@@ -392,7 +406,7 @@ pub enum ContextCmd {
 /// `/<name> [args]`. Parsed in `app::event_source` against the single
 /// `COMMAND_REGISTRY`; unknown commands produce `SlashCmd::Unknown`
 /// so the reducer can issue a "no such command" status line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SlashCmd {
     /// No arg → show current; `Some` → switch (and pull if needed).
     Model(Option<String>),

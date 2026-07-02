@@ -122,6 +122,7 @@ mermaid --model groq/qwen-qwq-32b               # Groq (requires GROQ_API_KEY)
 mermaid --reasoning high                        # Override default reasoning depth
 mermaid --path /path/to/project                  # Run against a specific project directory
 mermaid --record /tmp/session.jsonl              # Record reducer events for replay/debugging
+mermaid --replay /tmp/session.jsonl              # Reconstruct a recorded session (headless, deterministic)
 mermaid --append-system-prompt "Prefer small diffs" # Add one-off runtime instructions
 mermaid --system-prompt-file ./prompt.md         # Replace the default prompt for one run
 mermaid list                                    # List available models across providers

@@ -135,7 +135,7 @@ pub enum ReasoningCapability {
 /// markers the legacy text callback used. `signature` is reserved for
 /// providers that emit verifiable thinking traces (Anthropic's
 /// `signature` field, OpenAI's `encrypted_content`); `None` for now.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReasoningChunk {
     pub text: String,
     pub signature: Option<String>,

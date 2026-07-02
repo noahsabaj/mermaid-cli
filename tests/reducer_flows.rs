@@ -23,6 +23,7 @@ fn fresh() -> State {
         Config::default(),
         PathBuf::from("/tmp/flow"),
         "ollama/test".to_string(),
+        chrono::Local::now(),
     )
 }
 
@@ -166,11 +167,10 @@ fn tool_outcomes_must_all_land_before_followup_call() {
     ];
     state.turn = start_executing_tools(TurnId(1), calls, std::time::SystemTime::now());
     // Plant the prior assistant message so action displays attach.
-    state
-        .session
-        .append(mermaid_cli::models::ChatMessage::assistant(
-            "ok let me call tools",
-        ));
+    state.session.append(
+        mermaid_cli::models::ChatMessage::assistant("ok let me call tools"),
+        state.now,
+    );
 
     // Only first tool finishes — must stay in ExecutingTools.
     let (state, cmds) = update(
@@ -220,9 +220,10 @@ fn cancelled_tool_produces_placeholder_in_history() {
         },
     };
     state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
-    state
-        .session
-        .append(mermaid_cli::models::ChatMessage::assistant("calling tool"));
+    state.session.append(
+        mermaid_cli::models::ChatMessage::assistant("calling tool"),
+        state.now,
+    );
 
     let (state, _) = update(
         state,
@@ -378,9 +379,10 @@ fn upstream_error_from_stale_turn_is_dropped() {
 #[test]
 fn slash_clear_requires_confirmation_before_wiping() {
     let mut state = fresh();
-    state
-        .session
-        .append(mermaid_cli::models::ChatMessage::user("priceless"));
+    state.session.append(
+        mermaid_cli::models::ChatMessage::user("priceless"),
+        state.now,
+    );
     let (state, _) = update(state, Msg::Slash(SlashCmd::Clear));
     assert!(state.confirm.is_some());
     assert_eq!(state.session.messages().len(), 1);
@@ -399,9 +401,15 @@ fn slash_save_emits_save_conversation() {
 #[test]
 fn slash_compact_emits_compaction_command() {
     let mut state = fresh();
-    state.session.append(ChatMessage::user("old prompt"));
-    state.session.append(ChatMessage::assistant("old answer"));
-    state.session.append(ChatMessage::user("new prompt"));
+    state
+        .session
+        .append(ChatMessage::user("old prompt"), state.now);
+    state
+        .session
+        .append(ChatMessage::assistant("old answer"), state.now);
+    state
+        .session
+        .append(ChatMessage::user("new prompt"), state.now);
 
     let (state, cmds) = update(
         state,
@@ -423,9 +431,15 @@ fn slash_compact_emits_compaction_command() {
 #[test]
 fn compaction_finished_replaces_history_and_archives_head() {
     let mut state = fresh();
-    state.session.append(ChatMessage::user("old prompt"));
-    state.session.append(ChatMessage::assistant("old answer"));
-    state.session.append(ChatMessage::user("new prompt"));
+    state
+        .session
+        .append(ChatMessage::user("old prompt"), state.now);
+    state
+        .session
+        .append(ChatMessage::assistant("old answer"), state.now);
+    state
+        .session
+        .append(ChatMessage::user("new prompt"), state.now);
     let (state, cmds) = update(state, Msg::Slash(SlashCmd::Compact(None)));
     let turn = state.turn.id().expect("compaction turn");
     assert!(
@@ -586,9 +600,15 @@ fn manual_compaction_finish_drains_queued_message() {
     // #73: a message typed during `/compact` must auto-submit when compaction
     // finishes, not sit in the queue until some later turn happens to end.
     let mut state = fresh();
-    state.session.append(ChatMessage::user("old prompt"));
-    state.session.append(ChatMessage::assistant("old answer"));
-    state.session.append(ChatMessage::user("new prompt"));
+    state
+        .session
+        .append(ChatMessage::user("old prompt"), state.now);
+    state
+        .session
+        .append(ChatMessage::assistant("old answer"), state.now);
+    state
+        .session
+        .append(ChatMessage::user("new prompt"), state.now);
     let (state, _) = update(state, Msg::Slash(SlashCmd::Compact(None)));
     let turn = state.turn.id().expect("compaction turn");
 
@@ -751,20 +771,23 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
     // (e.g. after StreamDone with a tool call). We bypass the full
     // flow and construct the state manually.
     let mut state = state;
-    state.session.append(mermaid_cli::models::ChatMessage {
-        role: MessageRole::Assistant,
-        content: String::new(),
-        timestamp: chrono::Local::now(),
-        kind: mermaid_cli::models::ChatMessageKind::Normal,
-        metadata: None,
-        actions: vec![],
-        thinking: None,
-        images: None,
-        tool_calls: None,
-        tool_call_id: None,
-        tool_name: None,
-        thinking_signature: None,
-    });
+    state.session.append(
+        mermaid_cli::models::ChatMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            timestamp: chrono::Local::now(),
+            kind: mermaid_cli::models::ChatMessageKind::Normal,
+            metadata: None,
+            actions: vec![],
+            thinking: None,
+            images: None,
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            thinking_signature: None,
+        },
+        state.now,
+    );
     state.turn = start_executing_tools(
         id,
         vec![PendingToolCall {
@@ -822,7 +845,12 @@ fn configured_mcp_servers_seed_state_and_ready_updates() {
             env: std::collections::HashMap::new(),
         },
     );
-    let state = State::new(cfg, PathBuf::from("/tmp/p"), "ollama/test".to_string());
+    let state = State::new(
+        cfg,
+        PathBuf::from("/tmp/p"),
+        "ollama/test".to_string(),
+        chrono::Local::now(),
+    );
 
     // Seed placed the entry in Starting status before any effects run.
     let entry = state
