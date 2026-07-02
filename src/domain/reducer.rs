@@ -2439,8 +2439,13 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             // user mental model ("wipe everything").
             let project_path = state.session.conversation.project_path.clone();
             let model_name = state.session.conversation.model_name.clone();
+            // Carry the git branch forward: the impure startup can't re-detect
+            // it inside the pure reducer, and the cleared session is still the
+            // same working tree.
+            let git_branch = state.session.conversation.git_branch.clone();
             state.session.conversation =
                 crate::session::ConversationHistory::new(project_path, model_name, state.now);
+            state.session.conversation.git_branch = git_branch;
             state.session.cumulative_tokens = 0;
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();

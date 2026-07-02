@@ -27,12 +27,14 @@ pub struct Cli {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// Show session picker to choose a previous conversation
+    /// Pick a past conversation to resume from a searchable list (this
+    /// directory's sessions). Like `claude --resume`.
     #[arg(long, conflicts_with = "continue_session")]
-    pub sessions: bool,
+    pub resume: bool,
 
-    /// Resume the last conversation instead of starting fresh
-    #[arg(long = "continue", conflicts_with = "sessions")]
+    /// Resume the most recent conversation in this directory. Like
+    /// `claude --continue`.
+    #[arg(long = "continue", conflicts_with = "resume")]
     pub continue_session: bool,
 
     /// Append every reducer `Msg` to a JSONL file at this path for
@@ -455,5 +457,23 @@ mod tests {
     #[test]
     fn cli_run_accepts_normal_prompt() {
         assert!(Cli::try_parse_from(["mermaid", "run", "do a thing"]).is_ok());
+    }
+
+    #[test]
+    fn resume_and_continue_flags_parse_and_conflict() {
+        // Claude Code parity: `--resume` (picker) and `--continue` (last) both
+        // exist and are mutually exclusive. The old `--sessions` is gone.
+        let resume = Cli::try_parse_from(["mermaid", "--resume"]).expect("--resume parses");
+        assert!(resume.resume && !resume.continue_session);
+        let cont = Cli::try_parse_from(["mermaid", "--continue"]).expect("--continue parses");
+        assert!(cont.continue_session && !cont.resume);
+        assert!(
+            Cli::try_parse_from(["mermaid", "--resume", "--continue"]).is_err(),
+            "--resume and --continue must conflict"
+        );
+        assert!(
+            Cli::try_parse_from(["mermaid", "--sessions"]).is_err(),
+            "the old --sessions flag is renamed to --resume"
+        );
     }
 }
