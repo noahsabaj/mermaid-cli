@@ -1229,7 +1229,11 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.14.2...HEAD
+[0.14.2]: https://github.com/noahsabaj/mermaid-cli/compare/v0.14.1...v0.14.2
+[0.14.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.14.0...v0.14.1
+[0.14.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/noahsabaj/mermaid-cli/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.11.1...v0.12.0
