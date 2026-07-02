@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Closed a shell-classifier bypass found in a full audit: `yq -i` /
+  `--inplace` rewrites a file in place but was rated read-only by its
+  command name, so it auto-ran in `read_only` and `auto` modes. It (and
+  `date -s`/`--set`, which sets the system clock) now classify as mutations.
+  Their read-only invocations (`yq . f`, `date`, `date -d …`) are unaffected.
+
+### Fixed
+
+- `read_only` mode no longer blocks genuinely read-only commands
+  (user-reported): redirects to the null-device family (`2>/dev/null` and
+  friends) count as reads instead of writes; a glued separator
+  (`ls 2>/dev/null; echo done`) no longer hard-denies the whole chain as a
+  "sensitive `/dev/` write"; and `command -v NAME` — the POSIX binary-exists
+  test, which executes nothing — classifies as the lookup it is. Redirects
+  to real files, real devices (`/dev/sda`), and sensitive paths (`/etc/…`,
+  `~/.ssh/…`) stay blocked, with regression tests pinning both directions.
+- The read-only command allowlist gained the common pure-read tools it was
+  missing, so they stop needing approval / stop being blocked in
+  `read_only`: process/system inspection (`ps`, `groups`, `nproc`, `uptime`,
+  `free`, `tty`, `arch`, `vmstat`, `ls{cpu,blk,usb,pci}`), binary/file
+  inspection (`xxd`, `od`, `hexdump`, `strings`, `nm`, `objdump`, `readelf`,
+  `size`), text tools (`nl`, `tac`, `rev`, `comm`, `join`, `paste`, `fold`,
+  `fmt`, `expand`, `unexpand`, `[`), and the remaining checksum families
+  (`b2sum`, `sha224/384/512sum`). Tools that can mutate (`strip`, `ldd`,
+  `sed`, `awk`) were deliberately left off.
+
 ## [0.14.0] - 2026-07-02
 
 ### Security
