@@ -30,7 +30,9 @@ pub use ndjson::drain_complete_lines;
 pub use net::{HostClass, classify_host};
 pub use open::open_file;
 pub use private_tmp::private_temp_dir;
-pub use proc::{Grace, terminate_tree, terminate_tree_blocking};
+pub use proc::{
+    Grace, output_with_timeout, terminate_tree, terminate_tree_blocking, write_stdin_with_timeout,
+};
 pub use redact::{redact_json, redact_secrets};
 pub(crate) use retry::jitter;
 pub use retry::{RetryConfig, retry_async, retry_async_if};

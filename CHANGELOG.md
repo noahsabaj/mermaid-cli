@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Clipboard operations can no longer hang Mermaid. Every clipboard subprocess
+  (`wl-paste`/`wl-copy`, `xclip`, `pbpaste`/`pbcopy`, `osascript`, PowerShell)
+  now runs under a kill-on-timeout deadline, so a frozen selection owner or a
+  stale display connection surfaces as a visible paste/copy error within
+  seconds — instead of a paste that silently never lands, a permanently leaked
+  blocking thread, and a stuck child process that could stall shutdown.
+
 ## [0.13.0] - 2026-06-30
 
 ### Security
