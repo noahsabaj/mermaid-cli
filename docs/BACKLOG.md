@@ -10,9 +10,16 @@ Both review batches are resolved; the full history lives in
   `clippy -D warnings`, and `rustfmt` are clean, and the build was validated
   end-to-end headless against `ollama/minimax-m3:cloud` (read-only, and an
   edit-then-run-tests agentic task).
+- Third review (2026-07, whole-repo at v0.13.0): resolved — delivered as PRs
+  #115–#125: CI `--workspace` gap, cancel-mid-tools 400, headless
+  instructions/memory loading, daemon plaintext-command removal,
+  openai-compat `tool_calls` conformance + vision, release-pipeline
+  hardening, status-banner/dead-code sweep, formatter dedup, clipboard
+  kill-on-timeout deadlines, and reducer clock purity + deterministic
+  `--replay`. Every PR gate-verified locally and CI-green before merge.
 
 - **Status:** 0 open defects · 2 documented residuals (both by design, below)
-- **Last updated:** 2026-06-29
+- **Last updated:** 2026-07-02
 
 ---
 
