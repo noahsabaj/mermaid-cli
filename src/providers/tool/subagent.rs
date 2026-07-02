@@ -128,9 +128,12 @@ impl ToolExecutor for SubagentTool {
             .unwrap_or("subagent")
             .to_string();
 
-        // Safety gate: spawning a subagent is a Process-class action.
-        // ReadOnly (or a Deny override) blocks it; the child's own tool
-        // calls are independently gated by the same policy.
+        // Safety gate: Ask/Auto still vet the spawn (the prompt is
+        // model-authored), and Deny overrides plus the destructive-prompt
+        // hard-deny always win. ReadOnly deliberately ALLOWS the spawn: the
+        // child inherits the live safety mode below, so its own tool calls
+        // are re-gated at the same strength — a read_only child can fan out
+        // exploration but still can't mutate anything.
         if let Some(blocked) = super::policy_gate::gate_external(
             &ctx,
             "agent",

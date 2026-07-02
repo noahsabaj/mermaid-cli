@@ -267,7 +267,15 @@ impl PolicyEngine {
 
         match self.mode {
             SafetyMode::ReadOnly => {
-                if risk == RiskClass::ReadOnly {
+                // Subagent spawn is allowed even though it classifies as
+                // Process: the child inherits the parent's LIVE safety mode
+                // (`SubagentTool`), so every tool call it makes lands back in
+                // this engine at read_only strength — the spawn itself touches
+                // nothing. Denying it added no containment; it only blocked
+                // read-only fan-out (parallel exploration), the subagent
+                // tool's core use. A `Deny` override and the destructive-
+                // prompt hard-deny are checked above and still win.
+                if request.category == ToolCategory::Subagent || risk == RiskClass::ReadOnly {
                     PolicyDecision::Allow {
                         risk,
                         checkpoint: false,
@@ -2288,11 +2296,12 @@ mod tests {
 
     #[test]
     fn read_only_mode_denies_external_tool_categories() {
-        // C1/H1/H2: ReadOnly must block web/mcp/subagent/computer-use.
+        // C1/H1/H2: ReadOnly must block web/mcp/computer-use. (Subagent spawn
+        // is the deliberate exception — the child inherits read_only and every
+        // child tool call is re-gated; see `read_only_mode_allows_subagent_spawn`.)
         for cat in [
             ToolCategory::Web,
             ToolCategory::Mcp,
-            ToolCategory::Subagent,
             ToolCategory::ComputerUse,
         ] {
             let decision =
@@ -2302,6 +2311,57 @@ mod tests {
                 "ReadOnly should deny {cat:?}, got {decision:?}",
             );
         }
+    }
+
+    #[test]
+    fn read_only_mode_allows_subagent_spawn() {
+        // A subagent inherits the parent's LIVE safety mode, so every tool
+        // call it makes is re-gated by this engine at read_only strength —
+        // the spawn itself touches nothing. Blocking it only forbade
+        // read-only fan-out (parallel exploration).
+        let decision = PolicyEngine::new(SafetyMode::ReadOnly).decide(&ActionRequest::new(
+            "agent",
+            ToolCategory::Subagent,
+            "subagent: explore crates",
+        ));
+        assert!(
+            matches!(
+                decision,
+                PolicyDecision::Allow {
+                    checkpoint: false,
+                    ..
+                }
+            ),
+            "read_only must allow spawning a subagent, got {decision:?}",
+        );
+    }
+
+    #[test]
+    fn read_only_subagent_spawn_still_loses_to_overrides_and_hard_deny() {
+        // An operator Deny override outranks the read_only spawn carve-out…
+        let deny = PolicyOverride {
+            category: Some(ToolCategory::Subagent),
+            decision: PolicyOverrideDecision::Deny,
+            ..PolicyOverride::default()
+        };
+        let decision = PolicyEngine::new(SafetyMode::ReadOnly)
+            .with_overrides(vec![deny])
+            .decide(&ActionRequest::new(
+                "agent",
+                ToolCategory::Subagent,
+                "subagent: x",
+            ));
+        assert!(matches!(decision, PolicyDecision::Deny { .. }));
+        // …and so does the destructive hard-deny on the surfaced prompt.
+        let mut request = ActionRequest::new("agent", ToolCategory::Subagent, "subagent: cleanup");
+        request.command = Some("agent: run rm -rf / across the repo".to_string());
+        assert!(matches!(
+            PolicyEngine::new(SafetyMode::ReadOnly).decide(&request),
+            PolicyDecision::Deny {
+                risk: RiskClass::Destructive,
+                ..
+            }
+        ));
     }
 
     #[test]

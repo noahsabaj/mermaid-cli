@@ -15,10 +15,12 @@
 //!   approval row and BLOCKS, returning an "approval required" outcome. The
 //!   action is later re-run out-of-band by [`crate::runtime::approve_and_replay`].
 //! - **Non-replayable tools** (`web_*`, `mcp`, `subagent`, computer-use):
-//!   there is no checkpoint/replay path, so an `Ask` can't be satisfied
-//!   out-of-band — they proceed on `Ask` and are blocked only by `ReadOnly`
-//!   (or a `Deny` override). The meaningful safety knob for these tools is
-//!   `ReadOnly`.
+//!   there is no checkpoint/replay path, so an `Ask` decision resolves
+//!   inline when an approval broker is bound and otherwise fails closed
+//!   unless the run opted in via `--allow-untrusted-tools`. `ReadOnly`
+//!   denies them — except `subagent`: spawning is allowed there because the
+//!   child inherits the live safety mode, so every child tool call is
+//!   re-gated at the same strength.
 //!
 //! `Auto` mode resolves a `PolicyDecision::Classify` here by awaiting the
 //! injected `AutoClassifier` (in `ctx.classifier`): aligned ⇒ proceed,
@@ -50,8 +52,11 @@ pub enum Gate {
 /// Convenience for non-replayable tools (`web_*`, `mcp`, `subagent`,
 /// computer-use): consult the policy and return `Some(outcome)` when the
 /// action is blocked (e.g. `ReadOnly`/`Deny` override), or `None` to proceed.
-/// These tools have no checkpoint/replay path, so `Ask` proceeds — only
-/// `Deny` blocks them. Call this at the very top of `execute()`.
+/// These tools have no checkpoint/replay path: an `Ask` decision resolves
+/// inline when an approval broker is bound and otherwise fails closed unless
+/// `--allow-untrusted-tools`. `ReadOnly` blocks them all except `subagent`
+/// (the child inherits the live safety mode, so its own tool calls are
+/// re-gated individually). Call this at the very top of `execute()`.
 pub async fn gate_external(
     ctx: &ExecContext,
     tool: &'static str,
@@ -583,7 +588,6 @@ mod tests {
         for (tool, cat) in [
             ("web_fetch", ToolCategory::Web),
             ("mcp_proxy", ToolCategory::Mcp),
-            ("agent", ToolCategory::Subagent),
             ("click", ToolCategory::ComputerUse),
             ("memory", ToolCategory::Memory),
         ] {
@@ -594,6 +598,21 @@ mod tests {
                 "ReadOnly must block {tool}",
             );
         }
+        // Subagent spawn is the exception: the child inherits the live
+        // read_only mode and every child tool call is re-gated, so the spawn
+        // itself is allowed — read-only fan-out is the tool's core use.
+        assert!(
+            gate_external(
+                &ctx,
+                "agent",
+                ToolCategory::Subagent,
+                "subagent: explore".to_string(),
+                &serde_json::json!({"prompt": "map the crates"}),
+            )
+            .await
+            .is_none(),
+            "ReadOnly must allow subagent spawn",
+        );
     }
 
     #[tokio::test]
