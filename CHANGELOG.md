@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Daemon: the legacy plaintext socket commands were removed — every mutating
+  command now goes through the token-gated JSON surface, so a local process
+  can no longer bypass pairing.
+- The safety gate's "don't ask again" allowlist no longer matches a command
+  that contains a command substitution (an allowlisted prefix can't smuggle a
+  `$(…)` payload), and shadow-git checkpoint snapshots skip absolute and `..`
+  manifest entries — a crafted entry could previously truncate the very file
+  being checkpointed via a self-copy.
+
 ### Added
 
 - **`--replay <file>` — deterministic session replay.** A `--record` log now
@@ -36,9 +47,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every timestamp from the injected per-tick clock instead of reading the
   wall clock mid-update. Same recorded log in, same state out — the property
   `--replay` verifies and `tests/replay_determinism.rs` pins in CI.
+- CI now builds, lints, and tests the full workspace — the runtime crate's
+  test suite (daemon storage, checkpoints, policy, plugins) was silently
+  excluded before.
+- Dead-code sweep: the unused status-banner subsystem and a set of orphaned
+  helpers/wrappers were removed (−544 lines), and the three divergent
+  compact-count formatters were unified into one.
 
 ### Fixed
 
+- **Cancelling (or quitting) mid-tool-execution no longer poisons the next
+  turn.** Orphaned tool calls are sealed with cancelled placeholders, so the
+  follow-up request can't be rejected for a dangling tool call; a message
+  queued mid-turn no longer leaks across `/load` or `/clear` into the wrong
+  conversation; and a mid-turn system notice can no longer split an
+  assistant's tool call from its result (another next-turn rejection).
+- **Headless runs finally see your project.** `mermaid run` and daemon tasks
+  now load `AGENTS.md`/`MERMAID.md` project instructions and durable memory,
+  matching interactive sessions; subagents load them synchronously instead of
+  racing their first model call.
+- OpenAI-compatible providers: assistant tool calls are wire-conformant
+  (typed `function`, stringified arguments) — strict endpoints no longer
+  reject the second turn — and image attachments are actually sent to
+  vision models.
+- MCP: a hung server can no longer wedge a turn (tool calls time out after
+  5 minutes), and servers with paginated tool lists advertise all of their
+  tools instead of just the first page.
+- Repeated OS signals are all handled — previously the SIGINT/SIGTERM/SIGHUP
+  handlers fired once and went quiet, so a second Ctrl+C from outside the
+  TUI did nothing.
+- Daemon: the accept loop survives transient connection errors instead of
+  exiting, idle connections time out, and plugin hooks can no longer
+  deadlock on large stdin payloads.
+- Wide (CJK) characters no longer overflow truncated status lines, and
+  concurrent config saves can no longer interleave and corrupt the file.
+- A draw error during shutdown no longer skips MCP child cleanup and
+  pending session saves.
+- Release pipeline: the publish workflow verifies the tag matches the crate
+  version, changelog extraction works from shallow checkouts, and the
+  packaged systemd unit is generated from the same source as
+  `mermaid daemon install` (with a drift-guard test).
 - Clipboard operations can no longer hang Mermaid. Every clipboard subprocess
   (`wl-paste`/`wl-copy`, `xclip`, `pbpaste`/`pbcopy`, `osascript`, PowerShell)
   now runs under a kill-on-timeout deadline, so a frozen selection owner or a

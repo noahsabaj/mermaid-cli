@@ -54,7 +54,7 @@ pub struct Config {
     /// Example:
     /// ```toml
     /// [reasoning_per_model]
-    /// "anthropic/claude-sonnet-4-6" = "high"
+    /// "<provider>/<model>" = "high"
     /// "ollama/qwen3-coder:30b" = "low"
     /// ```
     #[serde(default)]
@@ -77,8 +77,8 @@ pub struct Config {
     /// ```toml
     /// [model_profiles]
     /// fast = "ollama/qwen3-coder:14b"
-    /// large-context = "openai/gpt-5.2"
-    /// tool-strong = "anthropic/claude-sonnet-4-6"
+    /// large-context = "openai/<model>"
+    /// tool-strong = "anthropic/<model>"
     /// vision = "gemini/gemini-2.5-pro"
     /// cheap = "groq/llama-3.3-70b-versatile"
     /// ```
@@ -582,7 +582,7 @@ pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
 }
 
 /// Persist a reasoning level for a specific model ID
-/// (e.g. `anthropic/claude-sonnet-4-6`). The TUI calls this from Alt+T,
+/// (e.g. `<provider>/<model>`). The TUI calls this from Alt+T,
 /// `/reasoning <level>`, and the does-not-support-thinking auto-snap so
 /// the choice sticks per-model rather than bleeding into other models on
 /// next session start.
