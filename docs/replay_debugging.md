@@ -18,6 +18,7 @@ replay: /tmp/session.jsonl
   entries: 41 total · 41 applied · 0 skipped
   note: session quit at line 42; 0 later entries not applied
   determinism: PASS — folding the log twice produced identical state
+  live match: yes — the fold reproduces the live session's recorded outcome
 
 transcript: fix the login bug — 7 messages
   [user] fix the login bug
@@ -49,6 +50,16 @@ One JSON object per line. **Line 1 is the session header** — everything replay
 - `ts` — not informational: it is the exact `state.now` the reducer saw for this input. The driver stamps one clock per tick and shares it between the recording and the reducer; replay stamps `state.now = ts` before folding the entry, so every derived timestamp (turn `started`, message commit times, run summaries) reproduces exactly.
 - `kind` / `turn` — denormalized copies of `Msg::kind()` / `Msg::turn_id()` for grepping a log by hand. Replay reads `msg`.
 - `msg` — the full `Msg`, serde-serialized (externally tagged). Binary payloads (pasted images, tool artifacts) ride as base64 and replay bit-exactly. New `Msg` variants round-trip automatically — there is no per-variant recording code to keep in sync, and a parity test (`every_msg_kind_has_a_round_trip_sample`) breaks the build if a variant stops round-tripping.
+
+**The last line of a cleanly-exited session is a trailer** — a SHA-256 fingerprint of the final session state (conversation, model, modes, token accounting; machine-derived fields and the redacted config are deliberately excluded so the fingerprint is machine-independent):
+
+```json
+{"ts":"2026-07-02T09:12:44.101-04:00","final_session_fingerprint":"sha256:9f2c…"}
+```
+
+`--replay` folds the log and compares: `live match: yes` means this build's fold reproduces what the live session actually saw — a strictly stronger claim than determinism (which only proves the fold is self-consistent). `no` is expected when redaction fired mid-session or the reducer changed between recording and replaying; `unknown` means the session crashed before sealing.
+
+**Ticks are not recorded.** The reducer's `Msg::Tick` arm is a documented no-op (render derives the spinner from `state.now`), so the 60 Hz stream would add megabytes per hour for zero replay fidelity. The `tick_is_a_reducer_noop` test pins the invariant; if Tick ever grows state effects, that test fails and ticks must be recorded again. Old logs containing Tick entries still fold fine.
 
 `Recorder::open` appends, so a reused `--record` path holds several sessions back to back (each starting with its own header). `--replay` folds the first and notes where the next begins.
 

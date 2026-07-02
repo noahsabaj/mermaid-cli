@@ -288,6 +288,14 @@ pub async fn run_interactive_with(
         }
     }
 
+    // Seal the recording with a fingerprint of the final session, so a
+    // future `--replay` can verify its fold reproduces what this live
+    // session actually saw — not merely that the fold is self-consistent.
+    // (Wall-clock read is fine here: we're outside the reducer.)
+    if let Some(r) = recorder.as_mut() {
+        let _ = r.record_trailer(chrono::Local::now(), &state.session);
+    }
+
     // Restore the user's terminal before async shutdown. Shutdown can
     // wait on pending saves / cancelled scopes for a bounded period;
     // keeping raw mode + mouse capture alive during that wait makes

@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input as a full serde round-trip — pasted images and tool artifacts ride
   as base64 and replay bit-exactly. Older (headerless, lossy) recordings are
   not readable; re-record with this version.
+- Replay verifies against the live session, not just itself: recordings are
+  sealed on clean exit with a fingerprint of the final session state, and
+  `--replay` reports whether its fold reproduces the recorded outcome
+  (`live match: yes / no / unknown`).
+- Recordings no longer store the 60 Hz `Tick` stream (a documented reducer
+  no-op, pinned by test) — hours-long recordings shrink from megabytes of
+  ticks to just the meaningful inputs, with zero replay fidelity loss.
 
 ### Changed
 
