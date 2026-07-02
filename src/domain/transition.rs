@@ -300,6 +300,34 @@ fn action_details_for(
                 }
             }
         },
+        "agent" => {
+            // Surface what the child actually cost and which model ran it —
+            // the child's usage is real spend the parent's own counters would
+            // otherwise hide.
+            let mut bits = Vec::new();
+            if let Some(usage) = outcome.metadata.token_usage.as_ref()
+                && usage.total_tokens > 0
+            {
+                bits.push(format!(
+                    "{} tokens",
+                    super::compaction::format_compact_count(usage.total_tokens)
+                ));
+            }
+            if let ToolMetadata::Subagent { model_id } = &outcome.metadata.detail
+                && !model_id.is_empty()
+            {
+                bits.push(model_id.clone());
+            }
+            let detail = if bits.is_empty() {
+                "subagent finished".to_string()
+            } else {
+                bits.join(" · ")
+            };
+            ActionDetails::Preview {
+                text: success_summary(detail, duration),
+                line_count: None,
+            }
+        },
         _ => ActionDetails::Simple,
     }
 }
@@ -521,6 +549,53 @@ mod tests {
                     arguments,
                 },
             },
+        }
+    }
+
+    #[test]
+    fn agent_action_reports_child_model_and_tokens() {
+        let call = sample_call_args(1, "agent", serde_json::json!({"description": "explore"}));
+        let usage = crate::models::TokenUsage {
+            prompt_tokens: 9_000,
+            completion_tokens: 3_300,
+            total_tokens: 12_300,
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            source: Default::default(),
+        };
+        let outcome = ToolOutcome::success("the report", "subagent completed", 62.0).with_metadata(
+            ToolRunMetadata {
+                detail: ToolMetadata::Subagent {
+                    model_id: "ollama/minimax-m3".to_string(),
+                },
+                token_usage: Some(usage),
+                ..Default::default()
+            },
+        );
+        let action = action_display_for(&call, &outcome);
+        match &action.details {
+            ActionDetails::Preview { text, .. } => {
+                assert!(text.starts_with("Success"), "got {text}");
+                assert!(text.contains("12.3k tokens"), "got {text}");
+                assert!(text.contains("ollama/minimax-m3"), "got {text}");
+            },
+            other => panic!("expected Preview details, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_action_without_usage_metadata_stays_plain() {
+        // Old recordings / providers that report no usage: no "0 tokens".
+        let call = sample_call_args(1, "agent", serde_json::json!({}));
+        let outcome = ToolOutcome::success("report", "subagent completed", 2.0);
+        let action = action_display_for(&call, &outcome);
+        match &action.details {
+            ActionDetails::Preview { text, .. } => {
+                assert!(!text.contains("tokens"), "got {text}");
+                assert!(text.contains("subagent finished"), "got {text}");
+            },
+            other => panic!("expected Preview details, got {other:?}"),
         }
     }
 

@@ -355,10 +355,10 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
         Msg::ToolProgress {
             turn,
-            call_id: _,
+            call_id,
             event,
         } => {
-            handle_tool_progress(&mut state, &mut cmds, turn, event);
+            handle_tool_progress(&mut state, &mut cmds, turn, call_id, event);
         },
         Msg::ToolFinished {
             turn,
@@ -2989,6 +2989,7 @@ fn handle_turn_cancelled(state: &mut State, turn: TurnId) {
     match state.turn {
         TurnState::Cancelling { id, .. } if id == turn => {
             state.turn = TurnState::Idle;
+            state.ui.live_tool_status.clear();
             drain_next_queued_message(state);
         },
         _ => {
@@ -3085,23 +3086,52 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
 fn handle_tool_progress(
     state: &mut State,
     _cmds: &mut Vec<Cmd>,
-    _turn: TurnId,
+    turn: TurnId,
+    call_id: super::ids::ToolCallId,
     event: crate::providers::ProgressEvent,
 ) {
-    use crate::providers::ProgressEvent;
+    use crate::providers::{ProgressEvent, SubagentPhase};
     use base64::{Engine as _, engine::general_purpose};
 
-    if let ProgressEvent::Artifact { mime, data, .. } = event
-        && mime.starts_with("image/")
-        && matches!(
-            state.turn,
-            TurnState::ExecutingTools { .. } | TurnState::Generating { .. }
-        )
-        && let Some(last) = state.session.conversation.messages.last_mut()
-        && last.role == MessageRole::Assistant
-    {
-        let encoded = general_purpose::STANDARD.encode(&data);
-        last.images.get_or_insert_with(Vec::new).push(encoded);
+    match event {
+        ProgressEvent::Artifact { mime, data, .. }
+            if mime.starts_with("image/")
+                && matches!(
+                    state.turn,
+                    TurnState::ExecutingTools { .. } | TurnState::Generating { .. }
+                ) =>
+        {
+            if let Some(last) = state.session.conversation.messages.last_mut()
+                && last.role == MessageRole::Assistant
+            {
+                let encoded = general_purpose::STANDARD.encode(&data);
+                last.images.get_or_insert_with(Vec::new).push(encoded);
+            }
+        },
+        // Live subagent activity → the per-call status the status line shows
+        // next to the tool label. Only while the owning turn is executing;
+        // a stale turn's progress must not repopulate a cleared map.
+        ProgressEvent::SubagentToolCall {
+            tool_name, phase, ..
+        } if matches!(&state.turn, TurnState::ExecutingTools { id, .. } if *id == turn) => {
+            let detail = match phase {
+                SubagentPhase::Started => format!("{tool_name}…"),
+                SubagentPhase::Finished => format!("{tool_name} done"),
+                SubagentPhase::Errored => format!("{tool_name} failed"),
+            };
+            state.ui.live_tool_status.insert(call_id, detail);
+        },
+        ProgressEvent::SubagentText(snippet) if matches!(&state.turn, TurnState::ExecutingTools { id, .. } if *id == turn) =>
+        {
+            let trimmed = snippet.trim();
+            if !trimmed.is_empty() {
+                state
+                    .ui
+                    .live_tool_status
+                    .insert(call_id, trimmed.to_string());
+            }
+        },
+        _ => {},
     }
 }
 
@@ -3123,6 +3153,24 @@ fn handle_tool_finished(
         } if *id == turn => {
             if !fill_outcome(calls, outcomes, call_id, outcome.clone()) {
                 return;
+            }
+            state.ui.live_tool_status.remove(&call_id);
+            // Fold tool-consumed provider usage (a subagent's child-session
+            // total) into the session counters, so the footer and the
+            // end-of-run "used N tokens" summary count the whole tree. Not
+            // `last_token_usage` — that field is the parent's most recent
+            // request, feeding the context-size estimate, and the child's
+            // context is a separate window.
+            if let Some(usage) = outcome.metadata.token_usage.as_ref() {
+                let totals = TokenUsageTotals::from_usage(usage);
+                state.session.cumulative_token_usage.add_assign(totals);
+                state.session.cumulative_tokens = state
+                    .session
+                    .cumulative_tokens
+                    .saturating_add(usage.total_tokens);
+                state.runtime.run_committed_tokens += usage
+                    .completion_tokens
+                    .saturating_add(usage.reasoning_output_tokens);
             }
             // Attach action display to the last assistant message so
             // the renderer can show it.
@@ -3152,6 +3200,8 @@ fn handle_tool_finished(
             std::mem::replace(&mut state.turn, TurnState::Idle)
         && id == turn
     {
+        // The executing turn is over; no call in it is live anymore.
+        state.ui.live_tool_status.clear();
         // Append each tool message to the conversation, then kick off
         // the follow-up model call.
         let tool_msgs = tool_result_messages(&calls, completed_outcomes);
@@ -3278,12 +3328,17 @@ fn system_prompt_for_state(state: &State) -> String {
         .settings
         .prompt
         .render_system_prompt(&get_system_prompt());
-    format!(
+    let mut prompt = format!(
         "{}\n\n## Current Session\nCurrent working directory: {}\nSafety mode: {} (live — the user can switch it anytime with Shift+Tab or /safety; trust this over any earlier tool error, and attempt gated actions rather than assuming they will fail).\nTreat this as the project root unless the user specifies a different path.",
         base,
         state.cwd.display(),
         state.session.safety_mode.as_str()
-    )
+    );
+    if state.session.is_subagent {
+        prompt.push_str("\n\n");
+        prompt.push_str(crate::prompts::SUBAGENT_CONTRACT);
+    }
+    prompt
 }
 
 /// Walk the message log and retain only the `MAX_RETAINED_SCREENSHOTS`
@@ -6481,6 +6536,156 @@ mod tests {
             _ => panic!("unchanged state expected"),
         }
         assert!(cmds.is_empty());
+    }
+
+    /// Build a one-call ExecutingTools state around an `agent` tool call,
+    /// shared by the subagent progress/rollup tests below.
+    fn state_executing_agent_call() -> (State, super::super::ids::ToolCallId) {
+        let mut state = fresh_state();
+        let call_id = super::super::ids::ToolCallId(1);
+        state.turn = start_executing_tools(
+            TurnId(3),
+            vec![PendingToolCall {
+                call_id,
+                source: crate::models::tool_call::ToolCall {
+                    id: None,
+                    function: crate::models::tool_call::FunctionCall {
+                        name: "agent".to_string(),
+                        arguments: serde_json::json!({"description": "explore"}),
+                    },
+                },
+            }],
+            std::time::SystemTime::now(),
+        );
+        state
+            .session
+            .append(ChatMessage::assistant("spawning"), state.now);
+        (state, call_id)
+    }
+
+    #[test]
+    fn subagent_progress_feeds_live_status_and_finish_clears_it() {
+        use crate::providers::{ProgressEvent, SubagentPhase};
+        let (state, call_id) = state_executing_agent_call();
+
+        // A child tool starting shows as "<tool>…" on the parent call.
+        let (state, _) = update(
+            state,
+            Msg::ToolProgress {
+                turn: TurnId(3),
+                call_id,
+                event: ProgressEvent::SubagentToolCall {
+                    child_call_id: super::super::ids::ToolCallId(9),
+                    tool_name: "read_file".to_string(),
+                    phase: SubagentPhase::Started,
+                },
+            },
+        );
+        assert_eq!(
+            state.ui.live_tool_status.get(&call_id).map(String::as_str),
+            Some("read_file…"),
+        );
+
+        // Child assistant text overwrites it with the latest snippet.
+        let (state, _) = update(
+            state,
+            Msg::ToolProgress {
+                turn: TurnId(3),
+                call_id,
+                event: ProgressEvent::SubagentText("scanning crates".to_string()),
+            },
+        );
+        assert_eq!(
+            state.ui.live_tool_status.get(&call_id).map(String::as_str),
+            Some("scanning crates"),
+        );
+
+        // Progress for a stale turn must not touch the live map.
+        let (state, _) = update(
+            state,
+            Msg::ToolProgress {
+                turn: TurnId(999),
+                call_id,
+                event: ProgressEvent::SubagentText("late straggler".to_string()),
+            },
+        );
+        assert_eq!(
+            state.ui.live_tool_status.get(&call_id).map(String::as_str),
+            Some("scanning crates"),
+        );
+
+        // The call finishing removes its entry (and here ends the turn).
+        let (state, _) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(3),
+                call_id,
+                outcome: ToolOutcome::success("report", "subagent completed", 0.5),
+            },
+        );
+        assert!(
+            state.ui.live_tool_status.is_empty(),
+            "live status must not outlive the call",
+        );
+    }
+
+    #[test]
+    fn subagent_usage_rolls_into_session_totals_and_run_counter() {
+        let (state, call_id) = state_executing_agent_call();
+        let before_cum = state.session.cumulative_tokens;
+        assert_eq!(state.runtime.run_committed_tokens, 0);
+
+        let usage = crate::models::TokenUsage {
+            prompt_tokens: 1_000,
+            completion_tokens: 250,
+            total_tokens: 1_250,
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 50,
+            source: Default::default(),
+        };
+        let metadata = crate::domain::ToolRunMetadata {
+            detail: crate::domain::ToolMetadata::Subagent {
+                model_id: "ollama/test".to_string(),
+            },
+            token_usage: Some(usage),
+            ..Default::default()
+        };
+        let (state, _) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(3),
+                call_id,
+                outcome: ToolOutcome::success("report", "subagent completed", 1.0)
+                    .with_metadata(metadata),
+            },
+        );
+
+        // Session totals count the child's whole session…
+        assert_eq!(state.session.cumulative_tokens, before_cum + 1_250);
+        assert_eq!(state.session.cumulative_token_usage.total_tokens, 1_250);
+        assert_eq!(state.session.cumulative_token_usage.completion_tokens, 250);
+        // …the run counter banks its generated tokens (completion + reasoning)…
+        assert_eq!(state.runtime.run_committed_tokens, 300);
+        // …but the child never poses as the parent's own last request (that
+        // field feeds the context-size estimate for the PARENT's window).
+        assert!(state.session.last_token_usage.is_none());
+    }
+
+    #[test]
+    fn system_prompt_appends_subagent_contract_only_when_flagged() {
+        let mut state = fresh_state();
+        assert!(
+            !system_prompt_for_state(&state).contains("Subagent Contract"),
+            "a user-facing session must not carry the subagent contract",
+        );
+        state.session.is_subagent = true;
+        let prompt = system_prompt_for_state(&state);
+        assert!(prompt.contains("## Subagent Contract"), "got {prompt}");
+        assert!(
+            prompt.contains("returned verbatim to the parent"),
+            "the contract must state the report semantics",
+        );
     }
 
     #[test]

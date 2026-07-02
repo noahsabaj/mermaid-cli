@@ -138,6 +138,7 @@ impl State {
                 last_token_usage: None,
                 cumulative_token_usage: TokenUsageTotals::default(),
                 context_usage: None,
+                is_subagent: false,
             },
             turn: TurnState::Idle,
             ui: UiState {
@@ -480,6 +481,11 @@ pub struct Session {
     /// while a request is in flight and is replaced by provider-reported
     /// usage when available.
     pub context_usage: Option<ContextUsageSnapshot>,
+    /// True when this session IS a subagent (a child reducer driven by
+    /// `SubagentTool`). `system_prompt_for_state` appends the subagent
+    /// contract (final message = the report returned to the parent) when
+    /// set. Never true for a user-facing session.
+    pub is_subagent: bool,
 }
 
 impl Session {
@@ -798,6 +804,14 @@ pub struct UiState {
     /// queuing `Msg::Slash(cmd)`) without self-invoking the
     /// reducer. Bounded drain depth guards against runaway loops.
     pub pending_msgs: VecDeque<Msg>,
+    /// Live one-line activity per in-flight tool call, keyed by the call id.
+    /// Fed by `Msg::ToolProgress` (today: subagent activity — the child's
+    /// current tool or latest text snippet) and rendered by the status line
+    /// next to the tool label. Entries are removed on that call's
+    /// `ToolFinished` and the map is cleared when the turn ends or cancels;
+    /// call ids are session-unique, so a stale entry can never attach to a
+    /// later call.
+    pub live_tool_status: HashMap<ToolCallId, String>,
     /// Up-arrow history navigation cursor into
     /// `session.conversation.input_history`. `None` = not
     /// navigating (input_buffer is whatever the user typed).

@@ -119,6 +119,12 @@ pub struct EffectRunner {
     /// Headless `mermaid run` must suppress them so stdout stays
     /// machine-readable for JSON/markdown/text output modes.
     terminal_title_enabled: bool,
+    /// Whether this runner's `shutdown` reaps the PROCESS-GLOBAL MCP manager
+    /// (`crate::mcp::manager_ref`). True only for the top-level runner. A
+    /// subagent's child runner shares the global manager, so it must NOT reap
+    /// it — otherwise the first subagent to finish would kill every MCP
+    /// server out from under the parent for the rest of the session.
+    owns_global_mcp: bool,
     /// Inline-approval broker. `Some` only for interactive TUI runs (set via
     /// `with_interactive_approvals`); headless + child runners leave it `None`,
     /// so the gate falls back to the out-of-band DB-approval flow.
@@ -142,6 +148,7 @@ impl EffectRunner {
             tools: None,
             task_id: None,
             terminal_title_enabled: true,
+            owns_global_mcp: true,
             approval: None,
             config_watch: None,
         }
@@ -179,6 +186,13 @@ impl EffectRunner {
     /// Disable terminal-title writes for non-interactive callers.
     pub fn without_terminal_title(mut self) -> Self {
         self.terminal_title_enabled = false;
+        self
+    }
+
+    /// Leave the process-global MCP manager alone on `shutdown`. Child
+    /// (subagent) runners share it with the parent and must not reap it.
+    pub fn without_global_mcp_shutdown(mut self) -> Self {
+        self.owns_global_mcp = false;
         self
     }
 
@@ -252,9 +266,13 @@ impl EffectRunner {
         // NOT emit OSC 2 terminal-title escapes: in a headless `mermaid run`
         // the parent suppresses them, but an un-suppressed child leaks
         // `\x1b]2;…\x07` into stdout and corrupts `--format json`/`text` output.
+        // It must also leave the process-global MCP manager running — the
+        // child shares the parent's servers, and reaping them here would kill
+        // MCP for the whole session the moment the first subagent finished.
         Self::new(msg_tx, workdir)
             .with_bindings(providers, tools)
             .without_terminal_title()
+            .without_global_mcp_shutdown()
     }
 
     /// Get or create the scope for a turn. Idempotent. The scope is
@@ -1180,23 +1198,31 @@ impl EffectRunner {
         // Drain with a bounded timeout.
         let shutdown_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
 
+        let owns_global_mcp = self.owns_global_mcp;
         let drain = async {
-            // If an MCP init is still in flight, its child processes are already
-            // spawned but `set_manager` hasn't run yet — `get()` below would
-            // return `None` and we'd leak those children. Wait (bounded) for init
-            // to settle so the manager is installed before we reap it (#59).
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                crate::mcp::manager_ref::wait_ready(),
-            )
-            .await;
-            // Gracefully shut down MCP server children (the stdin-EOF →
-            // terminate → kill ladder in `McpServerManager::shutdown`). The
-            // manager lives in a `'static OnceLock` that never drops, so this
-            // explicit call on the exit path is the only thing that reaps those
-            // child processes. No-op when no servers were configured.
-            if let Some(mgr) = crate::mcp::manager_ref::get() {
-                mgr.shutdown().await;
+            // Only the top-level runner reaps the process-global MCP manager.
+            // A subagent's child runner shares it; reaping here would kill the
+            // parent's servers the moment the first subagent finished.
+            if owns_global_mcp {
+                // If an MCP init is still in flight, its child processes are
+                // already spawned but `set_manager` hasn't run yet — `get()`
+                // below would return `None` and we'd leak those children. Wait
+                // (bounded) for init to settle so the manager is installed
+                // before we reap it (#59).
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    crate::mcp::manager_ref::wait_ready(),
+                )
+                .await;
+                // Gracefully shut down MCP server children (the stdin-EOF →
+                // terminate → kill ladder in `McpServerManager::shutdown`). The
+                // manager lives in a `'static OnceLock` that never drops, so
+                // this explicit call on the exit path is the only thing that
+                // reaps those child processes. No-op when no servers were
+                // configured.
+                if let Some(mgr) = crate::mcp::manager_ref::get() {
+                    mgr.shutdown().await;
+                }
             }
             // F42: bound each per-scope drain so one non-cooperative task can't
             // eat the whole shutdown budget and starve the remaining scopes'
@@ -2655,6 +2681,27 @@ mod tests {
         assert!(
             !child.terminal_title_enabled,
             "subagent child runner must suppress terminal-title escapes"
+        );
+    }
+
+    #[test]
+    fn new_child_does_not_own_global_mcp_shutdown() {
+        // The MCP manager is process-global and shared with the parent. A
+        // child runner's shutdown (which runs after EVERY subagent) must not
+        // reap it — that would kill the parent's MCP servers for the rest of
+        // the session. Only the top-level runner owns the reap.
+        let (tx, _rx) = mpsc::channel::<Msg>(MSG_CHANNEL_CAPACITY);
+        let providers = Arc::new(ProviderFactory::new(crate::app::Config::default()));
+        let tools = Arc::new(ToolRegistry::new());
+        let child = EffectRunner::new_child(tx, PathBuf::from("/tmp"), providers, tools);
+        assert!(
+            !child.owns_global_mcp,
+            "child runner must not reap the shared global MCP manager"
+        );
+        let (top, _rx2) = EffectRunner::pair(PathBuf::from("/tmp"));
+        assert!(
+            top.owns_global_mcp,
+            "top-level runner still owns the global MCP reap"
         );
     }
 
