@@ -24,7 +24,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -36,7 +36,6 @@ use crate::providers::{ProgressEvent, SubagentPhase};
 /// loop chooses to log.
 pub struct Recorder {
     writer: BufWriter<File>,
-    path: PathBuf,
 }
 
 impl Recorder {
@@ -71,12 +70,7 @@ impl Recorder {
         );
         Ok(Self {
             writer: BufWriter::new(file),
-            path,
         })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     /// Record a single `MsgKind` + optional body JSON. Meant for the
@@ -328,19 +322,12 @@ pub fn record_msg_body(msg: &Msg) -> serde_json::Value {
         Msg::ModelPullFinished { model } => serde_json::json!({"model": model}),
         Msg::ModelPullProgress(line) => serde_json::json!({"line": line}),
         Msg::Tick => serde_json::json!({}),
-        Msg::StatusDismiss => serde_json::json!({}),
         Msg::Resize { width, height } => serde_json::json!({
             "width": width,
             "height": height,
         }),
-        Msg::TransientStatus {
-            text,
-            kind,
-            dismiss_ms,
-        } => serde_json::json!({
+        Msg::TransientStatus { text } => serde_json::json!({
             "text": text,
-            "kind": format!("{:?}", kind),
-            "dismiss_ms": dismiss_ms,
         }),
         Msg::MouseScroll { delta } => serde_json::json!({"delta": delta}),
         Msg::OpenImageAt {
@@ -494,7 +481,6 @@ fn unsupported(reason: &str) -> serde_json::Value {
 /// replay doesn't allocate the whole file upfront.
 pub struct Replay {
     lines: std::io::Lines<BufReader<File>>,
-    path: PathBuf,
 }
 
 impl Replay {
@@ -504,12 +490,7 @@ impl Replay {
             File::open(&path).with_context(|| format!("open {} for replay", path.display()))?;
         Ok(Self {
             lines: BufReader::new(file).lines(),
-            path,
         })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 

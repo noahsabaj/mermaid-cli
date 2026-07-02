@@ -552,9 +552,6 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // `state.now` — so a 60 Hz Tick advances the display without the
             // reducer or render ever reading the wall clock.
         },
-        Msg::StatusDismiss => {
-            state.status = None;
-        },
         Msg::Resize { .. } => {
             // Render layer recomputes layout from the new area — no
             // reducer state depends on raw terminal dimensions.
@@ -565,11 +562,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // delta to ChatState. `saturating_add` never overflows.
             state.ui.mouse_scroll_accum = state.ui.mouse_scroll_accum.saturating_add(delta as i32);
         },
-        Msg::TransientStatus {
-            text,
-            kind: _,
-            dismiss_ms: _,
-        } => {
+        Msg::TransientStatus { text } => {
             // Generic async feedback from effect handlers ("clipboard is empty",
             // "config saved", etc.). Routed into the chat transcript instead of
             // the old transient banner above the input.
@@ -1315,7 +1308,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             match visible_reasoning_value(arg.as_deref(), state.ui.show_reasoning) {
                 Ok(next) => {
                     state.ui.show_reasoning = next;
-                    set_status(
+                    push_system(
                         state,
                         cmds,
                         if next {
@@ -1323,12 +1316,10 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                         } else {
                             "Visible reasoning: off"
                         },
-                        StatusKind::Info,
-                        3_000,
                     );
                 },
                 Err(usage) => {
-                    set_status(state, cmds, usage, StatusKind::Warn, 4_000);
+                    push_system(state, cmds, usage);
                 },
             }
         },
@@ -1473,24 +1464,16 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::RememberMemory { text });
         },
         SlashCmd::Remember(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /remember <fact to remember>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /remember <fact to remember>");
         },
         SlashCmd::Forget(Some(id)) => {
             cmds.push(Cmd::ForgetMemory { id });
         },
         SlashCmd::Forget(None) => {
-            set_status(
+            push_system(
                 state,
                 cmds,
                 "Usage: /forget <memory name> (see /memory for names)",
-                StatusKind::Info,
-                3_000,
             );
         },
         SlashCmd::ConsolidateMemory => {
@@ -1511,7 +1494,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::LoadRuntimeTask { id });
         },
         SlashCmd::Task(None) => {
-            set_status(state, cmds, "Usage: /task <id>", StatusKind::Info, 3_000);
+            push_system(state, cmds, "Usage: /task <id>");
         },
         SlashCmd::Pause(Some(id)) => {
             cmds.push(Cmd::UpdateRuntimeTaskStatus {
@@ -1521,13 +1504,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             });
         },
         SlashCmd::Pause(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /pause <task-id>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /pause <task-id>");
         },
         SlashCmd::Resume(Some(id)) => {
             cmds.push(Cmd::UpdateRuntimeTaskStatus {
@@ -1537,13 +1514,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             });
         },
         SlashCmd::Resume(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /resume <task-id>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /resume <task-id>");
         },
         SlashCmd::Cancel(Some(id)) => {
             cmds.push(Cmd::UpdateRuntimeTaskStatus {
@@ -1554,13 +1525,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::Cancel(None) => {
             if matches!(state.turn, TurnState::Idle) {
-                set_status(
-                    state,
-                    cmds,
-                    "No active turn to cancel.",
-                    StatusKind::Info,
-                    2_500,
-                );
+                push_system(state, cmds, "No active turn to cancel.");
             } else {
                 handle_cancel_turn(state, cmds);
             }
@@ -1593,49 +1558,25 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::ShowRuntimeProcessLogs { id });
         },
         SlashCmd::Logs(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /logs <process-id>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /logs <process-id>");
         },
         SlashCmd::Stop(Some(id)) => {
             cmds.push(Cmd::StopRuntimeProcess { id });
         },
         SlashCmd::Stop(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /stop <process-id>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /stop <process-id>");
         },
         SlashCmd::Restart(Some(id)) => {
             cmds.push(Cmd::RestartRuntimeProcess { id });
         },
         SlashCmd::Restart(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /restart <process-id>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /restart <process-id>");
         },
         SlashCmd::Open(Some(target)) => {
             cmds.push(Cmd::OpenRuntimeTarget { target });
         },
         SlashCmd::Open(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /open <url|path|process-id>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /open <url|path|process-id>");
         },
         SlashCmd::Ports => {
             cmds.push(Cmd::ShowRuntimePorts);
@@ -1650,13 +1591,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             });
         },
         SlashCmd::Approve(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /approve <approval-id>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /approve <approval-id>");
         },
         SlashCmd::Deny(Some(id)) => {
             cmds.push(Cmd::DecideRuntimeApproval {
@@ -1665,13 +1600,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             });
         },
         SlashCmd::Deny(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /deny <approval-id>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /deny <approval-id>");
         },
         SlashCmd::Checkpoint(Some(paths)) => {
             let paths = paths
@@ -1681,13 +1610,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::CreateRuntimeCheckpoint { paths });
         },
         SlashCmd::Checkpoint(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /checkpoint <path...>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /checkpoint <path...>");
         },
         SlashCmd::Checkpoints => {
             cmds.push(Cmd::ListRuntimeCheckpoints { limit: 10 });
@@ -1696,13 +1619,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::RestoreRuntimeCheckpoint { id });
         },
         SlashCmd::Restore(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /restore <checkpoint-id>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /restore <checkpoint-id>");
         },
         SlashCmd::Plugins => {
             cmds.push(Cmd::ListRuntimePlugins);
@@ -1711,13 +1628,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::ShowRuntimeModelInfo { model });
         },
         SlashCmd::ModelInfo(None) => {
-            set_status(
-                state,
-                cmds,
-                "Usage: /model-info <model>",
-                StatusKind::Info,
-                3_000,
-            );
+            push_system(state, cmds, "Usage: /model-info <model>");
         },
         SlashCmd::CloudSetup => {
             // Cloud setup needs interactive stdin (rpassword) which
@@ -1784,20 +1695,6 @@ fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) 
         state.session.append(ChatMessage::system(text.into()));
     }
     cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
-}
-
-/// Back-compat shim for the many call sites that used the old transient banner.
-/// Routes their text into the chat transcript via [`push_system`]; the severity
-/// and dismiss timeout no longer mean anything (there's no banner to color or
-/// auto-clear).
-fn set_status(
-    state: &mut State,
-    cmds: &mut Vec<Cmd>,
-    text: impl Into<String>,
-    _kind: StatusKind,
-    _dismiss_ms: u64,
-) {
-    push_system(state, cmds, text);
 }
 
 fn ollama_pull_target(model_id: &str) -> Option<String> {
@@ -1906,7 +1803,7 @@ fn doctor_text(state: &State) -> String {
     ));
     lines.push(format!(
         "Safety: mode={}, checkpoint_on_mutation={}",
-        safety_mode_name(state.settings.safety.mode),
+        state.settings.safety.mode.as_str(),
         state.settings.safety.checkpoint_on_mutation
     ));
     lines.push(format!(
@@ -1944,10 +1841,6 @@ fn doctor_text(state: &State) -> String {
         "Useful next commands: /help, /context, /model-info <model>, /compact [focus]".to_string(),
     );
     lines.join("\n")
-}
-
-fn safety_mode_name(mode: crate::runtime::SafetyMode) -> &'static str {
-    mode.as_str()
 }
 
 /// The most recent user message, trimmed and length-capped — used as the
@@ -3153,11 +3046,6 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
     // message. The chat widget paints ActionDisplays as colored
     // error blocks, so committing to both `content` and `actions`
     // would paint the same error twice.
-    //
-    // Do NOT also set `state.status`: the F9 banner would render the
-    // same error a second time directly above the input, which is
-    // just noise. The chat entry is persistent (scrollable);
-    // duplicating as a transient banner adds nothing.
     let now = state.now;
     state.turn = TurnState::Idle;
     let msg = ChatMessage {
@@ -3578,13 +3466,12 @@ mod tests {
         assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
     }
 
-    /// Tool stdout must NOT reach the status banner. Surfacing every
-    /// progress line there flickered noise above the input (build output,
-    /// pids, streamed file contents) that appeared for a fraction of a second
-    /// and vanished. The status line names the running tool and the full
-    /// output lands in chat; the banner is reserved for discrete messages.
+    /// Tool stdout progress lines must NOT append a chat message. Surfacing
+    /// every progress line (build output, pids, streamed file contents) as UI
+    /// would be noise; the status line names the running tool and the full
+    /// output lands in chat only when the tool finishes.
     #[test]
-    fn tool_progress_output_does_not_touch_status_banner() {
+    fn tool_progress_output_does_not_append_message() {
         use crate::providers::ProgressEvent;
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
@@ -3601,8 +3488,8 @@ mod tests {
             },
         );
         assert!(
-            state.status.is_none(),
-            "tool stdout must not appear in the status banner"
+            state.session.messages().is_empty(),
+            "tool stdout must not append a chat message"
         );
     }
 
@@ -3675,11 +3562,8 @@ mod tests {
             state,
             Msg::TransientStatus {
                 text: "Clipboard is empty".to_string(),
-                kind: StatusKind::Info,
-                dismiss_ms: 2_000,
             },
         );
-        assert!(state.status.is_none(), "no banner is set");
         let last = state
             .session
             .messages()
@@ -6113,10 +5997,6 @@ mod tests {
             _ => panic!("expected Errored"),
         }
         assert!(
-            state.status.is_none(),
-            "no banner — errors go to the transcript"
-        );
-        assert!(
             state
                 .session
                 .messages()
@@ -6608,7 +6488,6 @@ mod tests {
     fn ui_state_default_is_empty() {
         let s = UiState::default();
         assert!(s.input_buffer.is_empty());
-        assert_eq!(s.chat_scroll, 0);
         assert!(matches!(s.mode, UiMode::EditingInput));
     }
 }

@@ -340,14 +340,14 @@ fn upstream_error_ends_turn_exactly_once() {
     // guards against was v0.6's double-commit: once from the
     // streaming callback, once from the final error path.
     assert_eq!(state.session.messages().len(), 1);
-    // The error is surfaced only through the ActionDisplay in chat —
-    // we deliberately do NOT also set state.status, because the F9
-    // banner would render the same error a second time directly
-    // above the input (redundant noise). User reported this after
-    // F9 landed; removing the banner setter was the fix.
-    assert!(
-        state.status.is_none(),
-        "upstream errors must not set a status banner; chat already shows them"
+    // The error is surfaced only through the ActionDisplay in chat — a single
+    // channel. The bug this guards against was a second copy (the removed status
+    // banner rendered the same error again above the input).
+    let last = state.session.messages().last().expect("error message");
+    assert_eq!(
+        last.actions.len(),
+        1,
+        "error surfaced through one ActionDisplay"
     );
 }
 
@@ -663,9 +663,8 @@ fn manual_compaction_finish_drains_queued_message() {
 
 #[test]
 fn slash_unknown_posts_to_transcript() {
-    // The transient banner is gone; an unknown command posts to the transcript.
+    // An unknown command posts to the chat transcript.
     let (state, cmds) = update(fresh(), Msg::Slash(SlashCmd::Unknown("nope".to_string())));
-    assert!(state.status.is_none(), "no banner is set");
     assert!(
         state
             .session

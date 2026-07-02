@@ -202,11 +202,6 @@ pub enum Cmd {
     /// image-paste preview and the "open in editor" affordance.
     OpenInSystem(PathBuf),
 
-    // ── Status line ─────────────────────────────────────────────────
-    /// Schedule `Msg::StatusDismiss` after `ms` milliseconds. Reducer
-    /// uses this to self-clear transient status lines.
-    DismissStatusAfter { ms: u64 },
-
     // ── Attachments ─────────────────────────────────────────────────
     /// Persist a pasted image to a temp file so the TUI can open it
     /// via `OpenInSystem`. Emits no follow-up Msg on success; failure
@@ -343,7 +338,6 @@ impl Cmd {
             Cmd::StopMcpServer { .. } => "stop_mcp_server",
             Cmd::PullOllamaModel { .. } => "pull_ollama_model",
             Cmd::OpenInSystem(_) => "open_in_system",
-            Cmd::DismissStatusAfter { .. } => "dismiss_status_after",
             Cmd::WriteImageToTemp { .. } => "write_image_to_temp",
             Cmd::ReadClipboard => "read_clipboard",
             Cmd::CopyToClipboard(_) => "copy_to_clipboard",
@@ -469,7 +463,6 @@ impl Cmd {
             Cmd::StopMcpServer { name } => format!("stop_mcp_server({})", name),
             Cmd::PullOllamaModel { model } => format!("pull_ollama_model({})", model),
             Cmd::OpenInSystem(p) => format!("open_in_system({})", p.display()),
-            Cmd::DismissStatusAfter { ms } => format!("dismiss_status_after({}ms)", ms),
             Cmd::WriteImageToTemp {
                 path,
                 format,

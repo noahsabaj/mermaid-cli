@@ -27,7 +27,7 @@
 //! `PersistReasoningFor`), MCP lifecycle
 //! (`InitMcpServers`, `StopMcpServer`), local side-effects
 //! (`WriteImageToTemp`, `OpenInSystem`, `PullOllamaModel`,
-//! `SetTerminalTitle`, `DismissStatusAfter`). Cancellation flows
+//! `SetTerminalTitle`). Cancellation flows
 //! through `Cmd::CancelScope(TurnId)` → the scope's
 //! `CancellationToken`.
 
@@ -755,7 +755,7 @@ impl EffectRunner {
                 self.detached.spawn(async move {
                     let cfg = crate::app::load_config().unwrap_or_default().memory;
                     let name = memory_title_from_text(&text);
-                    let (status, kind) = match crate::app::memory::write_memory(
+                    let status = match crate::app::memory::write_memory(
                         &workdir,
                         crate::app::memory::MemoryScope::ProjectPrivate,
                         &name,
@@ -763,24 +763,12 @@ impl EffectRunner {
                         &[],
                         &text,
                     ) {
-                        Ok(_) => (
-                            format!("Remembered: {name}"),
-                            crate::domain::StatusKind::Info,
-                        ),
-                        Err(e) => (
-                            format!("Couldn't save memory: {e}"),
-                            crate::domain::StatusKind::Error,
-                        ),
+                        Ok(_) => format!("Remembered: {name}"),
+                        Err(e) => format!("Couldn't save memory: {e}"),
                     };
                     let (loaded, _) = crate::app::memory::refresh(None, &workdir, &cfg);
                     let _ = tx.send(Msg::MemoryChanged(loaded)).await;
-                    let _ = tx
-                        .send(Msg::TransientStatus {
-                            text: status,
-                            kind,
-                            dismiss_ms: 3_000,
-                        })
-                        .await;
+                    let _ = tx.send(Msg::TransientStatus { text: status }).await;
                 });
             },
             Cmd::ForgetMemory { id } => {
@@ -788,26 +776,14 @@ impl EffectRunner {
                 let workdir = self.workdir.clone();
                 self.detached.spawn(async move {
                     let cfg = crate::app::load_config().unwrap_or_default().memory;
-                    let (status, kind) = match crate::app::memory::delete_memory(&workdir, &id) {
-                        Ok(Some(_)) => (format!("Forgot: {id}"), crate::domain::StatusKind::Info),
-                        Ok(None) => (
-                            format!("No memory named '{id}'"),
-                            crate::domain::StatusKind::Info,
-                        ),
-                        Err(e) => (
-                            format!("Couldn't forget memory: {e}"),
-                            crate::domain::StatusKind::Error,
-                        ),
+                    let status = match crate::app::memory::delete_memory(&workdir, &id) {
+                        Ok(Some(_)) => format!("Forgot: {id}"),
+                        Ok(None) => format!("No memory named '{id}'"),
+                        Err(e) => format!("Couldn't forget memory: {e}"),
                     };
                     let (loaded, _) = crate::app::memory::refresh(None, &workdir, &cfg);
                     let _ = tx.send(Msg::MemoryChanged(loaded)).await;
-                    let _ = tx
-                        .send(Msg::TransientStatus {
-                            text: status,
-                            kind,
-                            dismiss_ms: 3_000,
-                        })
-                        .await;
+                    let _ = tx.send(Msg::TransientStatus { text: status }).await;
                 });
             },
             Cmd::ConsolidateMemory { model_id } => {
@@ -906,13 +882,9 @@ impl EffectRunner {
                     let msg = match crate::runtime::RuntimeClient::auto().stop_process(&id) {
                         Ok(response) => Msg::TransientStatus {
                             text: format!("Stopped process {} (pid {})", id, response.item.pid),
-                            kind: crate::domain::StatusKind::Info,
-                            dismiss_ms: 3_000,
                         },
                         Err(err) => Msg::TransientStatus {
                             text: format!("Process stop failed: {}", err),
-                            kind: crate::domain::StatusKind::Warn,
-                            dismiss_ms: 5_000,
                         },
                     };
                     let _ = tx.blocking_send(msg);
@@ -924,13 +896,9 @@ impl EffectRunner {
                     let msg = match crate::runtime::RuntimeClient::auto().restart_process(&id) {
                         Ok(response) => Msg::TransientStatus {
                             text: format!("Restarted process {} (pid {})", id, response.item.pid),
-                            kind: crate::domain::StatusKind::Info,
-                            dismiss_ms: 3_000,
                         },
                         Err(err) => Msg::TransientStatus {
                             text: format!("Process restart failed: {}", err),
-                            kind: crate::domain::StatusKind::Warn,
-                            dismiss_ms: 5_000,
                         },
                     };
                     let _ = tx.blocking_send(msg);
@@ -986,13 +954,9 @@ impl EffectRunner {
                             } else {
                                 format!("Approval {} {}", id, decision)
                             },
-                            kind: crate::domain::StatusKind::Info,
-                            dismiss_ms: 3_000,
                         },
                         Err(err) => Msg::TransientStatus {
                             text: format!("Approval update failed: {}", err),
-                            kind: crate::domain::StatusKind::Warn,
-                            dismiss_ms: 5_000,
                         },
                     };
                     let _ = tx.blocking_send(msg);
@@ -1032,13 +996,9 @@ impl EffectRunner {
                     }) {
                         Ok(()) => Msg::TransientStatus {
                             text: format!("Task {} -> {}", id, status),
-                            kind: crate::domain::StatusKind::Info,
-                            dismiss_ms: 3_000,
                         },
                         Err(err) => Msg::TransientStatus {
                             text: format!("Task update failed: {}", err),
-                            kind: crate::domain::StatusKind::Warn,
-                            dismiss_ms: 4_000,
                         },
                     };
                     let _ = tx.blocking_send(msg);
@@ -1060,13 +1020,9 @@ impl EffectRunner {
                                     manifest.id,
                                     manifest.files.len()
                                 ),
-                                kind: crate::domain::StatusKind::Info,
-                                dismiss_ms: 4_000,
                             },
                             Err(err) => Msg::TransientStatus {
                                 text: format!("Checkpoint failed: {}", err),
-                                kind: crate::domain::StatusKind::Warn,
-                                dismiss_ms: 5_000,
                             },
                         };
                     let _ = tx.blocking_send(msg);
@@ -1087,13 +1043,9 @@ impl EffectRunner {
                                     ""
                                 }
                             ),
-                            kind: crate::domain::StatusKind::Info,
-                            dismiss_ms: 4_000,
                         },
                         Err(err) => Msg::TransientStatus {
                             text: format!("Restore failed: {}", err),
-                            kind: crate::domain::StatusKind::Warn,
-                            dismiss_ms: 5_000,
                         },
                     };
                     let _ = tx.blocking_send(msg);
@@ -1159,13 +1111,6 @@ impl EffectRunner {
                         crate::utils::open_file(&path);
                     })
                     .await;
-                });
-            },
-            Cmd::DismissStatusAfter { ms } => {
-                let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-                    let _ = tx.send(Msg::StatusDismiss).await;
                 });
             },
             Cmd::WriteImageToTemp {
@@ -1281,13 +1226,6 @@ impl EffectRunner {
 
         let _ = tokio::time::timeout_at(shutdown_deadline, drain).await;
     }
-
-    /// Test helper: clone the Msg sender so a test can synthesize a
-    /// message as if it came from an effect handler.
-    #[doc(hidden)]
-    pub fn msg_sender(&self) -> MsgSender {
-        self.msg_tx.clone()
-    }
 }
 
 /// Dispatch a `CallModel` command. Resolves the provider (lazy,
@@ -1392,8 +1330,6 @@ async fn dispatch_call_model(
                     "{} does not advertise tool support; Mermaid will send the turn without tools",
                     request.model_id
                 ),
-                kind: crate::domain::StatusKind::Warn,
-                dismiss_ms: 6_000,
             })
             .await;
         request.tools.clear();
@@ -2597,7 +2533,7 @@ fn mcp_startup_msg(name: &str, started: bool, tools: Vec<crate::domain::McpToolS
 /// has_image` / `read_image_bytes` / `read_text` shell out to xclip /
 /// wl-paste / pngpaste / PowerShell, all of which block synchronously.
 async fn dispatch_read_clipboard(tx: MsgSender) {
-    use crate::domain::{Paste, StatusKind};
+    use crate::domain::Paste;
 
     enum Outcome {
         Image { bytes: Vec<u8>, format: String },
@@ -2628,14 +2564,8 @@ async fn dispatch_read_clipboard(tx: MsgSender) {
         Outcome::Text(text) => Msg::Paste(Paste::Text(text)),
         Outcome::Empty => Msg::TransientStatus {
             text: "Clipboard is empty".to_string(),
-            kind: StatusKind::Info,
-            dismiss_ms: 2_000,
         },
-        Outcome::Error(text) => Msg::TransientStatus {
-            text,
-            kind: StatusKind::Warn,
-            dismiss_ms: 4_000,
-        },
+        Outcome::Error(text) => Msg::TransientStatus { text },
     };
     let _ = tx.send(msg).await;
 }
@@ -2643,8 +2573,6 @@ async fn dispatch_read_clipboard(tx: MsgSender) {
 /// Write text to the system clipboard on a blocking thread (the platform
 /// tools shell out and block), then report the result via a transient status.
 async fn dispatch_copy_to_clipboard(text: String, tx: MsgSender) {
-    use crate::domain::StatusKind;
-
     let char_count = text.chars().count();
     let result = tokio::task::spawn_blocking(move || crate::clipboard::write_text(&text))
         .await
@@ -2653,13 +2581,9 @@ async fn dispatch_copy_to_clipboard(text: String, tx: MsgSender) {
     let msg = match result {
         Ok(()) => Msg::TransientStatus {
             text: format!("Copied {char_count} chars to clipboard"),
-            kind: StatusKind::Info,
-            dismiss_ms: 2_000,
         },
         Err(e) => Msg::TransientStatus {
             text: format!("Copy failed: {e}"),
-            kind: StatusKind::Warn,
-            dismiss_ms: 4_000,
         },
     };
     let _ = tx.send(msg).await;
@@ -2778,19 +2702,6 @@ mod tests {
             .expect("sender emits")
             .expect("channel alive");
         assert!(matches!(msg, Msg::SessionSaved));
-    }
-
-    #[tokio::test]
-    async fn dispatch_dismiss_after_delay_emits_status_dismiss() {
-        let (mut r, mut rx) = runner();
-        let t0 = std::time::Instant::now();
-        r.dispatch(Cmd::DismissStatusAfter { ms: 30 });
-        let msg = tokio::time::timeout(Duration::from_millis(300), rx.recv())
-            .await
-            .expect("sender emits")
-            .expect("channel alive");
-        assert!(matches!(msg, Msg::StatusDismiss));
-        assert!(t0.elapsed() >= Duration::from_millis(25));
     }
 
     #[test]
@@ -2927,7 +2838,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Any subsequent dispatch reaps the now-empty scope.
-        r.dispatch(Cmd::DismissStatusAfter { ms: 10 });
+        r.dispatch(Cmd::SetTerminalTitle("x".to_string()));
         assert_eq!(
             r.scope_count(),
             0,
