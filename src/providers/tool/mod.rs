@@ -335,9 +335,10 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn build_registers_native_web_fetch_without_key() {
-        // web_fetch defaults to the native backend, so it registers with no
-        // OLLAMA_API_KEY; web_search defaults to Ollama Cloud, so it does not.
+    fn build_registers_zero_config_web_tools_without_key() {
+        // Both web tools register with no OLLAMA_API_KEY: web_fetch is native,
+        // and web_search defaults to `auto`, which falls back to a managed local
+        // SearXNG (the container starts lazily at call time, not here).
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("OLLAMA_API_KEY").ok();
         unsafe {
@@ -351,8 +352,8 @@ mod tests {
             "native web_fetch registers without a key"
         );
         assert!(
-            r.get("web_search").is_none(),
-            "ollama web_search skipped without a key"
+            r.get("web_search").is_some(),
+            "auto web_search (managed SearXNG) registers without a key"
         );
         assert!(r.get("read_file").is_some());
         assert!(r.get("execute_command").is_some());

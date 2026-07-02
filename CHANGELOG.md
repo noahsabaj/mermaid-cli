@@ -9,13 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Web tools are now backend-pluggable via `[web]` config. `web_fetch` gains a
-  **native** backend (default): it fetches the URL directly from your machine
-  and converts the HTML to markdown, so it needs no `OLLAMA_API_KEY` and no
-  third party. `web_search` gains a **SearXNG** backend (`search_backend =
-  "searxng"`): keyless queries against a self-hosted SearXNG instance at
-  `searxng_url` (which must have the JSON format enabled). Ollama Cloud stays
-  available for both (`fetch_backend`/`search_backend = "ollama"`).
+- Web search and fetch now work out of the box with **zero configuration**, and
+  are backend-pluggable via `[web]` config. `web_fetch` defaults to a **native**
+  in-process backend (fetch the URL directly, convert HTML to markdown) — no
+  key, no third party. `web_search` defaults to **`auto`**: Ollama Cloud when
+  `OLLAMA_API_KEY` is set, otherwise mermaid **auto-starts and manages a local
+  SearXNG container** (via podman/docker) on the first search and tears it down
+  when it exits — you install and configure nothing. The first search pulls the
+  SearXNG image once. Force a backend with `fetch_backend = "ollama"` or
+  `search_backend = "ollama"`/`"searxng"` (your own instance at `searxng_url`,
+  which must have the JSON format enabled).
 - `mermaid --resume` opens a searchable picker of this directory's past
   conversations, styled like the main TUI (type to filter; each row shows the
   title and a `relative-time · branch · size` meta line). It replaces the old

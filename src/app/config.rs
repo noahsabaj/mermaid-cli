@@ -486,8 +486,12 @@ pub enum FetchBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchBackend {
-    /// Ollama Cloud's `/api/web_search` (needs `OLLAMA_API_KEY`).
+    /// Zero-config default: Ollama Cloud when `OLLAMA_API_KEY` is set, otherwise
+    /// an auto-managed local SearXNG container (mermaid starts it on the first
+    /// search and tears it down on exit). The user configures nothing.
     #[default]
+    Auto,
+    /// Ollama Cloud's `/api/web_search` (needs `OLLAMA_API_KEY`).
     Ollama,
     /// A self-hosted SearXNG instance queried at `searxng_url` — keyless.
     Searxng,
@@ -498,7 +502,7 @@ pub enum SearchBackend {
 /// ```toml
 /// [web]
 /// fetch_backend = "native"   # or "ollama"
-/// search_backend = "ollama"  # or "searxng"
+/// search_backend = "auto"    # or "ollama" / "searxng"
 /// searxng_url = "http://localhost:8080"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -507,13 +511,15 @@ pub struct WebConfig {
     /// Backend for `web_fetch`. `native` (default) fetches the URL from this
     /// machine and needs no key; `ollama` uses Ollama Cloud.
     pub fetch_backend: FetchBackend,
-    /// Backend for `web_search`. `ollama` (default) uses Ollama Cloud (needs
-    /// `OLLAMA_API_KEY`); `searxng` queries a self-hosted SearXNG at
-    /// `searxng_url` and needs no key.
+    /// Backend for `web_search`. `auto` (default) uses Ollama Cloud when
+    /// `OLLAMA_API_KEY` is set and otherwise auto-manages a local SearXNG
+    /// container. `ollama` forces Ollama Cloud; `searxng` forces a self-hosted
+    /// instance at `searxng_url`.
     pub search_backend: SearchBackend,
-    /// SearXNG base URL, used when `search_backend = "searxng"`. The instance
-    /// must have the JSON output format enabled (`search.formats` includes
-    /// `json`).
+    /// SearXNG base URL, used when `search_backend = "searxng"` (your own
+    /// instance). The instance must have the JSON output format enabled
+    /// (`search.formats` includes `json`). The `auto` managed instance ignores
+    /// this and picks its own port.
     pub searxng_url: String,
 }
 
@@ -521,7 +527,7 @@ impl Default for WebConfig {
     fn default() -> Self {
         Self {
             fetch_backend: FetchBackend::Native,
-            search_backend: SearchBackend::Ollama,
+            search_backend: SearchBackend::Auto,
             searxng_url: String::from("http://localhost:8080"),
         }
     }

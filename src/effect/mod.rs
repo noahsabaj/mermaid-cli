@@ -1223,6 +1223,10 @@ impl EffectRunner {
                 if let Some(mgr) = crate::mcp::manager_ref::get() {
                     mgr.shutdown().await;
                 }
+                // Tear down the auto-managed SearXNG container (zero-config
+                // web_search). Same ownership rule as MCP: only the top-level
+                // runner reaps process-global services. No-op if none started.
+                crate::searxng::shutdown().await;
             }
             // F42: bound each per-scope drain so one non-cooperative task can't
             // eat the whole shutdown budget and starve the remaining scopes'

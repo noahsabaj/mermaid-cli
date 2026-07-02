@@ -224,7 +224,7 @@ The model uses these autonomously via native tool calling:
 | `create_directory` | Create directories |
 | `execute_command` | Run shell commands; background mode registers PID/log/URL metadata for GUI apps and dev servers |
 | `memory` | Manage durable cross-session memory (remember / update / forget facts; project, shared, or global scope) |
-| `web_search` | Search the web (Ollama Cloud, or a self-hosted SearXNG) |
+| `web_search` | Search the web (zero-config: managed local SearXNG, or Ollama Cloud) |
 | `web_fetch` | Fetch a URL as markdown (native in-process by default, no key) |
 | `agent` | Spawn autonomous sub-agent for parallel tasks |
 | `screenshot` | Capture the screen (fullscreen, focused window, monitor, region, or window by title) |
@@ -235,21 +235,21 @@ The model uses these autonomously via native tool calling:
 | `scroll` | Scroll up or down |
 | `mouse_move` | Move mouse cursor without clicking |
 
-MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. `web_fetch` is registered by default (native, no key); `web_search` is registered when its backend is available — see [Web tool backends](#web-tool-backends). Computer-use tools are advertised only in interactive TUI sessions when a usable GUI backend is detected.
+MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. `web_fetch` (native) and `web_search` (see [Web tool backends](#web-tool-backends)) are both registered by default with no configuration. Computer-use tools are advertised only in interactive TUI sessions when a usable GUI backend is detected.
 
 ### Web tool backends
 
-The web tools are backend-pluggable under `[web]` in config:
+The web tools work out of the box with no configuration, and are backend-pluggable under `[web]`:
 
 ```toml
 [web]
 fetch_backend = "native"    # "native" (default, in-process, no key) or "ollama"
-search_backend = "ollama"   # "ollama" (default) or "searxng"
+search_backend = "auto"     # "auto" (default) | "ollama" | "searxng"
 searxng_url = "http://localhost:8080"
 ```
 
-- `web_fetch` defaults to **native**: it fetches the URL directly from your machine and converts the HTML to markdown — no API key, no third party. Set `fetch_backend = "ollama"` to route through Ollama Cloud's server-side fetch instead (handles JS-heavy pages and bot-walls better; needs `OLLAMA_API_KEY`).
-- `web_search` defaults to **Ollama Cloud** (`OLLAMA_API_KEY`). Set `search_backend = "searxng"` to query a self-hosted [SearXNG](https://github.com/searxng/searxng) instance at `searxng_url` instead — keyless. The instance must have the JSON format enabled (`json` in its `search.formats`).
+- **`web_fetch` defaults to `native`**: it fetches the URL directly from your machine and converts the HTML to markdown — no API key, no third party. Set `fetch_backend = "ollama"` to route through Ollama Cloud's server-side fetch instead (handles JS-heavy pages and bot-walls better; needs `OLLAMA_API_KEY`).
+- **`web_search` defaults to `auto`**, which just works with zero setup: if `OLLAMA_API_KEY` is set it uses Ollama Cloud; otherwise mermaid **auto-starts and manages a local [SearXNG](https://github.com/searxng/searxng) container** (via podman or docker) on your first search and tears it down when it exits — you install and configure nothing. The first search pulls the SearXNG image once; after that startup is a few seconds. Force a backend with `search_backend = "ollama"` (Ollama Cloud) or `"searxng"` (your own instance at `searxng_url`, which must have `json` in its `search.formats`).
 
 ## Project Instructions
 
@@ -424,7 +424,7 @@ Set the appropriate environment variable (or override via `[providers.<name>].ap
 | Together | `TOGETHER_API_KEY` | `together/<vendor>/<model>` |
 | Ollama Cloud | `OLLAMA_API_KEY` | `ollama/<model>:cloud` |
 
-Ollama Cloud models authenticate via `OLLAMA_API_KEY`. `web_fetch` no longer needs it — it defaults to a native in-process fetch. `web_search` needs a backend: Ollama Cloud (`OLLAMA_API_KEY`) or a keyless self-hosted SearXNG (see [Web tool backends](#web-tool-backends)). Use `mermaid cloud-setup` from your shell to set the key for cloud models and the Ollama-backed web tools; `/cloud-setup` in the TUI points back to that shell command.
+Ollama Cloud models authenticate via `OLLAMA_API_KEY`. The web tools don't require it: `web_fetch` is native, and `web_search` defaults to `auto` — Ollama Cloud when the key is set, otherwise a mermaid-managed local SearXNG (see [Web tool backends](#web-tool-backends)). Use `mermaid cloud-setup` from your shell to set the key for cloud models; `/cloud-setup` in the TUI points back to that shell command.
 
 ## License
 

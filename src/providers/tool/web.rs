@@ -16,8 +16,8 @@ use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
 use super::web_client::{
-    FetchProvider, NativeFetchClient, OllamaWebClient, SearchProvider, SearxngClient,
-    WebFetchResult, format_results,
+    FetchProvider, ManagedSearxngBackend, NativeFetchClient, OllamaWebClient, SearchProvider,
+    SearxngClient, WebFetchResult, format_results,
 };
 
 /// Build the `web_fetch` tool for the configured backend. `native` always
@@ -32,15 +32,22 @@ pub fn web_fetch_tool(web: &WebConfig) -> Option<WebFetchTool> {
     }
 }
 
-/// Build the `web_search` tool for the configured backend. `searxng` always
-/// yields a tool (reachability is checked at call time, with a clear error);
-/// `ollama` yields one only when `OLLAMA_API_KEY` resolves.
+/// Build the `web_search` tool for the configured backend. `auto` (the default)
+/// and `searxng` always yield a tool; `ollama` yields one only when
+/// `OLLAMA_API_KEY` resolves.
 pub fn web_search_tool(web: &WebConfig) -> Option<WebSearchTool> {
     match web.search_backend {
-        SearchBackend::Searxng => Some(WebSearchTool::searxng(web.searxng_url.clone())),
+        // Zero-config default: Ollama Cloud when a key is present, otherwise an
+        // auto-managed local SearXNG (started lazily on the first search).
+        SearchBackend::Auto => Some(
+            crate::utils::resolve_api_key("OLLAMA_API_KEY", None)
+                .map(WebSearchTool::ollama)
+                .unwrap_or_else(WebSearchTool::managed_searxng),
+        ),
         SearchBackend::Ollama => {
             crate::utils::resolve_api_key("OLLAMA_API_KEY", None).map(WebSearchTool::ollama)
         },
+        SearchBackend::Searxng => Some(WebSearchTool::searxng(web.searxng_url.clone())),
     }
 }
 
@@ -63,6 +70,13 @@ impl WebSearchTool {
     pub fn searxng(base_url: String) -> Self {
         Self {
             backend: Arc::new(SearxngClient::new(base_url)),
+        }
+    }
+
+    /// Search via an auto-managed local SearXNG container (zero-config default).
+    pub fn managed_searxng() -> Self {
+        Self {
+            backend: Arc::new(ManagedSearxngBackend),
         }
     }
 }

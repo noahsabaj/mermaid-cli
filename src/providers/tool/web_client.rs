@@ -347,6 +347,20 @@ impl SearchProvider for SearxngClient {
     }
 }
 
+/// `web_search` backed by an auto-managed local SearXNG container
+/// (`crate::searxng`): starts the container lazily on the first search, reuses
+/// it after, and mermaid tears it down on exit. This is the zero-config default
+/// when no Ollama key is configured — the user installs and configures nothing.
+pub struct ManagedSearxngBackend;
+
+#[async_trait]
+impl SearchProvider for ManagedSearxngBackend {
+    async fn search(&self, query: &str, count: usize) -> Result<Vec<SearchResult>> {
+        let base_url = crate::searxng::manager().ensure_running().await?;
+        SearxngClient::new(base_url).search(query, count).await
+    }
+}
+
 /// `web_fetch` performed in-process: fetch the URL directly and convert its
 /// HTML to markdown. No API key, no third party. Because the request leaves
 /// from this machine, the SSRF guards in `web.rs` (lexical) plus
