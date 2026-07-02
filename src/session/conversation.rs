@@ -99,6 +99,30 @@ pub struct ConversationHistory {
     /// History of user input prompts for navigation (up/down arrows)
     #[serde(default)]
     pub input_history: VecDeque<String>,
+    /// Git branch this session was worked on, for the `--resume` picker.
+    /// Captured at startup (impure) — `ConversationHistory::new` leaves it
+    /// `None` so the pure reducer / `--replay` stay deterministic. Empty for
+    /// non-git dirs and for sessions saved before this field existed.
+    #[serde(default)]
+    pub git_branch: Option<String>,
+}
+
+/// Best-effort current git branch of `dir`, for labelling `--resume` rows.
+/// `None` when `dir` isn't a git work tree, git is absent, or HEAD is
+/// detached. Kept out of the pure reducer — callers invoke it in the impure
+/// startup path and stamp the result onto the conversation.
+pub fn detect_git_branch(dir: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // A detached HEAD reports the literal "HEAD"; treat that as no branch.
+    (!branch.is_empty() && branch != "HEAD").then_some(branch)
 }
 
 impl ConversationHistory {
@@ -123,6 +147,9 @@ impl ConversationHistory {
             total_tokens: None,
             compactions: Vec::new(),
             input_history: VecDeque::new(),
+            // Populated by the impure startup path (`detect_git_branch`), not
+            // here — the reducer stays pure/deterministic for `--replay`.
+            git_branch: None,
         }
     }
 
@@ -499,6 +526,33 @@ impl ConversationManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_conversation_json_without_git_branch_deserializes() {
+        // Every session saved before the `--resume` picker existed lacks a
+        // `git_branch` key; `#[serde(default)]` must load it as `None` rather
+        // than failing the picker's `list_conversations`.
+        let json = r#"{
+            "id": "20260101_120000_001",
+            "title": "Legacy session",
+            "messages": [],
+            "model_name": "ollama/test",
+            "project_path": "/tmp/proj",
+            "created_at": "2026-01-01T12:00:00-05:00",
+            "updated_at": "2026-01-01T12:00:00-05:00",
+            "total_tokens": null
+        }"#;
+        let conv: ConversationHistory = serde_json::from_str(json).expect("legacy json loads");
+        assert!(conv.git_branch.is_none());
+        assert_eq!(conv.title, "Legacy session");
+        // And a round-trip of a branch-bearing conversation preserves it.
+        let mut fresh =
+            ConversationHistory::new("/tmp/proj".to_string(), "m".to_string(), Local::now());
+        fresh.git_branch = Some("feature/x".to_string());
+        let round: ConversationHistory =
+            serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        assert_eq!(round.git_branch.as_deref(), Some("feature/x"));
+    }
 
     #[test]
     fn validate_conversation_id_rejects_traversal() {

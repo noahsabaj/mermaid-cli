@@ -10,7 +10,7 @@ use mermaid_cli::{
     cli::{Cli, Commands, OutputFormat},
     ollama::ensure_model as ensure_ollama_model,
     runtime::{NewTask, RuntimeStore, TaskStatus},
-    session::{ConversationManager, select_conversation},
+    session::{ConversationManager, SessionEntry, select_conversation},
     utils::init_logger,
 };
 
@@ -119,7 +119,7 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_cli::app::Config) ->
     // F6 `--continue` / `--sessions`: optionally load a prior
     // conversation and seed the State with its history before the
     // first frame. Mutual exclusion is enforced by clap on Cli.
-    let seed_conversation = load_seed_conversation(&cwd, cli.continue_session, cli.sessions)?;
+    let seed_conversation = load_seed_conversation(&cwd, cli.continue_session, cli.resume)?;
 
     let recorder = match cli.record.as_ref() {
         Some(path) => Some(mermaid_cli::app::Recorder::open(path.clone())?),
@@ -143,20 +143,34 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_cli::app::Config) ->
 fn load_seed_conversation(
     cwd: &std::path::Path,
     continue_session: bool,
-    sessions_picker: bool,
+    resume_picker: bool,
 ) -> Result<Option<mermaid_cli::session::ConversationHistory>> {
-    if !continue_session && !sessions_picker {
+    if !continue_session && !resume_picker {
         return Ok(None);
     }
     let manager = ConversationManager::new(cwd)?;
     if continue_session {
         return manager.load_last_conversation();
     }
-    // --sessions: show the legacy picker. `select_conversation` owns
-    // its own mini-TUI — entering it before the main run loop keeps
-    // the two terminal modes from fighting.
-    let candidates = manager.list_conversations()?;
-    select_conversation(candidates)
+    // --resume: the searchable picker. `select_conversation` owns its own
+    // mini-TUI — entering it before the main run loop keeps the two terminal
+    // modes from fighting. Pair each conversation with its on-disk size for
+    // the meta line; a stat failure just shows 0B rather than dropping the row.
+    let entries: Vec<SessionEntry> = manager
+        .list_conversations()?
+        .into_iter()
+        .map(|history| {
+            let path = manager
+                .conversations_dir()
+                .join(format!("{}.json", history.id));
+            let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            SessionEntry {
+                history,
+                size_bytes,
+            }
+        })
+        .collect();
+    select_conversation(entries, chrono::Local::now())
 }
 
 async fn dispatch_non_interactive(

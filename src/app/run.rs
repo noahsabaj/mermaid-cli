@@ -81,9 +81,17 @@ pub async fn run_interactive_with(
         })?;
     }
     if let Some(history) = seed {
-        // `--continue` / `--sessions` seed — shared with `--replay` via
+        // `--continue` / `--resume` seed — shared with `--replay` via
         // `State::seed_conversation` so both build the same starting state.
         state.seed_conversation(history);
+    }
+    // Stamp the git branch for the `--resume` picker. Done here (impure
+    // startup) rather than in `ConversationHistory::new` so the reducer stays
+    // deterministic for `--replay`. Only fills a blank — a resumed session
+    // keeps the branch it was saved with; an older session with no stored
+    // branch gets backfilled on its next save.
+    if state.session.conversation.git_branch.is_none() {
+        state.session.conversation.git_branch = crate::session::detect_git_branch(&cwd);
     }
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
     let tools = ToolRegistry::build(

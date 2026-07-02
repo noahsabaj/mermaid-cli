@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `mermaid --resume` opens a searchable picker of this directory's past
+  conversations, styled like the main TUI (type to filter; each row shows the
+  title and a `relative-time · branch · size` meta line). It replaces the old
+  bordered `--sessions` picker (renamed for Claude Code parity). `--continue`
+  is unchanged — it reopens the most recent conversation in the directory.
+- Conversations now record the git branch they were worked on (shown in the
+  `--resume` picker). Sessions saved before this backfill their branch on the
+  next save; non-git directories simply omit it.
 - Agent types for the `agent` tool. Built-in `general` (full tool access at
   your safety mode) and `explore` (read-only reconnaissance: reads +
   read-only commands, cannot mutate regardless of the parent's mode), plus
@@ -46,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no per-child server processes), so `mcp__` tools are advertised to the
   child. Previously the registry carried the proxy but the tools were never
   advertised, making the documented capability dead in practice.
+
+### Changed
+
+- The `--sessions` flag is renamed to `--resume` to match `claude --resume`.
+  No deprecation alias — mermaid has no released users yet.
 
 ### Fixed
 

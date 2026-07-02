@@ -17,7 +17,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Project Instructions** — auto-loads `AGENTS.md` and `MERMAID.md` (MERMAID.md wins on conflict); edits take effect on the next turn
 - **Durable Memory** — the agent remembers facts across sessions (`memory` tool + `/remember`, `/memory`, `/forget`); a compact index auto-loads into every prompt
 - **MCP Servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers (`mermaid add <name>`)
-- **Session Persistence** — conversations auto-save and resume with `--continue`
+- **Session Persistence** — conversations auto-save; `--continue` reopens the last one in the current directory, `--resume` opens a searchable picker of past sessions
 - **Context Compaction** — automatic checkpoint-and-continue when the window fills (or the model truncates mid-run); manual `/compact [focus]` for handoffs
 - **Record & Replay** — `--record` captures every reducer input; `--replay` reconstructs the session offline, deterministically, with a built-in purity check
 - **Message Queuing** — type while the model generates, messages send in order
@@ -116,8 +116,8 @@ Computer-use registration is backend-gated: Linux/X11 and Linux/Wayland are the 
 
 ```bash
 mermaid                                         # Start fresh session
-mermaid --continue                              # Resume last session
-mermaid --sessions                              # Pick a previous session to resume
+mermaid --continue                              # Resume the most recent session in this directory
+mermaid --resume                                # Pick a past session from a searchable list
 mermaid --model ollama/qwen3-coder:30b          # Ollama local (any installed model — `mermaid list`)
 mermaid --model anthropic/<model>               # Anthropic (requires ANTHROPIC_API_KEY)
 mermaid --model gemini/<model>                  # Gemini (requires GOOGLE_API_KEY)
