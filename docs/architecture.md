@@ -45,11 +45,12 @@ src/
 │   └── factory.rs      ProviderFactory (cache by model_id)
 │
 ├── app/        — the thin outer shell.
-│   ├── run.rs          ~40-line main loop
+│   ├── run.rs          the select! main loop
 │   ├── event_source.rs crossterm Event → Msg
 │   ├── lifecycle.rs    SIGINT/SIGTERM/SIGHUP → Msg
 │   ├── terminal.rs     TerminalGuard (panic-safe teardown)
-│   └── recorder.rs     --record (JSONL capture; header + serde Msg round-trip)
+│   ├── recorder.rs     --record (JSONL capture; header + serde Msg round-trip)
+│   └── replay.rs       --replay (fold a recording through update(); determinism verdict)
 │
 └── render/     — pure view, fn(&State, &mut RenderCache, &mut Frame)
     ├── mod.rs          render() entrypoint + layout math
@@ -137,4 +138,4 @@ See [`docs/replay_debugging.md`](replay_debugging.md). Event sourcing is nearly 
 
 ## Migration status
 
-The v0.6 runtime is gone. The v0.7 architecture is the only code path — subagent dispatch, MCP init, conversation load, and the model list modal all run through the reducer + effect runner described above. `MERMAID_V7=1` used to gate the v0.7 runtime during the migration; it's a no-op now and will be removed in a future release.
+The v0.6 runtime is gone. The MVU architecture is the only code path — subagent dispatch, MCP init, conversation load, and the model list modal all run through the reducer + effect runner described above. (The `MERMAID_V7` env var that gated the runtime during the migration has been removed entirely.)

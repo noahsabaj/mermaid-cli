@@ -13,9 +13,13 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Reasoning Levels** — seven tiers (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`); cycle with Alt+T or set via `/reasoning`; persisted per-model
 - **Safety Modes** — `read_only`/`ask`/`auto`/`full_access`; `auto` is classifier-backed (an LLM vets each borderline action against your intent, auto-running aligned ones and escalating risky ones); cycle live with Shift+Tab or `/safety`
 - **Inline approvals** — in `ask` mode (and `auto` escalations) a gated action pauses and prompts inline (`1` Yes · `2` Yes, don't ask again · `3`/Esc No); the agent waits for your answer instead of erroring out
+- **Checkpoints** — shadow-git snapshots before mutations (`checkpoint_on_mutation`, on by default); inspect with `/checkpoints`, roll back with `/restore <id>`
 - **Project Instructions** — auto-loads `AGENTS.md` and `MERMAID.md` (MERMAID.md wins on conflict); edits take effect on the next turn
+- **Durable Memory** — the agent remembers facts across sessions (`memory` tool + `/remember`, `/memory`, `/forget`); a compact index auto-loads into every prompt
 - **MCP Servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers (`mermaid add <name>`)
 - **Session Persistence** — conversations auto-save and resume with `--continue`
+- **Context Compaction** — automatic checkpoint-and-continue when the window fills (or the model truncates mid-run); manual `/compact [focus]` for handoffs
+- **Record & Replay** — `--record` captures every reducer input; `--replay` reconstructs the session offline, deterministically, with a built-in purity check
 - **Message Queuing** — type while the model generates, messages send in order
 - **Non-Interactive Mode** — script with `mermaid run "prompt"` for CI/automation
 
@@ -115,7 +119,7 @@ mermaid                                         # Start fresh session
 mermaid --continue                              # Resume last session
 mermaid --sessions                              # Pick a previous session to resume
 mermaid --model ollama/qwen3-coder:30b          # Ollama local
-mermaid --model anthropic/claude-opus-4-7       # Anthropic (requires ANTHROPIC_API_KEY)
+mermaid --model anthropic/claude-opus-4-8       # Anthropic (requires ANTHROPIC_API_KEY)
 mermaid --model gemini/gemini-3.1-pro-preview   # Gemini (requires GOOGLE_API_KEY)
 mermaid --model openai/gpt-5                    # OpenAI (requires OPENAI_API_KEY)
 mermaid --model groq/qwen-qwq-32b               # Groq (requires GROQ_API_KEY)
@@ -205,7 +209,7 @@ Advanced runtime:
 - `/tasks`, `/task <id>`, `/pause <id>`, `/resume <id>`
 - `/processes`, `/logs <id>`, `/stop <id>`, `/restart <id>`, `/open <target>`, `/ports`
 
-Reasoning choices persist per-model: setting `/reasoning high` on Claude Opus 4.7 and `/reasoning low` on Ollama is remembered across sessions.
+Reasoning choices persist per-model: setting `/reasoning high` on Claude Opus 4.8 and `/reasoning low` on Ollama is remembered across sessions.
 
 ## Tools
 
@@ -312,9 +316,21 @@ output_format = "text"
 max_tokens = 4096
 no_execute = false
 
+# Durable agent memory (the `memory` tool, the always-loaded index, and
+# /remember & friends). On by default.
+[memory]
+enabled = true
+# index_cap_bytes = 8000   # byte cap on the always-loaded memory index
+
+[compaction]
+# Cap on consecutive auto compact-and-continue recoveries after a
+# context-window truncation, before the run stops and shows the manual
+# levers (`/context max`, `/context offload on`). 0 = uncapped.
+max_truncation_recoveries = 3
+
 # Per-model reasoning preferences (remembered across sessions)
 [reasoning_per_model]
-"anthropic/claude-opus-4-7" = "high"
+"anthropic/claude-opus-4-8" = "high"
 "ollama/qwen3-coder:30b" = "low"
 
 # Optional agent/plugin model profiles. A request for `--model fast` or
@@ -322,7 +338,7 @@ no_execute = false
 [model_profiles]
 fast = "ollama/qwen3-coder:14b"
 large-context = "openai/gpt-5"
-tool-strong = "anthropic/claude-opus-4-7"
+tool-strong = "anthropic/claude-opus-4-8"
 vision = "gemini/gemini-3.1-pro-preview"
 cheap = "groq/qwen-qwq-32b"
 
@@ -366,7 +382,7 @@ Set the appropriate environment variable (or override via `[providers.<name>].ap
 
 | Provider | Env var | Example model |
 |----------|---------|---------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `anthropic/claude-opus-4-7` |
+| Anthropic | `ANTHROPIC_API_KEY` | `anthropic/claude-opus-4-8` |
 | Google Gemini | `GOOGLE_API_KEY` (`GEMINI_API_KEY` legacy fallback) | `gemini/gemini-3.1-pro-preview` |
 | OpenAI | `OPENAI_API_KEY` | `openai/gpt-5` |
 | Groq | `GROQ_API_KEY` | `groq/qwen-qwq-32b` |

@@ -222,7 +222,7 @@ pub enum Commands {
     },
     /// Add an MCP server (e.g., mermaid add context7)
     Add {
-        /// MCP server name (e.g., context7, github, filesystem)
+        /// MCP server name (e.g., context7, git, filesystem)
         name: String,
         /// Skip the confirmation prompt before fetching and running a package
         /// that is not in the built-in registry (for scripted/CI use). Without
