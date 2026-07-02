@@ -7,8 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Live subagent visibility: while an `agent` call runs, the status line now
+  shows the child's current activity ("Running tools: Agent explore crates ·
+  read_file…") instead of an opaque spinner — the child's tool starts/finishes
+  and latest text were already streamed to the parent but silently dropped by
+  the reducer. Completed subagent rows also report what the child cost and
+  which model ran it ("Success, 12.3k tokens · ollama/…, took 62s").
+- Subagent report contract: a child session's system prompt now states that
+  its final message is returned verbatim to the parent as the tool result and
+  that nobody can answer questions — so children end with self-contained
+  reports instead of "Want me to continue?".
+- Subagents can now actually use MCP tools: the child's server entries are
+  seeded Ready from the process-global MCP manager (shared with the parent —
+  no per-child server processes), so `mcp__` tools are advertised to the
+  child. Previously the registry carried the proxy but the tools were never
+  advertised, making the documented capability dead in practice.
+
 ### Fixed
 
+- A completing subagent no longer kills the parent's MCP servers: the child
+  `EffectRunner`'s shutdown reaped the process-global MCP manager, so the
+  first subagent to finish terminated every MCP server for the rest of the
+  session. Child runners now leave the shared manager alone; only the
+  top-level runner reaps it on exit.
+- Subagent token usage now counts: the child session's provider usage rolls
+  up into the parent's session totals and the end-of-run "used N tokens"
+  summary (it was silently excluded — invisible spend on paid APIs).
+- The system prompt advertised a nonexistent `subagent` tool; the registered
+  tool is `agent`. It also now notes that subagent fan-out works in
+  `read_only` (children inherit read-only), so models explore in parallel
+  instead of assuming the spawn is blocked.
 - `read_only` no longer blocks spawning subagents (user-reported): the
   `agent` tool now spawns in every safety mode, because the child inherits
   the parent's live safety mode and each child tool call is re-gated

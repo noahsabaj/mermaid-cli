@@ -151,6 +151,12 @@ pub struct ToolRunMetadata {
     pub diff_truncated: bool,
     #[serde(default)]
     pub artifacts: Vec<ToolArtifact>,
+    /// Provider token usage the tool itself consumed (today: a subagent's
+    /// cumulative child-session usage). `handle_tool_finished` folds it into
+    /// the parent session's totals so the footer and the end-of-run summary
+    /// count the whole tree, not just the parent's own model calls.
+    #[serde(default)]
+    pub token_usage: Option<crate::models::TokenUsage>,
 }
 
 /// Tool outcome status independent of how the result is rendered.

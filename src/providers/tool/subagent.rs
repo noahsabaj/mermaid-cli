@@ -14,12 +14,16 @@
 //!   `Semaphore(max_inflight)` that backpressures parallel fan-out.
 //!   Subagents can't themselves spawn subagents — `build_child_registry`
 //!   omits the `agent` tool — so there's no recursion to depth-cap.
-//! - `SubagentTool::execute` builds a fresh child `State`, a
+//! - `SubagentTool::execute` builds a fresh child `State` (flagged
+//!   `is_subagent`, so its system prompt carries the report contract;
+//!   MCP entries seeded Ready from the process-global manager), a
 //!   filtered `ToolRegistry` (no self-recursion, no GUI tools), and
 //!   a child `EffectRunner` + msg channel. It drives the child
 //!   reducer to `Idle`, streaming progress back to the parent via
-//!   `ProgressEvent::Subagent*`, and returns the last assistant
-//!   message as the tool's `output`.
+//!   `ProgressEvent::Subagent*` (rendered live in the status line),
+//!   and returns the last assistant message as the tool's `output`,
+//!   with the child's token usage on the outcome metadata so the
+//!   parent's session totals count the whole tree.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -187,6 +191,10 @@ impl ToolExecutor for SubagentTool {
         let mut child_state =
             State::new(config.clone(), cwd.clone(), model_id, chrono::Local::now());
         child_state.session.safety_mode = ctx.safety_mode;
+        // Mark the child as a subagent: its system prompt gains the report
+        // contract (final message = the report returned to the parent; never
+        // ask questions — nobody is watching to answer them).
+        child_state.session.is_subagent = true;
         // Load project instructions + the memory index synchronously, before the
         // child is driven. Dispatching RefreshInstructions/RefreshMemory as
         // effects (as this used to) races the child's FIRST model call — which
@@ -197,6 +205,14 @@ impl ToolExecutor for SubagentTool {
             crate::app::instructions::load_project_context(&cwd, &config.memory);
         child_state.instructions = instructions;
         child_state.memory = memory;
+        // Advertise the parent's live MCP tools to the child. The MCP manager
+        // is process-global (`crate::mcp::manager_ref`), so the child's
+        // `mcp_proxy` calls hit the SAME already-running servers — no
+        // per-child processes. Without this seeding, the child's server
+        // entries sit `Starting` forever (a child has no `InitMcpServers`
+        // path of its own) and `build_chat_request` advertises zero `mcp__`
+        // tools, making the registry's MCP proxy unreachable in practice.
+        seed_child_mcp(&mut child_state);
 
         let child_tools = build_child_registry(self.spawner.providers.clone());
 
@@ -211,7 +227,7 @@ impl ToolExecutor for SubagentTool {
         // Drive the child reducer loop to completion. The wall-clock
         // timeout lives inside `drive_child` so the child runner is always
         // shut down — even on timeout — rather than dropped mid-flight (#76).
-        let result = drive_child(
+        let (result, child_usage) = drive_child(
             child_state,
             child_runner,
             child_rx,
@@ -226,7 +242,7 @@ impl ToolExecutor for SubagentTool {
         let elapsed = started.elapsed().as_secs_f64();
         match result {
             Ok(summary) => ToolOutcome::success(summary, "subagent completed", elapsed)
-                .with_metadata(subagent_metadata(child_model_id)),
+                .with_metadata(subagent_metadata(child_model_id, child_usage)),
             Err(DriveError::Cancelled) => ToolOutcome::cancelled(),
             Err(DriveError::TimedOut) => ToolOutcome::error(
                 format!(
@@ -235,18 +251,34 @@ impl ToolExecutor for SubagentTool {
                 ),
                 elapsed,
             )
-            .with_metadata(subagent_metadata(child_model_id)),
+            .with_metadata(subagent_metadata(child_model_id, child_usage)),
             Err(DriveError::Errored(e)) => {
                 ToolOutcome::error(format!("subagent ({}): {}", description, e), elapsed)
-                    .with_metadata(subagent_metadata(child_model_id))
+                    .with_metadata(subagent_metadata(child_model_id, child_usage))
             },
         }
     }
 }
 
-fn subagent_metadata(model_id: String) -> ToolRunMetadata {
+/// Metadata for the parent: which model ran the child, and what the child's
+/// session cost. The usage rides `ToolRunMetadata.token_usage`, which
+/// `handle_tool_finished` folds into the parent session's totals — without it
+/// the footer and the run summary silently exclude subagent spend. Timeout and
+/// error outcomes carry it too (that work was still billed); `None` when the
+/// provider reported nothing, so the UI doesn't render a bogus "0 tokens".
+fn subagent_metadata(model_id: String, usage: crate::domain::TokenUsageTotals) -> ToolRunMetadata {
+    let token_usage = (usage.total_tokens > 0).then(|| crate::models::TokenUsage {
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+        cached_input_tokens: usage.cached_input_tokens,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens,
+        reasoning_output_tokens: usage.reasoning_output_tokens,
+        source: Default::default(),
+    });
     ToolRunMetadata {
         detail: ToolMetadata::Subagent { model_id },
+        token_usage,
         ..ToolRunMetadata::default()
     }
 }
@@ -259,7 +291,10 @@ enum DriveError {
 
 /// Drive the child's reducer loop to `Idle`. Forwards child
 /// `ToolStarted` / `ToolFinished` / `StreamText` events to the
-/// parent's progress channel as `ProgressEvent::Subagent*`.
+/// parent's progress channel as `ProgressEvent::Subagent*`. Returns the
+/// child's final report alongside its cumulative session token usage —
+/// the usage is returned on EVERY exit path (success, timeout, error)
+/// because that spend is real regardless of how the child ended.
 async fn drive_child(
     mut state: State,
     mut runner: EffectRunner,
@@ -268,7 +303,7 @@ async fn drive_child(
     prompt: String,
     description: String,
     token: CancellationToken,
-) -> Result<String, DriveError> {
+) -> (Result<String, DriveError>, crate::domain::TokenUsageTotals) {
     // Signal start to parent.
     let _ = parent_progress
         .send(ProgressEvent::SubagentText(format!(
@@ -343,11 +378,19 @@ async fn drive_child(
         }
     }
 
-    // Always reap the child runner (cancel scopes, gracefully terminate MCP
-    // server children) regardless of how the loop exited.
+    // Always reap the child runner regardless of how the loop exited. This
+    // cancels the child's scopes and drains its tasks; it does NOT touch the
+    // process-global MCP manager (`new_child` opts out of that reap — the
+    // servers are shared with the parent).
     runner.shutdown().await;
 
-    outcome?;
+    // The child session's cumulative provider usage, handed to the parent on
+    // every exit path so the spend rolls up into the parent's counters.
+    let usage = state.session.cumulative_token_usage;
+
+    if let Err(e) = outcome {
+        return (Err(e), usage);
+    }
 
     // Extract last assistant message as the result.
     let summary = state
@@ -359,11 +402,14 @@ async fn drive_child(
         .map(|m| m.content.clone())
         .unwrap_or_default();
     if summary.trim().is_empty() {
-        return Err(DriveError::Errored(
-            "subagent produced no assistant output".to_string(),
-        ));
+        return (
+            Err(DriveError::Errored(
+                "subagent produced no assistant output".to_string(),
+            )),
+            usage,
+        );
     }
-    Ok(summary)
+    (Ok(summary), usage)
 }
 
 /// Translate child-scope `Msg` events into parent-scope
@@ -427,6 +473,49 @@ fn lookup_tool_name(state: &State, call_id: crate::domain::ToolCallId) -> Option
     }
 }
 
+/// Mark the child's configured MCP servers `Ready` (with their live tool
+/// lists) from the process-global manager, so the child's outgoing requests
+/// advertise `mcp__` tools. `State::new` seeds every configured server as
+/// `Starting`, and only the app entrypoints ever dispatch `InitMcpServers` —
+/// a child has no init path, so without this its MCP surface is empty even
+/// though its registry carries the proxy. No-op when no manager is installed
+/// (MCP unconfigured, or startup init still racing — same window in which the
+/// parent's own first turn sees no MCP tools either).
+fn seed_child_mcp(state: &mut State) {
+    let Some(manager) = crate::mcp::manager_ref::get() else {
+        return;
+    };
+    apply_live_mcp(&mut state.mcp.servers, manager.get_all_tools(), |name| {
+        manager.has_server(name)
+    });
+}
+
+/// Pure core of [`seed_child_mcp`], injectable for tests: flip every entry
+/// the live manager actually runs to `Ready` and attach its advertised tools.
+/// Entries for servers the manager doesn't have (failed to start) keep their
+/// `Starting` status and stay un-advertised — same as in the parent.
+fn apply_live_mcp(
+    servers: &mut std::collections::HashMap<String, crate::domain::McpServerEntry>,
+    live_tools: &[(String, crate::mcp::McpToolDef)],
+    has_server: impl Fn(&str) -> bool,
+) {
+    for (name, entry) in servers.iter_mut() {
+        if !has_server(name) {
+            continue;
+        }
+        entry.status = crate::domain::McpServerStatus::Ready;
+        entry.tools = live_tools
+            .iter()
+            .filter(|(server, _)| server == name)
+            .map(|(_, def)| crate::domain::McpToolSpec {
+                name: def.name.clone(),
+                description: def.description.clone(),
+                input_schema: def.input_schema.clone(),
+            })
+            .collect();
+    }
+}
+
 /// Construct the child `ToolRegistry` — a subset of what the parent
 /// offers. Explicitly excludes:
 ///
@@ -437,9 +526,12 @@ fn lookup_tool_name(state: &State, call_id: crate::domain::ToolCallId) -> Option
 ///     subagent clicking would corrupt the parent's latest-capture
 ///     pointer.
 ///
-/// Filesystem + exec + web + MCP tools come along unchanged. That
-/// lets subagents read/write files, run commands, and call MCP tools
-/// for their work.
+/// Filesystem + exec + web tools come along unchanged, and the MCP
+/// proxy routes through the process-global `McpServerManager` — the
+/// child calls the SAME running servers as the parent (advertised via
+/// `seed_child_mcp`, which marks them Ready in the child's state). So
+/// subagents read/write files, run commands, and call MCP tools, all
+/// gated at the child's inherited safety mode.
 fn build_child_registry(providers: Arc<ProviderFactory>) -> Arc<ToolRegistry> {
     use super::{
         computer_use, exec, filesystem, mcp,
@@ -538,6 +630,78 @@ mod tests {
         // provider is empty — single-slash shape would be
         // "/just-a-name", which provider resolution would reject.
         assert_eq!(default_model_id(&cfg), "just-a-name");
+    }
+
+    #[test]
+    fn apply_live_mcp_marks_running_servers_ready_with_their_tools() {
+        use crate::domain::{McpServerEntry, McpServerStatus};
+        let entry = || McpServerEntry {
+            config: crate::app::McpServerConfig {
+                command: String::new(),
+                args: Vec::new(),
+                env: std::collections::HashMap::new(),
+            },
+            status: McpServerStatus::Starting,
+            tools: Vec::new(),
+        };
+        let mut servers = std::collections::HashMap::new();
+        servers.insert("slack".to_string(), entry());
+        servers.insert("broken".to_string(), entry());
+
+        let live = vec![
+            (
+                "slack".to_string(),
+                crate::mcp::McpToolDef {
+                    name: "send".to_string(),
+                    description: "send a message".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                },
+            ),
+            // A tool from a server the child doesn't have configured must
+            // not create an entry out of thin air.
+            (
+                "other".to_string(),
+                crate::mcp::McpToolDef {
+                    name: "x".to_string(),
+                    description: String::new(),
+                    input_schema: serde_json::json!({}),
+                },
+            ),
+        ];
+        apply_live_mcp(&mut servers, &live, |name| name == "slack");
+
+        let slack = &servers["slack"];
+        assert_eq!(slack.status, McpServerStatus::Ready);
+        assert_eq!(slack.tools.len(), 1);
+        assert_eq!(slack.tools[0].name, "send");
+        // A configured server the manager doesn't run stays un-advertised.
+        assert_eq!(servers["broken"].status, McpServerStatus::Starting);
+        assert!(servers["broken"].tools.is_empty());
+        assert!(!servers.contains_key("other"));
+    }
+
+    #[test]
+    fn subagent_metadata_carries_usage_only_when_reported() {
+        use crate::domain::TokenUsageTotals;
+        let some = subagent_metadata(
+            "ollama/test".to_string(),
+            TokenUsageTotals {
+                prompt_tokens: 100,
+                completion_tokens: 40,
+                total_tokens: 140,
+                ..TokenUsageTotals::default()
+            },
+        );
+        let usage = some.token_usage.expect("usage attached");
+        assert_eq!(usage.total_tokens, 140);
+        assert_eq!(usage.completion_tokens, 40);
+        assert!(matches!(
+            some.detail,
+            crate::domain::ToolMetadata::Subagent { ref model_id } if model_id == "ollama/test"
+        ));
+        // A provider that reported nothing must not render as "0 tokens".
+        let none = subagent_metadata("ollama/test".to_string(), TokenUsageTotals::default());
+        assert!(none.token_usage.is_none());
     }
 
     #[test]

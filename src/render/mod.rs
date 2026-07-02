@@ -138,33 +138,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             TurnState::Cancelling { since, .. } => elapsed_since(*since),
             TurnState::Idle => 0,
         };
-        // While tools run, name the in-flight one(s) so the status line isn't an
-        // opaque "Running tools…". In-flight = the call slots without an outcome.
-        let active_tool = match &state.turn {
-            TurnState::ExecutingTools {
-                calls, outcomes, ..
-            } => {
-                let pending = outcomes.iter().filter(|o| o.is_none()).count();
-                calls
-                    .iter()
-                    .zip(outcomes)
-                    .find(|(_, o)| o.is_none())
-                    .map(|(call, _)| {
-                        let (action, target) = crate::domain::display_info_for(call);
-                        let label = if target.is_empty() {
-                            action
-                        } else {
-                            format!("{action} {target}")
-                        };
-                        if pending > 1 {
-                            format!("{label} (+{} more)", pending - 1)
-                        } else {
-                            label
-                        }
-                    })
-            },
-            _ => None,
-        };
+        let active_tool = active_tool_label(state);
         // Live, char-based estimate of tokens generated so far this run (answer +
         // thinking), accumulated across tool steps via `run_committed_tokens` so it
         // doesn't reset each model call. Marked estimated (`~`); the authoritative
@@ -463,6 +437,42 @@ fn build_live_messages<'a>(
     }
 }
 
+/// While tools run, name the first in-flight one so the status line isn't an
+/// opaque "Running tools…". In-flight = the call slots without an outcome.
+/// When the reducer holds live per-call activity (a subagent's current tool /
+/// latest text, from `Msg::ToolProgress`), it is appended after the label so
+/// a long-running child is never a silent spinner.
+fn active_tool_label(state: &State) -> Option<String> {
+    match &state.turn {
+        TurnState::ExecutingTools {
+            calls, outcomes, ..
+        } => {
+            let pending = outcomes.iter().filter(|o| o.is_none()).count();
+            calls
+                .iter()
+                .zip(outcomes)
+                .find(|(_, o)| o.is_none())
+                .map(|(call, _)| {
+                    let (action, target) = crate::domain::display_info_for(call);
+                    let mut label = if target.is_empty() {
+                        action
+                    } else {
+                        format!("{action} {target}")
+                    };
+                    if let Some(live) = state.ui.live_tool_status.get(&call.call_id) {
+                        label = format!("{label} · {live}");
+                    }
+                    if pending > 1 {
+                        format!("{label} (+{} more)", pending - 1)
+                    } else {
+                        label
+                    }
+                })
+        },
+        _ => None,
+    }
+}
+
 /// Future hook: consult `ProviderFactory` for per-model capabilities.
 /// Today returns `None` — reasoning snap indicator is suppressed
 /// until the factory is threaded through `State` (or an equivalent
@@ -515,6 +525,46 @@ mod tests {
             .draw(|f| render(state, &mut rstate, f))
             .expect("draw");
         terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn active_tool_label_appends_live_subagent_status() {
+        use crate::domain::{PendingToolCall, ToolCallId, TurnId};
+
+        let mut state = mock_state();
+        let call_id = ToolCallId(7);
+        state.turn = TurnState::ExecutingTools {
+            id: TurnId(1),
+            started: std::time::SystemTime::now(),
+            calls: vec![PendingToolCall {
+                call_id,
+                source: crate::models::tool_call::ToolCall {
+                    id: None,
+                    function: crate::models::tool_call::FunctionCall {
+                        name: "agent".to_string(),
+                        arguments: serde_json::json!({"description": "explore crates"}),
+                    },
+                },
+            }],
+            outcomes: vec![None],
+        };
+
+        // Without live status: just the tool label.
+        assert_eq!(
+            active_tool_label(&state).as_deref(),
+            Some("Agent explore crates"),
+        );
+
+        // With live status: the child's current activity rides along, so a
+        // long-running subagent is never an opaque spinner.
+        state
+            .ui
+            .live_tool_status
+            .insert(call_id, "read_file…".to_string());
+        assert_eq!(
+            active_tool_label(&state).as_deref(),
+            Some("Agent explore crates · read_file…"),
+        );
     }
 
     #[test]
