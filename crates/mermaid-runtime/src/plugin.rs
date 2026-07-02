@@ -270,7 +270,7 @@ fn resolve_plugin_source(path: &Path) -> Result<PathBuf> {
     let dest = data_dir()?
         .join("plugins")
         .join("sources")
-        .join(hex_lower(&Sha256::digest(git_source.as_bytes())));
+        .join(crate::hex_lower(&Sha256::digest(git_source.as_bytes())));
     // Harden git: no credential prompts, no repo-provided hooks, no external
     // transports (`ext::` RCE), so materializing the source can't itself run
     // attacker code.
@@ -303,16 +303,6 @@ fn resolve_plugin_source(path: &Path) -> Result<PathBuf> {
         anyhow::ensure!(status.success(), "git clone failed for {}", git_source);
     }
     Ok(dest)
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 fn ensure_relative_paths(kind: &str, paths: &[String], root: &Path) -> Result<()> {

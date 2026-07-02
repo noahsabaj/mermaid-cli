@@ -439,13 +439,29 @@ pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> usize {
     messages.iter().map(estimate_message_tokens).sum()
 }
 
+/// Canonical compact token/count formatter shared across the reducer status
+/// text, the footer widget, chat compaction receipts, and compaction records.
+/// Abbreviates at 1k (`43.8k`, `1.2M`), exact below; a whole value drops the
+/// decimal (`128k`, not `128.0k`). Previously three copies existed with two
+/// different policies (threshold + rounding), so the same count rendered
+/// inconsistently across the UI.
 pub fn format_compact_count(value: usize) -> String {
     if value >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
+        format_scaled(value, 1_000_000, "M")
     } else if value >= 1_000 {
-        format!("{:.1}k", value as f64 / 1_000.0)
+        format_scaled(value, 1_000, "k")
     } else {
         value.to_string()
+    }
+}
+
+fn format_scaled(value: usize, divisor: usize, suffix: &str) -> String {
+    let whole = value / divisor;
+    let decimal = ((value % divisor) * 10) / divisor;
+    if decimal == 0 {
+        format!("{}{}", whole, suffix)
+    } else {
+        format!("{}.{}{}", whole, decimal, suffix)
     }
 }
 

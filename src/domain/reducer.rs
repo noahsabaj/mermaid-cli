@@ -35,7 +35,7 @@ use crate::runtime::TaskStatus;
 use super::cmd::{ChatRequest, Cmd};
 use super::compaction::{
     CompactionArchive, CompactionPolicy, CompactionRequest, CompactionResult, CompactionTrigger,
-    context_exceeds_hard_limit, should_auto_compact,
+    context_exceeds_hard_limit, format_compact_count, should_auto_compact,
 };
 use super::ids::TurnId;
 use super::msg::{KeyCode, KeyMods, Msg, Paste, SlashCmd};
@@ -2311,26 +2311,6 @@ fn usage_totals_line(usage: TokenUsageTotals) -> String {
         ));
     }
     parts.join(", ")
-}
-
-fn format_compact_count(value: usize) -> String {
-    if value >= 1_000_000 {
-        format_scaled(value, 1_000_000, "m")
-    } else if value >= 10_000 {
-        format_scaled(value, 1_000, "k")
-    } else {
-        value.to_string()
-    }
-}
-
-fn format_scaled(value: usize, divisor: usize, suffix: &str) -> String {
-    let whole = value / divisor;
-    let decimal = ((value % divisor) * 10) / divisor;
-    if decimal == 0 {
-        format!("{}{}", whole, suffix)
-    } else {
-        format!("{}.{}{}", whole, decimal, suffix)
-    }
 }
 
 /// When a turn is aborted while its tools are mid-flight, the `assistant`

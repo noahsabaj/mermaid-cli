@@ -546,17 +546,7 @@ fn git_output<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String> {
 fn project_hash(path: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.display().to_string().as_bytes());
-    hex_lower(&hasher.finalize())
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
+    crate::hex_lower(&hasher.finalize())
 }
 
 /// Best-effort GC of on-disk checkpoint directories older than `retention_days`

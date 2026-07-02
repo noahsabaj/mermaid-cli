@@ -48,7 +48,7 @@ impl ModelProvider for MyProvider {
 }
 ```
 
-If your provider's wire format is close enough to an existing one, save work by delegating. Three of the four current providers are thin wrappers over the v0.6 adapters that already speak the wire format correctly — see `src/providers/model/anthropic.rs` for a ~90-line delegating wrapper.
+If your provider's wire format is close enough to an existing one, save work by delegating. Three of the four current providers are thin wrappers over the adapters that already speak the wire format correctly — see `src/providers/model/anthropic.rs` for a delegating wrapper.
 
 ## 2. Route to it in `ProviderFactory`
 
@@ -99,7 +99,7 @@ Without this, Ctrl+C during a long streaming response waits for the stream to fi
 
 Unit test the helpers (`build_request_body`, wire-format translation, error classification) — those are pure functions and don't need a runtime.
 
-Integration test the full `chat()` by pointing it at a test server. `src/providers/model/ollama.rs` uses `reqwest::get` against an in-process `TcpListener` for this; copy that pattern if you need the same.
+Integration test the full `chat()` by pointing it at a test server. `src/effect/middleware.rs` tests drive real HTTP against an in-process `TcpListener` (fake responses, including `Retry-After`); copy that pattern if you need the same.
 
 ## Custom providers without new code
 

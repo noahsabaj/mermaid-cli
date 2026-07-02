@@ -14,6 +14,19 @@ pub mod plugin;
 pub mod policy;
 pub mod storage;
 
+/// Lowercase hex encoding of a byte slice. Shared by the SHA-256 hashing sites
+/// (pairing-token hash, project hashes, plugin-source hash) that each used to
+/// carry an identical private copy.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 pub use atomic::write_atomic;
 
 pub use approval::{ApprovalReplayResult, approve_and_replay, deny_approval};

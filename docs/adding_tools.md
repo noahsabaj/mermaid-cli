@@ -89,7 +89,7 @@ The registry routes calls; the model needs to know the name + schema. Add a `Too
 
 ## Dos and don'ts
 
-**Do** emit progress events through `ctx.progress` for multi-step work. The reducer doesn't act on them today, but the renderer will surface them in a follow-up commit and recorded sessions include them.
+**Do** emit progress events through `ctx.progress` for multi-step work. The reducer routes image artifacts onto the in-flight assistant message for inline display; streamed stdout/status lines are intentionally dropped (the status line already names the running tool and full output lands in chat when the tool finishes).
 
 **Don't** call `tokio::time::sleep` or any other long await without racing it against `ctx.token.cancelled()`. Users expect Ctrl+C to abort; forgetting the select race is the structural bug the old architecture let slip repeatedly.
 

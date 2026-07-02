@@ -113,15 +113,23 @@ pub async fn run_interactive_with(
     // coalescing a key burst. Processed before pulling the next event.
     let mut pending_msgs: VecDeque<Msg> = VecDeque::new();
 
-    // Main loop.
+    // Main loop. A fatal error inside the loop is captured here and returned
+    // AFTER the orderly-shutdown path below, so a draw failure can't skip MCP
+    // child cleanup / pending-save drains (the terminal is still restored by
+    // `TerminalGuard::Drop` regardless).
+    let mut exit_result: Result<()> = Ok(());
     loop {
         // Render the current state. ratatui's draw closure captures
         // &state, so we don't thread &mut state through the renderer.
-        terminal
+        if let Err(err) = terminal
             .as_mut()
             .expect("terminal guard is alive while the render loop runs")
             .inner_mut()
-            .draw(|f| render(&state, &mut rstate, f))?;
+            .draw(|f| render(&state, &mut rstate, f))
+        {
+            exit_result = Err(err.into());
+            break;
+        }
 
         // Drain any msgs queued by a prior burst-coalesce before blocking
         // on the next event.
@@ -273,9 +281,10 @@ pub async fn run_interactive_with(
         terminal.restore_now();
     }
 
-    // Orderly shutdown — wait for any pending saves / scope cleanup.
+    // Orderly shutdown — wait for any pending saves / scope cleanup. Runs even
+    // when the loop broke on a draw error, so MCP children are reaped cleanly.
     runner.shutdown().await;
-    Ok(())
+    exit_result
 }
 
 /// Commands dispatched on startup before the first iteration of the

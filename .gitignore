@@ -23,16 +23,14 @@
 
 # Configuration files (contain user-specific settings)
 config.toml
-!.mermaid/config.toml.example
 
 # CLAUDE.md (contains AI assistant instructions)
 CLAUDE.md
 
-# Mermaid cache and data
-.mermaid/cache/
-.mermaid/data/
-.mermaid/logs/
-.mermaid/conversations/
+# Mermaid local runtime data — all of it is per-user/session state (cache,
+# conversations, compactions, logs). Nothing under `.mermaid/` is committed, so
+# ignore the whole directory rather than chasing each new subdir.
+.mermaid/
 
 # IDE directories
 .vs/
@@ -57,8 +55,3 @@ cobertura.xml
 # Temporary files
 *.tmp
 temp/
-
-# Note: do NOT add a bare `.mermaid` entry here — it would shadow the
-# `!.mermaid/config.toml.example` negation above and silently hide the
-# committed example. Specific subdirs (`.mermaid/cache/`, `.mermaid/data/`,
-# `.mermaid/logs/`) are already excluded by the patterns near the top.
