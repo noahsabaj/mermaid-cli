@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `read_only` no longer blocks spawning subagents (user-reported): the
+  `agent` tool now spawns in every safety mode, because the child inherits
+  the parent's live safety mode and each child tool call is re-gated
+  individually — a `read_only` child can fan out parallel exploration but
+  still can't mutate anything. Operator `Deny` overrides on the subagent
+  category/tool and the destructive-prompt hard-deny still block the spawn.
+
 ## [0.14.2] - 2026-07-02
 
 ### Fixed
