@@ -1,5 +1,5 @@
 [Unit]
-Description=Mermaid local AI runtime daemon
+Description=Mermaid local AI background service
 Documentation=https://github.com/noahsabaj/mermaid-cli#readme
 Wants=network-online.target
 After=network-online.target
@@ -9,7 +9,6 @@ Type=simple
 ExecStart=/usr/bin/mermaidd
 Restart=on-failure
 RestartSec=2
-Environment=MERMAID_DAEMON_TCP_ADDR=127.0.0.1:39871
 
 [Install]
 WantedBy=default.target

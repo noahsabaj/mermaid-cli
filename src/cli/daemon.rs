@@ -15,8 +15,6 @@ use super::DaemonCommand;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const SERVICE_NAME: &str = "mermaidd.service";
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub const DEFAULT_TCP_ADDR: &str = "127.0.0.1:39871";
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const DAEMON_BIN_ENV: &str = "MERMAID_DAEMON_BIN";
 
 #[cfg(target_os = "linux")]
@@ -121,6 +119,11 @@ fn systemctl_service(action: &str) -> Result<()> {
 
 #[cfg(any(target_os = "linux", test))]
 pub fn render_unit(exec_start: &Path) -> String {
+    // No `Environment=MERMAID_DAEMON_TCP_ADDR=...`: the daemon binds TCP only
+    // when MERMAID_DAEMON_ENABLE_TCP=1, so setting the address alone did nothing
+    // and misleadingly implied the service listens on TCP by default. Keep this
+    // byte-for-byte in sync with `packaging/systemd/mermaidd.service` (a test
+    // enforces it).
     format!(
         "[Unit]\n\
          Description=Mermaid local AI background service\n\
@@ -133,12 +136,10 @@ pub fn render_unit(exec_start: &Path) -> String {
          ExecStart={}\n\
          Restart=on-failure\n\
          RestartSec=2\n\
-         Environment=MERMAID_DAEMON_TCP_ADDR={}\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
         quote_systemd_exec_path(exec_start),
-        DEFAULT_TCP_ADDR
     )
 }
 
@@ -332,12 +333,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_unit_uses_localhost_tcp_and_exec_path() {
+    fn render_unit_has_exec_path_and_no_dead_tcp_env() {
         let unit = render_unit(Path::new("/usr/bin/mermaidd"));
         assert!(unit.contains("ExecStart=/usr/bin/mermaidd"));
-        assert!(unit.contains("Environment=MERMAID_DAEMON_TCP_ADDR=127.0.0.1:39871"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
+        // The TCP-address env var did nothing without MERMAID_DAEMON_ENABLE_TCP,
+        // so it must not appear (it implied the daemon listens on TCP).
+        assert!(!unit.contains("MERMAID_DAEMON_TCP_ADDR"));
+    }
+
+    #[test]
+    fn packaged_unit_matches_render_unit() {
+        // The static `packaging/systemd/mermaidd.service` and the CLI-generated
+        // unit are two sources of truth that had already drifted (description +
+        // the dead env line). Pin them byte-for-byte so they can't diverge again.
+        let packaged = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/packaging/systemd/mermaidd.service"
+        ));
+        assert_eq!(packaged, render_unit(Path::new("/usr/bin/mermaidd")));
     }
 
     #[test]
