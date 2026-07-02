@@ -22,6 +22,10 @@ pub struct Config {
     #[serde(default)]
     pub ollama: OllamaConfig,
 
+    /// Web tool (`web_search` / `web_fetch`) backend selection.
+    #[serde(default)]
+    pub web: WebConfig,
+
     /// Non-interactive mode configuration
     #[serde(default)]
     pub non_interactive: NonInteractiveConfig,
@@ -462,6 +466,63 @@ impl Default for OllamaConfig {
             numa: None,               // Auto-detect
             allow_ram_offload: false, // VRAM-only by default (RAM is slow)
             max_auto_num_ctx: None,   // No cap; auto-fit to the memory budget
+        }
+    }
+}
+
+/// Backend for the `web_fetch` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FetchBackend {
+    /// Fetch the URL directly from this machine and convert it to markdown.
+    /// No API key, no third party — works for any user with network access.
+    #[default]
+    Native,
+    /// Route through Ollama Cloud's `/api/web_fetch` (needs `OLLAMA_API_KEY`).
+    Ollama,
+}
+
+/// Backend for the `web_search` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchBackend {
+    /// Ollama Cloud's `/api/web_search` (needs `OLLAMA_API_KEY`).
+    #[default]
+    Ollama,
+    /// A self-hosted SearXNG instance queried at `searxng_url` — keyless.
+    Searxng,
+}
+
+/// Web tool backend configuration.
+///
+/// ```toml
+/// [web]
+/// fetch_backend = "native"   # or "ollama"
+/// search_backend = "ollama"  # or "searxng"
+/// searxng_url = "http://localhost:8080"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebConfig {
+    /// Backend for `web_fetch`. `native` (default) fetches the URL from this
+    /// machine and needs no key; `ollama` uses Ollama Cloud.
+    pub fetch_backend: FetchBackend,
+    /// Backend for `web_search`. `ollama` (default) uses Ollama Cloud (needs
+    /// `OLLAMA_API_KEY`); `searxng` queries a self-hosted SearXNG at
+    /// `searxng_url` and needs no key.
+    pub search_backend: SearchBackend,
+    /// SearXNG base URL, used when `search_backend = "searxng"`. The instance
+    /// must have the JSON output format enabled (`search.formats` includes
+    /// `json`).
+    pub searxng_url: String,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            fetch_backend: FetchBackend::Native,
+            search_backend: SearchBackend::Ollama,
+            searxng_url: String::from("http://localhost:8080"),
         }
     }
 }

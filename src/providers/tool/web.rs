@@ -1,31 +1,68 @@
 //! Web tools: `web_search` and `web_fetch`.
 //!
-//! Both delegate to `web_client::WebSearchClient` — a thin HTTP
-//! client for Ollama Cloud's web API (bearer-token path, via
-//! `OLLAMA_API_KEY`). The wrapper's job is cancellation plumbing +
-//! multi-query fan-out.
+//! Each tool holds a pluggable backend (`web_client::SearchProvider` /
+//! `FetchProvider`) selected from `[web]` config: `web_fetch` defaults to a
+//! native in-process fetch (no key), `web_search` to Ollama Cloud or a
+//! self-hosted SearXNG. This tool layer owns cancellation plumbing, the SSRF
+//! guard, and multi-query fan-out; the backend owns the transport.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::app::{FetchBackend, SearchBackend, WebConfig};
 use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
-use super::web_client::{WebFetchResult, WebSearchClient};
+use super::web_client::{
+    FetchProvider, NativeFetchClient, OllamaWebClient, SearchProvider, SearxngClient,
+    WebFetchResult, format_results,
+};
 
-/// `web_search` — query Ollama Cloud's web-search endpoint. Accepts a
-/// single `{query, max_results}` OR a list of `{queries: [{query,
-/// max_results}]}` for parallel fan-out.
+/// Build the `web_fetch` tool for the configured backend. `native` always
+/// yields a tool; `ollama` yields one only when `OLLAMA_API_KEY` resolves
+/// (otherwise the tool would 401 on every call, so we don't register it).
+pub fn web_fetch_tool(web: &WebConfig) -> Option<WebFetchTool> {
+    match web.fetch_backend {
+        FetchBackend::Native => Some(WebFetchTool::native()),
+        FetchBackend::Ollama => {
+            crate::utils::resolve_api_key("OLLAMA_API_KEY", None).map(WebFetchTool::ollama)
+        },
+    }
+}
+
+/// Build the `web_search` tool for the configured backend. `searxng` always
+/// yields a tool (reachability is checked at call time, with a clear error);
+/// `ollama` yields one only when `OLLAMA_API_KEY` resolves.
+pub fn web_search_tool(web: &WebConfig) -> Option<WebSearchTool> {
+    match web.search_backend {
+        SearchBackend::Searxng => Some(WebSearchTool::searxng(web.searxng_url.clone())),
+        SearchBackend::Ollama => {
+            crate::utils::resolve_api_key("OLLAMA_API_KEY", None).map(WebSearchTool::ollama)
+        },
+    }
+}
+
+/// `web_search` — query the configured search backend. Accepts a single
+/// `{query, max_results}` OR a list of `{queries: [{query, max_results}]}` for
+/// parallel fan-out.
 pub struct WebSearchTool {
-    client: Arc<WebSearchClient>,
+    backend: Arc<dyn SearchProvider>,
 }
 
 impl WebSearchTool {
-    pub fn new(api_key: String) -> Self {
+    /// Search via Ollama Cloud (bearer `OLLAMA_API_KEY`).
+    pub fn ollama(api_key: String) -> Self {
         Self {
-            client: Arc::new(WebSearchClient::new(api_key)),
+            backend: Arc::new(OllamaWebClient::new(api_key)),
+        }
+    }
+
+    /// Search via a self-hosted SearXNG instance at `base_url`.
+    pub fn searxng(base_url: String) -> Self {
+        Self {
+            backend: Arc::new(SearxngClient::new(base_url)),
         }
     }
 }
@@ -40,7 +77,7 @@ impl ToolExecutor for WebSearchTool {
         ToolDefinition {
             name: "web_search".to_string(),
             description:
-                "Search the web via Ollama Cloud's search API. Takes either a single `query` + `max_results`, or an array of `queries` for parallel fan-out."
+                "Search the web. Takes either a single `query` + `max_results`, or an array of `queries` for parallel fan-out."
                     .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -98,7 +135,7 @@ impl ToolExecutor for WebSearchTool {
                 )))
                 .await;
 
-            let search = self.client.search_query(query, *count);
+            let search = self.backend.search(query, *count);
             tokio::select! {
                 biased;
                 _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
@@ -107,7 +144,7 @@ impl ToolExecutor for WebSearchTool {
                         Ok(results) => {
                             result_count += results.len();
                             sources.extend(results.iter().map(|result| result.url.clone()));
-                            let formatted = self.client.format_results(&results);
+                            let formatted = format_results(&results);
                             if queries.len() > 1 {
                                 combined.push_str(&format!("=== query: {} ===\n{}\n\n", query, formatted));
                             } else {
@@ -162,16 +199,25 @@ impl ToolExecutor for WebSearchTool {
     }
 }
 
-/// `web_fetch` — retrieve a URL's readable content (Ollama Cloud's
-/// fetch endpoint). Single URL, single response.
+/// `web_fetch` — retrieve a URL's readable content as markdown. Single URL,
+/// single response. Native by default (fetches + converts in-process, no key);
+/// can be backed by Ollama Cloud instead.
 pub struct WebFetchTool {
-    client: Arc<WebSearchClient>,
+    backend: Arc<dyn FetchProvider>,
 }
 
 impl WebFetchTool {
-    pub fn new(api_key: String) -> Self {
+    /// Fetch the URL in-process and convert its HTML to markdown (no API key).
+    pub fn native() -> Self {
         Self {
-            client: Arc::new(WebSearchClient::new(api_key)),
+            backend: Arc::new(NativeFetchClient::new()),
+        }
+    }
+
+    /// Fetch via Ollama Cloud's server-side `/api/web_fetch`.
+    pub fn ollama(api_key: String) -> Self {
+        Self {
+            backend: Arc::new(OllamaWebClient::new(api_key)),
         }
     }
 }
@@ -185,8 +231,7 @@ impl ToolExecutor for WebFetchTool {
     fn schema(&self) -> ToolDefinition {
         ToolDefinition {
             name: "web_fetch".to_string(),
-            description: "Retrieve a single URL's main content as text (Ollama Cloud fetch API)."
-                .to_string(),
+            description: "Retrieve a single URL's main content as markdown.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": { "url": { "type": "string" } },
@@ -214,7 +259,7 @@ impl ToolExecutor for WebFetchTool {
             return blocked;
         }
         let start = std::time::Instant::now();
-        let fetch = self.client.fetch_url(url);
+        let fetch = self.backend.fetch(url);
 
         tokio::select! {
             biased;
@@ -325,10 +370,12 @@ fn parse_queries(args: &serde_json::Value) -> Result<Vec<(String, usize)>, Strin
     Err("web_search requires 'query' (string) or 'queries' (array)".to_string())
 }
 
-/// Reject obviously-unsafe fetch URLs client-side before handing them to the
-/// (server-side) Ollama fetch API: only `http`/`https`, and no loopback /
-/// link-local / private / metadata hosts. Defense-in-depth against SSRF-style
-/// abuse via model-supplied URLs.
+/// Reject obviously-unsafe fetch URLs before the backend runs: only
+/// `http`/`https`, and no loopback / link-local / private / metadata hosts.
+/// For the native backend this is the primary SSRF boundary (the request
+/// leaves from this process, so `web_client::guard_resolved_ips` also checks
+/// the resolved addresses); for the Ollama backend it's defense-in-depth ahead
+/// of Ollama's own server-side fetch. Guards against model-supplied URLs.
 fn validate_fetch_url(url: &str) -> Result<(), String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
     match parsed.scheme() {
@@ -361,20 +408,20 @@ const METADATA_HOSTNAMES: &[&str] = &[
     "instance-data.ec2.internal", // AWS
 ];
 
-/// F57: client-side SSRF denylist for `web_fetch`. This is DEFENSE-IN-DEPTH
-/// ONLY, NOT the authoritative boundary.
+/// F57: client-side SSRF denylist for `web_fetch`.
 ///
-/// `web_fetch` does NOT retrieve the URL from this process. `WebSearchClient::
-/// fetch_url` POSTs the URL to Ollama Cloud's server-side `/api/web_fetch`
-/// endpoint, and Ollama performs the actual fetch. The in-process reqwest
-/// client only ever connects to `ollama.com`. The AUTHORITATIVE SSRF boundary
-/// is therefore SERVER-SIDE (Ollama): a public DNS name that resolves to an
-/// internal address (the DNS-rebinding hole) cannot be closed here — a no-DNS
-/// lexical check can't see where a name resolves, and resolving it locally
-/// wouldn't bind what the remote server independently resolves later anyway.
+/// For the NATIVE backend the request originates from this process, so this
+/// lexical check plus `web_client::guard_resolved_ips` (which classifies the
+/// resolved addresses) is the authoritative boundary — modulo the
+/// DNS-rebinding TOCTOU that no pre-connect check can fully close.
 ///
-/// What we CAN do cheaply, so a model can't trivially aim the server at an
-/// obvious internal target, is reject:
+/// For the OLLAMA backend the URL is POSTed to Ollama's server-side
+/// `/api/web_fetch` and the in-process client only ever connects to
+/// `ollama.com`; there the authoritative boundary is server-side (Ollama) and
+/// this check is defense-in-depth so a model can't trivially aim the server at
+/// an obvious internal target.
+///
+/// Either way we reject:
 /// - every non-public IP form via the shared `classify_host` (loopback,
 ///   RFC-1918/ULA, link-local incl. `169.254.169.254`, CGNAT, unspecified
 ///   `0.0.0.0`/`::`, plus the IPv4-mapped-IPv6 / ULA / link-local-IPv6 / `[::1]`

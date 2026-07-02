@@ -1,5 +1,6 @@
-use crate::utils::{RetryConfig, retry_async_if};
+use crate::utils::{RetryConfig, classify_host, retry_async_if, truncate_content};
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -18,6 +19,21 @@ pub struct SearchResult {
 pub struct WebFetchResult {
     pub title: String,
     pub content: String,
+}
+
+/// A `web_search` backend: a query maps to ranked results. Implemented by
+/// [`OllamaWebClient`] (Ollama Cloud) and [`SearxngClient`] (self-hosted).
+#[async_trait]
+pub trait SearchProvider: Send + Sync {
+    async fn search(&self, query: &str, count: usize) -> Result<Vec<SearchResult>>;
+}
+
+/// A `web_fetch` backend: a URL maps to readable page content. Implemented by
+/// [`NativeFetchClient`] (in-process fetch) and [`OllamaWebClient`] (Ollama
+/// Cloud's server-side fetch).
+#[async_trait]
+pub trait FetchProvider: Send + Sync {
+    async fn fetch(&self, url: &str) -> Result<WebFetchResult>;
 }
 
 /// Ollama web search API response
@@ -40,11 +56,33 @@ struct OllamaFetchResponse {
     content: Option<String>,
 }
 
+/// SearXNG JSON search response (`/search?format=json`). Only the fields we use
+/// are modelled; the rest of the (large) payload is ignored.
+#[derive(Debug, Deserialize)]
+struct SearxngResponse {
+    #[serde(default)]
+    results: Vec<SearxngResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearxngResult {
+    #[serde(default)]
+    title: String,
+    url: String,
+    #[serde(default)]
+    content: String,
+}
+
 const OLLAMA_API_BASE: &str = "https://ollama.com/api";
 
-/// Carries the HTTP status of a non-success Ollama API response so the retry
-/// classifier can tell retryable (5xx / 429) from terminal (4xx) responses
-/// without string-matching the error message (#85).
+/// User-Agent for native (`fetch_backend = "native"`) fetches. Some sites 403 a
+/// blank UA; a descriptive one is polite and identifies the client.
+const NATIVE_FETCH_UA: &str =
+    "Mozilla/5.0 (compatible; MermaidBot/1.0; +https://github.com/noahsabaj/mermaid-cli)";
+
+/// Carries the HTTP status of a non-success response so the retry classifier can
+/// tell retryable (5xx / 429) from terminal (4xx) responses without
+/// string-matching the error message (#85).
 #[derive(Debug)]
 struct HttpStatusError {
     status: u16,
@@ -72,14 +110,15 @@ fn web_error_is_retryable(e: &anyhow::Error) -> bool {
     false
 }
 
-/// Web search client that uses Ollama's cloud API
+/// Web client backed by Ollama Cloud's `/api/web_search` + `/api/web_fetch`,
+/// authenticated with a bearer token (`OLLAMA_API_KEY`).
 #[derive(Clone)]
-pub struct WebSearchClient {
+pub struct OllamaWebClient {
     client: Client,
     api_key: String,
 }
 
-impl WebSearchClient {
+impl OllamaWebClient {
     pub fn new(api_key: String) -> Self {
         Self {
             client: Client::new(),
@@ -87,18 +126,12 @@ impl WebSearchClient {
         }
     }
 
-    /// Execute a search query
-    pub async fn search_query(&self, query: &str, count: usize) -> Result<Vec<SearchResult>> {
-        self.search(query, count).await
-    }
-
-    /// Execute search via Ollama Cloud API
+    /// Execute search via Ollama Cloud API.
     ///
-    /// The web_search API already returns full page content per result,
-    /// so no separate web_fetch calls are needed. Each result's content
-    /// is truncated to prevent context bloat.
-    async fn search(&self, query: &str, count: usize) -> Result<Vec<SearchResult>> {
-        // Validate count
+    /// The web_search API already returns full page content per result, so no
+    /// separate web_fetch calls are needed. Each result's content is truncated
+    /// to prevent context bloat.
+    async fn search_impl(&self, query: &str, count: usize) -> Result<Vec<SearchResult>> {
         if count == 0 || count > 10 {
             return Err(anyhow!(
                 "Result count must be between 1 and 10, got {}",
@@ -106,7 +139,6 @@ impl WebSearchClient {
             ));
         }
 
-        // Query Ollama web search API with retry logic
         let retry_config = RetryConfig {
             max_attempts: 3,
             initial_delay_ms: 500,
@@ -161,25 +193,13 @@ impl WebSearchClient {
         )
         .await?;
 
-        // The web_search API returns full page content in each result's content field.
-        // Truncate each to prevent context bloat.
-        let search_results: Vec<SearchResult> = ollama_response
-            .results
-            .iter()
-            .take(count)
-            .map(|result| {
-                let content = crate::utils::truncate_content(
-                    &result.content,
-                    crate::constants::WEB_CONTENT_MAX_CHARS,
-                );
-                SearchResult {
-                    title: result.title.clone(),
-                    url: result.url.clone(),
-                    snippet: result.content.chars().take(200).collect(),
-                    full_content: content,
-                }
-            })
-            .collect();
+        let search_results = map_search_results(
+            ollama_response
+                .results
+                .into_iter()
+                .map(|r| (r.title, r.url, r.content)),
+            count,
+        );
 
         if search_results.is_empty() {
             return Err(anyhow!("No search results found for: {}", query));
@@ -188,9 +208,8 @@ impl WebSearchClient {
         Ok(search_results)
     }
 
-    /// Fetch a URL's content via Ollama's web_fetch API
-    pub async fn fetch_url(&self, url: &str) -> Result<WebFetchResult> {
-        // Retry config for page fetches (2 attempts, shorter timeout)
+    /// Fetch a URL's content via Ollama's web_fetch API.
+    async fn fetch_impl(&self, url: &str) -> Result<WebFetchResult> {
         let retry_config = RetryConfig {
             max_attempts: 2,
             initial_delay_ms: 200,
@@ -242,39 +261,299 @@ impl WebSearchClient {
             content: response.content.unwrap_or_default(),
         })
     }
+}
 
-    /// Format search results for model consumption
-    ///
-    /// Pure data -- no behavioral instructions. Citation rules live in the
-    /// system prompt (src/prompts.rs), which is the SSOT for all model behavior.
-    pub fn format_results(&self, results: &[SearchResult]) -> String {
-        let mut formatted = String::from("[SEARCH_RESULTS]\n");
+#[async_trait]
+impl SearchProvider for OllamaWebClient {
+    async fn search(&self, query: &str, count: usize) -> Result<Vec<SearchResult>> {
+        self.search_impl(query, count).await
+    }
+}
 
-        for (i, result) in results.iter().enumerate() {
-            formatted.push_str(&format!(
-                "[{}] Title: {}\nURL: {}\nContent:\n{}\n---\n",
-                i + 1,
-                result.title,
-                result.url,
-                result.full_content
+#[async_trait]
+impl FetchProvider for OllamaWebClient {
+    async fn fetch(&self, url: &str) -> Result<WebFetchResult> {
+        self.fetch_impl(url).await
+    }
+}
+
+/// `web_search` backed by a self-hosted SearXNG instance's JSON API. Keyless —
+/// the instance itself queries upstream engines; Mermaid only talks to the
+/// user's local SearXNG.
+#[derive(Clone)]
+pub struct SearxngClient {
+    client: Client,
+    base_url: String,
+}
+
+impl SearxngClient {
+    pub fn new(base_url: String) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl SearchProvider for SearxngClient {
+    async fn search(&self, query: &str, count: usize) -> Result<Vec<SearchResult>> {
+        let request_url = reqwest::Url::parse_with_params(
+            &format!("{}/search", self.base_url),
+            &[("q", query), ("format", "json")],
+        )
+        .map_err(|e| anyhow!("invalid SearXNG URL {}: {e}", self.base_url))?;
+
+        let response = self
+            .client
+            .get(request_url)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| {
+                anyhow::Error::new(e).context(format!(
+                    "Failed to reach SearXNG at {} — is it running?",
+                    self.base_url
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(anyhow!(
+                "SearXNG at {} returned {status}. A 403 usually means the JSON format is \
+                 disabled — add `json` to `search.formats` in its settings.yml.",
+                self.base_url
             ));
         }
 
-        formatted.push_str("[/SEARCH_RESULTS]\n\n");
+        let body = read_body_capped(response, crate::constants::MAX_WEB_BODY_BYTES).await?;
+        let parsed: SearxngResponse = serde_json::from_slice(&body).map_err(|e| {
+            anyhow!("Failed to parse SearXNG response (is `format=json` enabled?): {e}")
+        })?;
 
-        // Source list for citation (behavior governed by system prompt)
-        formatted.push_str("Sources:\n");
-        for (i, result) in results.iter().enumerate() {
-            formatted.push_str(&format!("{}. {} - {}\n", i + 1, result.title, result.url));
+        let results = map_search_results(
+            parsed
+                .results
+                .into_iter()
+                .map(|r| (r.title, r.url, r.content)),
+            count,
+        );
+
+        if results.is_empty() {
+            return Err(anyhow!("No SearXNG results for: {}", query));
         }
 
-        formatted
+        Ok(results)
     }
+}
+
+/// `web_fetch` performed in-process: fetch the URL directly and convert its
+/// HTML to markdown. No API key, no third party. Because the request leaves
+/// from this machine, the SSRF guards in `web.rs` (lexical) plus
+/// [`guard_resolved_ips`] (resolved-address) are the boundary here — not a
+/// remote service's.
+pub struct NativeFetchClient {
+    client: Client,
+}
+
+impl Default for NativeFetchClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NativeFetchClient {
+    pub fn new() -> Self {
+        let client = Client::builder()
+            .user_agent(NATIVE_FETCH_UA)
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl FetchProvider for NativeFetchClient {
+    async fn fetch(&self, url: &str) -> Result<WebFetchResult> {
+        // Native fetch makes THIS process the fetcher, so re-check that the
+        // host doesn't resolve to an internal address (defense-in-depth on top
+        // of the lexical guard `web.rs` already applied).
+        guard_resolved_ips(url).await?;
+
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| anyhow::Error::new(e).context(format!("Failed to fetch {url}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(anyhow::Error::new(HttpStatusError {
+                status: status.as_u16(),
+            })
+            .context(format!("Failed to fetch {url}")));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        let body = read_body_capped(response, crate::constants::MAX_WEB_BODY_BYTES).await?;
+
+        // Only convert markup/text. A binary content-type (pdf, image, zip)
+        // can't become useful markdown — reject with a clear reason. An absent
+        // content-type is allowed (treated as text).
+        let looks_textual = content_type.is_empty()
+            || content_type.contains("html")
+            || content_type.contains("xml")
+            || content_type.contains("json")
+            || content_type.starts_with("text/");
+        if !looks_textual {
+            return Err(anyhow!(
+                "web_fetch: unsupported content-type '{content_type}' (only html/text pages)"
+            ));
+        }
+
+        let html = String::from_utf8_lossy(&body).into_owned();
+        let url_owned = url.to_string();
+        // HTML parsing + readability + markdown conversion is CPU-bound; keep it
+        // off the async runtime's worker threads.
+        let (title, content) =
+            tokio::task::spawn_blocking(move || extract_readable(&html, &url_owned))
+                .await
+                .map_err(|e| anyhow!("content extraction failed: {e}"))?;
+
+        Ok(WebFetchResult { title, content })
+    }
+}
+
+/// Reject a native fetch whose host resolves to a loopback / private /
+/// link-local / metadata address. Best-effort: the eventual connect re-resolves
+/// (a TOCTOU gap a no-network check can't close), but this stops the obvious
+/// "public name pointing at 127.0.0.1 / 169.254.169.254" aim.
+async fn guard_resolved_ips(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| anyhow!("invalid URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("URL has no host"))?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| anyhow!("DNS resolution failed for {host}: {e}"))?;
+    for addr in addrs {
+        if classify_host(&addr.ip().to_string()).is_internal() {
+            return Err(anyhow!(
+                "refusing to fetch '{host}' — it resolves to an internal address"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Extract a page's title + main content (as markdown) from raw HTML. Uses a
+/// readability pass to drop nav/boilerplate, then converts the isolated content
+/// to markdown (preserving links). Falls back to whole-document conversion when
+/// readability can't parse the page.
+fn extract_readable(html: &str, url: &str) -> (String, String) {
+    use dom_smoothie::Readability;
+
+    if let Ok(mut readability) = Readability::new(html, Some(url), None)
+        && let Ok(article) = readability.parse()
+    {
+        let content_html = article.content.to_string();
+        let markdown = htmd::convert(&content_html).unwrap_or_default();
+        let markdown = markdown.trim();
+        // Readability can succeed yet strip a page down to nothing (SPA shells,
+        // pages it misjudges). Only trust a non-empty extraction; otherwise
+        // fall through to whole-document conversion.
+        if !markdown.is_empty() {
+            let title = if article.title.trim().is_empty() {
+                fallback_title(html)
+            } else {
+                article.title
+            };
+            return (title, markdown.to_string());
+        }
+    }
+
+    let markdown = htmd::convert(html).unwrap_or_default();
+    (fallback_title(html), markdown.trim().to_string())
+}
+
+/// Crude `<title>` scrape for the fallback path (readability normally supplies
+/// the title; this only runs when it couldn't parse the document).
+fn fallback_title(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let Some(open) = lower.find("<title") else {
+        return String::new();
+    };
+    let after_tag = match html[open..].find('>') {
+        Some(gt) => &html[open + gt + 1..],
+        None => return String::new(),
+    };
+    match after_tag.to_ascii_lowercase().find("</title>") {
+        Some(end) => after_tag[..end].trim().to_string(),
+        None => String::new(),
+    }
+}
+
+/// Map raw `(title, url, content)` search hits to [`SearchResult`], truncating
+/// each hit's content to bound model context. Shared by every search backend.
+fn map_search_results(
+    hits: impl Iterator<Item = (String, String, String)>,
+    count: usize,
+) -> Vec<SearchResult> {
+    hits.take(count)
+        .map(|(title, url, content)| {
+            let full_content = truncate_content(&content, crate::constants::WEB_CONTENT_MAX_CHARS);
+            let snippet = content.chars().take(200).collect();
+            SearchResult {
+                title,
+                url,
+                snippet,
+                full_content,
+            }
+        })
+        .collect()
+}
+
+/// Format search results for model consumption.
+///
+/// Pure data -- no behavioral instructions. Citation rules live in the system
+/// prompt (src/prompts.rs), which is the SSOT for all model behavior.
+pub fn format_results(results: &[SearchResult]) -> String {
+    let mut formatted = String::from("[SEARCH_RESULTS]\n");
+
+    for (i, result) in results.iter().enumerate() {
+        formatted.push_str(&format!(
+            "[{}] Title: {}\nURL: {}\nContent:\n{}\n---\n",
+            i + 1,
+            result.title,
+            result.url,
+            result.full_content
+        ));
+    }
+
+    formatted.push_str("[/SEARCH_RESULTS]\n\n");
+
+    // Source list for citation (behavior governed by system prompt)
+    formatted.push_str("Sources:\n");
+    for (i, result) in results.iter().enumerate() {
+        formatted.push_str(&format!("{}. {} - {}\n", i + 1, result.title, result.url));
+    }
+
+    formatted
 }
 
 /// Read a reqwest response body, refusing to buffer more than `max_bytes`.
 /// `Response::json`/`bytes` buffer the whole body unbounded; a compromised or
-/// misconfigured Ollama endpoint could return a multi-gigabyte body and OOM the
+/// misconfigured endpoint could return a multi-gigabyte body and OOM the
 /// (long-lived) process. We reject early on an oversized `Content-Length` and
 /// also enforce the cap while streaming (a lying or absent header can't bypass
 /// it) (#28).
@@ -304,14 +583,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_web_search_client_creation() {
-        let client = WebSearchClient::new("test-key".to_string());
+    fn test_ollama_web_client_creation() {
+        let client = OllamaWebClient::new("test-key".to_string());
         assert_eq!(client.api_key, "test-key");
     }
 
     #[test]
     fn test_format_results() {
-        let client = WebSearchClient::new("test-key".to_string());
         let results = vec![SearchResult {
             title: "Test Article".to_string(),
             url: "https://example.com".to_string(),
@@ -319,11 +597,71 @@ mod tests {
             full_content: "Full content here".to_string(),
         }];
 
-        let formatted = client.format_results(&results);
+        let formatted = format_results(&results);
         assert!(formatted.contains("[SEARCH_RESULTS]"));
         assert!(formatted.contains("Test Article"));
         assert!(formatted.contains("https://example.com"));
         assert!(formatted.contains("[/SEARCH_RESULTS]"));
+    }
+
+    #[test]
+    fn map_search_results_truncates_and_caps_count() {
+        let hits = (0..5).map(|i| {
+            (
+                format!("t{i}"),
+                format!("https://e{i}.com"),
+                "x".repeat(crate::constants::WEB_CONTENT_MAX_CHARS * 2),
+            )
+        });
+        let out = map_search_results(hits, 3);
+        assert_eq!(out.len(), 3, "count cap applied");
+        assert!(
+            out[0].full_content.len() <= crate::constants::WEB_CONTENT_MAX_CHARS + 64,
+            "content truncated"
+        );
+        assert!(out[0].snippet.chars().count() <= 200);
+    }
+
+    #[test]
+    fn searxng_response_parses_results() {
+        let json = serde_json::json!({
+            "results": [
+                {"title": "A", "url": "https://a.com", "content": "alpha"},
+                {"url": "https://b.com"},
+            ]
+        })
+        .to_string();
+        let parsed: SearxngResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.results.len(), 2);
+        assert_eq!(parsed.results[0].url, "https://a.com");
+        // Missing title/content default to empty, not a parse error.
+        assert_eq!(parsed.results[1].title, "");
+        assert_eq!(parsed.results[1].content, "");
+    }
+
+    #[test]
+    fn extract_readable_produces_markdown() {
+        let html = r#"<html><head><title>My Page</title></head>
+            <body><article><h1>Heading</h1><p>Hello <a href="https://x.com">link</a>.</p>
+            <p>More text to satisfy the readability length heuristic so this block is
+            treated as the main article content rather than boilerplate chrome.</p>
+            </article></body></html>"#;
+        let (title, md) = extract_readable(html, "https://example.com/page");
+        assert!(!title.is_empty(), "title extracted, got {title:?}");
+        assert!(
+            md.contains("Hello"),
+            "content converted to markdown: {md:?}"
+        );
+        assert!(md.contains("](https://x.com)"), "links preserved: {md:?}");
+    }
+
+    #[test]
+    fn extract_readable_fallback_title_on_unparseable() {
+        // A bare fragment with no article structure still yields a title + body.
+        let html = "<title>Bare</title><p>just a snippet</p>";
+        let (title, md) = extract_readable(html, "https://example.com");
+        assert_eq!(title, "Bare");
+        assert!(md.contains("just a snippet"));
     }
 
     #[test]
