@@ -348,10 +348,13 @@ mod tests {
         // The static `packaging/systemd/mermaidd.service` and the CLI-generated
         // unit are two sources of truth that had already drifted (description +
         // the dead env line). Pin them byte-for-byte so they can't diverge again.
+        // Normalize CRLF: a `.gitattributes` rule forces this file to LF, but
+        // strip `\r` anyway so the test never depends on the checkout's autocrlf.
         let packaged = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/packaging/systemd/mermaidd.service"
-        ));
+        ))
+        .replace("\r\n", "\n");
         assert_eq!(packaged, render_unit(Path::new("/usr/bin/mermaidd")));
     }
 
