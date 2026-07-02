@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `read_only` mode no longer blocks genuinely read-only commands
+  (user-reported): redirects to the null-device family (`2>/dev/null` and
+  friends) count as reads instead of writes; a glued separator
+  (`ls 2>/dev/null; echo done`) no longer hard-denies the whole chain as a
+  "sensitive `/dev/` write"; and `command -v NAME` — the POSIX binary-exists
+  test, which executes nothing — classifies as the lookup it is. Redirects
+  to real files, real devices (`/dev/sda`), and sensitive paths (`/etc/…`,
+  `~/.ssh/…`) stay blocked, with regression tests pinning both directions.
+
 ## [0.14.0] - 2026-07-02
 
 ### Security

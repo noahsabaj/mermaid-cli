@@ -551,6 +551,50 @@ fn redirect_target_after(tok: &str) -> Option<&str> {
     Some(after.trim_start_matches('>'))
 }
 
+/// Resolve the WRITE TARGET of the output-redirect token at `tokens[i]`: the
+/// glued after-part (`2>/dev/null`) or, when the operator stands alone
+/// (`2> /dev/null`), the following token.
+///
+/// The whitespace tokenizer keeps unquoted chain operators glued to the
+/// preceding word (`2>/dev/null;` in `ls 2>/dev/null; echo done`), so
+/// trailing `;`/`&`/`|` are stripped here — otherwise the target reads as
+/// `/dev/null;`, which misses the safe-device list and then matches the
+/// sensitive `/dev/` prefix, hard-denying a benign read-only chain (user
+/// report, v0.14.0). Stripping never hides a sensitive target: it only
+/// normalizes the path the sensitivity checks compare against. Quotes are
+/// trimmed to match `is_sensitive_write_target`'s comparison.
+fn redirect_write_target(tokens: &[String], i: usize) -> Option<&str> {
+    let after = redirect_target_after(&tokens[i])?;
+    let raw = if after.is_empty() {
+        tokens.get(i + 1).map(String::as_str)?
+    } else {
+        after
+    };
+    Some(
+        raw.trim_end_matches([';', '&', '|'])
+            .trim_matches(['"', '\'']),
+    )
+}
+
+/// Character pseudo-devices that are safe WRITE targets: `2>/dev/null` is
+/// ubiquitous in read-only shell work and discards data by definition. Real
+/// block devices (`/dev/sda`, `/dev/nvme0n1`) are deliberately NOT here and
+/// keep counting as writes.
+fn is_safe_device_write(path: &str) -> bool {
+    const SAFE_DEVICES: &[&str] = &[
+        "/dev/null",
+        "/dev/zero",
+        "/dev/full",
+        "/dev/tty",
+        "/dev/stdin",
+        "/dev/stdout",
+        "/dev/stderr",
+        "/dev/random",
+        "/dev/urandom",
+    ];
+    SAFE_DEVICES.contains(&path) || path.starts_with("/dev/fd/")
+}
+
 /// Split a command line into the individual commands `sh -c` would run,
 /// breaking on UNQUOTED control operators (`;`, newline, `|`, `||`, `&&`, `&`,
 /// `|&`). Quotes and backslash escapes are respected so an operator inside a
@@ -881,20 +925,54 @@ fn classify_shell_command_depth(command: &str, depth: u8) -> RiskClass {
 fn classify_segment(tokens: &[String]) -> RiskClass {
     let mut worst = RiskClass::ReadOnly;
     let mut expect_head = true;
+    let mut after_wrapper = false;
     for (i, tok) in tokens.iter().enumerate() {
         let t = tok.as_str();
-        // Any file redirection (incl. `1>`/`2>>`/`&>`), `tee`, or `dd` writes.
-        if redirect_target_after(t).is_some() || t == "tee" || t == "dd" {
+        // A file redirection (incl. `1>`/`2>>`/`&>`), `tee`, or `dd` writes —
+        // EXCEPT redirects to the safe character devices (`2>/dev/null` and
+        // friends), which discard data and leave the segment read-only.
+        // Blanket-flagging every redirect denied ubiquitous read-only shapes
+        // like `ls 2>/dev/null` in read_only mode (user report, v0.14.0).
+        if t == "tee" || t == "dd" {
             worst = shell_max(worst, RiskClass::ShellMutation);
+        } else if redirect_target_after(t).is_some() {
+            match redirect_write_target(tokens, i) {
+                Some(target) if is_safe_device_write(target) => {},
+                // Unresolvable (dangling `>`) or a real file: a write.
+                _ => worst = shell_max(worst, RiskClass::ShellMutation),
+            }
         }
         if !expect_head {
             continue;
         }
-        // Skip `FOO=bar` env assignments and benign wrappers; the real head
-        // is the next token.
         let head = basename(t);
+        // `command -v/-V NAME` only LOOKS UP name (the POSIX binary-exists
+        // test) — nothing is executed, regardless of what NAME is. Plain
+        // `command NAME …` executes NAME and falls through to the wrapper
+        // skip below.
+        if t == "command"
+            && tokens[i + 1..]
+                .iter()
+                .take_while(|a| a.starts_with('-'))
+                .any(|a| a == "-v" || a == "-V")
+        {
+            expect_head = false;
+            continue;
+        }
+        // Skip `FOO=bar` env assignments and benign wrappers; the real head
+        // is a later token.
         if (t.contains('=') && !t.starts_with('-') && !t.contains('/')) || WRAPPERS.contains(&head)
         {
+            after_wrapper = true;
+            continue;
+        }
+        // A wrapper's own flags (`sudo -u`, `env -i`, `command -p`) precede
+        // the real head — a command name can't begin with `-`, so a dash
+        // token here was previously misread as an unknown head and escalated
+        // to ShellMutation (`command -v rg` denied in read_only). Only
+        // skipped AFTER a wrapper so a bare dash-leading segment keeps its
+        // fail-safe classification.
+        if after_wrapper && t.starts_with('-') {
             continue;
         }
         worst = shell_max(worst, classify_head(head, &tokens[i..]));
@@ -1028,20 +1106,8 @@ fn is_sensitive_write_target(path: &str) -> bool {
     let p = path.trim_matches(['"', '\'']);
     // Standard character pseudo-devices are safe write targets — `2>/dev/null`
     // is ubiquitous and not a destructive write. Excluded before the `/dev/`
-    // prefix check so they don't read as sensitive. Real block devices
-    // (`/dev/sda`, `/dev/nvme0n1`) are NOT in this set and stay flagged.
-    const SAFE_DEVICES: &[&str] = &[
-        "/dev/null",
-        "/dev/zero",
-        "/dev/full",
-        "/dev/tty",
-        "/dev/stdin",
-        "/dev/stdout",
-        "/dev/stderr",
-        "/dev/random",
-        "/dev/urandom",
-    ];
-    if SAFE_DEVICES.contains(&p) || p.starts_with("/dev/fd/") {
+    // prefix check so they don't read as sensitive.
+    if is_safe_device_write(p) {
         return false;
     }
     const SENSITIVE_PREFIXES: &[&str] = &[
@@ -1146,23 +1212,21 @@ fn destructive_with_depth(command: &str, depth: u8) -> bool {
             }
         }
     }
-    // Redirect / `tee` to a sensitive target (cron, dotfiles, ssh, system dirs).
+    // Redirect / `tee` to a sensitive target (cron, dotfiles, ssh, system
+    // dirs). Targets are normalized via `redirect_write_target` — this scan
+    // also runs on the PRE-segmentation command (for cross-segment shapes
+    // like fork bombs), where chain operators are still glued to the target
+    // token (`2>/dev/null;`) and would otherwise misread as sensitive.
     for (i, tok) in tokens.iter().enumerate() {
-        if let Some(after) = redirect_target_after(tok) {
-            let target = if after.is_empty() {
-                tokens.get(i + 1).map(String::as_str)
-            } else {
-                Some(after)
-            };
-            if let Some(target) = target
-                && is_sensitive_write_target(target)
-            {
-                return true;
-            }
+        if redirect_target_after(tok).is_some()
+            && let Some(target) = redirect_write_target(&tokens, i)
+            && is_sensitive_write_target(target)
+        {
+            return true;
         }
         if basename(tok) == "tee"
             && let Some(target) = tokens[i + 1..].iter().find(|t| !t.starts_with('-'))
-            && is_sensitive_write_target(target)
+            && is_sensitive_write_target(target.trim_end_matches([';', '&', '|']))
         {
             return true;
         }
@@ -1681,6 +1745,130 @@ mod tests {
         assert!(
             matches!(decision, PolicyDecision::Allow { .. }),
             "got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn read_only_allows_stderr_discard_chains() {
+        // User report (v0.14.0): every one of these read-only commands was
+        // blocked. The first two via `classify_segment` flagging ANY output
+        // redirect as a mutation (no safe-device exemption); the third via
+        // the glued-`;` token (`2>/dev/null;`) reading as a sensitive
+        // `/dev/` write in the hard-deny scan. Verbatim from the report.
+        let engine = PolicyEngine::new(SafetyMode::ReadOnly);
+        for cmd in [
+            r#"find . -maxdepth 4 -not -path '*/\.*' -type f 2>/dev/null | head -50 && echo "---ALL---" && find . -maxdepth 4 -not -path '*/\.*' -type d 2>/dev/null"#,
+            r#"ls public/images/ 2>/dev/null && cat public/manifest.webmanifest public/robots.txt public/sitemap.xml 2>/dev/null"#,
+            r#"ls -la public/images/ 2>/dev/null; echo "---"; cat public/images/README.md 2>/dev/null"#,
+        ] {
+            assert!(!is_destructive_command(cmd), "not destructive: {cmd}");
+            let decision = engine.decide(&shell(cmd));
+            assert!(
+                matches!(
+                    decision,
+                    PolicyDecision::Allow {
+                        risk: RiskClass::ReadOnly,
+                        ..
+                    }
+                ),
+                "read_only must allow {cmd}: {decision:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_device_redirect_forms_stay_read_only() {
+        for cmd in [
+            "ls 2>/dev/null",
+            "ls 2> /dev/null", // spaced target resolves to the next token
+            "ls >/dev/null",
+            "ls > /dev/null 2>&1",
+            "ls &>/dev/null",
+            "ls 2>>/dev/null",
+            "ls 2>/dev/null; echo done", // glued `;` (the hard-deny repro)
+            "grep -r foo . 2>/dev/null | wc -l",
+        ] {
+            assert_eq!(
+                super::classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "{cmd}"
+            );
+            assert!(!is_destructive_command(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn real_file_redirects_still_classify_as_writes() {
+        for cmd in [
+            "ls > out.txt",
+            "ls 2> errors.log",
+            "echo x >> notes.md",
+            "ls 2>$TMPFILE", // expansion is untrusted — stays a write
+            "ls >",          // dangling redirect — fail safe
+        ] {
+            assert_eq!(
+                super::classify_shell_command(cmd),
+                RiskClass::ShellMutation,
+                "{cmd}"
+            );
+        }
+        // A real block device is not merely a write — the sensitive-target
+        // scan hard-denies it outright (stronger than ShellMutation).
+        assert_eq!(
+            super::classify_shell_command("echo x > /dev/sda"),
+            RiskClass::Destructive
+        );
+    }
+
+    #[test]
+    fn sensitive_redirects_stay_hard_denied_even_with_glued_operators() {
+        // The target normalization that FIXES `2>/dev/null;` must not HIDE a
+        // sensitive write behind the same glued-operator shape.
+        for cmd in [
+            "echo x > /etc/cron.d/evil",
+            "echo x >/etc/cron.d/evil; echo done",
+            "echo key >> /home/u/.ssh/authorized_keys; true",
+            "echo x | tee /etc/profile; echo done",
+        ] {
+            assert!(is_destructive_command(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn command_dash_v_lookup_is_read_only_but_command_exec_is_not() {
+        // `command -v NAME` looks NAME up (the POSIX binary-exists test) and
+        // executes nothing — even `command -v rm` is a read. Without -v,
+        // `command NAME` runs NAME, so the wrapped head decides; wrapper
+        // flags (`sudo -u`, `env -i`) are transparent instead of being
+        // misread as unknown heads.
+        assert_eq!(
+            super::classify_shell_command("command -v rg"),
+            RiskClass::ReadOnly
+        );
+        assert_eq!(
+            super::classify_shell_command("command -v rm"),
+            RiskClass::ReadOnly
+        );
+        assert_eq!(
+            super::classify_shell_command("command -v rg >/dev/null 2>&1 && echo yes"),
+            RiskClass::ReadOnly
+        );
+        assert_eq!(
+            super::classify_shell_command("command rm -rf build"),
+            RiskClass::ShellMutation
+        );
+        assert_eq!(
+            super::classify_shell_command("command ls"),
+            RiskClass::ReadOnly
+        );
+        assert_eq!(
+            super::classify_shell_command("env -i ls"),
+            RiskClass::ReadOnly
+        );
+        // Unknown token after wrapper flags still fails safe.
+        assert_eq!(
+            super::classify_shell_command("sudo -u web somethingunknown"),
+            RiskClass::ShellMutation
         );
     }
 
