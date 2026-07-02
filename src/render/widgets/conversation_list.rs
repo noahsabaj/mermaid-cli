@@ -11,6 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
+use super::truncate_to_cells;
 use crate::domain::ConversationSummary;
 use crate::render::theme::Theme;
 
@@ -57,7 +58,7 @@ impl<'a> Widget for ConversationListWidget<'a> {
                 } else {
                     Style::default()
                 };
-                let title = truncate(&summary.title, 48);
+                let title = truncate_to_cells(&summary.title, 48);
                 let meta = format!(
                     "  ({} msg · {})",
                     summary.message_count,
@@ -75,15 +76,6 @@ impl<'a> Widget for ConversationListWidget<'a> {
             .collect();
 
         Paragraph::new(rows).block(block).render(area, buf);
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut = s.floor_char_boundary(max);
-        format!("{}…", &s[..cut])
     }
 }
 

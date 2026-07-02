@@ -551,22 +551,34 @@ pub fn init_config() -> Result<()> {
     Ok(())
 }
 
-/// Persist the last used model to config file. On a malformed config it
-/// propagates the error (the caller drops it) rather than clobbering the file
-/// with defaults — the three `persist_*` helpers all do this (#111).
-pub fn persist_last_model(model: &str) -> Result<()> {
+/// Serializes the read-modify-write persistence path. The `persist_*` helpers
+/// run as concurrent detached tasks (dispatched by the effect runner) that all
+/// load → mutate → save the same file; without a lock two quick toggles
+/// (`/model` then Alt+T) can interleave their loads and lose one write. Held
+/// only across the synchronous fs work — never across an `.await`.
+static PERSIST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Load the config, apply `mutate`, and save it back — under `PERSIST_LOCK` so
+/// concurrent persists can't clobber each other. On a malformed config the error
+/// propagates (the caller drops it) rather than overwriting the file with
+/// defaults (#111).
+fn update_config(mutate: impl FnOnce(&mut Config)) -> Result<()> {
+    let _guard = PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut config = load_config()?;
-    config.last_used_model = Some(model.to_string());
+    mutate(&mut config);
     save_config(&config, None)
 }
 
-/// Persist the user's default reasoning level to config file. Mirrors
-/// `persist_last_model` — used by the `/reasoning` slash command and the
-/// Alt+T cycle handler so the choice survives across sessions.
+/// Persist the last used model to config file.
+pub fn persist_last_model(model: &str) -> Result<()> {
+    update_config(|config| config.last_used_model = Some(model.to_string()))
+}
+
+/// Persist the user's default reasoning level to config file. Used by the
+/// `/reasoning` slash command and the Alt+T cycle handler so the choice survives
+/// across sessions.
 pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
-    let mut config = load_config()?;
-    config.default_model.reasoning = level;
-    save_config(&config, None)
+    update_config(|config| config.default_model.reasoning = level)
 }
 
 /// Persist a reasoning level for a specific model ID
@@ -575,18 +587,17 @@ pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
 /// the choice sticks per-model rather than bleeding into other models on
 /// next session start.
 pub fn persist_reasoning_for_model(model_id: &str, level: ReasoningLevel) -> Result<()> {
-    let mut config = load_config()?;
-    config
-        .reasoning_per_model
-        .insert(model_id.to_string(), level);
-    save_config(&config, None)
+    update_config(|config| {
+        config
+            .reasoning_per_model
+            .insert(model_id.to_string(), level);
+    })
 }
 
 /// Persist (or clear) a per-model Ollama `num_ctx` override. `Some(n)` sets it,
 /// `None` removes the entry (returning that model to auto-fit).
 pub fn persist_ollama_num_ctx_for_model(model_id: &str, num_ctx: Option<u32>) -> Result<()> {
-    let mut config = load_config()?;
-    match num_ctx {
+    update_config(|config| match num_ctx {
         Some(n) => {
             config
                 .ollama_num_ctx_per_model
@@ -595,15 +606,12 @@ pub fn persist_ollama_num_ctx_for_model(model_id: &str, num_ctx: Option<u32>) ->
         None => {
             config.ollama_num_ctx_per_model.remove(model_id);
         },
-    }
-    save_config(&config, None)
+    })
 }
 
 /// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
 pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
-    let mut config = load_config()?;
-    config.ollama.allow_ram_offload = enabled;
-    save_config(&config, None)
+    update_config(|config| config.ollama.allow_ram_offload = enabled)
 }
 
 /// Resolve which model to use: CLI arg > last_used > default_model > any available
