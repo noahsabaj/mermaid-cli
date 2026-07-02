@@ -871,6 +871,13 @@ fn classify_head(head: &str, segment: &[String]) -> RiskClass {
             _ => RiskClass::ShellMutation,
         };
     }
+    // `awk` is Turing-complete: field/pattern forms only read, but a program
+    // can write (`print > f`), exec (`system()`, `| "cmd"`), or edit in place
+    // (gawk `-i inplace`). Inspect the program so the ubiquitous read-only
+    // idiom (`awk '{print $1}'`) isn't blanket-blocked while writes stay gated.
+    if matches!(head, "awk" | "gawk" | "mawk" | "nawk") {
+        return classify_awk(segment);
+    }
     // `find` is read-only only without an action primitive: `-exec`/`-ok` run an
     // arbitrary command, `-delete`/`-fprint*`/`-fls` write or delete. argv0-only
     // classification rated all of these ReadOnly (RC-2).
@@ -901,6 +908,54 @@ fn classify_head(head: &str, segment: &[String]) -> RiskClass {
     }
     // Unknown binary ⇒ assume it can mutate. This is the safe default.
     RiskClass::ShellMutation
+}
+
+/// Classify an `awk` invocation by inspecting its program + flags. Read-only
+/// unless it can write, exec, or run un-inspectable external code. Every awk
+/// side effect needs one of a small set of surface markers, so a conservative
+/// scan for them can't miss a mutation (worst case it OVER-blocks a benign
+/// `$1 > 5` comparison — the safe direction):
+///   - file write: `print`/`printf` `> f` / `>> f` ⇒ contains `>`
+///   - command exec: `system(...)`, `print | "cmd"`, `"cmd" | getline`
+///     ⇒ contains `system` or `|`
+///   - in-place / extension load: gawk `-i` (`--include`) ⇒ arbitrary code
+///   - external program: `-f file` / `--file` ⇒ can't be inspected
+///
+/// `-F`/`-v` (and long forms) carry DATA, not code — a `>`/`|`/`system` in a
+/// field separator or variable value is a literal string, never executed — so
+/// those tokens are skipped before the marker scan.
+fn classify_awk(segment: &[String]) -> RiskClass {
+    for tok in segment.iter().skip(1) {
+        let t = tok.as_str();
+        // Field separator / variable assignment: value is data, scan-exempt.
+        if t.starts_with("-F")
+            || t.starts_with("-v")
+            || t.starts_with("--field-separator")
+            || t.starts_with("--assign")
+        {
+            continue;
+        }
+        // Extension load (`-i`, gawk `--include`) or external program
+        // (`-f`/`--file`): arbitrary or un-inspectable code.
+        if t == "-i"
+            || (t.starts_with("-i") && t.len() > 2)
+            || t == "-f"
+            || (t.starts_with("-f") && t.len() > 2)
+            || t.starts_with("--include")
+            || t.starts_with("--file")
+        {
+            return RiskClass::ShellMutation;
+        }
+        // Program / data / inline-source tokens: any output redirect is a
+        // write; a command pipe or `system()` is code execution.
+        if t.contains('>') {
+            return RiskClass::ShellMutation;
+        }
+        if t.contains('|') || t.contains("system") {
+            return RiskClass::Process;
+        }
+    }
+    RiskClass::ReadOnly
 }
 
 /// `find` only reads the tree unless it carries an action primitive. `-exec`/
@@ -2052,6 +2107,55 @@ mod tests {
                 super::classify_shell_command(cmd),
                 RiskClass::ReadOnly,
                 "mutation must never classify as read-only: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn awk_read_only_forms_are_reads() {
+        // User report (v0.14.1): `awk` was blanket-blocked in read_only, so a
+        // read-only field-extraction pipeline was denied. The common
+        // read-only idioms must classify as reads. `-F'|'`/`-v` carry data
+        // (a `|` separator here is not a command pipe), so they stay reads.
+        for cmd in [
+            "awk -F/ '{print $1}'",
+            "awk '{print $1}' f",
+            "awk '/pattern/' f",
+            "awk 'NR==1' f",
+            "awk '{sum+=$1} END{print sum}' f",
+            "awk -F'|' '{print $2}' f",
+            "awk -v x=1 '{print x}' f",
+            "mawk '{print NF}' f",
+            r#"rg --files 2>/dev/null | awk -F/ '{print $1}' | sort -u"#,
+        ] {
+            assert_eq!(
+                super::classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "read-only awk must classify as a read: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn awk_write_and_exec_forms_stay_gated() {
+        // Every awk side-effect surface must keep classifying as more than a
+        // read, so it can never auto-run in read_only. A missed case here
+        // would be a bypass (the direction that matters most).
+        for cmd in [
+            r#"awk '{print > "/tmp/x"}' f"#,        // file write
+            r#"awk '{printf "%s",$0 >> "log"}' f"#, // append
+            r#"awk '{system("rm -rf /")}'"#,        // command exec
+            r#"awk 'BEGIN{system("id")}'"#,
+            r#"awk '{print $1 | "sh"}'"#, // pipe to command
+            r#"awk 'BEGIN{"date"|getline d; print d}'"#, // pipe from command
+            "gawk -i inplace '{gsub(/a/,\"b\")}' f", // in-place edit
+            "awk -f script.awk f",        // external (un-inspectable)
+            "awk --file=script.awk f",
+        ] {
+            assert_ne!(
+                super::classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "awk side-effect form must NOT classify as read-only: {cmd}"
             );
         }
     }

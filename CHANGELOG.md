@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `read_only` no longer blanket-blocks `awk` (user-reported): the ubiquitous
+  read-only idioms (`awk '{print $1}'`, field/pattern extraction, `-F`/`-v`)
+  now classify as reads, so a pipeline like `… | awk -F/ '{print $1}' | sort`
+  runs. `awk` that writes a file (`print > f`), runs a command (`system()`,
+  `| "cmd"`), edits in place (gawk `-i inplace`), or loads an external program
+  (`-f script.awk`) still classifies as a mutation and stays gated. (A bare
+  `>` comparison like `awk '$1 > 5'` is conservatively treated as a write —
+  indistinguishable from a redirect without a full awk parser.)
+
 ## [0.14.1] - 2026-07-02
 
 ### Security
