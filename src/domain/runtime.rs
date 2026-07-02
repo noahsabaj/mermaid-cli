@@ -230,6 +230,11 @@ pub enum ToolMetadata {
     },
     Subagent {
         model_id: String,
+        /// Continuation handle: pass back via the `agent` tool's `agent_id`
+        /// arg to send a follow-up prompt to this child with its context
+        /// intact. Empty on recordings from before continuations existed.
+        #[serde(default)]
+        agent_id: String,
     },
     Custom {
         name: String,

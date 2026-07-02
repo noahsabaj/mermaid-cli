@@ -313,10 +313,13 @@ fn action_details_for(
                     super::compaction::format_compact_count(usage.total_tokens)
                 ));
             }
-            if let ToolMetadata::Subagent { model_id } = &outcome.metadata.detail
-                && !model_id.is_empty()
-            {
-                bits.push(model_id.clone());
+            if let ToolMetadata::Subagent { model_id, agent_id } = &outcome.metadata.detail {
+                if !model_id.is_empty() {
+                    bits.push(model_id.clone());
+                }
+                if !agent_id.is_empty() {
+                    bits.push(agent_id.clone());
+                }
             }
             let detail = if bits.is_empty() {
                 "subagent finished".to_string()
@@ -568,6 +571,7 @@ mod tests {
             ToolRunMetadata {
                 detail: ToolMetadata::Subagent {
                     model_id: "ollama/minimax-m3".to_string(),
+                    agent_id: "a3".to_string(),
                 },
                 token_usage: Some(usage),
                 ..Default::default()
@@ -579,6 +583,7 @@ mod tests {
                 assert!(text.starts_with("Success"), "got {text}");
                 assert!(text.contains("12.3k tokens"), "got {text}");
                 assert!(text.contains("ollama/minimax-m3"), "got {text}");
+                assert!(text.contains("a3"), "the continuation handle shows: {text}");
             },
             other => panic!("expected Preview details, got {other:?}"),
         }

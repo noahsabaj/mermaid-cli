@@ -3338,6 +3338,10 @@ fn system_prompt_for_state(state: &State) -> String {
         prompt.push_str("\n\n");
         prompt.push_str(crate::prompts::SUBAGENT_CONTRACT);
     }
+    if let Some(preamble) = &state.session.agent_preamble {
+        prompt.push_str("\n\n");
+        prompt.push_str(preamble);
+    }
     prompt
 }
 
@@ -6647,6 +6651,7 @@ mod tests {
         let metadata = crate::domain::ToolRunMetadata {
             detail: crate::domain::ToolMetadata::Subagent {
                 model_id: "ollama/test".to_string(),
+                agent_id: "a1".to_string(),
             },
             token_usage: Some(usage),
             ..Default::default()
@@ -6685,6 +6690,14 @@ mod tests {
         assert!(
             prompt.contains("returned verbatim to the parent"),
             "the contract must state the report semantics",
+        );
+        // An agent type's preamble rides after the contract.
+        state.session.agent_preamble = Some("## Explore Agent\nRead-only recon.".to_string());
+        let prompt = system_prompt_for_state(&state);
+        assert!(prompt.contains("## Explore Agent"), "got {prompt}");
+        assert!(
+            prompt.find("## Subagent Contract") < prompt.find("## Explore Agent"),
+            "type preamble must follow the contract",
         );
     }
 

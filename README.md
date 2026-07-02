@@ -7,7 +7,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Multi-Provider** — Ollama (local/cloud), Anthropic Claude, Google Gemini, OpenAI, Groq, OpenRouter, Cerebras, DeepInfra, Together, plus fully-custom OpenAI-compatible endpoints
 - **Native Tool Calling** — read, write, edit, delete, create directories, execute commands, search the web, spawn subagents, and call configured MCP tools
 - **Computer Use** — screenshot, click, type, press keys, scroll, move the mouse, and list windows on supported interactive GUI backends
-- **Subagents** — spawn parallel autonomous agents for independent tasks
+- **Subagents** — spawn parallel autonomous agents for independent tasks; built-in `general` and read-only `explore` types (plus user-defined ones), per-call model override, and continuation handles to follow up with a child that kept its context
 - **Agent Loop** — model calls tools autonomously, sees results, and continues until done
 - **Image Paste** — Ctrl+V to attach images for vision models (X11/Wayland/macOS/Windows)
 - **Reasoning Levels** — seven tiers (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`); cycle with Alt+T or set via `/reasoning`; persisted per-model
@@ -327,6 +327,24 @@ enabled = true
 # context-window truncation, before the run stops and shows the manual
 # levers (`/context max`, `/context offload on`). 0 = uncapped.
 max_truncation_recoveries = 3
+
+# Subagents (the `agent` tool). Built-in types: `general` (full tool access
+# at your safety mode) and `explore` (read-only reconnaissance). Define more
+# below; a custom name shadows a built-in, so `[agents.types.explore]`
+# retunes the built-in. Callers pick a type with the tool's `type` arg,
+# override the model per call with `model`, and continue a prior child with
+# `agent_id` (from the `[agent_id: …]` trailer on each result).
+[agents]
+# Wall-clock ceiling per subagent drive, in seconds. 0 = built-in default
+# (1200 = 20 minutes).
+timeout_secs = 1200
+
+# Example user-defined type. Every field is optional.
+# [agents.types.scout]
+# tools = ["read_file", "execute_command"]  # omit for the full child set
+# safety = "read_only"    # ceiling — the child never runs looser than this
+# preamble = "You are a scout: find and report, fast."
+# model = "ollama/qwen3:8b"   # default model for this type; per-call `model` wins
 
 # Per-model reasoning preferences (remembered across sessions)
 [reasoning_per_model]
