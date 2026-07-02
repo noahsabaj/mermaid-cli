@@ -40,7 +40,7 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::app::Config;
-use crate::domain::Msg;
+use crate::domain::{Msg, Session};
 use crate::session::ConversationHistory;
 
 /// Bumped when the wire shape changes incompatibly. Replay refuses logs
@@ -119,7 +119,18 @@ impl Recorder {
     /// Record one reducer input. `now` must be the same value the driver
     /// stamps into `state.now` for this tick — that identity is what makes
     /// the recorded `ts` a faithful replay clock.
+    ///
+    /// `Msg::Tick` is deliberately NOT recorded: the reducer's Tick arm is a
+    /// documented no-op (render derives the spinner from `state.now`), so a
+    /// 60 Hz tick stream would bloat the log by megabytes per hour for zero
+    /// replay fidelity. The `tick_is_a_reducer_noop` invariant test pins
+    /// this — if Tick ever grows state effects, that test fails and ticks
+    /// must be recorded again. Old logs containing Tick entries still fold
+    /// fine (a no-op replays as a no-op).
     pub fn record_msg(&mut self, now: DateTime<Local>, msg: &Msg) -> Result<()> {
+        if matches!(msg, Msg::Tick) {
+            return Ok(());
+        }
         // The copied selection is already visible in the transcript and the
         // reducer never reads the payload (it only feeds `Cmd::CopyToClipboard`),
         // so persist a placeholder instead of duplicating potentially-huge text.
@@ -147,6 +158,20 @@ impl Recorder {
         Ok(())
     }
 
+    /// Seal the recording with a fingerprint of the final session state, so
+    /// a future `--replay` can verify its fold reproduces what this live
+    /// session actually saw (not merely that the fold is self-consistent).
+    /// Written on clean exit; a crashed session simply has no trailer.
+    pub fn record_trailer(&mut self, now: DateTime<Local>, session: &Session) -> Result<()> {
+        let trailer = SessionTrailer {
+            ts: now,
+            final_session_fingerprint: session_fingerprint(session),
+        };
+        let line = serde_json::to_string(&trailer).context("serialize session trailer")?;
+        writeln!(self.writer, "{}", line).context("write trailer line")?;
+        self.flush()
+    }
+
     pub fn flush(&mut self) -> Result<()> {
         self.writer.flush().context("flush recorder")
     }
@@ -156,6 +181,39 @@ impl Drop for Recorder {
     fn drop(&mut self) {
         let _ = self.writer.flush();
     }
+}
+
+/// Stable fingerprint of the session outcome — the durable, user-visible
+/// half of `State`: the full conversation (messages, ids, titles,
+/// timestamps), model id, reasoning/safety modes, and token accounting.
+///
+/// Deliberately hashes ONLY `state.session`, excluding machine-derived
+/// fields (`temp_dir`) and `settings` (whose recorded copy is redacted), so
+/// the same log folds to the same fingerprint on any machine. A mismatch
+/// against a recorded trailer therefore means exactly one thing: the fold
+/// no longer reproduces the live session's outcome — expected when
+/// redaction fired mid-session or the reducer changed since recording,
+/// alarming otherwise.
+pub fn session_fingerprint(session: &Session) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{session:?}").as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity("sha256:".len() + digest.len() * 2);
+    out.push_str("sha256:");
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Final line of a cleanly-exited recording: the fingerprint `--replay`
+/// verifies its fold against.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTrailer {
+    pub ts: DateTime<Local>,
+    pub final_session_fingerprint: String,
 }
 
 /// Parsed JSONL entry. Fields mirror what [`Recorder::record_msg`] writes.
@@ -182,11 +240,13 @@ impl ReplayEntry {
 pub enum RecordLine {
     /// A normal `{ts, kind, turn, msg}` entry.
     Entry(ReplayEntry),
+    /// The clean-exit seal: a fingerprint of the live session's final state.
+    Trailer(SessionTrailer),
     /// Another session header: `Recorder::open` appends, so a reused
     /// `--record` path holds multiple sessions back to back. Replay folds
     /// the first session and stops here.
     Header(Box<SessionHeader>),
-    /// Neither an entry nor a header — corrupt or truncated write.
+    /// Neither an entry, trailer, nor header — corrupt or truncated write.
     Malformed { raw: String, error: String },
 }
 
@@ -232,15 +292,19 @@ impl Iterator for Replay {
             Ok(raw) => raw,
             Err(e) => return Some(Err(e)),
         };
-        // Entries are the overwhelmingly common case; a header mid-file marks
-        // the start of an appended second session.
+        // Entries are the overwhelmingly common case; a trailer seals a
+        // cleanly-exited session; a header mid-file marks the start of an
+        // appended second session.
         let line = match serde_json::from_str::<ReplayEntry>(&raw) {
             Ok(entry) => RecordLine::Entry(entry),
-            Err(entry_err) => match serde_json::from_str::<SessionHeader>(&raw) {
-                Ok(header) => RecordLine::Header(Box::new(header)),
-                Err(_) => RecordLine::Malformed {
-                    raw,
-                    error: entry_err.to_string(),
+            Err(entry_err) => match serde_json::from_str::<SessionTrailer>(&raw) {
+                Ok(trailer) => RecordLine::Trailer(trailer),
+                Err(_) => match serde_json::from_str::<SessionHeader>(&raw) {
+                    Ok(header) => RecordLine::Header(Box::new(header)),
+                    Err(_) => RecordLine::Malformed {
+                        raw,
+                        error: entry_err.to_string(),
+                    },
                 },
             },
         };
@@ -300,7 +364,7 @@ mod tests {
         {
             let mut r = Recorder::open(&path).expect("open");
             r.record_header(&test_header(ts)).expect("header");
-            r.record_msg(ts, &Msg::Tick).expect("record");
+            r.record_msg(ts, &Msg::SessionSaved).expect("record");
             r.record_msg(
                 ts,
                 &Msg::SubmitPrompt {
@@ -333,8 +397,8 @@ mod tests {
                 other => panic!("expected entry, got {other:?}"),
             })
             .collect();
-        assert_eq!(entries[0].kind, "Tick");
-        assert!(matches!(entries[0].to_msg().unwrap(), Msg::Tick));
+        assert_eq!(entries[0].kind, "SessionSaved");
+        assert!(matches!(entries[0].to_msg().unwrap(), Msg::SessionSaved));
         match entries[1].to_msg().unwrap() {
             Msg::SubmitPrompt {
                 text,
@@ -472,7 +536,8 @@ mod tests {
         {
             let mut r = Recorder::open(&path).expect("open");
             r.record_header(&test_header(fixed_ts())).expect("header");
-            r.record_msg(fixed_ts(), &Msg::Tick).expect("record");
+            r.record_msg(fixed_ts(), &Msg::SessionSaved)
+                .expect("record");
         }
         {
             let mut r = Recorder::open(&path).expect("reopen");
@@ -485,6 +550,61 @@ mod tests {
         assert!(matches!(lines[0], RecordLine::Entry(_)));
         assert!(matches!(lines[1], RecordLine::Header(_)));
         assert!(matches!(lines[2], RecordLine::Entry(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ticks_are_elided_from_recordings() {
+        // The reducer's Tick arm is a documented no-op (pinned by the
+        // `tick_is_a_reducer_noop` invariant test), so a 60 Hz tick stream
+        // adds nothing but bulk — record_msg drops it.
+        let path = tmpfile("noticks.jsonl");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut r = Recorder::open(&path).expect("open");
+            r.record_header(&test_header(fixed_ts())).expect("header");
+            r.record_msg(fixed_ts(), &Msg::Tick).expect("tick");
+            r.record_msg(fixed_ts(), &Msg::Quit).expect("quit");
+            r.record_msg(fixed_ts(), &Msg::Tick).expect("tick");
+        }
+        let (_, replay) = Replay::open(&path).expect("replay");
+        let lines: Vec<_> = replay.collect::<std::io::Result<_>>().expect("read");
+        assert_eq!(lines.len(), 1, "only the Quit entry may hit disk");
+        let RecordLine::Entry(entry) = &lines[0] else {
+            panic!("expected entry");
+        };
+        assert_eq!(entry.kind, "Quit");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn trailer_round_trips_and_fingerprint_is_stable() {
+        let path = tmpfile("trailer.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let session = crate::domain::State::new(
+            Config::default(),
+            PathBuf::from("/tmp/project"),
+            "ollama/test".to_string(),
+            fixed_ts(),
+        )
+        .session;
+        {
+            let mut r = Recorder::open(&path).expect("open");
+            r.record_header(&test_header(fixed_ts())).expect("header");
+            r.record_trailer(fixed_ts(), &session).expect("trailer");
+        }
+        let (_, mut replay) = Replay::open(&path).expect("replay");
+        let line = replay.next().expect("line").expect("io ok");
+        let RecordLine::Trailer(trailer) = line else {
+            panic!("expected trailer, got {line:?}");
+        };
+        // Same session, same fingerprint — the stability the live-match
+        // verdict rests on.
+        assert_eq!(
+            trailer.final_session_fingerprint,
+            session_fingerprint(&session)
+        );
+        assert!(trailer.final_session_fingerprint.starts_with("sha256:"));
         let _ = std::fs::remove_file(&path);
     }
 

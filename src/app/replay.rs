@@ -22,7 +22,7 @@ use std::path::Path;
 use anyhow::Result;
 use chrono::{DateTime, Local};
 
-use crate::app::recorder::{RecordLine, Replay, SessionHeader};
+use crate::app::recorder::{RecordLine, Replay, SessionHeader, session_fingerprint};
 use crate::domain::{Msg, State, update};
 use crate::models::MessageRole;
 
@@ -48,6 +48,14 @@ pub struct ReplayReport {
     /// True when folding the log twice produced byte-identical `State`
     /// debug representations — the reducer-purity invariant.
     pub deterministic: bool,
+    /// The live session's final fingerprint, when the recording was sealed
+    /// on clean exit. `None` for crashed sessions and pre-trailer logs.
+    pub live_fingerprint: Option<String>,
+    /// Whether the folded session reproduces the live one: `Some(true)` =
+    /// exact match, `Some(false)` = diverged (expected when redaction fired
+    /// mid-session or the reducer changed since recording), `None` = no
+    /// trailer to compare against.
+    pub matches_live: Option<bool>,
     /// Final state after the fold.
     pub state: State,
 }
@@ -62,6 +70,7 @@ pub fn replay_recording(path: &Path) -> Result<ReplayReport> {
     let mut msgs: Vec<(usize, DateTime<Local>, Msg)> = Vec::new();
     let mut skipped = Vec::new();
     let mut second_session_at = None;
+    let mut trailer = None;
     let mut line_no = 1usize; // the header is line 1
     for line in lines {
         line_no += 1;
@@ -69,6 +78,12 @@ pub fn replay_recording(path: &Path) -> Result<ReplayReport> {
             RecordLine::Entry(entry) => match entry.to_msg() {
                 Ok(msg) => msgs.push((line_no, entry.ts, msg)),
                 Err(err) => skipped.push((line_no, format!("{err:#}"))),
+            },
+            RecordLine::Trailer(t) => {
+                // Clean-exit seal: the live session's final fingerprint.
+                // Keep the first (this session's); keep reading in case an
+                // appended second session follows.
+                trailer.get_or_insert(t);
             },
             RecordLine::Header(_) => {
                 // `Recorder::open` appends, so a reused --record path holds
@@ -87,6 +102,13 @@ pub fn replay_recording(path: &Path) -> Result<ReplayReport> {
     let (second, _) = fold(&header, &msgs);
     let deterministic = format!("{state:?}") == format!("{second:?}");
 
+    // Verify the fold against the LIVE session's recorded outcome (a
+    // stronger claim than determinism, which only proves self-consistency).
+    let live_fingerprint = trailer.map(|t| t.final_session_fingerprint);
+    let matches_live = live_fingerprint
+        .as_ref()
+        .map(|live| *live == session_fingerprint(&state.session));
+
     let not_applied_after_stop = match stopped_at {
         Some(stop) => msgs.iter().filter(|(line, ..)| *line > stop).count(),
         None => 0,
@@ -102,6 +124,8 @@ pub fn replay_recording(path: &Path) -> Result<ReplayReport> {
         not_applied_after_stop,
         second_session_at,
         deterministic,
+        live_fingerprint,
+        matches_live,
         state,
     })
 }
@@ -201,6 +225,17 @@ fn render_report(path: &Path, report: &ReplayReport) -> String {
             "FAIL — two folds of the same log diverged (reducer purity bug)"
         }
     );
+    let _ = writeln!(
+        out,
+        "  live match: {}",
+        match report.matches_live {
+            Some(true) => "yes — the fold reproduces the live session's recorded outcome",
+            Some(false) =>
+                "no — the fold differs from the live session (expected if redaction \
+                 fired mid-session or the reducer changed since recording)",
+            None => "unknown — recording has no clean-exit fingerprint",
+        }
+    );
 
     let messages = report.state.session.messages();
     let _ = writeln!(out);
@@ -277,8 +312,12 @@ mod tests {
     /// stream end, quit — exactly as the live driver would.
     fn record_session(path: &PathBuf) {
         let _ = std::fs::remove_file(path);
+        let h = header(fixed_ts(0));
         let mut r = Recorder::open(path).expect("open recorder");
-        r.record_header(&header(fixed_ts(0))).expect("header");
+        r.record_header(&h).expect("header");
+        // Fold while recording, exactly like the live driver: one shared
+        // clock per entry, and the trailer seals the final session.
+        let mut state = State::new(h.config.clone(), h.cwd.clone(), h.model_id.clone(), h.ts);
         let script: Vec<(i64, Msg)> = vec![
             (
                 1,
@@ -312,9 +351,15 @@ mod tests {
             ),
             (5, Msg::Quit),
         ];
-        for (offset, msg) in &script {
-            r.record_msg(fixed_ts(*offset), msg).expect("record");
+        for (offset, msg) in script {
+            let now = fixed_ts(offset);
+            r.record_msg(now, &msg).expect("record");
+            state.now = now;
+            let (next, _cmds) = update(state, msg);
+            state = next;
         }
+        r.record_trailer(fixed_ts(9), &state.session)
+            .expect("trailer");
         r.flush().expect("flush");
     }
 
@@ -366,9 +411,75 @@ mod tests {
         let report = replay_recording(&path).expect("replay");
         let text = render_report(&path, &report);
         assert!(text.contains("determinism: PASS"));
+        assert!(text.contains("live match: yes"));
         assert!(text.contains("[user] hello there"));
         assert!(text.contains("[assistant] Hi — hello!"));
         assert!(text.contains("5 applied"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn replay_verifies_against_the_live_fingerprint() {
+        let path = tmpfile("livematch.jsonl");
+        record_session(&path);
+        let report = replay_recording(&path).expect("replay");
+        assert_eq!(
+            report.matches_live,
+            Some(true),
+            "a faithful fold must match the live session's seal"
+        );
+        assert!(
+            report
+                .live_fingerprint
+                .as_deref()
+                .expect("trailer present")
+                .starts_with("sha256:")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tampered_recording_fails_live_match_but_stays_deterministic() {
+        let path = tmpfile("tamper.jsonl");
+        record_session(&path);
+        // Alter one streamed chunk after the fact — the fold is still
+        // self-consistent (deterministic) but no longer reproduces what the
+        // live session saw.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("hello!"));
+        std::fs::write(&path, raw.replace("hello!", "goodbye")).unwrap();
+
+        let report = replay_recording(&path).expect("replay");
+        assert_eq!(
+            report.matches_live,
+            Some(false),
+            "an altered log must not match the live fingerprint"
+        );
+        assert!(
+            report.deterministic,
+            "tampering must not affect fold self-consistency"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn recording_without_trailer_reports_unknown_live_match() {
+        // A crashed session never writes the clean-exit seal.
+        let path = tmpfile("crash.jsonl");
+        record_session(&path);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let without_trailer: String = raw
+            .lines()
+            .filter(|l| !l.contains("final_session_fingerprint"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, without_trailer).unwrap();
+
+        let report = replay_recording(&path).expect("replay");
+        assert_eq!(report.matches_live, None);
+        assert!(report.live_fingerprint.is_none());
+        assert!(render_report(&path, &report).contains("live match: unknown"));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -380,11 +491,18 @@ mod tests {
         {
             let mut r = Recorder::open(&path).expect("reopen");
             r.record_header(&header(fixed_ts(100))).expect("header2");
-            r.record_msg(fixed_ts(101), &Msg::Tick).expect("record");
+            r.record_msg(fixed_ts(101), &Msg::SessionSaved)
+                .expect("record");
         }
         let report = replay_recording(&path).expect("replay");
-        assert_eq!(report.second_session_at, Some(7));
+        // File: header(1) + 5 entries(2-6) + trailer(7) + header2(8).
+        assert_eq!(report.second_session_at, Some(8));
         assert_eq!(report.total_entries, 5, "second session must not count");
+        assert_eq!(
+            report.matches_live,
+            Some(true),
+            "the first session's trailer still verifies"
+        );
         assert!(report.deterministic);
         let _ = std::fs::remove_file(&path);
     }

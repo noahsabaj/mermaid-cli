@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use mermaid_cli::app::Config;
-use mermaid_cli::domain::{Msg, State, ToolCallId, ToolOutcome, TurnId, update};
+use mermaid_cli::domain::{Msg, State, ToolCallId, ToolOutcome, TurnId, start_generating, update};
 use mermaid_cli::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
 use mermaid_cli::models::{FinishReason, MessageRole, TokenUsage};
 
@@ -160,6 +160,41 @@ fn the_script_exercises_the_full_turn_machinery() {
         "follow-up assistant answer missing"
     );
     assert!(state.should_exit, "Quit must end the fold");
+}
+
+#[test]
+fn tick_is_a_reducer_noop() {
+    // The recorder ELIDES `Msg::Tick` from `--record` logs on the strength
+    // of this invariant: the Tick arm mutates nothing (render derives the
+    // spinner and elapsed time from `state.now`), so recording a 60 Hz tick
+    // stream would bloat logs by megabytes per hour for zero replay
+    // fidelity. If this test fails because Tick has grown state effects,
+    // ticks must be recorded again — see `Recorder::record_msg`.
+    let idle = State::new(
+        Config::default(),
+        PathBuf::from("/tmp/tick"),
+        "ollama/test".to_string(),
+        fixed_ts(0),
+    );
+    let mut busy = State::new(
+        Config::default(),
+        PathBuf::from("/tmp/tick"),
+        "ollama/test".to_string(),
+        fixed_ts(0),
+    );
+    busy.turn = start_generating(TurnId(1), std::time::SystemTime::from(fixed_ts(0)));
+    let after_session = fold(0); // full script: transcript + should_exit
+
+    for state in [idle, busy, after_session] {
+        let before = format!("{state:?}");
+        let (after, cmds) = update(state, Msg::Tick);
+        assert_eq!(
+            before,
+            format!("{after:?}"),
+            "Msg::Tick mutated state — record ticks again before shipping this"
+        );
+        assert!(cmds.is_empty(), "Msg::Tick emitted commands");
+    }
 }
 
 #[test]
