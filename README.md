@@ -118,11 +118,11 @@ Computer-use registration is backend-gated: Linux/X11 and Linux/Wayland are the 
 mermaid                                         # Start fresh session
 mermaid --continue                              # Resume last session
 mermaid --sessions                              # Pick a previous session to resume
-mermaid --model ollama/qwen3-coder:30b          # Ollama local
-mermaid --model anthropic/claude-opus-4-8       # Anthropic (requires ANTHROPIC_API_KEY)
-mermaid --model gemini/gemini-3.1-pro-preview   # Gemini (requires GOOGLE_API_KEY)
-mermaid --model openai/gpt-5                    # OpenAI (requires OPENAI_API_KEY)
-mermaid --model groq/qwen-qwq-32b               # Groq (requires GROQ_API_KEY)
+mermaid --model ollama/qwen3-coder:30b          # Ollama local (any installed model — `mermaid list`)
+mermaid --model anthropic/<model>               # Anthropic (requires ANTHROPIC_API_KEY)
+mermaid --model gemini/<model>                  # Gemini (requires GOOGLE_API_KEY)
+mermaid --model openai/<model>                  # OpenAI (requires OPENAI_API_KEY)
+mermaid --model groq/<model>                    # Groq (requires GROQ_API_KEY)
 mermaid --reasoning high                        # Override default reasoning depth
 mermaid --path /path/to/project                  # Run against a specific project directory
 mermaid --record /tmp/session.jsonl              # Record reducer events for replay/debugging
@@ -209,7 +209,7 @@ Advanced runtime:
 - `/tasks`, `/task <id>`, `/pause <id>`, `/resume <id>`
 - `/processes`, `/logs <id>`, `/stop <id>`, `/restart <id>`, `/open <target>`, `/ports`
 
-Reasoning choices persist per-model: setting `/reasoning high` on Claude Opus 4.8 and `/reasoning low` on Ollama is remembered across sessions.
+Reasoning choices persist per-model: set `/reasoning high` on one model and `/reasoning low` on another, and each is remembered independently across sessions.
 
 ## Tools
 
@@ -305,7 +305,7 @@ mode = "ask"
 checkpoint_on_mutation = true
 # Model the "auto" classifier uses to vet actions. Omit to vet with the
 # session's active model; set a smaller/faster model to cut latency and cost.
-# auto_classifier_model = "anthropic/claude-haiku-4-5"
+# auto_classifier_model = "<provider>/<small-fast-model>"
 
 [non_interactive]
 # Run behavior is controlled by CLI flags:
@@ -330,17 +330,17 @@ max_truncation_recoveries = 3
 
 # Per-model reasoning preferences (remembered across sessions)
 [reasoning_per_model]
-"anthropic/claude-opus-4-8" = "high"
+# "<provider>/<model>" = "high"
 "ollama/qwen3-coder:30b" = "low"
 
 # Optional agent/plugin model profiles. A request for `--model fast` or
 # `--model profile:fast` resolves through this table when present.
 [model_profiles]
 fast = "ollama/qwen3-coder:14b"
-large-context = "openai/gpt-5"
-tool-strong = "anthropic/claude-opus-4-8"
-vision = "gemini/gemini-3.1-pro-preview"
-cheap = "groq/qwen-qwq-32b"
+# large-context = "openai/<model>"
+# tool-strong = "anthropic/<model>"
+# vision = "gemini/<model>"
+# cheap = "groq/<model>"
 
 # Remote providers — override env-var name, base URL, or extra headers
 [providers.anthropic]
@@ -378,19 +378,19 @@ mermaid --system-prompt-file ./replacement-system-prompt.md
 
 ## Remote Providers
 
-Set the appropriate environment variable (or override via `[providers.<name>].api_key_env` in config):
+Set the appropriate environment variable (or override via `[providers.<name>].api_key_env` in config). Model names are whatever the vendor currently ships — Mermaid passes them through, so use any model id from your provider's docs in the format below:
 
-| Provider | Env var | Example model |
-|----------|---------|---------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `anthropic/claude-opus-4-8` |
-| Google Gemini | `GOOGLE_API_KEY` (`GEMINI_API_KEY` legacy fallback) | `gemini/gemini-3.1-pro-preview` |
-| OpenAI | `OPENAI_API_KEY` | `openai/gpt-5` |
-| Groq | `GROQ_API_KEY` | `groq/qwen-qwq-32b` |
-| OpenRouter | `OPENROUTER_API_KEY` | `openrouter/anthropic/claude-3.7-sonnet` |
-| Cerebras | `CEREBRAS_API_KEY` | `cerebras/gpt-oss-120b` |
-| DeepInfra | `DEEPINFRA_API_KEY` | `deepinfra/deepseek-ai/DeepSeek-R1` |
-| Together | `TOGETHER_API_KEY` | `together/deepseek-ai/DeepSeek-R1` |
-| Ollama Cloud | `OLLAMA_API_KEY` | `ollama/kimi-k2-thinking:cloud` |
+| Provider | Env var | Model format |
+|----------|---------|--------------|
+| Anthropic | `ANTHROPIC_API_KEY` | `anthropic/<model>` |
+| Google Gemini | `GOOGLE_API_KEY` (`GEMINI_API_KEY` legacy fallback) | `gemini/<model>` |
+| OpenAI | `OPENAI_API_KEY` | `openai/<model>` |
+| Groq | `GROQ_API_KEY` | `groq/<model>` |
+| OpenRouter | `OPENROUTER_API_KEY` | `openrouter/<vendor>/<model>` |
+| Cerebras | `CEREBRAS_API_KEY` | `cerebras/<model>` |
+| DeepInfra | `DEEPINFRA_API_KEY` | `deepinfra/<vendor>/<model>` |
+| Together | `TOGETHER_API_KEY` | `together/<vendor>/<model>` |
+| Ollama Cloud | `OLLAMA_API_KEY` | `ollama/<model>:cloud` |
 
 Ollama Cloud models use `OLLAMA_API_KEY` or `cloud_api_key` under `[ollama]`. Web search and web fetch tool registration currently requires `OLLAMA_API_KEY` in the environment. Use `mermaid cloud-setup` from your shell to save the config key for cloud models; `/cloud-setup` in the TUI points back to that shell command.
 

@@ -95,7 +95,7 @@ pub enum Commands {
     Models,
     /// Show static and cached capability info for a model id
     ModelInfo {
-        /// Model id, e.g. openai/gpt-5.2
+        /// Model id, e.g. <provider>/<model>
         model: String,
     },
     /// Start a chat session (default)

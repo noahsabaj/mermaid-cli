@@ -99,7 +99,9 @@ for line in lines {
 ## Use cases
 
 - **Regression tests.** Save a JSONL log of any interesting session; fold it in a test and assert on the final `State`. The same log always folds to the same state — see `tests/replay_determinism.rs` for the property pinned as CI.
-- **Bug reports.** Ask a user to re-run with `--record` and send the log (remind them it contains their prompts and tool output in cleartext, secrets redacted). `mermaid --replay` shows you the exact state trajectory their session took.
+- **Bug reports.** Ask a user to re-run with `--record` and send the log. `mermaid --replay` shows you the exact state trajectory their session took.
+
+  **Before sharing a recording anywhere public, know what's in it.** Beyond the obvious (every prompt, every model reply, every tool result — including file contents the agent read — in cleartext, with only credential-shaped strings redacted), the self-contained header embeds a snapshot of your config: provider `base_url`s (which can reveal internal hostnames, e.g. a LAN vLLM box), MCP server commands/args/env-var names, your project path, and model choices. This is inherent to the design — the log must contain everything that influences the fold — so treat a recording with the same care as the conversation itself.
 - **Purity canary.** `--replay` exits 1 when the double fold diverges, so replaying any stored log in CI guards the reducer's no-wall-clock/no-randomness invariant.
 
 ## Why this is nearly free architecturally
