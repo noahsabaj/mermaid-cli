@@ -45,15 +45,6 @@ pub fn format_duration(total_secs: f64) -> String {
     }
 }
 
-/// Format token count for display: "X.Xk" for >= 1000, raw number otherwise.
-pub fn format_tokens(tokens: usize) -> String {
-    if tokens >= 1000 {
-        format!("{:.1}k tokens", tokens as f64 / 1000.0)
-    } else {
-        format!("{} tokens", tokens)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

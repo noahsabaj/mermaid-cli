@@ -8,7 +8,7 @@
 //!      lifecycle, save/load completion. Originates from
 //!      `effect::EffectRunner` when a spawned task finishes a unit of
 //!      work.
-//!   3. **Housekeeping** — `Tick` (timer-driven redraw), `StatusDismiss`,
+//!   3. **Housekeeping** — `Tick` (timer-driven redraw),
 //!      `InstructionsChanged` (mtime watcher).
 //!
 //! Every effect-result variant carries a `TurnId`. The reducer's first
@@ -259,8 +259,6 @@ pub enum Msg {
     /// 1/60s timer tick. Used for spinner animation + elapsed-time
     /// display. Reducer only advances derived fields.
     Tick,
-    /// Status line expired (self-clear) or user dismissed.
-    StatusDismiss,
     /// Terminal was resized. Reducer normally no-ops; render consumes.
     Resize {
         width: u16,
@@ -268,24 +266,18 @@ pub enum Msg {
     },
 
     // ── Status feedback from async effects ─────────────────────────
-    /// Set `state.status` to `(text, kind)` and schedule automatic
-    /// dismissal after `dismiss_ms`. Used by effect handlers that
-    /// need to surface user-visible feedback without a bespoke Msg
-    /// per effect — today that's clipboard-read success / failure
-    /// (F14), but the variant is general and other effects will reuse
-    /// it. Reducer handles this arm by setting `state.status` and
-    /// pushing `Cmd::DismissStatusAfter { ms: dismiss_ms }`.
+    /// Generic user-visible feedback from an async effect handler, routed into
+    /// the chat transcript. Lets effects surface a result (clipboard read,
+    /// config saved, plugin install, …) without a bespoke Msg per effect.
     TransientStatus {
         text: String,
-        kind: super::state::StatusKind,
-        dismiss_ms: u64,
     },
 
     // ── Mouse (F13) ─────────────────────────────────────────────────
     /// Mouse-wheel scroll in the chat pane. Positive delta = scroll
     /// toward older messages (up), negative = toward newer (down). The
-    /// reducer tracks the scroll offset on `ui.chat_scroll`; the
-    /// ChatWidget reads it during render.
+    /// reducer accumulates into `ui.mouse_scroll_accum`; the render layer
+    /// diffs it and applies the delta to the ChatWidget's scroll offset.
     MouseScroll {
         delta: i16,
     },
@@ -524,7 +516,6 @@ impl Msg {
             Msg::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
             Msg::ModelPullProgress(_) => MsgKind::ModelPullProgress,
             Msg::Tick => MsgKind::Tick,
-            Msg::StatusDismiss => MsgKind::StatusDismiss,
             Msg::Resize { .. } => MsgKind::Resize,
             Msg::MouseScroll { .. } => MsgKind::MouseScroll,
             Msg::OpenImageAt { .. } => MsgKind::OpenImageAt,
@@ -571,7 +562,6 @@ pub enum MsgKind {
     ModelPullFinished,
     ModelPullProgress,
     Tick,
-    StatusDismiss,
     Resize,
     MouseScroll,
     OpenImageAt,

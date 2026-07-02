@@ -196,18 +196,12 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         1
     };
 
-    // The transient status banner that used to live here is gone — that zone is
-    // the generation spinner's alone. Feedback, errors, and command results now
-    // post into the chat transcript instead. The zone is kept at height 0 to
-    // preserve the chunk indices below.
-    let status_banner_height: u16 = 0;
-
     // Reserve the status zone's height to match its row count, but never so much
     // that the input box or bottom bar get evicted on a short terminal: keep room
     // for the chat floor (Min 10), the input box, the bottom bar (≥2), and the
-    // banner/attachment rows. (The trailing Length zones would otherwise starve
-    // before the Min(10) chat zone does.)
-    let status_reserve = 10 + input_height + 2 + status_banner_height + attachment_height;
+    // attachment rows. (The trailing Length zones would otherwise starve before
+    // the Min(10) chat zone does.)
+    let status_reserve = 10 + input_height + 2 + attachment_height;
     let status_line_height = (status_lines.len() as u16)
         .min(6)
         .min(frame.area().height.saturating_sub(status_reserve));
@@ -256,10 +250,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         2
     };
 
-    // 6-zone vertical layout: chat / status line / attachments /
-    // status banner / input / bottom. The banner sits directly above
-    // input so the eye finds "what just happened" right next to
-    // "what's next to type".
+    // 5-zone vertical layout: chat / status line / attachments / input / bottom.
     use ratatui::layout::{Constraint, Direction, Layout};
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -267,7 +258,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             Constraint::Min(10),
             Constraint::Length(status_line_height),
             Constraint::Length(attachment_height),
-            Constraint::Length(status_banner_height),
             Constraint::Length(input_height),
             Constraint::Length(bottom_height),
         ])
@@ -308,8 +298,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         frame.render_widget(attachment_widget, chunks[2]);
     }
 
-    // (Status-banner zone intentionally left unpainted — see status_banner_height.)
-
     // Input box.
     let input_widget = InputWidget {
         input: state.ui.input_buffer.as_str(),
@@ -320,11 +308,11 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     let mut input_widget_state = InputState {
         cursor_position: state.ui.input_cursor.min(state.ui.input_buffer.len()),
     };
-    frame.render_stateful_widget(input_widget, chunks[4], &mut input_widget_state);
+    frame.render_stateful_widget(input_widget, chunks[3], &mut input_widget_state);
 
     // Cursor visible unless focus is on attachments.
     if !state.ui.attachment_focused {
-        let input_area = chunks[4];
+        let input_area = chunks[3];
         let content_width = input_area.width.saturating_sub(2) as usize;
         let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
             &state.ui.input_buffer,
@@ -374,7 +362,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             selected_index: Some(item.selected_option),
             accent: rstate.theme.colors.warning.to_color(),
         };
-        frame.render_widget(widget, chunks[5]);
+        frame.render_widget(widget, chunks[4]);
     } else if let Some(confirm) = &state.confirm {
         use widgets::ApprovalModalWidget;
         let widget = ApprovalModalWidget {
@@ -385,7 +373,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             selected_index: None,
             accent: rstate.theme.colors.warning.to_color(),
         };
-        frame.render_widget(widget, chunks[5]);
+        frame.render_widget(widget, chunks[4]);
     } else if let crate::domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
         use widgets::ConversationListWidget;
         let widget = ConversationListWidget {
@@ -393,7 +381,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             candidates,
             cursor: *cursor,
         };
-        frame.render_widget(widget, chunks[5]);
+        frame.render_widget(widget, chunks[4]);
     } else if palette_open {
         let typed = state
             .ui
@@ -408,7 +396,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             commands,
             selected_index: state.ui.palette_cursor.unwrap_or(0),
         };
-        frame.render_widget(palette_widget, chunks[5]);
+        frame.render_widget(palette_widget, chunks[4]);
     } else {
         let cwd = state.cwd.display().to_string();
         let status_widget = StatusWidget {
@@ -424,7 +412,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             requested_level,
             safety_mode: state.session.safety_mode,
         };
-        frame.render_widget(status_widget, chunks[5]);
+        frame.render_widget(status_widget, chunks[4]);
     }
 }
 
@@ -487,7 +475,7 @@ fn supported_reasoning_for(_state: &State) -> Option<ReasoningCapability> {
 mod tests {
     use super::*;
     use crate::app::Config;
-    use crate::domain::{State, StatusKind, StatusLine, TurnState};
+    use crate::domain::{State, TurnState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
@@ -739,24 +727,6 @@ mod tests {
         assert_eq!(
             GenerationStatus::from_turn(&TurnState::Idle),
             GenerationStatus::Idle
-        );
-    }
-
-    /// The transient status banner was removed — that zone above the input
-    /// belongs to the generation spinner alone, so `state.status` is never
-    /// painted even when set. Command feedback goes to the chat transcript now.
-    #[test]
-    fn state_status_is_never_painted() {
-        let mut s = mock_state();
-        s.status = Some(StatusLine {
-            text: "Reasoning: high".to_string(),
-            kind: StatusKind::Info,
-            shown_at: std::time::SystemTime::now(),
-        });
-        let frame = render_to_string(&s);
-        assert!(
-            !frame.contains("Reasoning: high"),
-            "the status banner is gone; state.status must not reach the screen"
         );
     }
 }

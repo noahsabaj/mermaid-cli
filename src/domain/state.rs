@@ -71,10 +71,6 @@ pub struct State {
     /// `Cmd::ResolveApproval`, which unblocks the parked tool task. Empty in
     /// headless mode (no broker → the out-of-band `/approve` flow instead).
     pub pending_approval: VecDeque<PendingApproval>,
-    /// Transient status line under the input box. One-shot — cleared by
-    /// `Msg::StatusConsumed` or by the next rendered frame depending on
-    /// `StatusKind`.
-    pub status: Option<StatusLine>,
     /// Runtime-only observability state: process registry, provider
     /// capability snapshot, and lifecycle timeline. Not sent to the
     /// model.
@@ -152,7 +148,6 @@ impl State {
             ids: IdAllocatorBundle::default(),
             confirm: None,
             pending_approval: VecDeque::new(),
-            status: None,
             runtime,
             should_exit: false,
             // Seed the injected clock so a freshly-built State is usable before
@@ -762,12 +757,6 @@ pub struct UiState {
     /// Highlighted attachment index when focused. Ignored when
     /// `attachment_focused` is false.
     pub attachment_selected: usize,
-    /// Scroll offset for the chat pane.
-    pub chat_scroll: usize,
-    /// When the slash-palette is open, this holds the filter prefix
-    /// (typed after the leading `/`) so the palette widget can
-    /// re-query the registry.
-    pub palette_filter: String,
     /// When `Some(i)`, the palette has a highlighted row. `None` =
     /// closed / not showing.
     pub palette_cursor: Option<usize>,
@@ -816,8 +805,6 @@ pub struct UiState {
 pub enum UiMode {
     #[default]
     EditingInput,
-    /// Slash-command palette open (user typed `/`).
-    Palette,
     /// `/load` — list of saved conversations visible. `candidates`
     /// holds what the effect handler returned; `cursor` is the
     /// highlighted row.
@@ -960,23 +947,14 @@ pub enum ApprovalKind {
     Classify,
 }
 
-/// Transient status line shown under the input box. Self-clears after
-/// its kind's expected lifetime — `Persistent` entries stay until
-/// explicitly dismissed.
-#[derive(Debug, Clone)]
-pub struct StatusLine {
-    pub text: String,
-    pub kind: StatusKind,
-    pub shown_at: SystemTime,
-}
-
+/// Severity carried on `Msg::CompactionFailed`. The compaction-failed handler
+/// uses it to distinguish a benign no-op (`Info`, e.g. too little history to
+/// compact) from a real failure worth surfacing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
     Info,
     Warn,
     Error,
-    /// Stays until the next turn or explicit dismissal.
-    Persistent,
 }
 
 /// All ID allocators for the session. Grouped so the reducer can

@@ -35,7 +35,7 @@ use crate::providers::ToolRegistry;
 use crate::render::{RenderCache, render};
 use crate::session::ConversationHistory;
 
-/// Options for `run_interactive`. Added so new flags land without
+/// Options for `run_interactive_with`. Added so new flags land without
 /// reshuffling positional args.
 ///
 /// Not `Debug` because `Recorder` owns a `BufWriter<File>` which isn't
@@ -43,32 +43,12 @@ use crate::session::ConversationHistory;
 /// argument bundle, not telemetry.
 #[derive(Default)]
 pub struct InteractiveOptions {
-    /// Optional recorder for `--record <file>` JSONL replay.
+    /// Optional recorder for `--record <file>` JSONL capture.
     pub recorder: Option<Recorder>,
     /// Optional conversation to seed the session with (e.g. from
     /// `--continue` or `--sessions`). When `Some`, the seeded history
     /// replaces `State::session.conversation` before the first frame.
     pub seed_conversation: Option<ConversationHistory>,
-}
-
-/// Interactive TUI main loop. Backwards-compatible wrapper that
-/// forwards to `run_interactive_with` with default options.
-pub async fn run_interactive(
-    config: Config,
-    cwd: PathBuf,
-    model_id: String,
-    recorder: Option<Recorder>,
-) -> Result<()> {
-    run_interactive_with(
-        config,
-        cwd,
-        model_id,
-        InteractiveOptions {
-            recorder,
-            seed_conversation: None,
-        },
-    )
-    .await
 }
 
 /// Interactive TUI main loop with explicit options. `recorder` (if

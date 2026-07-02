@@ -151,8 +151,8 @@ async fn effect_runner_shutdown_bounded_time() {
     let (mut runner, _rx) = EffectRunner::pair(PathBuf::from("/tmp"));
 
     // Queue up several detached operations.
-    for _ in 0..10 {
-        runner.dispatch(Cmd::DismissStatusAfter { ms: 10 });
+    for i in 0..10 {
+        runner.dispatch(Cmd::SetTerminalTitle(format!("t{i}")));
     }
 
     let start = Instant::now();

@@ -44,19 +44,8 @@ pub struct RunOptions {
     pub task_id: Option<String>,
 }
 
-/// Drive one prompt to completion. Bounded by a generous 20-minute
-/// wall-clock so a runaway model doesn't hang a script.
-pub async fn run_non_interactive(
-    config: Config,
-    cwd: PathBuf,
-    model_id: String,
-    prompt: String,
-) -> Result<RunResult> {
-    run_non_interactive_with(config, cwd, model_id, prompt, RunOptions::default()).await
-}
-
-/// Same as `run_non_interactive` but with explicit per-call options.
-/// Kept separate so existing call sites keep compiling unchanged.
+/// Drive one prompt to completion with explicit per-call options. Bounded by a
+/// generous 20-minute wall-clock so a runaway model doesn't hang a script.
 pub async fn run_non_interactive_with(
     config: Config,
     cwd: PathBuf,

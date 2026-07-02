@@ -141,9 +141,3 @@ fn install_panic_hook() {
         original(info);
     }));
 }
-
-/// Public best-effort restore helper for tests and external cleanup
-/// paths that do not own a `TerminalGuard`.
-pub fn force_restore_terminal() {
-    restore_terminal();
-}
