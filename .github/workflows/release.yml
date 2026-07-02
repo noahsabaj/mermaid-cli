@@ -15,9 +15,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Fail fast if the tag and Cargo.toml version disagree. Otherwise a tag pushed
+  # without the version bump publishes artifacts (and a Homebrew formula whose
+  # `mermaid version` test then fails) that report the previous version — first
+  # noticed at users' machines, not in CI.
+  verify-version:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Compare tag to Cargo.toml version
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.version || github.ref_name }}"
+          CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
+          echo "release tag: $TAG / Cargo.toml: v$CARGO_VERSION"
+          if [ "$TAG" != "v$CARGO_VERSION" ]; then
+            echo "::error::Release tag $TAG does not match Cargo.toml version v$CARGO_VERSION"
+            exit 1
+          fi
+
   # Create release and build binaries
   release:
     name: Release - ${{ matrix.platform.release_for }}
+    needs: [verify-version]
     strategy:
       fail-fast: false
       matrix:
@@ -143,6 +164,10 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history + tags so the changelog step's `git describe` can find
+          # the previous tag; a shallow clone made it always emit "First release".
+          fetch-depth: 0
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -171,6 +196,10 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
+          # Explicit tag so the manual `workflow_dispatch` path (which runs off a
+          # branch, not a tag ref) still creates/targets the right release; on a
+          # tag push this equals the pushed tag.
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
           files: |
             ./artifacts/**/*
             SHA256SUMS
