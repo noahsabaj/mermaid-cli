@@ -49,12 +49,14 @@ src/
 │   ├── event_source.rs crossterm Event → Msg
 │   ├── lifecycle.rs    SIGINT/SIGTERM/SIGHUP → Msg
 │   ├── terminal.rs     TerminalGuard (panic-safe teardown)
-│   └── recorder.rs     --record / --replay
+│   └── recorder.rs     --record (JSONL capture; Replay is the read-back API)
 │
-└── render/     — pure view, fn(&State, &mut Frame)
-    ├── mod.rs          render() entrypoint
-    ├── layout.rs       pure layout math
-    ├── chat.rs, input.rs, status.rs, palette.rs, attachments.rs
+└── render/     — pure view, fn(&State, &mut RenderCache, &mut Frame)
+    ├── mod.rs          render() entrypoint + layout math
+    ├── markdown.rs     markdown → wrapped ratatui lines
+    ├── diff.rs, theme.rs
+    └── widgets/        chat, input, status, status_line, slash_palette,
+                        attachment, conversation_list, approval
 ```
 
 ## Type-enforced invariants
@@ -126,9 +128,9 @@ See [`docs/adding_providers.md`](adding_providers.md). tl;dr: implement `ModelPr
 
 See [`docs/adding_tools.md`](adding_tools.md). tl;dr: implement `ToolExecutor` for a unit struct, register it in `ToolRegistry::default` (or a custom registry). One file; cancellation and progress come automatically from `ExecContext`.
 
-## Debugging with --record / --replay
+## Debugging with --record
 
-See [`docs/replay_debugging.md`](replay_debugging.md). Event sourcing is nearly free in an MVU architecture; we capture every `Msg` the reducer sees, and a replay is a straight fold.
+See [`docs/replay_debugging.md`](replay_debugging.md). Event sourcing is nearly free in an MVU architecture: `--record` captures every `Msg` the reducer sees as JSONL, and `app::recorder::Replay` reads it back as a straight fold. There is no `--replay` CLI subcommand yet — the reader is the programmatic entry point.
 
 ## Migration status
 

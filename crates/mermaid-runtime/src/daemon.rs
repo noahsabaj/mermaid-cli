@@ -51,7 +51,7 @@ pub fn generate_pairing_token() -> Result<(String, String)> {
 
 pub fn hash_pairing_token(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
-    hex_encode(&digest)
+    crate::hex_lower(&digest)
 }
 
 pub fn request_daemon_json(mut body: serde_json::Value) -> Result<serde_json::Value> {
@@ -108,16 +108,6 @@ pub fn snapshot_field_from_daemon<T: DeserializeOwned>(field: &str) -> Result<T>
         .with_context(|| format!("daemon snapshot missing `{}`", field))?;
     serde_json::from_value(field_value)
         .with_context(|| format!("daemon snapshot field `{}` had unexpected shape", field))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 #[cfg(test)]

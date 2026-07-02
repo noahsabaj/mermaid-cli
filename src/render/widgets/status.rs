@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::domain::{ContextUsageSnapshot, TokenUsageTotals};
+use crate::domain::{ContextUsageSnapshot, TokenUsageTotals, format_compact_count};
 use crate::models::{ReasoningLevel, TokenUsageSource};
 use crate::render::theme::Theme;
 use crate::runtime::SafetyMode;
@@ -166,26 +166,6 @@ fn format_context_snapshot(snapshot: &ContextUsageSnapshot) -> String {
             percent
         ),
         _ => format!("context: {}{} / unknown", source, used),
-    }
-}
-
-fn format_compact_count(value: usize) -> String {
-    if value >= 1_000_000 {
-        format_scaled(value, 1_000_000, "m")
-    } else if value >= 10_000 {
-        format_scaled(value, 1_000, "k")
-    } else {
-        value.to_string()
-    }
-}
-
-fn format_scaled(value: usize, divisor: usize, suffix: &str) -> String {
-    let whole = value / divisor;
-    let decimal = ((value % divisor) * 10) / divisor;
-    if decimal == 0 {
-        format!("{}{}", whole, suffix)
-    } else {
-        format!("{}.{}{}", whole, decimal, suffix)
     }
 }
 
