@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Empty sessions are no longer saved: running `mermaid` and closing it without
+  sending anything leaves no conversation file, so it can't clutter the
+  `--resume` picker or be reached by `--continue`. Pre-existing empty session
+  files are also filtered out of both resume paths.
 - The `--resume` picker now scrolls properly: the mouse wheel scrolls the
   viewport (it previously moved the selection, because the alternate screen was
   translating the wheel into arrow-key sequences), and the list follows the
