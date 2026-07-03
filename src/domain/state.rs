@@ -171,6 +171,17 @@ impl State {
     /// construct the same starting state by definition.
     pub fn seed_conversation(&mut self, history: ConversationHistory) {
         let title = history.title.clone();
+        // Restore the live meters + safety mode that ride on the saved file
+        // (see `Session::snapshot_conversation`). Sessions saved before these
+        // fields existed leave them at None/0, so keep the config-default
+        // safety mode (already set by `State::new`) when the file has none.
+        if let Some(mode) = history.safety_mode {
+            self.session.safety_mode = mode;
+        }
+        self.session.cumulative_tokens = history.cumulative_tokens;
+        self.session.last_token_usage = history.last_token_usage;
+        self.session.cumulative_token_usage = history.cumulative_token_usage;
+        self.session.context_usage = history.context_usage.clone();
         self.session.conversation = history;
         self.ui.last_title_dispatched = Some(title);
     }
@@ -194,7 +205,7 @@ impl State {
 /// Providers report usage per API request; the session keeps both the
 /// last request and the cumulative API usage so the footer does not
 /// imply this is the current model context length.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsageTotals {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
@@ -494,6 +505,21 @@ pub struct Session {
 }
 
 impl Session {
+    /// Clone the conversation with the live meters + safety mode overlaid, so
+    /// a saved file carries the full restorable state. These fields live on
+    /// `Session` (which is NOT serialized — only `conversation` is), so every
+    /// `Cmd::SaveConversation` snapshots them in and `seed_conversation`
+    /// hydrates them back on resume.
+    pub fn snapshot_conversation(&self) -> ConversationHistory {
+        let mut history = self.conversation.clone();
+        history.safety_mode = Some(self.safety_mode);
+        history.cumulative_tokens = self.cumulative_tokens;
+        history.last_token_usage = self.last_token_usage;
+        history.cumulative_token_usage = self.cumulative_token_usage;
+        history.context_usage = self.context_usage.clone();
+        history
+    }
+
     /// The committed message log. All messages visible in the chat
     /// widget live here; partial in-flight content lives in
     /// `TurnState::Generating`.
@@ -1035,6 +1061,73 @@ mod tests {
         assert!(matches!(s.turn, TurnState::Idle));
         assert!(!s.is_busy());
         assert!(s.current_turn_id().is_none());
+    }
+
+    #[test]
+    fn snapshot_and_seed_round_trip_restores_meters_and_safety() {
+        // Move the live session state away from its `State::new` defaults, then
+        // snapshot it into a conversation and seed it back into a fresh state —
+        // this is exactly the save→resume path.
+        let mut src = mock_state();
+        src.session.safety_mode = SafetyMode::FullAccess;
+        src.session.cumulative_tokens = 4321;
+        src.session.cumulative_token_usage = TokenUsageTotals {
+            total_tokens: 4321,
+            ..Default::default()
+        };
+        src.session.last_token_usage = Some(TokenUsageTotals {
+            total_tokens: 100,
+            ..Default::default()
+        });
+        src.session.context_usage = Some(ContextUsageSnapshot::new(
+            8000,
+            Some(128_000),
+            TokenUsageSource::Estimate,
+            8000,
+            0,
+            0,
+            0,
+            0,
+            None,
+        ));
+
+        let snapshot = src.session.snapshot_conversation();
+
+        let mut restored = mock_state();
+        assert_eq!(
+            restored.session.safety_mode,
+            SafetyMode::Ask,
+            "config default"
+        );
+        assert_eq!(restored.session.cumulative_token_usage.total_tokens, 0);
+
+        restored.seed_conversation(snapshot);
+        assert_eq!(restored.session.safety_mode, SafetyMode::FullAccess);
+        assert_eq!(restored.session.cumulative_tokens, 4321);
+        assert_eq!(restored.session.cumulative_token_usage.total_tokens, 4321);
+        assert_eq!(restored.session.last_token_usage.unwrap().total_tokens, 100);
+        assert_eq!(restored.session.context_usage.unwrap().used_tokens, 8000);
+    }
+
+    #[test]
+    fn seed_from_pre_persistence_file_keeps_config_default_safety() {
+        // A conversation saved before these fields existed has `safety_mode:
+        // None`; seeding it must NOT clobber the config-default mode that
+        // `State::new` already set.
+        let history = ConversationHistory::new(
+            "/tmp/p".to_string(),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
+        assert_eq!(history.safety_mode, None);
+        let mut restored = mock_state();
+        restored.session.safety_mode = SafetyMode::Auto; // stand in for a config default
+        restored.seed_conversation(history);
+        assert_eq!(
+            restored.session.safety_mode,
+            SafetyMode::Auto,
+            "a None saved mode must not override the config default"
+        );
     }
 
     #[test]
