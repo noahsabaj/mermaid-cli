@@ -349,6 +349,15 @@ impl ConversationManager {
         // tampered) on-disk state; validate it before it drives the write path,
         // so a loaded conversation can't escape the conversations dir on save.
         validate_conversation_id(&conversation.id)?;
+
+        // An untouched session — the user ran `mermaid` and closed it without
+        // sending anything — has no transcript. Never persist it, so it can't
+        // clutter the `--resume` picker or be reached by `--continue`; the first
+        // real message triggers the next save, which creates the file then.
+        if conversation.messages.is_empty() {
+            return Ok(());
+        }
+
         let filename = format!("{}.json", conversation.id);
         let path = self.conversations_dir.join(filename);
 
@@ -491,6 +500,11 @@ impl ConversationManager {
                 tracing::warn!(path = %path.display(), id = %conv.id, "skipping conversation with invalid id");
                 continue;
             }
+            // Skip untouched (message-less) sessions — `--continue` resumes the
+            // last chat with real history, not a blank one opened and closed.
+            if conv.messages.is_empty() {
+                continue;
+            }
             // Capture the load-time baseline for the optimistic-concurrency
             // guard so a later save can detect a concurrent writer (F73).
             self.record_stamp(&conv.id, &path);
@@ -510,6 +524,9 @@ impl ConversationManager {
                     && ext == "json"
                     && let Ok(json) = read_conversation_capped(&entry.path())
                     && let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json)
+                    // Skip untouched (message-less) sessions — they carry no
+                    // history worth resuming, so they never appear in the picker.
+                    && !conv.messages.is_empty()
                 {
                     conversations.push(conv);
                 }
@@ -548,6 +565,14 @@ impl ConversationManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A conversation carrying one message, so it actually persists — empty
+    /// (message-less) sessions are intentionally not saved.
+    fn touched(project: &str) -> ConversationHistory {
+        let mut c = ConversationHistory::new(project.into(), "m".into(), Local::now());
+        c.add_messages(&[ChatMessage::user("hi")], Local::now());
+        c
+    }
 
     #[test]
     fn legacy_conversation_json_without_git_branch_deserializes() {
@@ -778,9 +803,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let conv1 = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        let conv1 = touched("/tmp");
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let conv2 = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        let conv2 = touched("/tmp");
 
         manager.save_conversation(&conv1).unwrap();
         manager.save_conversation(&conv2).unwrap();
@@ -802,7 +827,7 @@ mod tests {
 
         assert!(manager.load_last_conversation().unwrap().is_none());
 
-        let conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        let conv = touched("/tmp");
         manager.save_conversation(&conv).unwrap();
 
         let last = manager.load_last_conversation().unwrap().unwrap();
@@ -821,15 +846,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let conv1 = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        let conv1 = touched("/tmp");
         manager.save_conversation(&conv1).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        let conv2 = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        let conv2 = touched("/tmp");
         manager.save_conversation(&conv2).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        let conv3 = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        let conv3 = touched("/tmp");
         manager.save_conversation(&conv3).unwrap();
 
         let last = manager.load_last_conversation().unwrap().unwrap();
@@ -847,7 +872,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let good = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        let good = touched("/tmp");
         manager.save_conversation(&good).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
 
@@ -936,12 +961,68 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let manager = ConversationManager::new(&dir).unwrap();
 
-        let conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        let conv = touched("/tmp");
         manager.save_conversation(&conv).unwrap();
         assert_eq!(manager.list_conversations().unwrap().len(), 1);
 
         manager.delete_conversation(&conv.id).unwrap();
         assert_eq!(manager.list_conversations().unwrap().len(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_session_is_not_saved() {
+        let dir = std::env::temp_dir().join("mermaid_test_conv_empty_save");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+
+        // An untouched (message-less) conversation must not create a file.
+        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        manager.save_conversation(&conv).unwrap();
+        assert!(
+            manager.list_conversations().unwrap().is_empty(),
+            "empty session must not be listed"
+        );
+        assert!(
+            manager.load_last_conversation().unwrap().is_none(),
+            "empty session must not be --continue-able"
+        );
+
+        // The first real message makes it persist.
+        conv.add_messages(&[ChatMessage::user("hi")], Local::now());
+        manager.save_conversation(&conv).unwrap();
+        assert_eq!(manager.list_conversations().unwrap().len(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resume_paths_skip_pre_existing_empty_files() {
+        // An empty session file planted directly on disk (e.g. saved before this
+        // guard existed) must be invisible to the picker and to `--continue`.
+        let dir = std::env::temp_dir().join("mermaid_test_conv_empty_resume");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+
+        let real = touched("/tmp");
+        manager.save_conversation(&real).unwrap();
+        // A NEWER empty file, written straight to disk to bypass the save guard.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let empty = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
+        let path = manager
+            .conversations_dir()
+            .join(format!("{}.json", empty.id));
+        fs::write(&path, serde_json::to_string(&empty).unwrap()).unwrap();
+
+        let list = manager.list_conversations().unwrap();
+        assert_eq!(list.len(), 1, "the empty file must not be listed");
+        assert_eq!(list[0].id, real.id);
+        assert_eq!(
+            manager.load_last_conversation().unwrap().unwrap().id,
+            real.id,
+            "--continue must skip the newer empty file"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
