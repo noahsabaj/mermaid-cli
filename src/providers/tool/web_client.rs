@@ -201,10 +201,7 @@ impl OllamaWebClient {
             count,
         );
 
-        if search_results.is_empty() {
-            return Err(anyhow!("No search results found for: {}", query));
-        }
-
+        // Empty is a valid outcome (no matches), not an error.
         Ok(search_results)
     }
 
@@ -339,10 +336,8 @@ impl SearchProvider for SearxngClient {
             count,
         );
 
-        if results.is_empty() {
-            return Err(anyhow!("No SearXNG results for: {}", query));
-        }
-
+        // Empty is a valid outcome (no matches), not an error — the tool layer
+        // reports "no results" and keeps any sibling queries' results.
         Ok(results)
     }
 }

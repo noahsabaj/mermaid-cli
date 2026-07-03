@@ -138,6 +138,7 @@ impl ToolExecutor for WebSearchTool {
         let mut combined = String::new();
         let mut result_count = 0usize;
         let mut sources = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
         for (idx, (query, count)) in queries.iter().enumerate() {
             let _ = ctx
                 .progress
@@ -150,30 +151,44 @@ impl ToolExecutor for WebSearchTool {
                 .await;
 
             let search = self.backend.search(query, *count);
-            tokio::select! {
+            let result = tokio::select! {
                 biased;
                 _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
-                result = search => {
-                    match result {
-                        Ok(results) => {
-                            result_count += results.len();
-                            sources.extend(results.iter().map(|result| result.url.clone()));
-                            let formatted = format_results(&results);
-                            if queries.len() > 1 {
-                                combined.push_str(&format!("=== query: {} ===\n{}\n\n", query, formatted));
-                            } else {
-                                combined = formatted;
-                            }
-                        },
-                        Err(e) => {
-                            return ToolOutcome::error(
-                                format!("web_search({}): {}", query, e),
-                                start.elapsed().as_secs_f64(),
-                            );
-                        },
+                result = search => result,
+            };
+            // A single query returning nothing or erroring does NOT abort the
+            // batch — record it and carry on so the other queries' results
+            // survive (a partial answer beats none).
+            let section = match result {
+                Ok(results) => {
+                    result_count += results.len();
+                    sources.extend(results.iter().map(|result| result.url.clone()));
+                    if results.is_empty() {
+                        "[SEARCH_RESULTS]\n(no results found)\n[/SEARCH_RESULTS]\n".to_string()
+                    } else {
+                        format_results(&results)
                     }
-                }
+                },
+                Err(e) => {
+                    errors.push(format!("{query}: {e}"));
+                    format!("(search failed: {e})\n")
+                },
+            };
+            if queries.len() > 1 {
+                combined.push_str(&format!("=== query: {query} ===\n{section}\n\n"));
+            } else {
+                combined = section;
             }
+        }
+
+        // Only a total failure — every query hit a backend error — is a tool
+        // error. An empty-but-reachable search, or a partial success, returns
+        // normally so the model sees what did come back.
+        if errors.len() == queries.len() {
+            return ToolOutcome::error(
+                format!("web_search failed: {}", errors.join("; ")),
+                start.elapsed().as_secs_f64(),
+            );
         }
 
         // Cap the aggregate output. Per-result content is already truncated to
@@ -608,5 +623,76 @@ mod tests {
             parse_queries(&args).unwrap().len(),
             crate::constants::MAX_BATCH_TOOL_ITEMS
         );
+    }
+
+    #[tokio::test]
+    async fn web_search_batch_survives_empty_and_failed_queries() {
+        use crate::domain::{ToolCallId, ToolStatus, TurnId};
+        use crate::providers::ctx::test_exec_context;
+        use crate::providers::tool::web_client::SearchResult;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+
+        struct Mock;
+        #[async_trait]
+        impl SearchProvider for Mock {
+            async fn search(
+                &self,
+                query: &str,
+                _count: usize,
+            ) -> anyhow::Result<Vec<SearchResult>> {
+                match query {
+                    "boom" => Err(anyhow::anyhow!("backend down")),
+                    "empty" => Ok(Vec::new()),
+                    _ => Ok(vec![SearchResult {
+                        title: "Title".to_string(),
+                        url: "https://example.com".to_string(),
+                        snippet: "snip".to_string(),
+                        full_content: "content".to_string(),
+                    }]),
+                }
+            }
+        }
+
+        let mk = || WebSearchTool {
+            backend: Arc::new(Mock),
+        };
+        let tmp = std::path::PathBuf::from("/tmp");
+
+        // Partial: one good, one empty, one erroring -> success, good kept.
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), tmp.clone());
+        let out = mk()
+            .execute(
+                serde_json::json!({"queries": [{"query":"good"},{"query":"empty"},{"query":"boom"}]}),
+                ctx,
+            )
+            .await;
+        assert_eq!(
+            out.status,
+            ToolStatus::Success,
+            "a partial batch must not abort"
+        );
+        assert!(
+            out.output().contains("https://example.com"),
+            "keeps the good result"
+        );
+
+        // A single empty query is "no results", not a hard error.
+        let (ctx, _rx) = test_exec_context(TurnId(2), ToolCallId(2), tmp.clone());
+        let out = mk()
+            .execute(serde_json::json!({"query": "empty"}), ctx)
+            .await;
+        assert_eq!(out.status, ToolStatus::Success, "empty is not an error");
+        assert!(out.output().contains("no results"));
+
+        // Every query failing IS a tool error.
+        let (ctx, _rx) = test_exec_context(TurnId(3), ToolCallId(3), tmp);
+        let out = mk()
+            .execute(
+                serde_json::json!({"queries": [{"query":"boom"},{"query":"boom"}]}),
+                ctx,
+            )
+            .await;
+        assert_eq!(out.status, ToolStatus::Error, "total failure is an error");
     }
 }
