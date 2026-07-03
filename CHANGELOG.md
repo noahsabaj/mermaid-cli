@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The `--resume` picker can now delete a session: press `Del` on a row to
+  remove its saved conversation (with a `y`/N confirm).
+
 ### Fixed
 
+- The `--resume` picker now scrolls properly: the mouse wheel scrolls the
+  viewport (it previously moved the selection, because the alternate screen was
+  translating the wheel into arrow-key sequences), and the list follows the
+  selection when you arrow past the bottom or top instead of clipping.
 - `--resume`/`--continue` now restore the full session state, not just the
   transcript: the safety mode and the token/context meters (the `context: …`
   and `session: …` figures in the status bar) are saved with the conversation
