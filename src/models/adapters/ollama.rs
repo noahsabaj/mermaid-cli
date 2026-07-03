@@ -593,25 +593,12 @@ impl OllamaAdapter {
             json_messages.push(json_msg);
         }
 
-        // Tools come from `config.tools` (populated by the provider
-        // wrapper from `ChatRequest.tools`). Cloud-key-gated web
-        // tools are filtered here — no point advertising them when
-        // the adapter couldn't call through without a bearer token.
-        let no_cloud_key = crate::ollama::get_cloud_api_key().is_none();
-        let tools: Vec<&serde_json::Value> = config
-            .tools
-            .iter()
-            .filter(|t| {
-                let name = t
-                    .pointer("/function/name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("");
-                if no_cloud_key && (name == "web_search" || name == "web_fetch") {
-                    return false;
-                }
-                true
-            })
-            .collect();
+        // Tools come from `config.tools` (populated by the provider wrapper
+        // from `ChatRequest.tools`). The registry only registers a web tool
+        // when its backend is usable — native `web_fetch` needs no key, and the
+        // Ollama-backed web tools are gated on `OLLAMA_API_KEY` at registration
+        // — so whatever reaches here is advertisable as-is.
+        let tools: Vec<&serde_json::Value> = config.tools.iter().collect();
 
         let mut request_body = json!({
             "model": self.model_name,

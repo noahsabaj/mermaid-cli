@@ -166,10 +166,11 @@ impl ToolRegistry {
     /// Config-aware factory. Always registers filesystem + exec +
     /// the MCP proxy + the subagent tool. Conditionally registers:
     ///
-    ///   - `web_search` + `web_fetch` iff `OLLAMA_API_KEY` resolves
-    ///     (via `utils::resolve_api_key`). Without a key, the tools
-    ///     would error on every call — so we don't advertise them at
-    ///     all.
+    ///   - `web_fetch` and `web_search` per `config.web`. `web_fetch`
+    ///     defaults to the native backend (always registered, no key);
+    ///     `web_search` defaults to Ollama Cloud (registered iff
+    ///     `OLLAMA_API_KEY` resolves) or SearXNG (always). See
+    ///     `web::web_fetch_tool` / `web::web_search_tool`.
     ///   - The computer-use tools the detected backend can drive (see
     ///     `register_computer_use_tools`) iff `mode == Interactive` AND
     ///     `computer_use::probe()` returns a usable backend.
@@ -181,7 +182,7 @@ impl ToolRegistry {
     /// Returns `Arc<Self>` so the effect runner can share a handle
     /// across turns without cloning the underlying HashMap.
     pub fn build(
-        _config: &crate::app::Config,
+        config: &crate::app::Config,
         mode: TuiMode,
         providers: Arc<crate::providers::ProviderFactory>,
     ) -> Arc<Self> {
@@ -195,9 +196,11 @@ impl ToolRegistry {
         r.register(Arc::new(memory::MemoryTool));
         r.register(Arc::new(mcp::McpToolProxy));
 
-        if let Some(key) = crate::utils::resolve_api_key("OLLAMA_API_KEY", None) {
-            r.register(Arc::new(web::WebSearchTool::new(key.clone())));
-            r.register(Arc::new(web::WebFetchTool::new(key)));
+        if let Some(tool) = web::web_fetch_tool(&config.web) {
+            r.register(Arc::new(tool));
+        }
+        if let Some(tool) = web::web_search_tool(&config.web) {
+            r.register(Arc::new(tool));
         }
 
         // Computer-use tools only register when (a) the process runs
@@ -332,7 +335,38 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn build_registers_web_tools_when_key_present() {
+    fn build_registers_zero_config_web_tools_without_key() {
+        // Both web tools register with no OLLAMA_API_KEY: web_fetch is native,
+        // and web_search defaults to `auto`, which falls back to a managed local
+        // SearXNG (the container starts lazily at call time, not here).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("OLLAMA_API_KEY").ok();
+        unsafe {
+            std::env::remove_var("OLLAMA_API_KEY");
+        }
+        let cfg = crate::app::Config::default();
+        let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
+        let r = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
+        assert!(
+            r.get("web_fetch").is_some(),
+            "native web_fetch registers without a key"
+        );
+        assert!(
+            r.get("web_search").is_some(),
+            "auto web_search (managed SearXNG) registers without a key"
+        );
+        assert!(r.get("read_file").is_some());
+        assert!(r.get("execute_command").is_some());
+        unsafe {
+            if let Some(v) = prior {
+                std::env::set_var("OLLAMA_API_KEY", v);
+            }
+        }
+    }
+
+    #[test]
+    fn build_registers_ollama_web_search_with_key() {
+        // With a key, the default Ollama search backend registers too.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("OLLAMA_API_KEY").ok();
         unsafe {
@@ -352,19 +386,26 @@ mod tests {
     }
 
     #[test]
-    fn build_skips_web_tools_without_key() {
+    fn build_registers_searxng_web_search_without_key() {
+        // The SearXNG search backend registers regardless of OLLAMA_API_KEY —
+        // reachability is a call-time concern, not a registration one.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("OLLAMA_API_KEY").ok();
         unsafe {
             std::env::remove_var("OLLAMA_API_KEY");
         }
-        let cfg = crate::app::Config::default();
+        let mut cfg = crate::app::Config::default();
+        cfg.web.search_backend = crate::app::SearchBackend::Searxng;
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
         let r = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
-        assert!(r.get("web_search").is_none(), "web_search skipped");
-        assert!(r.get("web_fetch").is_none(), "web_fetch skipped");
-        assert!(r.get("read_file").is_some());
-        assert!(r.get("execute_command").is_some());
+        assert!(
+            r.get("web_search").is_some(),
+            "searxng web_search registers without a key"
+        );
+        assert!(
+            r.get("web_fetch").is_some(),
+            "native web_fetch still present"
+        );
         unsafe {
             if let Some(v) = prior {
                 std::env::set_var("OLLAMA_API_KEY", v);

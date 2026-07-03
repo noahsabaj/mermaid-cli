@@ -69,7 +69,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 which = "8.0"  # Find executables
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "gzip", "brotli"] }
 bytes = "1.11"
 rusqlite = { version = "0.40", features = ["bundled"] }
 getrandom = "0.4"
@@ -83,6 +83,10 @@ base64 = "0.22"  # Base64 encoding for binary files (PDFs, images)
 rpassword = "7.4.0"
 unicode-width = "0.2"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+# Native `web_fetch`: readability extraction + HTML-to-markdown, so a URL fetch
+# runs in-process without Ollama Cloud.
+dom_smoothie = "0.18.0"
+htmd = "0.5.4"
 
 [dev-dependencies]
 # Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`

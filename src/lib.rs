@@ -17,6 +17,7 @@ pub mod prompts;
 pub mod providers;
 pub mod render;
 pub mod runtime;
+pub mod searxng;
 pub mod session;
 pub mod utils;
 

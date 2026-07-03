@@ -515,8 +515,11 @@ impl ToolExecutor for SubagentTool {
             seed_child_mcp(&mut child_state);
         }
 
-        let child_tools =
-            build_child_registry(self.spawner.providers.clone(), agent_type.tools.as_deref());
+        let child_tools = build_child_registry(
+            self.spawner.providers.clone(),
+            agent_type.tools.as_deref(),
+            &config.web,
+        );
 
         // Child runner rooted at parent's scope child token. When
         // parent cancels, `child_token.cancelled()` fires and the
@@ -895,10 +898,11 @@ fn apply_live_mcp(
 fn build_child_registry(
     providers: Arc<ProviderFactory>,
     tools: Option<&[String]>,
+    web: &crate::app::WebConfig,
 ) -> Arc<ToolRegistry> {
     use super::{
         computer_use, exec, filesystem, mcp,
-        web::{WebFetchTool, WebSearchTool},
+        web::{web_fetch_tool, web_search_tool},
     };
     let allowed = |name: &str| tools.is_none_or(|t| t.iter().any(|x| x == name));
     let mut r = ToolRegistry::new();
@@ -923,13 +927,15 @@ fn build_child_registry(
     if allowed("mcp") {
         r.register(Arc::new(mcp::McpToolProxy));
     }
-    if let Some(key) = crate::utils::resolve_api_key("OLLAMA_API_KEY", None) {
-        if allowed("web_search") {
-            r.register(Arc::new(WebSearchTool::new(key.clone())));
-        }
-        if allowed("web_fetch") {
-            r.register(Arc::new(WebFetchTool::new(key)));
-        }
+    if allowed("web_search")
+        && let Some(tool) = web_search_tool(web)
+    {
+        r.register(Arc::new(tool));
+    }
+    if allowed("web_fetch")
+        && let Some(tool) = web_fetch_tool(web)
+    {
+        r.register(Arc::new(tool));
     }
     // NO computer_use::*  — GUI tools are parent-only.
     // NO subagent::SubagentTool — subagents can't spawn subagents; this
@@ -1279,7 +1285,7 @@ mod tests {
     #[test]
     fn build_child_registry_excludes_gui_and_self() {
         let providers = Arc::new(ProviderFactory::new(crate::app::Config::default()));
-        let r = build_child_registry(providers, None);
+        let r = build_child_registry(providers, None, &crate::app::WebConfig::default());
         // GUI tools absent.
         assert!(r.get("screenshot").is_none());
         assert!(r.get("click").is_none());
@@ -1299,7 +1305,11 @@ mod tests {
     fn explore_registry_is_a_read_only_surface() {
         let providers = Arc::new(ProviderFactory::new(crate::app::Config::default()));
         let explore = builtin_agent_type("explore").expect("builtin");
-        let r = build_child_registry(providers, explore.tools.as_deref());
+        let r = build_child_registry(
+            providers,
+            explore.tools.as_deref(),
+            &crate::app::WebConfig::default(),
+        );
         assert!(r.get("read_file").is_some());
         assert!(r.get("execute_command").is_some());
         for tool in [

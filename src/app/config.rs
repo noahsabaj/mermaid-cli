@@ -22,6 +22,10 @@ pub struct Config {
     #[serde(default)]
     pub ollama: OllamaConfig,
 
+    /// Web tool (`web_search` / `web_fetch`) backend selection.
+    #[serde(default)]
+    pub web: WebConfig,
+
     /// Non-interactive mode configuration
     #[serde(default)]
     pub non_interactive: NonInteractiveConfig,
@@ -462,6 +466,69 @@ impl Default for OllamaConfig {
             numa: None,               // Auto-detect
             allow_ram_offload: false, // VRAM-only by default (RAM is slow)
             max_auto_num_ctx: None,   // No cap; auto-fit to the memory budget
+        }
+    }
+}
+
+/// Backend for the `web_fetch` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FetchBackend {
+    /// Fetch the URL directly from this machine and convert it to markdown.
+    /// No API key, no third party — works for any user with network access.
+    #[default]
+    Native,
+    /// Route through Ollama Cloud's `/api/web_fetch` (needs `OLLAMA_API_KEY`).
+    Ollama,
+}
+
+/// Backend for the `web_search` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchBackend {
+    /// Zero-config default: Ollama Cloud when `OLLAMA_API_KEY` is set, otherwise
+    /// an auto-managed local SearXNG container (mermaid starts it on the first
+    /// search and tears it down on exit). The user configures nothing.
+    #[default]
+    Auto,
+    /// Ollama Cloud's `/api/web_search` (needs `OLLAMA_API_KEY`).
+    Ollama,
+    /// A self-hosted SearXNG instance queried at `searxng_url` — keyless.
+    Searxng,
+}
+
+/// Web tool backend configuration.
+///
+/// ```toml
+/// [web]
+/// fetch_backend = "native"   # or "ollama"
+/// search_backend = "auto"    # or "ollama" / "searxng"
+/// searxng_url = "http://localhost:8080"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebConfig {
+    /// Backend for `web_fetch`. `native` (default) fetches the URL from this
+    /// machine and needs no key; `ollama` uses Ollama Cloud.
+    pub fetch_backend: FetchBackend,
+    /// Backend for `web_search`. `auto` (default) uses Ollama Cloud when
+    /// `OLLAMA_API_KEY` is set and otherwise auto-manages a local SearXNG
+    /// container. `ollama` forces Ollama Cloud; `searxng` forces a self-hosted
+    /// instance at `searxng_url`.
+    pub search_backend: SearchBackend,
+    /// SearXNG base URL, used when `search_backend = "searxng"` (your own
+    /// instance). The instance must have the JSON output format enabled
+    /// (`search.formats` includes `json`). The `auto` managed instance ignores
+    /// this and picks its own port.
+    pub searxng_url: String,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            fetch_backend: FetchBackend::Native,
+            search_backend: SearchBackend::Auto,
+            searxng_url: String::from("http://localhost:8080"),
         }
     }
 }

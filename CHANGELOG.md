@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Web search and fetch now work out of the box with **zero configuration**, and
+  are backend-pluggable via `[web]` config. `web_fetch` defaults to a **native**
+  in-process backend (fetch the URL directly, convert HTML to markdown) — no
+  key, no third party. `web_search` defaults to **`auto`**: Ollama Cloud when
+  `OLLAMA_API_KEY` is set, otherwise mermaid **auto-starts and manages a local
+  SearXNG container** (via podman/docker) on the first search and tears it down
+  when it exits — you install and configure nothing. The first search pulls the
+  SearXNG image once. Force a backend with `fetch_backend = "ollama"` or
+  `search_backend = "ollama"`/`"searxng"` (your own instance at `searxng_url`,
+  which must have the JSON format enabled).
 - `mermaid --resume` opens a searchable picker of this directory's past
   conversations, styled like the main TUI (type to filter; each row shows the
   title and a `relative-time · branch · size` meta line). It replaces the old
@@ -57,11 +67,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `web_fetch` now defaults to the native in-process backend instead of Ollama
+  Cloud, so it works with no API key. Set `[web] fetch_backend = "ollama"` to
+  keep the previous server-side behavior.
 - The `--sessions` flag is renamed to `--resume` to match `claude --resume`.
   No deprecation alias — mermaid has no released users yet.
 
 ### Fixed
 
+- Weak models no longer hit `unknown tool: web_search` when the web tools
+  aren't configured. The system prompt now tells the model to call only tools
+  present in its actual tool list, and the Ollama adapter no longer strips
+  registered web tools by `OLLAMA_API_KEY` presence — which would otherwise
+  have hidden the new keyless native `web_fetch`.
 - A completing subagent no longer kills the parent's MCP servers: the child
   `EffectRunner`'s shutdown reaped the process-global MCP manager, so the
   first subagent to finish terminated every MCP server for the rest of the

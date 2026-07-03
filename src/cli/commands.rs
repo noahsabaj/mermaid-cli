@@ -317,13 +317,36 @@ async fn show_doctor(
         },
     };
 
+    let has_ollama_key = std::env::var("OLLAMA_API_KEY").is_ok();
     let mut tools = vec![
         "read/edit/write files".to_string(),
         "run shell commands".to_string(),
         "create checkpoints before risky mutations".to_string(),
     ];
-    if std::env::var("OLLAMA_API_KEY").is_ok() {
-        tools.push("web search/fetch tools gated by OLLAMA_API_KEY".to_string());
+    // web_fetch: native always works (no key); the Ollama backend needs a key.
+    match config.web.fetch_backend {
+        crate::app::FetchBackend::Native => tools.push("web_fetch (native, no key)".to_string()),
+        crate::app::FetchBackend::Ollama if has_ollama_key => {
+            tools.push("web_fetch (Ollama Cloud)".to_string())
+        },
+        crate::app::FetchBackend::Ollama => {},
+    }
+    // web_search: `auto` resolves to Ollama when a key is present, else a
+    // mermaid-managed local SearXNG; `searxng`/`ollama` force one backend.
+    match config.web.search_backend {
+        crate::app::SearchBackend::Auto if has_ollama_key => {
+            tools.push("web_search (auto: Ollama Cloud)".to_string())
+        },
+        crate::app::SearchBackend::Auto => {
+            tools.push("web_search (auto: managed local SearXNG)".to_string())
+        },
+        crate::app::SearchBackend::Searxng => {
+            tools.push(format!("web_search (SearXNG {})", config.web.searxng_url))
+        },
+        crate::app::SearchBackend::Ollama if has_ollama_key => {
+            tools.push("web_search (Ollama Cloud)".to_string())
+        },
+        crate::app::SearchBackend::Ollama => {},
     }
     if !config.mcp_servers.is_empty() {
         tools.push(format!(
@@ -346,6 +369,20 @@ async fn show_doctor(
     }
     if instruction_paths.is_empty() {
         next_steps.push("Optional: add MERMAID.md or AGENTS.md with project-specific run commands and conventions.".to_string());
+    }
+    if matches!(config.web.search_backend, crate::app::SearchBackend::Ollama) && !has_ollama_key {
+        next_steps.push(
+            "Web search needs a backend: set OLLAMA_API_KEY (run `mermaid cloud-setup`) or set `[web] search_backend = \"searxng\"` with a running SearXNG.".to_string(),
+        );
+    }
+    if matches!(config.web.search_backend, crate::app::SearchBackend::Auto)
+        && !has_ollama_key
+        && which::which("podman").is_err()
+        && which::which("docker").is_err()
+    {
+        next_steps.push(
+            "Web search (auto) starts a local SearXNG container, but no podman or docker was found. Install one, or set OLLAMA_API_KEY.".to_string(),
+        );
     }
     if next_steps.is_empty() {
         next_steps.push(
