@@ -499,43 +499,43 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             state
                 .session
                 .append(ChatMessage::system(tasks_text(&tasks)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         Msg::RuntimeTaskLoaded { task, events } => {
             state.session.append(
                 ChatMessage::system(task_detail_text(task.as_ref(), &events)),
                 state.now,
             );
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         Msg::RuntimeProcessesListed(processes) => {
             state
                 .session
                 .append(ChatMessage::system(processes_text(&processes)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         Msg::RuntimeText(text) => {
             state.session.append(ChatMessage::system(text), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         Msg::RuntimeApprovalsListed(approvals) => {
             state
                 .session
                 .append(ChatMessage::system(approvals_text(&approvals)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         Msg::RuntimeCheckpointsListed(checkpoints) => {
             state.session.append(
                 ChatMessage::system(checkpoints_text(&checkpoints)),
                 state.now,
             );
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         Msg::RuntimePluginsListed(plugins) => {
             state
                 .session
                 .append(ChatMessage::system(plugins_text(&plugins)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         Msg::ModelPullFinished { model } => {
             push_system(&mut state, &mut cmds, format!("Pulled {}", model));
@@ -768,6 +768,9 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     if code == KeyCode::BackTab {
         let next = cycle_safety(state.session.safety_mode);
         state.session.safety_mode = next;
+        // Persist now so `--resume`/`--continue` restore this mode even if the
+        // user changes it and quits without sending another message.
+        cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         // The bottom status bar already shows the new safety mode — no banner.
         return;
     }
@@ -1303,6 +1306,9 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::Safety(Some(mode)) => {
             // Session-scoped (mirrors Shift+Tab) — not written to the config.
             state.session.safety_mode = mode;
+            // Persist so `--resume`/`--continue` restore this mode (see the
+            // Shift+Tab handler).
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
             // The bottom status bar shows the new mode — no banner.
         },
         SlashCmd::VisibleReasoning(arg) => {
@@ -1332,7 +1338,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             });
         },
         SlashCmd::Save(_name) => {
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Load(Some(id)) => {
             cmds.push(Cmd::LoadConversation(id));
@@ -1351,7 +1357,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             state
                 .session
                 .append(ChatMessage::system(usage_text(state)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Context(cmd) => {
             use crate::domain::ContextCmd;
@@ -1362,7 +1368,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                     state
                         .session
                         .append(ChatMessage::system(context_text(state)), state.now);
-                    cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+                    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
                 },
                 // The sizing knobs only affect Ollama's num_ctx.
                 _ if !is_ollama => {
@@ -1488,7 +1494,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             state
                 .session
                 .append(ChatMessage::system(doctor_text(state)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Tasks => {
             cmds.push(Cmd::ListRuntimeTasks { limit: 10 });
@@ -1543,7 +1549,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 usage_text(state)
             );
             state.session.append(ChatMessage::system(text), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Report(None) => {
             let text = format!(
@@ -1552,7 +1558,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 usage_text(state)
             );
             state.session.append(ChatMessage::system(text), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Processes => {
             cmds.push(Cmd::ListRuntimeProcesses { limit: 10 });
@@ -1648,7 +1654,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             state
                 .session
                 .append(ChatMessage::system(help_text()), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Quit => {
             request_exit(state, cmds);
@@ -1701,7 +1707,7 @@ fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) 
             .session
             .append(ChatMessage::system(text.into()), state.now);
     }
-    cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
 }
 
 fn ollama_pull_target(model_id: &str) -> Option<String> {
@@ -2409,7 +2415,7 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     // placeholders so the saved history a later `--continue` reloads isn't a
     // malformed `assistant(tool_calls)` with no results.
     seal_orphaned_tool_calls(state);
-    cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
     cmds.push(Cmd::Exit);
 }
 
@@ -2839,7 +2845,7 @@ fn handle_stream_done(
     // the footer's "Last API request" should reflect the last request that
     // actually reported usage, not flip to "n/a".
 
-    cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
 
     // If the model asked for any tools, transition to ExecutingTools
     // and dispatch one ExecuteTool per call. The Vec<Option<ToolOutcome>>
@@ -2940,7 +2946,7 @@ fn handle_stream_done(
         state
             .session
             .append(ChatMessage::run_summary(summary), state.now);
-        cmds.push(Cmd::SaveConversation(state.session.conversation.clone()));
+        cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
     }
 
     // No tool calls — turn ends here. Drain the queued-message FIFO.

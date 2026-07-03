@@ -105,6 +105,22 @@ pub struct ConversationHistory {
     /// non-git dirs and for sessions saved before this field existed.
     #[serde(default)]
     pub git_branch: Option<String>,
+    /// Live session state that rides on `Session` (which is NOT serialized —
+    /// only this `ConversationHistory` is), snapshotted here on every save via
+    /// `Session::snapshot_conversation` so `--resume`/`--continue` restore the
+    /// safety mode and token/context meters instead of resetting them. All
+    /// `#[serde(default)]`: sessions saved before these existed omit them, and
+    /// a `None` safety mode falls back to the config default on resume.
+    #[serde(default)]
+    pub safety_mode: Option<crate::runtime::SafetyMode>,
+    #[serde(default)]
+    pub cumulative_tokens: usize,
+    #[serde(default)]
+    pub last_token_usage: Option<crate::domain::TokenUsageTotals>,
+    #[serde(default)]
+    pub cumulative_token_usage: crate::domain::TokenUsageTotals,
+    #[serde(default)]
+    pub context_usage: Option<crate::domain::ContextUsageSnapshot>,
 }
 
 /// Best-effort current git branch of `dir`, for labelling `--resume` rows.
@@ -150,6 +166,12 @@ impl ConversationHistory {
             // Populated by the impure startup path (`detect_git_branch`), not
             // here — the reducer stays pure/deterministic for `--replay`.
             git_branch: None,
+            // Snapshotted from `Session` on save (see `snapshot_conversation`).
+            safety_mode: None,
+            cumulative_tokens: 0,
+            last_token_usage: None,
+            cumulative_token_usage: crate::domain::TokenUsageTotals::default(),
+            context_usage: None,
         }
     }
 
@@ -552,6 +574,51 @@ mod tests {
         let round: ConversationHistory =
             serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
         assert_eq!(round.git_branch.as_deref(), Some("feature/x"));
+    }
+
+    #[test]
+    fn legacy_json_defaults_session_state_fields() {
+        // A file written before the session-state fields existed lacks them;
+        // `#[serde(default)]` must load safety/meters as None/0 (safety then
+        // falls back to the config default on resume — see `seed_conversation`).
+        let json = r#"{
+            "id": "20260101_120000_002",
+            "title": "Old",
+            "messages": [],
+            "model_name": "m",
+            "project_path": "/tmp/proj",
+            "created_at": "2026-01-01T12:00:00-05:00",
+            "updated_at": "2026-01-01T12:00:00-05:00",
+            "total_tokens": null
+        }"#;
+        let conv: ConversationHistory = serde_json::from_str(json).expect("legacy json loads");
+        assert_eq!(conv.safety_mode, None);
+        assert_eq!(conv.cumulative_tokens, 0);
+        assert_eq!(
+            conv.cumulative_token_usage,
+            crate::domain::TokenUsageTotals::default()
+        );
+        assert!(conv.last_token_usage.is_none());
+        assert!(conv.context_usage.is_none());
+    }
+
+    #[test]
+    fn session_state_round_trips_through_json() {
+        let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into(), Local::now());
+        conv.safety_mode = Some(crate::runtime::SafetyMode::FullAccess);
+        conv.cumulative_tokens = 777;
+        conv.cumulative_token_usage = crate::domain::TokenUsageTotals {
+            total_tokens: 777,
+            ..Default::default()
+        };
+        let round: ConversationHistory =
+            serde_json::from_str(&serde_json::to_string(&conv).unwrap()).unwrap();
+        assert_eq!(
+            round.safety_mode,
+            Some(crate::runtime::SafetyMode::FullAccess)
+        );
+        assert_eq!(round.cumulative_tokens, 777);
+        assert_eq!(round.cumulative_token_usage.total_tokens, 777);
     }
 
     #[test]

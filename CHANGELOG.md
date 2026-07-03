@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `--resume`/`--continue` now restore the full session state, not just the
+  transcript: the safety mode and the token/context meters (the `context: …`
+  and `session: …` figures in the status bar) are saved with the conversation
+  and hydrated on resume, instead of resetting to `n/a` / `0` / the
+  config-default safety mode. Safety-mode changes (`Shift+Tab`, `/safety`) now
+  persist immediately; conversations saved before this fall back to defaults.
+
 ## [0.15.0] - 2026-07-02
 
 ### Added
