@@ -170,7 +170,7 @@ fn load_seed_conversation(
             }
         })
         .collect();
-    select_conversation(entries, chrono::Local::now())
+    select_conversation(entries, &manager, chrono::Local::now())
 }
 
 async fn dispatch_non_interactive(

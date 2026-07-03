@@ -10,7 +10,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -25,7 +25,15 @@ use ratatui::{
 use std::io;
 use std::path::Path;
 
-use super::conversation::ConversationHistory;
+use super::conversation::{ConversationHistory, ConversationManager};
+
+/// Entries the mouse wheel scrolls the picker viewport per notch. The wheel
+/// moves the *viewport*; the arrow keys move the *selection*.
+const WHEEL_STEP: usize = 3;
+
+/// Terminal rows each session block occupies (title + meta + a blank spacer).
+/// The viewport fits `list.height / ROWS_PER_ENTRY` entries.
+const ROWS_PER_ENTRY: usize = 3;
 
 /// One row in the picker: a conversation plus its on-disk size (shown in the
 /// meta line; not stored on the history itself).
@@ -39,6 +47,7 @@ pub struct SessionEntry {
 /// are testable and match the caller's clock.
 pub fn select_conversation(
     entries: Vec<SessionEntry>,
+    manager: &ConversationManager,
     now: DateTime<Local>,
 ) -> Result<Option<ConversationHistory>> {
     if entries.is_empty() {
@@ -48,15 +57,22 @@ pub fn select_conversation(
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // Enable mouse capture so the wheel arrives as real scroll events rather
+    // than the alternate-screen's arrow-key translation (which would otherwise
+    // move the selection instead of scrolling the viewport).
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = SelectorState::new(entries);
-    let result = run_selector(&mut terminal, &mut state, now);
+    let result = run_selector(&mut terminal, &mut state, manager, now);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -69,6 +85,14 @@ pub struct SelectorState {
     query: String,
     /// Selection index within the current filtered set.
     selected: usize,
+    /// First visible entry (index into the filtered set). The mouse wheel moves
+    /// this freely; arrow-key selection clamps it so `selected` stays visible.
+    scroll_offset: usize,
+    /// Entries that fit in the list viewport — set by `render` each frame so the
+    /// follow-selection clamp in `move_up`/`move_down` knows the window size.
+    viewport_entries: usize,
+    /// When `Some`, a delete of this *entries* index is awaiting a y/N confirm.
+    pending_delete: Option<usize>,
 }
 
 impl SelectorState {
@@ -77,6 +101,9 @@ impl SelectorState {
             entries,
             query: String::new(),
             selected: 0,
+            scroll_offset: 0,
+            viewport_entries: 0,
+            pending_delete: None,
         }
     }
 
@@ -108,25 +135,75 @@ impl SelectorState {
         let n = self.filtered().len();
         if n > 0 && self.selected + 1 < n {
             self.selected += 1;
+            // Follow: if the selection dropped below the viewport, scroll to it.
+            let visible = self.viewport_entries.max(1);
+            if self.selected >= self.scroll_offset + visible {
+                self.scroll_offset = self.selected + 1 - visible;
+            }
         }
     }
 
     fn move_up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
+            // Follow: if the selection rose above the viewport, scroll to it.
+            if self.selected < self.scroll_offset {
+                self.scroll_offset = self.selected;
+            }
         }
     }
 
-    /// A typed character extends the query; selection resets to the top so the
-    /// highlight can never point past the shrunken filtered set.
+    /// A typed character extends the query; selection + viewport reset to the
+    /// top so the highlight can never point past the shrunken filtered set.
     fn push_query(&mut self, c: char) {
         self.query.push(c);
         self.selected = 0;
+        self.scroll_offset = 0;
     }
 
     fn pop_query(&mut self) {
         self.query.pop();
         self.selected = 0;
+        self.scroll_offset = 0;
+    }
+
+    /// Mouse wheel: scroll the viewport without touching the selection. The
+    /// upper bound is clamped in `render`, which knows the viewport height.
+    fn scroll_viewport_down(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_add(WHEEL_STEP);
+    }
+
+    fn scroll_viewport_up(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(WHEEL_STEP);
+    }
+
+    /// Arm a delete of the highlighted entry (awaits a y/N confirm). Stores the
+    /// *entries* index so a filtered-view change can't misredirect it.
+    fn request_delete(&mut self) {
+        self.pending_delete = self.filtered().get(self.selected).copied();
+    }
+
+    fn cancel_delete(&mut self) {
+        self.pending_delete = None;
+    }
+
+    fn take_pending_delete(&mut self) -> Option<usize> {
+        self.pending_delete.take()
+    }
+
+    /// Drop an entry after it's deleted on disk, re-clamping the selection into
+    /// the new (smaller) filtered set.
+    fn remove_entry(&mut self, entries_idx: usize) {
+        if entries_idx >= self.entries.len() {
+            return;
+        }
+        self.entries.remove(entries_idx);
+        let n = self.filtered().len();
+        if n == 0 {
+            self.selected = 0;
+        } else if self.selected >= n {
+            self.selected = n - 1;
+        }
     }
 }
 
@@ -143,23 +220,55 @@ fn entry_matches(history: &ConversationHistory, needle: &str) -> bool {
 fn run_selector(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut SelectorState,
+    manager: &ConversationManager,
     now: DateTime<Local>,
 ) -> Result<Option<ConversationHistory>> {
     loop {
         terminal.draw(|f| render(f, state, now))?;
 
-        if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Esc => return Ok(None),
-                KeyCode::Enter => return Ok(state.current().map(|e| e.history.clone())),
-                KeyCode::Down => state.move_down(),
-                KeyCode::Up => state.move_up(),
-                KeyCode::Backspace => state.pop_query(),
-                // Everything printable is search input — there is no vim-style
-                // `j`/`k`/`q` navigation, or it would be swallowed as typing.
-                KeyCode::Char(c) => state.push_query(c),
+        match event::read()? {
+            Event::Key(key) => {
+                // A pending delete captures the next key: `y` confirms, anything
+                // else cancels — intercepted here so neither falls through to
+                // the search box.
+                if state.pending_delete.is_some() {
+                    if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                        if let Some(idx) = state.take_pending_delete() {
+                            let id = state.entries[idx].history.id.clone();
+                            if manager.delete_conversation(&id).is_ok() {
+                                state.remove_entry(idx);
+                                if state.entries.is_empty() {
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                    } else {
+                        state.cancel_delete();
+                    }
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Esc => return Ok(None),
+                    KeyCode::Enter => return Ok(state.current().map(|e| e.history.clone())),
+                    KeyCode::Down => state.move_down(),
+                    KeyCode::Up => state.move_up(),
+                    // Del arms a confirm to delete the highlighted session. Must
+                    // be a non-typing key — printable chars are search input.
+                    KeyCode::Delete => state.request_delete(),
+                    KeyCode::Backspace => state.pop_query(),
+                    // Everything printable is search input — there is no vim-style
+                    // `j`/`k`/`q` navigation, or it would be swallowed as typing.
+                    KeyCode::Char(c) => state.push_query(c),
+                    _ => {},
+                }
+            },
+            // The wheel scrolls the viewport; the selection stays put.
+            Event::Mouse(m) => match m.kind {
+                MouseEventKind::ScrollUp => state.scroll_viewport_up(),
+                MouseEventKind::ScrollDown => state.scroll_viewport_down(),
                 _ => {},
-            }
+            },
+            _ => {},
         }
     }
 }
@@ -171,8 +280,12 @@ const META: Color = Color::Gray;
 const DIM: Color = Color::DarkGray;
 
 /// Draw the picker: header, search line, project name, one two-line block per
-/// filtered session, then the key hints.
-pub fn render(f: &mut Frame, state: &SelectorState, now: DateTime<Local>) {
+/// filtered session (windowed by the scroll offset), then the key hints.
+///
+/// Takes `&mut SelectorState` because the viewport height is only known here:
+/// it records how many entries fit (for follow-selection) and clamps the
+/// wheel-driven scroll offset to the valid range.
+pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -186,6 +299,20 @@ pub fn render(f: &mut Frame, state: &SelectorState, now: DateTime<Local>) {
             Constraint::Length(1), // hints
         ]);
     let [title, _s1, search, _s2, project, _s3, list, hints] = f.area().layout(&layout);
+
+    // Viewport math first (this mutates `state`, so it must precede the
+    // immutable-borrow draws below): how many 3-line entry blocks fit, recorded
+    // for follow-selection, and the wheel-driven offset clamped to range.
+    let filtered = state.filtered();
+    let visible = (list.height as usize / ROWS_PER_ENTRY).max(1);
+    state.viewport_entries = visible;
+    let max_offset = filtered.len().saturating_sub(visible);
+    if state.scroll_offset > max_offset {
+        state.scroll_offset = max_offset;
+    }
+    let scroll_offset = state.scroll_offset;
+    let selected = state.selected;
+    let pending_delete = state.pending_delete;
 
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -222,7 +349,6 @@ pub fn render(f: &mut Frame, state: &SelectorState, now: DateTime<Local>) {
         );
     }
 
-    let filtered = state.filtered();
     let lines: Vec<Line> = if filtered.is_empty() {
         vec![Line::from(Span::styled(
             "  No sessions match your search.",
@@ -232,9 +358,11 @@ pub fn render(f: &mut Frame, state: &SelectorState, now: DateTime<Local>) {
         filtered
             .iter()
             .enumerate()
+            .skip(scroll_offset)
+            .take(visible)
             .flat_map(|(row, &idx)| {
                 let entry = &state.entries[idx];
-                let is_selected = row == state.selected;
+                let is_selected = row == selected;
                 let (marker, title_style) = if is_selected {
                     (
                         "> ",
@@ -257,13 +385,24 @@ pub fn render(f: &mut Frame, state: &SelectorState, now: DateTime<Local>) {
     };
     f.render_widget(Paragraph::new(lines), list);
 
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "↑↓ select · type to search · enter resume · esc cancel",
+    // Hints line, or the delete confirm prompt when one is armed.
+    let hints_line = if let Some(idx) = pending_delete {
+        let name: String = state
+            .entries
+            .get(idx)
+            .map(|e| e.history.title.chars().take(40).collect::<String>())
+            .unwrap_or_default();
+        Line::from(Span::styled(
+            format!("Delete \"{name}\"?  y confirms · any other key cancels"),
+            Style::default().fg(Color::Yellow),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "↑↓ select · type to search · del delete · enter resume · esc cancel",
             Style::default().fg(DIM),
-        ))),
-        hints,
-    );
+        ))
+    };
+    f.render_widget(Paragraph::new(hints_line), hints);
 }
 
 /// The gray meta line under a title: "relative-time · branch · size", with the
@@ -445,7 +584,7 @@ mod tests {
     #[test]
     fn render_shows_claude_code_style_rows() {
         let now = at(2026, 7, 2, 12, 0);
-        let state = SelectorState::new(vec![
+        let mut state = SelectorState::new(vec![
             entry(
                 "Examine the workspace",
                 Some("main"),
@@ -461,7 +600,7 @@ mod tests {
         ]);
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, &state, now)).unwrap();
+        terminal.draw(|f| render(f, &mut state, now)).unwrap();
         let buf = terminal.backend().buffer();
         let mut text = String::new();
         for y in 0..buf.area.height {
@@ -494,7 +633,7 @@ mod tests {
         }
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, &state, now)).unwrap();
+        terminal.draw(|f| render(f, &mut state, now)).unwrap();
         let buf = terminal.backend().buffer();
         let mut text = String::new();
         for y in 0..buf.area.height {
@@ -503,5 +642,95 @@ mod tests {
             }
         }
         assert!(text.contains("No sessions match"), "{text}");
+    }
+
+    /// Render the current buffer to a plain string for assertions.
+    fn dump(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn arrowing_past_the_viewport_scrolls_to_follow_selection() {
+        let now = at(2026, 7, 2, 12, 0);
+        // 8 entries × 3 rows; a short terminal fits only ~2, so moving the
+        // selection to the bottom must scroll the window to keep it visible.
+        let mut state = SelectorState::new(
+            (0..8)
+                .map(|i| entry(&format!("Session {i}"), None, now, 100))
+                .collect(),
+        );
+        let backend = TestBackend::new(80, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // First frame records the viewport height for the follow clamp.
+        terminal.draw(|f| render(f, &mut state, now)).unwrap();
+        for _ in 0..7 {
+            state.move_down();
+        }
+        terminal.draw(|f| render(f, &mut state, now)).unwrap();
+        let text = dump(&terminal);
+        assert!(
+            text.contains("> Session 7"),
+            "selection followed into view:\n{text}"
+        );
+        assert!(
+            !text.contains("Session 0"),
+            "top entries scrolled away:\n{text}"
+        );
+    }
+
+    #[test]
+    fn wheel_scrolls_viewport_without_moving_selection() {
+        let now = at(2026, 7, 2, 12, 0);
+        let mut state = SelectorState::new(
+            (0..8)
+                .map(|i| entry(&format!("Session {i}"), None, now, 100))
+                .collect(),
+        );
+        let backend = TestBackend::new(80, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut state, now)).unwrap();
+
+        state.scroll_viewport_down(); // wheel down: viewport moves, selection doesn't
+        terminal.draw(|f| render(f, &mut state, now)).unwrap();
+        let text = dump(&terminal);
+        assert_eq!(state.selected, 0, "the wheel must not move the selection");
+        assert!(
+            !text.contains("Session 0"),
+            "viewport scrolled past the top:\n{text}"
+        );
+    }
+
+    #[test]
+    fn delete_flow_arms_confirm_then_drops_the_entry() {
+        let now = at(2026, 7, 2, 12, 0);
+        let mut state = SelectorState::new(vec![
+            entry("keep", None, now, 1),
+            entry("gone", None, now, 1),
+        ]);
+        state.move_down(); // highlight "gone" (entries index 1)
+        state.request_delete();
+        assert_eq!(
+            state.pending_delete,
+            Some(1),
+            "armed on the highlighted entry"
+        );
+        // The manager's on-disk delete lives in run_selector; here we drive the
+        // state mutation that follows a confirmed delete.
+        let idx = state.take_pending_delete().expect("pending");
+        state.remove_entry(idx);
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(
+            state.current().map(|e| e.history.title.as_str()),
+            Some("keep"),
+            "selection re-clamped onto the surviving entry"
+        );
     }
 }
