@@ -92,11 +92,29 @@ fn autostart_disabled() -> bool {
     cfg!(test) || std::env::var_os("MERMAID_OLLAMA_AUTOSTART").is_some_and(|v| v == "0")
 }
 
+/// The single user-visible line surfaced at the moment a start is actually
+/// attempted. Owned here (next to the spawn) so every trigger path — TUI
+/// chat, headless `mermaid run`, CLI model list — shows identical wording,
+/// and so it can say the part users can't otherwise discover: the server is
+/// detached and deliberately outlives mermaid.
+pub const STARTING_NOTICE: &str =
+    "Starting the local Ollama server (it stays running after mermaid exits)…";
+
 /// Make sure a *local* Ollama server is listening at `base_url`, starting
 /// `ollama serve` if needed. `Ok(())` means the URL answered a health probe
 /// (whether it was already up or we just started it) and a retry is
 /// worthwhile.
-pub async fn ensure_running(base_url: &str) -> Result<(), AutostartError> {
+///
+/// `notify` is invoked with [`STARTING_NOTICE`] exactly once, at the moment
+/// a spawn is committed to — never for `NotLocal`/`Disabled`, never when the
+/// probe finds the server already healthy, never when the binary is missing.
+/// Callers route it to their user-visible surface (stream status line,
+/// stderr); the up-to-15s wait behind a generic spinner, the invisible
+/// detached process, and file-only tracing are otherwise all silent.
+pub async fn ensure_running(
+    base_url: &str,
+    notify: Option<&(dyn Fn(&str) + Sync)>,
+) -> Result<(), AutostartError> {
     let authority = authority_of(base_url).to_string();
     if !classify_host(host_of(&authority)).is_loopback() {
         return Err(AutostartError::NotLocal);
@@ -127,7 +145,7 @@ pub async fn ensure_running(base_url: &str) -> Result<(), AutostartError> {
         return Err(err.clone());
     }
 
-    let outcome = start_and_wait(&mut state, &client, base_url, &authority).await;
+    let outcome = start_and_wait(&mut state, &client, base_url, &authority, notify).await;
     state.last_failure = match &outcome {
         Ok(()) => None,
         Err(e) => Some((Instant::now(), e.clone())),
@@ -142,10 +160,16 @@ async fn start_and_wait(
     client: &reqwest::Client,
     base_url: &str,
     authority: &str,
+    notify: Option<&(dyn Fn(&str) + Sync)>,
 ) -> Result<(), AutostartError> {
     let Some(binary) = find_binary() else {
         return Err(AutostartError::NotInstalled);
     };
+    // The spawn is committed — this is the one moment the user hears about
+    // it (tracing below lands in the log file, invisible in normal use).
+    if let Some(notify) = notify {
+        notify(STARTING_NOTICE);
+    }
     tracing::info!(
         binary = %binary.display(),
         authority,
@@ -334,7 +358,7 @@ mod tests {
             "http://192.168.1.50:11434",
             "http://10.0.0.7:11434",
         ] {
-            match ensure_running(url).await {
+            match ensure_running(url, None).await {
                 Err(AutostartError::NotLocal) => {},
                 other => panic!("{url} must be NotLocal, got {other:?}"),
             }
@@ -348,10 +372,27 @@ mod tests {
         // makes default-config adapters (autostart=true, localhost:11434)
         // safe in every present and future test on machines with Ollama
         // installed.
-        match ensure_running("http://127.0.0.1:11434").await {
+        match ensure_running("http://127.0.0.1:11434", None).await {
             Err(AutostartError::Disabled) => {},
             other => panic!("expected Disabled in test builds, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn notice_fires_only_when_a_spawn_is_committed() {
+        // The gate paths that return before a spawn (NotLocal, Disabled)
+        // must NOT invoke `notify` — the notice's contract is "a start is
+        // actually happening", so a remote URL or a killed switch stays
+        // silent and no false "Starting…" line ever reaches the user.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let called = AtomicBool::new(false);
+        let notify = |_: &str| called.store(true, Ordering::SeqCst);
+        let _ = ensure_running("https://ollama.example.com", Some(&notify)).await;
+        let _ = ensure_running("http://127.0.0.1:11434", Some(&notify)).await;
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "notify must not fire on NotLocal/Disabled paths"
+        );
     }
 
     #[test]

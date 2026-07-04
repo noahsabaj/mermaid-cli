@@ -305,9 +305,11 @@ host = "localhost"
 port = 11434
 # Start `ollama serve` automatically when the local server isn't running
 # (loopback hosts only; the revived server binds to exactly this host:port).
-# Diagnostics (`mermaid status` / `doctor`) only observe and never start it.
-# Disable here — or with MERMAID_OLLAMA_AUTOSTART=0 in the environment — if
-# you manage Ollama yourself (custom bind address, containers, CI).
+# Only paths that USE Ollama start it (chat, the startup model check); the
+# read-only verbs (`mermaid list` / `models` / `status` / `doctor`) observe
+# and never start anything. Disable here — or with
+# MERMAID_OLLAMA_AUTOSTART=0 in the environment — if you manage Ollama
+# yourself (custom bind address, containers, CI).
 auto_start = true
 # cloud_api_key = "your-key"  # for :cloud models
 # num_gpu = 10

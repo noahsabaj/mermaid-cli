@@ -55,6 +55,10 @@ pub enum StreamEvent {
     Text(String),
     Reasoning(ReasoningChunk),
     ToolCall(ModelToolCall),
+    /// Out-of-band, user-visible plumbing notice (e.g. "Starting the local
+    /// Ollama server…"). Not response content — the effect layer routes it
+    /// to a transient/system line, never into the assistant message.
+    Status(String),
     /// Optional — some providers emit a signature mid-stream
     /// (Anthropic). Adapters that only have it at the end can attach
     /// it to `Done` instead.

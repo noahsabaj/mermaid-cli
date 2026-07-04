@@ -16,7 +16,18 @@ async fn list_installed_models(config: &Config) -> Vec<String> {
         ollama_autostart: config.ollama.auto_start,
     };
     match OllamaAdapter::new("__list__", Arc::new(backend)).await {
-        Ok(adapter) => adapter.list_models().await.unwrap_or_default(),
+        // This runs pre-TUI on plain console, so the autostart notice can go
+        // straight to stderr — otherwise a cold-boot `mermaid` sits silent
+        // for the whole server start.
+        Ok(adapter) => adapter
+            .with_status_notify(Arc::new(|ev| {
+                if let crate::models::StreamEvent::Status(text) = ev {
+                    eprintln!("{text}");
+                }
+            }))
+            .list_models()
+            .await
+            .unwrap_or_default(),
         Err(_) => Vec::new(),
     }
 }

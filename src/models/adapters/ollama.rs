@@ -118,6 +118,14 @@ pub struct OllamaAdapter {
     /// request is refused (`BackendConfig::ollama_autostart`). The user should
     /// never have to leave mermaid to run `ollama serve`.
     autostart: bool,
+    /// Fallback surface for the autostart notice on paths that carry no
+    /// stream callback (`list_models` — the startup preflight and the CLI
+    /// list verbs). Console constructors attach an stderr printer via
+    /// [`OllamaAdapter::with_status_notify`]; the chat path's stream
+    /// callback takes precedence. `None` (the default) keeps recovery
+    /// silent, which is the safe choice anywhere a TUI might own the
+    /// screen.
+    status_notify: Option<StreamCallback>,
 }
 
 /// True if the given model name is a gpt-oss variant. Matching is
@@ -212,7 +220,17 @@ impl OllamaAdapter {
             capabilities,
             thinking_cap: tokio::sync::OnceCell::new(),
             autostart: config.ollama_autostart,
+            status_notify: None,
         })
+    }
+
+    /// Attach a surface for the autostart notice on callback-less paths
+    /// (`list_models`). For console-owned contexts only — the startup
+    /// preflight and the CLI list verbs print it to stderr; never attach
+    /// anything that writes to a terminal a TUI might own.
+    pub fn with_status_notify(mut self, notify: StreamCallback) -> Self {
+        self.status_notify = Some(notify);
+        self
     }
 
     /// Whether this model supports `think`. Probes `/api/show` `capabilities`
@@ -673,9 +691,13 @@ impl OllamaAdapter {
     /// via `crate::effect::retry_transient_http`. Mid-stream failures
     /// (body consumption) are NOT retried — partial content has already
     /// reached the caller at that point.
-    async fn send_chat(&self, body: &serde_json::Value) -> Result<reqwest::Response> {
+    async fn send_chat(
+        &self,
+        body: &serde_json::Value,
+        notify: Option<&StreamCallback>,
+    ) -> Result<reqwest::Response> {
         let url = format!("{}/api/chat", self.base_url);
-        self.with_local_recovery(|| async {
+        self.with_local_recovery(notify, || async {
             self.client.post(&url).json(body).send().await.map_err(|e| {
                 ModelError::Backend(BackendError::ConnectionFailed {
                     backend: "ollama".to_string(),
@@ -694,7 +716,20 @@ impl OllamaAdapter {
     /// not the user's. When auto-start itself fails, its hint is appended to
     /// the connection error so the surfaced message says what to do next;
     /// non-local URLs pass their error through untouched.
-    async fn with_local_recovery<F, Fut>(&self, mut op: F) -> Result<reqwest::Response>
+    ///
+    /// `notify` carries the moment-of-spawn notice ("Starting the local
+    /// Ollama server…") out as a `StreamEvent::Status` — the revival can
+    /// block ~15s behind an otherwise generic spinner, and the spawned
+    /// server outlives mermaid, so this one line covers latency feedback,
+    /// discoverability, and consent at once. `ensure_running` invokes it
+    /// only when a spawn is actually committed (never on NotLocal /
+    /// Disabled / already-healthy / binary-missing), so no false notices
+    /// reach the user.
+    async fn with_local_recovery<F, Fut>(
+        &self,
+        notify: Option<&StreamCallback>,
+        mut op: F,
+    ) -> Result<reqwest::Response>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<reqwest::Response>>,
@@ -709,7 +744,16 @@ impl OllamaAdapter {
         ) {
             return first;
         }
-        match crate::ollama::ensure_running(&self.base_url).await {
+        // Stream callback first (chat), constructor sink second (console
+        // list paths) — whichever exists carries the one notice.
+        let ensured = match notify.or(self.status_notify.as_ref()) {
+            Some(cb) => {
+                let forward = |text: &str| cb(StreamEvent::Status(text.to_string()));
+                crate::ollama::ensure_running(&self.base_url, Some(&forward)).await
+            },
+            None => crate::ollama::ensure_running(&self.base_url, None).await,
+        };
+        match ensured {
             Ok(()) => crate::effect::retry_transient_http(&mut op).await,
             Err(autostart_err) => match autostart_err.hint() {
                 Some(hint) => first.map_err(|e| append_reason_hint(e, &hint)),
@@ -777,8 +821,10 @@ impl Model for OllamaAdapter {
         // Recovery here is what makes a cold boot self-heal: the startup
         // model check (`ollama::installer`) and the model picker both land on
         // this call, so a dead local server is revived before the first chat.
+        // No stream callback exists on this path (notify: None) — its callers
+        // are console contexts where the pause reads as startup work.
         let response = self
-            .with_local_recovery(|| async {
+            .with_local_recovery(None, || async {
                 self.client.get(&url).send().await.map_err(|e| {
                     ModelError::Backend(BackendError::ConnectionFailed {
                         backend: "ollama".to_string(),
@@ -814,7 +860,10 @@ impl Model for OllamaAdapter {
         let stream = callback.is_some();
         let supports_thinking = self.thinking_supported().await;
         let request_body = self.build_request_body(messages, config, stream, supports_thinking);
-        let response = self.send_chat(&request_body).await?;
+        // `callback` doubles as the autostart notice channel: if the local
+        // server has to be started, the user sees a status line instead of
+        // ~15s of bare spinner.
+        let response = self.send_chat(&request_body, callback.as_ref()).await?;
 
         if stream {
             self.handle_stream(response, callback, config.hide_reasoning_trace)

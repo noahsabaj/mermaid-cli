@@ -384,6 +384,7 @@ fn stream_callback_for(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) ->
                 signature: chunk.signature,
             }),
             ModelStreamEvent::ToolCall(tc) => StreamEvent::ToolCall(tc),
+            ModelStreamEvent::Status(s) => StreamEvent::Status(s),
             ModelStreamEvent::Done { tokens } => StreamEvent::Done {
                 usage: if tokens > 0 {
                     Some(crate::models::TokenUsage::provider(0, tokens, tokens))
@@ -500,6 +501,26 @@ mod tests {
             .expect("sender alive");
         match recv {
             StreamEvent::Text(s) => assert_eq!(s, "hello"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_callback_forwards_status_notice() {
+        // The autostart notice rides the same ordered relay as content
+        // events; the bridge must map it 1:1 so it reaches the effect
+        // layer (→ Msg::TransientStatus → system line / stderr).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cb = stream_callback_for(tx);
+        cb(ModelStreamEvent::Status(
+            "Starting the local Ollama server…".to_string(),
+        ));
+        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("recv")
+            .expect("sender alive");
+        match recv {
+            StreamEvent::Status(s) => assert!(s.contains("Starting")),
             _ => panic!("wrong variant"),
         }
     }
