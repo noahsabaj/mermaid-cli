@@ -254,7 +254,7 @@ async fn show_doctor(
     // (unreachable) vs `Some(vec![])` (running, nothing pulled) get distinct
     // messages; the "next steps" nudge below only needs "no usable models".
     let ollama_models = if is_ollama_installed() {
-        list_ollama_models(config, false).await
+        list_ollama_models(config).await
     } else {
         None
     };
@@ -1629,17 +1629,23 @@ fn show_ports() -> Result<()> {
 }
 
 /// List available models across all backends (honors user config).
+/// Read-only: a dead local server is reported, never resurrected — a
+/// cloud-model user who stopped Ollama on purpose must be able to
+/// enumerate without a surprise VRAM grab.
 pub async fn list_models(config: &Config) -> Result<()> {
-    // User intent is "show me my models" — reviving a dead local server IS
-    // the job here (autostart=true), unlike the observe-only diagnostics.
-    let ollama_models = list_ollama_models(config, true).await.unwrap_or_default();
-    if ollama_models.is_empty() {
-        println!("No Ollama models installed locally.");
-    } else {
-        println!("Ollama models (local/cloud):");
-        for name in &ollama_models {
-            println!("  - ollama/{}", name);
-        }
+    match list_ollama_models(config).await {
+        None if is_ollama_installed() => {
+            println!("Ollama is installed but not running — local models can't be listed.");
+            println!("(It starts automatically when you use an Ollama model.)");
+        },
+        None => println!("Ollama is not installed; no local models."),
+        Some(models) if models.is_empty() => println!("No Ollama models installed locally."),
+        Some(models) => {
+            println!("Ollama models (local/cloud):");
+            for name in &models {
+                println!("  - ollama/{}", name);
+            }
+        },
     }
 
     println!("\nConfigured remote providers:");
@@ -1662,34 +1668,25 @@ pub async fn list_models(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Ask the local Ollama daemon for its list of models. `None` when the
-/// server couldn't be reached (distinct from `Some(vec![])` — running but
-/// nothing pulled) so the diagnostic verbs can report a dead server
-/// truthfully. `autostart` decides whether a dead *local* server may be
-/// revived: user-intent verbs (`mermaid models` / `list`) pass `true`;
-/// diagnostics (`status` / `doctor`) pass `false` so observing state never
-/// mutates it ([ollama] auto_start still gates the `true` case).
-async fn list_ollama_models(config: &Config, autostart: bool) -> Option<Vec<String>> {
+/// Ask the local Ollama daemon for its list of models — strictly read-only.
+/// `None` when the server couldn't be reached (distinct from `Some(vec![])`:
+/// running with nothing pulled) so callers can report a dead server
+/// truthfully. Every caller is an enumeration/diagnostic verb (`list` /
+/// `models` / `status` / `doctor`), and observing state must never mutate
+/// it — a cloud-only user who deliberately stopped Ollama to free VRAM must
+/// not get it resurrected by a listing — so autostart is hard-off here. The
+/// intent paths (chat's `send_chat`, the startup preflight in
+/// `ollama::installer`) keep autostart; that's where a dead server heals.
+async fn list_ollama_models(config: &Config) -> Option<Vec<String>> {
     use crate::models::adapters::ollama::OllamaAdapter;
     let backend = BackendConfig {
         ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
         timeout_secs: 5,
         max_idle_per_host: 2,
-        ollama_autostart: autostart && config.ollama.auto_start,
+        ollama_autostart: false,
     };
     match OllamaAdapter::new("__list__", Arc::new(backend)).await {
-        // CLI verbs own the console, so the autostart notice (fires only on
-        // an actual spawn, i.e. never for the autostart=false diagnostics)
-        // goes straight to stderr.
-        Ok(adapter) => adapter
-            .with_status_notify(Arc::new(|ev| {
-                if let crate::models::StreamEvent::Status(text) = ev {
-                    eprintln!("{text}");
-                }
-            }))
-            .list_models()
-            .await
-            .ok(),
+        Ok(adapter) => adapter.list_models().await.ok(),
         Err(_) => None,
     }
 }
@@ -1957,7 +1954,7 @@ async fn show_status(config: &Config) -> Result<()> {
     // status check would start the server and then report "Running" —
     // never able to observe the dead state it exists to surface.
     if is_ollama_installed() {
-        match list_ollama_models(config, false).await {
+        match list_ollama_models(config).await {
             None => println!(
                 "  [WARNING] Ollama: Installed but not running (started automatically \
                  when an Ollama model is used)"

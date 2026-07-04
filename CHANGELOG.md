@@ -15,13 +15,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as a system line in the TUI transcript (via a new out-of-band
   `StreamEvent::Status` → `Msg::TransientStatus` path, recorded/replayed
   like any other Msg), on stderr for headless `mermaid run` (stdout stays
-  clean for the response payload), and on stderr for the console verbs
-  (startup preflight, `mermaid models`/`list`). The line fires only when a
-  spawn actually happens — never when the server was already up, never on
-  remote URLs, never from the observe-only diagnostics — closing the
-  latency-feedback, discoverability, and consent gaps of a revival that can
-  otherwise hide up to ~15s behind a generic spinner and leave behind a
-  detached server with no breadcrumb.
+  clean for the response payload), and on stderr for the startup model
+  check. The line fires only when a spawn actually happens — never when the
+  server was already up, never on remote URLs, never from the read-only
+  verbs — closing the latency-feedback, discoverability, and consent gaps
+  of a revival that can otherwise hide up to ~15s behind a generic spinner
+  and leave behind a detached server with no breadcrumb.
+
+### Changed
+
+- **`mermaid list` and `mermaid models` no longer start Ollama.** All four
+  read-only verbs (`list` / `models` / `status` / `doctor`) now enumerate
+  with auto-start hard-off: observing state never mutates it, so a
+  cloud-model user who deliberately stopped Ollama to free VRAM can run any
+  of them without resurrecting the daemon. A dead server is reported
+  honestly ("Ollama is installed but not running — local models can't be
+  listed") instead of the misleading "No Ollama models installed locally."
+  Auto-start remains on the paths that actually use Ollama: chat and the
+  startup model check.
 
 ## [0.16.0] - 2026-07-04
 
