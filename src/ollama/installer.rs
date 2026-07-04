@@ -13,6 +13,7 @@ async fn list_installed_models(config: &Config) -> Vec<String> {
         ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
         timeout_secs: 5,
         max_idle_per_host: 2,
+        ollama_autostart: config.ollama.auto_start,
     };
     match OllamaAdapter::new("__list__", Arc::new(backend)).await {
         Ok(adapter) => adapter.list_models().await.unwrap_or_default(),

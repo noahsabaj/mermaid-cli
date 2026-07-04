@@ -40,6 +40,9 @@ pub enum Grace {
 }
 
 /// How long `Graceful` waits between SIGTERM and the SIGKILL backstop.
+/// Unix-only like the SIGTERM path itself; Windows teardown has no
+/// graceful phase (`taskkill /F` only), so there the constant is dead.
+#[cfg(not(target_os = "windows"))]
 const GRACE_PERIOD: Duration = Duration::from_millis(400);
 
 /// pids 0 and 1 are never legitimate teardown targets. On Unix we signal the

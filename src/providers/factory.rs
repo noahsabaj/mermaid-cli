@@ -239,6 +239,7 @@ pub(crate) fn ollama_backend_config(config: &Config) -> BackendConfig {
         ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
         max_idle_per_host: 10,
         timeout_secs: 10,
+        ollama_autostart: config.ollama.auto_start,
     }
 }
 

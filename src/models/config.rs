@@ -208,6 +208,12 @@ pub struct BackendConfig {
     /// Max idle connections per host
     #[serde(default = "default_max_idle")]
     pub max_idle_per_host: usize,
+
+    /// Auto-start a dead *local* Ollama server on connection failure
+    /// (`ollama::server::ensure_running`). Sourced from
+    /// `app::Config.ollama.auto_start`; only ever acts on loopback URLs.
+    #[serde(default = "default_ollama_autostart")]
+    pub ollama_autostart: bool,
 }
 
 impl Default for BackendConfig {
@@ -216,6 +222,7 @@ impl Default for BackendConfig {
             ollama_url: default_ollama_url(),
             timeout_secs: default_timeout(),
             max_idle_per_host: default_max_idle(),
+            ollama_autostart: default_ollama_autostart(),
         }
     }
 }
@@ -244,6 +251,10 @@ fn default_timeout() -> u64 {
     10
 }
 
+fn default_ollama_autostart() -> bool {
+    true
+}
+
 fn default_max_idle() -> usize {
     10
 }
@@ -251,6 +262,19 @@ fn default_max_idle() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialized `BackendConfig`s from before the autostart knob lack the
+    /// key — it must default ON (reviving a dead local server is the
+    /// out-of-the-box behavior).
+    #[test]
+    fn backend_config_defaults_autostart_on_when_key_absent() {
+        let cfg: BackendConfig = serde_json::from_str(
+            r#"{"ollama_url":"http://localhost:11434","timeout_secs":5,"max_idle_per_host":2}"#,
+        )
+        .expect("parse");
+        assert!(cfg.ollama_autostart);
+        assert!(BackendConfig::default().ollama_autostart);
+    }
 
     /// Step 4 wires `default_model.reasoning` from app config into the
     /// per-call ModelConfig. Without this, the user's config-file choice

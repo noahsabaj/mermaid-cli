@@ -303,6 +303,9 @@ reasoning = "medium"  # none | minimal | low | medium | high | xhigh | max
 [ollama]
 host = "localhost"
 port = 11434
+# Start `ollama serve` automatically when the local server isn't running
+# (loopback hosts only). Disable if you manage Ollama yourself.
+auto_start = true
 # cloud_api_key = "your-key"  # for :cloud models
 # num_gpu = 10
 # num_thread = 8

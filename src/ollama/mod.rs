@@ -3,6 +3,7 @@ mod cloud_setup;
 mod detector;
 mod guide;
 mod installer;
+pub mod server;
 
 pub use cloud_setup::{
     get_cloud_api_key, is_cloud_configured, is_cloud_model, prompt_cloud_setup_if_needed,
