@@ -26,3 +26,14 @@ sha2 = "0.11"
 shell-words = "1.1"
 toml = "1.1"
 tracing = "0.1"
+
+# Named-pipe daemon transport (#7): token→SID lookup for the per-user pipe
+# name, and SDDL→security-descriptor conversion for the owner-only pipe ACL —
+# the Windows analog of the 0600 Unix socket + uid peer check.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }

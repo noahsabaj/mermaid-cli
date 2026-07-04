@@ -1,13 +1,13 @@
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use anyhow::{Context, Result};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const DEFAULT_TCP_ADDR: &str = "127.0.0.1:39871";
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const HELP: &str = "\
 mermaidd — Mermaid's background daemon (durable runtime state, remote attach,
 long-running process ownership).
@@ -15,11 +15,12 @@ long-running process ownership).
 Usage: mermaidd [--version | --help]
 
 With no arguments it runs the daemon in the foreground, serving the control
-socket. It is normally managed via the `mermaid daemon` subcommands (install,
-start, stop, restart, status, logs) rather than invoked directly.
+socket (a Unix domain socket; an owner-locked named pipe on Windows). On Linux
+it is normally managed via the `mermaid daemon` subcommands (install, start,
+stop, restart, status, logs) rather than invoked directly.
 ";
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug, PartialEq, Eq)]
 enum CliAction {
     Run,
@@ -34,7 +35,7 @@ enum CliAction {
 /// starting the daemon: a `mermaidd --version` probe would otherwise boot a
 /// foreground daemon and — because startup replaces the control socket — could
 /// knock a running daemon off its socket.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn classify_args<I: IntoIterator<Item = String>>(args: I) -> CliAction {
     match args.into_iter().next().as_deref() {
         None => CliAction::Run,
@@ -47,9 +48,10 @@ fn classify_args<I: IntoIterator<Item = String>>(args: I) -> CliAction {
 /// Retention window for the startup GC (#130): archived approvals/checkpoints,
 /// the events of long-finished tasks, and on-disk checkpoint dirs older than this
 /// are pruned. Generous so nothing recently useful is dropped.
+#[cfg(any(unix, windows))]
 const RUNTIME_RETENTION_DAYS: i64 = 30;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::main]
 async fn main() -> Result<()> {
     match classify_args(std::env::args().skip(1)) {
@@ -68,10 +70,51 @@ async fn main() -> Result<()> {
         },
     }
 
-    let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+    // Open (and thereby create/validate) the runtime store up front on every
+    // platform: a broken DB should fail the daemon fast, not its first client.
+    drop(mermaid_cli::runtime::RuntimeStore::open_default()?);
+
+    #[cfg(unix)]
+    return serve_unix().await;
+    #[cfg(windows)]
+    return serve_windows().await;
+}
+
+/// Recover state stranded by a previous daemon's crash (#120, #118) and prune
+/// old runtime rows + checkpoint dirs (#130). Must run singleton-guarded — by
+/// the unix flock or the windows first-pipe-instance — so it executes once per
+/// live daemon. All best-effort.
+#[cfg(any(unix, windows))]
+fn startup_recovery() {
+    if let Ok(store) = mermaid_cli::runtime::RuntimeStore::open_default() {
+        match store.reconcile_after_restart() {
+            Ok((tasks, claims)) if tasks + claims > 0 => {
+                tracing::info!(
+                    tasks,
+                    claims,
+                    "reconciled state stranded by a previous daemon"
+                );
+            },
+            Ok(_) => {},
+            Err(error) => tracing::warn!(error = %error, "startup reconcile failed"),
+        }
+        match store.gc(RUNTIME_RETENTION_DAYS) {
+            Ok(removed) if removed > 0 => tracing::info!(removed, "gc pruned old runtime rows"),
+            Ok(_) => {},
+            Err(error) => tracing::warn!(error = %error, "startup gc failed"),
+        }
+    }
+    if let Ok(removed) = mermaid_cli::runtime::gc_old_checkpoint_dirs(RUNTIME_RETENTION_DAYS)
+        && removed > 0
+    {
+        tracing::info!(removed, "gc removed old checkpoint directories");
+    }
+}
+
+#[cfg(unix)]
+async fn serve_unix() -> Result<()> {
     let data_dir = mermaid_cli::runtime::data_dir()?;
     let socket_path = data_dir.join("mermaidd.sock");
-    drop(store);
 
     // #66: the 0700 data dir is what makes the 0600 socket meaningful.
     // `open_default` warns but stays non-fatal on a chmod failure (a shared
@@ -98,32 +141,9 @@ async fn main() -> Result<()> {
         ),
     };
 
-    // Only the lock holder reaches here, so this runs once per live daemon:
-    // recover state a previous daemon left stranded by crashing (#120, #118) and
-    // prune old runtime rows + checkpoint dirs (#130). All best-effort.
-    if let Ok(store) = mermaid_cli::runtime::RuntimeStore::open_default() {
-        match store.reconcile_after_restart() {
-            Ok((tasks, claims)) if tasks + claims > 0 => {
-                tracing::info!(
-                    tasks,
-                    claims,
-                    "reconciled state stranded by a previous daemon"
-                );
-            },
-            Ok(_) => {},
-            Err(error) => tracing::warn!(error = %error, "startup reconcile failed"),
-        }
-        match store.gc(RUNTIME_RETENTION_DAYS) {
-            Ok(removed) if removed > 0 => tracing::info!(removed, "gc pruned old runtime rows"),
-            Ok(_) => {},
-            Err(error) => tracing::warn!(error = %error, "startup gc failed"),
-        }
-    }
-    if let Ok(removed) = mermaid_cli::runtime::gc_old_checkpoint_dirs(RUNTIME_RETENTION_DAYS)
-        && removed > 0
-    {
-        tracing::info!(removed, "gc removed old checkpoint directories");
-    }
+    // Only the lock holder reaches here, so recovery/GC runs once per live
+    // daemon (#120, #118, #130).
+    startup_recovery();
 
     if socket_path.exists() {
         // Don't clobber a daemon that's already serving here. If something
@@ -220,7 +240,86 @@ fn uid_allowed(peer_uid: u32, owner_uid: u32) -> bool {
     peer_uid == owner_uid || peer_uid == 0
 }
 
-#[cfg(unix)]
+/// Serve the control plane over a named pipe locked to the owning user. The
+/// pipe's DACL (see `pipe_sddl`) is the Windows analog of the 0600 socket +
+/// uid peer check: identity is enforced by the kernel at `open` time, so no
+/// post-accept peer check is needed. Remote clients are refused via
+/// `PIPE_REJECT_REMOTE_CLIENTS` (tokio's default, set explicitly anyway).
+#[cfg(windows)]
+async fn serve_windows() -> Result<()> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let pipe_name = mermaid_cli::runtime::daemon::daemon_pipe_name()?;
+    let mut security = mermaid_cli::runtime::daemon::PipeSecurity::owner_only()?;
+
+    // The first instance doubles as the singleton guard (the named-pipe analog
+    // of the unix flock, #131): while any mermaidd holds an instance of this
+    // name, a second daemon's first-instance create fails with
+    // `PermissionDenied`. Unlike unix sockets there is no stale-file case —
+    // the name vanishes with the last handle.
+    let mut server = match unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(&pipe_name, security.attributes_ptr())
+    } {
+        Ok(server) => server,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => anyhow::bail!(
+            "a mermaidd daemon is already serving {pipe_name} — stop it before starting another"
+        ),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to create pipe {pipe_name}"));
+        },
+    };
+
+    // Only the first-instance holder reaches here, so recovery/GC runs once
+    // per live daemon (#120, #118, #130) — same guarantee the flock gives unix.
+    startup_recovery();
+
+    println!("mermaidd listening on {pipe_name}");
+
+    maybe_spawn_tcp_listener().await;
+
+    loop {
+        if let Err(err) = server.connect().await {
+            // Transient connect failures must not take the daemon down — log,
+            // brief-pause to avoid a hot spin, and keep serving (mirrors the
+            // unix accept-error handling).
+            tracing::warn!(error = %err, "mermaidd pipe connect failed; continuing");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        }
+        // Stand up the next instance before handing this one off, so a client
+        // burst never finds no listener (their opens see ERROR_PIPE_BUSY only
+        // for the moment between connect and this create).
+        let next = loop {
+            match unsafe {
+                ServerOptions::new()
+                    .reject_remote_clients(true)
+                    .create_with_security_attributes_raw(&pipe_name, security.attributes_ptr())
+            } {
+                Ok(next) => break next,
+                Err(err) => {
+                    tracing::warn!(error = %err, "mermaidd pipe re-create failed; retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                },
+            }
+        };
+        let client = std::mem::replace(&mut server, next);
+        tokio::spawn(async move {
+            let timeout = std::time::Duration::from_secs(
+                mermaid_cli::constants::DAEMON_CONNECTION_TIMEOUT_SECS,
+            );
+            match tokio::time::timeout(timeout, handle_stream(client)).await {
+                Ok(Ok(())) => {},
+                Ok(Err(err)) => tracing::warn!(error = %err, "mermaidd client failed"),
+                Err(_) => tracing::warn!("mermaidd client timed out; dropping connection"),
+            }
+        });
+    }
+}
+
+#[cfg(any(unix, windows))]
 async fn maybe_spawn_tcp_listener() {
     // TCP control is OFF by default — it exposes the agent control plane to
     // every local UID and anything that can reach loopback. Opt in with
@@ -239,14 +338,18 @@ async fn maybe_spawn_tcp_listener() {
                 if let Ok(dir) = mermaid_cli::runtime::data_dir() {
                     let tcp_file = dir.join("mermaidd.tcp");
                     if std::fs::write(&tcp_file, local_addr.to_string()).is_ok() {
-                        use std::os::unix::fs::PermissionsExt;
                         // The hint file holds a loopback address, not a secret, so
                         // a chmod failure warns rather than killing the listener.
-                        if let Err(err) = std::fs::set_permissions(
-                            &tcp_file,
-                            std::fs::Permissions::from_mode(0o600),
-                        ) {
-                            tracing::warn!(file = %tcp_file.display(), error = %err, "failed to lock tcp hint file to 0600");
+                        // (Windows: the per-user profile dir's ACL already scopes it.)
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            if let Err(err) = std::fs::set_permissions(
+                                &tcp_file,
+                                std::fs::Permissions::from_mode(0o600),
+                            ) {
+                                tracing::warn!(file = %tcp_file.display(), error = %err, "failed to lock tcp hint file to 0600");
+                            }
                         }
                     }
                 }
@@ -287,7 +390,7 @@ async fn maybe_spawn_tcp_listener() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn handle_stream<S>(stream: S) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -295,7 +398,7 @@ where
     handle_stream_inner(stream, false).await
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn handle_remote_stream<S>(stream: S) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -303,7 +406,7 @@ where
     handle_stream_inner(stream, true).await
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn handle_stream_inner<S>(stream: S, require_auth: bool) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -331,7 +434,7 @@ where
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json::Value> {
     if command.starts_with('{') {
         let body: serde_json::Value = serde_json::from_str(command)?;
@@ -374,7 +477,7 @@ async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json:
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn handle_json_command(
     body: &serde_json::Value,
     require_remote_auth: bool,
@@ -696,7 +799,7 @@ async fn handle_json_command(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn command_requires_auth(command: &str) -> bool {
     matches!(
         command,
@@ -747,7 +850,7 @@ fn command_requires_auth(command: &str) -> bool {
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn authorize(body: &serde_json::Value) -> Result<bool> {
     let Some(token) = body
         .get("auth")
@@ -772,7 +875,7 @@ fn authorize(body: &serde_json::Value) -> Result<bool> {
 /// is left `running` and the next startup reconcile fails it (discarding the real
 /// report). Retry a few times, reopening the store each attempt, and log loudly
 /// if it still can't be written rather than swallowing the error.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn persist_terminal_status(
     task_id: &str,
     status: mermaid_cli::runtime::TaskStatus,
@@ -810,7 +913,7 @@ async fn persist_terminal_status(
 /// not propagated. Finer, higher-value signals (test/build results, git-survival,
 /// user edit/accept preference pairs) attach to the same `outcomes` table as the
 /// run lifecycle grows hooks for them.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn record_terminal_outcome(task_id: &str, status: mermaid_cli::runtime::TaskStatus) {
     use mermaid_cli::runtime::{
         NewOutcome, OUTCOME_LABEL_FAILURE, OUTCOME_LABEL_SUCCESS, OUTCOME_LABEL_UNKNOWN,
@@ -844,7 +947,7 @@ fn record_terminal_outcome(task_id: &str, status: mermaid_cli::runtime::TaskStat
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn task_title_from_prompt(prompt: &str) -> String {
     let one_line = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.is_empty() {
@@ -857,7 +960,7 @@ fn task_title_from_prompt(prompt: &str) -> String {
     format!("{}...", &one_line[..end])
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn str_field<'a>(body: &'a serde_json::Value, name: &str) -> Result<&'a str> {
     body.get(name)
         .and_then(|v| v.as_str())
@@ -865,14 +968,14 @@ fn str_field<'a>(body: &'a serde_json::Value, name: &str) -> Result<&'a str> {
         .with_context(|| format!("missing string field `{}`", name))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn bool_field(body: &serde_json::Value, name: &str) -> Result<bool> {
     body.get(name)
         .and_then(|v| v.as_bool())
         .with_context(|| format!("missing bool field `{}`", name))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     #[test]
     fn classify_args_handles_flags_help_and_unknowns() {
@@ -946,6 +1049,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn uid_allowed_accepts_owner_and_root_only() {
         assert!(super::uid_allowed(1000, 1000), "owner uid must be allowed");
@@ -1004,8 +1108,8 @@ mod tests {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn main() {
-    eprintln!("mermaidd currently supports Unix sockets only");
+    eprintln!("mermaidd currently supports Unix and Windows only");
     std::process::exit(1);
 }

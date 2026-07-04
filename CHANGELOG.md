@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`mermaidd` now runs on Windows.** The daemon serves its JSONL control
+  protocol over a named pipe (`\\.\pipe\mermaidd-<user-SID>`) locked to the
+  owning user with an explicit security descriptor — the named-pipe analog of
+  the `0600` Unix socket + peer-uid check — with remote pipe clients rejected
+  and the first pipe instance doubling as the single-daemon guard. The
+  `mermaid` CLI and the optional localhost TCP listener work unchanged.
+  Service install (`mermaid daemon install`) remains systemd/Linux-only; on
+  Windows start `mermaidd.exe` manually or via Task Scheduler.
+
 - The runtime store now records **outcomes** — a durable, append-only table of
   verifiable results and reward/preference signals attached to a task (and
   optionally a specific tool run). Each outcome carries a `kind` (e.g.

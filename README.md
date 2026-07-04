@@ -279,6 +279,8 @@ The CLI can inspect and manage the same store with `mermaid tasks`, `mermaid tas
 
 On Linux, install a per-user systemd unit with `mermaid daemon install --start`. The installer writes `~/.config/systemd/user/mermaidd.service`, points `ExecStart` at the discovered `mermaidd` binary, reloads systemd's user manager, and optionally enables/starts the service. Use `mermaid daemon status`, `mermaid daemon logs [-f]`, `mermaid daemon restart`, `mermaid daemon stop`, `mermaid daemon uninstall`, or `mermaid daemon print-unit` for day-to-day service management. Set `MERMAID_DAEMON_BIN=/absolute/path/to/mermaidd` before installing if the background-service binary is not next to `mermaid` or on `PATH`.
 
+On Windows, `mermaidd.exe` serves the same JSONL control surface over a named pipe at `\\.\pipe\mermaidd-<your-user-SID>` instead of a Unix socket. The pipe carries an explicit owner-only security descriptor (LocalSystem + your user, nothing else) and rejects remote pipe clients, mirroring the `0600` socket + peer-uid check on Unix; the same pairing-token rules apply on top. There is no service installer yet — start `mermaidd.exe` directly or wire it into Task Scheduler; `mermaid daemon install` remains Linux/systemd-only.
+
 Release builds keep the existing `.tar.gz`/`.zip` archives and add Linux `.deb`/`.rpm` artifacts for x86_64 and aarch64. The distro packages install `mermaid`, `mermaidd`, docs, and a reference systemd user unit at `/usr/lib/systemd/user/mermaidd.service`; they do not auto-enable or start the daemon.
 
 ## Configuration
