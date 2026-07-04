@@ -114,6 +114,10 @@ pub struct OllamaAdapter {
     /// `None` until resolved; recent Ollama 400s a `think` field sent to a
     /// non-thinking model, so the send is gated on this (#122).
     thinking_cap: tokio::sync::OnceCell<bool>,
+    /// Start a dead *local* server via `ollama::ensure_running` when a
+    /// request is refused (`BackendConfig::ollama_autostart`). The user should
+    /// never have to leave mermaid to run `ollama serve`.
+    autostart: bool,
 }
 
 /// True if the given model name is a gpt-oss variant. Matching is
@@ -207,6 +211,7 @@ impl OllamaAdapter {
             model_name: model_name.to_string(),
             capabilities,
             thinking_cap: tokio::sync::OnceCell::new(),
+            autostart: config.ollama_autostart,
         })
     }
 
@@ -670,7 +675,7 @@ impl OllamaAdapter {
     /// reached the caller at that point.
     async fn send_chat(&self, body: &serde_json::Value) -> Result<reqwest::Response> {
         let url = format!("{}/api/chat", self.base_url);
-        crate::effect::retry_transient_http(|| async {
+        self.with_local_recovery(|| async {
             self.client.post(&url).json(body).send().await.map_err(|e| {
                 ModelError::Backend(BackendError::ConnectionFailed {
                     backend: "ollama".to_string(),
@@ -680,6 +685,37 @@ impl OllamaAdapter {
             })
         })
         .await
+    }
+
+    /// Run `op` under the transient-HTTP retry policy; if it still ends in
+    /// `ConnectionFailed` and the server is local, start it
+    /// (`ollama::ensure_running`) and run one more retry round. The
+    /// "it just works" contract: a dead local server is mermaid's problem,
+    /// not the user's. When auto-start itself fails, its hint is appended to
+    /// the connection error so the surfaced message says what to do next;
+    /// non-local URLs pass their error through untouched.
+    async fn with_local_recovery<F, Fut>(&self, mut op: F) -> Result<reqwest::Response>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<reqwest::Response>>,
+    {
+        let first = crate::effect::retry_transient_http(&mut op).await;
+        if !self.autostart {
+            return first;
+        }
+        if !matches!(
+            first,
+            Err(ModelError::Backend(BackendError::ConnectionFailed { .. }))
+        ) {
+            return first;
+        }
+        match crate::ollama::ensure_running(&self.base_url).await {
+            Ok(()) => crate::effect::retry_transient_http(&mut op).await,
+            Err(autostart_err) => match autostart_err.hint() {
+                Some(hint) => first.map_err(|e| append_reason_hint(e, &hint)),
+                None => first,
+            },
+        }
     }
 
     /// Decode the single non-streaming response body into a `ModelResponse`.
@@ -738,13 +774,20 @@ impl Model for OllamaAdapter {
     async fn list_models(&self) -> Result<Vec<String>> {
         let url = format!("{}/api/tags", self.base_url);
 
-        let response = self.client.get(&url).send().await.map_err(|e| {
-            ModelError::Backend(BackendError::ConnectionFailed {
-                backend: "ollama".to_string(),
-                url: self.base_url.clone(),
-                reason: e.to_string(),
+        // Recovery here is what makes a cold boot self-heal: the startup
+        // model check (`ollama::installer`) and the model picker both land on
+        // this call, so a dead local server is revived before the first chat.
+        let response = self
+            .with_local_recovery(|| async {
+                self.client.get(&url).send().await.map_err(|e| {
+                    ModelError::Backend(BackendError::ConnectionFailed {
+                        backend: "ollama".to_string(),
+                        url: self.base_url.clone(),
+                        reason: e.to_string(),
+                    })
+                })
             })
-        })?;
+            .await?;
 
         if !response.status().is_success() {
             return Err(ModelError::Backend(BackendError::HttpError {
@@ -872,6 +915,24 @@ pub struct OllamaModelInfo {
 }
 
 // Helper functions
+
+/// Append an auto-start hint to a `ConnectionFailed` reason so the surfaced
+/// error explains what mermaid tried and what the user can do ("Ollama isn't
+/// installed — …"). Other error shapes pass through untouched.
+fn append_reason_hint(error: ModelError, hint: &str) -> ModelError {
+    match error {
+        ModelError::Backend(BackendError::ConnectionFailed {
+            backend,
+            url,
+            reason,
+        }) => ModelError::Backend(BackendError::ConnectionFailed {
+            backend,
+            url,
+            reason: format!("{reason}. {hint}"),
+        }),
+        other => other,
+    }
+}
 
 /// Parse one newline-delimited Ollama stream frame into an `OllamaStreamChunk`.
 ///
@@ -1149,6 +1210,63 @@ mod tests {
         OllamaAdapter::new("test-model", Arc::new(BackendConfig::default()))
             .await
             .expect("adapter")
+    }
+
+    #[tokio::test]
+    async fn connection_failure_passes_through_when_autostart_disabled() {
+        // Reserve a port, then release it so nothing is listening. With
+        // autostart disabled the adapter must surface the plain connection
+        // error — no `ensure_running` attempt, no hint injected. (The
+        // autostart=true path is deliberately not exercised here: on a dev
+        // box it would spawn a real `ollama serve`.)
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+        let backend = BackendConfig {
+            ollama_url: format!("http://127.0.0.1:{port}"),
+            timeout_secs: 1,
+            max_idle_per_host: 1,
+            ollama_autostart: false,
+        };
+        use crate::models::traits::Model;
+        let adapter = OllamaAdapter::new("test-model", Arc::new(backend))
+            .await
+            .expect("adapter");
+        let err = adapter
+            .list_models()
+            .await
+            .expect_err("dead port must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("Failed to connect to ollama"), "got: {msg}");
+        assert!(
+            !msg.contains("auto-start") && !msg.contains("ollama.com/download"),
+            "no hint expected with autostart disabled, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn append_reason_hint_enriches_connection_failed_only() {
+        use crate::models::error::{BackendError, ModelError};
+        let base = ModelError::Backend(BackendError::ConnectionFailed {
+            backend: "ollama".into(),
+            url: "http://localhost:11434".into(),
+            reason: "connection refused".into(),
+        });
+        let enriched = super::append_reason_hint(base, "install it from https://ollama.com");
+        assert!(
+            enriched
+                .to_string()
+                .contains("connection refused. install it from https://ollama.com"),
+            "got: {enriched}"
+        );
+        // Non-connection errors pass through untouched.
+        let other = ModelError::ParseError {
+            message: "bad json".into(),
+            raw: None,
+        };
+        let untouched = super::append_reason_hint(other, "should not appear");
+        assert!(!untouched.to_string().contains("should not appear"));
     }
 
     #[tokio::test]

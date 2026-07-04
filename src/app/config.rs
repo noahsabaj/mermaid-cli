@@ -453,6 +453,11 @@ pub struct OllamaConfig {
     /// lets auto-fit use the full memory budget up to the model's max; set this
     /// to bound it (e.g. to leave VRAM headroom for other apps).
     pub max_auto_num_ctx: Option<usize>,
+    /// Start `ollama serve` automatically when the configured server is local
+    /// (loopback) and not running — the user should never have to leave
+    /// mermaid to start Ollama. Disable if you manage the server yourself
+    /// (e.g. systemd with custom flags). Never applies to remote hosts.
+    pub auto_start: bool,
 }
 
 impl Default for OllamaConfig {
@@ -466,6 +471,7 @@ impl Default for OllamaConfig {
             numa: None,               // Auto-detect
             allow_ram_offload: false, // VRAM-only by default (RAM is slow)
             max_auto_num_ctx: None,   // No cap; auto-fit to the memory budget
+            auto_start: true,         // A dead local server is mermaid's problem
         }
     }
 }
@@ -981,6 +987,9 @@ port = 11434
         assert!(cfg.ollama_num_ctx_per_model.is_empty());
         assert!(!cfg.ollama.allow_ram_offload);
         assert_eq!(cfg.ollama.max_auto_num_ctx, None);
+        // Configs from before the auto-start knob default it ON — reviving a
+        // dead local server is the out-of-the-box behavior.
+        assert!(cfg.ollama.auto_start);
     }
 
     /// Configs from before Step 5b don't have a `reasoning_per_model`

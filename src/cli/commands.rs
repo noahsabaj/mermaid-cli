@@ -249,10 +249,14 @@ async fn show_doctor(
         Err(err) => (None, Some(err.to_string()), None),
     };
 
+    // Diagnostics observe, they don't heal: autostart=false so `doctor` can
+    // actually report a dead server instead of reviving it mid-check. `None`
+    // (unreachable) vs `Some(vec![])` (running, nothing pulled) get distinct
+    // messages; the "next steps" nudge below only needs "no usable models".
     let ollama_models = if is_ollama_installed() {
-        list_ollama_models(config).await
+        list_ollama_models(config, false).await
     } else {
-        Vec::new()
+        None
     };
     let ollama = if !is_ollama_installed() {
         DoctorCheck {
@@ -260,15 +264,22 @@ async fn show_doctor(
             message: "Ollama is not installed; remote providers can still work if configured."
                 .to_string(),
         }
-    } else if ollama_models.is_empty() {
-        DoctorCheck {
-            status: "warning",
-            message: "Ollama is installed but no local/cloud models were listed.".to_string(),
-        }
     } else {
-        DoctorCheck {
-            status: "ok",
-            message: format!("Ollama reachable with {} models.", ollama_models.len()),
+        match &ollama_models {
+            None => DoctorCheck {
+                status: "warning",
+                message: "Ollama is installed but not running; mermaid starts it \
+                          automatically when an Ollama model is used."
+                    .to_string(),
+            },
+            Some(models) if models.is_empty() => DoctorCheck {
+                status: "warning",
+                message: "Ollama is running but no local/cloud models were listed.".to_string(),
+            },
+            Some(models) => DoctorCheck {
+                status: "ok",
+                message: format!("Ollama reachable with {} models.", models.len()),
+            },
         }
     };
 
@@ -362,7 +373,7 @@ async fn show_doctor(
                 .to_string(),
         );
     }
-    if remote_providers.is_empty() && ollama_models.is_empty() {
+    if remote_providers.is_empty() && ollama_models.as_deref().unwrap_or_default().is_empty() {
         next_steps.push(
             "Install or start Ollama, pull a model, or set a remote provider API key.".to_string(),
         );
@@ -1619,7 +1630,9 @@ fn show_ports() -> Result<()> {
 
 /// List available models across all backends (honors user config).
 pub async fn list_models(config: &Config) -> Result<()> {
-    let ollama_models = list_ollama_models(config).await;
+    // User intent is "show me my models" — reviving a dead local server IS
+    // the job here (autostart=true), unlike the observe-only diagnostics.
+    let ollama_models = list_ollama_models(config, true).await.unwrap_or_default();
     if ollama_models.is_empty() {
         println!("No Ollama models installed locally.");
     } else {
@@ -1649,19 +1662,24 @@ pub async fn list_models(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Ask the local Ollama daemon for its list of models. Empty on
-/// failure — the status widget separately shows whether Ollama is
-/// reachable.
-async fn list_ollama_models(config: &Config) -> Vec<String> {
+/// Ask the local Ollama daemon for its list of models. `None` when the
+/// server couldn't be reached (distinct from `Some(vec![])` — running but
+/// nothing pulled) so the diagnostic verbs can report a dead server
+/// truthfully. `autostart` decides whether a dead *local* server may be
+/// revived: user-intent verbs (`mermaid models` / `list`) pass `true`;
+/// diagnostics (`status` / `doctor`) pass `false` so observing state never
+/// mutates it ([ollama] auto_start still gates the `true` case).
+async fn list_ollama_models(config: &Config, autostart: bool) -> Option<Vec<String>> {
     use crate::models::adapters::ollama::OllamaAdapter;
     let backend = BackendConfig {
         ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
         timeout_secs: 5,
         max_idle_per_host: 2,
+        ollama_autostart: autostart && config.ollama.auto_start,
     };
     match OllamaAdapter::new("__list__", Arc::new(backend)).await {
-        Ok(adapter) => adapter.list_models().await.unwrap_or_default(),
-        Err(_) => Vec::new(),
+        Ok(adapter) => adapter.list_models().await.ok(),
+        Err(_) => None,
     }
 }
 
@@ -1924,18 +1942,27 @@ async fn show_status(config: &Config) -> Result<()> {
     }
 
     // Check Ollama (via HTTP, so remote deployments are honored).
+    // Diagnostics observe, they don't heal: autostart=false, otherwise a
+    // status check would start the server and then report "Running" —
+    // never able to observe the dead state it exists to surface.
     if is_ollama_installed() {
-        let models = list_ollama_models(config).await;
-        if models.is_empty() {
-            println!("  [WARNING] Ollama: Installed (no models)");
-        } else {
-            println!("  [OK] Ollama: Running ({} models installed)", models.len());
-            for model in models.iter().take(3) {
-                println!("      - {}", model);
-            }
-            if models.len() > 3 {
-                println!("      ... and {} more", models.len() - 3);
-            }
+        match list_ollama_models(config, false).await {
+            None => println!(
+                "  [WARNING] Ollama: Installed but not running (started automatically \
+                 when an Ollama model is used)"
+            ),
+            Some(models) if models.is_empty() => {
+                println!("  [WARNING] Ollama: Running (no models installed)");
+            },
+            Some(models) => {
+                println!("  [OK] Ollama: Running ({} models installed)", models.len());
+                for model in models.iter().take(3) {
+                    println!("      - {}", model);
+                }
+                if models.len() > 3 {
+                    println!("      ... and {} more", models.len() - 3);
+                }
+            },
         }
     } else {
         println!("  [ERROR] Ollama: Not installed");

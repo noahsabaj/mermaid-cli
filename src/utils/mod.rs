@@ -4,7 +4,6 @@
 // Private submodules - not directly accessible from outside
 mod auth;
 mod bounded;
-mod checks;
 mod confirm;
 mod host_memory;
 mod logger;
@@ -23,7 +22,6 @@ mod timestamp;
 // Public re-exports - the ONLY way to access utils functionality
 pub use auth::{resolve_api_key, resolve_api_key_with_fallback};
 pub use bounded::{CappedLine, read_capped, read_file_capped, read_line_capped};
-pub use checks::{CheckResult, check_ollama_available, check_ollama_model};
 pub use confirm::{confirm_or_refuse, is_affirmative, should_refuse_noninteractive};
 pub use host_memory::{gpu_vram_bytes, system_ram_bytes};
 pub use logger::{init_logger, log_debug, log_error, log_info, log_progress, log_warn};
@@ -31,6 +29,8 @@ pub use ndjson::drain_complete_lines;
 pub use net::{HostClass, classify_host};
 pub use open::open_file;
 pub use private_tmp::private_temp_dir;
+#[cfg(target_os = "windows")]
+pub use proc::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
 pub use proc::{
     Grace, output_with_timeout, terminate_tree, terminate_tree_blocking, write_stdin_with_timeout,
 };

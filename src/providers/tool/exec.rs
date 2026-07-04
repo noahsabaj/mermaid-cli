@@ -571,11 +571,7 @@ async fn launch_background_process(
     workdir: &Path,
     log_path: &Path,
 ) -> Result<u32, String> {
-    // DETACHED_PROCESS: no inherited console. CREATE_NEW_PROCESS_GROUP: not
-    // killed when the parent gets Ctrl+C. Together: `cmd /C <command>` keeps
-    // running after the tool returns.
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    use crate::utils::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
     let log = std::fs::File::create(log_path).map_err(|e| {
         format!(
             "failed to create background log {}: {e}",

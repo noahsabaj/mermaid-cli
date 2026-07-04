@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mermaid now starts Ollama itself.** When a request to a *local* (loopback)
+  Ollama URL is refused — cold boot after a reboot, server crashed mid-session
+  — mermaid finds the `ollama` binary (PATH or the platform's default install
+  locations), launches `ollama serve` detached (it survives mermaid exiting
+  and ignores the TUI's Ctrl+C), waits for it to come up, and retries the
+  request. No more leaving mermaid to run `ollama serve` by hand. Applies to
+  chat, `mermaid models`/`list`, and the startup model check, for local and
+  `:cloud` models alike; remote hosts are never touched, and the diagnostics
+  (`mermaid status` / `doctor`) deliberately observe without healing — they
+  now report "installed but not running" instead of conflating it with "no
+  models". "Is Ollama installed" checks share the autostart's binary
+  discovery, so a fresh install whose PATH hasn't reached the current shell
+  is still found. If auto-start can't help (e.g. Ollama isn't installed), the
+  connection error says exactly that and where to get it. Opt out with
+  `auto_start = false` under `[ollama]`, or `MERMAID_OLLAMA_AUTOSTART=0` in
+  the environment (containers/CI).
+
 - **`mermaidd` now runs on Windows.** The daemon serves its JSONL control
   protocol over a named pipe (`\\.\pipe\mermaidd-<user-SID>`) locked to the
   owning user with an explicit security descriptor — the named-pipe analog of
