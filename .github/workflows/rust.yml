@@ -3,8 +3,10 @@ name: Rust CI
 on:
   push:
     branches: [ "main" ]
+  # No base-branch filter on pull_request: stacked PRs (base = another feature
+  # branch) must get the same gate as PRs to main — the Windows jobs
+  # especially, since a local Linux gate can't catch cfg(windows) breakage.
   pull_request:
-    branches: [ "main" ]
 
 env:
   CARGO_TERM_COLOR: always
