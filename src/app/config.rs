@@ -99,6 +99,10 @@ pub struct Config {
     #[serde(default)]
     pub memory: MemoryConfig,
 
+    /// `mermaidd` background-daemon settings (task scheduler).
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+
     /// Context-compaction settings.
     #[serde(default)]
     pub compaction: CompactionConfig,
@@ -185,6 +189,31 @@ impl Default for SafetyConfig {
             overrides: Vec::new(),
             auto_classifier_model: None,
             allow_untrusted_headless_tools: false,
+        }
+    }
+}
+
+/// `mermaidd` background-daemon settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    /// How many daemon-queued tasks may execute concurrently. Each task is a
+    /// full agent run holding a model context, so the default is strictly
+    /// serial — honest for a single local GPU. Raise it when the daemon's
+    /// tasks target cloud providers (or a box with VRAM to spare).
+    pub max_concurrent_tasks: usize,
+    /// Wall-clock budget per daemon task, in minutes. `None` keeps the
+    /// headless runner's built-in 20-minute deadline; set it to give queued
+    /// batch work a shorter (or longer) leash. A task over budget is failed
+    /// with a timeout report.
+    pub task_timeout_minutes: Option<u64>,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_tasks: 1,
+            task_timeout_minutes: None,
         }
     }
 }

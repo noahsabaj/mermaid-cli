@@ -42,6 +42,15 @@ pub struct RunOptions {
     /// Durable runtime task that owns this run, when launched through
     /// `mermaidd` or `mermaid run` task creation.
     pub task_id: Option<String>,
+    /// External cancellation. When it fires, the driver injects
+    /// `Msg::CancelTurn` — the same message the TUI's Esc sends — so the
+    /// reducer unwinds the turn gracefully (tool process tree killed, turn
+    /// `JoinSet` drained). If the reducer hasn't reached `Idle` within a grace
+    /// window after that, the drive loop hard-stops.
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Wall-clock budget override. `None` keeps the built-in 20-minute
+    /// deadline.
+    pub deadline: Option<Duration>,
 }
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
@@ -107,10 +116,23 @@ pub async fn run_non_interactive_with(
         runner.dispatch(cmd);
     }
 
-    let deadline = Duration::from_secs(20 * 60);
+    let deadline = opts.deadline.unwrap_or(Duration::from_secs(20 * 60));
+
+    /// How long a cancelled run may keep unwinding before the drive loop
+    /// hard-stops. Generous next to the turn scope's own ~2s teardown bound.
+    const CANCEL_GRACE: Duration = Duration::from_secs(15);
+    let cancel = opts.cancel.clone();
+    // Set when the cancel token fires; from then on the loop exits as soon as
+    // the turn is idle (queued messages must not seed another turn) or the
+    // grace deadline passes.
+    let mut cancel_deadline: Option<tokio::time::Instant> = None;
 
     let drive = async {
-        while !matches!(state.turn, TurnState::Idle) || !state.ui.queued_messages.is_empty() {
+        loop {
+            let idle = matches!(state.turn, TurnState::Idle);
+            if idle && (state.ui.queued_messages.is_empty() || cancel_deadline.is_some()) {
+                break;
+            }
             let msg = tokio::select! {
                 m = msg_rx.recv() => match m {
                     Some(m) => m,
@@ -119,6 +141,24 @@ pub async fn run_non_interactive_with(
                 s = lifecycle.next_msg() => match s {
                     Some(s) => s,
                     None => continue,
+                },
+                _ = async {
+                    match &cancel {
+                        Some(token) => token.cancelled().await,
+                        None => std::future::pending().await,
+                    }
+                }, if cancel.is_some() && cancel_deadline.is_none() => {
+                    cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_GRACE);
+                    Msg::CancelTurn
+                },
+                // NOTE: select! evaluates every branch expression even when its
+                // `if` guard is false, so the sleep target must not unwrap.
+                _ = tokio::time::sleep_until(
+                    cancel_deadline
+                        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400)),
+                ), if cancel_deadline.is_some() => {
+                    tracing::warn!("cancelled run did not unwind within grace; hard-stopping");
+                    break;
                 },
             };
             // Plumbing notices ("Starting the local Ollama server…") have no

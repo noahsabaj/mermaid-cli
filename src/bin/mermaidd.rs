@@ -51,6 +51,31 @@ fn classify_args<I: IntoIterator<Item = String>>(args: I) -> CliAction {
 #[cfg(any(unix, windows))]
 const RUNTIME_RETENTION_DAYS: i64 = 30;
 
+/// The daemon task scheduler. `run` requests only *enqueue*; the drain loop
+/// executes queued tasks bounded by `daemon.max_concurrent_tasks` permits, so
+/// a burst of runs proceeds serially (or up to the configured width) instead
+/// of stampeding the GPU with N simultaneous agent loops. `running` maps each
+/// in-flight task to its cancellation token — the handle `cancel_task` uses to
+/// stop it.
+#[cfg(any(unix, windows))]
+struct Scheduler {
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+    running:
+        std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>,
+    wake: tokio::sync::Notify,
+    task_timeout: Option<std::time::Duration>,
+}
+
+#[cfg(any(unix, windows))]
+static SCHEDULER: std::sync::OnceLock<Scheduler> = std::sync::OnceLock::new();
+
+#[cfg(any(unix, windows))]
+fn scheduler() -> &'static Scheduler {
+    SCHEDULER
+        .get()
+        .expect("scheduler is initialized in main before serving")
+}
+
 #[cfg(any(unix, windows))]
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -74,10 +99,163 @@ async fn main() -> Result<()> {
     // platform: a broken DB should fail the daemon fast, not its first client.
     drop(mermaid_cli::runtime::RuntimeStore::open_default()?);
 
+    // Scheduler singleton. Config is read once at startup (a restart picks up
+    // changes); the drain loop itself is spawned by the serve fns AFTER the
+    // platform singleton guard + startup_recovery, so a fresh claim can never
+    // race the stranded-Running reconcile.
+    let daemon_config = mermaid_cli::app::load_config().unwrap_or_default().daemon;
+    let _ = SCHEDULER.set(Scheduler {
+        permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            daemon_config.max_concurrent_tasks.max(1),
+        )),
+        running: std::sync::Mutex::new(std::collections::HashMap::new()),
+        wake: tokio::sync::Notify::new(),
+        task_timeout: daemon_config
+            .task_timeout_minutes
+            .map(|minutes| std::time::Duration::from_secs(minutes * 60)),
+    });
+
     #[cfg(unix)]
     return serve_unix().await;
     #[cfg(windows)]
     return serve_windows().await;
+}
+
+/// Drain queued daemon tasks forever: take a permit, claim the next queued
+/// task, execute it, repeat. Queued tasks left over from a previous daemon are
+/// picked up automatically on restart — the queue is durable.
+#[cfg(any(unix, windows))]
+async fn scheduler_drain_loop() {
+    let sched = scheduler();
+    loop {
+        let permit = match sched.permits.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            // A closed semaphore means the process is going down.
+            Err(_) => return,
+        };
+        // With a permit in hand, wait until a task is claimable. Holding the
+        // permit while idle is fine — only executions consume permits.
+        let task = loop {
+            let claimed = mermaid_cli::runtime::RuntimeStore::open_default()
+                .and_then(|store| store.tasks().claim_next_queued());
+            match claimed {
+                Ok(Some(task)) => break task,
+                Ok(None) => {
+                    // `notify_one` stores a wakeup when no waiter is parked, so
+                    // the enqueue→notify path can't be lost; the periodic tick
+                    // is belt-and-braces.
+                    tokio::select! {
+                        _ = sched.wake.notified() => {},
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {},
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(error = %error, "scheduler claim failed; retrying");
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                },
+            }
+        };
+        tokio::spawn(execute_claimed_task(task, permit));
+    }
+}
+
+/// Execute one claimed task to its terminal status, holding its concurrency
+/// permit for the duration and registering a cancellation token so
+/// `cancel_task` can reach it.
+#[cfg(any(unix, windows))]
+async fn execute_claimed_task(
+    task: mermaid_cli::runtime::TaskRecord,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    let _permit = permit;
+    let sched = scheduler();
+    let Some(prompt) = task.prompt.clone() else {
+        // Unreachable via `claim_next_queued` (it filters `prompt IS NOT
+        // NULL`), but never leave a row wedged in Running if it happens.
+        persist_terminal_status(
+            &task.id,
+            mermaid_cli::runtime::TaskStatus::Failed,
+            "task has no persisted prompt",
+        )
+        .await;
+        return;
+    };
+    let token = tokio_util::sync::CancellationToken::new();
+    sched
+        .running
+        .lock()
+        .expect("scheduler running map poisoned")
+        .insert(task.id.clone(), token.clone());
+
+    let _ = mermaid_cli::runtime::run_plugin_hooks(
+        "task_start",
+        &serde_json::json!({
+            "id": task.id.clone(),
+            "title": task.title.clone(),
+            "project_path": task.project_path.clone(),
+            "model_id": task.model_id.clone(),
+        }),
+    );
+
+    let config = mermaid_cli::app::load_config().unwrap_or_default();
+    let result = mermaid_cli::app::run_non_interactive_with(
+        config,
+        std::path::PathBuf::from(&task.project_path),
+        task.model_id.clone(),
+        prompt,
+        mermaid_cli::app::RunOptions {
+            task_id: Some(task.id.clone()),
+            cancel: Some(token.clone()),
+            deadline: sched.task_timeout,
+            ..mermaid_cli::app::RunOptions::default()
+        },
+    )
+    .await;
+
+    sched
+        .running
+        .lock()
+        .expect("scheduler running map poisoned")
+        .remove(&task.id);
+
+    // Map the run outcome to its terminal status + report. An explicit cancel
+    // wins over whatever the interrupted run managed to return.
+    let (status, report, hook_status) = if token.is_cancelled() {
+        (
+            mermaid_cli::runtime::TaskStatus::Cancelled,
+            "cancelled by user".to_string(),
+            "cancelled",
+        )
+    } else {
+        match result {
+            Ok(result) if result.errors.is_empty() => (
+                mermaid_cli::runtime::TaskStatus::Completed,
+                result.response,
+                "completed",
+            ),
+            Ok(result) => (
+                mermaid_cli::runtime::TaskStatus::Failed,
+                result.errors.join("\n"),
+                "failed",
+            ),
+            Err(err) => (
+                mermaid_cli::runtime::TaskStatus::Failed,
+                err.to_string(),
+                "failed",
+            ),
+        }
+    };
+    // F20: persist the terminal status DURABLY (see persist_terminal_status).
+    persist_terminal_status(&task.id, status, &report).await;
+    record_terminal_outcome(&task.id, status);
+    let _ = mermaid_cli::runtime::run_plugin_hooks(
+        "task_stop",
+        &serde_json::json!({
+            "id": task.id.clone(),
+            "status": hook_status,
+            "final_report": report.clone(),
+        }),
+    );
 }
 
 /// Recover state stranded by a previous daemon's crash (#120, #118) and prune
@@ -144,6 +322,11 @@ async fn serve_unix() -> Result<()> {
     // Only the lock holder reaches here, so recovery/GC runs once per live
     // daemon (#120, #118, #130).
     startup_recovery();
+
+    // Drain queued tasks (including any left by a previous daemon) — spawned
+    // only after recovery so a fresh claim can't race the stranded-Running
+    // reset.
+    tokio::spawn(scheduler_drain_loop());
 
     if socket_path.exists() {
         // Don't clobber a daemon that's already serving here. If something
@@ -275,6 +458,11 @@ async fn serve_windows() -> Result<()> {
     // Only the first-instance holder reaches here, so recovery/GC runs once
     // per live daemon (#120, #118, #130) — same guarantee the flock gives unix.
     startup_recovery();
+
+    // Drain queued tasks (including any left by a previous daemon) — spawned
+    // only after recovery so a fresh claim can't race the stranded-Running
+    // reset.
+    tokio::spawn(scheduler_drain_loop());
 
     println!("mermaidd listening on {pipe_name}");
 
@@ -472,7 +660,7 @@ async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json:
             "ok": false,
             "error": format!("unknown command: {}", other),
             "commands": ["health"],
-            "json_commands": ["create_task", "run", "update_task", "session_messages", "snapshot", "runtime_snapshot", "runtime_dashboard", "runtime_diagnostics", "runtime_hygiene_preview", "runtime_hygiene_archive", "runtime_task_detail", "runtime_approval_detail", "runtime_checkpoint_detail", "runtime_tasks", "runtime_processes", "runtime_approvals", "runtime_tool_runs", "runtime_checkpoints", "runtime_plugins", "logs", "stop_process", "restart_process", "open_process", "ports", "restore_checkpoint", "approve", "deny", "plugin_preview", "plugin_install", "set_plugin_enabled", "model_info", "set_safety_mode", "pair"],
+            "json_commands": ["create_task", "run", "cancel_task", "update_task", "session_messages", "snapshot", "runtime_snapshot", "runtime_dashboard", "runtime_diagnostics", "runtime_hygiene_preview", "runtime_hygiene_archive", "runtime_task_detail", "runtime_approval_detail", "runtime_checkpoint_detail", "runtime_tasks", "runtime_processes", "runtime_approvals", "runtime_tool_runs", "runtime_checkpoints", "runtime_plugins", "logs", "stop_process", "restart_process", "open_process", "ports", "restore_checkpoint", "approve", "deny", "plugin_preview", "plugin_install", "set_plugin_enabled", "model_info", "set_safety_mode", "pair"],
         })),
     }
 }
@@ -601,83 +789,76 @@ async fn handle_json_command(
                 Some(model_id) if !model_id.is_empty() => model_id.to_string(),
                 _ => mermaid_cli::app::resolve_model_id(None, &config).await?,
             };
+            let priority = match body.get("priority").and_then(|v| v.as_str()) {
+                None | Some("") | Some("normal") => mermaid_cli::runtime::TaskPriority::Normal,
+                Some("high") => mermaid_cli::runtime::TaskPriority::High,
+                Some("low") => mermaid_cli::runtime::TaskPriority::Low,
+                // Respond, don't bail: a bail here propagates out of the
+                // handler and the client sees a silent connection drop instead
+                // of an error.
+                Some(other) => {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error": format!("unknown priority: {other} (expected low|normal|high)"),
+                    }));
+                },
+            };
             let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
-            // F18 (RC-E): this task runs in the daemon process, so tag it
-            // daemon-owned — a crash leaving it `Running` is recovered by the
-            // next startup reconcile (which leaves un-owned CLI tasks alone).
+            // Enqueue only — the scheduler claims it when a permit frees, so a
+            // burst of runs executes bounded by `daemon.max_concurrent_tasks`
+            // instead of stampeding the GPU. The full prompt is persisted for
+            // that deferred execution (and survives a daemon restart).
+            // F18 (RC-E): daemon-owned, so a crash leaving it `Running` is
+            // recovered by the next startup reconcile.
             let task = store.tasks().create(
                 mermaid_cli::runtime::NewTask::new(
                     task_title_from_prompt(&prompt),
                     project_path.display().to_string(),
-                    model_id.clone(),
-                )
-                .daemon_owned(),
-            )?;
-            store.tasks().update_status(
-                &task.id,
-                mermaid_cli::runtime::TaskStatus::Running,
-                None,
-            )?;
-            let _ = mermaid_cli::runtime::run_plugin_hooks(
-                "task_start",
-                &serde_json::json!({
-                    "id": task.id.clone(),
-                    "title": task.title.clone(),
-                    "project_path": task.project_path.clone(),
-                    "model_id": task.model_id.clone(),
-                }),
-            );
-
-            let task_id = task.id.clone();
-            tokio::spawn(async move {
-                let result = mermaid_cli::app::run_non_interactive_with(
-                    config,
-                    project_path,
                     model_id,
-                    prompt,
-                    mermaid_cli::app::RunOptions {
-                        task_id: Some(task_id.clone()),
-                        ..mermaid_cli::app::RunOptions::default()
-                    },
                 )
-                .await;
-                // Map the run outcome to its terminal status + report.
-                let (status, report, hook_status) = match result {
-                    Ok(result) if result.errors.is_empty() => (
-                        mermaid_cli::runtime::TaskStatus::Completed,
-                        result.response,
-                        "completed",
-                    ),
-                    Ok(result) => (
-                        mermaid_cli::runtime::TaskStatus::Failed,
-                        result.errors.join("\n"),
-                        "failed",
-                    ),
-                    Err(err) => (
-                        mermaid_cli::runtime::TaskStatus::Failed,
-                        err.to_string(),
-                        "failed",
-                    ),
-                };
-                // F20: persist the terminal status DURABLY. The old code
-                // `let _`-swallowed this write AND skipped it entirely when the
-                // store failed to open — so a truly-finished task stayed `running`
-                // and the next daemon reconcile flipped it to `failed`, discarding
-                // the real final_report. Retry (reopening the store) and log loudly
-                // so the final status + report survive.
-                persist_terminal_status(&task_id, status, &report).await;
-                record_terminal_outcome(&task_id, status);
-                let _ = mermaid_cli::runtime::run_plugin_hooks(
-                    "task_stop",
-                    &serde_json::json!({
-                        "id": task_id.clone(),
-                        "status": hook_status,
-                        "final_report": report.clone(),
-                    }),
-                );
-            });
-
+                .daemon_owned()
+                .with_prompt(prompt)
+                .with_priority(priority),
+            )?;
+            scheduler().wake.notify_one();
             Ok(serde_json::json!({"ok": true, "task": task}))
+        },
+        "cancel_task" => {
+            let id = str_field(body, "id")?;
+            // Running here? Fire its token — the run injects `Msg::CancelTurn`
+            // (the same graceful teardown as Esc in the TUI) and the executor
+            // persists `cancelled` when it unwinds.
+            let token = scheduler()
+                .running
+                .lock()
+                .expect("scheduler running map poisoned")
+                .get(id)
+                .cloned();
+            if let Some(token) = token {
+                token.cancel();
+                return Ok(serde_json::json!({"ok": true, "id": id, "cancelling": true}));
+            }
+            // Not in-flight: a queued task is cancelled by flipping the row —
+            // the claim query only ever picks `queued` rows, so this is safe.
+            let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+            match store.tasks().get(id)? {
+                Some(task) if task.status == mermaid_cli::runtime::TaskStatus::Queued => {
+                    store.tasks().update_status(
+                        id,
+                        mermaid_cli::runtime::TaskStatus::Cancelled,
+                        Some("cancelled before start"),
+                    )?;
+                    Ok(serde_json::json!({"ok": true, "task": store.tasks().get(id)?}))
+                },
+                Some(task) => Ok(serde_json::json!({
+                    "ok": false,
+                    "error": format!("task {} is {} — not cancellable", id, task.status),
+                })),
+                None => Ok(serde_json::json!({
+                    "ok": false,
+                    "error": format!("task not found: {}", id),
+                })),
+            }
         },
         "update_task" => {
             let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
@@ -805,6 +986,7 @@ fn command_requires_auth(command: &str) -> bool {
         command,
         "create_task"
             | "run"
+            | "cancel_task"
             | "update_task"
             | "restore_checkpoint"
             | "approve"
@@ -1005,6 +1187,7 @@ mod tests {
         for command in [
             "create_task",
             "run",
+            "cancel_task",
             "update_task",
             "restore_checkpoint",
             "approve",
