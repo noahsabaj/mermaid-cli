@@ -53,11 +53,14 @@ pub use policy::{
 pub use storage::{
     ApprovalRecord, ApprovalsRepo, CheckpointRecord, CheckpointsRepo, CompactionRecord,
     CompactionsRepo, MessageRecord, MessagesRepo, NewApproval, NewCheckpoint, NewCompaction,
-    NewMessage, NewPluginInstall, NewProcess, NewProviderProbe, NewSession, NewTask, NewToolRun,
-    PairingTokenRecord, PairingTokensRepo, PluginInstallRecord, PluginsRepo, ProcessRecord,
-    ProcessStatus, ProcessesRepo, ProviderProbeRecord, ProviderProbesRepo, RuntimeStore,
-    SessionRecord, SessionsRepo, TaskPriority, TaskRecord, TaskStatus, TaskTimelineEvent,
-    TasksRepo, ToolRunRecord, ToolRunsRepo, data_dir,
+    NewMessage, NewOutcome, NewPluginInstall, NewProcess, NewProviderProbe, NewSession, NewTask,
+    NewToolRun, OUTCOME_LABEL_ACCEPTED, OUTCOME_LABEL_FAILURE, OUTCOME_LABEL_PARTIAL,
+    OUTCOME_LABEL_REJECTED, OUTCOME_LABEL_SUCCESS, OUTCOME_LABEL_UNKNOWN, OUTCOME_SOURCE_MODEL,
+    OUTCOME_SOURCE_SYSTEM, OUTCOME_SOURCE_USER, OUTCOME_SOURCE_VERIFIER, OutcomeRecord,
+    OutcomesRepo, PairingTokenRecord, PairingTokensRepo, PluginInstallRecord, PluginsRepo,
+    ProcessRecord, ProcessStatus, ProcessesRepo, ProviderProbeRecord, ProviderProbesRepo,
+    RuntimeStore, SessionRecord, SessionsRepo, TaskPriority, TaskRecord, TaskStatus,
+    TaskTimelineEvent, TasksRepo, ToolRunRecord, ToolRunsRepo, data_dir,
 };
 // Unix-only: backs the `#[cfg(unix)]` daemon singleton via `flock`.
 #[cfg(unix)]

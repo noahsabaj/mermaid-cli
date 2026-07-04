@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The runtime store now records **outcomes** — a durable, append-only table of
+  verifiable results and reward/preference signals attached to a task (and
+  optionally a specific tool run). Each outcome carries a `kind` (e.g.
+  `task_terminal`, `test`, `preference`), a graded `label`, an optional scalar
+  `reward`, and a `source` marking provenance (`verifier`/`user`/`model`/
+  `system`) — the enrichment that turns the trajectory log into training data.
+  `mermaidd` records a `task_terminal` outcome when a daemon-run task finishes.
+
 ## [0.15.1] - 2026-07-02
 
 ### Added
