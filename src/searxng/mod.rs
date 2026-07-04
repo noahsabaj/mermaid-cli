@@ -64,6 +64,8 @@ impl SearxngManager {
                  at your own instance."
             )
         })?;
+        #[cfg(any(windows, target_os = "macos"))]
+        ensure_podman_machine(runtime).await?;
         let port = free_port()?;
         let config_dir = write_settings()?;
         start_container(runtime, port, &config_dir).await?;
@@ -96,6 +98,101 @@ fn detect_runtime() -> Option<&'static str> {
         Some("docker")
     } else {
         None
+    }
+}
+
+/// The no-container escape hatch, appended to podman-machine failures so the
+/// error always names a route that needs zero local infrastructure.
+#[cfg(any(windows, target_os = "macos"))]
+const NO_CONTAINER_HINT: &str = " — or skip containers entirely: set OLLAMA_API_KEY and web_search uses \
+     Ollama's hosted search (see `mermaid cloud-setup`)";
+
+/// How a `podman machine list --format json` output reads.
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum MachineState {
+    /// At least one machine is running (or already coming up).
+    Running,
+    /// Machines exist but none is running.
+    Stopped,
+    /// No machine has ever been created.
+    Missing,
+    /// Unparseable / unexpected output — don't block on it.
+    Unknown,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn machine_state(list_json: &str) -> MachineState {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(list_json) else {
+        return MachineState::Unknown;
+    };
+    let Some(machines) = value.as_array() else {
+        return MachineState::Unknown;
+    };
+    if machines.is_empty() {
+        return MachineState::Missing;
+    }
+    let up = machines.iter().any(|m| {
+        ["Running", "Starting"]
+            .iter()
+            .any(|key| m.get(*key).and_then(|v| v.as_bool()).unwrap_or(false))
+    });
+    if up {
+        MachineState::Running
+    } else {
+        MachineState::Stopped
+    }
+}
+
+/// On Windows and macOS podman runs containers inside a managed VM (the
+/// "podman machine"); with the machine stopped, `podman run` fails with
+/// "Cannot connect to Podman". Mermaid's job is to make `web_search` just
+/// work: a STOPPED machine is started here (seconds, transparent — the same
+/// philosophy as the Ollama server auto-start). A MISSING machine is NOT
+/// auto-initialized — `podman machine init` downloads a multi-hundred-MB VM
+/// image, which needs the user's say-so — so it gets an actionable error
+/// naming both the fix and the container-free alternative. Linux podman is
+/// daemonless; this function doesn't exist there.
+#[cfg(any(windows, target_os = "macos"))]
+async fn ensure_podman_machine(runtime: &'static str) -> Result<()> {
+    if runtime != "podman" {
+        return Ok(());
+    }
+    let Ok(list) = run(runtime, &["machine", "list", "--format", "json"]).await else {
+        return Ok(()); // couldn't even ask — let `podman run` produce the error
+    };
+    if !list.status.success() {
+        return Ok(());
+    }
+    match machine_state(&String::from_utf8_lossy(&list.stdout)) {
+        // `podman run` will connect (or fail with its own, now-accurate error).
+        MachineState::Running | MachineState::Unknown => Ok(()),
+        MachineState::Stopped => {
+            tracing::info!("podman machine is stopped — starting it for SearXNG");
+            let start = tokio::time::timeout(
+                Duration::from_secs(120),
+                run(runtime, &["machine", "start"]),
+            )
+            .await
+            .map_err(|_| anyhow!("timed out starting the podman machine (120s)"))??;
+            if start.status.success() {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "could not start the podman machine: {}. If the machine is \
+                     corrupted, rebuild it with `podman machine rm`, `podman machine \
+                     init`, `podman machine start`{}",
+                    String::from_utf8_lossy(&start.stderr).trim(),
+                    NO_CONTAINER_HINT
+                ))
+            }
+        },
+        MachineState::Missing => Err(anyhow!(
+            "podman is installed but has no machine (the VM that runs containers on \
+             this platform). Create one with `podman machine init` then `podman \
+             machine start` (downloads a VM image once){}",
+            NO_CONTAINER_HINT
+        )),
     }
 }
 
@@ -168,9 +265,23 @@ async fn start_container(runtime: &str, port: u16, config_dir: &Path) -> Result<
     .await
     .map_err(|_| anyhow!("timed out starting the SearXNG container (image pull too slow?)"))??;
     if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // On the VM-backed platforms a podman failure that survives the
+        // machine pre-check usually means a broken machine (e.g. missing
+        // WSL2 disk) — name the rebuild and the container-free route.
+        #[cfg(any(windows, target_os = "macos"))]
+        if runtime == "podman" {
+            return Err(anyhow!(
+                "failed to start SearXNG via podman: {}. If the podman machine is \
+                 corrupted, rebuild it with `podman machine rm`, `podman machine \
+                 init`, `podman machine start`{}",
+                stderr.trim(),
+                NO_CONTAINER_HINT
+            ));
+        }
         return Err(anyhow!(
             "failed to start SearXNG via {runtime}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            stderr.trim()
         ));
     }
     Ok(())
@@ -221,6 +332,38 @@ mod tests {
     #[test]
     fn free_port_is_nonzero() {
         assert!(free_port().unwrap() > 0);
+    }
+
+    #[test]
+    fn machine_state_reads_podman_machine_list_shapes() {
+        // Real `podman machine list --format json` shapes (podman 4/5).
+        assert_eq!(machine_state("[]"), MachineState::Missing);
+        assert_eq!(
+            machine_state(
+                r#"[{"Name":"podman-machine-default","Running":false,"Starting":false}]"#
+            ),
+            MachineState::Stopped
+        );
+        assert_eq!(
+            machine_state(r#"[{"Name":"podman-machine-default","Running":true}]"#),
+            MachineState::Running
+        );
+        // A machine mid-boot counts as up — `podman run` will wait/connect.
+        assert_eq!(
+            machine_state(r#"[{"Name":"m","Running":false,"Starting":true}]"#),
+            MachineState::Running
+        );
+        // Two machines, one running.
+        assert_eq!(
+            machine_state(r#"[{"Name":"a","Running":false},{"Name":"b","Running":true}]"#),
+            MachineState::Running
+        );
+        // Garbage / unexpected shapes must not block the search path.
+        assert_eq!(machine_state("not json"), MachineState::Unknown);
+        assert_eq!(
+            machine_state(r#"{"Name":"obj-not-array"}"#),
+            MachineState::Unknown
+        );
     }
 
     #[test]

@@ -322,7 +322,9 @@ auto_start = true
 # actions. "auto" runs an LLM classifier that vets each borderline action
 # against your stated intent — aligned actions run automatically, risky ones
 # escalate to an approval prompt. "full_access" auto-runs everything (the
-# legacy default); "read_only" blocks all mutations. Change it live with
+# legacy default); "read_only" blocks all mutations but keeps reads flowing —
+# including web_search / web_fetch, which are reads of the public web (the
+# SSRF guard on internal hosts applies in every mode). Change it live with
 # Shift+Tab or `/safety <mode>` (session-scoped; this value is the persistent
 # default each session starts from).
 mode = "ask"
