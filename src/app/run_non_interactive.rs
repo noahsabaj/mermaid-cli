@@ -121,6 +121,13 @@ pub async fn run_non_interactive_with(
                     None => continue,
                 },
             };
+            // Plumbing notices ("Starting the local Ollama server…") have no
+            // renderer here — mirror them to stderr live so the user isn't
+            // staring at silence during an up-to-15s server start. stderr,
+            // not stdout: the response payload must stay clean for scripts.
+            if let Msg::TransientStatus { text } = &msg {
+                eprintln!("{text}");
+            }
             state.now = chrono::Local::now();
             let (new_state, cmds) = update(state, msg);
             state = new_state;

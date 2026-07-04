@@ -1678,7 +1678,18 @@ async fn list_ollama_models(config: &Config, autostart: bool) -> Option<Vec<Stri
         ollama_autostart: autostart && config.ollama.auto_start,
     };
     match OllamaAdapter::new("__list__", Arc::new(backend)).await {
-        Ok(adapter) => adapter.list_models().await.ok(),
+        // CLI verbs own the console, so the autostart notice (fires only on
+        // an actual spawn, i.e. never for the autostart=false diagnostics)
+        // goes straight to stderr.
+        Ok(adapter) => adapter
+            .with_status_notify(Arc::new(|ev| {
+                if let crate::models::StreamEvent::Status(text) = ev {
+                    eprintln!("{text}");
+                }
+            }))
+            .list_models()
+            .await
+            .ok(),
         Err(_) => None,
     }
 }

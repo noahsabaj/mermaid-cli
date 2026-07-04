@@ -33,6 +33,11 @@ pub enum StreamEvent {
     Reasoning(ReasoningChunk),
     /// A tool/function call extracted from the model response.
     ToolCall(ToolCall),
+    /// Out-of-band, user-visible plumbing notice (e.g. "Starting the local
+    /// Ollama server…"). NOT response content: surfaces as a transient /
+    /// system line, never appended to the assistant message. May arrive
+    /// before any `Text`.
+    Status(String),
     /// Stream complete. Carries the total token usage if reported by the
     /// provider; `0` if unavailable (still meaningful — the caller knows
     /// generation finished).

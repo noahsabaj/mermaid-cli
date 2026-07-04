@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Ollama auto-start is no longer silent.** At the moment mermaid
+  commits to spawning `ollama serve`, one line — "Starting the local Ollama
+  server (it stays running after mermaid exits)…" — now reaches the user:
+  as a system line in the TUI transcript (via a new out-of-band
+  `StreamEvent::Status` → `Msg::TransientStatus` path, recorded/replayed
+  like any other Msg), on stderr for headless `mermaid run` (stdout stays
+  clean for the response payload), and on stderr for the console verbs
+  (startup preflight, `mermaid models`/`list`). The line fires only when a
+  spawn actually happens — never when the server was already up, never on
+  remote URLs, never from the observe-only diagnostics — closing the
+  latency-feedback, discoverability, and consent gaps of a revival that can
+  otherwise hide up to ~15s behind a generic spinner and leave behind a
+  detached server with no breadcrumb.
+
 ## [0.16.0] - 2026-07-04
 
 ### Added

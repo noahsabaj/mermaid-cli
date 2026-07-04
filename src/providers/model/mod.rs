@@ -123,8 +123,11 @@ pub(crate) async fn collect_text(
                 StreamEvent::Done {
                     usage: done_usage, ..
                 } => usage = done_usage,
+                // Status is a user-facing plumbing notice, not content —
+                // a text collector has nowhere to surface it.
                 StreamEvent::Reasoning(_)
                 | StreamEvent::ToolCall(_)
+                | StreamEvent::Status(_)
                 | StreamEvent::ThinkingSignature(_) => {},
             }
         }

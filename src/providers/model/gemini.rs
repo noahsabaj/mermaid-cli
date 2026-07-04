@@ -100,6 +100,7 @@ fn forward_callback(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) -> St
                 signature: chunk.signature,
             }),
             ModelStreamEvent::ToolCall(tc) => StreamEvent::ToolCall(tc),
+            ModelStreamEvent::Status(s) => StreamEvent::Status(s),
             ModelStreamEvent::Done { tokens } => StreamEvent::Done {
                 usage: if tokens > 0 {
                     Some(crate::models::TokenUsage::provider(0, tokens, tokens))
