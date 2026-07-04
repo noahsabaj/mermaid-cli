@@ -10,16 +10,18 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-// Bumped to 3 for the F75 covering indexes (pending-approval and reconcile
-// scans). They are additive, but the bump lets a DB already at v2 re-run the
-// migration once to pick them up. The bump is load-bearing alongside the F17
-// early-return in `init_schema`: a DB at an older version still runs the
-// migration (the idempotent baseline plus any per-version step dispatched by
-// `migrate_within_txn`) exactly once, while an already-current DB skips the
-// write lock entirely.
+// Bumped to 4 for the additive `outcomes` table (verifiable outcome + reward
+// capture — the fuel the self-improving loop reads). It's additive (a
+// `CREATE TABLE IF NOT EXISTS` in the baseline), but the bump lets a DB already
+// at v3 re-run the migration once to pick it up. The bump is load-bearing
+// alongside the F17 early-return in `init_schema`: a DB at an older version
+// still runs the migration (the idempotent baseline plus any per-version step
+// dispatched by `migrate_within_txn`) exactly once, while an already-current DB
+// skips the write lock entirely.
 //
-// History: v2 added the additive `tasks.owner_kind` column (F18/RC-E).
-const SCHEMA_VERSION: i32 = 3;
+// History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
+// the F75 covering indexes.
+const SCHEMA_VERSION: i32 = 4;
 
 /// `tasks.owner_kind` value for a task the daemon runs in-process. Only these are
 /// reset by `reconcile_after_restart`; a `NULL` owner (an interactive CLI run, or
@@ -340,6 +342,65 @@ pub struct NewCheckpoint {
     pub approval_id: Option<String>,
 }
 
+/// Provenance of an [`OutcomeRecord`] — the axis that separates a genuine
+/// external training signal from model self-judgement. `verifier` (compiler,
+/// tests, runtime) and `user` (human edit/accept/reject) are the signals that
+/// can actually improve a model; `model` is self-judged and must never be
+/// trained on unfiltered; `system` is bookkeeping (e.g. a task's terminal
+/// status).
+pub const OUTCOME_SOURCE_VERIFIER: &str = "verifier";
+pub const OUTCOME_SOURCE_USER: &str = "user";
+pub const OUTCOME_SOURCE_MODEL: &str = "model";
+pub const OUTCOME_SOURCE_SYSTEM: &str = "system";
+
+/// Graded result of an outcome. Stored as free-form `TEXT` (like
+/// `tool_runs.status`) so the taxonomy can grow without a migration; these
+/// constants are the canonical spellings so callers don't drift.
+pub const OUTCOME_LABEL_SUCCESS: &str = "success";
+pub const OUTCOME_LABEL_FAILURE: &str = "failure";
+pub const OUTCOME_LABEL_PARTIAL: &str = "partial";
+pub const OUTCOME_LABEL_ACCEPTED: &str = "accepted";
+pub const OUTCOME_LABEL_REJECTED: &str = "rejected";
+pub const OUTCOME_LABEL_UNKNOWN: &str = "unknown";
+
+/// A verifiable outcome / reward signal attached to a trajectory (a task, and
+/// optionally a specific tool run). The other durable tables record *what
+/// happened* (messages, tool_runs, checkpoints=diffs); `outcomes` records *how
+/// good it was* and *who says so* ([`source`](Self::source)) — the enrichment
+/// that turns logs into a training set for the self-improving loop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutcomeRecord {
+    pub id: String,
+    pub task_id: Option<String>,
+    pub tool_run_id: Option<String>,
+    /// Signal type, e.g. `task_terminal`, `build`, `test`, `tool_exec`,
+    /// `user_edit`, `git_survival`, `preference`. Free-form.
+    pub kind: String,
+    /// Graded result — one of the `OUTCOME_LABEL_*` values.
+    pub label: String,
+    /// Optional scalar reward (convention: roughly `-1.0..=1.0`). `None` when
+    /// the signal is categorical only.
+    pub reward: Option<f64>,
+    /// Provenance — one of the `OUTCOME_SOURCE_*` values.
+    pub source: String,
+    /// Optional structured payload: test counts, a git sha, or a preference
+    /// pair `{ "chosen": ..., "rejected": ... }` for DPO.
+    pub detail_json: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewOutcome {
+    pub id: Option<String>,
+    pub task_id: Option<String>,
+    pub tool_run_id: Option<String>,
+    pub kind: String,
+    pub label: String,
+    pub reward: Option<f64>,
+    pub source: String,
+    pub detail_json: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactionRecord {
     pub id: String,
@@ -547,6 +608,10 @@ impl RuntimeStore {
 
     pub fn pairing_tokens(&self) -> PairingTokensRepo<'_> {
         PairingTokensRepo { conn: &self.conn }
+    }
+
+    pub fn outcomes(&self) -> OutcomesRepo<'_> {
+        OutcomesRepo { conn: &self.conn }
     }
 
     /// Recover state stranded by a previous daemon's crash/stop (#120, #118).
@@ -904,6 +969,20 @@ impl RuntimeStore {
             );
             CREATE INDEX IF NOT EXISTS idx_pairing_tokens_enabled
                 ON pairing_tokens(enabled, created_at);
+
+            CREATE TABLE IF NOT EXISTS outcomes (
+                id TEXT PRIMARY KEY,
+                task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+                tool_run_id TEXT REFERENCES tool_runs(id) ON DELETE SET NULL,
+                kind TEXT NOT NULL,
+                label TEXT NOT NULL,
+                reward REAL,
+                source TEXT NOT NULL,
+                detail_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_outcomes_task_id ON outcomes(task_id);
+            CREATE INDEX IF NOT EXISTS idx_outcomes_kind ON outcomes(kind, created_at);
             "#,
         )?;
 
@@ -946,7 +1025,11 @@ impl RuntimeStore {
                 // above; this call is the concrete template for the first real
                 // non-additive change.
                 3 => self.migrate_to_v3()?,
-                // A future v4+ adds its non-additive step here.
+                // v4: additive `outcomes` table — created by the idempotent
+                // baseline above; this arm is its versioned home if a
+                // non-additive change to that schema is ever needed.
+                4 => self.migrate_to_v4()?,
+                // A future v5+ adds its non-additive step here.
                 _ => {},
             }
         }
@@ -961,6 +1044,14 @@ impl RuntimeStore {
     /// `CREATE ... IF NOT EXISTS` and `ensure_column` cannot express. Runs inside
     /// the `init_schema` transaction, exactly once, when a DB upgrades past v2.
     fn migrate_to_v3(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Non-additive migration steps introduced at schema v4. Today v4 only adds
+    /// the additive `outcomes` table (applied by the idempotent baseline in
+    /// [`Self::migrate_within_txn`]), so this is intentionally a no-op — the
+    /// versioned home for a future non-additive change to the outcomes schema.
+    fn migrate_to_v4(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -1265,6 +1356,87 @@ impl ToolRunsRepo<'_> {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
+}
+
+pub struct OutcomesRepo<'a> {
+    conn: &'a Connection,
+}
+
+impl OutcomesRepo<'_> {
+    /// Record a verifiable outcome / reward signal for a trajectory. Append-only
+    /// — the loop reads these; nothing mutates them after the fact.
+    pub fn record(&self, new: NewOutcome) -> Result<OutcomeRecord> {
+        let id = new.id.unwrap_or_else(|| fresh_id("outcome"));
+        self.conn.execute(
+            "INSERT INTO outcomes
+             (id, task_id, tool_run_id, kind, label, reward, source, detail_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                id,
+                new.task_id,
+                new.tool_run_id,
+                new.kind,
+                new.label,
+                new.reward,
+                new.source,
+                new.detail_json,
+                now_rfc3339(),
+            ],
+        )?;
+        self.get(&id)?
+            .context("outcome was inserted but could not be reloaded")
+    }
+
+    pub fn get(&self, id: &str) -> Result<Option<OutcomeRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, task_id, tool_run_id, kind, label, reward, source,
+                        detail_json, created_at
+                 FROM outcomes WHERE id = ?1",
+                [id],
+                outcome_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Every outcome recorded against one task, oldest first (the order the
+    /// trajectory earned them).
+    pub fn list_for_task(&self, task_id: &str) -> Result<Vec<OutcomeRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, tool_run_id, kind, label, reward, source,
+                    detail_json, created_at
+             FROM outcomes WHERE task_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([task_id], outcome_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn list(&self, limit: usize) -> Result<Vec<OutcomeRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, tool_run_id, kind, label, reward, source,
+                    detail_json, created_at
+             FROM outcomes ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([clamp_limit(limit)], outcome_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+}
+
+fn outcome_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutcomeRecord> {
+    Ok(OutcomeRecord {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        tool_run_id: row.get(2)?,
+        kind: row.get(3)?,
+        label: row.get(4)?,
+        reward: row.get(5)?,
+        source: row.get(6)?,
+        detail_json: row.get(7)?,
+        created_at: row.get(8)?,
+    })
 }
 
 pub struct ApprovalsRepo<'a> {
@@ -2419,6 +2591,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir.join("runtime.sqlite3")
+    }
+
+    #[test]
+    fn outcomes_round_trip_and_list_for_task() {
+        let path = temp_db("outcomes");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let task = store
+            .tasks()
+            .create(NewTask::new("t", "/tmp/p", "m"))
+            .expect("create task");
+
+        let first = store
+            .outcomes()
+            .record(NewOutcome {
+                id: None,
+                task_id: Some(task.id.clone()),
+                tool_run_id: None,
+                kind: "task_terminal".to_string(),
+                label: OUTCOME_LABEL_SUCCESS.to_string(),
+                reward: Some(1.0),
+                source: OUTCOME_SOURCE_SYSTEM.to_string(),
+                detail_json: None,
+            })
+            .expect("record first");
+        let second = store
+            .outcomes()
+            .record(NewOutcome {
+                id: None,
+                task_id: Some(task.id.clone()),
+                tool_run_id: None,
+                kind: "preference".to_string(),
+                label: OUTCOME_LABEL_ACCEPTED.to_string(),
+                reward: None,
+                source: OUTCOME_SOURCE_USER.to_string(),
+                detail_json: Some("{\"chosen\":\"a\",\"rejected\":\"b\"}".to_string()),
+            })
+            .expect("record second");
+
+        // get() round-trips every field, including the nullable reward and the
+        // structured detail payload.
+        assert_eq!(
+            store.outcomes().get(&first.id).expect("get").as_ref(),
+            Some(&first)
+        );
+        assert_eq!(first.reward, Some(1.0));
+        assert_eq!(second.reward, None);
+        assert_eq!(second.source, OUTCOME_SOURCE_USER);
+        assert!(second.detail_json.as_deref().unwrap().contains("chosen"));
+
+        // Both attach to the task. Assert as a set — two records created within
+        // the same coarse clock tick can share a `created_at`, so the ASC order
+        // between them isn't something to pin a test on.
+        let for_task = store
+            .outcomes()
+            .list_for_task(&task.id)
+            .expect("list_for_task");
+        assert_eq!(for_task.len(), 2);
+        let ids: std::collections::HashSet<&str> = for_task.iter().map(|o| o.id.as_str()).collect();
+        assert!(ids.contains(first.id.as_str()));
+        assert!(ids.contains(second.id.as_str()));
+
+        // The global list sees them too.
+        assert_eq!(store.outcomes().list(10).expect("list").len(), 2);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn outcome_allows_null_task_and_tool_run() {
+        // A free-floating outcome (no task/tool_run) is valid — task_id is
+        // nullable with ON DELETE SET NULL, so the loop never loses a signal to
+        // a deleted subject.
+        let path = temp_db("outcomes_null");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let rec = store
+            .outcomes()
+            .record(NewOutcome {
+                id: None,
+                task_id: None,
+                tool_run_id: None,
+                kind: "build".to_string(),
+                label: OUTCOME_LABEL_FAILURE.to_string(),
+                reward: Some(-1.0),
+                source: OUTCOME_SOURCE_VERIFIER.to_string(),
+                detail_json: None,
+            })
+            .expect("record");
+        assert_eq!(rec.task_id, None);
+        assert_eq!(rec.tool_run_id, None);
+        assert_eq!(store.outcomes().list(10).expect("list").len(), 1);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

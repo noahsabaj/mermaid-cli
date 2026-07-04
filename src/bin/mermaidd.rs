@@ -563,6 +563,7 @@ async fn handle_json_command(
                 // the real final_report. Retry (reopening the store) and log loudly
                 // so the final status + report survive.
                 persist_terminal_status(&task_id, status, &report).await;
+                record_terminal_outcome(&task_id, status);
                 let _ = mermaid_cli::runtime::run_plugin_hooks(
                     "task_stop",
                     &serde_json::json!({
@@ -801,6 +802,46 @@ async fn persist_terminal_status(
         task_id,
         "gave up persisting terminal task status after retries; it may be reconciled as failed on the next daemon restart"
     );
+}
+
+/// Record a coarse `task_terminal` outcome for a finished daemon run — the
+/// cheapest reward signal available today (did the whole trajectory succeed?).
+/// Best-effort: a lost outcome must never fail the run, so failures are logged,
+/// not propagated. Finer, higher-value signals (test/build results, git-survival,
+/// user edit/accept preference pairs) attach to the same `outcomes` table as the
+/// run lifecycle grows hooks for them.
+#[cfg(unix)]
+fn record_terminal_outcome(task_id: &str, status: mermaid_cli::runtime::TaskStatus) {
+    use mermaid_cli::runtime::{
+        NewOutcome, OUTCOME_LABEL_FAILURE, OUTCOME_LABEL_SUCCESS, OUTCOME_LABEL_UNKNOWN,
+        OUTCOME_SOURCE_SYSTEM, RuntimeStore, TaskStatus,
+    };
+    let (label, reward) = match status {
+        TaskStatus::Completed => (OUTCOME_LABEL_SUCCESS, 1.0),
+        TaskStatus::Failed => (OUTCOME_LABEL_FAILURE, -1.0),
+        // Only Completed/Failed reach here from the run mapper; be explicit
+        // rather than silently skip anything else.
+        _ => (OUTCOME_LABEL_UNKNOWN, 0.0),
+    };
+    let store = match RuntimeStore::open_default() {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(task_id, error = %error, "failed to open store to record terminal outcome");
+            return;
+        },
+    };
+    if let Err(error) = store.outcomes().record(NewOutcome {
+        id: None,
+        task_id: Some(task_id.to_string()),
+        tool_run_id: None,
+        kind: "task_terminal".to_string(),
+        label: label.to_string(),
+        reward: Some(reward),
+        source: OUTCOME_SOURCE_SYSTEM.to_string(),
+        detail_json: None,
+    }) {
+        tracing::warn!(task_id, error = %error, "failed to record terminal outcome");
+    }
 }
 
 #[cfg(unix)]
