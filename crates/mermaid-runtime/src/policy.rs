@@ -295,9 +295,23 @@ impl PolicyEngine {
                 // this engine at read_only strength — the spawn itself touches
                 // nothing. Denying it added no containment; it only blocked
                 // read-only fan-out (parallel exploration), the subagent
-                // tool's core use. A `Deny` override and the destructive-
-                // prompt hard-deny are checked above and still win.
-                if request.category == ToolCategory::Subagent || risk == RiskClass::ReadOnly {
+                // tool's core use.
+                //
+                // Web is allowed too: `web_search` / `web_fetch` are
+                // GET-shaped reads of the public web — reading the world is
+                // exactly what read-only mode exists for, and the SSRF guard
+                // lives in the web tool itself (internal/loopback/metadata
+                // hosts are refused there in every mode). The `Web` category
+                // is reserved for those read tools; anything that ACTS on the
+                // network (posting, submitting, uploading) must take
+                // `Network`, which stays blocked here.
+                //
+                // A `Deny` override and the destructive-prompt hard-deny are
+                // checked above and still win over both carve-outs.
+                if request.category == ToolCategory::Subagent
+                    || request.category == ToolCategory::Web
+                    || risk == RiskClass::ReadOnly
+                {
                     PolicyDecision::Allow {
                         risk,
                         checkpoint: false,
@@ -2336,11 +2350,12 @@ mod tests {
 
     #[test]
     fn read_only_mode_denies_external_tool_categories() {
-        // C1/H1/H2: ReadOnly must block web/mcp/computer-use. (Subagent spawn
-        // is the deliberate exception — the child inherits read_only and every
-        // child tool call is re-gated; see `read_only_mode_allows_subagent_spawn`.)
+        // C1/H1/H2: ReadOnly must block mcp/computer-use/raw network. (Two
+        // deliberate exceptions: Subagent spawn — the child inherits
+        // read_only and every child tool call is re-gated — and Web, whose
+        // tools are GET-shaped reads; see the read_only_mode_allows_* tests.)
         for cat in [
-            ToolCategory::Web,
+            ToolCategory::Network,
             ToolCategory::Mcp,
             ToolCategory::ComputerUse,
         ] {
@@ -2351,6 +2366,52 @@ mod tests {
                 "ReadOnly should deny {cat:?}, got {decision:?}",
             );
         }
+    }
+
+    #[test]
+    fn read_only_mode_allows_web_reads() {
+        // `web_search` / `web_fetch` are reads of the public web — read-only
+        // mode is FOR reading. The SSRF guard (internal-host refusal) lives
+        // in the web tool and applies in every mode.
+        for (tool, summary) in [
+            ("web_search", "web_search rust release notes"),
+            ("web_fetch", "web_fetch https://example.com/docs"),
+        ] {
+            let decision = PolicyEngine::new(SafetyMode::ReadOnly).decide(&ActionRequest::new(
+                tool,
+                ToolCategory::Web,
+                summary,
+            ));
+            assert!(
+                matches!(
+                    decision,
+                    PolicyDecision::Allow {
+                        checkpoint: false,
+                        ..
+                    }
+                ),
+                "read_only must allow {tool}, got {decision:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_web_carveout_still_loses_to_deny_override() {
+        // An operator can still lock the web down in read_only: a Deny
+        // override on the Web category outranks the carve-out.
+        let deny = PolicyOverride {
+            category: Some(ToolCategory::Web),
+            decision: PolicyOverrideDecision::Deny,
+            ..PolicyOverride::default()
+        };
+        let decision = PolicyEngine::new(SafetyMode::ReadOnly)
+            .with_overrides(vec![deny])
+            .decide(&ActionRequest::new(
+                "web_search",
+                ToolCategory::Web,
+                "web_search x",
+            ));
+        assert!(matches!(decision, PolicyDecision::Deny { .. }));
     }
 
     #[test]

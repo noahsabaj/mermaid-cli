@@ -584,9 +584,10 @@ mod tests {
     #[tokio::test]
     async fn readonly_blocks_external_tools() {
         // C1/H1/H2: the previously-bypassing tools must be denied in ReadOnly.
+        // (Web is deliberately absent: web_search/web_fetch are GET-shaped
+        // reads and read_only permits them — see readonly_allows_web_reads.)
         let ctx = ctx(SafetyMode::ReadOnly);
         for (tool, cat) in [
-            ("web_fetch", ToolCategory::Web),
             ("mcp_proxy", ToolCategory::Mcp),
             ("click", ToolCategory::ComputerUse),
             ("memory", ToolCategory::Memory),
@@ -613,6 +614,31 @@ mod tests {
             .is_none(),
             "ReadOnly must allow subagent spawn",
         );
+    }
+
+    #[tokio::test]
+    async fn readonly_allows_web_reads() {
+        // Reading the public web IS reading — read_only lets web_search and
+        // web_fetch through the gate untouched (the tools' own SSRF guard
+        // still applies in every mode).
+        let ctx = ctx(SafetyMode::ReadOnly);
+        for (tool, summary) in [
+            ("web_search", "web_search rust release notes"),
+            ("web_fetch", "web_fetch https://example.com/docs"),
+        ] {
+            assert!(
+                gate_external(
+                    &ctx,
+                    tool,
+                    ToolCategory::Web,
+                    summary.to_string(),
+                    &serde_json::json!({}),
+                )
+                .await
+                .is_none(),
+                "ReadOnly must allow {tool}",
+            );
+        }
     }
 
     #[tokio::test]
