@@ -210,7 +210,7 @@ pub struct BackendConfig {
     pub max_idle_per_host: usize,
 
     /// Auto-start a dead *local* Ollama server on connection failure
-    /// (`ollama::server::ensure_running`). Sourced from
+    /// (`ollama::ensure_running`). Sourced from
     /// `app::Config.ollama.auto_start`; only ever acts on loopback URLs.
     #[serde(default = "default_ollama_autostart")]
     pub ollama_autostart: bool,

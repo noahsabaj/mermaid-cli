@@ -114,7 +114,7 @@ pub struct OllamaAdapter {
     /// `None` until resolved; recent Ollama 400s a `think` field sent to a
     /// non-thinking model, so the send is gated on this (#122).
     thinking_cap: tokio::sync::OnceCell<bool>,
-    /// Start a dead *local* server via `ollama::server::ensure_running` when a
+    /// Start a dead *local* server via `ollama::ensure_running` when a
     /// request is refused (`BackendConfig::ollama_autostart`). The user should
     /// never have to leave mermaid to run `ollama serve`.
     autostart: bool,
@@ -689,7 +689,7 @@ impl OllamaAdapter {
 
     /// Run `op` under the transient-HTTP retry policy; if it still ends in
     /// `ConnectionFailed` and the server is local, start it
-    /// (`ollama::server::ensure_running`) and run one more retry round. The
+    /// (`ollama::ensure_running`) and run one more retry round. The
     /// "it just works" contract: a dead local server is mermaid's problem,
     /// not the user's. When auto-start itself fails, its hint is appended to
     /// the connection error so the surfaced message says what to do next;
@@ -709,7 +709,7 @@ impl OllamaAdapter {
         ) {
             return first;
         }
-        match crate::ollama::server::ensure_running(&self.base_url).await {
+        match crate::ollama::ensure_running(&self.base_url).await {
             Ok(()) => crate::effect::retry_transient_http(&mut op).await,
             Err(autostart_err) => match autostart_err.hint() {
                 Some(hint) => first.map_err(|e| append_reason_hint(e, &hint)),

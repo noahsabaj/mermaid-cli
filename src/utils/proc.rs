@@ -45,6 +45,18 @@ pub enum Grace {
 #[cfg(not(target_os = "windows"))]
 const GRACE_PERIOD: Duration = Duration::from_millis(400);
 
+/// Windows creation-flag pair for every "outlives mermaid" spawn (the exec
+/// tool's background launcher, ollama autostart). `DETACHED_PROCESS`: no
+/// inherited console (and therefore no console window). This flag pair means
+/// the child is exempt from the parent console's Ctrl+C fan-out and keeps
+/// running after mermaid exits.
+#[cfg(target_os = "windows")]
+pub const DETACHED_PROCESS: u32 = 0x0000_0008;
+/// `CREATE_NEW_PROCESS_GROUP`: the child gets its own process group, so
+/// console control events aimed at mermaid's group never reach it.
+#[cfg(target_os = "windows")]
+pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
 /// pids 0 and 1 are never legitimate teardown targets. On Unix we signal the
 /// *process group* `-pid`, so `kill -KILL -- -0` hits our OWN process group
 /// (mermaid self-terminates) and `-1` fans out to every process we may signal.
