@@ -1077,7 +1077,7 @@ fn render_actions(
             lines.push(Line::from(""));
         }
         let action_color = match action.action_type.as_str() {
-            "Write" | "Edit" => theme.colors.success.to_color(),
+            "Write" | "Update" => theme.colors.success.to_color(),
             "Delete" => theme.colors.warning.to_color(),
             _ => theme.colors.info.to_color(),
         };
@@ -1625,7 +1625,7 @@ mod tests {
             p = DIFF_ADDED_MARKER
         );
         let action = ActionDisplay {
-            action_type: "Edit".to_string(),
+            action_type: "Update".to_string(),
             target: "engine.ts".to_string(),
             result: ActionResult::Success {
                 output: String::new(),

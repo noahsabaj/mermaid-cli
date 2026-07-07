@@ -171,6 +171,17 @@ pub fn tool_result_messages(
 /// the chat renderer can show "Read main.rs → 1,234 bytes" etc.
 pub fn action_display_for(call: &PendingToolCall, outcome: &ToolOutcome) -> ActionDisplay {
     let (action_type, target) = display_info_for(call);
+    // `write_file` that overwrote an existing file is an *update*, not a fresh
+    // write — relabel it so the transcript reads "Update" (as Claude Code does),
+    // reserving "Write" for a genuinely new file. The tool records which case it
+    // was in its outcome metadata; the pending call couldn't know yet.
+    let action_type = match &outcome.metadata.detail {
+        ToolMetadata::WriteFile {
+            created: Some(false),
+            ..
+        } => "Update".to_string(),
+        _ => action_type,
+    };
     let duration = outcome.duration_secs;
     let result = if outcome.is_success() {
         ActionResult::Success {
@@ -462,7 +473,11 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
             ("Read".to_string(), target)
         },
         "write_file" => ("Write".to_string(), string_arg("path").unwrap_or_default()),
-        "edit_file" => ("Edit".to_string(), string_arg("path").unwrap_or_default()),
+        // `edit_file` always modifies a file that already exists — that's an
+        // update. (`write_file` is disambiguated create-vs-update from its
+        // outcome metadata in `action_display_for`, which the bare call can't
+        // see here.)
+        "edit_file" => ("Update".to_string(), string_arg("path").unwrap_or_default()),
         "delete_file" => ("Delete".to_string(), string_arg("path").unwrap_or_default()),
         "create_directory" => (
             "Bash".to_string(),
@@ -645,6 +660,10 @@ mod tests {
                 }),
         );
 
+        assert_eq!(
+            action.action_type, "Write",
+            "a newly created file reads as Write"
+        );
         match action.details {
             ActionDetails::Diff { summary, diff } => {
                 assert!(summary.contains("+2 -0"));
@@ -653,6 +672,37 @@ mod tests {
             },
             other => panic!("expected diff details, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn action_display_write_over_existing_file_is_labeled_update() {
+        // Overwriting a file that already existed is an update, not a fresh
+        // write — the tool reports `created: Some(false)` and the label follows.
+        let call = sample_call_args(
+            1,
+            "write_file",
+            serde_json::json!({"path": "metadata.json", "content": "{}\n"}),
+        );
+        let action = action_display_for(
+            &call,
+            &ToolOutcome::success("Wrote metadata.json (1 lines)", "1 line written", 0.05)
+                .with_metadata(ToolRunMetadata {
+                    detail: ToolMetadata::WriteFile {
+                        path: "metadata.json".to_string(),
+                        line_count: 1,
+                        byte_count: 3,
+                        created: Some(false),
+                    },
+                    display_diff: Some("   1 - old\n   1 + {}".to_string()),
+                    ..ToolRunMetadata::default()
+                }),
+        );
+
+        assert_eq!(
+            action.action_type, "Update",
+            "overwriting an existing file reads as Update"
+        );
+        assert_eq!(action.target, "metadata.json");
     }
 
     #[test]
@@ -676,6 +726,10 @@ mod tests {
             ),
         );
 
+        assert_eq!(
+            action.action_type, "Update",
+            "edit_file reads as Update, matching Claude Code"
+        );
         match action.details {
             ActionDetails::Diff { summary, diff } => {
                 assert!(summary.contains("+1 -1"));
