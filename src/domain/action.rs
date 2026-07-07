@@ -33,7 +33,7 @@ pub enum ActionResult {
 /// call that ran during that turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionDisplay {
-    /// Human-readable kind ("Read", "Bash", "Edit", "Web Search", …).
+    /// Human-readable kind ("Read", "Bash", "Update", "Web Search", …).
     pub action_type: String,
     /// Target string (file path, command, query, …).
     pub target: String,

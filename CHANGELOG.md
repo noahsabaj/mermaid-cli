@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Tool-call transcript labels distinguish creating a file from changing one.**
+  A `write_file` that overwrites an existing file now reads `Update`, not
+  `Write` — `Write` is reserved for a genuinely new file — and targeted
+  `edit_file` calls read `Update` too. The vocabulary is now
+  `Write` / `Update` / `Delete` (previously `Write` / `Edit` / `Delete`),
+  matching Claude Code, so it's clear at a glance whether a call created,
+  modified, or removed a file. The create-vs-modify distinction comes from the
+  `created` flag the write tool already records, so it's accurate even when the
+  model rewrites a whole file with `write_file` instead of `edit_file`.
+
 - **`mermaid list` and `mermaid models` no longer start Ollama.** All four
   read-only verbs (`list` / `models` / `status` / `doctor`) now enumerate
   with auto-start hard-off: observing state never mutates it, so a
