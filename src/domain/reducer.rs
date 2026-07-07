@@ -782,12 +782,6 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
-    // Attachment-focus mode: keyboard navigates the bar.
-    if state.ui.attachment_focused {
-        handle_attachment_key(state, code);
-        return;
-    }
-
     // Slash-palette navigation — intercepts ↑/↓/Tab/Esc while the
     // input buffer opens with `/`. Enter falls through to the normal
     // handler below so the command actually dispatches.
@@ -905,7 +899,15 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 state.ui.input_history_cursor = None;
                 state.ui.history_draft.clear();
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
-                if pos > 0 {
+                // If a whole `[Image #N]` pill ends at the cursor, delete it and
+                // drop its attachment together; otherwise one codepoint.
+                if let Some((start, number)) =
+                    crate::domain::image_token::token_ending_at(&state.ui.input_buffer, pos)
+                {
+                    state.ui.input_buffer.drain(start..pos);
+                    state.ui.input_cursor = start;
+                    state.ui.attachments.retain(|a| a.number != number);
+                } else if pos > 0 {
                     let new_pos = state.ui.input_buffer.floor_char_boundary(pos - 1);
                     state.ui.input_buffer.drain(new_pos..pos);
                     state.ui.input_cursor = new_pos;
@@ -920,7 +922,14 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 state.ui.input_history_cursor = None;
                 state.ui.history_draft.clear();
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
-                if pos < state.ui.input_buffer.len() {
+                // Symmetric to Backspace: a pill starting at the cursor deletes
+                // whole, taking its attachment with it.
+                if let Some((end, number)) =
+                    crate::domain::image_token::token_starting_at(&state.ui.input_buffer, pos)
+                {
+                    state.ui.input_buffer.drain(pos..end);
+                    state.ui.attachments.retain(|a| a.number != number);
+                } else if pos < state.ui.input_buffer.len() {
                     let next = state.ui.input_buffer.ceil_char_boundary(pos + 1);
                     state.ui.input_buffer.drain(pos..next);
                 }
@@ -945,25 +954,15 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             KeyCode::Home => state.ui.input_cursor = 0,
             KeyCode::End => state.ui.input_cursor = state.ui.input_buffer.len(),
             KeyCode::Up => {
-                // Up precedence: attachment focus wins ONLY when the
-                // input is empty AND attachments exist — otherwise
-                // step back through input history.
-                if state.ui.input_buffer.is_empty() && !state.ui.attachments.is_empty() {
-                    state.ui.attachment_focused = true;
-                    state.ui.attachment_selected = state
-                        .ui
-                        .attachment_selected
-                        .min(state.ui.attachments.len() - 1);
-                } else {
-                    history_nav_back(state);
-                }
+                // Images are inline `[Image #N]` tokens now, so Up always steps
+                // back through input history — no attachment-bar contention.
+                history_nav_back(state);
             },
             KeyCode::Down => {
                 history_nav_forward(state);
             },
             KeyCode::Escape => {
-                state.ui.attachment_focused = false;
-                // Also clear any in-progress history nav.
+                // Clear any in-progress history nav.
                 state.ui.input_history_cursor = None;
                 state.ui.history_draft.clear();
             },
@@ -1003,45 +1002,6 @@ fn handle_conversation_list_key(state: &mut State, cmds: &mut Vec<Cmd>, code: Ke
         },
         KeyCode::Escape => {
             state.ui.mode = UiMode::EditingInput;
-        },
-        _ => {},
-    }
-}
-
-/// Handle keyboard input while the attachment bar has keyboard
-/// focus. Returns without emitting Cmds; attachment removal happens
-/// inline on state.ui.attachments.
-fn handle_attachment_key(state: &mut State, code: KeyCode) {
-    match code {
-        KeyCode::Escape | KeyCode::Down => {
-            state.ui.attachment_focused = false;
-        },
-        KeyCode::Left => {
-            if !state.ui.attachments.is_empty() {
-                state.ui.attachment_selected = state
-                    .ui
-                    .attachment_selected
-                    .checked_sub(1)
-                    .unwrap_or(state.ui.attachments.len() - 1);
-            }
-        },
-        KeyCode::Right => {
-            if !state.ui.attachments.is_empty() {
-                state.ui.attachment_selected =
-                    (state.ui.attachment_selected + 1) % state.ui.attachments.len();
-            }
-        },
-        KeyCode::Delete | KeyCode::Backspace => {
-            let idx = state.ui.attachment_selected;
-            if idx < state.ui.attachments.len() {
-                state.ui.attachments.remove(idx);
-            }
-            if state.ui.attachments.is_empty() {
-                state.ui.attachment_focused = false;
-                state.ui.attachment_selected = 0;
-            } else if state.ui.attachment_selected >= state.ui.attachments.len() {
-                state.ui.attachment_selected = state.ui.attachments.len() - 1;
-            }
         },
         _ => {},
     }
@@ -1160,11 +1120,22 @@ fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
         },
         Paste::Image { bytes, format } => {
             let id = state.ids.tool_call.next();
+            let number = state.ids.fresh_image();
             let temp_path = state
                 .temp_dir
                 .join(format!("mermaid-img-{}.{}", id, format));
+            // Splice the inline `[Image #N] ` token into the buffer at the
+            // cursor — the token IS how the image lives in the message now, so
+            // reset history-nav like the text-paste arm and advance past it.
+            state.ui.input_history_cursor = None;
+            state.ui.history_draft.clear();
+            let token = crate::domain::image_token::render_token(number);
+            let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
+            state.ui.input_buffer.insert_str(pos, &token);
+            state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + token.len());
             state.ui.attachments.push(super::state::Attachment {
                 id,
+                number,
                 base64_data: base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
                     &bytes,
@@ -1205,29 +1176,40 @@ fn handle_submit_prompt(
         return;
     }
 
-    // Consume attachments by ID — ignoring stale IDs gracefully.
+    // Select images by the `[Image #N]` tokens present in the submitted text, in
+    // first-appearance order — the inline tokens are the source of truth. Scope
+    // by `attachment_ids` (the attachments this message owns) so the busy/queued
+    // path can never grab a later message's image. `images[i]` and
+    // `image_numbers[i]` stay parallel so the model correlates each image block
+    // with its `[Image #N]` reference.
+    let numbers = crate::domain::image_token::numbers_in_order(&text);
     let mut images: Vec<String> = Vec::new();
-    state.ui.attachments.retain(|a| {
-        if attachment_ids.contains(&a.id) {
+    let mut image_numbers: Vec<u64> = Vec::new();
+    for n in &numbers {
+        if let Some(a) = state
+            .ui
+            .attachments
+            .iter()
+            .find(|a| a.number == *n && attachment_ids.contains(&a.id))
+        {
             images.push(a.base64_data.clone());
-            false
-        } else {
-            true
+            image_numbers.push(*n);
         }
-    });
-    // Submitting consumes attachments while the bar may still be focused;
-    // re-clamp the selection so the render layer never indexes past the
-    // shrunken list (mirrors the Delete-key path in handle_key).
-    if state.ui.attachments.is_empty() {
-        state.ui.attachment_focused = false;
-        state.ui.attachment_selected = 0;
-    } else if state.ui.attachment_selected >= state.ui.attachments.len() {
-        state.ui.attachment_selected = state.ui.attachments.len() - 1;
+        // A token with no owned attachment (typed literal / mangled pill) stays
+        // as plain text and simply sends no image.
     }
+    // Drop every attachment this message owns — sent or orphaned — while keeping
+    // any that belong to still-queued messages.
+    state
+        .ui
+        .attachments
+        .retain(|a| !attachment_ids.contains(&a.id));
 
     let mut user_msg = ChatMessage::user(text.clone());
     if !images.is_empty() {
-        user_msg = user_msg.with_images(images);
+        user_msg = user_msg
+            .with_images(images)
+            .with_image_numbers(image_numbers);
     }
     state.session.append(user_msg, state.now);
     state.session.conversation.add_to_input_history(text);
@@ -3072,6 +3054,7 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
         }],
         thinking: None,
         images: None,
+        image_numbers: None,
         tool_calls: None,
         tool_call_id: None,
         tool_name: None,
@@ -3429,6 +3412,7 @@ mod tests {
                 actions: vec![],
                 thinking: None,
                 images: Some(vec![format!("png-base64-{}", i)]),
+                image_numbers: None,
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
@@ -3466,6 +3450,7 @@ mod tests {
                 actions: vec![],
                 thinking: None,
                 images: None,
+                image_numbers: None,
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
@@ -3482,6 +3467,7 @@ mod tests {
                 actions: vec![],
                 thinking: None,
                 images: Some(vec![format!("png-{}", i)]),
+                image_numbers: None,
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
@@ -3660,9 +3646,165 @@ mod tests {
         let att = &state.ui.attachments[0];
         assert_eq!(att.format, "png");
         assert_eq!(att.size_bytes, 4);
+        // First paste mints global image #1, splices the inline pill into the
+        // buffer, and advances the cursor past it.
+        assert_eq!(att.number, 1);
+        assert_eq!(state.ui.input_buffer, "[Image #1] ");
+        assert_eq!(state.ui.input_cursor, "[Image #1] ".len());
         assert!(cmds.iter().any(|c| {
             matches!(c, Cmd::WriteImageToTemp { path, .. } if path == &att.temp_path)
         }));
+    }
+
+    #[test]
+    fn atomic_backspace_deletes_whole_pill_and_its_attachment() {
+        let (state, _) = update(
+            fresh_state(),
+            Msg::Paste(super::super::msg::Paste::Image {
+                bytes: vec![1, 2, 3, 4],
+                format: "png".to_string(),
+            }),
+        );
+        assert_eq!(state.ui.input_buffer, "[Image #1] ");
+        // Backspace #1: normal delete of the trailing space; pill intact.
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Backspace,
+                modifiers: KeyMods::default(),
+            }),
+        );
+        assert_eq!(state.ui.input_buffer, "[Image #1]");
+        assert_eq!(state.ui.attachments.len(), 1, "pill intact → image intact");
+        // Backspace #2: cursor now abuts the pill → whole pill + image removed.
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Backspace,
+                modifiers: KeyMods::default(),
+            }),
+        );
+        assert_eq!(state.ui.input_buffer, "");
+        assert!(state.ui.attachments.is_empty(), "pill gone → image gone");
+    }
+
+    #[test]
+    fn submit_sends_images_in_token_order_and_drops_orphans() {
+        let mut state = fresh_state();
+        state.ui.attachments.push(test_attachment(2)); // id 2, number 2
+        state.ui.attachments.push(test_attachment(1)); // id 1, number 1
+        // References #2 before #1, plus a phantom #9 that owns no attachment.
+        let (state, _) = update(
+            state,
+            Msg::SubmitPrompt {
+                text: "[Image #2] a [Image #1] b [Image #9]".to_string(),
+                attachment_ids: vec![1, 2],
+            },
+        );
+        let msg = state
+            .session
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .expect("submitted user message");
+        // First-appearance order (#2 then #1); the phantom #9 sends no image.
+        assert_eq!(msg.image_numbers, Some(vec![2, 1]));
+        assert_eq!(msg.images.as_ref().map(Vec::len), Some(2));
+        assert!(
+            state.ui.attachments.is_empty(),
+            "owned attachments consumed / GC'd"
+        );
+    }
+
+    #[test]
+    fn submit_with_typed_literal_and_no_attachment_sends_no_image() {
+        let (state, _) = update(
+            fresh_state(),
+            Msg::SubmitPrompt {
+                text: "compare [Image #99] please".to_string(),
+                attachment_ids: vec![],
+            },
+        );
+        let msg = state
+            .session
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .expect("submitted user message");
+        assert!(msg.images.is_none());
+        assert!(
+            msg.content.contains("[Image #99]"),
+            "the literal stays in the text"
+        );
+    }
+
+    #[test]
+    fn image_numbering_is_global_and_monotonic_across_messages() {
+        // Message 1: paste (→ #1) and submit.
+        let (state, _) = update(
+            fresh_state(),
+            Msg::Paste(super::super::msg::Paste::Image {
+                bytes: vec![1],
+                format: "png".to_string(),
+            }),
+        );
+        assert_eq!(state.ui.attachments[0].number, 1);
+        let text1 = state.ui.input_buffer.clone();
+        let ids1: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
+        let (state, _) = update(
+            state,
+            Msg::SubmitPrompt {
+                text: text1,
+                attachment_ids: ids1,
+            },
+        );
+        assert_eq!(
+            state
+                .session
+                .messages()
+                .iter()
+                .rev()
+                .find(|m| m.role == MessageRole::User)
+                .unwrap()
+                .image_numbers,
+            Some(vec![1])
+        );
+        // Message 2: the next paste keeps climbing to #2 (global, not per-message).
+        let (state, _) = update(
+            state,
+            Msg::Paste(super::super::msg::Paste::Image {
+                bytes: vec![2],
+                format: "png".to_string(),
+            }),
+        );
+        assert_eq!(state.ui.attachments[0].number, 2);
+        assert_eq!(state.ui.input_buffer, "[Image #2] ");
+    }
+
+    #[test]
+    fn resume_continues_image_numbering_past_transcript_max() {
+        let mut state = fresh_state();
+        let mut history = crate::session::ConversationHistory::new(
+            "proj".to_string(),
+            "model".to_string(),
+            state.now,
+        );
+        history
+            .messages
+            .push(ChatMessage::user("look [Image #16]").with_image_numbers(vec![16]));
+        state.seed_conversation(history);
+        // A paste after resume continues past the transcript's #16 → #17, not #1.
+        let (state, _) = update(
+            state,
+            Msg::Paste(super::super::msg::Paste::Image {
+                bytes: vec![1],
+                format: "png".to_string(),
+            }),
+        );
+        assert_eq!(state.ui.attachments[0].number, 17);
+        assert_eq!(state.ui.input_buffer, "[Image #17] ");
     }
 
     #[test]
@@ -6128,6 +6270,8 @@ mod tests {
     fn test_attachment(id: u64) -> crate::domain::Attachment {
         crate::domain::Attachment {
             id,
+            // Mirror id → number so a test can reference the pill as `[Image #id]`.
+            number: id,
             base64_data: "AAAA".to_string(),
             temp_path: PathBuf::from(format!("/tmp/a{id}.png")),
             size_bytes: 4,
@@ -6155,21 +6299,20 @@ mod tests {
         // FIFO drains.
         let mut state = fresh_state();
         state.turn = generating(5, "answer");
-        state.ui.attachments.push(test_attachment(1));
+        state.ui.attachments.push(test_attachment(1)); // id 1, number 1
 
-        // Busy → queued, capturing attachment id 1.
+        // Busy → queued, capturing id 1. The text carries its inline pill.
         let (mut state, _) = update(
             state,
             Msg::SubmitPrompt {
-                text: "queued".to_string(),
+                text: "[Image #1] queued".to_string(),
                 attachment_ids: vec![1],
             },
         );
         assert_eq!(state.ui.queued_messages.len(), 1);
 
-        // User swaps attachments while the turn is still running.
-        state.ui.attachments.clear();
-        state.ui.attachments.push(test_attachment(2));
+        // User preps a different image for the NEXT message while the turn runs.
+        state.ui.attachments.push(test_attachment(2)); // id 2, number 2
 
         // Turn completes → queued message drains and re-submits.
         let (state, _) = update(
@@ -6182,17 +6325,18 @@ mod tests {
             },
         );
 
-        // The re-submit targeted attachment id 1 (now gone), so live id 2 is
-        // untouched — proving the queued ids were used, not the live set.
+        // The queued message consumed image #1 (matched by its token + queued id
+        // scope); the live id 2 is untouched — proving the queue-time set was
+        // used, not whatever is live at drain.
         assert_eq!(state.ui.attachments.len(), 1);
         assert_eq!(state.ui.attachments[0].id, 2);
         let queued_msg = state
             .session
             .messages()
             .iter()
-            .find(|m| m.role == MessageRole::User && m.content == "queued")
+            .find(|m| m.role == MessageRole::User && m.content == "[Image #1] queued")
             .expect("queued message submitted");
-        assert!(queued_msg.images.is_none());
+        assert_eq!(queued_msg.image_numbers, Some(vec![1]));
     }
 
     #[test]
@@ -6279,27 +6423,6 @@ mod tests {
         assert!(last.content.contains("half written"));
         assert!(last.content.contains("[interrupted]"));
         assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
-    }
-
-    #[test]
-    fn submit_clears_attachment_focus_when_consumed() {
-        // Axis 1 #7: submitting while the attachment bar is focused must
-        // re-clamp the selection so the render layer can't index past the
-        // now-empty list.
-        let mut state = fresh_state();
-        state.ui.attachments.push(test_attachment(1));
-        state.ui.attachment_focused = true;
-        state.ui.attachment_selected = 0;
-        let (state, _) = update(
-            state,
-            Msg::SubmitPrompt {
-                text: "go".to_string(),
-                attachment_ids: vec![1],
-            },
-        );
-        assert!(state.ui.attachments.is_empty());
-        assert!(!state.ui.attachment_focused);
-        assert_eq!(state.ui.attachment_selected, 0);
     }
 
     #[test]

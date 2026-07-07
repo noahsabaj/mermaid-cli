@@ -837,13 +837,23 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                                 image_index: i,
                             },
                         ));
+                        // Prefer the stable global number stored with the
+                        // message; fall back to a positional index for sessions
+                        // saved before image numbering (and assistant/tool
+                        // images, which carry no global number).
+                        let label = msg
+                            .image_numbers
+                            .as_ref()
+                            .and_then(|v| v.get(i))
+                            .map(|n| format!("[Image #{n}]"))
+                            .unwrap_or_else(|| format!("[Image #{}]", i + 1));
                         lines.push(Line::from(vec![
                             Span::styled(
                                 "  ⎿ ",
                                 Style::new().fg(self.theme.colors.info.to_color()),
                             ),
                             Span::styled(
-                                format!("[Image #{}]", i + 1),
+                                label,
                                 Style::new().fg(self.theme.colors.info.to_color()).italic(),
                             ),
                         ]));

@@ -14,6 +14,7 @@ pub mod action;
 pub mod cmd;
 pub mod compaction;
 pub mod ids;
+pub mod image_token;
 pub mod msg;
 pub mod reducer;
 pub mod runtime;

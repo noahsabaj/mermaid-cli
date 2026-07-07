@@ -24,6 +24,13 @@ pub struct ChatMessage {
     /// Base64-encoded images/PDFs for multimodal models
     #[serde(default)]
     pub images: Option<Vec<String>>,
+    /// Global `[Image #N]` display numbers, parallel to `images` (same length,
+    /// same order). Kept separate from `images` so provider adapters and the
+    /// `/context` image count keep reading `images: Vec<String>` unchanged, and
+    /// so sessions saved before image numbering deserialize cleanly (`None` →
+    /// the transcript falls back to a positional index).
+    #[serde(default)]
+    pub image_numbers: Option<Vec<u64>>,
     /// Tool calls from the model (Ollama native function calling)
     #[serde(default)]
     pub tool_calls: Option<Vec<crate::models::tool_call::ToolCall>>,
@@ -84,6 +91,7 @@ impl ChatMessage {
             actions: Vec::new(),
             thinking: None,
             images: None,
+            image_numbers: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             tool_name: Some(tool_name.into()),
@@ -102,6 +110,7 @@ impl ChatMessage {
             actions: Vec::new(),
             thinking: None,
             images: None,
+            image_numbers: None,
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
@@ -112,6 +121,14 @@ impl ChatMessage {
     /// Builder: attach images
     pub fn with_images(mut self, images: Vec<String>) -> Self {
         self.images = Some(images);
+        self
+    }
+
+    /// Builder: attach the parallel global image numbers (same length/order as
+    /// `with_images`). Set together at submit time so the transcript can show
+    /// each image's stable `[Image #N]`.
+    pub fn with_image_numbers(mut self, numbers: Vec<u64>) -> Self {
+        self.image_numbers = Some(numbers);
         self
     }
 
