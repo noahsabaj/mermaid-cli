@@ -781,6 +781,7 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
             actions: vec![],
             thinking: None,
             images: None,
+            image_numbers: None,
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,

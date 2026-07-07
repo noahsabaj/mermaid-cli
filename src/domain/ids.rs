@@ -67,6 +67,14 @@ impl IdAllocator {
         Self { next: 1 }
     }
 
+    /// Start handing out IDs from `next`. Used when resuming a conversation to
+    /// continue a global counter past the highest value already persisted (e.g.
+    /// image numbers), so a resumed session never re-issues a number that an
+    /// earlier message already used.
+    pub const fn starting_at(next: u64) -> Self {
+        Self { next }
+    }
+
     /// Hand out the next ID.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u64 {

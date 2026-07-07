@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pasted images are now inline `[Image #N]` tokens in the prompt.** Instead of
+  a separate `[Image #1] (PNG, 1KB)  (↑ to select)` bar floating above the input
+  box, Ctrl+V splices an inline `[Image #N]` pill into the message text at the
+  cursor — you can type around it and it deletes as a unit (Backspace on the pill
+  removes both the token and the image). `N` is a **stable, conversation-global**
+  number (it keeps climbing across messages and survives `--resume`/`--continue`),
+  so "in image #16 you can see…" is unambiguous for you and the model; the
+  submitted text carries the tokens so the model can correlate each image with
+  its reference, and the transcript shows the same number. This also retires the
+  attachment-focus bar entirely, so the up-arrow always steps through prompt
+  history with no contention.
+
 - **`read_only` safety mode now permits `web_search` and `web_fetch`.**
   Searching and fetching the public web are reads — reading is what
   read-only mode is for — so they no longer die with "blocks mutations and

@@ -125,6 +125,7 @@ pub fn commit_assistant_message(
         actions: Vec::new(),
         thinking,
         images: None,
+        image_numbers: None,
         tool_calls: if tool_calls.is_empty() {
             None
         } else {

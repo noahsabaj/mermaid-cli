@@ -27,8 +27,8 @@ use crate::domain::{State, TurnState};
 use crate::models::{ReasoningCapability, ReasoningLevel, nearest_effort};
 
 use widgets::{
-    AttachmentWidget, ChatState, ChatWidget, GenerationStatus, InputState, InputWidget,
-    SlashPaletteWidget, StatusWidget, build_status_lines,
+    ChatState, ChatWidget, GenerationStatus, InputState, InputWidget, SlashPaletteWidget,
+    StatusWidget, build_status_lines,
 };
 
 /// Transient render-layer state that lives across frames but isn't
@@ -164,18 +164,11 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         Vec::new()
     };
 
-    let attachment_height = if state.ui.attachments.is_empty() {
-        0
-    } else {
-        1
-    };
-
     // Reserve the status zone's height to match its row count, but never so much
     // that the input box or bottom bar get evicted on a short terminal: keep room
-    // for the chat floor (Min 10), the input box, the bottom bar (≥2), and the
-    // attachment rows. (The trailing Length zones would otherwise starve before
-    // the Min(10) chat zone does.)
-    let status_reserve = 10 + input_height + 2 + attachment_height;
+    // for the chat floor (Min 10), the input box, and the bottom bar (≥2). (The
+    // trailing Length zones would otherwise starve before the Min(10) chat zone.)
+    let status_reserve = 10 + input_height + 2;
     let status_line_height = (status_lines.len() as u16)
         .min(6)
         .min(frame.area().height.saturating_sub(status_reserve));
@@ -224,14 +217,15 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         2
     };
 
-    // 5-zone vertical layout: chat / status line / attachments / input / bottom.
+    // 4-zone vertical layout: chat / status line / input / bottom. Pasted images
+    // are inline `[Image #N]` tokens in the input now, so there's no separate
+    // attachment zone.
     use ratatui::layout::{Constraint, Direction, Layout};
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(10),
             Constraint::Length(status_line_height),
-            Constraint::Length(attachment_height),
             Constraint::Length(input_height),
             Constraint::Length(bottom_height),
         ])
@@ -261,18 +255,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         frame.render_widget(ratatui::widgets::Paragraph::new(status_lines), status_area);
     }
 
-    // Attachment bar.
-    if !state.ui.attachments.is_empty() {
-        let attachment_widget = AttachmentWidget {
-            attachments: &state.ui.attachments,
-            theme: &rstate.theme,
-            focused: state.ui.attachment_focused,
-            selected: state.ui.attachment_selected,
-        };
-        frame.render_widget(attachment_widget, chunks[2]);
-    }
-
-    // Input box.
+    // Input box (chunks[2] now that the attachment zone is gone).
     let input_widget = InputWidget {
         input: state.ui.input_buffer.as_str(),
         showing_command_hints: state.ui.input_buffer.starts_with('/'),
@@ -282,19 +265,17 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     let mut input_widget_state = InputState {
         cursor_position: state.ui.input_cursor.min(state.ui.input_buffer.len()),
     };
-    frame.render_stateful_widget(input_widget, chunks[3], &mut input_widget_state);
+    frame.render_stateful_widget(input_widget, chunks[2], &mut input_widget_state);
 
-    // Cursor visible unless focus is on attachments.
-    if !state.ui.attachment_focused {
-        let input_area = chunks[3];
-        let content_width = input_area.width.saturating_sub(2) as usize;
-        let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
-            &state.ui.input_buffer,
-            state.ui.input_cursor.min(state.ui.input_buffer.len()),
-            content_width,
-        );
-        frame.set_cursor_position((input_area.x + cursor_col + 2, input_area.y + 1 + cursor_row));
-    }
+    // Cursor always tracks the input caret.
+    let input_area = chunks[2];
+    let content_width = input_area.width.saturating_sub(2) as usize;
+    let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
+        &state.ui.input_buffer,
+        state.ui.input_cursor.min(state.ui.input_buffer.len()),
+        content_width,
+    );
+    frame.set_cursor_position((input_area.x + cursor_col + 2, input_area.y + 1 + cursor_row));
 
     // Effective reasoning level. Per-model supported_reasoning cap
     // isn't threaded through `State` yet; defaults to no snap
@@ -336,7 +317,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             selected_index: Some(item.selected_option),
             accent: rstate.theme.colors.warning.to_color(),
         };
-        frame.render_widget(widget, chunks[4]);
+        frame.render_widget(widget, chunks[3]);
     } else if let Some(confirm) = &state.confirm {
         use widgets::ApprovalModalWidget;
         let widget = ApprovalModalWidget {
@@ -347,7 +328,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             selected_index: None,
             accent: rstate.theme.colors.warning.to_color(),
         };
-        frame.render_widget(widget, chunks[4]);
+        frame.render_widget(widget, chunks[3]);
     } else if let crate::domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
         use widgets::ConversationListWidget;
         let widget = ConversationListWidget {
@@ -355,7 +336,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             candidates,
             cursor: *cursor,
         };
-        frame.render_widget(widget, chunks[4]);
+        frame.render_widget(widget, chunks[3]);
     } else if palette_open {
         let typed = state
             .ui
@@ -370,7 +351,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             commands,
             selected_index: state.ui.palette_cursor.unwrap_or(0),
         };
-        frame.render_widget(palette_widget, chunks[4]);
+        frame.render_widget(palette_widget, chunks[3]);
     } else {
         let cwd = state.cwd.display().to_string();
         let status_widget = StatusWidget {
@@ -386,7 +367,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             requested_level,
             safety_mode: state.session.safety_mode,
         };
-        frame.render_widget(status_widget, chunks[4]);
+        frame.render_widget(status_widget, chunks[3]);
     }
 }
 
@@ -424,6 +405,7 @@ fn build_live_messages<'a>(
             actions: Vec::new(),
             thinking,
             images: None,
+            image_numbers: None,
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
