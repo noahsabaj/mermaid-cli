@@ -897,7 +897,8 @@ fn tick_never_mutates_visible_state() {
 // unit-tested separately in `providers::questions`).
 
 use mermaid_cli::domain::{
-    Key, KeyCode, KeyMods, PendingQuestionSet, Question, QuestionOption, QuestionResolution,
+    Key, KeyCode, KeyMods, PendingQuestionSet, Question, QuestionKind, QuestionOption,
+    QuestionResolution, TextValidate,
 };
 
 fn opt(label: &str) -> QuestionOption {
@@ -913,7 +914,11 @@ fn question(header: &str, text: &str, multi: bool, labels: &[&str]) -> Question 
     Question {
         header: header.to_string(),
         question: text.to_string(),
-        multi_select: multi,
+        kind: if multi {
+            QuestionKind::MultiSelect
+        } else {
+            QuestionKind::Select
+        },
         options: labels.iter().map(|l| opt(l)).collect(),
     }
 }
@@ -1053,4 +1058,79 @@ fn note_rides_back_with_the_answer() {
         },
         other => panic!("expected Answered, got {other:?}"),
     }
+}
+
+fn input_q(kind: QuestionKind) -> Question {
+    Question {
+        header: "H".to_string(),
+        question: "Q?".to_string(),
+        kind,
+        options: vec![],
+    }
+}
+
+fn rank_q(labels: &[&str]) -> Question {
+    Question {
+        header: "H".to_string(),
+        question: "Q?".to_string(),
+        kind: QuestionKind::Rank,
+        options: labels.iter().map(|l| opt(l)).collect(),
+    }
+}
+
+#[test]
+fn text_input_value_rides_back() {
+    let state = seed_questions(vec![input_q(QuestionKind::Text {
+        validate: TextValidate::Any,
+    })]);
+    let mut state = state;
+    for ch in "hello".chars() {
+        let (s, _) = press(state, KeyCode::Char(ch));
+        state = s;
+    }
+    let (state, cmds) = press(state, KeyCode::Enter);
+    assert!(state.pending_question.is_empty());
+    assert_answered(&cmds, &[&["hello"]]);
+}
+
+#[test]
+fn number_steps_with_up_arrow() {
+    let state = seed_questions(vec![input_q(QuestionKind::Number {
+        min: Some(0.0),
+        max: Some(10.0),
+        step: Some(2.0),
+        slider: false,
+    })]);
+    let (state, _) = press(state, KeyCode::Up); // 0 -> 2
+    let (state, _) = press(state, KeyCode::Up); // 2 -> 4
+    let (state, cmds) = press(state, KeyCode::Enter);
+    assert!(state.pending_question.is_empty());
+    assert_answered(&cmds, &[&["4"]]);
+}
+
+#[test]
+fn invalid_number_blocks_submit() {
+    let state = seed_questions(vec![input_q(QuestionKind::Text {
+        validate: TextValidate::Number,
+    })]);
+    let mut state = state;
+    for ch in "abc".chars() {
+        let (s, _) = press(state, KeyCode::Char(ch));
+        state = s;
+    }
+    let (state, cmds) = press(state, KeyCode::Enter);
+    assert!(!state.pending_question.is_empty(), "invalid value must not submit");
+    assert!(resolution(&cmds).is_none());
+}
+
+#[test]
+fn rank_reorder_moves_item_and_submits() {
+    let state = seed_questions(vec![rank_q(&["A", "B", "C"])]);
+    let (state, _) = press(state, KeyCode::Char(' ')); // grab A (cursor 0)
+    let (state, _) = press(state, KeyCode::Down); // -> B, A, C
+    let (state, _) = press(state, KeyCode::Down); // -> B, C, A
+    let (state, _) = press(state, KeyCode::Char(' ')); // drop
+    let (state, cmds) = press(state, KeyCode::Enter);
+    assert!(state.pending_question.is_empty());
+    assert_answered(&cmds, &[&["B", "C", "A"]]);
 }

@@ -27,13 +27,129 @@ pub struct Question {
     pub header: String,
     /// The question text itself.
     pub question: String,
-    /// When true the user may select any number of options (checkboxes + an
-    /// explicit Submit); when false exactly one option resolves the question.
+    /// How the question is answered — choice kinds (`Select`/`MultiSelect`/
+    /// `Rank`) use `options`; input kinds (`Text`/`Number`/`Date`/`Path`) use a
+    /// single typed value.
     #[serde(default)]
-    pub multi_select: bool,
-    /// The selectable options, in display order. Convention: a recommended
-    /// option is listed first and flagged.
+    pub kind: QuestionKind,
+    /// The selectable options (choice kinds only), in display order. A
+    /// recommended option is listed first and flagged. Empty for input kinds.
+    #[serde(default)]
     pub options: Vec<QuestionOption>,
+}
+
+impl Question {
+    /// Choice kinds present a list of options.
+    pub fn is_choice(&self) -> bool {
+        matches!(
+            self.kind,
+            QuestionKind::Select | QuestionKind::MultiSelect | QuestionKind::Rank
+        )
+    }
+    pub fn is_multi(&self) -> bool {
+        matches!(self.kind, QuestionKind::MultiSelect)
+    }
+    pub fn is_rank(&self) -> bool {
+        matches!(self.kind, QuestionKind::Rank)
+    }
+    /// Input kinds present a single typed value field.
+    pub fn is_input(&self) -> bool {
+        !self.is_choice()
+    }
+}
+
+/// How a question is answered. Choice kinds carry `options`; input kinds carry
+/// their own validation parameters. Shaped like `ToolMetadata` (a tagged union)
+/// so new kinds slot in without reshaping the schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum QuestionKind {
+    /// Pick exactly one option.
+    #[default]
+    Select,
+    /// Pick any number of options (checkboxes + explicit Submit).
+    MultiSelect,
+    /// Reorder the options into a ranked list.
+    Rank,
+    /// Free-text with an optional validator.
+    Text {
+        #[serde(default)]
+        validate: TextValidate,
+    },
+    /// A number with optional bounds and step; `slider` adds a bar.
+    Number {
+        #[serde(default)]
+        min: Option<f64>,
+        #[serde(default)]
+        max: Option<f64>,
+        #[serde(default)]
+        step: Option<f64>,
+        #[serde(default)]
+        slider: bool,
+    },
+    /// An ISO date, `YYYY-MM-DD`.
+    Date,
+    /// A filesystem path; `must_exist` is advisory (the pure reducer performs no
+    /// filesystem I/O, so existence isn't enforced live).
+    Path {
+        #[serde(default)]
+        must_exist: bool,
+    },
+}
+
+/// Validator for a `Text` question.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "rule", content = "pattern", rename_all = "camelCase")]
+pub enum TextValidate {
+    /// Any non-empty text.
+    #[default]
+    Any,
+    /// Must parse as a number.
+    Number,
+    /// Must match this regular expression.
+    Regex(String),
+}
+
+/// Validate a typed input value against its question kind. `Ok(())` means valid
+/// (an empty value is treated as "skipped"). Pure — performs no filesystem I/O,
+/// so `Path { must_exist }` is not enforced here.
+pub fn validate_input(kind: &QuestionKind, value: &str) -> Result<(), String> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Ok(());
+    }
+    match kind {
+        QuestionKind::Number { min, max, .. } => {
+            let n: f64 = v.parse().map_err(|_| "must be a number".to_string())?;
+            if let Some(lo) = min
+                && n < *lo
+            {
+                return Err(format!("must be >= {lo}"));
+            }
+            if let Some(hi) = max
+                && n > *hi
+            {
+                return Err(format!("must be <= {hi}"));
+            }
+            Ok(())
+        },
+        QuestionKind::Text { validate } => match validate {
+            TextValidate::Any => Ok(()),
+            TextValidate::Number => v
+                .parse::<f64>()
+                .map(|_| ())
+                .map_err(|_| "must be a number".to_string()),
+            TextValidate::Regex(pat) => match regex::Regex::new(pat) {
+                Ok(re) if re.is_match(v) => Ok(()),
+                Ok(_) => Err(format!("must match /{pat}/")),
+                Err(_) => Ok(()),
+            },
+        },
+        QuestionKind::Date => chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
+            .map(|_| ())
+            .map_err(|_| "must be a date (YYYY-MM-DD)".to_string()),
+        _ => Ok(()),
+    }
 }
 
 /// One selectable option: a label plus an optional one-line description.
@@ -103,6 +219,13 @@ pub struct QuestionSelection {
     /// Optional free-text note attached to this question (press `n` to edit).
     /// Rides back with the answer to capture intent the options didn't cover.
     pub note: String,
+    /// Typed value for input kinds (Text/Number/Date/Path).
+    pub value: String,
+    /// Current option ordering for a Rank question (indices into `options`);
+    /// empty means the default `0..n` order.
+    pub order: Vec<usize>,
+    /// Rank: whether the item under the cursor is "picked up" for moving.
+    pub grabbed: bool,
 }
 
 impl PendingQuestionSet {
@@ -127,14 +250,14 @@ impl PendingQuestionSet {
     /// resolves it immediately). Every other shape (multi-question, or any
     /// multi-select) confirms via the Submit/review screen.
     pub fn skips_review(&self) -> bool {
-        self.questions.len() == 1 && !self.questions[0].multi_select
+        self.questions.len() == 1 && !self.questions[0].is_multi()
     }
 
-    /// Number of navigable rows for the question at `idx`: options, the Other
-    /// row, and (multi-select only) the Submit row.
+    /// Number of navigable rows for a Select/MultiSelect question at `idx`:
+    /// options, the Other row, and (multi-select only) the Submit row.
     pub fn row_count(&self, idx: usize) -> usize {
         let q = &self.questions[idx];
-        q.options.len() + 1 + usize::from(q.multi_select)
+        q.options.len() + 1 + usize::from(q.is_multi())
     }
 
     /// Row index of the "Other" free-text row for the question at `idx`.
@@ -145,7 +268,7 @@ impl PendingQuestionSet {
     /// Row index of the Submit row for a multi-select question, if any.
     pub fn submit_row(&self, idx: usize) -> Option<usize> {
         let q = &self.questions[idx];
-        q.multi_select.then_some(q.options.len() + 1)
+        q.is_multi().then_some(q.options.len() + 1)
     }
 
     /// Build the final answers from current selections. Each answer carries the
@@ -157,15 +280,30 @@ impl PendingQuestionSet {
             .iter()
             .zip(&self.selections)
             .map(|(q, sel)| {
-                let mut selected: Vec<String> = sel
-                    .chosen
-                    .iter()
-                    .filter_map(|&i| q.options.get(i).map(|o| o.label.clone()))
-                    .collect();
-                let other = sel.other_text.trim();
-                if !other.is_empty() {
-                    selected.push(other.to_string());
-                }
+                let selected = if q.is_input() {
+                    let v = sel.value.trim();
+                    if v.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![v.to_string()]
+                    }
+                } else if q.is_rank() {
+                    rank_order(q, sel)
+                        .iter()
+                        .filter_map(|&i| q.options.get(i).map(|o| o.label.clone()))
+                        .collect()
+                } else {
+                    let mut s: Vec<String> = sel
+                        .chosen
+                        .iter()
+                        .filter_map(|&i| q.options.get(i).map(|o| o.label.clone()))
+                        .collect();
+                    let other = sel.other_text.trim();
+                    if !other.is_empty() {
+                        s.push(other.to_string());
+                    }
+                    s
+                };
                 let note = sel.note.trim();
                 QuestionAnswer {
                     header: q.header.clone(),
@@ -175,6 +313,16 @@ impl PendingQuestionSet {
                 }
             })
             .collect()
+    }
+}
+
+/// The current ranked ordering for a Rank question: the selection's `order`,
+/// or the default `0..n` when it hasn't been reordered yet.
+pub fn rank_order(q: &Question, sel: &QuestionSelection) -> Vec<usize> {
+    if sel.order.is_empty() {
+        (0..q.options.len()).collect()
+    } else {
+        sel.order.clone()
     }
 }
 
@@ -200,4 +348,38 @@ pub struct QuestionAnswer {
     /// Optional free-text note the user attached to this question.
     #[serde(default)]
     pub note: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn num(min: f64, max: f64) -> QuestionKind {
+        QuestionKind::Number {
+            min: Some(min),
+            max: Some(max),
+            step: None,
+            slider: false,
+        }
+    }
+
+    #[test]
+    fn validate_number_bounds() {
+        assert!(validate_input(&num(0.0, 5.0), "3").is_ok());
+        assert!(validate_input(&num(0.0, 5.0), "9").is_err());
+        assert!(validate_input(&num(0.0, 5.0), "x").is_err());
+        // Empty is treated as "skipped", always valid.
+        assert!(validate_input(&num(0.0, 5.0), "").is_ok());
+    }
+
+    #[test]
+    fn validate_date_and_regex() {
+        assert!(validate_input(&QuestionKind::Date, "2026-07-07").is_ok());
+        assert!(validate_input(&QuestionKind::Date, "nope").is_err());
+        let re = QuestionKind::Text {
+            validate: TextValidate::Regex("^a+$".to_string()),
+        };
+        assert!(validate_input(&re, "aaa").is_ok());
+        assert!(validate_input(&re, "abc").is_err());
+    }
 }

@@ -98,7 +98,7 @@ mod tests {
         vec![Question {
             header: "Database".to_string(),
             question: "Which database?".to_string(),
-            multi_select: false,
+            kind: crate::domain::QuestionKind::Select,
             options: vec![QuestionOption {
                 label: "PostgreSQL".to_string(),
                 description: None,

@@ -651,7 +651,7 @@ fn act_on_option(
     q_idx: usize,
     opt_idx: usize,
 ) -> QuestionKeyAction {
-    let multi = set.questions[q_idx].multi_select;
+    let multi = set.questions[q_idx].is_multi();
     let sel = &mut set.selections[q_idx];
     if multi {
         if let Some(pos) = sel.chosen.iter().position(|&i| i == opt_idx) {
@@ -675,7 +675,7 @@ fn act_on_row(
     row: usize,
 ) -> QuestionKeyAction {
     let n = set.questions[q_idx].options.len();
-    let multi = set.questions[q_idx].multi_select;
+    let multi = set.questions[q_idx].is_multi();
     if row < n {
         return act_on_option(set, q_idx, row);
     }
@@ -733,6 +733,7 @@ fn apply_question_key(
     if code == KeyCode::Char('n')
         && mods.is_empty()
         && set.active < nq
+        && set.questions[set.active].is_choice()
         && set.selections[set.active].cursor != set.other_row(set.active)
     {
         set.editing_note = true;
@@ -773,6 +774,13 @@ fn apply_question_key(
 
     // A question tab.
     let q_idx = set.active;
+    if set.questions[q_idx].is_input() {
+        return apply_input_key(set, q_idx, code, mods);
+    }
+    if set.questions[q_idx].is_rank() {
+        return apply_rank_key(set, q_idx, code, mods);
+    }
+    // Select / MultiSelect.
     let n = set.questions[q_idx].options.len();
     let other_row = set.other_row(q_idx);
     let row_count = set.row_count(q_idx);
@@ -814,6 +822,121 @@ fn apply_question_key(
             }
         },
         KeyCode::Enter | KeyCode::Char(' ') => act_on_row(set, q_idx, cursor),
+        _ => QuestionKeyAction::Stay,
+    }
+}
+
+/// Key handling for an input-kind question (Text/Number/Date/Path): typing
+/// edits the value, Number steps with Up/Down, Enter submits when valid.
+fn apply_input_key(
+    set: &mut super::question::PendingQuestionSet,
+    q_idx: usize,
+    code: KeyCode,
+    mods: KeyMods,
+) -> QuestionKeyAction {
+    let is_number = matches!(
+        set.questions[q_idx].kind,
+        crate::domain::QuestionKind::Number { .. }
+    );
+    match code {
+        KeyCode::Char(c) if !mods.ctrl && !mods.alt => {
+            set.selections[q_idx].value.push(c);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Backspace => {
+            set.selections[q_idx].value.pop();
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Up if is_number => {
+            step_number(set, q_idx, 1.0);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Down if is_number => {
+            step_number(set, q_idx, -1.0);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Enter => {
+            let kind = set.questions[q_idx].kind.clone();
+            if crate::domain::validate_input(&kind, &set.selections[q_idx].value).is_ok() {
+                advance_question(set)
+            } else {
+                QuestionKeyAction::Stay
+            }
+        },
+        _ => QuestionKeyAction::Stay,
+    }
+}
+
+/// Step a Number question's value by `dir * step`, clamped to min/max.
+fn step_number(set: &mut super::question::PendingQuestionSet, q_idx: usize, dir: f64) {
+    let (min, max, step) = match &set.questions[q_idx].kind {
+        crate::domain::QuestionKind::Number {
+            min, max, step, ..
+        } => (*min, *max, *step),
+        _ => return,
+    };
+    let step = step.unwrap_or(1.0);
+    let cur: f64 = set.selections[q_idx]
+        .value
+        .trim()
+        .parse()
+        .unwrap_or(min.unwrap_or(0.0));
+    let mut next = cur + dir * step;
+    if let Some(lo) = min {
+        next = next.max(lo);
+    }
+    if let Some(hi) = max {
+        next = next.min(hi);
+    }
+    set.selections[q_idx].value = format_number(next);
+}
+
+/// Format a number without a trailing `.0` for whole values.
+fn format_number(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
+/// Key handling for a Rank question: Up/Down move the cursor; Space grabs the
+/// item under the cursor so Up/Down then moves it; Enter submits the order.
+fn apply_rank_key(
+    set: &mut super::question::PendingQuestionSet,
+    q_idx: usize,
+    code: KeyCode,
+    _mods: KeyMods,
+) -> QuestionKeyAction {
+    let n = set.questions[q_idx].options.len();
+    if set.selections[q_idx].order.is_empty() {
+        set.selections[q_idx].order = (0..n).collect();
+    }
+    let sel = &mut set.selections[q_idx];
+    match code {
+        KeyCode::Char(' ') => {
+            sel.grabbed = !sel.grabbed;
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Up => {
+            if sel.grabbed && sel.cursor > 0 {
+                sel.order.swap(sel.cursor, sel.cursor - 1);
+                sel.cursor -= 1;
+            } else {
+                sel.cursor = sel.cursor.saturating_sub(1);
+            }
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Down => {
+            if sel.grabbed && sel.cursor + 1 < n {
+                sel.order.swap(sel.cursor, sel.cursor + 1);
+                sel.cursor += 1;
+            } else {
+                sel.cursor = (sel.cursor + 1).min(n.saturating_sub(1));
+            }
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Enter => advance_question(set),
         _ => QuestionKeyAction::Stay,
     }
 }

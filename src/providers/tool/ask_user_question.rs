@@ -13,7 +13,10 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use crate::domain::{Question, QuestionAnswer, QuestionResolution, ToolDefinition, ToolOutcome};
+use crate::domain::{
+    OptionPreview, Question, QuestionAnswer, QuestionKind, QuestionOption, QuestionResolution,
+    TextValidate, ToolDefinition, ToolOutcome,
+};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
@@ -53,6 +56,110 @@ fn summarize_answers(answers: &[QuestionAnswer]) -> String {
     }
 }
 
+/// Parse the model's flat option JSON into a `QuestionOption`.
+fn parse_option(v: &serde_json::Value) -> Option<QuestionOption> {
+    let label = v.get("label").and_then(|x| x.as_str())?.to_string();
+    let description = v
+        .get("description")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    let preview = v.get("preview").and_then(parse_preview);
+    // Honor the Claude-Code convention: a trailing "(Recommended)" flags it.
+    let recommended = label.to_lowercase().contains("(recommended)");
+    Some(QuestionOption {
+        label,
+        description,
+        recommended,
+        preview,
+    })
+}
+
+fn parse_preview(v: &serde_json::Value) -> Option<OptionPreview> {
+    let content = v.get("content").and_then(|x| x.as_str())?.to_string();
+    let language = v
+        .get("language")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    let diff = v.get("diff").and_then(|x| x.as_bool()).unwrap_or(false);
+    Some(OptionPreview {
+        content,
+        language,
+        diff,
+    })
+}
+
+/// Parse a `text` question's `validate`: the string "number"/"any", any other
+/// string as a regex pattern, or `{ "regex": "..." }`.
+fn parse_validate(v: Option<&serde_json::Value>) -> TextValidate {
+    match v {
+        None => TextValidate::Any,
+        Some(val) => {
+            if let Some(s) = val.as_str() {
+                match s {
+                    "number" => TextValidate::Number,
+                    "any" | "" => TextValidate::Any,
+                    pat => TextValidate::Regex(pat.to_string()),
+                }
+            } else if let Some(pat) = val.get("regex").and_then(|x| x.as_str()) {
+                TextValidate::Regex(pat.to_string())
+            } else {
+                TextValidate::Any
+            }
+        },
+    }
+}
+
+/// Parse one flat question object into a `Question`.
+fn parse_question(v: &serde_json::Value) -> Result<Question, String> {
+    let header = v
+        .get("header")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let question = v
+        .get("question")
+        .and_then(|x| x.as_str())
+        .ok_or("each question needs a `question` string")?
+        .to_string();
+    let kind = match v.get("kind").and_then(|x| x.as_str()).unwrap_or("select") {
+        "select" => QuestionKind::Select,
+        "multiSelect" | "multiselect" => QuestionKind::MultiSelect,
+        "rank" => QuestionKind::Rank,
+        "text" => QuestionKind::Text {
+            validate: parse_validate(v.get("validate")),
+        },
+        "number" => QuestionKind::Number {
+            min: v.get("min").and_then(|x| x.as_f64()),
+            max: v.get("max").and_then(|x| x.as_f64()),
+            step: v.get("step").and_then(|x| x.as_f64()),
+            slider: v.get("slider").and_then(|x| x.as_bool()).unwrap_or(false),
+        },
+        "date" => QuestionKind::Date,
+        "path" => QuestionKind::Path {
+            must_exist: v.get("mustExist").and_then(|x| x.as_bool()).unwrap_or(false),
+        },
+        other => return Err(format!("unknown question kind: {other}")),
+    };
+    let options = v
+        .get("options")
+        .and_then(|x| x.as_array())
+        .map(|arr| arr.iter().filter_map(parse_option).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let q = Question {
+        header,
+        question,
+        kind,
+        options,
+    };
+    if q.is_choice() && q.options.is_empty() {
+        return Err(format!(
+            "question \"{}\" is a choice kind but has no options",
+            q.question
+        ));
+    }
+    Ok(q)
+}
+
 #[async_trait]
 impl ToolExecutor for AskUserQuestionTool {
     fn name(&self) -> &'static str {
@@ -64,7 +171,7 @@ impl ToolExecutor for AskUserQuestionTool {
             name: "ask_user_question".to_string(),
             description: "Ask the user one or more multiple-choice questions when you are genuinely blocked on a decision that is theirs to make — one you cannot resolve from their request, the code, or a sensible default. The terminal renders an interactive selectable prompt and the user's answer comes back as this tool's result. \
                 Use it only when the answer changes what you do next; do NOT use it for choices with an obvious default (just pick, say so, and proceed) or for facts you can verify yourself. The user can always type a custom \"Other\" answer, so your options need not be exhaustive. \
-                Batch up to 4 independent questions in one call rather than asking one at a time. For each question set `multiSelect` true when the choices are not mutually exclusive (the user may check any number). List a recommended option first and mark it by ending its label with \"(Recommended)\". \
+                Batch up to 4 independent questions in one call rather than asking one at a time. Set each question's `kind`: `select` (pick one), `multiSelect` (pick any), `rank` (reorder options), or an input kind that collects a typed value — `text` (optional `validate`), `number` (`min`/`max`/`step`/`slider`), `date`, or `path`. Choice kinds need `options`; list a recommended option first and mark it by ending its label with \"(Recommended)\". \
                 Attach an optional preview to an option (a `content` string plus an optional `diff` flag) to show an ASCII mockup, code, config, or a unified diff side-by-side when that option is focused — a diff of the change an option would make is often clearer than a text description."
                 .to_string(),
             input_schema: serde_json::json!({
@@ -84,13 +191,23 @@ impl ToolExecutor for AskUserQuestionTool {
                                     "type": "string",
                                     "description": "The full question text. Clear, specific, ends with a question mark."
                                 },
-                                "multiSelect": {
-                                    "type": "boolean",
-                                    "description": "True if the user may select multiple options; false for exactly one."
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["select", "multiSelect", "rank", "text", "number", "date", "path"],
+                                    "description": "How the question is answered. Choice kinds use `options`: `select` (pick one), `multiSelect` (pick any), `rank` (reorder). Input kinds collect a typed value: `text` (optional `validate`), `number` (optional `min`/`max`/`step`/`slider`), `date` (YYYY-MM-DD), `path`."
                                 },
+                                "validate": {
+                                    "type": "string",
+                                    "description": "For `text`: \"number\" to require a number, or a regex pattern the answer must match."
+                                },
+                                "min": { "type": "number", "description": "For `number`: minimum value." },
+                                "max": { "type": "number", "description": "For `number`: maximum value." },
+                                "step": { "type": "number", "description": "For `number`: increment for Up/Down." },
+                                "slider": { "type": "boolean", "description": "For `number`: show a slider bar (needs `min` and `max`)." },
+                                "mustExist": { "type": "boolean", "description": "For `path`: hint that the path should already exist." },
                                 "options": {
                                     "type": "array",
-                                    "description": "2-4 options (more allowed). Each is a distinct choice.",
+                                    "description": "Options for choice kinds (select/multiSelect/rank); omit for input kinds. Two or more; long lists scroll.",
                                     "items": {
                                         "type": "object",
                                         "properties": {
@@ -117,7 +234,7 @@ impl ToolExecutor for AskUserQuestionTool {
                                     }
                                 }
                             },
-                            "required": ["question", "header", "options", "multiSelect"]
+                            "required": ["question", "header", "kind"]
                         }
                     }
                 },
@@ -130,37 +247,23 @@ impl ToolExecutor for AskUserQuestionTool {
         let start = Instant::now();
         let secs = || start.elapsed().as_secs_f64();
 
-        let Some(questions_val) = args.get("questions") else {
+        let Some(questions_val) = args.get("questions").and_then(|v| v.as_array()) else {
             return ToolOutcome::error(
                 "ask_user_question requires a `questions` array",
                 secs(),
             );
         };
-        let mut questions: Vec<Question> = match serde_json::from_value(questions_val.clone()) {
-            Ok(q) => q,
-            Err(e) => {
-                return ToolOutcome::error(format!("invalid `questions`: {e}"), secs());
-            },
-        };
-        if questions.is_empty() {
+        if questions_val.is_empty() {
             return ToolOutcome::error(
                 "`questions` must contain at least one question",
                 secs(),
             );
         }
-        for q in &mut questions {
-            if q.options.is_empty() {
-                return ToolOutcome::error(
-                    format!("question \"{}\" has no options", q.header),
-                    secs(),
-                );
-            }
-            // Honor the Claude-Code convention: a trailing "(Recommended)" in
-            // the label flags the option (kept in the label text verbatim).
-            for o in &mut q.options {
-                if o.label.to_lowercase().contains("(recommended)") {
-                    o.recommended = true;
-                }
+        let mut questions = Vec::with_capacity(questions_val.len());
+        for qv in questions_val {
+            match parse_question(qv) {
+                Ok(q) => questions.push(q),
+                Err(e) => return ToolOutcome::error(format!("invalid question: {e}"), secs()),
             }
         }
 
