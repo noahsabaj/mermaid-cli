@@ -127,6 +127,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still releases the held submit instead of wedging it, and a normal terminal
   paste is never mistaken for a Ctrl+V read.
 
+### Security
+
+- **`web_fetch` now pins DNS resolution against rebinding.** The native fetch
+  resolved a URL's host and vetted the addresses, then let the HTTP client
+  re-resolve at connect time — a TOCTOU a hostile DNS server could exploit to
+  pass the pre-check with a public IP, then connect to `127.0.0.1` /
+  `169.254.169.254`. A custom resolver now vets the resolved addresses at connect
+  time, for the initial host and every redirect hop, failing closed on any
+  internal address — so the connection binds to exactly what was vetted.
+
 ## [0.16.0] - 2026-07-04
 
 ### Added
