@@ -16,6 +16,7 @@ pub mod capabilities;
 pub mod ctx;
 pub mod factory;
 pub mod model;
+pub mod questions;
 pub mod tool;
 
 pub use approval::{ApprovalBroker, ApprovalDecision, allowlist_key};
@@ -29,6 +30,7 @@ pub use factory::ProviderFactory;
 pub use model::{
     AnthropicProvider, GeminiProvider, ModelProvider, OllamaProvider, OpenAICompatProvider,
 };
+pub use questions::QuestionBroker;
 pub use tool::{ToolExecutor, ToolRegistry, TuiMode};
 
 #[cfg(test)]

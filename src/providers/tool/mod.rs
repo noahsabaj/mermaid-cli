@@ -15,6 +15,7 @@
 //! name + JSON schema the model sees cannot drift from the handler
 //! that runs when the model calls it. Single source of truth.
 
+pub mod ask_user_question;
 pub mod computer_use;
 pub mod exec;
 pub mod filesystem;
@@ -123,6 +124,7 @@ impl Default for ToolRegistry {
         r.register(Arc::new(filesystem::CreateDirectoryTool));
         r.register(Arc::new(exec::ExecuteCommandTool));
         r.register(Arc::new(memory::MemoryTool));
+        r.register(Arc::new(ask_user_question::AskUserQuestionTool));
         // MCP proxy is the dispatcher for every mcp__server__tool
         // call; it's internal (not advertised) but MUST be registered
         // so runtime lookups succeed.
@@ -194,6 +196,7 @@ impl ToolRegistry {
         r.register(Arc::new(filesystem::CreateDirectoryTool));
         r.register(Arc::new(exec::ExecuteCommandTool));
         r.register(Arc::new(memory::MemoryTool));
+        r.register(Arc::new(ask_user_question::AskUserQuestionTool));
         r.register(Arc::new(mcp::McpToolProxy));
 
         if let Some(tool) = web::web_fetch_tool(&config.web) {

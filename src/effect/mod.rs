@@ -129,6 +129,10 @@ pub struct EffectRunner {
     /// `with_interactive_approvals`); headless + child runners leave it `None`,
     /// so the gate falls back to the out-of-band DB-approval flow.
     approval: Option<crate::providers::ApprovalBroker>,
+    /// Inline-question broker for `ask_user_question`. `Some` only for
+    /// interactive TUI runs (set via `with_interactive_questions`); headless +
+    /// child runners leave it `None`, so the tool proceeds without asking.
+    questions: Option<crate::providers::QuestionBroker>,
     /// Abort handle for the background config watcher (#45). It's a perpetual
     /// loop living in `detached`, so `shutdown` aborts it explicitly before
     /// draining — otherwise the drain would block on it until the timeout.
@@ -150,6 +154,7 @@ impl EffectRunner {
             terminal_title_enabled: true,
             owns_global_mcp: true,
             approval: None,
+            questions: None,
             config_watch: None,
         }
     }
@@ -159,6 +164,14 @@ impl EffectRunner {
     /// `ApprovalBroker` instead of writing an out-of-band DB approval row.
     pub fn with_interactive_approvals(mut self) -> Self {
         self.approval = Some(crate::providers::ApprovalBroker::new(self.msg_tx.clone()));
+        self
+    }
+
+    /// Enable inline `ask_user_question` prompts (interactive TUI only). The tool
+    /// then parks on the `QuestionBroker` and routes the user's answers back
+    /// through it instead of proceeding without asking.
+    pub fn with_interactive_questions(mut self) -> Self {
+        self.questions = Some(crate::providers::QuestionBroker::new(self.msg_tx.clone()));
         self
     }
 
@@ -568,6 +581,7 @@ impl EffectRunner {
                     };
                 let task_id = self.task_id.clone();
                 let approval = self.approval.clone();
+                let questions = self.questions.clone();
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 let background = scope.background_token();
@@ -590,6 +604,7 @@ impl EffectRunner {
                         intent,
                         classifier,
                         approval,
+                        questions,
                     ))
                     .catch_unwind()
                     .await
@@ -622,6 +637,16 @@ impl EffectRunner {
                 // Not turn-scoped — fire-and-forget to the broker.
                 if let Some(broker) = &self.approval {
                     broker.resolve(call_id, decision.into());
+                }
+            },
+            Cmd::ResolveQuestion {
+                call_id,
+                resolution,
+            } => {
+                // Deliver the user's answers to the parked ask_user_question
+                // task. Not turn-scoped — fire-and-forget to the broker.
+                if let Some(broker) = &self.questions {
+                    broker.resolve(call_id, resolution);
                 }
             },
             Cmd::CancelScope(turn) => {
@@ -2257,6 +2282,7 @@ async fn dispatch_execute_tool(
     intent: Option<String>,
     classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
     approval: Option<crate::providers::ApprovalBroker>,
+    questions: Option<crate::providers::QuestionBroker>,
 ) {
     let _ = msg_tx.send(Msg::ToolStarted { turn, call_id }).await;
 
@@ -2368,6 +2394,7 @@ async fn dispatch_execute_tool(
         intent,
         classifier,
         approval,
+        questions,
     );
     ctx.background = background;
     let before_payload = serde_json::json!({

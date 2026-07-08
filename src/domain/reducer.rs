@@ -435,6 +435,22 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     selected_option: 0,
                 });
         },
+        Msg::QuestionAsked {
+            turn,
+            call_id,
+            questions,
+        } => {
+            // Same cancellation guard as approvals: drop a question for a turn
+            // that's already unwinding (#74) so its modal can't outlive the turn.
+            if matches!(state.turn, TurnState::Cancelling { .. }) {
+                return (state, cmds);
+            }
+            state
+                .pending_question
+                .push_back(super::question::PendingQuestionSet::new(
+                    turn, call_id, questions,
+                ));
+        },
 
         // ── MCP ─────────────────────────────────────────────────────
         // F5: upsert semantics. State::new seeds entries for configured
@@ -640,6 +656,384 @@ fn emit_title_if_changed(state: &mut State, cmds: &mut Vec<Cmd>) {
 
 // ─── helpers ────────────────────────────────────────────────────────
 
+/// Outcome of one keypress against a question modal: keep showing it, or
+/// resolve the whole set one way or the other.
+enum QuestionKeyAction {
+    Stay,
+    Submit,
+    Dismiss,
+    Reformulate,
+}
+
+/// Advance past the current question: resolve immediately for the atomic
+/// single-select-single-question case, step to the next question, or land on
+/// the review screen.
+fn advance_question(set: &mut super::question::PendingQuestionSet) -> QuestionKeyAction {
+    let nq = set.questions.len();
+    if set.skips_review() {
+        return QuestionKeyAction::Submit;
+    }
+    if set.active + 1 < nq {
+        set.active += 1;
+    } else {
+        set.active = nq; // review screen
+    }
+    QuestionKeyAction::Stay
+}
+
+/// Act on an option row: toggle it (multi-select) or choose it and advance
+/// (single-select, which also drops any typed "Other" text).
+fn act_on_option(
+    set: &mut super::question::PendingQuestionSet,
+    q_idx: usize,
+    opt_idx: usize,
+) -> QuestionKeyAction {
+    let multi = set.questions[q_idx].is_multi();
+    let sel = &mut set.selections[q_idx];
+    if multi {
+        if let Some(pos) = sel.chosen.iter().position(|&i| i == opt_idx) {
+            sel.chosen.remove(pos);
+        } else {
+            sel.chosen.push(opt_idx);
+        }
+        QuestionKeyAction::Stay
+    } else {
+        sel.chosen = vec![opt_idx];
+        sel.other_text.clear();
+        advance_question(set)
+    }
+}
+
+/// Act on the row under the cursor: an option, the "Other" free-text row, or
+/// the multi-select Submit row.
+fn act_on_row(
+    set: &mut super::question::PendingQuestionSet,
+    q_idx: usize,
+    row: usize,
+) -> QuestionKeyAction {
+    let n = set.questions[q_idx].options.len();
+    let multi = set.questions[q_idx].is_multi();
+    if row < n {
+        return act_on_option(set, q_idx, row);
+    }
+    if row == set.other_row(q_idx) {
+        // Multi-select captures the typed text directly, so Enter here is a
+        // no-op; single-select commits the typed answer (if any) and advances.
+        if multi || set.selections[q_idx].other_text.trim().is_empty() {
+            return QuestionKeyAction::Stay;
+        }
+        set.selections[q_idx].chosen.clear();
+        return advance_question(set);
+    }
+    if Some(row) == set.submit_row(q_idx) {
+        return advance_question(set);
+    }
+    QuestionKeyAction::Stay
+}
+
+/// Apply one keypress to the front question set, returning whether it resolves.
+fn apply_question_key(
+    set: &mut super::question::PendingQuestionSet,
+    code: KeyCode,
+    mods: KeyMods,
+) -> QuestionKeyAction {
+    // Note-editing sub-mode: keystrokes edit the active question's note until
+    // Enter/Esc exits (Esc here leaves the note intact — it does not dismiss).
+    if set.editing_note {
+        match code {
+            KeyCode::Enter | KeyCode::Escape => set.editing_note = false,
+            KeyCode::Char(c) if !mods.ctrl && !mods.alt => {
+                if let Some(sel) = set.selections.get_mut(set.active) {
+                    sel.note.push(c);
+                }
+            },
+            KeyCode::Backspace => {
+                if let Some(sel) = set.selections.get_mut(set.active) {
+                    sel.note.pop();
+                }
+            },
+            _ => {},
+        }
+        return QuestionKeyAction::Stay;
+    }
+
+    // Esc dismisses the whole set.
+    if code == KeyCode::Escape && mods.is_empty() {
+        return QuestionKeyAction::Dismiss;
+    }
+
+    let nq = set.questions.len();
+
+    // `n` opens note editing for the active question — but not on the review
+    // screen, and not when the cursor sits in the Other text field (where `n`
+    // is a literal character).
+    if code == KeyCode::Char('n')
+        && mods.is_empty()
+        && set.active < nq
+        && set.questions[set.active].is_choice()
+        && set.selections[set.active].cursor != set.other_row(set.active)
+    {
+        set.editing_note = true;
+        return QuestionKeyAction::Stay;
+    }
+
+    // `c` = "Chat about this": bounce the whole set back to the model to
+    // reformulate. Available on choice/rank tabs (not the Other field) and on
+    // the review screen; on input tabs `c` is a literal character.
+    if code == KeyCode::Char('c')
+        && mods.is_empty()
+        && (set.active >= nq
+            || (set.questions[set.active].is_choice()
+                && set.selections[set.active].cursor != set.other_row(set.active)))
+    {
+        return QuestionKeyAction::Reformulate;
+    }
+
+    // `r` = toggle "remember my answers across sessions" (available where `c`
+    // is). The tool persists answers keyed by each question's `memory_key`.
+    if code == KeyCode::Char('r')
+        && mods.is_empty()
+        && (set.active >= nq
+            || (set.questions[set.active].is_choice()
+                && set.selections[set.active].cursor != set.other_row(set.active)))
+    {
+        set.remember = !set.remember;
+        return QuestionKeyAction::Stay;
+    }
+
+    // Tab-strip navigation between questions / the review screen. Tab + Right
+    // move forward; BackTab + Left move back (no in-field cursor in Stage 1).
+    let go_next = code == KeyCode::Tab || (mods.is_empty() && code == KeyCode::Right);
+    let go_prev = code == KeyCode::BackTab || (mods.is_empty() && code == KeyCode::Left);
+    if go_next {
+        set.active = (set.active + 1).min(nq);
+        return QuestionKeyAction::Stay;
+    }
+    if go_prev {
+        set.active = set.active.saturating_sub(1);
+        return QuestionKeyAction::Stay;
+    }
+
+    // Review screen: 0 = Submit answers, 1 = Cancel.
+    if set.active >= nq {
+        match code {
+            KeyCode::Up => set.review_cursor = 0,
+            KeyCode::Down => set.review_cursor = 1,
+            KeyCode::Char('1') => return QuestionKeyAction::Submit,
+            KeyCode::Char('2') => return QuestionKeyAction::Dismiss,
+            KeyCode::Enter => {
+                return if set.review_cursor == 0 {
+                    QuestionKeyAction::Submit
+                } else {
+                    QuestionKeyAction::Dismiss
+                };
+            },
+            _ => {},
+        }
+        return QuestionKeyAction::Stay;
+    }
+
+    // A question tab.
+    let q_idx = set.active;
+    if set.questions[q_idx].is_input() {
+        return apply_input_key(set, q_idx, code, mods);
+    }
+    if set.questions[q_idx].is_rank() {
+        return apply_rank_key(set, q_idx, code, mods);
+    }
+    // Select / MultiSelect.
+    let n = set.questions[q_idx].options.len();
+    let other_row = set.other_row(q_idx);
+    let row_count = set.row_count(q_idx);
+    let cursor = set.selections[q_idx].cursor;
+
+    // Text entry into the "Other" row: plain/shifted printables append,
+    // Backspace deletes. Other keys fall through to navigation below.
+    if cursor == other_row {
+        match code {
+            KeyCode::Char(c) if !mods.ctrl && !mods.alt => {
+                set.selections[q_idx].other_text.push(c);
+                return QuestionKeyAction::Stay;
+            },
+            KeyCode::Backspace => {
+                set.selections[q_idx].other_text.pop();
+                return QuestionKeyAction::Stay;
+            },
+            _ => {},
+        }
+    }
+
+    match code {
+        KeyCode::Up => {
+            set.selections[q_idx].cursor = cursor.saturating_sub(1);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Down => {
+            set.selections[q_idx].cursor = (cursor + 1).min(row_count.saturating_sub(1));
+            QuestionKeyAction::Stay
+        },
+        // Number keys jump to and act on an option directly (1-based).
+        KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+            let idx = (c as usize) - ('1' as usize);
+            if idx < n {
+                set.selections[q_idx].cursor = idx;
+                act_on_option(set, q_idx, idx)
+            } else {
+                QuestionKeyAction::Stay
+            }
+        },
+        KeyCode::Enter | KeyCode::Char(' ') => act_on_row(set, q_idx, cursor),
+        _ => QuestionKeyAction::Stay,
+    }
+}
+
+/// Key handling for an input-kind question (Text/Number/Date/Path): typing
+/// edits the value, Number steps with Up/Down, Enter submits when valid.
+fn apply_input_key(
+    set: &mut super::question::PendingQuestionSet,
+    q_idx: usize,
+    code: KeyCode,
+    mods: KeyMods,
+) -> QuestionKeyAction {
+    let is_number = matches!(
+        set.questions[q_idx].kind,
+        crate::domain::QuestionKind::Number { .. }
+    );
+    match code {
+        KeyCode::Char(c) if !mods.ctrl && !mods.alt => {
+            set.selections[q_idx].value.push(c);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Backspace => {
+            set.selections[q_idx].value.pop();
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Up if is_number => {
+            step_number(set, q_idx, 1.0);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Down if is_number => {
+            step_number(set, q_idx, -1.0);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Enter => {
+            let kind = set.questions[q_idx].kind.clone();
+            if crate::domain::validate_input(&kind, &set.selections[q_idx].value).is_ok() {
+                advance_question(set)
+            } else {
+                QuestionKeyAction::Stay
+            }
+        },
+        _ => QuestionKeyAction::Stay,
+    }
+}
+
+/// Step a Number question's value by `dir * step`, clamped to min/max.
+fn step_number(set: &mut super::question::PendingQuestionSet, q_idx: usize, dir: f64) {
+    let (min, max, step) = match &set.questions[q_idx].kind {
+        crate::domain::QuestionKind::Number { min, max, step, .. } => (*min, *max, *step),
+        _ => return,
+    };
+    let step = step.unwrap_or(1.0);
+    let cur: f64 = set.selections[q_idx]
+        .value
+        .trim()
+        .parse()
+        .unwrap_or(min.unwrap_or(0.0));
+    let mut next = cur + dir * step;
+    if let Some(lo) = min {
+        next = next.max(lo);
+    }
+    if let Some(hi) = max {
+        next = next.min(hi);
+    }
+    set.selections[q_idx].value = format_number(next);
+}
+
+/// Format a number without a trailing `.0` for whole values.
+fn format_number(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
+/// Key handling for a Rank question: Up/Down move the cursor; Space grabs the
+/// item under the cursor so Up/Down then moves it; Enter submits the order.
+fn apply_rank_key(
+    set: &mut super::question::PendingQuestionSet,
+    q_idx: usize,
+    code: KeyCode,
+    _mods: KeyMods,
+) -> QuestionKeyAction {
+    let n = set.questions[q_idx].options.len();
+    if set.selections[q_idx].order.is_empty() {
+        set.selections[q_idx].order = (0..n).collect();
+    }
+    let sel = &mut set.selections[q_idx];
+    match code {
+        KeyCode::Char(' ') => {
+            sel.grabbed = !sel.grabbed;
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Up => {
+            if sel.grabbed && sel.cursor > 0 {
+                sel.order.swap(sel.cursor, sel.cursor - 1);
+                sel.cursor -= 1;
+            } else {
+                sel.cursor = sel.cursor.saturating_sub(1);
+            }
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Down => {
+            if sel.grabbed && sel.cursor + 1 < n {
+                sel.order.swap(sel.cursor, sel.cursor + 1);
+                sel.cursor += 1;
+            } else {
+                sel.cursor = (sel.cursor + 1).min(n.saturating_sub(1));
+            }
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Enter => advance_question(set),
+        _ => QuestionKeyAction::Stay,
+    }
+}
+
+/// Route a keypress to the front question modal, resolving it into
+/// `Cmd::ResolveQuestion` when the user submits or dismisses. Exclusive while a
+/// question set is pending.
+fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
+    let action = {
+        let Some(set) = state.pending_question.front_mut() else {
+            return;
+        };
+        apply_question_key(set, code, mods)
+    };
+    let resolution = match action {
+        QuestionKeyAction::Stay => return,
+        QuestionKeyAction::Submit => {
+            let Some(set) = state.pending_question.front() else {
+                return;
+            };
+            crate::domain::QuestionResolution::Answered {
+                answers: set.build_answers(),
+                remember: set.remember,
+            }
+        },
+        QuestionKeyAction::Dismiss => crate::domain::QuestionResolution::Dismissed,
+        QuestionKeyAction::Reformulate => crate::domain::QuestionResolution::Reformulate,
+    };
+    if let Some(front) = state.pending_question.front() {
+        let call_id = front.call_id;
+        state.pending_question.pop_front();
+        cmds.push(Cmd::ResolveQuestion {
+            call_id,
+            resolution,
+        });
+    }
+}
+
 fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
     // Ctrl+C is the hard "leave the TUI" path. If work is active,
     // emit a cancellation first so shutdown does not wait on a live
@@ -729,6 +1123,14 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             state.pending_approval.pop_front();
             cmds.push(Cmd::ResolveApproval { call_id, decision });
         }
+        return;
+    }
+
+    // Inline question modal (ask_user_question): exclusive while a question set
+    // awaits answers. Sits ABOVE the Esc-cancel guard so Esc dismisses just the
+    // question and keeps the turn alive, mirroring the approval modal.
+    if !state.pending_question.is_empty() {
+        handle_question_key(state, cmds, code, mods);
         return;
     }
 

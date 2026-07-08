@@ -889,3 +889,279 @@ fn tick_never_mutates_visible_state() {
     assert_eq!(after.session.messages().len(), before_msg_count);
     assert!(matches!(after.turn, TurnState::Idle));
 }
+
+// ─── ask_user_question modal interaction ───────────────────────────
+//
+// Drive the question modal's key-handling state machine through `update`,
+// seeding a pending question set directly (the broker/effect round-trip is
+// unit-tested separately in `providers::questions`).
+
+use mermaid_cli::domain::{
+    Key, KeyCode, KeyMods, PendingQuestionSet, Question, QuestionKind, QuestionOption,
+    QuestionResolution, TextValidate,
+};
+
+fn opt(label: &str) -> QuestionOption {
+    QuestionOption {
+        label: label.to_string(),
+        description: Some("desc".to_string()),
+        recommended: false,
+        preview: None,
+    }
+}
+
+fn question(header: &str, text: &str, multi: bool, labels: &[&str]) -> Question {
+    Question {
+        header: header.to_string(),
+        question: text.to_string(),
+        kind: if multi {
+            QuestionKind::MultiSelect
+        } else {
+            QuestionKind::Select
+        },
+        options: labels.iter().map(|l| opt(l)).collect(),
+        memory_key: None,
+    }
+}
+
+fn seed_questions(questions: Vec<Question>) -> State {
+    let mut s = fresh();
+    s.pending_question
+        .push_back(PendingQuestionSet::new(TurnId(1), ToolCallId(1), questions));
+    s
+}
+
+fn press(state: State, code: KeyCode) -> (State, Vec<Cmd>) {
+    update(
+        state,
+        Msg::Key(Key {
+            code,
+            modifiers: KeyMods::NONE,
+        }),
+    )
+}
+
+fn resolution(cmds: &[Cmd]) -> Option<&QuestionResolution> {
+    cmds.iter().find_map(|c| match c {
+        Cmd::ResolveQuestion { resolution, .. } => Some(resolution),
+        _ => None,
+    })
+}
+
+fn assert_answered(cmds: &[Cmd], expected: &[&[&str]]) {
+    match resolution(cmds) {
+        Some(QuestionResolution::Answered { answers: ans, .. }) => {
+            assert_eq!(ans.len(), expected.len(), "answer count");
+            for (a, exp) in ans.iter().zip(expected) {
+                let got: Vec<&str> = a.selected.iter().map(|s| s.as_str()).collect();
+                assert_eq!(&got, exp, "selected labels for {:?}", a.question);
+            }
+        },
+        other => panic!("expected Answered, got {other:?}"),
+    }
+}
+
+#[test]
+fn single_select_number_key_resolves_immediately() {
+    let state = seed_questions(vec![question(
+        "DB",
+        "Which database?",
+        false,
+        &["PostgreSQL", "SQLite"],
+    )]);
+    let (state, cmds) = press(state, KeyCode::Char('1'));
+    assert!(state.pending_question.is_empty(), "resolved and popped");
+    assert_answered(&cmds, &[&["PostgreSQL"]]);
+}
+
+#[test]
+fn single_select_arrow_then_enter_picks_second() {
+    let state = seed_questions(vec![question("DB", "Which?", false, &["A", "B"])]);
+    let (state, _) = press(state, KeyCode::Down);
+    let (state, cmds) = press(state, KeyCode::Enter);
+    assert!(state.pending_question.is_empty());
+    assert_answered(&cmds, &[&["B"]]);
+}
+
+#[test]
+fn multi_select_toggles_then_submits_via_review() {
+    let state = seed_questions(vec![question(
+        "Feat",
+        "Which features?",
+        true,
+        &["Auth", "API", "Jobs"],
+    )]);
+    let (state, _) = press(state, KeyCode::Char('1')); // toggle Auth (cursor→0)
+    let (state, _) = press(state, KeyCode::Char('3')); // toggle Jobs (cursor→2)
+    let (state, _) = press(state, KeyCode::Down); // → Other row
+    let (state, _) = press(state, KeyCode::Down); // → Submit row
+    let (state, _) = press(state, KeyCode::Enter); // Submit → review screen
+    assert!(
+        !state.pending_question.is_empty(),
+        "review screen, not resolved"
+    );
+    let (state, cmds) = press(state, KeyCode::Enter); // review: Submit answers
+    assert!(state.pending_question.is_empty());
+    assert_answered(&cmds, &[&["Auth", "Jobs"]]);
+}
+
+#[test]
+fn batched_questions_advance_then_review_submit() {
+    let state = seed_questions(vec![
+        question("Runtime", "Which runtime?", false, &["Node", "Python"]),
+        question("Style", "Which styling?", false, &["Tailwind", "CSS"]),
+    ]);
+    let (state, _) = press(state, KeyCode::Enter); // Q1: Node → advance to Q2
+    let (state, _) = press(state, KeyCode::Char('2')); // Q2: CSS → advance to review
+    assert!(!state.pending_question.is_empty(), "review screen");
+    let (state, cmds) = press(state, KeyCode::Enter); // submit
+    assert!(state.pending_question.is_empty());
+    assert_answered(&cmds, &[&["Node"], &["CSS"]]);
+}
+
+#[test]
+fn esc_dismisses_the_question() {
+    let state = seed_questions(vec![question("DB", "Which?", false, &["A", "B"])]);
+    let (state, cmds) = press(state, KeyCode::Escape);
+    assert!(state.pending_question.is_empty());
+    assert!(matches!(
+        resolution(&cmds),
+        Some(QuestionResolution::Dismissed)
+    ));
+}
+
+#[test]
+fn other_free_text_becomes_the_answer() {
+    let state = seed_questions(vec![question("DB", "Which?", false, &["A", "B"])]);
+    let (state, _) = press(state, KeyCode::Down); // → option B
+    let (mut state, _) = press(state, KeyCode::Down); // → Other row
+    for ch in "duck".chars() {
+        let (s, _) = press(state, KeyCode::Char(ch));
+        state = s;
+    }
+    let (state, cmds) = press(state, KeyCode::Enter);
+    assert!(state.pending_question.is_empty());
+    assert_answered(&cmds, &[&["duck"]]);
+}
+
+#[test]
+fn note_rides_back_with_the_answer() {
+    let state = seed_questions(vec![question("DB", "Which?", false, &["A", "B"])]);
+    let (mut state, _) = press(state, KeyCode::Char('n')); // open note editing
+    for ch in "prefer A".chars() {
+        let (s, _) = press(state, KeyCode::Char(ch));
+        state = s;
+    }
+    let (state, _) = press(state, KeyCode::Enter); // exit note editing (keeps note)
+    let (state, cmds) = press(state, KeyCode::Char('1')); // pick A -> resolves
+    assert!(state.pending_question.is_empty());
+    match resolution(&cmds) {
+        Some(QuestionResolution::Answered { answers: ans, .. }) => {
+            assert_eq!(ans[0].selected, vec!["A".to_string()]);
+            assert_eq!(ans[0].note.as_deref(), Some("prefer A"));
+        },
+        other => panic!("expected Answered, got {other:?}"),
+    }
+}
+
+fn input_q(kind: QuestionKind) -> Question {
+    Question {
+        header: "H".to_string(),
+        question: "Q?".to_string(),
+        kind,
+        options: vec![],
+        memory_key: None,
+    }
+}
+
+fn rank_q(labels: &[&str]) -> Question {
+    Question {
+        header: "H".to_string(),
+        question: "Q?".to_string(),
+        kind: QuestionKind::Rank,
+        options: labels.iter().map(|l| opt(l)).collect(),
+        memory_key: None,
+    }
+}
+
+#[test]
+fn text_input_value_rides_back() {
+    let state = seed_questions(vec![input_q(QuestionKind::Text {
+        validate: TextValidate::Any,
+    })]);
+    let mut state = state;
+    for ch in "hello".chars() {
+        let (s, _) = press(state, KeyCode::Char(ch));
+        state = s;
+    }
+    let (state, cmds) = press(state, KeyCode::Enter);
+    assert!(state.pending_question.is_empty());
+    assert_answered(&cmds, &[&["hello"]]);
+}
+
+#[test]
+fn number_steps_with_up_arrow() {
+    let state = seed_questions(vec![input_q(QuestionKind::Number {
+        min: Some(0.0),
+        max: Some(10.0),
+        step: Some(2.0),
+        slider: false,
+    })]);
+    let (state, _) = press(state, KeyCode::Up); // 0 -> 2
+    let (state, _) = press(state, KeyCode::Up); // 2 -> 4
+    let (state, cmds) = press(state, KeyCode::Enter);
+    assert!(state.pending_question.is_empty());
+    assert_answered(&cmds, &[&["4"]]);
+}
+
+#[test]
+fn invalid_number_blocks_submit() {
+    let state = seed_questions(vec![input_q(QuestionKind::Text {
+        validate: TextValidate::Number,
+    })]);
+    let mut state = state;
+    for ch in "abc".chars() {
+        let (s, _) = press(state, KeyCode::Char(ch));
+        state = s;
+    }
+    let (state, cmds) = press(state, KeyCode::Enter);
+    assert!(
+        !state.pending_question.is_empty(),
+        "invalid value must not submit"
+    );
+    assert!(resolution(&cmds).is_none());
+}
+
+#[test]
+fn rank_reorder_moves_item_and_submits() {
+    let state = seed_questions(vec![rank_q(&["A", "B", "C"])]);
+    let (state, _) = press(state, KeyCode::Char(' ')); // grab A (cursor 0)
+    let (state, _) = press(state, KeyCode::Down); // -> B, A, C
+    let (state, _) = press(state, KeyCode::Down); // -> B, C, A
+    let (state, _) = press(state, KeyCode::Char(' ')); // drop
+    let (state, cmds) = press(state, KeyCode::Enter);
+    assert!(state.pending_question.is_empty());
+    assert_answered(&cmds, &[&["B", "C", "A"]]);
+}
+
+#[test]
+fn chat_about_this_reformulates() {
+    let state = seed_questions(vec![question("DB", "Which?", false, &["A", "B"])]);
+    let (state, cmds) = press(state, KeyCode::Char('c'));
+    assert!(state.pending_question.is_empty());
+    assert!(matches!(
+        resolution(&cmds),
+        Some(QuestionResolution::Reformulate)
+    ));
+}
+
+#[test]
+fn r_toggles_remember_flag() {
+    let state = seed_questions(vec![question("DB", "Which?", false, &["A", "B"])]);
+    let (state, _) = press(state, KeyCode::Char('r')); // remember -> true
+    let (_state, cmds) = press(state, KeyCode::Char('1')); // pick A -> resolves
+    match resolution(&cmds) {
+        Some(QuestionResolution::Answered { remember, .. }) => assert!(*remember),
+        other => panic!("expected Answered, got {other:?}"),
+    }
+}

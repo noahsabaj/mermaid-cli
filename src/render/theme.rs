@@ -53,6 +53,20 @@ pub struct ThemeColors {
     pub warning: ColorValue,
     pub error: ColorValue,
     pub info: ColorValue,
+
+    /// Brand accent (aqua #22D3EE) — the `ask_user_question` modal's header chip
+    /// and border. Serde-defaulted so themes/configs predating it still load.
+    #[serde(default = "default_brand")]
+    pub brand: ColorValue,
+}
+
+/// Mermaid's aqua brand accent, used when a theme omits `brand`.
+fn default_brand() -> ColorValue {
+    ColorValue::Rgb {
+        r: 34,
+        g: 211,
+        b: 238,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +157,8 @@ impl Theme {
                 warning: ColorValue::Named("yellow".to_string()),
                 error: ColorValue::Named("red".to_string()),
                 info: ColorValue::Named("blue".to_string()),
+
+                brand: default_brand(),
             },
         }
     }
@@ -201,6 +217,8 @@ impl Theme {
                 warning: ColorValue::Named("yellow".to_string()),
                 error: ColorValue::Named("red".to_string()),
                 info: ColorValue::Named("cyan".to_string()),
+
+                brand: default_brand(),
             },
         }
     }

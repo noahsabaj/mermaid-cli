@@ -33,6 +33,7 @@ use super::cmd::ChatRequest;
 use super::compaction::CompactionTrigger;
 use super::ids::{IdAllocator, ToolCallId, TurnId};
 use super::msg::Msg;
+use super::question::PendingQuestionSet;
 use super::runtime::{RuntimeState, ToolArtifact, ToolRunMetadata, ToolStatus};
 
 /// Root state. The reducer takes `State` by value, returns a new
@@ -71,6 +72,11 @@ pub struct State {
     /// `Cmd::ResolveApproval`, which unblocks the parked tool task. Empty in
     /// headless mode (no broker → the out-of-band `/approve` flow instead).
     pub pending_approval: VecDeque<PendingApproval>,
+    /// FIFO queue of `ask_user_question` batches awaiting the user's answers.
+    /// The front item renders as a selectable modal; submitting pops it and
+    /// emits `Cmd::ResolveQuestion`, unblocking the parked tool task. Empty in
+    /// headless mode (no broker → the tool proceeds without asking).
+    pub pending_question: VecDeque<PendingQuestionSet>,
     /// Runtime-only observability state: process registry, provider
     /// capability snapshot, and lifecycle timeline. Not sent to the
     /// model.
@@ -155,6 +161,7 @@ impl State {
             ids: IdAllocatorBundle::default(),
             confirm: None,
             pending_approval: VecDeque::new(),
+            pending_question: VecDeque::new(),
             runtime,
             should_exit: false,
             // Seed the injected clock from the caller (live: startup wall
