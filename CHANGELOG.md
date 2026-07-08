@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Calling a stopped MCP server now returns a clear error.** After
+  `stop_server`, a later `call_tool` hit the dead server and surfaced a
+  broken-pipe transport error instead of saying the server was stopped. The
+  client is now flagged on shutdown and the manager returns a clean
+  "MCP server '…' has been stopped" message.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
