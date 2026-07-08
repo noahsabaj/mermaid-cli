@@ -236,6 +236,39 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 }
             }
         },
+        Msg::ProviderVisionResolved {
+            model_id,
+            supports_vision,
+            warn,
+        } => {
+            // Drop a probe that landed after a `/model` switch (it describes the
+            // previous model, not the one now active) — mirrors
+            // ProviderContextResolved / OllamaPlacementResolved.
+            if model_id == state.session.model_id {
+                // Refresh the display/telemetry snapshot (Ollama's was a static
+                // `false`), so `/doctor` stops under-reporting vision.
+                if let Some(v) = supports_vision {
+                    state.runtime.provider_capabilities.supports_vision = v;
+                }
+                // One-shot, and only when an image is actually in play (`warn`):
+                // a model that can't see images silently ignores them, which
+                // looks like a bug. `None` (unknown) / `Some(true)` never warn.
+                if warn
+                    && supports_vision == Some(false)
+                    && state.runtime.vision_warned.insert(model_id.clone())
+                {
+                    push_system(
+                        &mut state,
+                        &mut cmds,
+                        format!(
+                            "Heads up: {model_id} reports no vision capability, so attached \
+                             images are not seen by the model. Switch to a vision-capable \
+                             model to send images."
+                        ),
+                    );
+                }
+            }
+        },
         Msg::OllamaPlacementResolved {
             model_id,
             size_vram_bytes,
@@ -1190,6 +1223,13 @@ fn handle_clipboard_read(state: &mut State, cmds: &mut Vec<Cmd>, read: Clipboard
                 bytes,
                 format,
             });
+            // Proactively probe whether the current model can even see this
+            // image, so a no-vision warning appears now — before you send —
+            // rather than after a wasted turn.
+            cmds.push(Cmd::ProbeVision {
+                model_id: state.session.model_id.clone(),
+                warn: true,
+            });
         },
         ClipboardRead::Text(t) => {
             insert_text_at_cursor(state, &t);
@@ -1312,6 +1352,14 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             let pull_target = ollama_pull_target(&new_model);
             state.session.model_id = new_model.clone();
             state.runtime.set_model(&new_model);
+            // Refresh vision capability for the newly-selected model (set_model
+            // reset the snapshot to a static default). Nag only if an image is
+            // already staged — i.e. you switched TO a no-vision model with a
+            // pending paste; otherwise this just keeps `/doctor` honest.
+            cmds.push(Cmd::ProbeVision {
+                model_id: state.session.model_id.clone(),
+                warn: !state.ui.attachments.is_empty(),
+            });
             // The bottom status bar shows the new model — no banner.
             cmds.push(Cmd::PersistLastModel(new_model));
             if let Some(model) = pull_target {
@@ -3834,6 +3882,149 @@ mod tests {
         assert!(
             cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
             "the transcript message is persisted"
+        );
+    }
+
+    // ── No-vision-model warning (Msg::ProviderVisionResolved) ───────────
+
+    fn vision_resolved(model_id: &str, supports_vision: Option<bool>, warn: bool) -> Msg {
+        Msg::ProviderVisionResolved {
+            model_id: model_id.to_string(),
+            supports_vision,
+            warn,
+        }
+    }
+
+    fn count_no_vision_notices(state: &State) -> usize {
+        state
+            .session
+            .messages()
+            .iter()
+            .filter(|m| m.content.contains("no vision capability"))
+            .count()
+    }
+
+    /// A no-vision model with an image in play warns exactly once per session.
+    #[test]
+    fn no_vision_model_warns_once() {
+        // fresh_state's model is "ollama/test".
+        let (state, cmds) = update(
+            fresh_state(),
+            vision_resolved("ollama/test", Some(false), true),
+        );
+        assert_eq!(
+            count_no_vision_notices(&state),
+            1,
+            "one warning on first probe"
+        );
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        // A second probe for the same model must not nag again.
+        let (state, _) = update(state, vision_resolved("ollama/test", Some(false), true));
+        assert_eq!(
+            count_no_vision_notices(&state),
+            1,
+            "warning is once-per-session"
+        );
+    }
+
+    /// A vision-capable model refreshes the display snapshot but never warns.
+    #[test]
+    fn vision_capable_model_updates_snapshot_without_warning() {
+        let state = fresh_state();
+        assert!(
+            !state.runtime.provider_capabilities.supports_vision,
+            "ollama's static default is false"
+        );
+        let (state, _) = update(state, vision_resolved("ollama/test", Some(true), true));
+        assert!(
+            state.runtime.provider_capabilities.supports_vision,
+            "snapshot refreshed to the probed value"
+        );
+        assert_eq!(count_no_vision_notices(&state), 0);
+    }
+
+    /// Unknown vision (`None` — non-Ollama or a failed probe) is ignored: no
+    /// warning and no snapshot change.
+    #[test]
+    fn unknown_vision_is_ignored() {
+        let (state, _) = update(fresh_state(), vision_resolved("ollama/test", None, true));
+        assert!(
+            !state.runtime.provider_capabilities.supports_vision,
+            "snapshot untouched on unknown"
+        );
+        assert_eq!(count_no_vision_notices(&state), 0);
+    }
+
+    /// `warn: false` (no image in play) suppresses the nag even for a no-vision
+    /// model — the probe is only keeping the snapshot honest.
+    #[test]
+    fn no_warn_flag_suppresses_the_nag() {
+        let (state, _) = update(
+            fresh_state(),
+            vision_resolved("ollama/test", Some(false), false),
+        );
+        assert_eq!(count_no_vision_notices(&state), 0);
+    }
+
+    /// A probe that lands after a `/model` switch (model_id no longer matches the
+    /// active model) is dropped — no warning for the model now in use.
+    #[test]
+    fn stale_vision_probe_is_dropped() {
+        let (state, _) = update(
+            fresh_state(),
+            vision_resolved("ollama/previous", Some(false), true),
+        );
+        assert_eq!(count_no_vision_notices(&state), 0);
+    }
+
+    /// Staging a pasted image proactively probes vision so the warning can appear
+    /// before the user sends.
+    #[test]
+    fn staging_an_image_probes_vision() {
+        let (_, cmds) = update(
+            fresh_state(),
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Image {
+                bytes: vec![1, 2, 3],
+                format: "png".to_string(),
+            }),
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ProbeVision { warn: true, .. })),
+            "pasting an image probes vision with warn=true"
+        );
+    }
+
+    /// Switching models probes the new model's vision; it only arms the warning
+    /// (`warn: true`) when an image is already staged.
+    #[test]
+    fn model_switch_probes_vision_and_arms_warning_only_with_staged_image() {
+        // No image staged → probe with warn=false (snapshot refresh only).
+        let (_, cmds) = update(
+            fresh_state(),
+            Msg::Slash(SlashCmd::Model(Some("ollama/other".to_string()))),
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ProbeVision { warn: false, .. })),
+            "switching with no staged image probes with warn=false"
+        );
+        // Stage an image, then switch → probe with warn=true.
+        let (state, _) = update(
+            fresh_state(),
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Image {
+                bytes: vec![9],
+                format: "png".to_string(),
+            }),
+        );
+        let (_, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Model(Some("ollama/other".to_string()))),
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ProbeVision { warn: true, .. })),
+            "switching with a staged image arms the warning"
         );
     }
 

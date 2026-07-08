@@ -648,6 +648,7 @@ mod tests {
                 | MsgKind::ContextUsageEstimated
                 | MsgKind::ProviderContextResolved
                 | MsgKind::OllamaPlacementResolved
+                | MsgKind::ProviderVisionResolved
                 | MsgKind::BuiltinToolSchemaTokens
                 | MsgKind::CompactionFinished
                 | MsgKind::CompactionFailed
@@ -748,6 +749,11 @@ mod tests {
                 size_vram_bytes: 1,
                 total_bytes: 2,
                 suggested_num_ctx: Some(8192),
+            },
+            Msg::ProviderVisionResolved {
+                model_id: "m".to_string(),
+                supports_vision: Some(false),
+                warn: true,
             },
             Msg::BuiltinToolSchemaTokens(1234),
             Msg::CompactionFailed {
@@ -910,6 +916,7 @@ mod tests {
             MsgKind::ContextUsageEstimated,
             MsgKind::ProviderContextResolved,
             MsgKind::OllamaPlacementResolved,
+            MsgKind::ProviderVisionResolved,
             MsgKind::BuiltinToolSchemaTokens,
             MsgKind::CompactionFinished,
             MsgKind::CompactionFailed,

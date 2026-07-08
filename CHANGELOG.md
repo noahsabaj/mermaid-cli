@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mermaid warns when you attach an image to a model that can't see it.** Some
+  Ollama models have no vision capability, so a pasted image is silently ignored
+  — which looks exactly like a bug. Mermaid now probes the model's advertised
+  `vision` capability (Ollama `/api/show`) the moment you paste an image (and on
+  `/model` switch), and posts a one-line notice *before* you send if the model
+  can't see it, so you can switch to a vision-capable model instead of wasting a
+  turn. The notice is shown once per model per session; a per-turn re-check backs
+  it up for a fast paste-then-send. This also makes `/doctor` report Ollama
+  vision support accurately instead of always claiming "no".
+
 - **Pasted images are now inline `[Image #N]` tokens in the prompt.** Instead of
   a separate `[Image #1] (PNG, 1KB)  (↑ to select)` bar floating above the input
   box, Ctrl+V splices an inline `[Image #N]` pill into the message text at the

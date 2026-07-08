@@ -129,6 +129,19 @@ pub enum Msg {
         /// spilled, or `None` if it fits / can't be helped by shrinking.
         suggested_num_ctx: Option<u32>,
     },
+    /// Effect runner probed whether the active model can see images (Ollama
+    /// `/api/show` `capabilities`). Model-level metadata (not turn-scoped);
+    /// `model_id` is carried so a probe that lands after a `/model` switch is
+    /// dropped. `warn` (set at the trigger site — an image paste, a `/model`
+    /// switch with an image staged, or a send carrying images) gates the
+    /// one-shot no-vision-model notice; the capability snapshot refreshes
+    /// regardless. `supports_vision` is `None` when unknown (non-Ollama, or the
+    /// probe failed) → never warn.
+    ProviderVisionResolved {
+        model_id: String,
+        supports_vision: Option<bool>,
+        warn: bool,
+    },
     /// The effect runner's estimate of the built-in tool-schema token cost
     /// it appends to every request during dispatch. Not turn-scoped — the
     /// reducer stores it on `runtime` so `/context` can fold it into its
@@ -526,6 +539,7 @@ impl Msg {
             Msg::ContextUsageEstimated { .. } => MsgKind::ContextUsageEstimated,
             Msg::ProviderContextResolved { .. } => MsgKind::ProviderContextResolved,
             Msg::OllamaPlacementResolved { .. } => MsgKind::OllamaPlacementResolved,
+            Msg::ProviderVisionResolved { .. } => MsgKind::ProviderVisionResolved,
             Msg::BuiltinToolSchemaTokens(_) => MsgKind::BuiltinToolSchemaTokens,
             Msg::CompactionFinished { .. } => MsgKind::CompactionFinished,
             Msg::CompactionFailed { .. } => MsgKind::CompactionFailed,
@@ -581,6 +595,7 @@ pub enum MsgKind {
     ContextUsageEstimated,
     ProviderContextResolved,
     OllamaPlacementResolved,
+    ProviderVisionResolved,
     BuiltinToolSchemaTokens,
     CompactionFinished,
     CompactionFailed,
