@@ -187,6 +187,10 @@ impl ModelProvider for OllamaProvider {
         })
     }
 
+    async fn supports_vision(&self) -> Option<bool> {
+        Some(self.adapter.vision_supported().await)
+    }
+
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
         // Resolve the effective window first (cache-first probe). Idempotent with
         // the effect layer's call — both read the same cached probe + memory, so
