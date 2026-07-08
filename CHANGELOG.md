@@ -118,6 +118,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The daemon's `outcomes` and finished-`tasks` tables no longer grow without
+  bound.** The startup GC now prunes terminal tasks (with their events) and the
+  append-only `outcomes` reward table, which #148's durable queue would otherwise
+  keep — with their full prompts — forever. `outcomes` (the self-improving-loop
+  training corpus) is retained on its own, deliberately longer window so a large
+  training history survives the shorter task/session retention, and each outcome
+  is stamped with its task's context so it stays usable after that task is
+  pruned. New `[daemon] retention_days` (default 30) and
+  `[daemon] outcomes_retention_days` (default 180) tune the two windows.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and

@@ -207,6 +207,15 @@ pub struct DaemonConfig {
     /// batch work a shorter (or longer) leash. A task over budget is failed
     /// with a timeout report.
     pub task_timeout_minutes: Option<u64>,
+    /// Days to retain finished runtime rows (terminal tasks, stale sessions,
+    /// finished tool runs, old compactions, …) before the startup GC prunes
+    /// them. Active data is never pruned regardless of this value.
+    pub retention_days: i64,
+    /// Days to retain `outcomes` reward rows — the self-improving-loop training
+    /// corpus. Deliberately longer than `retention_days` so a large training
+    /// history survives the shorter task/session window; each outcome's
+    /// denormalized context keeps it usable after its task row is pruned.
+    pub outcomes_retention_days: i64,
 }
 
 impl Default for DaemonConfig {
@@ -214,6 +223,8 @@ impl Default for DaemonConfig {
         Self {
             max_concurrent_tasks: 1,
             task_timeout_minutes: None,
+            retention_days: 30,
+            outcomes_retention_days: 180,
         }
     }
 }
