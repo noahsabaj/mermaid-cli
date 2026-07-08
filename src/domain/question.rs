@@ -334,6 +334,9 @@ pub enum QuestionResolution {
     Answered(Vec<QuestionAnswer>),
     /// The user dismissed the prompt (Esc / Cancel) or the turn was cancelled.
     Dismissed,
+    /// The user chose "Chat about this" — bounce the set back to the model to
+    /// reformulate, rather than answering.
+    Reformulate,
 }
 
 /// One question's resolved answer, keyed by its header + text so the model can

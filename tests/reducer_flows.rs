@@ -1134,3 +1134,14 @@ fn rank_reorder_moves_item_and_submits() {
     assert!(state.pending_question.is_empty());
     assert_answered(&cmds, &[&["B", "C", "A"]]);
 }
+
+#[test]
+fn chat_about_this_reformulates() {
+    let state = seed_questions(vec![question("DB", "Which?", false, &["A", "B"])]);
+    let (state, cmds) = press(state, KeyCode::Char('c'));
+    assert!(state.pending_question.is_empty());
+    assert!(matches!(
+        resolution(&cmds),
+        Some(QuestionResolution::Reformulate)
+    ));
+}

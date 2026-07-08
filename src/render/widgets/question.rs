@@ -313,7 +313,7 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Enter to select | Up/Down to navigate | Esc to cancel",
+            "Enter to select | Up/Down to navigate | c: chat | Esc to cancel",
             Style::default().fg(dim),
         )));
         return lines;
@@ -378,7 +378,7 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
         hint.push_str(" | Tab to switch");
     }
     if q.is_choice() {
-        hint.push_str(" | n: notes");
+        hint.push_str(" | n: notes | c: chat");
     }
     hint.push_str(" | Esc to cancel");
     lines.push(Line::from(Span::styled(hint, Style::default().fg(dim))));

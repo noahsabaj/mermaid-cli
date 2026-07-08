@@ -291,6 +291,13 @@ impl ToolExecutor for AskUserQuestionTool {
                 "ask_user_question (dismissed)",
                 secs(),
             ),
+            QuestionResolution::Reformulate => ToolOutcome::success(
+                "The user chose to discuss these questions rather than answer them as posed. \
+                 Do not re-issue the same questions; engage with what they say next and \
+                 reformulate your approach based on their input.",
+                "ask_user_question (chat about this)",
+                secs(),
+            ),
         }
     }
 }

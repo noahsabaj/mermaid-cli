@@ -626,6 +626,7 @@ enum QuestionKeyAction {
     Stay,
     Submit,
     Dismiss,
+    Reformulate,
 }
 
 /// Advance past the current question: resolve immediately for the atomic
@@ -738,6 +739,18 @@ fn apply_question_key(
     {
         set.editing_note = true;
         return QuestionKeyAction::Stay;
+    }
+
+    // `c` = "Chat about this": bounce the whole set back to the model to
+    // reformulate. Available on choice/rank tabs (not the Other field) and on
+    // the review screen; on input tabs `c` is a literal character.
+    if code == KeyCode::Char('c')
+        && mods.is_empty()
+        && (set.active >= nq
+            || (set.questions[set.active].is_choice()
+                && set.selections[set.active].cursor != set.other_row(set.active)))
+    {
+        return QuestionKeyAction::Reformulate;
     }
 
     // Tab-strip navigation between questions / the review screen. Tab + Right
@@ -960,6 +973,7 @@ fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mo
             crate::domain::QuestionResolution::Answered(set.build_answers())
         },
         QuestionKeyAction::Dismiss => crate::domain::QuestionResolution::Dismissed,
+        QuestionKeyAction::Reformulate => crate::domain::QuestionResolution::Reformulate,
     };
     if let Some(front) = state.pending_question.front() {
         let call_id = front.call_id;

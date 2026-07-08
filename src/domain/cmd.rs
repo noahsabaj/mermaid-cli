@@ -423,6 +423,7 @@ impl Cmd {
                 let kind = match resolution {
                     QuestionResolution::Answered(a) => format!("answered({})", a.len()),
                     QuestionResolution::Dismissed => "dismissed".to_string(),
+                    QuestionResolution::Reformulate => "reformulate".to_string(),
                 };
                 format!("resolve_question(call={}, {})", call_id, kind)
             },
