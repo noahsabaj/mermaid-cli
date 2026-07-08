@@ -837,13 +837,23 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                                 image_index: i,
                             },
                         ));
+                        // Prefer the stable global number stored with the
+                        // message; fall back to a positional index for sessions
+                        // saved before image numbering (and assistant/tool
+                        // images, which carry no global number).
+                        let label = msg
+                            .image_numbers
+                            .as_ref()
+                            .and_then(|v| v.get(i))
+                            .map(|n| format!("[Image #{n}]"))
+                            .unwrap_or_else(|| format!("[Image #{}]", i + 1));
                         lines.push(Line::from(vec![
                             Span::styled(
                                 "  ⎿ ",
                                 Style::new().fg(self.theme.colors.info.to_color()),
                             ),
                             Span::styled(
-                                format!("[Image #{}]", i + 1),
+                                label,
                                 Style::new().fg(self.theme.colors.info.to_color()).italic(),
                             ),
                         ]));
@@ -1077,7 +1087,7 @@ fn render_actions(
             lines.push(Line::from(""));
         }
         let action_color = match action.action_type.as_str() {
-            "Write" | "Edit" => theme.colors.success.to_color(),
+            "Write" | "Update" => theme.colors.success.to_color(),
             "Delete" => theme.colors.warning.to_color(),
             _ => theme.colors.info.to_color(),
         };
@@ -1625,7 +1635,7 @@ mod tests {
             p = DIFF_ADDED_MARKER
         );
         let action = ActionDisplay {
-            action_type: "Edit".to_string(),
+            action_type: "Update".to_string(),
             target: "engine.ts".to_string(),
             result: ActionResult::Success {
                 output: String::new(),
