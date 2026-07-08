@@ -118,6 +118,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A context-limit compaction no longer silently drops your turn.** When a
+  provider rejected a request mid-stream for length, Mermaid compacted the
+  conversation but then ended the turn instead of resuming — abandoning the work
+  you asked for. It now resumes the request after compacting, exactly like a
+  truncation recovery. Relatedly, a system note posted *during* a compaction
+  (e.g. an MCP server error) is now inserted before a pending tool call rather
+  than wedged between a `tool_use` and its `tool_result`, which some providers
+  reject on the next request.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
