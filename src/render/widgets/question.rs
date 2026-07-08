@@ -351,7 +351,12 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
     let q = &set.questions[set.active];
     let sel = &set.selections[set.active];
 
-    lines.push(Line::from(chip(&truncate_to_cells(&q.header, 12), brand)));
+    // The batched tab strip already shows the header chip for the active
+    // question, so only render it here (above the title) when there's no tab
+    // strip — i.e. a single question. Otherwise it's a duplicate.
+    if nq == 1 {
+        lines.push(Line::from(chip(&truncate_to_cells(&q.header, 12), brand)));
+    }
     lines.push(Line::from(Span::styled(
         q.question.clone(),
         Style::default().fg(white).add_modifier(Modifier::BOLD),
@@ -591,5 +596,48 @@ mod tests {
             question_modal_height(&set, &theme) >= 22,
             "expected height >= 22 to fit the preview"
         );
+    }
+
+    fn q_with_header(header: &str) -> Question {
+        Question {
+            header: header.to_string(),
+            question: format!("Which {}?", header),
+            kind: crate::domain::QuestionKind::Select,
+            options: vec![opt_with_preview("A", None), opt_with_preview("B", None)],
+            memory_key: None,
+        }
+    }
+
+    /// Count lines that are a lone header chip (a single span whose text is
+    /// exactly `label`). The tab strip renders the header among several spans, so
+    /// it never matches; only the standalone chip above the title does.
+    fn lone_chip_lines(lines: &[Line<'static>], label: &str) -> usize {
+        // `chip()` pads the label to " label ", so trim before comparing.
+        lines
+            .iter()
+            .filter(|l| l.spans.len() == 1 && l.spans[0].content.as_ref().trim() == label)
+            .count()
+    }
+
+    #[test]
+    fn header_chip_shown_once_for_single_question() {
+        // No tab strip for a single question, so the header chip appears exactly
+        // once (above the title) — otherwise the header would vanish entirely.
+        let set = PendingQuestionSet::new(TurnId(1), ToolCallId(1), vec![q_with_header("HDR")]);
+        let lines = build_question_lines(&set, &Theme::dark());
+        assert_eq!(lone_chip_lines(&lines, "HDR"), 1);
+    }
+
+    #[test]
+    fn header_chip_not_duplicated_above_title_when_batched() {
+        // The batched tab strip already shows the active header, so there must be
+        // NO standalone header chip above the title (it used to be duplicated).
+        let set = PendingQuestionSet::new(
+            TurnId(1),
+            ToolCallId(1),
+            vec![q_with_header("HDR"), q_with_header("Other")],
+        );
+        let lines = build_question_lines(&set, &Theme::dark());
+        assert_eq!(lone_chip_lines(&lines, "HDR"), 0);
     }
 }
