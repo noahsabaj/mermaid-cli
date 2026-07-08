@@ -306,6 +306,51 @@ fn startup_recovery() {
     {
         tracing::info!(removed, "gc removed old checkpoint directories");
     }
+    if let Ok(removed) = sweep_stale_bg_logs(daemon.retention_days)
+        && removed > 0
+    {
+        tracing::info!(removed, "reaped stale background-command logs");
+    }
+}
+
+/// Reap background-command tee logs (`mermaid-bg-<pid>-<nanos>.log`) left in the
+/// private temp dir by detached (Ctrl+B) commands of prior sessions. A live
+/// detached process keeps appending to its log, so an mtime older than the
+/// retention window means the writer is long gone.
+#[cfg(any(unix, windows))]
+fn sweep_stale_bg_logs(retention_days: i64) -> std::io::Result<u64> {
+    sweep_stale_bg_logs_in(&mermaid_cli::utils::private_temp_dir()?, retention_days)
+}
+
+/// The `sweep_stale_bg_logs` body over an explicit directory, for testing.
+/// Best-effort: files it can't stat or remove (e.g. one a live process still
+/// holds open on Windows) are skipped.
+#[cfg(any(unix, windows))]
+fn sweep_stale_bg_logs_in(dir: &std::path::Path, retention_days: i64) -> std::io::Result<u64> {
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(
+            retention_days.max(0) as u64 * 24 * 60 * 60,
+        ))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut removed = 0u64;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !(name.starts_with("mermaid-bg-") && name.ends_with(".log")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|mtime| mtime < cutoff)
+            .unwrap_or(false);
+        if stale && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(unix)]
@@ -1205,6 +1250,30 @@ mod tests {
             classify_args(["--bogus".to_string()]),
             CliAction::Unknown("--bogus".to_string())
         );
+    }
+
+    #[test]
+    fn sweep_stale_bg_logs_targets_only_old_bg_logs() {
+        let dir = std::env::temp_dir().join(format!("mermaidd_bg_sweep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bg = dir.join("mermaid-bg-1234-99.log");
+        std::fs::write(&bg, b"old log").unwrap();
+        let keep = dir.join("notes.txt");
+        std::fs::write(&keep, b"keep me").unwrap();
+        let other_log = dir.join("mermaidd.log");
+        std::fs::write(&other_log, b"daemon log").unwrap();
+
+        // retention 0 → the cutoff is "now", captured after the files were
+        // written, so the just-created bg log counts as stale and is reaped;
+        // non-matching names survive.
+        let removed = super::sweep_stale_bg_logs_in(&dir, 0).expect("sweep");
+        assert_eq!(removed, 1);
+        assert!(!bg.exists(), "the bg tee log must be reaped");
+        assert!(keep.exists(), "unrelated files must survive");
+        assert!(other_log.exists(), "non-bg logs must survive");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn temp_db(name: &str) -> std::path::PathBuf {
