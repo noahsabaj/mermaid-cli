@@ -118,6 +118,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The daemon reaps orphaned background-command logs on startup.** Ctrl+B-
+  detached commands leave a tee log (capped at 64 MiB each) in the private temp
+  dir; across many restarts with backgrounded processes these accumulated
+  forever. The daemon's startup recovery now sweeps `mermaid-bg-*.log` files
+  older than `[daemon] retention_days` (a live detached process keeps its log
+  fresh, so an old mtime means the writer is long gone).
 - **The daemon's `outcomes` and finished-`tasks` tables no longer grow without
   bound.** The startup GC now prunes terminal tasks (with their events) and the
   append-only `outcomes` reward table, which #148's durable queue would otherwise
