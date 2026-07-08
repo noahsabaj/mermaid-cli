@@ -284,8 +284,10 @@ pub async fn run_interactive_with(
 
         // Optional recording: one JSONL line per Msg, before the
         // reducer runs so the log captures even no-op inputs.
-        if let Some(r) = recorder.as_mut() {
-            let _ = r.record_msg(now, &msg);
+        if let Some(r) = recorder.as_mut()
+            && let Err(err) = r.record_msg(now, &msg)
+        {
+            tracing::warn!(error = %err, "recorder: failed to record message; --replay may be non-deterministic");
         }
 
         state.now = now;
@@ -304,8 +306,10 @@ pub async fn run_interactive_with(
     // future `--replay` can verify its fold reproduces what this live
     // session actually saw — not merely that the fold is self-consistent.
     // (Wall-clock read is fine here: we're outside the reducer.)
-    if let Some(r) = recorder.as_mut() {
-        let _ = r.record_trailer(chrono::Local::now(), &state.session);
+    if let Some(r) = recorder.as_mut()
+        && let Err(err) = r.record_trailer(chrono::Local::now(), &state.session)
+    {
+        tracing::warn!(error = %err, "recorder: failed to write replay trailer");
     }
 
     // Restore the user's terminal before async shutdown. Shutdown can

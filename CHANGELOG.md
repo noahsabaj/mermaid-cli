@@ -118,6 +118,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Failed background saves now report what went wrong instead of vanishing.**
+  Conversation saves, the compaction archive's conversation write, model /
+  reasoning / Ollama-preference persistence, the `--record` replay log, the
+  daemon's TCP hint file, and the `ask_user_question` "remember this answer"
+  store all dropped their error on failure (some logged a bare "failed" with no
+  detail). Each now logs the underlying error, and the answer-prefs write is
+  atomic so a crash mid-save can't truncate it.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
