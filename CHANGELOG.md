@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The agent can ask you structured multiple-choice questions.** A new
+  `ask_user_question` tool lets the model pause mid-run and pose 1–4 questions in
+  an interactive terminal modal — single-select, multi-select, rank, or typed
+  inputs (text/number/date/path) — each with an "Other" free-text escape,
+  optional side-by-side previews (including diffs), and a "remember this answer"
+  toggle that persists settled preferences across sessions. Answers flow back as
+  the tool result so the run continues with your decision; headless runs with no
+  TTY proceed with best judgment instead of blocking.
+
 - **Mermaid warns when you attach an image to a model that can't see it.** Some
   Ollama models have no vision capability, so a pasted image is silently ignored
   — which looks exactly like a bug. Mermaid now probes the model's advertised
