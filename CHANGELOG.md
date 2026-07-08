@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cancelling or resetting a turn no longer leaves a dead question modal on
+  screen.** An `ask_user_question` prompt parked mid-turn survived `/load`,
+  `/clear`, Ctrl+C, and quit — the tool task behind it was torn down, so the
+  modal could never be answered. All four paths now clear it (and the stale
+  running-tool indicator) alongside the pending approval they already dropped.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
