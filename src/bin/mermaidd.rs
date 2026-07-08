@@ -238,31 +238,7 @@ async fn execute_claimed_task(
     // The run has ended; `_running_guard` removes the token from the running map
     // when this function returns. Map the outcome to a terminal status + report
     // — an explicit cancel wins over whatever the interrupted run returned.
-    let (status, report, hook_status) = if token.is_cancelled() {
-        (
-            mermaid_cli::runtime::TaskStatus::Cancelled,
-            "cancelled by user".to_string(),
-            "cancelled",
-        )
-    } else {
-        match result {
-            Ok(result) if result.errors.is_empty() => (
-                mermaid_cli::runtime::TaskStatus::Completed,
-                result.response,
-                "completed",
-            ),
-            Ok(result) => (
-                mermaid_cli::runtime::TaskStatus::Failed,
-                result.errors.join("\n"),
-                "failed",
-            ),
-            Err(err) => (
-                mermaid_cli::runtime::TaskStatus::Failed,
-                err.to_string(),
-                "failed",
-            ),
-        }
-    };
+    let (status, report, hook_status) = classify_run_result(token.is_cancelled(), result);
     // F20: persist the terminal status DURABLY (see persist_terminal_status).
     persist_terminal_status(&task.id, status, &report).await;
     record_terminal_outcome(&task, status);
@@ -1108,6 +1084,40 @@ async fn persist_terminal_status(
     );
 }
 
+/// Map a finished run to its terminal `(status, report, hook_status)`. An
+/// explicit cancel wins over whatever the interrupted run returned. Otherwise a
+/// run with no errors AND a non-empty response is a success; a run with no
+/// errors but an EMPTY response produced nothing — for a headless task that is a
+/// failure, not a success. Recording the empty case as `Completed` would stamp a
+/// false `task_terminal` success/1.0 into the `outcomes` training corpus (the
+/// signal the self-improving loop learns from), so it is mapped to `Failed`.
+#[cfg(any(unix, windows))]
+fn classify_run_result<E: std::fmt::Display>(
+    cancelled: bool,
+    result: std::result::Result<mermaid_cli::app::RunResult, E>,
+) -> (mermaid_cli::runtime::TaskStatus, String, &'static str) {
+    use mermaid_cli::runtime::TaskStatus;
+    if cancelled {
+        return (
+            TaskStatus::Cancelled,
+            "cancelled by user".to_string(),
+            "cancelled",
+        );
+    }
+    match result {
+        Ok(run) if run.errors.is_empty() && !run.response.trim().is_empty() => {
+            (TaskStatus::Completed, run.response, "completed")
+        },
+        Ok(run) if run.errors.is_empty() => (
+            TaskStatus::Failed,
+            "model returned an empty response".to_string(),
+            "failed",
+        ),
+        Ok(run) => (TaskStatus::Failed, run.errors.join("\n"), "failed"),
+        Err(err) => (TaskStatus::Failed, err.to_string(), "failed"),
+    }
+}
+
 /// Record a coarse `task_terminal` outcome for a finished daemon run — the
 /// cheapest reward signal available today (did the whole trajectory succeed?).
 /// Best-effort: a lost outcome must never fail the run, so failures are logged,
@@ -1205,6 +1215,66 @@ mod tests {
             classify_args(["--bogus".to_string()]),
             CliAction::Unknown("--bogus".to_string())
         );
+    }
+
+    #[test]
+    fn classify_run_result_maps_empty_response_to_failure() {
+        use super::classify_run_result;
+        use mermaid_cli::app::RunResult;
+        use mermaid_cli::runtime::TaskStatus;
+
+        // A real response with no errors → success.
+        let (status, report, hook) = classify_run_result::<String>(
+            false,
+            Ok(RunResult {
+                response: "here is the answer".to_string(),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(status, TaskStatus::Completed);
+        assert_eq!(report, "here is the answer");
+        assert_eq!(hook, "completed");
+
+        // No errors but an EMPTY (whitespace-only) response → failure, NOT a
+        // false success/1.0 in the outcomes signal.
+        let (status, report, hook) = classify_run_result::<String>(
+            false,
+            Ok(RunResult {
+                response: "   \n".to_string(),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(status, TaskStatus::Failed);
+        assert_eq!(report, "model returned an empty response");
+        assert_eq!(hook, "failed");
+
+        // Tool/action errors → failure carrying the joined errors.
+        let (status, report, _) = classify_run_result::<String>(
+            false,
+            Ok(RunResult {
+                errors: vec!["exec: boom".to_string()],
+                ..Default::default()
+            }),
+        );
+        assert_eq!(status, TaskStatus::Failed);
+        assert_eq!(report, "exec: boom");
+
+        // A run error → failure carrying the error text.
+        let (status, report, _) =
+            classify_run_result(false, Err::<RunResult, _>("provider exploded"));
+        assert_eq!(status, TaskStatus::Failed);
+        assert_eq!(report, "provider exploded");
+
+        // An explicit cancel wins over the run result, even a good one.
+        let (status, _, hook) = classify_run_result::<String>(
+            true,
+            Ok(RunResult {
+                response: "ignored".to_string(),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(status, TaskStatus::Cancelled);
+        assert_eq!(hook, "cancelled");
     }
 
     fn temp_db(name: &str) -> std::path::PathBuf {
