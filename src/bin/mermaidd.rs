@@ -159,6 +159,29 @@ async fn scheduler_drain_loop() {
     }
 }
 
+/// RAII guard that removes a task's token from the scheduler's running map when
+/// it drops — on the normal return and, crucially, if the run panics. Without
+/// it a panicking run would leak the map entry (the permit is freed by its own
+/// drop and the row is reconciled on restart, but the map would keep growing).
+#[cfg(any(unix, windows))]
+struct RunningGuard {
+    sched: &'static Scheduler,
+    task_id: String,
+}
+
+#[cfg(any(unix, windows))]
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        // A destructor must not panic (a double-panic aborts), so recover a
+        // poisoned lock instead of `expect`.
+        self.sched
+            .running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.task_id);
+    }
+}
+
 /// Execute one claimed task to its terminal status, holding its concurrency
 /// permit for the duration and registering a cancellation token so
 /// `cancel_task` can reach it.
@@ -186,6 +209,12 @@ async fn execute_claimed_task(
         .lock()
         .expect("scheduler running map poisoned")
         .insert(task.id.clone(), token.clone());
+    // Removed on every exit path (including a panic in the run below) by the
+    // guard's Drop, so the running map can't leak a dead task's entry.
+    let _running_guard = RunningGuard {
+        sched,
+        task_id: task.id.clone(),
+    };
 
     let _ = mermaid_cli::runtime::run_plugin_hooks(
         "task_start",
@@ -212,14 +241,9 @@ async fn execute_claimed_task(
     )
     .await;
 
-    sched
-        .running
-        .lock()
-        .expect("scheduler running map poisoned")
-        .remove(&task.id);
-
-    // Map the run outcome to its terminal status + report. An explicit cancel
-    // wins over whatever the interrupted run managed to return.
+    // The run has ended; `_running_guard` removes the token from the running map
+    // when this function returns. Map the outcome to a terminal status + report
+    // — an explicit cancel wins over whatever the interrupted run returned.
     let (status, report, hook_status) = if token.is_cancelled() {
         (
             mermaid_cli::runtime::TaskStatus::Cancelled,

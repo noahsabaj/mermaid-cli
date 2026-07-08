@@ -130,7 +130,11 @@ pub async fn run_non_interactive_with(
     let drive = async {
         loop {
             let idle = matches!(state.turn, TurnState::Idle);
-            if idle && (state.ui.queued_messages.is_empty() || cancel_deadline.is_some()) {
+            if drive_should_stop(
+                idle,
+                state.ui.queued_messages.is_empty(),
+                cancel_deadline.is_some(),
+            ) {
                 break;
             }
             let msg = tokio::select! {
@@ -252,5 +256,48 @@ pub fn format_result(result: &RunResult, format: OutputFormat) -> String {
             });
             serde_json::to_string_pretty(&json).unwrap_or_default()
         },
+    }
+}
+
+/// Whether the drive loop should stop this iteration.
+///
+/// A completed run stops once the turn is `idle` and nothing is queued. A
+/// *cancelled* run (its grace deadline armed, so `cancelling` is true) stops as
+/// soon as the turn is idle even if messages are queued — a cancel must never
+/// let the queue seed a fresh turn.
+fn drive_should_stop(idle: bool, queue_empty: bool, cancelling: bool) -> bool {
+    idle && (queue_empty || cancelling)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drive_should_stop;
+
+    #[test]
+    fn drive_keeps_running_until_idle() {
+        // Never stop mid-turn, whatever the queue/cancel state.
+        assert!(!drive_should_stop(false, true, false));
+        assert!(!drive_should_stop(false, true, true));
+        assert!(!drive_should_stop(false, false, true));
+    }
+
+    #[test]
+    fn drive_stops_when_idle_and_drained() {
+        // Normal completion: idle with an empty queue.
+        assert!(drive_should_stop(true, true, false));
+    }
+
+    #[test]
+    fn drive_keeps_draining_queue_when_not_cancelling() {
+        // Idle but messages queued and not cancelling → keep going so the
+        // queued input seeds the next turn.
+        assert!(!drive_should_stop(true, false, false));
+    }
+
+    #[test]
+    fn cancel_stops_at_idle_even_with_queued_messages() {
+        // The load-bearing case: once cancelling, an idle turn stops the loop
+        // even with messages queued — the cancel must not start a new turn.
+        assert!(drive_should_stop(true, false, true));
     }
 }
