@@ -31,7 +31,9 @@ pub use compaction::{
     format_compact_count, normalize_summary, prepare_compaction, should_auto_compact,
 };
 pub use ids::{IdAllocator, ToolCallId, TurnId};
-pub use msg::{ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig};
+pub use msg::{
+    ClipboardRead, ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig,
+};
 pub use reducer::{build_chat_request, update};
 pub use runtime::{
     ManagedProcess, ManagedProcessStatus, ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState,

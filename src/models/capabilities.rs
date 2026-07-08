@@ -29,10 +29,12 @@ pub struct ModelCapabilities {
 impl ModelCapabilities {
     /// Conservative defaults for an Ollama-served model. We assume tool
     /// calling (every modern Ollama-supported model the project targets
-    /// has it), assume no vision (the safer default — vision support is
-    /// detected via response errors at runtime in `loop_coordinator.rs`),
-    /// and treat reasoning as binary on/off (matches the `think: bool`
-    /// semantics for everything except gpt-oss).
+    /// has it), assume no vision (the safer static default — real vision
+    /// support is probed from the `/api/show` `capabilities` array by
+    /// `OllamaAdapter::vision_supported` and refreshed into the runtime
+    /// snapshot via `Msg::ProviderVisionResolved`), and treat reasoning as
+    /// binary on/off (matches the `think: bool` semantics for everything
+    /// except gpt-oss).
     pub fn ollama_default() -> Self {
         Self {
             supports_tools: true,

@@ -54,8 +54,12 @@ pub enum Msg {
     /// Raw key event from crossterm, after the event source has
     /// stripped mouse/resize/paste.
     Key(Key),
-    /// A full paste (text OR image) from the terminal.
+    /// A terminal bracketed paste (always text; see [`Paste`]).
     Paste(Paste),
+    /// Async result of a `Cmd::ReadClipboard` (Ctrl+V) — image, text, empty, or
+    /// error. Kept separate from [`Msg::Paste`] so the paste-race guard can
+    /// track exactly these reads (see [`ClipboardRead`]).
+    ClipboardRead(ClipboardRead),
     /// User hit Enter on a non-empty input. The event source has
     /// already stripped the slash-command routing.
     SubmitPrompt {
@@ -124,6 +128,19 @@ pub enum Msg {
         /// Auto-converge target: largest `num_ctx` that would fit when the model
         /// spilled, or `None` if it fits / can't be helped by shrinking.
         suggested_num_ctx: Option<u32>,
+    },
+    /// Effect runner probed whether the active model can see images (Ollama
+    /// `/api/show` `capabilities`). Model-level metadata (not turn-scoped);
+    /// `model_id` is carried so a probe that lands after a `/model` switch is
+    /// dropped. `warn` (set at the trigger site — an image paste, a `/model`
+    /// switch with an image staged, or a send carrying images) gates the
+    /// one-shot no-vision-model notice; the capability snapshot refreshes
+    /// regardless. `supports_vision` is `None` when unknown (non-Ollama, or the
+    /// probe failed) → never warn.
+    ProviderVisionResolved {
+        model_id: String,
+        supports_vision: Option<bool>,
+        warn: bool,
     },
     /// The effect runner's estimate of the built-in tool-schema token cost
     /// it appends to every request during dispatch. Not turn-scoped — the
@@ -373,17 +390,36 @@ impl KeyMods {
     }
 }
 
-/// Paste payload. Images come in as raw bytes; text as UTF-8. Image bytes
-/// serialize as base64 so a recorded session replays pasted images
-/// bit-exactly without a numbers-array blowup in the JSONL line.
+/// Terminal paste payload. Always text: crossterm bracketed paste (and the
+/// Windows key-burst coalescer) only ever deliver text. Clipboard reads via
+/// Ctrl+V — which can be images — arrive separately as [`Msg::ClipboardRead`]
+/// so the paste-race guard can tell the two apart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Paste {
     Text(String),
+}
+
+/// Result of a `Cmd::ReadClipboard` (Ctrl+V), delivered asynchronously by the
+/// effect runner. Distinct from [`Paste`] (terminal bracketed paste) so the
+/// reducer can decrement `clipboard_reads_pending` on exactly these — and only
+/// these — messages, including the empty/error outcomes, which must still
+/// release a submit that was held waiting on the read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ClipboardRead {
+    /// A raster image. Bytes serialize as base64 so a recorded session replays
+    /// pasted images bit-exactly without a numbers-array blowup in the JSONL.
     Image {
         #[serde(with = "crate::utils::serde_base64")]
         bytes: Vec<u8>,
         format: String,
     },
+    /// Plain text on the clipboard.
+    Text(String),
+    /// The clipboard held nothing readable.
+    Empty,
+    /// The read failed (helper missing, timed out, etc.); the string is a
+    /// user-facing reason.
+    Error(String),
 }
 
 /// `/context` subcommands. No-arg shows the window; the rest tune the Ollama
@@ -490,6 +526,7 @@ impl Msg {
         match self {
             Msg::Key(_) => MsgKind::Key,
             Msg::Paste(_) => MsgKind::Paste,
+            Msg::ClipboardRead(_) => MsgKind::ClipboardRead,
             Msg::SubmitPrompt { .. } => MsgKind::SubmitPrompt,
             Msg::Slash(_) => MsgKind::Slash,
             Msg::CancelTurn => MsgKind::CancelTurn,
@@ -502,6 +539,7 @@ impl Msg {
             Msg::ContextUsageEstimated { .. } => MsgKind::ContextUsageEstimated,
             Msg::ProviderContextResolved { .. } => MsgKind::ProviderContextResolved,
             Msg::OllamaPlacementResolved { .. } => MsgKind::OllamaPlacementResolved,
+            Msg::ProviderVisionResolved { .. } => MsgKind::ProviderVisionResolved,
             Msg::BuiltinToolSchemaTokens(_) => MsgKind::BuiltinToolSchemaTokens,
             Msg::CompactionFinished { .. } => MsgKind::CompactionFinished,
             Msg::CompactionFailed { .. } => MsgKind::CompactionFailed,
@@ -544,6 +582,7 @@ impl Msg {
 pub enum MsgKind {
     Key,
     Paste,
+    ClipboardRead,
     SubmitPrompt,
     Slash,
     CancelTurn,
@@ -556,6 +595,7 @@ pub enum MsgKind {
     ContextUsageEstimated,
     ProviderContextResolved,
     OllamaPlacementResolved,
+    ProviderVisionResolved,
     BuiltinToolSchemaTokens,
     CompactionFinished,
     CompactionFailed,

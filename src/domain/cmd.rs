@@ -196,6 +196,12 @@ pub enum Cmd {
     // ── Ollama helpers ──────────────────────────────────────────────
     /// `ollama pull <model>` with progress → `Msg::ModelPullFinished`.
     PullOllamaModel { model: String },
+    /// Probe whether `model_id` advertises the `vision` capability (Ollama
+    /// `/api/show`) → `Msg::ProviderVisionResolved`. `warn` rides through so the
+    /// reducer nags only when an image is actually in play (a paste, or a
+    /// `/model` switch with an image already staged); the probe always refreshes
+    /// the capability snapshot regardless.
+    ProbeVision { model_id: String, warn: bool },
 
     // ── UI side-effects (cross-process) ─────────────────────────────
     /// `xdg-open` / `open` / `start` on a file path. Used by the
@@ -215,9 +221,9 @@ pub enum Cmd {
     /// Read the system clipboard on a blocking task. The per-platform
     /// dispatch (xclip / wl-paste / pngpaste / PowerShell) can block
     /// for hundreds of ms on macOS via osascript, so it never runs on
-    /// the reducer thread. Emits `Msg::Paste(Paste::Image|Text)` on
-    /// success; `Msg::TransientStatus` when the clipboard is empty or
-    /// the read fails.
+    /// the reducer thread. Always emits `Msg::ClipboardRead(..)` —
+    /// `Image`/`Text` on success, `Empty`/`Error` otherwise — so the
+    /// paste-race guard sees every read resolve.
     ReadClipboard,
 
     /// Write text to the system clipboard on a blocking task (mirrors
@@ -337,6 +343,7 @@ impl Cmd {
             Cmd::InitMcpServers(_) => "init_mcp_servers",
             Cmd::StopMcpServer { .. } => "stop_mcp_server",
             Cmd::PullOllamaModel { .. } => "pull_ollama_model",
+            Cmd::ProbeVision { .. } => "probe_vision",
             Cmd::OpenInSystem(_) => "open_in_system",
             Cmd::WriteImageToTemp { .. } => "write_image_to_temp",
             Cmd::ReadClipboard => "read_clipboard",
@@ -462,6 +469,7 @@ impl Cmd {
             Cmd::InitMcpServers(m) => format!("init_mcp_servers(n={})", m.len()),
             Cmd::StopMcpServer { name } => format!("stop_mcp_server({})", name),
             Cmd::PullOllamaModel { model } => format!("pull_ollama_model({})", model),
+            Cmd::ProbeVision { model_id, warn } => format!("probe_vision({model_id}, warn={warn})"),
             Cmd::OpenInSystem(p) => format!("open_in_system({})", p.display()),
             Cmd::WriteImageToTemp {
                 path,

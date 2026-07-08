@@ -315,7 +315,7 @@ impl Iterator for Replay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{MsgKind, Paste, TurnId};
+    use crate::domain::{ClipboardRead, MsgKind, Paste, TurnId};
 
     fn tmpfile(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("mermaid_recorder_tests");
@@ -489,7 +489,7 @@ mod tests {
             r.record_header(&test_header(fixed_ts())).expect("header");
             r.record_msg(
                 fixed_ts(),
-                &Msg::Paste(Paste::Image {
+                &Msg::ClipboardRead(ClipboardRead::Image {
                     bytes: bytes.clone(),
                     format: "png".to_string(),
                 }),
@@ -501,7 +501,7 @@ mod tests {
             panic!("expected entry");
         };
         match entry.to_msg().unwrap() {
-            Msg::Paste(Paste::Image {
+            Msg::ClipboardRead(ClipboardRead::Image {
                 bytes: back,
                 format,
             }) => {
@@ -635,6 +635,7 @@ mod tests {
             match kind {
                 MsgKind::Key
                 | MsgKind::Paste
+                | MsgKind::ClipboardRead
                 | MsgKind::SubmitPrompt
                 | MsgKind::Slash
                 | MsgKind::CancelTurn
@@ -647,6 +648,7 @@ mod tests {
                 | MsgKind::ContextUsageEstimated
                 | MsgKind::ProviderContextResolved
                 | MsgKind::OllamaPlacementResolved
+                | MsgKind::ProviderVisionResolved
                 | MsgKind::BuiltinToolSchemaTokens
                 | MsgKind::CompactionFinished
                 | MsgKind::CompactionFailed
@@ -685,7 +687,7 @@ mod tests {
                 modifiers: KeyMods::NONE,
             }),
             Msg::Paste(Paste::Text("pasted".to_string())),
-            Msg::Paste(Paste::Image {
+            Msg::ClipboardRead(ClipboardRead::Image {
                 bytes: vec![9, 8, 7],
                 format: "png".to_string(),
             }),
@@ -747,6 +749,11 @@ mod tests {
                 size_vram_bytes: 1,
                 total_bytes: 2,
                 suggested_num_ctx: Some(8192),
+            },
+            Msg::ProviderVisionResolved {
+                model_id: "m".to_string(),
+                supports_vision: Some(false),
+                warn: true,
             },
             Msg::BuiltinToolSchemaTokens(1234),
             Msg::CompactionFailed {
@@ -896,6 +903,7 @@ mod tests {
         let missing: Vec<String> = [
             MsgKind::Key,
             MsgKind::Paste,
+            MsgKind::ClipboardRead,
             MsgKind::SubmitPrompt,
             MsgKind::Slash,
             MsgKind::CancelTurn,
@@ -908,6 +916,7 @@ mod tests {
             MsgKind::ContextUsageEstimated,
             MsgKind::ProviderContextResolved,
             MsgKind::OllamaPlacementResolved,
+            MsgKind::ProviderVisionResolved,
             MsgKind::BuiltinToolSchemaTokens,
             MsgKind::CompactionFinished,
             MsgKind::CompactionFailed,
