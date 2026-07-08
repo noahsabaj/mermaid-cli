@@ -361,16 +361,20 @@ impl ConversationManager {
         let filename = format!("{}.json", conversation.id);
         let path = self.conversations_dir.join(filename);
 
-        // Strip computer-use screenshot bytes before they hit disk (#99). Only
-        // clones the conversation when there is actually something to scrub.
-        let json = match strip_persisted_screenshots(&conversation.messages) {
+        // Sanitize before persisting: strip computer-use screenshot bytes (#99)
+        // AND scrub credential-shaped strings, so a persisted `read_file` of
+        // `.env` or an API error echoing a key can't sit in cleartext (mirrors
+        // the --record redaction in recorder.rs). Only clones when scrubbing.
+        let mut value = match strip_persisted_screenshots(&conversation.messages) {
             Some(sanitized) => {
-                let mut redacted = conversation.clone();
-                redacted.messages = sanitized;
-                serde_json::to_string_pretty(&redacted)?
+                let mut stripped = conversation.clone();
+                stripped.messages = sanitized;
+                serde_json::to_value(&stripped)?
             },
-            None => serde_json::to_string_pretty(conversation)?,
+            None => serde_json::to_value(conversation)?,
         };
+        crate::utils::redact_json(&mut value);
+        let json = serde_json::to_string_pretty(&value)?;
 
         // Optimistic-concurrency guard (F73). Without this, two processes (e.g. a
         // daemon `run` and an interactive session) saving the same id do blind
@@ -389,8 +393,8 @@ impl ConversationManager {
             && current != base
         {
             let sibling = self.conflict_sibling_path(&conversation.id);
-            // Keep the existing atomic-write for the preserved copy too.
-            crate::runtime::write_atomic(&sibling, json.as_bytes())?;
+            // Keep the existing atomic-write for the preserved copy too (owner-only).
+            crate::runtime::write_atomic_private(&sibling, json.as_bytes())?;
             tracing::warn!(
                 id = %conversation.id,
                 main = %path.display(),
@@ -402,7 +406,8 @@ impl ConversationManager {
 
         // Atomic write: a crash mid-save must not empty/corrupt the session
         // file (this is the hot path, rewritten after nearly every message).
-        crate::runtime::write_atomic(&path, json.as_bytes())?;
+        // Owner-only (0o600): the transcript can carry secrets in cleartext.
+        crate::runtime::write_atomic_private(&path, json.as_bytes())?;
         // Refresh our baseline to the file we just wrote so the NEXT save by this
         // process compares against our own write, not the pre-save state.
         self.record_stamp(&conversation.id, &path);
@@ -428,19 +433,21 @@ impl ConversationManager {
         fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", archive.id));
         // The archive is the only durable copy of compacted-out messages; scrub
-        // screenshot bytes here too so they don't survive in compaction archives
-        // (#99). Clones only when a screenshot is actually present.
-        let json = match strip_persisted_screenshots(&archive.messages) {
+        // screenshot bytes AND credential-shaped strings here too so neither
+        // survives in compaction archives (#99). Clones only when scrubbing.
+        let mut value = match strip_persisted_screenshots(&archive.messages) {
             Some(sanitized) => {
-                let mut redacted = archive.clone();
-                redacted.messages = sanitized;
-                serde_json::to_string_pretty(&redacted)?
+                let mut stripped = archive.clone();
+                stripped.messages = sanitized;
+                serde_json::to_value(&stripped)?
             },
-            None => serde_json::to_string_pretty(archive)?,
+            None => serde_json::to_value(archive)?,
         };
+        crate::utils::redact_json(&mut value);
+        let json = serde_json::to_string_pretty(&value)?;
         // Atomic write: the archive is the ONLY durable copy of messages
-        // dropped by a compaction — a partial write would lose them.
-        crate::runtime::write_atomic(&path, json.as_bytes())?;
+        // dropped by a compaction — a partial write would lose them. Owner-only.
+        crate::runtime::write_atomic_private(&path, json.as_bytes())?;
         Ok(path)
     }
 
@@ -713,6 +720,47 @@ mod tests {
             Some(["SHOTBYTES".to_string()].as_slice())
         );
         let _ = fs::remove_file(dir.join(format!("{}.json", conv.id)));
+    }
+
+    #[test]
+    fn saved_conversation_redacts_secrets_and_is_owner_only() {
+        let dir = std::env::temp_dir().join(format!("mermaid_conv_redact_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+        let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into(), Local::now());
+        // A read_file of .env lands in a tool-result message in cleartext today.
+        conv.messages = vec![
+            ChatMessage::user("read .env"),
+            ChatMessage::assistant("OPENAI_API_KEY=sk-abcdefghijklmnop1234"),
+        ];
+        let store = ConversationManager {
+            conversations_dir: dir.clone(),
+            compactions_dir: dir.clone(),
+            seen: Arc::new(Mutex::new(HashMap::new())),
+        };
+        store.save_conversation(&conv).expect("save");
+        let path = dir.join(format!("{}.json", conv.id));
+        let raw = fs::read_to_string(&path).expect("read");
+        assert!(
+            !raw.contains("sk-abcdefghijklmnop1234"),
+            "secret leaked to the conversation store: {raw}"
+        );
+        assert!(
+            raw.contains("[REDACTED]"),
+            "expected redaction marker: {raw}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "conversation file must be owner-only, got {mode:o}"
+            );
+        }
+        // Live conversation untouched — the model still sees the real content in-session.
+        assert!(conv.messages[1].content.contains("sk-abcdefghijklmnop1234"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

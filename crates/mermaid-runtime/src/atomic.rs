@@ -27,6 +27,21 @@ const STALE_TEMP_SECS: u64 = 3600;
 /// `sync_all` → rename over the destination. The rename is atomic on the same
 /// filesystem (and replaces an existing target on both Unix and Windows).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_inner(path, bytes, None)
+}
+
+/// Like [`write_atomic`], but creates the destination owner-only (`0o600` on
+/// Unix) for state that can incidentally carry secrets — session transcripts
+/// and compaction archives, which may hold a persisted `read_file` of `.env` or
+/// an error echoing a key. The temp sibling is chmodded while still empty,
+/// before any bytes are written, so secret-bearing content never lands in a
+/// default-umask (often `0o644`) file; the atomic rename preserves the mode.
+/// The mode is a no-op on non-Unix (rename semantics are unchanged).
+pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_inner(path, bytes, Some(0o600))
+}
+
+fn write_atomic_inner(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 
@@ -45,6 +60,15 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
     {
         let mut f = File::create(&tmp)?;
+        // Tighten the (empty) temp before writing any content, so secret-bearing
+        // bytes never land in a default-umask file. The rename preserves the mode.
+        #[cfg(unix)]
+        if let Some(m) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(fs::Permissions::from_mode(m))?;
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
@@ -167,6 +191,28 @@ mod tests {
         sweep_stale_temps(&dir, "conv.json", Duration::from_secs(STALE_TEMP_SECS));
 
         assert!(fresh.exists(), "a fresh/in-flight temp must not be swept");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_write_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("mermaid_atomic_priv_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+        let target = dir.join("secret.json");
+        write_atomic_private(&target, b"OPENAI_API_KEY=sk-abcdefghijklmnop1234").unwrap();
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "private atomic write must be 0o600, got {mode:o}"
+        );
+        // Content still round-trips.
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "OPENAI_API_KEY=sk-abcdefghijklmnop1234"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

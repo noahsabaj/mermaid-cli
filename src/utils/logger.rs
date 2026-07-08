@@ -1,6 +1,9 @@
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Rotate the log file when it reaches this size. Bounded: at most two
@@ -52,10 +55,26 @@ pub fn init_logger(verbose: bool) {
         // Rotate at startup if the previous session left a large file.
         rotate_if_large(&log_path);
 
-        // Open log file for appending
-        if let Ok(file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+        // Open the log for appending, owner-only (0o600): it can incidentally
+        // capture secrets the model surfaced (a `read_file` of `.env`, an API
+        // error echoing a key), so a shared temp/cwd must not expose it. Mirrors
+        // recorder.rs; RedactingWriter additionally scrubs credential shapes.
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        if let Ok(file) = opts.open(&log_path) {
+            // `mode` only applies on create; tighten an existing log too.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
+            }
             let fmt_layer = tracing_subscriber::fmt::layer()
-                .with_writer(file)
+                .with_writer(RedactingWriter::new(file))
                 .with_target(false)
                 .with_thread_ids(false)
                 .with_thread_names(false)
@@ -72,6 +91,69 @@ pub fn init_logger(verbose: bool) {
 
     // Fallback: no logging if file creation fails (don't corrupt TUI)
     tracing_subscriber::registry().with(filter).init();
+}
+
+/// A `MakeWriter` that scrubs credential-shaped strings out of every formatted
+/// log event before it reaches disk. The log can incidentally capture secrets
+/// the model surfaced (a `read_file` of `.env`, an API error echoing a key);
+/// [`redact_secrets`](crate::utils::redact_secrets) removes the common shapes at
+/// this single sink so no `tracing::warn!`/`error!` payload persists a key.
+#[derive(Clone)]
+struct RedactingWriter {
+    file: Arc<Mutex<File>>,
+}
+
+impl RedactingWriter {
+    /// Wrap an open log file; the handle is shared across concurrently-logging threads.
+    fn new(file: File) -> Self {
+        Self {
+            file: Arc::new(Mutex::new(file)),
+        }
+    }
+}
+
+impl<'a> MakeWriter<'a> for RedactingWriter {
+    type Writer = RedactingEvent;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactingEvent {
+            buf: Vec::new(),
+            file: Arc::clone(&self.file),
+        }
+    }
+}
+
+/// One event's write buffer. The fmt layer formats a whole event and writes it
+/// here; we accumulate the bytes and redact the *complete* text on drop (so a
+/// secret split across writes can't slip through unredacted), then append the
+/// scrubbed line to the shared file.
+struct RedactingEvent {
+    buf: Vec<u8>,
+    file: Arc<Mutex<File>>,
+}
+
+impl Write for RedactingEvent {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for RedactingEvent {
+    fn drop(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&self.buf);
+        let redacted = crate::utils::redact_secrets(&text);
+        if let Ok(mut file) = self.file.lock() {
+            let _ = file.write_all(redacted.as_bytes());
+        }
+    }
 }
 
 /// Log an info message with category prefix (backward compatible)
@@ -161,5 +243,28 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&old);
+    }
+
+    #[test]
+    fn log_writer_redacts_secrets_per_event() {
+        let tmp =
+            std::env::temp_dir().join(format!("mermaid_log_redact_{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let file = std::fs::File::create(&tmp).unwrap();
+        let mw = RedactingWriter::new(file);
+        {
+            let mut w = mw.make_writer();
+            writeln!(w, "startup OPENAI_API_KEY=sk-abcdefghijklmnop1234 ready").unwrap();
+        } // drop flushes + redacts the complete event
+        let contents = std::fs::read_to_string(&tmp).unwrap();
+        assert!(
+            contents.contains("[REDACTED]"),
+            "secret must be redacted in the log: {contents}"
+        );
+        assert!(
+            !contents.contains("sk-abcdefghijklmnop1234"),
+            "raw key must not reach disk: {contents}"
+        );
+        let _ = std::fs::remove_file(&tmp);
     }
 }

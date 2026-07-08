@@ -27,7 +27,7 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-pub use atomic::write_atomic;
+pub use atomic::{write_atomic, write_atomic_private};
 
 pub use approval::{ApprovalReplayResult, approve_and_replay, deny_approval};
 pub use checkpoint::{
