@@ -376,7 +376,25 @@ impl NativeFetchClient {
         let client = Client::builder()
             .user_agent(NATIVE_FETCH_UA)
             .timeout(Duration::from_secs(20))
-            .redirect(reqwest::redirect::Policy::limited(5))
+            // Re-validate every redirect hop. reqwest follows 3xx internally, so a
+            // public URL that 302s to an internal host (127.0.0.1, localhost,
+            // 169.254.169.254, RFC-1918) would sail past the one-shot pre-send
+            // `guard_resolved_ips`. Re-check each hop's target host lexically.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= MAX_FETCH_REDIRECTS {
+                    return attempt.error("too many redirects");
+                }
+                // Own the host string before moving `attempt` into follow()/error().
+                let host = attempt.url().host_str().map(str::to_owned);
+                if redirect_allowed(host.as_deref()) {
+                    attempt.follow()
+                } else {
+                    attempt.error(format!(
+                        "refusing redirect to internal host '{}'",
+                        host.as_deref().unwrap_or("<none>")
+                    ))
+                }
+            }))
             .build()
             .unwrap_or_else(|_| Client::new());
         Self { client }
@@ -439,6 +457,21 @@ impl FetchProvider for NativeFetchClient {
                 .map_err(|e| anyhow!("content extraction failed: {e}"))?;
 
         Ok(WebFetchResult { title, content })
+    }
+}
+
+/// Maximum redirect hops the native fetch client follows (mirrors the previous
+/// `Policy::limited(5)`); the fetch errors after this many.
+const MAX_FETCH_REDIRECTS: usize = 5;
+
+/// Whether a redirect to `target_host` may be followed: refuse when the host is
+/// missing or classifies as internal (loopback / link-local / private / CGNAT /
+/// unspecified). Factored out so the per-hop SSRF re-check is unit-testable
+/// without a live redirecting server.
+fn redirect_allowed(target_host: Option<&str>) -> bool {
+    match target_host {
+        Some(host) => !classify_host(host).is_internal(),
+        None => false,
     }
 }
 
@@ -595,6 +628,33 @@ mod tests {
     fn test_ollama_web_client_creation() {
         let client = OllamaWebClient::new("test-key".to_string());
         assert_eq!(client.api_key, "test-key");
+    }
+
+    #[test]
+    fn redirect_to_internal_host_is_refused() {
+        // The classic SSRF-via-redirect aim: a public URL 302-ing to an internal
+        // literal. Every internal target (and a hostless one) must be refused.
+        for internal in [
+            "127.0.0.1",
+            "localhost",
+            "169.254.169.254",
+            "10.0.0.5",
+            "192.168.1.1",
+            "[::1]",
+        ] {
+            assert!(
+                !redirect_allowed(Some(internal)),
+                "{internal} redirect must be refused"
+            );
+        }
+        assert!(
+            !redirect_allowed(None),
+            "a hostless redirect must be refused"
+        );
+        assert!(
+            redirect_allowed(Some("example.com")),
+            "a public host redirect must be allowed"
+        );
     }
 
     #[test]
