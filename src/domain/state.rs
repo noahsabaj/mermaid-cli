@@ -828,6 +828,17 @@ pub struct UiState {
     /// inline `[Image #N]` token in `input_buffer`; the token is the source of
     /// truth at submit time (see `image_token` + `handle_submit_prompt`).
     pub attachments: Vec<Attachment>,
+    /// In-flight `Cmd::ReadClipboard` reads (Ctrl+V) whose result
+    /// (`Msg::ClipboardRead`) hasn't arrived yet. A counter, not a bool, so a
+    /// burst of rapid Ctrl+V presses all drain before a held submit fires.
+    /// Incremented where `Cmd::ReadClipboard` is pushed; decremented in
+    /// `handle_clipboard_read`.
+    pub clipboard_reads_pending: u32,
+    /// Set when Enter is pressed while `clipboard_reads_pending > 0`: the submit
+    /// is held until the read drains so a fast paste-then-Enter still includes
+    /// the pasted image instead of racing past it. `handle_clipboard_read`
+    /// re-runs the submit once the last pending read lands.
+    pub submit_after_clipboard: bool,
     /// When `Some(i)`, the palette has a highlighted row. `None` =
     /// closed / not showing.
     pub palette_cursor: Option<usize>,

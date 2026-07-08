@@ -76,6 +76,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Auto-start remains on the paths that actually use Ollama: chat and the
   startup model check.
 
+### Fixed
+
+- **Pasting an image and immediately pressing Enter no longer drops the image.**
+  Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
+  submit the message before the image arrived — sending it with no image (and
+  leaking a stray `[Image #N]` into the next prompt). Enter now waits for any
+  in-flight clipboard read to land, then submits with the image included. The
+  read result rides a dedicated internal message so an empty or failed read
+  still releases the held submit instead of wedging it, and a normal terminal
+  paste is never mistaken for a Ctrl+V read.
+
 ## [0.16.0] - 2026-07-04
 
 ### Added
