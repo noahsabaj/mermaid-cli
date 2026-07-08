@@ -118,6 +118,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The streaming relay task can no longer leak on cancel.** Each provider's
+  stream bridge spawned a relay task whose handle was dropped (not aborted) when
+  a turn was cancelled; parked on a full downstream sink, it could outlive the
+  turn. It now rides an abort-on-drop guard (promoted to a shared util), so a
+  cancelled turn aborts it — the same structural task ownership the effect runner
+  already used internally.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and

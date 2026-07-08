@@ -32,10 +32,14 @@ pub fn ordered_relay(
     bounded_sink: mpsc::Sender<StreamEvent>,
 ) -> (
     mpsc::UnboundedSender<StreamEvent>,
-    tokio::task::JoinHandle<()>,
+    crate::utils::AbortOnDrop,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
-    let handle = tokio::spawn(async move {
+    // Wrap the relay in an AbortOnDrop guard: if the parent `chat` future is
+    // dropped (turn cancelled) before it `take()`s the handle to drain, the
+    // relay is aborted rather than leaked — otherwise, parked on a full bounded
+    // sink, it could outlive the turn.
+    let handle = crate::utils::spawn_guarded(async move {
         while let Some(event) = rx.recv().await {
             if bounded_sink.send(event).await.is_err() {
                 // Downstream closed — the reducer cancelled or the

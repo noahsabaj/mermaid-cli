@@ -76,7 +76,7 @@ impl ModelProvider for AnthropicProvider {
             stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
-        let _ = relay_handle.await;
+        crate::utils::join_logged(relay_handle.take(), "stream_relay").await;
 
         Ok(FinalResponse {
             usage,
