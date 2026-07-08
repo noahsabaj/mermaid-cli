@@ -275,6 +275,22 @@ pub const REGISTRY: &[ProviderProfile] = &[
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
     },
+    ProviderProfile {
+        name: "nvidia",
+        base_url: "https://integrate.api.nvidia.com/v1",
+        api_key_env: "NVIDIA_API_KEY",
+        extra_headers: &[],
+        // NVIDIA NIM is a plain OpenAI-compatible endpoint. Its own snippets
+        // send no reasoning param, so `None` keeps the request to exactly what
+        // NIM documents — no risk of a rejected `reasoning_effort`. Reasoning
+        // models like GLM-5.2 still show their trace via the extraction below.
+        reasoning_strategy: ReasoningStrategy::None,
+        // GLM-5.2 (and Nemotron) stream thinking in `delta.reasoning_content`,
+        // the same shape as DeepInfra.
+        reasoning_extraction: ReasoningExtraction::DeltaContentField("reasoning_content"),
+        max_tokens_param: MaxTokensParam::MaxTokens,
+        disable_parallel_tool_calls_for: &[],
+    },
 ];
 
 /// Look up a built-in provider by name. Case-insensitive.
@@ -298,6 +314,19 @@ mod tests {
     }
 
     #[test]
+    fn lookup_nvidia_provider() {
+        let p = lookup_provider("nvidia").expect("nvidia is in the registry");
+        assert_eq!(p.name, "nvidia");
+        assert_eq!(p.base_url, "https://integrate.api.nvidia.com/v1");
+        assert_eq!(p.api_key_env, "NVIDIA_API_KEY");
+        // GLM-5.2 streams its reasoning trace in `delta.reasoning_content`.
+        assert_eq!(
+            p.reasoning_extraction,
+            ReasoningExtraction::DeltaContentField("reasoning_content")
+        );
+    }
+
+    #[test]
     fn lookup_is_case_insensitive() {
         assert!(lookup_provider("OpenAI").is_some());
         assert!(lookup_provider("OPENROUTER").is_some());
@@ -309,8 +338,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_six_providers() {
-        assert_eq!(REGISTRY.len(), 6);
+    fn registry_has_seven_providers() {
+        assert_eq!(REGISTRY.len(), 7);
     }
 
     #[test]

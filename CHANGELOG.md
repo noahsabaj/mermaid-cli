@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tool result so the run continues with your decision; headless runs with no
   TTY proceed with best judgment instead of blocking.
 
+- **NVIDIA NIM is now a built-in provider.** Reach NVIDIA-hosted models through
+  their OpenAI-compatible endpoint with `mermaid --model nvidia/<model>` and an
+  `NVIDIA_API_KEY` — for example `nvidia/z-ai/glm-5.2` (GLM-5.2). Reasoning-model
+  traces (streamed as `delta.reasoning_content`) are surfaced, and tool calling
+  works as with any built-in provider.
+
 - **Mermaid warns when you attach an image to a model that can't see it.** Some
   Ollama models have no vision capability, so a pasted image is silently ignored
   — which looks exactly like a bug. Mermaid now probes the model's advertised
