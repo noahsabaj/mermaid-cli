@@ -31,6 +31,7 @@ use crate::runtime::SafetyMode;
 
 use super::approval::ApprovalBroker;
 use super::auto_classifier::AutoClassifier;
+use super::questions::QuestionBroker;
 
 /// What a `ModelProvider::chat()` receives.
 #[derive(Debug)]
@@ -122,6 +123,10 @@ pub struct ExecContext {
     /// gate prompt the user and park until they answer; `None` (headless) falls
     /// back to the out-of-band DB-approval flow.
     pub approval: Option<ApprovalBroker>,
+    /// Inline-question back-channel for `ask_user_question` (interactive runs
+    /// only). `Some` lets the tool park until the user answers; `None`
+    /// (headless) makes the tool proceed with best judgment instead of blocking.
+    pub questions: Option<QuestionBroker>,
 }
 
 impl std::fmt::Debug for ExecContext {
@@ -143,6 +148,10 @@ impl std::fmt::Debug for ExecContext {
                 "approval",
                 &self.approval.as_ref().map(|_| "<ApprovalBroker>"),
             )
+            .field(
+                "questions",
+                &self.questions.as_ref().map(|_| "<QuestionBroker>"),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -162,6 +171,7 @@ impl ExecContext {
         intent: Option<String>,
         classifier: Option<Arc<dyn AutoClassifier>>,
         approval: Option<ApprovalBroker>,
+        questions: Option<QuestionBroker>,
     ) -> Self {
         Self {
             token,
@@ -180,6 +190,7 @@ impl ExecContext {
             intent,
             classifier,
             approval,
+            questions,
         }
     }
 }
@@ -275,6 +286,7 @@ pub fn test_exec_context(
             String::new(),
             None,
             crate::runtime::SafetyMode::FullAccess,
+            None,
             None,
             None,
             None,

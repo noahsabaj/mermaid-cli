@@ -88,6 +88,15 @@ pub trait ModelProvider: Send + Sync {
         None
     }
 
+    /// Best-effort: whether the active model can actually see images. `None`
+    /// means "unknown / not applicable" — the default for providers that don't
+    /// probe, and for cloud providers whose vision support is already known
+    /// good; `Some(false)` is what drives the no-vision-model warning. Awaited
+    /// only on the effect runtime, so a probe never blocks the UI.
+    async fn supports_vision(&self) -> Option<bool> {
+        None
+    }
+
     /// Stream a chat turn. Typed events flow through
     /// `ctx.sink`; the returned `FinalResponse` carries token usage
     /// and the Anthropic thinking-signature (opaque blob required to

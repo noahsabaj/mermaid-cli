@@ -463,6 +463,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -481,6 +482,7 @@ mod tests {
             String::new(),
             None,
             SafetyMode::Ask,
+            None,
             None,
             None,
             None,
@@ -577,6 +579,7 @@ mod tests {
             SafetyMode::Auto,
             Some("fetch the changelog".to_string()),
             classifier,
+            None,
             None,
         )
     }
@@ -765,6 +768,7 @@ mod tests {
             None,
             None,
             Some(broker),
+            None,
         )
     }
 
