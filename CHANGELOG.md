@@ -127,6 +127,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is stamped with its task's context so it stays usable after that task is
   pruned. New `[daemon] retention_days` (default 30) and
   `[daemon] outcomes_retention_days` (default 180) tune the two windows.
+- **A daemon task that produces an empty response is recorded as a failure, not
+  a success.** A run that returned no error but also no text was mapped to
+  `Completed` and stamped a `task_terminal` success/1.0 into the `outcomes`
+  training corpus — a false positive the self-improving loop would learn from. It
+  is now a `Failed` task with a clear report, so the reward signal reflects that
+  nothing was produced.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
