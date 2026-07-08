@@ -127,9 +127,9 @@ impl ToolExecutor for ReadFileTool {
         // at MAX_RESPONSE_CHARS by read_one, but a batch of files can still sum to
         // ~12.8 MB in one tool result — past any sane context budget. Only the
         // multi-file accumulation needs this (single-file output is already
-        // bounded); truncate_content appends a clear "...[truncated]" marker.
+        // bounded); truncate_middle keeps the head AND tail with an elision marker.
         if paths.len() > 1 && combined.len() > MAX_READ_AGGREGATE_CHARS {
-            combined = crate::utils::truncate_content(&combined, MAX_READ_AGGREGATE_CHARS);
+            combined = crate::utils::truncate_middle(&combined, MAX_READ_AGGREGATE_CHARS);
             any_truncated = true;
         }
 
@@ -1088,8 +1088,8 @@ mod tests {
             output.len()
         );
         assert!(
-            output.contains("...[truncated]"),
-            "expected aggregate truncation marker"
+            output.contains("elided"),
+            "expected aggregate head+tail elision marker"
         );
         match &outcome.metadata.detail {
             ToolMetadata::ReadFile { truncated, .. } => {

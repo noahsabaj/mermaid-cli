@@ -1,4 +1,4 @@
-use crate::utils::{RetryConfig, classify_host, retry_async_if, truncate_content};
+use crate::utils::{RetryConfig, classify_host, retry_async_if, truncate_middle};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -553,7 +553,7 @@ fn map_search_results(
 ) -> Vec<SearchResult> {
     hits.take(count)
         .map(|(title, url, content)| {
-            let full_content = truncate_content(&content, crate::constants::WEB_CONTENT_MAX_CHARS);
+            let full_content = truncate_middle(&content, crate::constants::WEB_CONTENT_MAX_CHARS);
             let snippet = content.chars().take(200).collect();
             SearchResult {
                 title,

@@ -1,26 +1,42 @@
 use crate::constants::WEB_CONTENT_MAX_CHARS;
 
-/// Truncate content to a maximum character count (char-boundary safe)
-pub fn truncate_content(content: &str, max_chars: usize) -> String {
-    // Fast path: if byte length fits, char count definitely fits too
-    // (every char is at least 1 byte, so len <= max_chars implies char_count <= max_chars)
+/// Truncate `content` to about `max_chars` characters, keeping the HEAD and the
+/// TAIL with an elision marker in the middle (char-boundary safe). Command/tool
+/// output and web pages put the most important content — compiler errors, exit
+/// summaries, page footers — at the END, so head-only truncation discarded
+/// exactly what mattered. Content that already fits is returned unchanged.
+pub fn truncate_middle(content: &str, max_chars: usize) -> String {
+    // Fast path: fits by bytes ⇒ fits by chars (every char is ≥ 1 byte).
     if content.len() <= max_chars {
         return content.to_string();
     }
-
-    // Slow path: multi-byte content might have fewer chars than bytes
-    // Find the byte position of the max_chars-th character
-    if let Some((byte_end, _)) = content.char_indices().nth(max_chars) {
-        format!("{}...[truncated]", &content[..byte_end])
-    } else {
-        // Fewer than max_chars characters total — no truncation needed
-        content.to_string()
+    let total_chars = content.chars().count();
+    if total_chars <= max_chars {
+        return content.to_string();
     }
+    let head_chars = max_chars / 2;
+    let tail_chars = max_chars - head_chars;
+    let elided = total_chars - head_chars - tail_chars;
+    let head_end = content
+        .char_indices()
+        .nth(head_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(content.len());
+    let tail_start = content
+        .char_indices()
+        .nth(total_chars - tail_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(content.len());
+    format!(
+        "{}\n…[{elided} chars elided]…\n{}",
+        &content[..head_end],
+        &content[tail_start..]
+    )
 }
 
-/// Truncate web content using the default limit
+/// Truncate web content using the default limit, keeping head and tail.
 pub fn truncate_web_content(content: &str) -> String {
-    truncate_content(content, WEB_CONTENT_MAX_CHARS)
+    truncate_middle(content, WEB_CONTENT_MAX_CHARS)
 }
 
 /// Format a duration in seconds as a human-readable string.
@@ -66,13 +82,25 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_content() {
+    fn truncate_middle_keeps_head_and_tail() {
         let short = "hello";
-        assert_eq!(truncate_content(short, 100), "hello");
+        assert_eq!(truncate_middle(short, 100), "hello");
 
-        let long = "a".repeat(200);
-        let truncated = truncate_content(&long, 50);
-        assert!(truncated.ends_with("...[truncated]"));
-        assert!(truncated.len() < 200);
+        // 200 'H's + a distinctive tail; truncating to 50 must keep BOTH ends.
+        let long = format!("{}TAIL_ERROR", "H".repeat(200));
+        let truncated = truncate_middle(&long, 50);
+        assert!(
+            truncated.starts_with("HHHH"),
+            "head must survive: {truncated}"
+        );
+        assert!(
+            truncated.ends_with("TAIL_ERROR"),
+            "tail must survive: {truncated}"
+        );
+        assert!(
+            truncated.contains("elided"),
+            "must mark elision: {truncated}"
+        );
+        assert!(truncated.chars().count() < long.chars().count());
     }
 }

@@ -38,5 +38,5 @@ pub use redact::{redact_json, redact_secrets};
 pub(crate) use retry::jitter;
 pub use retry::{RetryConfig, retry_async, retry_async_if};
 pub use sse::drain_sse_events;
-pub use text::{format_duration, truncate_content, truncate_web_content};
+pub use text::{format_duration, truncate_middle, truncate_web_content};
 pub use timestamp::format_relative_timestamp;
