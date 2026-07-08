@@ -12,6 +12,7 @@
 
 pub mod approval;
 pub mod auto_classifier;
+pub mod questions;
 pub mod capabilities;
 pub mod ctx;
 pub mod factory;
@@ -19,6 +20,7 @@ pub mod model;
 pub mod tool;
 
 pub use approval::{ApprovalBroker, ApprovalDecision, allowlist_key};
+pub use questions::QuestionBroker;
 pub use auto_classifier::{AutoClassifier, ModelAutoClassifier, VetRequest, VetVerdict};
 pub use capabilities::Capabilities;
 pub use ctx::{

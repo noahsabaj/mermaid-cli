@@ -656,6 +656,7 @@ mod tests {
                 | MsgKind::ToolProgress
                 | MsgKind::ToolFinished
                 | MsgKind::ApprovalRequested
+                | MsgKind::QuestionAsked
                 | MsgKind::TurnCancelled
                 | MsgKind::Mcp
                 | MsgKind::InstructionsChanged

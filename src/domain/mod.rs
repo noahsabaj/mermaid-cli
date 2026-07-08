@@ -16,6 +16,7 @@ pub mod compaction;
 pub mod ids;
 pub mod image_token;
 pub mod msg;
+pub mod question;
 pub mod reducer;
 pub mod runtime;
 pub mod slash_commands;
@@ -32,6 +33,10 @@ pub use compaction::{
 };
 pub use ids::{IdAllocator, ToolCallId, TurnId};
 pub use msg::{ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig};
+pub use question::{
+    OptionPreview, PendingQuestionSet, Question, QuestionAnswer, QuestionOption,
+    QuestionResolution, QuestionSelection,
+};
 pub use reducer::{build_chat_request, update};
 pub use runtime::{
     ManagedProcess, ManagedProcessStatus, ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState,

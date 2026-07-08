@@ -31,6 +31,7 @@ use crate::runtime::{
 };
 
 use super::ids::{ToolCallId, TurnId};
+use super::question::Question;
 use super::runtime::RuntimeSignal;
 use super::state::ContextUsageSnapshot;
 use super::state::StatusKind;
@@ -210,6 +211,15 @@ pub enum Msg {
         kind: ApprovalKind,
         prompt: String,
         allowlist_scope: String,
+    },
+    /// The `ask_user_question` tool is asking the user a batch of questions. The
+    /// reducer stores a `PendingQuestionSet` and renders a selectable modal; the
+    /// answer flows back as `Cmd::ResolveQuestion`. The tool task is parked until
+    /// then, so the turn naturally pauses (its outcome slot stays `None`).
+    QuestionAsked {
+        turn: TurnId,
+        call_id: ToolCallId,
+        questions: Vec<Question>,
     },
 
     // ── MCP (from effect::mcp) ──────────────────────────────────────
@@ -478,7 +488,8 @@ impl Msg {
             | Msg::ToolStarted { turn, .. }
             | Msg::ToolProgress { turn, .. }
             | Msg::ToolFinished { turn, .. }
-            | Msg::ApprovalRequested { turn, .. } => Some(*turn),
+            | Msg::ApprovalRequested { turn, .. }
+            | Msg::QuestionAsked { turn, .. } => Some(*turn),
             Msg::TurnCancelled(turn) => Some(*turn),
             _ => None,
         }
@@ -511,6 +522,7 @@ impl Msg {
             Msg::ToolProgress { .. } => MsgKind::ToolProgress,
             Msg::ToolFinished { .. } => MsgKind::ToolFinished,
             Msg::ApprovalRequested { .. } => MsgKind::ApprovalRequested,
+            Msg::QuestionAsked { .. } => MsgKind::QuestionAsked,
             Msg::TurnCancelled(_) => MsgKind::TurnCancelled,
             Msg::McpServerReady { .. }
             | Msg::McpServerErrored { .. }
@@ -565,6 +577,7 @@ pub enum MsgKind {
     ToolProgress,
     ToolFinished,
     ApprovalRequested,
+    QuestionAsked,
     TurnCancelled,
     Mcp,
     InstructionsChanged,

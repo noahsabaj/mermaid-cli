@@ -28,6 +28,7 @@ use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::runtime::{SafetyMode, TaskStatus};
 use crate::session::ConversationHistory;
 
+use super::question::QuestionResolution;
 use super::state::ApprovalChoice;
 
 use super::compaction::{CompactionArchive, CompactionRecord, CompactionRequest};
@@ -98,6 +99,14 @@ pub enum Cmd {
     ResolveApproval {
         call_id: ToolCallId,
         decision: ApprovalChoice,
+    },
+
+    /// Resolve an `ask_user_question` prompt: deliver the user's answers to the
+    /// parked tool task via the `QuestionBroker`. Like `ResolveApproval`, a
+    /// fire-and-forget to the broker (not turn-scoped).
+    ResolveQuestion {
+        call_id: ToolCallId,
+        resolution: QuestionResolution,
     },
 
     // ── Persistence ─────────────────────────────────────────────────
@@ -305,6 +314,7 @@ impl Cmd {
             Cmd::CancelScope(_) => "cancel_scope",
             Cmd::BackgroundScope(_) => "background_scope",
             Cmd::ResolveApproval { .. } => "resolve_approval",
+            Cmd::ResolveQuestion { .. } => "resolve_question",
             Cmd::SaveConversation(_) => "save_conversation",
             Cmd::SaveCompactionArchive { .. } => "save_compaction_archive",
             Cmd::SaveProcess(_) => "save_process",
@@ -408,6 +418,13 @@ impl Cmd {
             Cmd::BackgroundScope(turn) => format!("background_scope(turn={})", turn),
             Cmd::ResolveApproval { call_id, decision } => {
                 format!("resolve_approval(call={}, {:?})", call_id, decision)
+            },
+            Cmd::ResolveQuestion { call_id, resolution } => {
+                let kind = match resolution {
+                    QuestionResolution::Answered(a) => format!("answered({})", a.len()),
+                    QuestionResolution::Dismissed => "dismissed".to_string(),
+                };
+                format!("resolve_question(call={}, {})", call_id, kind)
             },
             Cmd::SaveConversation(c) => format!("save_conversation(id={})", c.id),
             Cmd::SaveCompactionArchive {

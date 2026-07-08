@@ -182,14 +182,22 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // slash palette > status bar. Approvals/confirms are interrupts that
     // overlay regardless of input mode.
     let approval_item = state.pending_approval.front();
-    let confirm_open = approval_item.is_none() && state.confirm.is_some();
+    let question_item = if approval_item.is_none() {
+        state.pending_question.front()
+    } else {
+        None
+    };
+    let confirm_open =
+        approval_item.is_none() && question_item.is_none() && state.confirm.is_some();
     let conv_list_open = approval_item.is_none()
+        && question_item.is_none()
         && !confirm_open
         && matches!(
             state.ui.mode,
             crate::domain::UiMode::ConversationList { .. }
         );
     let palette_open = approval_item.is_none()
+        && question_item.is_none()
         && !confirm_open
         && !conv_list_open
         && state.ui.input_buffer.starts_with('/');
@@ -197,6 +205,8 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         // border(2) + body lines + blank(1) + 3 option lines
         let body_lines = item.prompt.lines().count().clamp(1, 6) as u16;
         2 + body_lines + 1 + 3
+    } else if let Some(qset) = question_item {
+        widgets::question_modal_height(qset, &rstate.theme)
     } else if confirm_open {
         6
     } else if conv_list_open {
@@ -316,6 +326,13 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             options,
             selected_index: Some(item.selected_option),
             accent: rstate.theme.colors.warning.to_color(),
+        };
+        frame.render_widget(widget, chunks[3]);
+    } else if let Some(qset) = state.pending_question.front() {
+        use widgets::QuestionModalWidget;
+        let widget = QuestionModalWidget {
+            theme: &rstate.theme,
+            set: qset,
         };
         frame.render_widget(widget, chunks[3]);
     } else if let Some(confirm) = &state.confirm {
