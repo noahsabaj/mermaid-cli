@@ -138,7 +138,10 @@ fn parse_question(v: &serde_json::Value) -> Result<Question, String> {
         },
         "date" => QuestionKind::Date,
         "path" => QuestionKind::Path {
-            must_exist: v.get("mustExist").and_then(|x| x.as_bool()).unwrap_or(false),
+            must_exist: v
+                .get("mustExist")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
         },
         other => return Err(format!("unknown question kind: {other}")),
     };
@@ -296,16 +299,10 @@ impl ToolExecutor for AskUserQuestionTool {
         let secs = || start.elapsed().as_secs_f64();
 
         let Some(questions_val) = args.get("questions").and_then(|v| v.as_array()) else {
-            return ToolOutcome::error(
-                "ask_user_question requires a `questions` array",
-                secs(),
-            );
+            return ToolOutcome::error("ask_user_question requires a `questions` array", secs());
         };
         if questions_val.is_empty() {
-            return ToolOutcome::error(
-                "`questions` must contain at least one question",
-                secs(),
-            );
+            return ToolOutcome::error("`questions` must contain at least one question", secs());
         }
         let mut questions = Vec::with_capacity(questions_val.len());
         for qv in questions_val {
@@ -375,7 +372,11 @@ impl ToolExecutor for AskUserQuestionTool {
                     }
                     save_prefs(&prefs);
                 }
-                ToolOutcome::success(format_answers(&answers), summarize_answers(&answers), secs())
+                ToolOutcome::success(
+                    format_answers(&answers),
+                    summarize_answers(&answers),
+                    secs(),
+                )
             },
             QuestionResolution::Dismissed => ToolOutcome::success(
                 "The user dismissed the question(s) without answering. Do not re-ask unless you \

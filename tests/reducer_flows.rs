@@ -996,7 +996,10 @@ fn multi_select_toggles_then_submits_via_review() {
     let (state, _) = press(state, KeyCode::Down); // → Other row
     let (state, _) = press(state, KeyCode::Down); // → Submit row
     let (state, _) = press(state, KeyCode::Enter); // Submit → review screen
-    assert!(!state.pending_question.is_empty(), "review screen, not resolved");
+    assert!(
+        !state.pending_question.is_empty(),
+        "review screen, not resolved"
+    );
     let (state, cmds) = press(state, KeyCode::Enter); // review: Submit answers
     assert!(state.pending_question.is_empty());
     assert_answered(&cmds, &[&["Auth", "Jobs"]]);
@@ -1122,7 +1125,10 @@ fn invalid_number_blocks_submit() {
         state = s;
     }
     let (state, cmds) = press(state, KeyCode::Enter);
-    assert!(!state.pending_question.is_empty(), "invalid value must not submit");
+    assert!(
+        !state.pending_question.is_empty(),
+        "invalid value must not submit"
+    );
     assert!(resolution(&cmds).is_none());
 }
 

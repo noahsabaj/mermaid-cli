@@ -419,7 +419,10 @@ impl Cmd {
             Cmd::ResolveApproval { call_id, decision } => {
                 format!("resolve_approval(call={}, {:?})", call_id, decision)
             },
-            Cmd::ResolveQuestion { call_id, resolution } => {
+            Cmd::ResolveQuestion {
+                call_id,
+                resolution,
+            } => {
                 let kind = match resolution {
                     QuestionResolution::Answered { answers, .. } => {
                         format!("answered({})", answers.len())

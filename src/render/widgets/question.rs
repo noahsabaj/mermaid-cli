@@ -79,7 +79,10 @@ fn push_choice_lines(
         let focused = sel.cursor == i;
         let checked = sel.chosen.contains(&i);
         let mut spans: Vec<Span<'static>> = vec![
-            Span::styled(if focused { "> " } else { "  " }, Style::default().fg(brand)),
+            Span::styled(
+                if focused { "> " } else { "  " },
+                Style::default().fg(brand),
+            ),
             Span::styled(format!("{}. ", i + 1), Style::default().fg(dim)),
         ];
         if multi {
@@ -114,7 +117,10 @@ fn push_choice_lines(
     // "Other" free-text row.
     let other_focused = sel.cursor == n;
     let mut spans: Vec<Span<'static>> = vec![
-        Span::styled(if other_focused { "> " } else { "  " }, Style::default().fg(brand)),
+        Span::styled(
+            if other_focused { "> " } else { "  " },
+            Style::default().fg(brand),
+        ),
         Span::styled(format!("{}. ", n + 1), Style::default().fg(dim)),
     ];
     if multi {
@@ -127,7 +133,10 @@ fn push_choice_lines(
     if sel.other_text.is_empty() {
         spans.push(Span::styled("Type something", Style::default().fg(dim)));
     } else {
-        spans.push(Span::styled(sel.other_text.clone(), Style::default().fg(white)));
+        spans.push(Span::styled(
+            sel.other_text.clone(),
+            Style::default().fg(white),
+        ));
     }
     lines.push(Line::from(spans));
 
@@ -140,7 +149,10 @@ fn push_choice_lines(
             Style::default().fg(white).add_modifier(Modifier::BOLD)
         };
         lines.push(Line::from(vec![
-            Span::styled(if focused { "> " } else { "  " }, Style::default().fg(brand)),
+            Span::styled(
+                if focused { "> " } else { "  " },
+                Style::default().fg(brand),
+            ),
             Span::styled("Submit", style),
         ]));
     }
@@ -160,7 +172,10 @@ fn push_input_lines(
     let value = &sel.value;
     let mut field: Vec<Span<'static>> = vec![Span::styled("> ", Style::default().fg(brand))];
     if value.is_empty() {
-        field.push(Span::styled(input_placeholder(&q.kind), Style::default().fg(dim)));
+        field.push(Span::styled(
+            input_placeholder(&q.kind),
+            Style::default().fg(dim),
+        ));
     } else {
         field.push(Span::styled(value.clone(), Style::default().fg(white)));
     }
@@ -256,7 +271,10 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
             if qi == set.active {
                 spans.push(chip(&label, brand));
             } else {
-                spans.push(Span::styled(format!(" {} ", label), Style::default().fg(dim)));
+                spans.push(Span::styled(
+                    format!(" {} ", label),
+                    Style::default().fg(dim),
+                ));
             }
             spans.push(Span::raw(" "));
         }
@@ -530,14 +548,25 @@ mod tests {
         };
         let lines = build_preview_lines(&preview, &theme);
         assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme.colors.info.to_color()));
-        assert_eq!(lines[1].spans[0].style.fg, Some(theme.colors.error.to_color()));
-        assert_eq!(lines[2].spans[0].style.fg, Some(theme.colors.success.to_color()));
+        assert_eq!(
+            lines[0].spans[0].style.fg,
+            Some(theme.colors.info.to_color())
+        );
+        assert_eq!(
+            lines[1].spans[0].style.fg,
+            Some(theme.colors.error.to_color())
+        );
+        assert_eq!(
+            lines[2].spans[0].style.fg,
+            Some(theme.colors.success.to_color())
+        );
     }
 
     #[test]
     fn tall_preview_drives_modal_height() {
-        let body = std::iter::repeat_n("line", 20).collect::<Vec<_>>().join("\n");
+        let body = std::iter::repeat_n("line", 20)
+            .collect::<Vec<_>>()
+            .join("\n");
         let q = Question {
             header: "H".to_string(),
             question: "Q?".to_string(),

@@ -895,9 +895,7 @@ fn apply_input_key(
 /// Step a Number question's value by `dir * step`, clamped to min/max.
 fn step_number(set: &mut super::question::PendingQuestionSet, q_idx: usize, dir: f64) {
     let (min, max, step) = match &set.questions[q_idx].kind {
-        crate::domain::QuestionKind::Number {
-            min, max, step, ..
-        } => (*min, *max, *step),
+        crate::domain::QuestionKind::Number { min, max, step, .. } => (*min, *max, *step),
         _ => return,
     };
     let step = step.unwrap_or(1.0);
@@ -993,7 +991,10 @@ fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mo
     if let Some(front) = state.pending_question.front() {
         let call_id = front.call_id;
         state.pending_question.pop_front();
-        cmds.push(Cmd::ResolveQuestion { call_id, resolution });
+        cmds.push(Cmd::ResolveQuestion {
+            call_id,
+            resolution,
+        });
     }
 }
 

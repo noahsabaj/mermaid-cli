@@ -639,7 +639,10 @@ impl EffectRunner {
                     broker.resolve(call_id, decision.into());
                 }
             },
-            Cmd::ResolveQuestion { call_id, resolution } => {
+            Cmd::ResolveQuestion {
+                call_id,
+                resolution,
+            } => {
                 // Deliver the user's answers to the parked ask_user_question
                 // task. Not turn-scoped — fire-and-forget to the broker.
                 if let Some(broker) = &self.questions {
