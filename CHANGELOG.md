@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The agent can ask you structured multiple-choice questions.** A new
+  `ask_user_question` tool lets the model pause mid-run and pose 1–4 questions in
+  an interactive terminal modal — single-select, multi-select, rank, or typed
+  inputs (text/number/date/path) — each with an "Other" free-text escape,
+  optional side-by-side previews (including diffs), and a "remember this answer"
+  toggle that persists settled preferences across sessions. Answers flow back as
+  the tool result so the run continues with your decision; headless runs with no
+  TTY proceed with best judgment instead of blocking.
+
+- **NVIDIA NIM is now a built-in provider.** Reach NVIDIA-hosted models through
+  their OpenAI-compatible endpoint with `mermaid --model nvidia/<model>` and an
+  `NVIDIA_API_KEY` — for example `nvidia/z-ai/glm-5.2` (GLM-5.2). Reasoning-model
+  traces (streamed as `delta.reasoning_content`) are surfaced, and tool calling
+  works as with any built-in provider.
+
+- **Mermaid warns when you attach an image to a model that can't see it.** Some
+  Ollama models have no vision capability, so a pasted image is silently ignored
+  — which looks exactly like a bug. Mermaid now probes the model's advertised
+  `vision` capability (Ollama `/api/show`) the moment you paste an image (and on
+  `/model` switch), and posts a one-line notice *before* you send if the model
+  can't see it, so you can switch to a vision-capable model instead of wasting a
+  turn. The notice is shown once per model per session; a per-turn re-check backs
+  it up for a fast paste-then-send. This also makes `/doctor` report Ollama
+  vision support accurately instead of always claiming "no".
+
+- **Pasted images are now inline `[Image #N]` tokens in the prompt.** Instead of
+  a separate `[Image #1] (PNG, 1KB)  (↑ to select)` bar floating above the input
+  box, Ctrl+V splices an inline `[Image #N]` pill into the message text at the
+  cursor — you can type around it and it deletes as a unit (Backspace on the pill
+  removes both the token and the image). `N` is a **stable, conversation-global**
+  number (it keeps climbing across messages and survives `--resume`/`--continue`),
+  so "in image #16 you can see…" is unambiguous for you and the model; the
+  submitted text carries the tokens so the model can correlate each image with
+  its reference, and the transcript shows the same number. This also retires the
+  attachment-focus bar entirely, so the up-arrow always steps through prompt
+  history with no contention.
+
 - **`read_only` safety mode now permits `web_search` and `web_fetch`.**
   Searching and fetching the public web are reads — reading is what
   read-only mode is for — so they no longer die with "blocks mutations and
@@ -44,6 +81,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Tool-call transcript labels distinguish creating a file from changing one.**
+  A `write_file` that overwrites an existing file now reads `Update`, not
+  `Write` — `Write` is reserved for a genuinely new file — and targeted
+  `edit_file` calls read `Update` too. The vocabulary is now
+  `Write` / `Update` / `Delete` (previously `Write` / `Edit` / `Delete`),
+  matching Claude Code, so it's clear at a glance whether a call created,
+  modified, or removed a file. The create-vs-modify distinction comes from the
+  `created` flag the write tool already records, so it's accurate even when the
+  model rewrites a whole file with `write_file` instead of `edit_file`.
+
 - **`mermaid list` and `mermaid models` no longer start Ollama.** All four
   read-only verbs (`list` / `models` / `status` / `doctor`) now enumerate
   with auto-start hard-off: observing state never mutates it, so a
@@ -53,6 +100,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listed") instead of the misleading "No Ollama models installed locally."
   Auto-start remains on the paths that actually use Ollama: chat and the
   startup model check.
+
+### Fixed
+
+- **Pasting an image and immediately pressing Enter no longer drops the image.**
+  Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
+  submit the message before the image arrived — sending it with no image (and
+  leaking a stray `[Image #N]` into the next prompt). Enter now waits for any
+  in-flight clipboard read to land, then submits with the image included. The
+  read result rides a dedicated internal message so an empty or failed read
+  still releases the held submit instead of wedging it, and a normal terminal
+  paste is never mistaken for a Ctrl+V read.
 
 ## [0.16.0] - 2026-07-04
 

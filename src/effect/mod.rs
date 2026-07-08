@@ -129,6 +129,10 @@ pub struct EffectRunner {
     /// `with_interactive_approvals`); headless + child runners leave it `None`,
     /// so the gate falls back to the out-of-band DB-approval flow.
     approval: Option<crate::providers::ApprovalBroker>,
+    /// Inline-question broker for `ask_user_question`. `Some` only for
+    /// interactive TUI runs (set via `with_interactive_questions`); headless +
+    /// child runners leave it `None`, so the tool proceeds without asking.
+    questions: Option<crate::providers::QuestionBroker>,
     /// Abort handle for the background config watcher (#45). It's a perpetual
     /// loop living in `detached`, so `shutdown` aborts it explicitly before
     /// draining — otherwise the drain would block on it until the timeout.
@@ -150,6 +154,7 @@ impl EffectRunner {
             terminal_title_enabled: true,
             owns_global_mcp: true,
             approval: None,
+            questions: None,
             config_watch: None,
         }
     }
@@ -159,6 +164,14 @@ impl EffectRunner {
     /// `ApprovalBroker` instead of writing an out-of-band DB approval row.
     pub fn with_interactive_approvals(mut self) -> Self {
         self.approval = Some(crate::providers::ApprovalBroker::new(self.msg_tx.clone()));
+        self
+    }
+
+    /// Enable inline `ask_user_question` prompts (interactive TUI only). The tool
+    /// then parks on the `QuestionBroker` and routes the user's answers back
+    /// through it instead of proceeding without asking.
+    pub fn with_interactive_questions(mut self) -> Self {
+        self.questions = Some(crate::providers::QuestionBroker::new(self.msg_tx.clone()));
         self
     }
 
@@ -568,6 +581,7 @@ impl EffectRunner {
                     };
                 let task_id = self.task_id.clone();
                 let approval = self.approval.clone();
+                let questions = self.questions.clone();
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 let background = scope.background_token();
@@ -590,6 +604,7 @@ impl EffectRunner {
                         intent,
                         classifier,
                         approval,
+                        questions,
                     ))
                     .catch_unwind()
                     .await
@@ -622,6 +637,16 @@ impl EffectRunner {
                 // Not turn-scoped — fire-and-forget to the broker.
                 if let Some(broker) = &self.approval {
                     broker.resolve(call_id, decision.into());
+                }
+            },
+            Cmd::ResolveQuestion {
+                call_id,
+                resolution,
+            } => {
+                // Deliver the user's answers to the parked ask_user_question
+                // task. Not turn-scoped — fire-and-forget to the broker.
+                if let Some(broker) = &self.questions {
+                    broker.resolve(call_id, resolution);
                 }
             },
             Cmd::CancelScope(turn) => {
@@ -1148,6 +1173,13 @@ impl EffectRunner {
                     dispatch_read_clipboard(tx).await;
                 });
             },
+            Cmd::ProbeVision { model_id, warn } => {
+                let tx = self.msg_tx.clone();
+                let providers = self.providers.clone();
+                self.detached.spawn(async move {
+                    dispatch_probe_vision(model_id, warn, providers, tx).await;
+                });
+            },
             Cmd::CopyToClipboard(text) => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn(async move {
@@ -1385,6 +1417,25 @@ async fn dispatch_call_model(
             source: sizing.source,
         })
         .await;
+    // No-vision-model fallback: if this turn actually carries images, probe the
+    // model's vision capability and let the reducer warn if it can't see them.
+    // This backs up the proactive paste-time probe for the rare case where the
+    // user pasted and sent before that probe resolved. Cheap — `supports_vision`
+    // is cache-first, so a repeat probe in the same session is free.
+    if request
+        .messages
+        .iter()
+        .any(|m| m.images.as_ref().is_some_and(|v| !v.is_empty()))
+    {
+        let supports_vision = provider.supports_vision().await;
+        let _ = msg_tx
+            .send(Msg::ProviderVisionResolved {
+                model_id: request.model_id.clone(),
+                supports_vision,
+                warn: true,
+            })
+            .await;
+    }
     let context_snapshot =
         crate::domain::estimate_context_usage_for_request(&request, max_context_tokens);
     let _ = msg_tx
@@ -2231,6 +2282,7 @@ async fn dispatch_execute_tool(
     intent: Option<String>,
     classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
     approval: Option<crate::providers::ApprovalBroker>,
+    questions: Option<crate::providers::QuestionBroker>,
 ) {
     let _ = msg_tx.send(Msg::ToolStarted { turn, call_id }).await;
 
@@ -2342,6 +2394,7 @@ async fn dispatch_execute_tool(
         intent,
         classifier,
         approval,
+        questions,
     );
     ctx.background = background;
     let before_payload = serde_json::json!({
@@ -2571,7 +2624,7 @@ fn mcp_startup_msg(name: &str, started: bool, tools: Vec<crate::domain::McpToolS
 /// deadline, so a hung helper returns an error here instead of pinning
 /// this blocking thread forever.
 async fn dispatch_read_clipboard(tx: MsgSender) {
-    use crate::domain::Paste;
+    use crate::domain::ClipboardRead;
 
     enum Outcome {
         Image { bytes: Vec<u8>, format: String },
@@ -2597,15 +2650,46 @@ async fn dispatch_read_clipboard(tx: MsgSender) {
     .await
     .unwrap_or_else(|e| Outcome::Error(format!("clipboard spawn_blocking: {}", e)));
 
+    // Route ALL four outcomes through `Msg::ClipboardRead` (not `Msg::Paste` /
+    // `Msg::TransientStatus`): the reducer decrements `clipboard_reads_pending`
+    // on exactly these messages, so an empty/failed read must still land here to
+    // release a submit that was held waiting on it.
     let msg = match outcome {
-        Outcome::Image { bytes, format } => Msg::Paste(Paste::Image { bytes, format }),
-        Outcome::Text(text) => Msg::Paste(Paste::Text(text)),
-        Outcome::Empty => Msg::TransientStatus {
-            text: "Clipboard is empty".to_string(),
+        Outcome::Image { bytes, format } => {
+            Msg::ClipboardRead(ClipboardRead::Image { bytes, format })
         },
-        Outcome::Error(text) => Msg::TransientStatus { text },
+        Outcome::Text(text) => Msg::ClipboardRead(ClipboardRead::Text(text)),
+        Outcome::Empty => Msg::ClipboardRead(ClipboardRead::Empty),
+        Outcome::Error(text) => Msg::ClipboardRead(ClipboardRead::Error(text)),
     };
     let _ = tx.send(msg).await;
+}
+
+/// Probe whether `model_id` can see images and report it via
+/// `Msg::ProviderVisionResolved`. Best-effort: an unresolvable provider or a
+/// provider that doesn't probe (non-Ollama) reports `None` ("unknown"), which
+/// the reducer treats as "don't warn". `warn` rides through unchanged so the
+/// reducer knows whether an image is actually in play.
+async fn dispatch_probe_vision(
+    model_id: String,
+    warn: bool,
+    providers: Option<Arc<ProviderFactory>>,
+    tx: MsgSender,
+) {
+    let supports_vision = match providers {
+        Some(factory) => match factory.resolve(&model_id).await {
+            Ok(provider) => provider.supports_vision().await,
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let _ = tx
+        .send(Msg::ProviderVisionResolved {
+            model_id,
+            supports_vision,
+            warn,
+        })
+        .await;
 }
 
 /// Write text to the system clipboard on a blocking thread (the platform

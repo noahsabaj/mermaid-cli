@@ -33,6 +33,7 @@ use super::cmd::ChatRequest;
 use super::compaction::CompactionTrigger;
 use super::ids::{IdAllocator, ToolCallId, TurnId};
 use super::msg::Msg;
+use super::question::PendingQuestionSet;
 use super::runtime::{RuntimeState, ToolArtifact, ToolRunMetadata, ToolStatus};
 
 /// Root state. The reducer takes `State` by value, returns a new
@@ -71,6 +72,11 @@ pub struct State {
     /// `Cmd::ResolveApproval`, which unblocks the parked tool task. Empty in
     /// headless mode (no broker → the out-of-band `/approve` flow instead).
     pub pending_approval: VecDeque<PendingApproval>,
+    /// FIFO queue of `ask_user_question` batches awaiting the user's answers.
+    /// The front item renders as a selectable modal; submitting pops it and
+    /// emits `Cmd::ResolveQuestion`, unblocking the parked tool task. Empty in
+    /// headless mode (no broker → the tool proceeds without asking).
+    pub pending_question: VecDeque<PendingQuestionSet>,
     /// Runtime-only observability state: process registry, provider
     /// capability snapshot, and lifecycle timeline. Not sent to the
     /// model.
@@ -155,6 +161,7 @@ impl State {
             ids: IdAllocatorBundle::default(),
             confirm: None,
             pending_approval: VecDeque::new(),
+            pending_question: VecDeque::new(),
             runtime,
             should_exit: false,
             // Seed the injected clock from the caller (live: startup wall
@@ -183,6 +190,22 @@ impl State {
         self.session.cumulative_token_usage = history.cumulative_token_usage;
         self.session.context_usage = history.context_usage.clone();
         self.session.conversation = history;
+        // Continue global image numbering past the highest number already in the
+        // loaded transcript, so `[Image #16]` keeps referring to that same image
+        // across --resume/--continue. Sessions saved before image numbering (no
+        // `image_numbers`) yield max 0 → start at 1, the default. Shared live +
+        // --replay seed path, so both reconstruct an identical allocator.
+        let max_image = self
+            .session
+            .conversation
+            .messages
+            .iter()
+            .filter_map(|m| m.image_numbers.as_ref())
+            .flatten()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        self.ids.image = crate::domain::ids::IdAllocator::starting_at(max_image + 1);
         self.ui.last_title_dispatched = Some(title);
     }
 
@@ -808,14 +831,21 @@ pub struct UiState {
     /// a UTF-8 char boundary on every mutation via
     /// `floor_char_boundary`, so widgets can slice safely.
     pub input_cursor: usize,
-    /// Pending image pastes queued for the next user message.
+    /// Pending image pastes for the next user message. Each is mirrored by an
+    /// inline `[Image #N]` token in `input_buffer`; the token is the source of
+    /// truth at submit time (see `image_token` + `handle_submit_prompt`).
     pub attachments: Vec<Attachment>,
-    /// When true, keyboard focus is on the attachment bar (up arrow
-    /// from input moves focus up here; Esc returns focus to input).
-    pub attachment_focused: bool,
-    /// Highlighted attachment index when focused. Ignored when
-    /// `attachment_focused` is false.
-    pub attachment_selected: usize,
+    /// In-flight `Cmd::ReadClipboard` reads (Ctrl+V) whose result
+    /// (`Msg::ClipboardRead`) hasn't arrived yet. A counter, not a bool, so a
+    /// burst of rapid Ctrl+V presses all drain before a held submit fires.
+    /// Incremented where `Cmd::ReadClipboard` is pushed; decremented in
+    /// `handle_clipboard_read`.
+    pub clipboard_reads_pending: u32,
+    /// Set when Enter is pressed while `clipboard_reads_pending > 0`: the submit
+    /// is held until the read drains so a fast paste-then-Enter still includes
+    /// the pasted image instead of racing past it. `handle_clipboard_read`
+    /// re-runs the submit once the last pending read lands.
+    pub submit_after_clipboard: bool,
     /// When `Some(i)`, the palette has a highlighted row. `None` =
     /// closed / not showing.
     pub palette_cursor: Option<usize>,
@@ -898,6 +928,11 @@ pub struct ConversationSummary {
 #[derive(Debug, Clone)]
 pub struct Attachment {
     pub id: u64,
+    /// Global, conversation-wide image number — the `N` shown in the inline
+    /// `[Image #N]` token and, once sent, in the committed message. Stable for
+    /// the life of the image; distinct from `id`, which only scopes attachment
+    /// ownership within a submit.
+    pub number: u64,
     pub base64_data: String,
     /// Temp file path (written by the effect runner when the paste
     /// event comes in, so the TUI can show a preview).
@@ -1030,6 +1065,11 @@ pub enum StatusKind {
 pub struct IdAllocatorBundle {
     pub turn: IdAllocator,
     pub tool_call: IdAllocator,
+    /// Global, conversation-wide image counter. Every pasted image draws its
+    /// stable `[Image #N]` display number from here, so the number stays with
+    /// that image across the whole chat (and across `--resume`, which reseeds it
+    /// past the highest persisted number in `seed_conversation`).
+    pub image: IdAllocator,
 }
 
 impl IdAllocatorBundle {
@@ -1039,6 +1079,10 @@ impl IdAllocatorBundle {
 
     pub fn fresh_tool_call(&mut self) -> ToolCallId {
         ToolCallId(self.tool_call.next())
+    }
+
+    pub fn fresh_image(&mut self) -> u64 {
+        self.image.next()
     }
 }
 

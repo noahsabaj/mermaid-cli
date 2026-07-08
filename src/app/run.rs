@@ -101,8 +101,12 @@ pub async fn run_interactive_with(
     );
     let (runner, mut msg_rx) = EffectRunner::pair_from(cwd.clone(), providers, tools);
     // Interactive TUI: enable inline approval prompts so `ask` mode (and Auto
-    // escalations) pause and prompt instead of erroring out.
-    let mut runner = runner.with_interactive_approvals();
+    // escalations) pause and prompt instead of erroring out, and inline
+    // `ask_user_question` prompts so the model can ask the user structured
+    // questions mid-run instead of proceeding without them.
+    let mut runner = runner
+        .with_interactive_approvals()
+        .with_interactive_questions();
     // Keep instructions/memory fresh via the background config watcher (#45):
     // it emits Msg::InstructionsChanged/MemoryChanged on change, so the reducer
     // reads them as injected data and never does the refresh I/O inline.

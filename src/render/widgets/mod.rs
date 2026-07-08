@@ -5,19 +5,19 @@
 //! holds a reference to any god-object.
 
 mod approval;
-mod attachment;
 mod chat;
 mod conversation_list;
 mod input;
+mod question;
 mod slash_palette;
 mod status;
 mod status_line;
 
 pub use approval::ApprovalModalWidget;
-pub use attachment::AttachmentWidget;
 pub use chat::{ChatState, ChatWidget, ImageClickTarget};
 pub use conversation_list::ConversationListWidget;
 pub use input::{InputState, InputWidget};
+pub use question::{QuestionModalWidget, question_modal_height};
 pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
 pub use status_line::build_status_lines;

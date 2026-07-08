@@ -38,7 +38,7 @@ use super::compaction::{
     context_exceeds_hard_limit, format_compact_count, should_auto_compact,
 };
 use super::ids::TurnId;
-use super::msg::{KeyCode, KeyMods, Msg, Paste, SlashCmd};
+use super::msg::{ClipboardRead, KeyCode, KeyMods, Msg, Paste, SlashCmd};
 use super::state::{
     GenPhase, McpServerEntry, McpServerStatus, State, StatusKind, TokenUsageTotals, ToolOutcome,
     TurnState, UiMode,
@@ -109,7 +109,10 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             handle_key(&mut state, &mut cmds, key.code, key.modifiers);
         },
         Msg::Paste(paste) => {
-            handle_paste(&mut state, &mut cmds, paste);
+            handle_paste(&mut state, paste);
+        },
+        Msg::ClipboardRead(read) => {
+            handle_clipboard_read(&mut state, &mut cmds, read);
         },
         Msg::SubmitPrompt {
             text,
@@ -228,6 +231,39 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                              `/context max` uses the full window; `/context offload on` allows RAM (slower).",
                             format_compact_count(mm),
                             format_compact_count(eff)
+                        ),
+                    );
+                }
+            }
+        },
+        Msg::ProviderVisionResolved {
+            model_id,
+            supports_vision,
+            warn,
+        } => {
+            // Drop a probe that landed after a `/model` switch (it describes the
+            // previous model, not the one now active) — mirrors
+            // ProviderContextResolved / OllamaPlacementResolved.
+            if model_id == state.session.model_id {
+                // Refresh the display/telemetry snapshot (Ollama's was a static
+                // `false`), so `/doctor` stops under-reporting vision.
+                if let Some(v) = supports_vision {
+                    state.runtime.provider_capabilities.supports_vision = v;
+                }
+                // One-shot, and only when an image is actually in play (`warn`):
+                // a model that can't see images silently ignores them, which
+                // looks like a bug. `None` (unknown) / `Some(true)` never warn.
+                if warn
+                    && supports_vision == Some(false)
+                    && state.runtime.vision_warned.insert(model_id.clone())
+                {
+                    push_system(
+                        &mut state,
+                        &mut cmds,
+                        format!(
+                            "Heads up: {model_id} reports no vision capability, so attached \
+                             images are not seen by the model. Switch to a vision-capable \
+                             model to send images."
                         ),
                     );
                 }
@@ -398,6 +434,22 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     allowlist_scope,
                     selected_option: 0,
                 });
+        },
+        Msg::QuestionAsked {
+            turn,
+            call_id,
+            questions,
+        } => {
+            // Same cancellation guard as approvals: drop a question for a turn
+            // that's already unwinding (#74) so its modal can't outlive the turn.
+            if matches!(state.turn, TurnState::Cancelling { .. }) {
+                return (state, cmds);
+            }
+            state
+                .pending_question
+                .push_back(super::question::PendingQuestionSet::new(
+                    turn, call_id, questions,
+                ));
         },
 
         // ── MCP ─────────────────────────────────────────────────────
@@ -604,6 +656,384 @@ fn emit_title_if_changed(state: &mut State, cmds: &mut Vec<Cmd>) {
 
 // ─── helpers ────────────────────────────────────────────────────────
 
+/// Outcome of one keypress against a question modal: keep showing it, or
+/// resolve the whole set one way or the other.
+enum QuestionKeyAction {
+    Stay,
+    Submit,
+    Dismiss,
+    Reformulate,
+}
+
+/// Advance past the current question: resolve immediately for the atomic
+/// single-select-single-question case, step to the next question, or land on
+/// the review screen.
+fn advance_question(set: &mut super::question::PendingQuestionSet) -> QuestionKeyAction {
+    let nq = set.questions.len();
+    if set.skips_review() {
+        return QuestionKeyAction::Submit;
+    }
+    if set.active + 1 < nq {
+        set.active += 1;
+    } else {
+        set.active = nq; // review screen
+    }
+    QuestionKeyAction::Stay
+}
+
+/// Act on an option row: toggle it (multi-select) or choose it and advance
+/// (single-select, which also drops any typed "Other" text).
+fn act_on_option(
+    set: &mut super::question::PendingQuestionSet,
+    q_idx: usize,
+    opt_idx: usize,
+) -> QuestionKeyAction {
+    let multi = set.questions[q_idx].is_multi();
+    let sel = &mut set.selections[q_idx];
+    if multi {
+        if let Some(pos) = sel.chosen.iter().position(|&i| i == opt_idx) {
+            sel.chosen.remove(pos);
+        } else {
+            sel.chosen.push(opt_idx);
+        }
+        QuestionKeyAction::Stay
+    } else {
+        sel.chosen = vec![opt_idx];
+        sel.other_text.clear();
+        advance_question(set)
+    }
+}
+
+/// Act on the row under the cursor: an option, the "Other" free-text row, or
+/// the multi-select Submit row.
+fn act_on_row(
+    set: &mut super::question::PendingQuestionSet,
+    q_idx: usize,
+    row: usize,
+) -> QuestionKeyAction {
+    let n = set.questions[q_idx].options.len();
+    let multi = set.questions[q_idx].is_multi();
+    if row < n {
+        return act_on_option(set, q_idx, row);
+    }
+    if row == set.other_row(q_idx) {
+        // Multi-select captures the typed text directly, so Enter here is a
+        // no-op; single-select commits the typed answer (if any) and advances.
+        if multi || set.selections[q_idx].other_text.trim().is_empty() {
+            return QuestionKeyAction::Stay;
+        }
+        set.selections[q_idx].chosen.clear();
+        return advance_question(set);
+    }
+    if Some(row) == set.submit_row(q_idx) {
+        return advance_question(set);
+    }
+    QuestionKeyAction::Stay
+}
+
+/// Apply one keypress to the front question set, returning whether it resolves.
+fn apply_question_key(
+    set: &mut super::question::PendingQuestionSet,
+    code: KeyCode,
+    mods: KeyMods,
+) -> QuestionKeyAction {
+    // Note-editing sub-mode: keystrokes edit the active question's note until
+    // Enter/Esc exits (Esc here leaves the note intact — it does not dismiss).
+    if set.editing_note {
+        match code {
+            KeyCode::Enter | KeyCode::Escape => set.editing_note = false,
+            KeyCode::Char(c) if !mods.ctrl && !mods.alt => {
+                if let Some(sel) = set.selections.get_mut(set.active) {
+                    sel.note.push(c);
+                }
+            },
+            KeyCode::Backspace => {
+                if let Some(sel) = set.selections.get_mut(set.active) {
+                    sel.note.pop();
+                }
+            },
+            _ => {},
+        }
+        return QuestionKeyAction::Stay;
+    }
+
+    // Esc dismisses the whole set.
+    if code == KeyCode::Escape && mods.is_empty() {
+        return QuestionKeyAction::Dismiss;
+    }
+
+    let nq = set.questions.len();
+
+    // `n` opens note editing for the active question — but not on the review
+    // screen, and not when the cursor sits in the Other text field (where `n`
+    // is a literal character).
+    if code == KeyCode::Char('n')
+        && mods.is_empty()
+        && set.active < nq
+        && set.questions[set.active].is_choice()
+        && set.selections[set.active].cursor != set.other_row(set.active)
+    {
+        set.editing_note = true;
+        return QuestionKeyAction::Stay;
+    }
+
+    // `c` = "Chat about this": bounce the whole set back to the model to
+    // reformulate. Available on choice/rank tabs (not the Other field) and on
+    // the review screen; on input tabs `c` is a literal character.
+    if code == KeyCode::Char('c')
+        && mods.is_empty()
+        && (set.active >= nq
+            || (set.questions[set.active].is_choice()
+                && set.selections[set.active].cursor != set.other_row(set.active)))
+    {
+        return QuestionKeyAction::Reformulate;
+    }
+
+    // `r` = toggle "remember my answers across sessions" (available where `c`
+    // is). The tool persists answers keyed by each question's `memory_key`.
+    if code == KeyCode::Char('r')
+        && mods.is_empty()
+        && (set.active >= nq
+            || (set.questions[set.active].is_choice()
+                && set.selections[set.active].cursor != set.other_row(set.active)))
+    {
+        set.remember = !set.remember;
+        return QuestionKeyAction::Stay;
+    }
+
+    // Tab-strip navigation between questions / the review screen. Tab + Right
+    // move forward; BackTab + Left move back (no in-field cursor in Stage 1).
+    let go_next = code == KeyCode::Tab || (mods.is_empty() && code == KeyCode::Right);
+    let go_prev = code == KeyCode::BackTab || (mods.is_empty() && code == KeyCode::Left);
+    if go_next {
+        set.active = (set.active + 1).min(nq);
+        return QuestionKeyAction::Stay;
+    }
+    if go_prev {
+        set.active = set.active.saturating_sub(1);
+        return QuestionKeyAction::Stay;
+    }
+
+    // Review screen: 0 = Submit answers, 1 = Cancel.
+    if set.active >= nq {
+        match code {
+            KeyCode::Up => set.review_cursor = 0,
+            KeyCode::Down => set.review_cursor = 1,
+            KeyCode::Char('1') => return QuestionKeyAction::Submit,
+            KeyCode::Char('2') => return QuestionKeyAction::Dismiss,
+            KeyCode::Enter => {
+                return if set.review_cursor == 0 {
+                    QuestionKeyAction::Submit
+                } else {
+                    QuestionKeyAction::Dismiss
+                };
+            },
+            _ => {},
+        }
+        return QuestionKeyAction::Stay;
+    }
+
+    // A question tab.
+    let q_idx = set.active;
+    if set.questions[q_idx].is_input() {
+        return apply_input_key(set, q_idx, code, mods);
+    }
+    if set.questions[q_idx].is_rank() {
+        return apply_rank_key(set, q_idx, code, mods);
+    }
+    // Select / MultiSelect.
+    let n = set.questions[q_idx].options.len();
+    let other_row = set.other_row(q_idx);
+    let row_count = set.row_count(q_idx);
+    let cursor = set.selections[q_idx].cursor;
+
+    // Text entry into the "Other" row: plain/shifted printables append,
+    // Backspace deletes. Other keys fall through to navigation below.
+    if cursor == other_row {
+        match code {
+            KeyCode::Char(c) if !mods.ctrl && !mods.alt => {
+                set.selections[q_idx].other_text.push(c);
+                return QuestionKeyAction::Stay;
+            },
+            KeyCode::Backspace => {
+                set.selections[q_idx].other_text.pop();
+                return QuestionKeyAction::Stay;
+            },
+            _ => {},
+        }
+    }
+
+    match code {
+        KeyCode::Up => {
+            set.selections[q_idx].cursor = cursor.saturating_sub(1);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Down => {
+            set.selections[q_idx].cursor = (cursor + 1).min(row_count.saturating_sub(1));
+            QuestionKeyAction::Stay
+        },
+        // Number keys jump to and act on an option directly (1-based).
+        KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+            let idx = (c as usize) - ('1' as usize);
+            if idx < n {
+                set.selections[q_idx].cursor = idx;
+                act_on_option(set, q_idx, idx)
+            } else {
+                QuestionKeyAction::Stay
+            }
+        },
+        KeyCode::Enter | KeyCode::Char(' ') => act_on_row(set, q_idx, cursor),
+        _ => QuestionKeyAction::Stay,
+    }
+}
+
+/// Key handling for an input-kind question (Text/Number/Date/Path): typing
+/// edits the value, Number steps with Up/Down, Enter submits when valid.
+fn apply_input_key(
+    set: &mut super::question::PendingQuestionSet,
+    q_idx: usize,
+    code: KeyCode,
+    mods: KeyMods,
+) -> QuestionKeyAction {
+    let is_number = matches!(
+        set.questions[q_idx].kind,
+        crate::domain::QuestionKind::Number { .. }
+    );
+    match code {
+        KeyCode::Char(c) if !mods.ctrl && !mods.alt => {
+            set.selections[q_idx].value.push(c);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Backspace => {
+            set.selections[q_idx].value.pop();
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Up if is_number => {
+            step_number(set, q_idx, 1.0);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Down if is_number => {
+            step_number(set, q_idx, -1.0);
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Enter => {
+            let kind = set.questions[q_idx].kind.clone();
+            if crate::domain::validate_input(&kind, &set.selections[q_idx].value).is_ok() {
+                advance_question(set)
+            } else {
+                QuestionKeyAction::Stay
+            }
+        },
+        _ => QuestionKeyAction::Stay,
+    }
+}
+
+/// Step a Number question's value by `dir * step`, clamped to min/max.
+fn step_number(set: &mut super::question::PendingQuestionSet, q_idx: usize, dir: f64) {
+    let (min, max, step) = match &set.questions[q_idx].kind {
+        crate::domain::QuestionKind::Number { min, max, step, .. } => (*min, *max, *step),
+        _ => return,
+    };
+    let step = step.unwrap_or(1.0);
+    let cur: f64 = set.selections[q_idx]
+        .value
+        .trim()
+        .parse()
+        .unwrap_or(min.unwrap_or(0.0));
+    let mut next = cur + dir * step;
+    if let Some(lo) = min {
+        next = next.max(lo);
+    }
+    if let Some(hi) = max {
+        next = next.min(hi);
+    }
+    set.selections[q_idx].value = format_number(next);
+}
+
+/// Format a number without a trailing `.0` for whole values.
+fn format_number(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
+/// Key handling for a Rank question: Up/Down move the cursor; Space grabs the
+/// item under the cursor so Up/Down then moves it; Enter submits the order.
+fn apply_rank_key(
+    set: &mut super::question::PendingQuestionSet,
+    q_idx: usize,
+    code: KeyCode,
+    _mods: KeyMods,
+) -> QuestionKeyAction {
+    let n = set.questions[q_idx].options.len();
+    if set.selections[q_idx].order.is_empty() {
+        set.selections[q_idx].order = (0..n).collect();
+    }
+    let sel = &mut set.selections[q_idx];
+    match code {
+        KeyCode::Char(' ') => {
+            sel.grabbed = !sel.grabbed;
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Up => {
+            if sel.grabbed && sel.cursor > 0 {
+                sel.order.swap(sel.cursor, sel.cursor - 1);
+                sel.cursor -= 1;
+            } else {
+                sel.cursor = sel.cursor.saturating_sub(1);
+            }
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Down => {
+            if sel.grabbed && sel.cursor + 1 < n {
+                sel.order.swap(sel.cursor, sel.cursor + 1);
+                sel.cursor += 1;
+            } else {
+                sel.cursor = (sel.cursor + 1).min(n.saturating_sub(1));
+            }
+            QuestionKeyAction::Stay
+        },
+        KeyCode::Enter => advance_question(set),
+        _ => QuestionKeyAction::Stay,
+    }
+}
+
+/// Route a keypress to the front question modal, resolving it into
+/// `Cmd::ResolveQuestion` when the user submits or dismisses. Exclusive while a
+/// question set is pending.
+fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
+    let action = {
+        let Some(set) = state.pending_question.front_mut() else {
+            return;
+        };
+        apply_question_key(set, code, mods)
+    };
+    let resolution = match action {
+        QuestionKeyAction::Stay => return,
+        QuestionKeyAction::Submit => {
+            let Some(set) = state.pending_question.front() else {
+                return;
+            };
+            crate::domain::QuestionResolution::Answered {
+                answers: set.build_answers(),
+                remember: set.remember,
+            }
+        },
+        QuestionKeyAction::Dismiss => crate::domain::QuestionResolution::Dismissed,
+        QuestionKeyAction::Reformulate => crate::domain::QuestionResolution::Reformulate,
+    };
+    if let Some(front) = state.pending_question.front() {
+        let call_id = front.call_id;
+        state.pending_question.pop_front();
+        cmds.push(Cmd::ResolveQuestion {
+            call_id,
+            resolution,
+        });
+    }
+}
+
 fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
     // Ctrl+C is the hard "leave the TUI" path. If work is active,
     // emit a cancellation first so shutdown does not wait on a live
@@ -696,6 +1126,14 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Inline question modal (ask_user_question): exclusive while a question set
+    // awaits answers. Sits ABOVE the Esc-cancel guard so Esc dismisses just the
+    // question and keeps the turn alive, mirroring the approval modal.
+    if !state.pending_question.is_empty() {
+        handle_question_key(state, cmds, code, mods);
+        return;
+    }
+
     // Pending confirmation modal (e.g. `/clear`): y/Enter accepts, n/Esc
     // declines. (This handler — and the render side — were missing, so the
     // confirmation was previously inert.)
@@ -737,13 +1175,15 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // conversation-list picker don't swallow the keystroke. The
     // actual clipboard read happens off-thread in the effect runner
     // (xclip / wl-paste / pngpaste / PowerShell can block for
-    // hundreds of ms on macOS); result comes back as
-    // `Msg::Paste(Image|Text)` or `Msg::TransientStatus` on failure.
+    // hundreds of ms on macOS); result comes back asynchronously as
+    // `Msg::ClipboardRead(Image|Text|Empty|Error)`.
     if mods.ctrl
         && code == KeyCode::Char('v')
         && matches!(state.ui.mode, UiMode::EditingInput)
         && state.confirm.is_none()
     {
+        // Mark a read in flight so a fast Enter waits for it (paste-race guard).
+        state.ui.clipboard_reads_pending += 1;
         cmds.push(Cmd::ReadClipboard);
         return;
     }
@@ -779,12 +1219,6 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // navigate, Enter loads the highlighted session, Esc dismisses.
     if matches!(state.ui.mode, UiMode::ConversationList { .. }) {
         handle_conversation_list_key(state, cmds, code);
-        return;
-    }
-
-    // Attachment-focus mode: keyboard navigates the bar.
-    if state.ui.attachment_focused {
-        handle_attachment_key(state, code);
         return;
     }
 
@@ -860,25 +1294,18 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // will run the follow-up with stale-filter + pending-msgs
     // guarantees intact.
     if code == KeyCode::Enter && !mods.shift {
-        let buf = state.ui.input_buffer.trim().to_string();
-        if buf.is_empty() {
+        // Paste-race guard: if a Ctrl+V clipboard read is still in flight, hold
+        // the submit until it lands. `handle_clipboard_read` re-runs
+        // `submit_current_input` once the last pending read drains, re-deriving
+        // the text + attachments so a just-pasted image is included rather than
+        // dropped (and no stray `[Image #N]` leaks into the next prompt).
+        if state.ui.clipboard_reads_pending > 0 {
+            if !state.ui.input_buffer.trim().is_empty() {
+                state.ui.submit_after_clipboard = true;
+            }
             return;
         }
-        if let Some(rest) = buf.strip_prefix('/') {
-            let slash = crate::app::event_source::parse_slash_command(rest);
-            state.ui.input_buffer.clear();
-            state.ui.input_cursor = 0;
-            state.ui.palette_cursor = None;
-            state.ui.pending_msgs.push_back(Msg::Slash(slash));
-        } else {
-            let text = std::mem::take(&mut state.ui.input_buffer);
-            state.ui.input_cursor = 0;
-            let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
-            state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
-                text,
-                attachment_ids,
-            });
-        }
+        submit_current_input(state);
         return;
     }
 
@@ -905,7 +1332,15 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 state.ui.input_history_cursor = None;
                 state.ui.history_draft.clear();
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
-                if pos > 0 {
+                // If a whole `[Image #N]` pill ends at the cursor, delete it and
+                // drop its attachment together; otherwise one codepoint.
+                if let Some((start, number)) =
+                    crate::domain::image_token::token_ending_at(&state.ui.input_buffer, pos)
+                {
+                    state.ui.input_buffer.drain(start..pos);
+                    state.ui.input_cursor = start;
+                    state.ui.attachments.retain(|a| a.number != number);
+                } else if pos > 0 {
                     let new_pos = state.ui.input_buffer.floor_char_boundary(pos - 1);
                     state.ui.input_buffer.drain(new_pos..pos);
                     state.ui.input_cursor = new_pos;
@@ -920,7 +1355,14 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 state.ui.input_history_cursor = None;
                 state.ui.history_draft.clear();
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
-                if pos < state.ui.input_buffer.len() {
+                // Symmetric to Backspace: a pill starting at the cursor deletes
+                // whole, taking its attachment with it.
+                if let Some((end, number)) =
+                    crate::domain::image_token::token_starting_at(&state.ui.input_buffer, pos)
+                {
+                    state.ui.input_buffer.drain(pos..end);
+                    state.ui.attachments.retain(|a| a.number != number);
+                } else if pos < state.ui.input_buffer.len() {
                     let next = state.ui.input_buffer.ceil_char_boundary(pos + 1);
                     state.ui.input_buffer.drain(pos..next);
                 }
@@ -945,25 +1387,15 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             KeyCode::Home => state.ui.input_cursor = 0,
             KeyCode::End => state.ui.input_cursor = state.ui.input_buffer.len(),
             KeyCode::Up => {
-                // Up precedence: attachment focus wins ONLY when the
-                // input is empty AND attachments exist — otherwise
-                // step back through input history.
-                if state.ui.input_buffer.is_empty() && !state.ui.attachments.is_empty() {
-                    state.ui.attachment_focused = true;
-                    state.ui.attachment_selected = state
-                        .ui
-                        .attachment_selected
-                        .min(state.ui.attachments.len() - 1);
-                } else {
-                    history_nav_back(state);
-                }
+                // Images are inline `[Image #N]` tokens now, so Up always steps
+                // back through input history — no attachment-bar contention.
+                history_nav_back(state);
             },
             KeyCode::Down => {
                 history_nav_forward(state);
             },
             KeyCode::Escape => {
-                state.ui.attachment_focused = false;
-                // Also clear any in-progress history nav.
+                // Clear any in-progress history nav.
                 state.ui.input_history_cursor = None;
                 state.ui.history_draft.clear();
             },
@@ -1003,45 +1435,6 @@ fn handle_conversation_list_key(state: &mut State, cmds: &mut Vec<Cmd>, code: Ke
         },
         KeyCode::Escape => {
             state.ui.mode = UiMode::EditingInput;
-        },
-        _ => {},
-    }
-}
-
-/// Handle keyboard input while the attachment bar has keyboard
-/// focus. Returns without emitting Cmds; attachment removal happens
-/// inline on state.ui.attachments.
-fn handle_attachment_key(state: &mut State, code: KeyCode) {
-    match code {
-        KeyCode::Escape | KeyCode::Down => {
-            state.ui.attachment_focused = false;
-        },
-        KeyCode::Left => {
-            if !state.ui.attachments.is_empty() {
-                state.ui.attachment_selected = state
-                    .ui
-                    .attachment_selected
-                    .checked_sub(1)
-                    .unwrap_or(state.ui.attachments.len() - 1);
-            }
-        },
-        KeyCode::Right => {
-            if !state.ui.attachments.is_empty() {
-                state.ui.attachment_selected =
-                    (state.ui.attachment_selected + 1) % state.ui.attachments.len();
-            }
-        },
-        KeyCode::Delete | KeyCode::Backspace => {
-            let idx = state.ui.attachment_selected;
-            if idx < state.ui.attachments.len() {
-                state.ui.attachments.remove(idx);
-            }
-            if state.ui.attachments.is_empty() {
-                state.ui.attachment_focused = false;
-                state.ui.attachment_selected = 0;
-            } else if state.ui.attachment_selected >= state.ui.attachments.len() {
-                state.ui.attachment_selected = state.ui.attachments.len() - 1;
-            }
         },
         _ => {},
     }
@@ -1140,31 +1533,85 @@ fn cycle_safety(current: crate::runtime::SafetyMode) -> crate::runtime::SafetyMo
     }
 }
 
-fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
-    match paste {
-        Paste::Text(t) => {
-            // Insert at the cursor and advance it, exactly like typing. Pasted
-            // text and individual key presses MUST agree on position: on the
-            // Windows console a paste arrives as a mix of coalesced `Paste`
-            // chunks and stray `Char` key events, so appending to the end here
-            // while keys insert at the cursor scrambled the result (uppercase
-            // letters piled at the front).
-            state.ui.input_history_cursor = None;
-            state.ui.history_draft.clear();
-            let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
-            state.ui.input_buffer.insert_str(pos, &t);
-            state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + t.len());
-            if state.ui.input_buffer.starts_with('/') {
-                state.ui.palette_cursor = Some(0);
-            }
-        },
-        Paste::Image { bytes, format } => {
+/// Build and enqueue the submit for whatever is in the input buffer *right now*
+/// — a slash command, or a prompt plus its staged attachments. Extracted from
+/// the Enter handler so the paste-race guard can replay it verbatim once a
+/// deferred clipboard read drains, re-deriving text + attachments (and thus
+/// picking up a freshly-pasted image). No-op on empty/whitespace input.
+fn submit_current_input(state: &mut State) {
+    let buf = state.ui.input_buffer.trim().to_string();
+    if buf.is_empty() {
+        return;
+    }
+    if let Some(rest) = buf.strip_prefix('/') {
+        let slash = crate::app::event_source::parse_slash_command(rest);
+        state.ui.input_buffer.clear();
+        state.ui.input_cursor = 0;
+        state.ui.palette_cursor = None;
+        state.ui.pending_msgs.push_back(Msg::Slash(slash));
+    } else {
+        let text = std::mem::take(&mut state.ui.input_buffer);
+        state.ui.input_cursor = 0;
+        let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
+        state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
+            text,
+            attachment_ids,
+        });
+    }
+}
+
+/// Insert `text` at the input cursor and advance past it, resetting history-nav
+/// and opening the slash palette if the buffer now starts with `/`. Shared by
+/// terminal bracketed paste (`handle_paste`) and Ctrl+V text
+/// (`handle_clipboard_read`) so the two agree on cursor handling.
+fn insert_text_at_cursor(state: &mut State, text: &str) {
+    // Insert at the cursor (not the end): on the Windows console a paste arrives
+    // as a mix of coalesced `Paste` chunks and stray `Char` key events, and
+    // appending here while keys insert at the cursor scrambled the result
+    // (uppercase letters piled at the front).
+    state.ui.input_history_cursor = None;
+    state.ui.history_draft.clear();
+    let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
+    state.ui.input_buffer.insert_str(pos, text);
+    state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + text.len());
+    if state.ui.input_buffer.starts_with('/') {
+        state.ui.palette_cursor = Some(0);
+    }
+}
+
+fn handle_paste(state: &mut State, paste: Paste) {
+    // Terminal bracketed paste (and the Windows key-burst coalescer) is always
+    // text; Ctrl+V clipboard reads — which can be images — arrive separately as
+    // `Msg::ClipboardRead`.
+    let Paste::Text(t) = paste;
+    insert_text_at_cursor(state, &t);
+}
+
+/// A `Cmd::ReadClipboard` (Ctrl+V) has resolved. Release the pending-read
+/// counter first — even on empty/error, so a submit held by the paste-race
+/// guard is never wedged — then apply the outcome, and finally fire any held
+/// submit once the last in-flight read has drained.
+fn handle_clipboard_read(state: &mut State, cmds: &mut Vec<Cmd>, read: ClipboardRead) {
+    state.ui.clipboard_reads_pending = state.ui.clipboard_reads_pending.saturating_sub(1);
+    match read {
+        ClipboardRead::Image { bytes, format } => {
             let id = state.ids.tool_call.next();
+            let number = state.ids.fresh_image();
             let temp_path = state
                 .temp_dir
                 .join(format!("mermaid-img-{}.{}", id, format));
+            // Splice the inline `[Image #N] ` token into the buffer at the
+            // cursor — the token IS how the image lives in the message now, so
+            // reset history-nav and advance past it.
+            state.ui.input_history_cursor = None;
+            state.ui.history_draft.clear();
+            let token = crate::domain::image_token::render_token(number);
+            let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
+            state.ui.input_buffer.insert_str(pos, &token);
+            state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + token.len());
             state.ui.attachments.push(super::state::Attachment {
                 id,
+                number,
                 base64_data: base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
                     &bytes,
@@ -1178,7 +1625,30 @@ fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
                 bytes,
                 format,
             });
+            // Proactively probe whether the current model can even see this
+            // image, so a no-vision warning appears now — before you send —
+            // rather than after a wasted turn.
+            cmds.push(Cmd::ProbeVision {
+                model_id: state.session.model_id.clone(),
+                warn: true,
+            });
         },
+        ClipboardRead::Text(t) => {
+            insert_text_at_cursor(state, &t);
+        },
+        ClipboardRead::Empty => {
+            push_system(state, cmds, "Clipboard is empty");
+        },
+        ClipboardRead::Error(text) => {
+            push_system(state, cmds, text);
+        },
+    }
+    // Release a submit held by the paste-race guard once the last pending read
+    // drains — re-deriving text + attachments so the freshly-pasted image is
+    // included.
+    if state.ui.clipboard_reads_pending == 0 && state.ui.submit_after_clipboard {
+        state.ui.submit_after_clipboard = false;
+        submit_current_input(state);
     }
 }
 
@@ -1205,29 +1675,40 @@ fn handle_submit_prompt(
         return;
     }
 
-    // Consume attachments by ID — ignoring stale IDs gracefully.
+    // Select images by the `[Image #N]` tokens present in the submitted text, in
+    // first-appearance order — the inline tokens are the source of truth. Scope
+    // by `attachment_ids` (the attachments this message owns) so the busy/queued
+    // path can never grab a later message's image. `images[i]` and
+    // `image_numbers[i]` stay parallel so the model correlates each image block
+    // with its `[Image #N]` reference.
+    let numbers = crate::domain::image_token::numbers_in_order(&text);
     let mut images: Vec<String> = Vec::new();
-    state.ui.attachments.retain(|a| {
-        if attachment_ids.contains(&a.id) {
+    let mut image_numbers: Vec<u64> = Vec::new();
+    for n in &numbers {
+        if let Some(a) = state
+            .ui
+            .attachments
+            .iter()
+            .find(|a| a.number == *n && attachment_ids.contains(&a.id))
+        {
             images.push(a.base64_data.clone());
-            false
-        } else {
-            true
+            image_numbers.push(*n);
         }
-    });
-    // Submitting consumes attachments while the bar may still be focused;
-    // re-clamp the selection so the render layer never indexes past the
-    // shrunken list (mirrors the Delete-key path in handle_key).
-    if state.ui.attachments.is_empty() {
-        state.ui.attachment_focused = false;
-        state.ui.attachment_selected = 0;
-    } else if state.ui.attachment_selected >= state.ui.attachments.len() {
-        state.ui.attachment_selected = state.ui.attachments.len() - 1;
+        // A token with no owned attachment (typed literal / mangled pill) stays
+        // as plain text and simply sends no image.
     }
+    // Drop every attachment this message owns — sent or orphaned — while keeping
+    // any that belong to still-queued messages.
+    state
+        .ui
+        .attachments
+        .retain(|a| !attachment_ids.contains(&a.id));
 
     let mut user_msg = ChatMessage::user(text.clone());
     if !images.is_empty() {
-        user_msg = user_msg.with_images(images);
+        user_msg = user_msg
+            .with_images(images)
+            .with_image_numbers(image_numbers);
     }
     state.session.append(user_msg, state.now);
     state.session.conversation.add_to_input_history(text);
@@ -1273,6 +1754,14 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             let pull_target = ollama_pull_target(&new_model);
             state.session.model_id = new_model.clone();
             state.runtime.set_model(&new_model);
+            // Refresh vision capability for the newly-selected model (set_model
+            // reset the snapshot to a static default). Nag only if an image is
+            // already staged — i.e. you switched TO a no-vision model with a
+            // pending paste; otherwise this just keeps `/doctor` honest.
+            cmds.push(Cmd::ProbeVision {
+                model_id: state.session.model_id.clone(),
+                warn: !state.ui.attachments.is_empty(),
+            });
             // The bottom status bar shows the new model — no banner.
             cmds.push(Cmd::PersistLastModel(new_model));
             if let Some(model) = pull_target {
@@ -3072,6 +3561,7 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
         }],
         thinking: None,
         images: None,
+        image_numbers: None,
         tool_calls: None,
         tool_call_id: None,
         tool_name: None,
@@ -3429,6 +3919,7 @@ mod tests {
                 actions: vec![],
                 thinking: None,
                 images: Some(vec![format!("png-base64-{}", i)]),
+                image_numbers: None,
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
@@ -3466,6 +3957,7 @@ mod tests {
                 actions: vec![],
                 thinking: None,
                 images: None,
+                image_numbers: None,
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
@@ -3482,6 +3974,7 @@ mod tests {
                 actions: vec![],
                 thinking: None,
                 images: Some(vec![format!("png-{}", i)]),
+                image_numbers: None,
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
@@ -3618,6 +4111,159 @@ mod tests {
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::ReadClipboard)));
     }
 
+    // ── Paste-race guard: Ctrl+V clipboard read vs. a fast Enter ────────
+
+    /// Ctrl+V marks a clipboard read in flight so a racing Enter can wait for it.
+    #[test]
+    fn ctrl_v_marks_a_clipboard_read_pending() {
+        let (state, _) = update(
+            fresh_state(),
+            Msg::Key(Key {
+                code: KeyCode::Char('v'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        assert_eq!(state.ui.clipboard_reads_pending, 1);
+    }
+
+    /// Enter while a clipboard read is still in flight must NOT submit: it holds
+    /// the submit (so the racing paste isn't dropped) and leaves the buffer intact.
+    #[test]
+    fn enter_while_clipboard_read_pending_holds_the_submit() {
+        let mut state = fresh_state();
+        for c in "hi".chars() {
+            let (s, _) = update(state, key(KeyCode::Char(c)));
+            state = s;
+        }
+        // Ctrl+V: a read is now pending.
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('v'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        // Enter: held, not submitted.
+        let (state, cmds) = update(state, key(KeyCode::Enter));
+        assert!(state.ui.submit_after_clipboard, "submit is held");
+        assert_eq!(
+            state.ui.input_buffer, "hi",
+            "buffer not consumed while held"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+            "no turn dispatched while a read is pending"
+        );
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .all(|m| m.role != MessageRole::User),
+            "no user message sent while the read is pending"
+        );
+    }
+
+    /// The full race: paste (read in flight) → Enter → the image lands. The held
+    /// submit fires exactly once, includes the pasted image, and leaves no stray
+    /// `[Image #N]` behind in the input.
+    #[test]
+    fn held_submit_fires_with_the_pasted_image_once_the_read_lands() {
+        let mut state = fresh_state();
+        for c in "look".chars() {
+            let (s, _) = update(state, key(KeyCode::Char(c)));
+            state = s;
+        }
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('v'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        let (state, _) = update(state, key(KeyCode::Enter));
+        // The async clipboard read resolves with an image.
+        let (state, cmds) = update(
+            state,
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Image {
+                bytes: vec![0x89, 0x50, 0x4E, 0x47],
+                format: "png".to_string(),
+            }),
+        );
+        assert_eq!(state.ui.clipboard_reads_pending, 0);
+        assert!(!state.ui.submit_after_clipboard, "held submit released");
+        let msg = state
+            .session
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .expect("the held submit fires once the image lands");
+        assert_eq!(
+            msg.images.as_ref().map(Vec::len),
+            Some(1),
+            "the pasted image is included, not dropped"
+        );
+        assert_eq!(msg.image_numbers, Some(vec![1]));
+        assert!(msg.content.contains("look") && msg.content.contains("[Image #1]"));
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
+        assert!(
+            state.ui.attachments.is_empty(),
+            "attachment consumed by submit"
+        );
+        assert!(
+            state.ui.input_buffer.is_empty(),
+            "no stray token left in the input"
+        );
+    }
+
+    /// An empty/failed clipboard read must still release a held submit (never
+    /// wedge it): the typed text goes out, just without an image.
+    #[test]
+    fn empty_clipboard_read_releases_held_submit_without_an_image() {
+        let mut state = fresh_state();
+        for c in "just text".chars() {
+            let (s, _) = update(state, key(KeyCode::Char(c)));
+            state = s;
+        }
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('v'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        let (state, _) = update(state, key(KeyCode::Enter));
+        let (state, _) = update(
+            state,
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Empty),
+        );
+        assert_eq!(state.ui.clipboard_reads_pending, 0);
+        assert!(!state.ui.submit_after_clipboard);
+        let msg = state
+            .session
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .expect("held submit still fires on an empty read");
+        assert!(msg.images.is_none(), "no image on an empty read");
+        assert!(msg.content.contains("just text"));
+    }
+
+    /// A terminal bracketed paste (`Msg::Paste`) is NOT a Ctrl+V clipboard read:
+    /// it must not touch the pending counter, which would otherwise let a stray
+    /// paste prematurely release a held submit.
+    #[test]
+    fn bracketed_text_paste_does_not_touch_the_clipboard_counter() {
+        let (state, _) = update(
+            fresh_state(),
+            Msg::Paste(super::super::msg::Paste::Text("pasted".to_string())),
+        );
+        assert_eq!(state.ui.clipboard_reads_pending, 0);
+        assert_eq!(state.ui.input_buffer, "pasted");
+    }
+
     /// Generic async feedback (`Msg::TransientStatus`, e.g. clipboard results)
     /// posts a system message into the chat transcript — there is no banner.
     #[test]
@@ -3641,9 +4287,151 @@ mod tests {
         );
     }
 
-    /// F14: a Paste::Image Msg (whatever its origin — bracketed paste,
-    /// Ctrl+V via clipboard, or a future drag-drop) creates an
-    /// Attachment entry and emits Cmd::WriteImageToTemp. This is the
+    // ── No-vision-model warning (Msg::ProviderVisionResolved) ───────────
+
+    fn vision_resolved(model_id: &str, supports_vision: Option<bool>, warn: bool) -> Msg {
+        Msg::ProviderVisionResolved {
+            model_id: model_id.to_string(),
+            supports_vision,
+            warn,
+        }
+    }
+
+    fn count_no_vision_notices(state: &State) -> usize {
+        state
+            .session
+            .messages()
+            .iter()
+            .filter(|m| m.content.contains("no vision capability"))
+            .count()
+    }
+
+    /// A no-vision model with an image in play warns exactly once per session.
+    #[test]
+    fn no_vision_model_warns_once() {
+        // fresh_state's model is "ollama/test".
+        let (state, cmds) = update(
+            fresh_state(),
+            vision_resolved("ollama/test", Some(false), true),
+        );
+        assert_eq!(
+            count_no_vision_notices(&state),
+            1,
+            "one warning on first probe"
+        );
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        // A second probe for the same model must not nag again.
+        let (state, _) = update(state, vision_resolved("ollama/test", Some(false), true));
+        assert_eq!(
+            count_no_vision_notices(&state),
+            1,
+            "warning is once-per-session"
+        );
+    }
+
+    /// A vision-capable model refreshes the display snapshot but never warns.
+    #[test]
+    fn vision_capable_model_updates_snapshot_without_warning() {
+        let state = fresh_state();
+        assert!(
+            !state.runtime.provider_capabilities.supports_vision,
+            "ollama's static default is false"
+        );
+        let (state, _) = update(state, vision_resolved("ollama/test", Some(true), true));
+        assert!(
+            state.runtime.provider_capabilities.supports_vision,
+            "snapshot refreshed to the probed value"
+        );
+        assert_eq!(count_no_vision_notices(&state), 0);
+    }
+
+    /// Unknown vision (`None` — non-Ollama or a failed probe) is ignored: no
+    /// warning and no snapshot change.
+    #[test]
+    fn unknown_vision_is_ignored() {
+        let (state, _) = update(fresh_state(), vision_resolved("ollama/test", None, true));
+        assert!(
+            !state.runtime.provider_capabilities.supports_vision,
+            "snapshot untouched on unknown"
+        );
+        assert_eq!(count_no_vision_notices(&state), 0);
+    }
+
+    /// `warn: false` (no image in play) suppresses the nag even for a no-vision
+    /// model — the probe is only keeping the snapshot honest.
+    #[test]
+    fn no_warn_flag_suppresses_the_nag() {
+        let (state, _) = update(
+            fresh_state(),
+            vision_resolved("ollama/test", Some(false), false),
+        );
+        assert_eq!(count_no_vision_notices(&state), 0);
+    }
+
+    /// A probe that lands after a `/model` switch (model_id no longer matches the
+    /// active model) is dropped — no warning for the model now in use.
+    #[test]
+    fn stale_vision_probe_is_dropped() {
+        let (state, _) = update(
+            fresh_state(),
+            vision_resolved("ollama/previous", Some(false), true),
+        );
+        assert_eq!(count_no_vision_notices(&state), 0);
+    }
+
+    /// Staging a pasted image proactively probes vision so the warning can appear
+    /// before the user sends.
+    #[test]
+    fn staging_an_image_probes_vision() {
+        let (_, cmds) = update(
+            fresh_state(),
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Image {
+                bytes: vec![1, 2, 3],
+                format: "png".to_string(),
+            }),
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ProbeVision { warn: true, .. })),
+            "pasting an image probes vision with warn=true"
+        );
+    }
+
+    /// Switching models probes the new model's vision; it only arms the warning
+    /// (`warn: true`) when an image is already staged.
+    #[test]
+    fn model_switch_probes_vision_and_arms_warning_only_with_staged_image() {
+        // No image staged → probe with warn=false (snapshot refresh only).
+        let (_, cmds) = update(
+            fresh_state(),
+            Msg::Slash(SlashCmd::Model(Some("ollama/other".to_string()))),
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ProbeVision { warn: false, .. })),
+            "switching with no staged image probes with warn=false"
+        );
+        // Stage an image, then switch → probe with warn=true.
+        let (state, _) = update(
+            fresh_state(),
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Image {
+                bytes: vec![9],
+                format: "png".to_string(),
+            }),
+        );
+        let (_, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Model(Some("ollama/other".to_string()))),
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ProbeVision { warn: true, .. })),
+            "switching with a staged image arms the warning"
+        );
+    }
+
+    /// F14: a `Msg::ClipboardRead(Image)` (the Ctrl+V clipboard read result)
+    /// creates an Attachment entry and emits Cmd::WriteImageToTemp. This is the
     /// existing contract; the test pins it so the Ctrl+V wiring has a
     /// known-good downstream to rely on.
     #[test]
@@ -3651,7 +4439,7 @@ mod tests {
         let state = fresh_state();
         let (state, cmds) = update(
             state,
-            Msg::Paste(super::super::msg::Paste::Image {
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Image {
                 bytes: vec![0x89, 0x50, 0x4E, 0x47], // PNG magic bytes
                 format: "png".to_string(),
             }),
@@ -3660,9 +4448,165 @@ mod tests {
         let att = &state.ui.attachments[0];
         assert_eq!(att.format, "png");
         assert_eq!(att.size_bytes, 4);
+        // First paste mints global image #1, splices the inline pill into the
+        // buffer, and advances the cursor past it.
+        assert_eq!(att.number, 1);
+        assert_eq!(state.ui.input_buffer, "[Image #1] ");
+        assert_eq!(state.ui.input_cursor, "[Image #1] ".len());
         assert!(cmds.iter().any(|c| {
             matches!(c, Cmd::WriteImageToTemp { path, .. } if path == &att.temp_path)
         }));
+    }
+
+    #[test]
+    fn atomic_backspace_deletes_whole_pill_and_its_attachment() {
+        let (state, _) = update(
+            fresh_state(),
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Image {
+                bytes: vec![1, 2, 3, 4],
+                format: "png".to_string(),
+            }),
+        );
+        assert_eq!(state.ui.input_buffer, "[Image #1] ");
+        // Backspace #1: normal delete of the trailing space; pill intact.
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Backspace,
+                modifiers: KeyMods::default(),
+            }),
+        );
+        assert_eq!(state.ui.input_buffer, "[Image #1]");
+        assert_eq!(state.ui.attachments.len(), 1, "pill intact → image intact");
+        // Backspace #2: cursor now abuts the pill → whole pill + image removed.
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Backspace,
+                modifiers: KeyMods::default(),
+            }),
+        );
+        assert_eq!(state.ui.input_buffer, "");
+        assert!(state.ui.attachments.is_empty(), "pill gone → image gone");
+    }
+
+    #[test]
+    fn submit_sends_images_in_token_order_and_drops_orphans() {
+        let mut state = fresh_state();
+        state.ui.attachments.push(test_attachment(2)); // id 2, number 2
+        state.ui.attachments.push(test_attachment(1)); // id 1, number 1
+        // References #2 before #1, plus a phantom #9 that owns no attachment.
+        let (state, _) = update(
+            state,
+            Msg::SubmitPrompt {
+                text: "[Image #2] a [Image #1] b [Image #9]".to_string(),
+                attachment_ids: vec![1, 2],
+            },
+        );
+        let msg = state
+            .session
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .expect("submitted user message");
+        // First-appearance order (#2 then #1); the phantom #9 sends no image.
+        assert_eq!(msg.image_numbers, Some(vec![2, 1]));
+        assert_eq!(msg.images.as_ref().map(Vec::len), Some(2));
+        assert!(
+            state.ui.attachments.is_empty(),
+            "owned attachments consumed / GC'd"
+        );
+    }
+
+    #[test]
+    fn submit_with_typed_literal_and_no_attachment_sends_no_image() {
+        let (state, _) = update(
+            fresh_state(),
+            Msg::SubmitPrompt {
+                text: "compare [Image #99] please".to_string(),
+                attachment_ids: vec![],
+            },
+        );
+        let msg = state
+            .session
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .expect("submitted user message");
+        assert!(msg.images.is_none());
+        assert!(
+            msg.content.contains("[Image #99]"),
+            "the literal stays in the text"
+        );
+    }
+
+    #[test]
+    fn image_numbering_is_global_and_monotonic_across_messages() {
+        // Message 1: paste (→ #1) and submit.
+        let (state, _) = update(
+            fresh_state(),
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Image {
+                bytes: vec![1],
+                format: "png".to_string(),
+            }),
+        );
+        assert_eq!(state.ui.attachments[0].number, 1);
+        let text1 = state.ui.input_buffer.clone();
+        let ids1: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
+        let (state, _) = update(
+            state,
+            Msg::SubmitPrompt {
+                text: text1,
+                attachment_ids: ids1,
+            },
+        );
+        assert_eq!(
+            state
+                .session
+                .messages()
+                .iter()
+                .rev()
+                .find(|m| m.role == MessageRole::User)
+                .unwrap()
+                .image_numbers,
+            Some(vec![1])
+        );
+        // Message 2: the next paste keeps climbing to #2 (global, not per-message).
+        let (state, _) = update(
+            state,
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Image {
+                bytes: vec![2],
+                format: "png".to_string(),
+            }),
+        );
+        assert_eq!(state.ui.attachments[0].number, 2);
+        assert_eq!(state.ui.input_buffer, "[Image #2] ");
+    }
+
+    #[test]
+    fn resume_continues_image_numbering_past_transcript_max() {
+        let mut state = fresh_state();
+        let mut history = crate::session::ConversationHistory::new(
+            "proj".to_string(),
+            "model".to_string(),
+            state.now,
+        );
+        history
+            .messages
+            .push(ChatMessage::user("look [Image #16]").with_image_numbers(vec![16]));
+        state.seed_conversation(history);
+        // A paste after resume continues past the transcript's #16 → #17, not #1.
+        let (state, _) = update(
+            state,
+            Msg::ClipboardRead(super::super::msg::ClipboardRead::Image {
+                bytes: vec![1],
+                format: "png".to_string(),
+            }),
+        );
+        assert_eq!(state.ui.attachments[0].number, 17);
+        assert_eq!(state.ui.input_buffer, "[Image #17] ");
     }
 
     #[test]
@@ -6128,6 +7072,8 @@ mod tests {
     fn test_attachment(id: u64) -> crate::domain::Attachment {
         crate::domain::Attachment {
             id,
+            // Mirror id → number so a test can reference the pill as `[Image #id]`.
+            number: id,
             base64_data: "AAAA".to_string(),
             temp_path: PathBuf::from(format!("/tmp/a{id}.png")),
             size_bytes: 4,
@@ -6155,21 +7101,20 @@ mod tests {
         // FIFO drains.
         let mut state = fresh_state();
         state.turn = generating(5, "answer");
-        state.ui.attachments.push(test_attachment(1));
+        state.ui.attachments.push(test_attachment(1)); // id 1, number 1
 
-        // Busy → queued, capturing attachment id 1.
+        // Busy → queued, capturing id 1. The text carries its inline pill.
         let (mut state, _) = update(
             state,
             Msg::SubmitPrompt {
-                text: "queued".to_string(),
+                text: "[Image #1] queued".to_string(),
                 attachment_ids: vec![1],
             },
         );
         assert_eq!(state.ui.queued_messages.len(), 1);
 
-        // User swaps attachments while the turn is still running.
-        state.ui.attachments.clear();
-        state.ui.attachments.push(test_attachment(2));
+        // User preps a different image for the NEXT message while the turn runs.
+        state.ui.attachments.push(test_attachment(2)); // id 2, number 2
 
         // Turn completes → queued message drains and re-submits.
         let (state, _) = update(
@@ -6182,17 +7127,18 @@ mod tests {
             },
         );
 
-        // The re-submit targeted attachment id 1 (now gone), so live id 2 is
-        // untouched — proving the queued ids were used, not the live set.
+        // The queued message consumed image #1 (matched by its token + queued id
+        // scope); the live id 2 is untouched — proving the queue-time set was
+        // used, not whatever is live at drain.
         assert_eq!(state.ui.attachments.len(), 1);
         assert_eq!(state.ui.attachments[0].id, 2);
         let queued_msg = state
             .session
             .messages()
             .iter()
-            .find(|m| m.role == MessageRole::User && m.content == "queued")
+            .find(|m| m.role == MessageRole::User && m.content == "[Image #1] queued")
             .expect("queued message submitted");
-        assert!(queued_msg.images.is_none());
+        assert_eq!(queued_msg.image_numbers, Some(vec![1]));
     }
 
     #[test]
@@ -6279,27 +7225,6 @@ mod tests {
         assert!(last.content.contains("half written"));
         assert!(last.content.contains("[interrupted]"));
         assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
-    }
-
-    #[test]
-    fn submit_clears_attachment_focus_when_consumed() {
-        // Axis 1 #7: submitting while the attachment bar is focused must
-        // re-clamp the selection so the render layer can't index past the
-        // now-empty list.
-        let mut state = fresh_state();
-        state.ui.attachments.push(test_attachment(1));
-        state.ui.attachment_focused = true;
-        state.ui.attachment_selected = 0;
-        let (state, _) = update(
-            state,
-            Msg::SubmitPrompt {
-                text: "go".to_string(),
-                attachment_ids: vec![1],
-            },
-        );
-        assert!(state.ui.attachments.is_empty());
-        assert!(!state.ui.attachment_focused);
-        assert_eq!(state.ui.attachment_selected, 0);
     }
 
     #[test]

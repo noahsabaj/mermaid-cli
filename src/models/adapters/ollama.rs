@@ -114,6 +114,11 @@ pub struct OllamaAdapter {
     /// `None` until resolved; recent Ollama 400s a `think` field sent to a
     /// non-thinking model, so the send is gated on this (#122).
     thinking_cap: tokio::sync::OnceCell<bool>,
+    /// Whether the model advertises the `vision` capability via `/api/show`.
+    /// Probed lazily and cached like `thinking_cap`. Drives the no-vision-model
+    /// warning (sending an image to a model that can't see it is silently
+    /// ignored by Ollama); never gates the send.
+    vision_cap: tokio::sync::OnceCell<bool>,
     /// Start a dead *local* server via `ollama::ensure_running` when a
     /// request is refused (`BackendConfig::ollama_autostart`). The user should
     /// never have to leave mermaid to run `ollama serve`.
@@ -219,6 +224,7 @@ impl OllamaAdapter {
             model_name: model_name.to_string(),
             capabilities,
             thinking_cap: tokio::sync::OnceCell::new(),
+            vision_cap: tokio::sync::OnceCell::new(),
             autostart: config.ollama_autostart,
             status_notify: None,
         })
@@ -245,6 +251,25 @@ impl OllamaAdapter {
             .get_or_try_init(|| async {
                 match self.probe_capabilities().await {
                     Some(caps) if !caps.is_empty() => Ok(caps.iter().any(|c| c == "thinking")),
+                    _ => Err(()),
+                }
+            })
+            .await
+            .unwrap_or(&true)
+    }
+
+    /// Whether this model advertises the `vision` capability via `/api/show`,
+    /// probed lazily and cached. Mirrors `thinking_supported`: a failed/empty
+    /// probe is treated as "unknown" and NOT cached (so a transient blip
+    /// retries), defaulting to `true` so we never falsely warn "no vision" on an
+    /// older Ollama that omits the capabilities array. Consumed by the provider
+    /// to drive the no-vision-model warning; never gates the send.
+    pub async fn vision_supported(&self) -> bool {
+        *self
+            .vision_cap
+            .get_or_try_init(|| async {
+                match self.probe_capabilities().await {
+                    Some(caps) if !caps.is_empty() => Ok(caps.iter().any(|c| c == "vision")),
                     _ => Err(()),
                 }
             })
