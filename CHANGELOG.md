@@ -118,6 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The queued-message FIFO is now bounded.** Prompts typed while a turn is in
+  flight are queued and auto-submitted when it finishes; holding Enter through a
+  long turn could grow that queue without limit. It's now capped at 32, dropping
+  the oldest with a warning.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
