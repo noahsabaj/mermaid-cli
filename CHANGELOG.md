@@ -118,6 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`temperature = 0.0` is now honored.** Setting an explicit `0.0`
+  (deterministic / greedy decoding) was silently overridden with the `0.7`
+  default — a leftover `> 0.0` guard treated a deliberate zero as "unset." It now
+  passes through verbatim.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
