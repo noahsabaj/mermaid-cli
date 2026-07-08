@@ -421,7 +421,9 @@ impl Cmd {
             },
             Cmd::ResolveQuestion { call_id, resolution } => {
                 let kind = match resolution {
-                    QuestionResolution::Answered(a) => format!("answered({})", a.len()),
+                    QuestionResolution::Answered { answers, .. } => {
+                        format!("answered({})", answers.len())
+                    },
                     QuestionResolution::Dismissed => "dismissed".to_string(),
                     QuestionResolution::Reformulate => "reformulate".to_string(),
                 };

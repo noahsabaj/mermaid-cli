@@ -753,6 +753,18 @@ fn apply_question_key(
         return QuestionKeyAction::Reformulate;
     }
 
+    // `r` = toggle "remember my answers across sessions" (available where `c`
+    // is). The tool persists answers keyed by each question's `memory_key`.
+    if code == KeyCode::Char('r')
+        && mods.is_empty()
+        && (set.active >= nq
+            || (set.questions[set.active].is_choice()
+                && set.selections[set.active].cursor != set.other_row(set.active)))
+    {
+        set.remember = !set.remember;
+        return QuestionKeyAction::Stay;
+    }
+
     // Tab-strip navigation between questions / the review screen. Tab + Right
     // move forward; BackTab + Left move back (no in-field cursor in Stage 1).
     let go_next = code == KeyCode::Tab || (mods.is_empty() && code == KeyCode::Right);
@@ -970,7 +982,10 @@ fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mo
             let Some(set) = state.pending_question.front() else {
                 return;
             };
-            crate::domain::QuestionResolution::Answered(set.build_answers())
+            crate::domain::QuestionResolution::Answered {
+                answers: set.build_answers(),
+                remember: set.remember,
+            }
         },
         QuestionKeyAction::Dismiss => crate::domain::QuestionResolution::Dismissed,
         QuestionKeyAction::Reformulate => crate::domain::QuestionResolution::Reformulate,

@@ -105,6 +105,7 @@ mod tests {
                 recommended: true,
                 preview: None,
             }],
+            memory_key: None,
         }]
     }
 
@@ -131,14 +132,26 @@ mod tests {
             note: None,
         }];
         for _ in 0..100 {
-            broker.resolve(ToolCallId(1), QuestionResolution::Answered(answers.clone()));
+            broker.resolve(
+                ToolCallId(1),
+                QuestionResolution::Answered {
+                    answers: answers.clone(),
+                    remember: false,
+                },
+            );
             tokio::task::yield_now().await;
             if broker.pending.lock().unwrap().is_empty() {
                 break;
             }
         }
         let resolution = handle.await.unwrap();
-        assert_eq!(resolution, QuestionResolution::Answered(answers));
+        assert_eq!(
+            resolution,
+            QuestionResolution::Answered {
+                answers,
+                remember: false
+            }
+        );
     }
 
     #[tokio::test]

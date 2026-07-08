@@ -36,6 +36,11 @@ pub struct Question {
     /// recommended option is listed first and flagged. Empty for input kinds.
     #[serde(default)]
     pub options: Vec<QuestionOption>,
+    /// Stable key for remembering the user's answer across sessions. When set
+    /// and the user opts to remember, a later question with the same key
+    /// auto-answers without prompting.
+    #[serde(default)]
+    pub memory_key: Option<String>,
 }
 
 impl Question {
@@ -201,6 +206,9 @@ pub struct PendingQuestionSet {
     pub review_cursor: usize,
     /// When true, keystrokes edit the active question's note (toggled with `n`).
     pub editing_note: bool,
+    /// When true, the user opted to remember these answers across sessions
+    /// (toggled with `r`); the tool persists answers keyed by `memory_key`.
+    pub remember: bool,
 }
 
 /// Live selection state for one question.
@@ -242,6 +250,7 @@ impl PendingQuestionSet {
             selections,
             review_cursor: 0,
             editing_note: false,
+            remember: false,
         }
     }
 
@@ -331,7 +340,11 @@ pub fn rank_order(q: &Question, sel: &QuestionSelection) -> Vec<usize> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum QuestionResolution {
     /// The user submitted answers (some questions may be unanswered).
-    Answered(Vec<QuestionAnswer>),
+    Answered {
+        answers: Vec<QuestionAnswer>,
+        /// The user asked to remember these answers across sessions (`r`).
+        remember: bool,
+    },
     /// The user dismissed the prompt (Esc / Cancel) or the turn was cancelled.
     Dismissed,
     /// The user chose "Chat about this" — bounce the set back to the model to

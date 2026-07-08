@@ -9,6 +9,8 @@
 //! rather than blocking. Asking mutates nothing, so the tool is ungated (it
 //! never touches the policy gate) and runs in every safety mode.
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -145,11 +147,17 @@ fn parse_question(v: &serde_json::Value) -> Result<Question, String> {
         .and_then(|x| x.as_array())
         .map(|arr| arr.iter().filter_map(parse_option).collect::<Vec<_>>())
         .unwrap_or_default();
+    let memory_key = v
+        .get("memoryKey")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let q = Question {
         header,
         question,
         kind,
         options,
+        memory_key,
     };
     if q.is_choice() && q.options.is_empty() {
         return Err(format!(
@@ -158,6 +166,44 @@ fn parse_question(v: &serde_json::Value) -> Result<Question, String> {
         ));
     }
     Ok(q)
+}
+
+/// A remembered answer, persisted across sessions keyed by a question's
+/// `memory_key`.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct StoredAnswer {
+    selected: Vec<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+fn prefs_path() -> Option<PathBuf> {
+    crate::app::get_config_dir()
+        .ok()
+        .map(|d| d.join("question_prefs.json"))
+}
+
+fn load_prefs_at(path: &Path) -> HashMap<String, StoredAnswer> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_prefs_at(path: &Path, map: &HashMap<String, StoredAnswer>) {
+    if let Ok(json) = serde_json::to_string_pretty(map) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn load_prefs() -> HashMap<String, StoredAnswer> {
+    prefs_path().map(|p| load_prefs_at(&p)).unwrap_or_default()
+}
+
+fn save_prefs(map: &HashMap<String, StoredAnswer>) {
+    if let Some(p) = prefs_path() {
+        save_prefs_at(&p, map);
+    }
 }
 
 #[async_trait]
@@ -172,7 +218,8 @@ impl ToolExecutor for AskUserQuestionTool {
             description: "Ask the user one or more multiple-choice questions when you are genuinely blocked on a decision that is theirs to make — one you cannot resolve from their request, the code, or a sensible default. The terminal renders an interactive selectable prompt and the user's answer comes back as this tool's result. \
                 Use it only when the answer changes what you do next; do NOT use it for choices with an obvious default (just pick, say so, and proceed) or for facts you can verify yourself. The user can always type a custom \"Other\" answer, so your options need not be exhaustive. \
                 Batch up to 4 independent questions in one call rather than asking one at a time. Set each question's `kind`: `select` (pick one), `multiSelect` (pick any), `rank` (reorder options), or an input kind that collects a typed value — `text` (optional `validate`), `number` (`min`/`max`/`step`/`slider`), `date`, or `path`. Choice kinds need `options`; list a recommended option first and mark it by ending its label with \"(Recommended)\". \
-                Attach an optional preview to an option (a `content` string plus an optional `diff` flag) to show an ASCII mockup, code, config, or a unified diff side-by-side when that option is focused — a diff of the change an option would make is often clearer than a text description."
+                Attach an optional preview to an option (a `content` string plus an optional `diff` flag) to show an ASCII mockup, code, config, or a unified diff side-by-side when that option is focused — a diff of the change an option would make is often clearer than a text description. \
+                Set `memoryKey` on a question to let the user remember the answer across sessions, so settled preferences (package manager, code style) aren't re-asked."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -205,6 +252,7 @@ impl ToolExecutor for AskUserQuestionTool {
                                 "step": { "type": "number", "description": "For `number`: increment for Up/Down." },
                                 "slider": { "type": "boolean", "description": "For `number`: show a slider bar (needs `min` and `max`)." },
                                 "mustExist": { "type": "boolean", "description": "For `path`: hint that the path should already exist." },
+                                "memoryKey": { "type": "string", "description": "Stable key to remember this answer across sessions. If the user opts in, a later question with the same key auto-answers without prompting. Use for settled preferences (e.g. package manager, code style)." },
                                 "options": {
                                     "type": "array",
                                     "description": "Options for choice kinds (select/multiSelect/rank); omit for input kinds. Two or more; long lists scroll.",
@@ -267,6 +315,33 @@ impl ToolExecutor for AskUserQuestionTool {
             }
         }
 
+        // Cross-session preferences: if every question already has a remembered
+        // answer, return them without prompting (works interactively and
+        // headlessly) so settled decisions aren't re-asked every session.
+        let prefs = load_prefs();
+        if questions
+            .iter()
+            .all(|q| q.memory_key.as_ref().is_some_and(|k| prefs.contains_key(k)))
+        {
+            let answers: Vec<QuestionAnswer> = questions
+                .iter()
+                .map(|q| {
+                    let stored = &prefs[q.memory_key.as_ref().unwrap()];
+                    QuestionAnswer {
+                        header: q.header.clone(),
+                        question: q.question.clone(),
+                        selected: stored.selected.clone(),
+                        note: stored.note.clone(),
+                    }
+                })
+                .collect();
+            return ToolOutcome::success(
+                format_answers(&answers),
+                format!("{} (remembered)", summarize_answers(&answers)),
+                secs(),
+            );
+        }
+
         let Some(broker) = ctx.questions.as_ref() else {
             // Headless / no interactive terminal: nobody to ask. Proceed rather
             // than block an automated run.
@@ -279,10 +354,27 @@ impl ToolExecutor for AskUserQuestionTool {
         };
 
         match broker
-            .request(&ctx.token, ctx.turn, ctx.call_id, questions)
+            .request(&ctx.token, ctx.turn, ctx.call_id, questions.clone())
             .await
         {
-            QuestionResolution::Answered(answers) => {
+            QuestionResolution::Answered { answers, remember } => {
+                if remember {
+                    let mut prefs = prefs;
+                    for (q, a) in questions.iter().zip(&answers) {
+                        if let Some(key) = &q.memory_key
+                            && !a.selected.is_empty()
+                        {
+                            prefs.insert(
+                                key.clone(),
+                                StoredAnswer {
+                                    selected: a.selected.clone(),
+                                    note: a.note.clone(),
+                                },
+                            );
+                        }
+                    }
+                    save_prefs(&prefs);
+                }
                 ToolOutcome::success(format_answers(&answers), summarize_answers(&answers), secs())
             },
             QuestionResolution::Dismissed => ToolOutcome::success(
@@ -368,5 +460,27 @@ mod tests {
             .await;
         assert_eq!(out.status, crate::domain::ToolStatus::Success);
         assert!(out.model_content.contains("Proceed"));
+    }
+
+    #[test]
+    fn prefs_round_trip() {
+        let dir = std::env::temp_dir().join(format!("mermaid_qprefs_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prefs.json");
+        let mut map = HashMap::new();
+        map.insert(
+            "pkg_mgr".to_string(),
+            StoredAnswer {
+                selected: vec!["pnpm".to_string()],
+                note: None,
+            },
+        );
+        save_prefs_at(&path, &map);
+        let loaded = load_prefs_at(&path);
+        assert_eq!(
+            loaded.get("pkg_mgr").map(|s| s.selected.clone()),
+            Some(vec!["pnpm".to_string()])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

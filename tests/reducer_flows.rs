@@ -920,6 +920,7 @@ fn question(header: &str, text: &str, multi: bool, labels: &[&str]) -> Question 
             QuestionKind::Select
         },
         options: labels.iter().map(|l| opt(l)).collect(),
+        memory_key: None,
     }
 }
 
@@ -949,7 +950,7 @@ fn resolution(cmds: &[Cmd]) -> Option<&QuestionResolution> {
 
 fn assert_answered(cmds: &[Cmd], expected: &[&[&str]]) {
     match resolution(cmds) {
-        Some(QuestionResolution::Answered(ans)) => {
+        Some(QuestionResolution::Answered { answers: ans, .. }) => {
             assert_eq!(ans.len(), expected.len(), "answer count");
             for (a, exp) in ans.iter().zip(expected) {
                 let got: Vec<&str> = a.selected.iter().map(|s| s.as_str()).collect();
@@ -1052,7 +1053,7 @@ fn note_rides_back_with_the_answer() {
     let (state, cmds) = press(state, KeyCode::Char('1')); // pick A -> resolves
     assert!(state.pending_question.is_empty());
     match resolution(&cmds) {
-        Some(QuestionResolution::Answered(ans)) => {
+        Some(QuestionResolution::Answered { answers: ans, .. }) => {
             assert_eq!(ans[0].selected, vec!["A".to_string()]);
             assert_eq!(ans[0].note.as_deref(), Some("prefer A"));
         },
@@ -1066,6 +1067,7 @@ fn input_q(kind: QuestionKind) -> Question {
         question: "Q?".to_string(),
         kind,
         options: vec![],
+        memory_key: None,
     }
 }
 
@@ -1075,6 +1077,7 @@ fn rank_q(labels: &[&str]) -> Question {
         question: "Q?".to_string(),
         kind: QuestionKind::Rank,
         options: labels.iter().map(|l| opt(l)).collect(),
+        memory_key: None,
     }
 }
 
@@ -1144,4 +1147,15 @@ fn chat_about_this_reformulates() {
         resolution(&cmds),
         Some(QuestionResolution::Reformulate)
     ));
+}
+
+#[test]
+fn r_toggles_remember_flag() {
+    let state = seed_questions(vec![question("DB", "Which?", false, &["A", "B"])]);
+    let (state, _) = press(state, KeyCode::Char('r')); // remember -> true
+    let (_state, cmds) = press(state, KeyCode::Char('1')); // pick A -> resolves
+    match resolution(&cmds) {
+        Some(QuestionResolution::Answered { remember, .. }) => assert!(*remember),
+        other => panic!("expected Answered, got {other:?}"),
+    }
 }

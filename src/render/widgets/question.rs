@@ -244,6 +244,7 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
     let dim = theme.colors.text_disabled.to_color();
     let white = Color::White;
     let nq = set.questions.len();
+    let has_memory = set.questions.iter().any(|q| q.memory_key.is_some());
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Tab strip for batched questions: chips for each question plus a trailing
@@ -291,6 +292,13 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
                 Style::default().fg(brand),
             )));
         }
+        if has_memory {
+            let mark = if set.remember { "[x]" } else { "[ ]" };
+            lines.push(Line::from(Span::styled(
+                format!("{mark} Remember my answers across sessions (r)"),
+                Style::default().fg(if set.remember { brand } else { dim }),
+            )));
+        }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Ready to submit your answers?",
@@ -312,10 +320,12 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
             ]));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Enter to select | Up/Down to navigate | c: chat | Esc to cancel",
-            Style::default().fg(dim),
-        )));
+        let mut foot = String::from("Enter to select | Up/Down to navigate | c: chat");
+        if has_memory {
+            foot.push_str(" | r: remember");
+        }
+        foot.push_str(" | Esc to cancel");
+        lines.push(Line::from(Span::styled(foot, Style::default().fg(dim))));
         return lines;
     }
 
@@ -379,6 +389,9 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
     }
     if q.is_choice() {
         hint.push_str(" | n: notes | c: chat");
+        if has_memory {
+            hint.push_str(" | r: remember");
+        }
     }
     hint.push_str(" | Esc to cancel");
     lines.push(Line::from(Span::styled(hint, Style::default().fg(dim))));
@@ -540,6 +553,7 @@ mod tests {
                 ),
                 opt_with_preview("B", None),
             ],
+            memory_key: None,
         };
         let set = PendingQuestionSet::new(TurnId(1), ToolCallId(1), vec![q]);
         let theme = Theme::dark();
