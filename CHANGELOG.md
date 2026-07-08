@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NVIDIA NIM is now a built-in provider.** Reach NVIDIA-hosted models through
+  their OpenAI-compatible endpoint with `mermaid --model nvidia/<model>` and an
+  `NVIDIA_API_KEY` — for example `nvidia/z-ai/glm-5.2` (GLM-5.2). Reasoning-model
+  traces (streamed as `delta.reasoning_content`) are surfaced, and tool calling
+  works as with any built-in provider.
 - **Pasted images are now inline `[Image #N]` tokens in the prompt.** Instead of
   a separate `[Image #1] (PNG, 1KB)  (↑ to select)` bar floating above the input
   box, Ctrl+V splices an inline `[Image #N]` pill into the message text at the
