@@ -118,6 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A misbehaving Ollama stream can't exhaust memory.** The newline-delimited
+  JSON reassembly buffer had no cap, so an endpoint that streamed bytes without
+  ever sending a newline would grow it until OOM. It now enforces the same 8 MiB
+  reassembly cap the SSE (Anthropic/Gemini/OpenAI) streams already had.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
