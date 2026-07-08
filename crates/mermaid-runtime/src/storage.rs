@@ -10,18 +10,18 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-// Bumped to 4 for the additive `outcomes` table (verifiable outcome + reward
-// capture — the fuel the self-improving loop reads). It's additive (a
-// `CREATE TABLE IF NOT EXISTS` in the baseline), but the bump lets a DB already
-// at v3 re-run the migration once to pick it up. The bump is load-bearing
-// alongside the F17 early-return in `init_schema`: a DB at an older version
-// still runs the migration (the idempotent baseline plus any per-version step
-// dispatched by `migrate_within_txn`) exactly once, while an already-current DB
-// skips the write lock entirely.
+// Bumped to 5 for the additive `tasks.prompt` column (the daemon scheduler
+// executes queued tasks later, so the full prompt must be persisted at enqueue
+// time — `title` is truncated at 80 chars). Additive, but the bump lets a DB
+// already at v4 re-run the migration once to pick it up. The bump is
+// load-bearing alongside the F17 early-return in `init_schema`: a DB at an
+// older version still runs the migration (the idempotent baseline plus any
+// per-version step dispatched by `migrate_within_txn`) exactly once, while an
+// already-current DB skips the write lock entirely.
 //
 // History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
-// the F75 covering indexes.
-const SCHEMA_VERSION: i32 = 4;
+// the F75 covering indexes; v4 added the `outcomes` table.
+const SCHEMA_VERSION: i32 = 5;
 
 /// `tasks.owner_kind` value for a task the daemon runs in-process. Only these are
 /// reset by `reconcile_after_restart`; a `NULL` owner (an interactive CLI run, or
@@ -148,6 +148,10 @@ pub struct TaskRecord {
     pub created_at: String,
     pub updated_at: String,
     pub final_report: Option<String>,
+    /// Full prompt for deferred daemon execution (v5). `None` for
+    /// metadata-only tasks (interactive CLI runs, external `create_task`
+    /// callers) — the scheduler never claims those.
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +214,9 @@ pub struct NewTask {
     /// default, used by interactive CLI runs and any other creator — is left
     /// untouched by reconcile so a live session isn't clobbered (F18/RC-E).
     pub owner_kind: Option<String>,
+    /// Full prompt for deferred execution by the daemon scheduler. Tasks
+    /// without one are metadata-only and are never claimed.
+    pub prompt: Option<String>,
 }
 
 impl NewTask {
@@ -225,6 +232,7 @@ impl NewTask {
             priority: TaskPriority::Normal,
             conversation_id: None,
             owner_kind: None,
+            prompt: None,
         }
     }
 
@@ -233,6 +241,17 @@ impl NewTask {
     /// interactive CLI runs so they survive a daemon restart.
     pub fn daemon_owned(mut self) -> Self {
         self.owner_kind = Some(OWNER_KIND_DAEMON.to_string());
+        self
+    }
+
+    /// Persist the full prompt so the scheduler can execute this task later.
+    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.prompt = Some(prompt.into());
+        self
+    }
+
+    pub fn with_priority(mut self, priority: TaskPriority) -> Self {
+        self.priority = priority;
         self
     }
 }
@@ -995,6 +1014,10 @@ impl RuntimeStore {
         // `NULL` (treated as un-owned, so reconcile leaves them alone), and only
         // tasks the daemon explicitly marks `daemon` are reset on restart.
         ensure_column(&self.conn, "tasks", "owner_kind", "TEXT")?;
+        // v5: full prompt for scheduler-executed tasks. Nullable — only tasks
+        // enqueued for deferred daemon execution set it; the claim query treats
+        // a NULL prompt as "metadata-only task, never claim".
+        ensure_column(&self.conn, "tasks", "prompt", "TEXT")?;
         // Pairing-token TTL. When the column is first added to an existing DB,
         // backfill live tokens with a 30-day grace window from now rather than
         // expiring them instantly on upgrade. Fresh DBs already have the column
@@ -1029,7 +1052,10 @@ impl RuntimeStore {
                 // baseline above; this arm is its versioned home if a
                 // non-additive change to that schema is ever needed.
                 4 => self.migrate_to_v4()?,
-                // A future v5+ adds its non-additive step here.
+                // v5: additive `tasks.prompt` column — applied by `ensure_column`
+                // in the baseline above.
+                5 => self.migrate_to_v5()?,
+                // A future v6+ adds its non-additive step here.
                 _ => {},
             }
         }
@@ -1052,6 +1078,13 @@ impl RuntimeStore {
     /// [`Self::migrate_within_txn`]), so this is intentionally a no-op — the
     /// versioned home for a future non-additive change to the outcomes schema.
     fn migrate_to_v4(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Non-additive migration steps introduced at schema v5. Today v5 only adds
+    /// the additive `tasks.prompt` column (applied by `ensure_column` in the
+    /// baseline), so this is intentionally a no-op.
+    fn migrate_to_v5(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -1186,14 +1219,15 @@ impl TasksRepo<'_> {
             created_at: now.clone(),
             updated_at: now.clone(),
             final_report: None,
+            prompt: new.prompt,
         };
         // The task row and its initial event are one logical write — commit
         // them atomically so a crash between can't leave an event-less task.
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO tasks
-             (id, title, status, priority, project_path, model_id, conversation_id, created_at, updated_at, final_report, owner_kind)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             (id, title, status, priority, project_path, model_id, conversation_id, created_at, updated_at, final_report, owner_kind, prompt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 record.id,
                 record.title,
@@ -1206,6 +1240,7 @@ impl TasksRepo<'_> {
                 record.updated_at,
                 record.final_report,
                 owner_kind,
+                record.prompt,
             ],
         )?;
         tx.execute(
@@ -1222,7 +1257,7 @@ impl TasksRepo<'_> {
         self.conn
             .query_row(
                 "SELECT id, title, status, priority, project_path, model_id, conversation_id,
-                        created_at, updated_at, final_report
+                        created_at, updated_at, final_report, prompt
                  FROM tasks WHERE id = ?1",
                 [id],
                 task_from_row,
@@ -1234,7 +1269,7 @@ impl TasksRepo<'_> {
     pub fn list(&self, limit: usize) -> Result<Vec<TaskRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, status, priority, project_path, model_id, conversation_id,
-                    created_at, updated_at, final_report
+                    created_at, updated_at, final_report, prompt
              FROM tasks
              ORDER BY updated_at DESC
              LIMIT ?1",
@@ -1273,6 +1308,55 @@ impl TasksRepo<'_> {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Atomically claim the next runnable queued task for the daemon scheduler:
+    /// flip it to `Running` and return it, or `None` when the queue is empty.
+    ///
+    /// Only daemon-owned tasks WITH a persisted prompt are claimable —
+    /// metadata-only tasks (interactive CLI runs, external `create_task`
+    /// callers) are never executed by the scheduler. Order: priority
+    /// (high → normal → low), then FIFO by `created_at` (id as tiebreaker,
+    /// since two enqueues can share a coarse-clock timestamp). The claim is a
+    /// single `UPDATE … RETURNING`, so concurrent claimers can never run the
+    /// same task twice.
+    pub fn claim_next_queued(&self) -> Result<Option<TaskRecord>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let claimed = tx
+            .query_row(
+                "UPDATE tasks SET status = 'running', updated_at = ?1
+                 WHERE id = (
+                     SELECT id FROM tasks
+                     WHERE status = 'queued' AND owner_kind = ?2 AND prompt IS NOT NULL
+                     ORDER BY CASE priority
+                                  WHEN 'high' THEN 0
+                                  WHEN 'normal' THEN 1
+                                  WHEN 'low' THEN 2
+                                  ELSE 1
+                              END,
+                              created_at ASC, id ASC
+                     LIMIT 1
+                 )
+                 RETURNING id, title, status, priority, project_path, model_id,
+                           conversation_id, created_at, updated_at, final_report, prompt",
+                params![now_rfc3339(), OWNER_KIND_DAEMON],
+                task_from_row,
+            )
+            .optional()?;
+        if let Some(task) = &claimed {
+            tx.execute(
+                "INSERT INTO task_events (task_id, kind, message, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    task.id,
+                    "status_changed",
+                    "status changed to running (claimed by scheduler)",
+                    now_rfc3339(),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(claimed)
     }
 
     pub fn add_event(&self, task_id: &str, kind: &str, message: &str) -> Result<()> {
@@ -2229,6 +2313,7 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         final_report: row.get("final_report")?,
+        prompt: row.get("prompt")?,
     })
 }
 
@@ -2654,6 +2739,93 @@ mod tests {
 
         // The global list sees them too.
         assert_eq!(store.outcomes().list(10).expect("list").len(), 2);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn claim_next_queued_orders_by_priority_then_fifo_and_skips_unclaimable() {
+        let path = temp_db("claim_queue");
+        let store = RuntimeStore::open(&path).expect("open store");
+
+        // Unclaimable rows: not daemon-owned; daemon-owned but prompt-less
+        // (metadata-only); daemon-owned with prompt but already running.
+        store
+            .tasks()
+            .create(NewTask::new("cli", "/p", "m").with_prompt("x"))
+            .expect("cli task");
+        store
+            .tasks()
+            .create(NewTask::new("meta", "/p", "m").daemon_owned())
+            .expect("meta task");
+        let busy = store
+            .tasks()
+            .create(
+                NewTask::new("busy", "/p", "m")
+                    .daemon_owned()
+                    .with_prompt("x"),
+            )
+            .expect("busy task");
+        store
+            .tasks()
+            .update_status(&busy.id, TaskStatus::Running, None)
+            .expect("mark busy running");
+
+        let normal_first = store
+            .tasks()
+            .create(
+                NewTask::new("n1", "/p", "m")
+                    .daemon_owned()
+                    .with_prompt("p1"),
+            )
+            .expect("n1");
+        let low = store
+            .tasks()
+            .create(
+                NewTask::new("l1", "/p", "m")
+                    .daemon_owned()
+                    .with_prompt("p2")
+                    .with_priority(TaskPriority::Low),
+            )
+            .expect("l1");
+        let high = store
+            .tasks()
+            .create(
+                NewTask::new("h1", "/p", "m")
+                    .daemon_owned()
+                    .with_prompt("p-high")
+                    .with_priority(TaskPriority::High),
+            )
+            .expect("h1");
+        let normal_second = store
+            .tasks()
+            .create(
+                NewTask::new("n2", "/p", "m")
+                    .daemon_owned()
+                    .with_prompt("p3"),
+            )
+            .expect("n2");
+
+        // High first (despite being enqueued after the normals), then the two
+        // normals FIFO, then low; each claim flips the row to Running and
+        // returns the persisted prompt.
+        let c1 = store.tasks().claim_next_queued().expect("claim 1").unwrap();
+        assert_eq!(c1.id, high.id);
+        assert_eq!(c1.status, TaskStatus::Running);
+        assert_eq!(c1.prompt.as_deref(), Some("p-high"));
+        let c2 = store.tasks().claim_next_queued().expect("claim 2").unwrap();
+        assert_eq!(c2.id, normal_first.id);
+        let c3 = store.tasks().claim_next_queued().expect("claim 3").unwrap();
+        assert_eq!(c3.id, normal_second.id);
+        let c4 = store.tasks().claim_next_queued().expect("claim 4").unwrap();
+        assert_eq!(c4.id, low.id);
+        // Queue drained: nothing claimable remains (the unclaimable trio stays).
+        assert!(
+            store
+                .tasks()
+                .claim_next_queued()
+                .expect("claim 5")
+                .is_none()
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The daemon now schedules its tasks instead of stampeding.** `run` requests
+  enqueue; a scheduler executes queued tasks bounded by
+  `[daemon] max_concurrent_tasks` (default 1 — one agent run at a time, honest
+  for a single local GPU), ordered by priority (`run` accepts
+  `"priority": "low"|"normal"|"high"`) then FIFO. The queue is durable: tasks
+  submitted while the daemon is down or busy survive restarts and drain
+  automatically.
+- **Daemon tasks can be cancelled.** New `cancel_task` daemon command and
+  `mermaid cancel <task-id>` CLI: a running task gets the same graceful
+  teardown as pressing Esc in the TUI (current tool's process tree killed,
+  turn unwound, status `cancelled` persisted), with a hard stop if it doesn't
+  unwind within a grace window; a queued task is cancelled before it starts.
+- **Per-task wall-clock budgets.** `[daemon] task_timeout_minutes` bounds each
+  daemon task's runtime (unset keeps the existing 20-minute headless default),
+  so an unattended run's worst case is bounded.
 - **The agent can ask you structured multiple-choice questions.** A new
   `ask_user_question` tool lets the model pause mid-run and pose 1–4 questions in
   an interactive terminal modal — single-select, multi-select, rank, or typed

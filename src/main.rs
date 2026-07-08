@@ -218,6 +218,7 @@ async fn dispatch_non_interactive(
         RunOptions {
             no_execute,
             task_id: runtime_task_id.clone(),
+            ..RunOptions::default()
         },
     )
     .await;

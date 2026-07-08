@@ -42,6 +42,15 @@ pub struct RunOptions {
     /// Durable runtime task that owns this run, when launched through
     /// `mermaidd` or `mermaid run` task creation.
     pub task_id: Option<String>,
+    /// External cancellation. When it fires, the driver injects
+    /// `Msg::CancelTurn` — the same message the TUI's Esc sends — so the
+    /// reducer unwinds the turn gracefully (tool process tree killed, turn
+    /// `JoinSet` drained). If the reducer hasn't reached `Idle` within a grace
+    /// window after that, the drive loop hard-stops.
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Wall-clock budget override. `None` keeps the built-in 20-minute
+    /// deadline.
+    pub deadline: Option<Duration>,
 }
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
@@ -107,10 +116,27 @@ pub async fn run_non_interactive_with(
         runner.dispatch(cmd);
     }
 
-    let deadline = Duration::from_secs(20 * 60);
+    let deadline = opts.deadline.unwrap_or(Duration::from_secs(20 * 60));
+
+    /// How long a cancelled run may keep unwinding before the drive loop
+    /// hard-stops. Generous next to the turn scope's own ~2s teardown bound.
+    const CANCEL_GRACE: Duration = Duration::from_secs(15);
+    let cancel = opts.cancel.clone();
+    // Set when the cancel token fires; from then on the loop exits as soon as
+    // the turn is idle (queued messages must not seed another turn) or the
+    // grace deadline passes.
+    let mut cancel_deadline: Option<tokio::time::Instant> = None;
 
     let drive = async {
-        while !matches!(state.turn, TurnState::Idle) || !state.ui.queued_messages.is_empty() {
+        loop {
+            let idle = matches!(state.turn, TurnState::Idle);
+            if drive_should_stop(
+                idle,
+                state.ui.queued_messages.is_empty(),
+                cancel_deadline.is_some(),
+            ) {
+                break;
+            }
             let msg = tokio::select! {
                 m = msg_rx.recv() => match m {
                     Some(m) => m,
@@ -119,6 +145,24 @@ pub async fn run_non_interactive_with(
                 s = lifecycle.next_msg() => match s {
                     Some(s) => s,
                     None => continue,
+                },
+                _ = async {
+                    match &cancel {
+                        Some(token) => token.cancelled().await,
+                        None => std::future::pending().await,
+                    }
+                }, if cancel.is_some() && cancel_deadline.is_none() => {
+                    cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_GRACE);
+                    Msg::CancelTurn
+                },
+                // NOTE: select! evaluates every branch expression even when its
+                // `if` guard is false, so the sleep target must not unwrap.
+                _ = tokio::time::sleep_until(
+                    cancel_deadline
+                        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400)),
+                ), if cancel_deadline.is_some() => {
+                    tracing::warn!("cancelled run did not unwind within grace; hard-stopping");
+                    break;
                 },
             };
             // Plumbing notices ("Starting the local Ollama server…") have no
@@ -212,5 +256,48 @@ pub fn format_result(result: &RunResult, format: OutputFormat) -> String {
             });
             serde_json::to_string_pretty(&json).unwrap_or_default()
         },
+    }
+}
+
+/// Whether the drive loop should stop this iteration.
+///
+/// A completed run stops once the turn is `idle` and nothing is queued. A
+/// *cancelled* run (its grace deadline armed, so `cancelling` is true) stops as
+/// soon as the turn is idle even if messages are queued — a cancel must never
+/// let the queue seed a fresh turn.
+fn drive_should_stop(idle: bool, queue_empty: bool, cancelling: bool) -> bool {
+    idle && (queue_empty || cancelling)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drive_should_stop;
+
+    #[test]
+    fn drive_keeps_running_until_idle() {
+        // Never stop mid-turn, whatever the queue/cancel state.
+        assert!(!drive_should_stop(false, true, false));
+        assert!(!drive_should_stop(false, true, true));
+        assert!(!drive_should_stop(false, false, true));
+    }
+
+    #[test]
+    fn drive_stops_when_idle_and_drained() {
+        // Normal completion: idle with an empty queue.
+        assert!(drive_should_stop(true, true, false));
+    }
+
+    #[test]
+    fn drive_keeps_draining_queue_when_not_cancelling() {
+        // Idle but messages queued and not cancelling → keep going so the
+        // queued input seeds the next turn.
+        assert!(!drive_should_stop(true, false, false));
+    }
+
+    #[test]
+    fn cancel_stops_at_idle_even_with_queued_messages() {
+        // The load-bearing case: once cancelling, an idle turn stops the loop
+        // even with messages queued — the cancel must not start a new turn.
+        assert!(drive_should_stop(true, false, true));
     }
 }

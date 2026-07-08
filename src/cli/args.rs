@@ -181,6 +181,11 @@ pub enum Commands {
         /// Approval id
         id: String,
     },
+    /// Cancel a queued or running daemon task
+    Cancel {
+        /// Task id from `mermaid tasks`
+        id: String,
+    },
     /// List recent persisted tool runs
     ToolRuns {
         /// Maximum number of tool runs to show

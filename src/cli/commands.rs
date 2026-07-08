@@ -113,6 +113,10 @@ pub async fn handle_command(
             deny(id)?;
             Ok(true)
         },
+        Commands::Cancel { id } => {
+            cancel_task(id)?;
+            Ok(true)
+        },
         Commands::ToolRuns { limit } => {
             show_tool_runs(*limit)?;
             Ok(true)
@@ -1308,6 +1312,47 @@ fn deny(id: &str) -> Result<()> {
     let _ = RuntimeClient::auto().deny(id)?;
     println!("Denied {}", id);
     Ok(())
+}
+
+/// Cancel a daemon task. Cancelling a *running* task must reach the daemon —
+/// it holds the in-flight cancellation tokens. A *queued* task can be
+/// cancelled straight in the local store when no daemon is reachable, since
+/// queued tasks only ever execute via the daemon's claim query.
+fn cancel_task(id: &str) -> Result<()> {
+    match crate::runtime::request_daemon_json(serde_json::json!({
+        "command": "cancel_task",
+        "id": id,
+    })) {
+        Ok(response) => {
+            if response.get("cancelling").and_then(|v| v.as_bool()) == Some(true) {
+                println!("Cancelling {} (running; the agent unwinds gracefully)", id);
+            } else {
+                println!("Cancelled {}", id);
+            }
+            Ok(())
+        },
+        Err(daemon_err) => {
+            let store = crate::runtime::RuntimeStore::open_default()?;
+            match store.tasks().get(id)? {
+                Some(task) if task.status == crate::runtime::TaskStatus::Queued => {
+                    store.tasks().update_status(
+                        id,
+                        crate::runtime::TaskStatus::Cancelled,
+                        Some("cancelled before start"),
+                    )?;
+                    println!("Cancelled {} (was queued; daemon unreachable)", id);
+                    Ok(())
+                },
+                Some(task) => anyhow::bail!(
+                    "task {} is {} and the daemon request failed: {}",
+                    id,
+                    task.status,
+                    daemon_err
+                ),
+                None => anyhow::bail!("task not found: {}", id),
+            }
+        },
+    }
 }
 
 fn show_tool_runs(limit: usize) -> Result<()> {
