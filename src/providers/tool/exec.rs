@@ -815,6 +815,11 @@ fn all_urls(text: &str) -> Vec<String> {
 }
 
 async fn open_browser_url(url: &str) -> Result<(), String> {
+    // Only ever hand a plain http(s) URL to the OS launcher — reject
+    // `file:`/`javascript:`/`data:`/etc. supplied by the model. On Windows this
+    // is also what lets us drop the `cmd` shell below safely.
+    super::web::require_http_scheme(url)?;
+
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut cmd = Command::new("open");
@@ -831,8 +836,12 @@ async fn open_browser_url(url: &str) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", url]);
+        // Launch via `rundll32` (a real executable) rather than `cmd /C start`,
+        // so the URL is passed as a single argv and never re-parsed by a shell —
+        // `& | > ^ "` in a model-supplied URL can't break out into arbitrary
+        // commands the way they can inside `cmd`.
+        let mut cmd = Command::new("rundll32");
+        cmd.args(["url.dll,FileProtocolHandler", url]);
         cmd
     };
 

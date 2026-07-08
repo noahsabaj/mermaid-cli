@@ -405,16 +405,23 @@ fn parse_queries(args: &serde_json::Value) -> Result<Vec<(String, usize)>, Strin
 /// leaves from this process, so `web_client::guard_resolved_ips` also checks
 /// the resolved addresses); for the Ollama backend it's defense-in-depth ahead
 /// of Ollama's own server-side fetch. Guards against model-supplied URLs.
-fn validate_fetch_url(url: &str) -> Result<(), String> {
+/// Reject anything that isn't a plain `http(s)` URL. A `file:`, `javascript:`,
+/// `data:`, or otherwise exotic scheme has no business reaching an HTTP fetch or
+/// an OS browser launcher. Returns the parsed URL so callers can inspect the
+/// host without re-parsing. Note: this deliberately does NOT block loopback —
+/// `open_url` legitimately opens a just-started local dev server.
+pub(crate) fn require_http_scheme(url: &str) -> Result<reqwest::Url, String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
     match parsed.scheme() {
-        "http" | "https" => {},
-        other => {
-            return Err(format!(
-                "unsupported URL scheme '{other}' (only http/https allowed)"
-            ));
-        },
+        "http" | "https" => Ok(parsed),
+        other => Err(format!(
+            "unsupported URL scheme '{other}' (only http/https allowed)"
+        )),
     }
+}
+
+fn validate_fetch_url(url: &str) -> Result<(), String> {
+    let parsed = require_http_scheme(url)?;
     let host = parsed
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
@@ -472,6 +479,33 @@ fn is_blocked_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn require_http_scheme_accepts_http_rejects_exotic() {
+        // http/https pass — including loopback, since `open_url` legitimately
+        // opens a just-started local dev server (so this must NOT block localhost).
+        for good in [
+            "http://example.com",
+            "https://example.com/path?a=1&b=2",
+            "http://localhost:3000",
+            "http://127.0.0.1:8080",
+        ] {
+            assert!(require_http_scheme(good).is_ok(), "{good} should pass");
+        }
+        // Non-http(s) schemes and unparseable input are rejected.
+        for bad in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:text/html,<script>",
+            "ftp://example.com",
+            "not a url",
+        ] {
+            assert!(
+                require_http_scheme(bad).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
 
     #[test]
     fn validate_fetch_url_blocks_unsafe_targets() {
