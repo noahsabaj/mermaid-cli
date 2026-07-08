@@ -1148,6 +1148,13 @@ impl EffectRunner {
                     dispatch_read_clipboard(tx).await;
                 });
             },
+            Cmd::ProbeVision { model_id, warn } => {
+                let tx = self.msg_tx.clone();
+                let providers = self.providers.clone();
+                self.detached.spawn(async move {
+                    dispatch_probe_vision(model_id, warn, providers, tx).await;
+                });
+            },
             Cmd::CopyToClipboard(text) => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn(async move {
@@ -1385,6 +1392,25 @@ async fn dispatch_call_model(
             source: sizing.source,
         })
         .await;
+    // No-vision-model fallback: if this turn actually carries images, probe the
+    // model's vision capability and let the reducer warn if it can't see them.
+    // This backs up the proactive paste-time probe for the rare case where the
+    // user pasted and sent before that probe resolved. Cheap — `supports_vision`
+    // is cache-first, so a repeat probe in the same session is free.
+    if request
+        .messages
+        .iter()
+        .any(|m| m.images.as_ref().is_some_and(|v| !v.is_empty()))
+    {
+        let supports_vision = provider.supports_vision().await;
+        let _ = msg_tx
+            .send(Msg::ProviderVisionResolved {
+                model_id: request.model_id.clone(),
+                supports_vision,
+                warn: true,
+            })
+            .await;
+    }
     let context_snapshot =
         crate::domain::estimate_context_usage_for_request(&request, max_context_tokens);
     let _ = msg_tx
@@ -2610,6 +2636,33 @@ async fn dispatch_read_clipboard(tx: MsgSender) {
         Outcome::Error(text) => Msg::ClipboardRead(ClipboardRead::Error(text)),
     };
     let _ = tx.send(msg).await;
+}
+
+/// Probe whether `model_id` can see images and report it via
+/// `Msg::ProviderVisionResolved`. Best-effort: an unresolvable provider or a
+/// provider that doesn't probe (non-Ollama) reports `None` ("unknown"), which
+/// the reducer treats as "don't warn". `warn` rides through unchanged so the
+/// reducer knows whether an image is actually in play.
+async fn dispatch_probe_vision(
+    model_id: String,
+    warn: bool,
+    providers: Option<Arc<ProviderFactory>>,
+    tx: MsgSender,
+) {
+    let supports_vision = match providers {
+        Some(factory) => match factory.resolve(&model_id).await {
+            Ok(provider) => provider.supports_vision().await,
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let _ = tx
+        .send(Msg::ProviderVisionResolved {
+            model_id,
+            supports_vision,
+            warn,
+        })
+        .await;
 }
 
 /// Write text to the system clipboard on a blocking thread (the platform
