@@ -53,6 +53,13 @@ impl ModelProvider for OpenAICompatProvider {
         &self.capabilities
     }
 
+    async fn supports_vision(&self) -> Option<bool> {
+        // Report the model-driven capability (derived from the model id) so the
+        // no-vision-model warning fires for text-only models and stays quiet for
+        // genuine vision models — instead of the default `None` (never warns).
+        Some(self.capabilities.supports_vision)
+    }
+
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
         let config = build_model_config(&request);
         let (relay_tx, relay_handle) = super::stream_bridge::ordered_relay(ctx.sink.clone());
