@@ -215,9 +215,9 @@ pub enum Cmd {
     /// Read the system clipboard on a blocking task. The per-platform
     /// dispatch (xclip / wl-paste / pngpaste / PowerShell) can block
     /// for hundreds of ms on macOS via osascript, so it never runs on
-    /// the reducer thread. Emits `Msg::Paste(Paste::Image|Text)` on
-    /// success; `Msg::TransientStatus` when the clipboard is empty or
-    /// the read fails.
+    /// the reducer thread. Always emits `Msg::ClipboardRead(..)` —
+    /// `Image`/`Text` on success, `Empty`/`Error` otherwise — so the
+    /// paste-race guard sees every read resolve.
     ReadClipboard,
 
     /// Write text to the system clipboard on a blocking task (mirrors

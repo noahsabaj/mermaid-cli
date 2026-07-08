@@ -2571,7 +2571,7 @@ fn mcp_startup_msg(name: &str, started: bool, tools: Vec<crate::domain::McpToolS
 /// deadline, so a hung helper returns an error here instead of pinning
 /// this blocking thread forever.
 async fn dispatch_read_clipboard(tx: MsgSender) {
-    use crate::domain::Paste;
+    use crate::domain::ClipboardRead;
 
     enum Outcome {
         Image { bytes: Vec<u8>, format: String },
@@ -2597,13 +2597,17 @@ async fn dispatch_read_clipboard(tx: MsgSender) {
     .await
     .unwrap_or_else(|e| Outcome::Error(format!("clipboard spawn_blocking: {}", e)));
 
+    // Route ALL four outcomes through `Msg::ClipboardRead` (not `Msg::Paste` /
+    // `Msg::TransientStatus`): the reducer decrements `clipboard_reads_pending`
+    // on exactly these messages, so an empty/failed read must still land here to
+    // release a submit that was held waiting on it.
     let msg = match outcome {
-        Outcome::Image { bytes, format } => Msg::Paste(Paste::Image { bytes, format }),
-        Outcome::Text(text) => Msg::Paste(Paste::Text(text)),
-        Outcome::Empty => Msg::TransientStatus {
-            text: "Clipboard is empty".to_string(),
+        Outcome::Image { bytes, format } => {
+            Msg::ClipboardRead(ClipboardRead::Image { bytes, format })
         },
-        Outcome::Error(text) => Msg::TransientStatus { text },
+        Outcome::Text(text) => Msg::ClipboardRead(ClipboardRead::Text(text)),
+        Outcome::Empty => Msg::ClipboardRead(ClipboardRead::Empty),
+        Outcome::Error(text) => Msg::ClipboardRead(ClipboardRead::Error(text)),
     };
     let _ = tx.send(msg).await;
 }
