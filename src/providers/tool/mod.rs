@@ -21,6 +21,7 @@ pub mod exec;
 pub mod filesystem;
 pub mod mcp;
 pub mod memory;
+pub mod path_lock;
 pub mod path_safety;
 pub mod policy_gate;
 pub mod subagent;

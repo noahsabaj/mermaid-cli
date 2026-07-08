@@ -342,6 +342,15 @@ impl ToolExecutor for DeleteFileTool {
         {
             return outcome;
         }
+        // Serialize writers to this canonical path: sibling tool calls in the same
+        // turn run concurrently, so without this the checkpoint + delete could race
+        // another writer to the same file. Distinct paths still overlap. Raced
+        // against cancellation so a contended lock stays Ctrl+C-responsive.
+        let _write_guard = tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
+            g = super::path_lock::lock_path(&abs) => g,
+        };
         if ctx.config.safety.checkpoint_on_mutation
             && let Err(e) = crate::runtime::create_checkpoint_for_task(
                 &ctx.workdir,
@@ -439,6 +448,13 @@ impl ToolExecutor for CreateDirectoryTool {
         {
             return outcome;
         }
+        // Serialize writers to this canonical path (see delete_file). mkdir -p is
+        // idempotent, but a uniform gate keeps ordering consistent and cheap.
+        let _write_guard = tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
+            g = super::path_lock::lock_path(&abs) => g,
+        };
         if ctx.config.safety.checkpoint_on_mutation
             && let Err(e) = crate::runtime::create_checkpoint_for_task(
                 &ctx.workdir,
@@ -544,6 +560,15 @@ impl ToolExecutor for WriteFileTool {
         {
             return outcome;
         }
+        // Serialize writers to this canonical path: two write_file/edit calls to
+        // the same file in one turn run concurrently, so without this the last
+        // atomic rename silently wins (lost update). Distinct paths still overlap.
+        // The owned guard is Send and held across the spawn_blocking below.
+        let _write_guard = tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
+            g = super::path_lock::lock_path(&abs_path) => g,
+        };
         if ctx.config.safety.checkpoint_on_mutation
             && let Err(e) = crate::runtime::create_checkpoint_for_task(
                 &ctx.workdir,
@@ -1172,6 +1197,30 @@ mod tests {
         assert!(outcome.output().contains("3 lines"));
         let written = fs::read_to_string(dir.join("out.txt")).expect("read");
         assert!(written.contains("line1"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_write_file_same_path_serializes_cleanly() {
+        // The per-path write gate must let two writes to the same file in one turn
+        // both succeed and leave the file as exactly one clean write (never a
+        // corrupt interleave), and must not deadlock.
+        let dir = temp_root("write_race");
+        let (ctx1, _r1) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let (ctx2, _r2) = test_exec_context(TurnId(1), ToolCallId(2), dir.clone());
+        let a = "AAAA\nAAAA\n";
+        let b = "BBBB\nBBBB\n";
+        let (o1, o2) = tokio::join!(
+            WriteFileTool.execute(serde_json::json!({"path": "race.txt", "content": a}), ctx1),
+            WriteFileTool.execute(serde_json::json!({"path": "race.txt", "content": b}), ctx2),
+        );
+        assert!(o1.is_success(), "first write failed: {o1:?}");
+        assert!(o2.is_success(), "second write failed: {o2:?}");
+        let final_content = fs::read_to_string(dir.join("race.txt")).expect("read");
+        assert!(
+            final_content == a || final_content == b,
+            "file must be exactly one clean write, got {final_content:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
