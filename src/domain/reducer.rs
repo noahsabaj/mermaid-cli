@@ -3785,19 +3785,25 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         })
         .collect();
 
+    // Run-summary lines ("Worked for …") are display-only UI — never send them
+    // to the model, or they'd accumulate as junk context every run. Then repair
+    // tool_use/tool_result pairing as the FINAL pass over the CLONED request
+    // messages (never state.session): a session persisted or hand-edited mid-tool
+    // would otherwise send a dangling tool_use and hit an unrecoverable 400.
+    let mut messages = evict_stale_screenshots(
+        state
+            .session
+            .messages()
+            .iter()
+            .filter(|m| m.kind != crate::models::ChatMessageKind::RunSummary)
+            .cloned()
+            .collect(),
+    );
+    super::compaction::normalize_history(&mut messages);
+
     ChatRequest {
         model_id: state.session.model_id.clone(),
-        // Run-summary lines ("Worked for …") are display-only UI — never send
-        // them to the model, or they'd accumulate as junk context every run.
-        messages: evict_stale_screenshots(
-            state
-                .session
-                .messages()
-                .iter()
-                .filter(|m| m.kind != crate::models::ChatMessageKind::RunSummary)
-                .cloned()
-                .collect(),
-        ),
+        messages,
         system_prompt: system_prompt_for_state(state),
         instructions,
         reasoning: state.session.reasoning,

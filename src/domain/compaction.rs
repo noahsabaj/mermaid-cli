@@ -521,7 +521,22 @@ fn summary_prompt(prepared: &PreparedCompaction, focus: Option<&str>) -> String 
 /// tool result, a follow-up, a user cancel) means it is no longer pending. This
 /// is trigger-gated by the caller because a user cancel yields the same trailing
 /// shape but must still drop — there, the result will never arrive.
-fn drop_orphan_tool_calls(messages: &mut Vec<ChatMessage>, preserve_pending_tail: bool) {
+/// Repair `tool_use`/`tool_result` pairing on a message list before it is sent
+/// to a provider (or seeded as a resumed prefix). Drops orphans in both
+/// directions: an assistant `tool_use` with no matching result, and a
+/// `tool_result` whose call is gone.
+///
+/// `preserve_pending_tail` is always `false` here: an outgoing request must
+/// never carry a trailing unanswered `tool_use` (providers 400 on it), and a
+/// cold-loaded prefix has no in-flight turn to append the awaited result — a
+/// preserved tail would be a permanent orphan. The compaction path calls
+/// [`drop_orphan_tool_calls`] directly with `true` for the truncation-recovery
+/// checkpoint, which *does* resume the pending call.
+pub(crate) fn normalize_history(messages: &mut Vec<ChatMessage>) {
+    drop_orphan_tool_calls(messages, false);
+}
+
+pub(crate) fn drop_orphan_tool_calls(messages: &mut Vec<ChatMessage>, preserve_pending_tail: bool) {
     let pending_tail = if preserve_pending_tail
         && messages.last().is_some_and(|m| {
             m.role == MessageRole::Assistant && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
@@ -813,6 +828,79 @@ mod tests {
             .iter()
             .any(|m| m.tool_calls.as_ref().is_some_and(|c| !c.is_empty()));
         assert!(kept, "a tool_call paired with its result must be preserved");
+    }
+
+    #[test]
+    fn normalize_history_drops_orphan_assistant_tool_use() {
+        let mut orphan = ChatMessage::assistant("calling a tool");
+        orphan.tool_calls = Some(vec![tool_call("call_1", "do_thing")]);
+        let mut messages = vec![ChatMessage::user("hi"), orphan];
+        normalize_history(&mut messages);
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.tool_calls.as_ref().is_none_or(|c| c.is_empty())),
+            "dangling tool_use must be dropped"
+        );
+        assert!(
+            messages.iter().any(|m| m.content == "calling a tool"),
+            "the assistant text is preserved — only the unpaired call is removed"
+        );
+    }
+
+    #[test]
+    fn normalize_history_drops_orphan_tool_result() {
+        let mut messages = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::tool("call_ghost", "do_thing", "result with no call"),
+        ];
+        normalize_history(&mut messages);
+        assert!(
+            !messages.iter().any(|m| m.role == MessageRole::Tool),
+            "a tool_result whose call is absent must be dropped"
+        );
+    }
+
+    #[test]
+    fn normalize_history_keeps_well_paired_tool_calls() {
+        let mut asst = ChatMessage::assistant("calling");
+        asst.tool_calls = Some(vec![tool_call("call_1", "do_thing")]);
+        let mut messages = vec![
+            ChatMessage::user("hi"),
+            asst,
+            ChatMessage::tool("call_1", "do_thing", "ok"),
+        ];
+        let before = messages.len();
+        normalize_history(&mut messages);
+        assert_eq!(
+            messages.len(),
+            before,
+            "a paired call+result survives intact"
+        );
+        assert!(
+            messages[1]
+                .tool_calls
+                .as_ref()
+                .is_some_and(|c| c.len() == 1)
+        );
+    }
+
+    #[test]
+    fn normalize_history_drops_idless_tool_use() {
+        let mut asst = ChatMessage::assistant("calling");
+        asst.tool_calls = Some(vec![crate::models::tool_call::ToolCall {
+            id: None,
+            function: crate::models::tool_call::FunctionCall {
+                name: "do_thing".into(),
+                arguments: serde_json::json!({}),
+            },
+        }]);
+        let mut messages = vec![asst];
+        normalize_history(&mut messages);
+        assert!(
+            messages[0].tool_calls.as_ref().is_none_or(|c| c.is_empty()),
+            "an id-less tool_use is inherently unpaired → dropped"
+        );
     }
 
     #[test]
