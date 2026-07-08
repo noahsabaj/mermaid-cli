@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The config file is now written atomically.** `save_config` truncated the
+  config in place, so a crash, kill, or disk-full mid-write could leave an empty
+  or half-written `config.toml` — losing your settings (and inline secrets). It
+  now writes via a temp file + fsync + atomic rename, created `0o600` on Unix so
+  the secret-bearing config is never even briefly world-readable.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
