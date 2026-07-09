@@ -55,6 +55,9 @@ pub struct RenderCache {
     /// `chat.scroll_up/down`. Diffing lets the reducer stay pure —
     /// it just publishes a counter; render owns the chat-state side.
     last_mouse_scroll_accum: i32,
+    /// Last `state.ui.scroll_to_bottom_seq` we acted on; a bump (keyboard
+    /// `End`) means resume auto-follow / jump to the newest message.
+    last_scroll_to_bottom_seq: u32,
 }
 
 impl Default for RenderCache {
@@ -70,6 +73,7 @@ impl Default for RenderCache {
                 .or_else(|_| std::env::var("USERNAME"))
                 .unwrap_or_else(|_| "user".to_string()),
             last_mouse_scroll_accum: 0,
+            last_scroll_to_bottom_seq: 0,
         }
     }
 }
@@ -93,6 +97,11 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         rstate.chat.scroll_down((-pending) as u16);
     }
     rstate.last_mouse_scroll_accum = state.ui.mouse_scroll_accum;
+    // Keyboard End: a bumped counter means jump back to the newest message.
+    if state.ui.scroll_to_bottom_seq != rstate.last_scroll_to_bottom_seq {
+        rstate.chat.resume_auto_scroll();
+        rstate.last_scroll_to_bottom_seq = state.ui.scroll_to_bottom_seq;
+    }
 
     // Input height: content-aware, respecting CJK/emoji widths.
     let terminal_width = frame.area().width.saturating_sub(4) as usize;
