@@ -1806,6 +1806,28 @@ mod tests {
     }
 
     #[test]
+    fn auto_max_tokens_omits_the_cap_field() {
+        // `max_tokens == 0` is AUTO: omit the cap entirely so the provider
+        // applies its own per-response maximum (the model-scaled budget).
+        let groq = lookup_provider("groq").unwrap();
+        let adapter = OpenAICompatAdapter::new(
+            groq,
+            groq.base_url.to_string(),
+            Some("k".to_string()),
+            "qwen-qwq-32b".to_string(),
+            HashMap::new(),
+        )
+        .unwrap();
+        let config = ModelConfig {
+            max_tokens: 0,
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, true);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
     fn cerebras_gpt_oss_disables_parallel_tool_calls() {
         let cerebras = lookup_provider("cerebras").unwrap();
         let adapter = OpenAICompatAdapter::new(

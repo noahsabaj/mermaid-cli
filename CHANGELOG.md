@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Model-scaled output budget — the hardcoded 4096-token cap is gone.**
+  `default_model.max_tokens` now defaults to `0` = **auto**: OpenAI-compatible
+  providers and Gemini get no cap at all (the provider applies the model's own
+  per-response maximum), Ollama's `num_predict` gets the full room the context
+  window leaves after the prompt, and Anthropic (which requires `max_tokens`)
+  gets the model's documented output ceiling clamped to the window. Reasoning
+  models like GLM-5.2 can finally emit tens of thousands of thinking tokens
+  without tripping a stale 2024-era limit. A positive `max_tokens` remains an
+  explicit hard cap (cost control); existing config files carrying the frozen
+  legacy `4096` are migrated to auto on load. Compaction's response reserve is
+  now reasoning-aware instead of mirroring the send-cap.
 - **Optional filesystem write-confinement for shell commands (Linux).**
   `mermaid --confine-fs …` (or `safety.filesystem = "project"`) confines
   model-run shell commands with a Landlock ruleset: writes are allowed only

@@ -303,7 +303,7 @@ last_used_model = "ollama/qwen3-coder:30b"
 provider = "ollama"
 name = "qwen3-coder:30b"
 temperature = 0.7
-max_tokens = 4096
+max_tokens = 0        # 0 = auto (model-scaled output budget); positive = hard cap
 reasoning = "medium"  # none | minimal | low | medium | high | xhigh | max
 
 [ollama]
@@ -345,7 +345,7 @@ checkpoint_on_mutation = true
 # These fields remain in the schema for compatibility but are not the
 # source of truth for `mermaid run`.
 output_format = "text"
-max_tokens = 4096
+max_tokens = 0        # 0 = auto (model-scaled); positive = hard cap
 no_execute = false
 
 # Durable agent memory (the `memory` tool, the always-loaded index, and
