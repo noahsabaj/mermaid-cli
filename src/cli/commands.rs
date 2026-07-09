@@ -558,6 +558,7 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
     };
 
     let sandbox_available = crate::runtime::network_killswitch_available();
+    let fs_sandbox_available = crate::runtime::fs_confinement_available();
     let checks = vec![
         "compact smoke exercises reducer compaction path".to_string(),
         "compact smoke persists conversation and archive artifacts".to_string(),
@@ -566,8 +567,15 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
             "network kill-switch builds on this platform: {}",
             if sandbox_available { "yes" } else { "no" }
         ),
+        format!(
+            "filesystem confinement ruleset builds on this platform: {}",
+            if fs_sandbox_available { "yes" } else { "no" }
+        ),
     ];
-    let ok = compact_smoke.ok && runtime_store.status == "ok" && sandbox_available;
+    let ok = compact_smoke.ok
+        && runtime_store.status == "ok"
+        && sandbox_available
+        && fs_sandbox_available;
     let report = SelfTestReport {
         ok,
         workspace: workspace.display().to_string(),

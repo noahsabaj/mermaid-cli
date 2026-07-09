@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use crate::app::NetworkPolicy;
+use crate::app::{FilesystemPolicy, NetworkPolicy};
 use crate::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 use crate::domain::{
     ManagedProcess, ManagedProcessStatus, ToolDefinition, ToolMetadata, ToolOutcome,
@@ -243,13 +243,32 @@ impl ToolExecutor for ExecuteCommandTool {
         // arms both tree-kill before returning.
         //
         // When network access is denied (Linux `safety.network = "deny"` /
-        // `--no-network`), the shell is wrapped in the `__sandbox-exec` launcher,
-        // which installs the seccomp network kill-switch and then execs it — so a
-        // network attempt inside the command dies with SIGSYS, which the
-        // completion arm below maps to a clear denial. A no-op elsewhere.
+        // `--no-network`) and/or writes are confined (`safety.filesystem =
+        // "project"` / `--confine-fs`), the shell is wrapped in the
+        // `__sandbox-exec` launcher, which installs the seccomp network
+        // kill-switch / Landlock write rules on itself and then execs it — so a
+        // network attempt dies with SIGSYS and an out-of-bounds write fails
+        // with EACCES, which the completion arm below maps to clear denials. A
+        // no-op elsewhere.
         let sandbox_network =
             cfg!(target_os = "linux") && matches!(ctx.config.safety.network, NetworkPolicy::Deny);
-        let mut cmd = build_sandboxed_shell(&command, sandbox_network);
+        let sandbox_fs = cfg!(target_os = "linux")
+            && matches!(ctx.config.safety.filesystem, FilesystemPolicy::Project);
+        // Write allowlist: the project root (so a build in a subdir can still
+        // write repo-root artifacts), the effective workdir (out-of-project
+        // commands, separately gated by policy), the system temp dir, and /dev
+        // (shell redirects like `>/dev/null` are writes).
+        let confine_writes: Option<Vec<PathBuf>> = sandbox_fs.then(|| {
+            let mut dirs = vec![
+                ctx.workdir.clone(),
+                effective_workdir.clone(),
+                std::env::temp_dir(),
+                PathBuf::from("/dev"),
+            ];
+            dirs.dedup();
+            dirs
+        });
+        let mut cmd = build_sandboxed_shell(&command, sandbox_network, confine_writes.as_deref());
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -312,6 +331,21 @@ impl ToolExecutor for ExecuteCommandTool {
                     }
                     ToolOutcome::error(NETWORK_DENIED_MESSAGE.to_string(), duration_secs)
                         .with_metadata(metadata)
+                } else if sandbox_fs && is_fs_denial(&run) {
+                    // Landlock denials are errno-based (EACCES), so this is a
+                    // signature match, not a certainty — keep the original
+                    // output attached and hedge the wording accordingly.
+                    if let ToolMetadata::ExecuteCommand {
+                        denied_by_sandbox, ..
+                    } = &mut metadata.detail
+                    {
+                        *denied_by_sandbox = true;
+                    }
+                    let message = format!(
+                        "{FS_DENIED_MESSAGE}\n\n--- original output ---\n{}",
+                        run.output
+                    );
+                    ToolOutcome::error(message, duration_secs).with_metadata(metadata)
                 } else {
                     ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
                         .with_metadata(metadata)
@@ -824,17 +858,45 @@ fn is_network_denial(run: &CommandRunOutput) -> bool {
     run.signal == Some(SANDBOX_KILL_SIGNAL) || run.exit_code == Some(128 + SANDBOX_KILL_SIGNAL)
 }
 
+/// Message shown when a command's failure matches the filesystem-sandbox denial
+/// signature. Hedged ("likely") because Landlock denials surface as ordinary
+/// EACCES, unlike the unambiguous SIGSYS of the network kill-switch. No emojis.
+const FS_DENIED_MESSAGE: &str = "Command failed with a permission error while the filesystem sandbox was active (safety.filesystem = \"project\" / --confine-fs); a write outside the project directory, the system temp directory, or /dev was likely denied. Write inside the project, or re-run without --confine-fs to allow it.";
+
+/// Whether a completed command's failure looks like a Landlock write denial:
+/// non-zero exit plus the shell/tool permission-error text. A signature match,
+/// not a proof — callers must gate on "the filesystem sandbox was active for
+/// this spawn", and the surfaced message hedges accordingly.
+fn is_fs_denial(run: &CommandRunOutput) -> bool {
+    let failed = matches!(run.exit_code, Some(code) if code != 0);
+    failed
+        && (run.output.contains("Permission denied")
+            || run.output.contains("Operation not permitted"))
+}
+
 /// Build the shell `Command` for a model command, optionally wrapped in the
-/// `__sandbox-exec` network kill-switch launcher (Linux). The caller sets stdio,
-/// process group, cwd, and env scrubbing on the returned command.
-fn build_sandboxed_shell(command: &str, sandbox_network: bool) -> Command {
-    if sandbox_network {
-        // `mermaid __sandbox-exec --no-network -- sh -c <command>`: the launcher
-        // installs the seccomp filter on itself, then execs the shell.
+/// `__sandbox-exec` launcher (Linux) for the network kill-switch and/or
+/// Landlock write-confinement. The caller sets stdio, process group, cwd, and
+/// env scrubbing on the returned command.
+fn build_sandboxed_shell(
+    command: &str,
+    sandbox_network: bool,
+    confine_writes: Option<&[PathBuf]>,
+) -> Command {
+    if sandbox_network || confine_writes.is_some() {
+        // `mermaid __sandbox-exec [--no-network] [--confine-writes <dir>]… --
+        // sh -c <command>`: the launcher installs the requested confinement on
+        // itself, then execs the shell.
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mermaid"));
         let mut cmd = Command::new(exe);
-        cmd.args(["__sandbox-exec", "--no-network", "--", "sh", "-c"])
-            .arg(command);
+        cmd.arg("__sandbox-exec");
+        if sandbox_network {
+            cmd.arg("--no-network");
+        }
+        for dir in confine_writes.unwrap_or_default() {
+            cmd.arg("--confine-writes").arg(dir);
+        }
+        cmd.args(["--", "sh", "-c"]).arg(command);
         cmd
     } else {
         let mut cmd = Command::new(if cfg!(target_os = "windows") {
@@ -1279,15 +1341,43 @@ mod tests {
     }
 
     #[test]
+    fn fs_denial_requires_failure_and_permission_signature() {
+        let out = |exit: Option<i32>, output: &str| CommandRunOutput {
+            output: output.to_string(),
+            exit_code: exit,
+            signal: None,
+            stdout_lines: 0,
+            stderr_lines: 0,
+        };
+        // Non-zero exit + the permission-error text ⇒ denial signature.
+        assert!(is_fs_denial(&out(
+            Some(1),
+            "sh: line 1: /etc/nope: Permission denied"
+        )));
+        assert!(is_fs_denial(&out(
+            Some(2),
+            "touch: Operation not permitted"
+        )));
+        // A successful command mentioning the phrase is not a denial…
+        assert!(!is_fs_denial(&out(
+            Some(0),
+            "grep found: Permission denied"
+        )));
+        // …nor is an ordinary failure without it, or a signal death.
+        assert!(!is_fs_denial(&out(Some(1), "some other failure")));
+        assert!(!is_fs_denial(&out(None, "Permission denied")));
+    }
+
+    #[test]
     fn sandboxed_shell_wraps_only_when_requested() {
-        let plain = build_sandboxed_shell("echo hi", false);
+        let plain = build_sandboxed_shell("echo hi", false, None);
         let plain_prog = plain.as_std().get_program().to_string_lossy().into_owned();
         assert!(
             plain_prog.ends_with("sh") || plain_prog.ends_with("cmd"),
             "plain shell program: {plain_prog}"
         );
 
-        let wrapped = build_sandboxed_shell("echo hi", true);
+        let wrapped = build_sandboxed_shell("echo hi", true, None);
         let args: Vec<String> = wrapped
             .as_std()
             .get_args()
@@ -1295,7 +1385,29 @@ mod tests {
             .collect();
         assert_eq!(args.first().map(String::as_str), Some("__sandbox-exec"));
         assert!(args.contains(&"--no-network".to_string()));
+        assert!(!args.contains(&"--confine-writes".to_string()));
         assert!(args.contains(&"sh".to_string()));
+    }
+
+    #[test]
+    fn sandboxed_shell_passes_confine_writes_dirs() {
+        let dirs = vec![PathBuf::from("/proj"), PathBuf::from("/dev")];
+        let wrapped = build_sandboxed_shell("echo hi", false, Some(&dirs));
+        let args: Vec<String> = wrapped
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.first().map(String::as_str), Some("__sandbox-exec"));
+        assert!(!args.contains(&"--no-network".to_string()));
+        // Each dir rides its own `--confine-writes`.
+        assert_eq!(
+            args.iter().filter(|a| *a == "--confine-writes").count(),
+            2,
+            "args: {args:?}"
+        );
+        assert!(args.contains(&"/proj".to_string()));
+        assert!(args.contains(&"/dev".to_string()));
     }
 
     #[tokio::test]

@@ -2,10 +2,11 @@
 //!
 //! The exec tool spawns `mermaid __sandbox-exec [flags] -- <program> <args…>`
 //! instead of running a command directly when OS confinement is requested. This
-//! process applies the requested sandbox (today: the Linux seccomp network
-//! kill-switch) to **itself**, from ordinary single-threaded code, then
-//! `execve`s the real command — the filter survives `execve`, so the command
-//! and everything it spawns inherit the restriction.
+//! process applies the requested sandbox — the Linux seccomp network
+//! kill-switch (`--no-network`) and/or Landlock filesystem write-confinement
+//! (repeatable `--confine-writes <dir>`) — to **itself**, from ordinary
+//! single-threaded code, then `execve`s the real command. Both restrictions
+//! survive `execve`, so the command and everything it spawns inherit them.
 //!
 //! Applying from a fresh process (rather than a `pre_exec` closure in the
 //! parent) side-steps the async-signal-safety hazard of the post-`fork`
@@ -13,6 +14,7 @@
 //! (`mermaid __sandbox-exec --no-network -- sh -c 'curl …'`).
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 /// Marker subcommand that routes an invocation to this launcher.
 pub const SANDBOX_EXEC_SUBCOMMAND: &str = "__sandbox-exec";
@@ -33,15 +35,26 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
     }
 
     let mut no_network = false;
+    let mut confine_writes: Vec<PathBuf> = Vec::new();
     let mut argv: Vec<OsString> = Vec::new();
     let mut in_argv = false;
-    for arg in it {
+    while let Some(arg) = it.next() {
         if in_argv {
             argv.push(arg);
         } else if arg == "--" {
             in_argv = true;
         } else if arg == "--no-network" {
             no_network = true;
+        } else if arg == "--confine-writes" {
+            match it.next() {
+                Some(dir) => confine_writes.push(PathBuf::from(dir)),
+                None => {
+                    eprintln!(
+                        "mermaid {SANDBOX_EXEC_SUBCOMMAND}: --confine-writes needs a directory"
+                    );
+                    return Some(2);
+                },
+            }
         } else {
             eprintln!("mermaid {SANDBOX_EXEC_SUBCOMMAND}: unexpected argument {arg:?}");
             return Some(2);
@@ -51,6 +64,24 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
     if argv.is_empty() {
         eprintln!("mermaid {SANDBOX_EXEC_SUBCOMMAND}: missing command after `--`");
         return Some(2);
+    }
+
+    // Landlock first (its setup opens the allowed dirs), then seccomp. A real
+    // setup failure fails closed; a kernel that simply can't enforce Landlock
+    // degrades to a warned no-op (documented best-effort — pre-5.13 kernels).
+    if !confine_writes.is_empty() {
+        match crate::runtime::apply_fs_confinement(&confine_writes) {
+            Ok(true) => {},
+            Ok(false) => eprintln!(
+                "mermaid {SANDBOX_EXEC_SUBCOMMAND}: filesystem confinement not enforced (kernel without Landlock); continuing"
+            ),
+            Err(err) => {
+                eprintln!(
+                    "mermaid {SANDBOX_EXEC_SUBCOMMAND}: filesystem sandbox unavailable: {err}"
+                );
+                return Some(126);
+            },
+        }
     }
 
     // Fail closed: if the caller asked for confinement and we cannot apply it,
@@ -115,6 +146,20 @@ mod tests {
     fn unknown_flag_before_separator_errors() {
         assert_eq!(
             maybe_dispatch(os(&["mermaid", "__sandbox-exec", "--bogus", "--", "true"])),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn confine_writes_without_a_directory_errors() {
+        assert_eq!(
+            maybe_dispatch(os(&["mermaid", "__sandbox-exec", "--confine-writes"])),
+            Some(2)
+        );
+        // A trailing `--confine-writes` must not swallow the `--` separator as
+        // its value and then exec with an empty argv.
+        assert_eq!(
+            maybe_dispatch(os(&["mermaid", "__sandbox-exec", "--confine-writes", "--"])),
             Some(2)
         );
     }

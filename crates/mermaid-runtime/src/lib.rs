@@ -53,7 +53,10 @@ pub use policy::{
     ActionRequest, PolicyDecision, PolicyEngine, PolicyOverride, PolicyOverrideDecision,
     READ_ONLY_DENIAL_MARKER, RiskClass, SafetyMode, ToolCategory, is_destructive_command,
 };
-pub use sandbox::{apply_network_killswitch, network_killswitch_available};
+pub use sandbox::{
+    apply_fs_confinement, apply_network_killswitch, fs_confinement_available,
+    network_killswitch_available,
+};
 pub use storage::{
     ApprovalRecord, ApprovalsRepo, CheckpointRecord, CheckpointsRepo, CompactionRecord,
     CompactionsRepo, MessageRecord, MessagesRepo, NewApproval, NewCheckpoint, NewCompaction,

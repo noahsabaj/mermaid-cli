@@ -82,6 +82,18 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_network: bool,
 
+    /// Confine model-run shell commands' writes to the project directory (plus
+    /// the system temp directory and `/dev`) this session. Linux Landlock,
+    /// best-effort; a no-op on other platforms and pre-5.13 kernels. Equivalent
+    /// to `-c safety.filesystem=project`.
+    #[arg(long, global = true)]
+    pub confine_fs: bool,
+
+    /// Full OS sandbox for model-run shell commands: shorthand for
+    /// `--no-network --confine-fs`.
+    #[arg(long, global = true)]
+    pub sandbox: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
