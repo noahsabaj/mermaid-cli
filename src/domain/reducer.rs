@@ -214,11 +214,23 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             model_max,
             effective,
             source,
+            max_output,
         } => {
             // Drop a probe that landed after a `/model` switch (it describes the
             // previous model, not the one now active) — mirrors
             // OllamaPlacementResolved.
             if model_id == state.session.model_id {
+                // Refresh the capability snapshot with the live values (the
+                // vision-probe pattern): a discovered window turns `Context:
+                // unknown` into a real number and re-enables proactive
+                // auto-compaction for remote providers; a discovered output
+                // ceiling feeds the truncation classifier and `model-info`.
+                if let Some(window) = effective.or(model_max) {
+                    state.runtime.provider_capabilities.max_context_tokens = Some(window);
+                }
+                if max_output.is_some() {
+                    state.runtime.provider_capabilities.max_output_tokens = max_output;
+                }
                 state.runtime.ollama_context = Some(crate::domain::runtime::OllamaContextInfo {
                     model_max,
                     effective,
@@ -6921,11 +6933,22 @@ mod tests {
                 model_max: Some(262_144),
                 effective: Some(12_288),
                 source: Some(NumCtxSource::Auto),
+                max_output: Some(64_000),
             },
         );
         let ctx = state.runtime.ollama_context.expect("stored");
         assert_eq!(ctx.model_max, Some(262_144));
         assert_eq!(ctx.effective, Some(12_288));
+        // The live values also refresh the capability snapshot (this is what
+        // turns `Context: unknown` into a real number for remote providers).
+        assert_eq!(
+            state.runtime.provider_capabilities.max_context_tokens,
+            Some(12_288)
+        );
+        assert_eq!(
+            state.runtime.provider_capabilities.max_output_tokens,
+            Some(64_000)
+        );
     }
 
     #[test]
@@ -6941,9 +6964,15 @@ mod tests {
                 model_max: Some(262_144),
                 effective: Some(12_288),
                 source: Some(NumCtxSource::Auto),
+                max_output: Some(64_000),
             },
         );
         assert!(state.runtime.ollama_context.is_none());
+        // The stale probe must not leak into the capability snapshot either.
+        assert_ne!(
+            state.runtime.provider_capabilities.max_output_tokens,
+            Some(64_000)
+        );
     }
 
     // A spill with no fitting smaller window (weights-bound) → the warn path.

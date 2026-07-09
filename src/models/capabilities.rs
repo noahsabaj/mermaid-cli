@@ -24,6 +24,9 @@ pub struct ModelCapabilities {
     pub supports_reasoning: ReasoningCapability,
     /// Maximum context window in tokens, if known.
     pub max_context_tokens: Option<usize>,
+    /// The model's per-response output ceiling in tokens, if known (from
+    /// `/models` metadata or a documented per-model table).
+    pub max_output_tokens: Option<usize>,
 }
 
 impl ModelCapabilities {
@@ -41,6 +44,7 @@ impl ModelCapabilities {
             supports_vision: false,
             supports_reasoning: ReasoningCapability::Binary,
             max_context_tokens: None,
+            max_output_tokens: None,
         }
     }
 }

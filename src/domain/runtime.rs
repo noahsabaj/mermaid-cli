@@ -54,6 +54,10 @@ pub struct ProviderCapabilitySnapshot {
     pub supports_vision: bool,
     pub reasoning: String,
     pub max_context_tokens: Option<usize>,
+    /// Per-response output ceiling, when known (static table at model-switch
+    /// time; refreshed live via `ProviderContextResolved`).
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
 }
 
 impl ProviderCapabilitySnapshot {
@@ -77,6 +81,11 @@ impl ProviderCapabilitySnapshot {
         };
 
         let max_context_tokens = infer_static_context_window(&provider, &model);
+        // Anthropic's output ceilings are documented per family; other
+        // providers start unknown and are refreshed live from `/models`
+        // metadata via `ProviderContextResolved`.
+        let max_output_tokens = (provider == "anthropic")
+            .then(|| crate::models::adapters::anthropic::anthropic_max_output_tokens(&model));
 
         Self {
             provider,
@@ -85,6 +94,7 @@ impl ProviderCapabilitySnapshot {
             supports_vision,
             reasoning,
             max_context_tokens,
+            max_output_tokens,
         }
     }
 }

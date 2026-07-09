@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Live model-limit discovery — `Context: unknown` gets real numbers.** Most
+  OpenAI-compatible providers attach the model's context window and output
+  ceiling to their `/models` metadata (OpenRouter, Cloudflare, …); mermaid
+  previously threw that data away. It's now parsed, cached across sessions in
+  `provider_probes`, and refreshed into the live capability snapshot — so the
+  status bar shows a real window for remote models, proactive auto-compaction
+  works for them, the truncation classifier gets real windows, and
+  `mermaid model-info` gains an `Output limit:` line. Anthropic models report
+  their documented window/ceiling statically.
 - **Truncation is now diagnosed correctly — no more false "Context window
   full".** A `length` stop is classified from the response usage: hitting the
   per-response output cap (window still has room — the common case on remote

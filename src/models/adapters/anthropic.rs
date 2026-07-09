@@ -250,7 +250,7 @@ fn legacy_budget_for(level: ReasoningLevel, max_tokens: usize) -> Option<u32> {
 /// the models-overview table, per model family. Anthropic REQUIRES `max_tokens`
 /// on every request, so AUTO resolves to the model's real documented ceiling
 /// rather than a guessed constant. Unknown/legacy ids get a conservative 8192.
-fn anthropic_max_output_tokens(model: &str) -> usize {
+pub fn anthropic_max_output_tokens(model: &str) -> usize {
     let m = model.to_lowercase();
     if m.starts_with("claude-3-5") {
         8_192
@@ -573,7 +573,11 @@ impl AnthropicAdapter {
                 ReasoningLevel::Max,
                 ReasoningLevel::XHigh,
             ]),
-            max_context_tokens: None,
+            // Documented values, advertised so the default
+            // `resolve_context_window` reports them live (window + output
+            // ceiling) without a bespoke provider override.
+            max_context_tokens: Some(ANTHROPIC_CONTEXT_WINDOW_TOKENS),
+            max_output_tokens: Some(anthropic_max_output_tokens(&model_name)),
         };
 
         Ok(Self {

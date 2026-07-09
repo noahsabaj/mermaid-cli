@@ -25,7 +25,7 @@ use crate::runtime::{NewProviderProbe, RuntimeStore};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::{ContextSizing, ModelPlacement, ModelProvider};
+use super::{ContextSizing, ModelPlacement, ModelProvider, probe_is_stale};
 
 /// Ollama adapter fronted by `ModelProvider`.
 pub struct OllamaProvider {
@@ -148,12 +148,15 @@ impl ModelProvider for OllamaProvider {
                 model_max,
                 effective: Some(r.value),
                 source: Some(r.source),
+                // Ollama has no per-response ceiling — num_predict is ours.
+                max_output: None,
             },
             // No model_max and nothing configured → omit num_ctx (Ollama default).
             None => ContextSizing {
                 model_max,
                 effective: None,
                 source: None,
+                max_output: None,
             },
         }
     }
@@ -358,20 +361,6 @@ async fn save_probe_to_db(model: String, info: OllamaModelInfo) {
         Some(())
     })
     .await;
-}
-
-fn probe_is_stale(probed_at: &str) -> bool {
-    use chrono::{DateTime, Utc};
-    match DateTime::parse_from_rfc3339(probed_at) {
-        Ok(t) => {
-            Utc::now()
-                .signed_duration_since(t.with_timezone(&Utc))
-                .num_days()
-                >= crate::constants::OLLAMA_PROBE_TTL_DAYS
-        },
-        // Unparseable timestamp → treat as stale and re-probe.
-        Err(_) => true,
-    }
 }
 
 /// Build a `StreamCallback` that forwards `ModelStreamEvent`s from the

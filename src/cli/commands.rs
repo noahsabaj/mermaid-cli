@@ -1144,6 +1144,13 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
             .map(|n| n.to_string())
             .unwrap_or_else(|| "unknown".to_string())
     );
+    println!(
+        "Output limit: {}",
+        snapshot
+            .max_output_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown (discovered live from /models when exposed)".to_string())
+    );
     if let Some(profile) = lookup_provider(&snapshot.provider) {
         for (key, value) in [
             (

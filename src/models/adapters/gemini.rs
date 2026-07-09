@@ -405,6 +405,7 @@ impl GeminiAdapter {
                 ReasoningLevel::XHigh,
             ]),
             max_context_tokens: None,
+            max_output_tokens: None,
         };
 
         Ok(Self {

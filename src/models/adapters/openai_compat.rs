@@ -900,21 +900,26 @@ fn derive_capabilities(profile: &ProviderProfile, model_name: &str) -> ModelCapa
         supports_tools: true,
         supports_vision: model_supports_vision(model_name),
         supports_reasoning,
+        // Unknown statically; discovered live from `/models` metadata by the
+        // provider wrapper's `resolve_context_window` override.
         max_context_tokens: None,
+        max_output_tokens: None,
     }
 }
 
-#[async_trait]
-impl Model for OpenAICompatAdapter {
-    fn name(&self) -> &str {
-        &self.model_name
+impl OpenAICompatAdapter {
+    /// The registry/profile name of the provider this adapter targets (e.g.
+    /// `"cloudflare"`), for cache keys and diagnostics.
+    pub fn provider_name(&self) -> &str {
+        self.profile.name
     }
 
-    fn capabilities(&self) -> &ModelCapabilities {
-        &self.capabilities
-    }
-
-    async fn list_models(&self) -> Result<Vec<String>> {
+    /// `GET /models`, keeping the limit metadata providers attach
+    /// (`context_length`, `max_completion_tokens`, OpenRouter's
+    /// `top_provider.*`) instead of collapsing to bare ids. The `Model` trait's
+    /// `list_models` delegates here; the provider wrapper uses the limits to
+    /// resolve the live context window / output ceiling.
+    pub async fn list_models_detailed(&self) -> Result<Vec<ModelListing>> {
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
         let mut req = self.client.get(&url);
         if let Some(key) = &self.api_key {
@@ -946,7 +951,27 @@ impl Model for OpenAICompatAdapter {
                 message: format!("Failed to parse {} models list: {}", self.profile.name, e),
                 raw: None,
             })?;
-        Ok(body.data.into_iter().map(|m| m.id).collect())
+        Ok(body.data.into_iter().map(ModelListing::from).collect())
+    }
+}
+
+#[async_trait]
+impl Model for OpenAICompatAdapter {
+    fn name(&self) -> &str {
+        &self.model_name
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        &self.capabilities
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        Ok(self
+            .list_models_detailed()
+            .await?
+            .into_iter()
+            .map(|m| m.id)
+            .collect())
     }
 
     async fn chat(
@@ -1233,9 +1258,59 @@ struct ListModelsResponse {
     data: Vec<ModelInfo>,
 }
 
+/// One `/models` entry. Providers decorate the OpenAI-standard `{id}` with
+/// their own limit metadata — OpenRouter sends `context_length` +
+/// `top_provider.max_completion_tokens`, others use `context_window` /
+/// `max_completion_tokens` flat. All optional; absent fields deserialize to
+/// `None` instead of failing the whole list.
 #[derive(Debug, Deserialize)]
 struct ModelInfo {
     id: String,
+    #[serde(default)]
+    context_length: Option<usize>,
+    #[serde(default)]
+    context_window: Option<usize>,
+    #[serde(default)]
+    max_completion_tokens: Option<usize>,
+    #[serde(default)]
+    max_output_tokens: Option<usize>,
+    #[serde(default)]
+    top_provider: Option<TopProviderInfo>,
+}
+
+/// OpenRouter's per-model routing metadata (the shape its `/models` uses for
+/// limits).
+#[derive(Debug, Deserialize)]
+struct TopProviderInfo {
+    #[serde(default)]
+    context_length: Option<usize>,
+    #[serde(default)]
+    max_completion_tokens: Option<usize>,
+}
+
+/// A `/models` entry with whatever limit metadata the provider exposed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelListing {
+    pub id: String,
+    pub max_context_tokens: Option<usize>,
+    pub max_output_tokens: Option<usize>,
+}
+
+impl From<ModelInfo> for ModelListing {
+    fn from(m: ModelInfo) -> Self {
+        let top = m.top_provider.as_ref();
+        ModelListing {
+            max_context_tokens: m
+                .context_length
+                .or(m.context_window)
+                .or_else(|| top.and_then(|t| t.context_length)),
+            max_output_tokens: m
+                .max_completion_tokens
+                .or(m.max_output_tokens)
+                .or_else(|| top.and_then(|t| t.max_completion_tokens)),
+            id: m.id,
+        }
+    }
 }
 
 // ===== Inline <think> tag stripping (Wave 6) =====
@@ -1359,6 +1434,36 @@ impl ThinkTagState {
 mod tests {
     use super::*;
     use crate::models::providers::lookup_provider;
+
+    #[test]
+    fn model_listing_parses_provider_limit_shapes() {
+        // OpenRouter shape: context_length + top_provider.max_completion_tokens.
+        let openrouter: ListModelsResponse = serde_json::from_str(
+            r#"{"data":[{"id":"z-ai/glm-5.2","context_length":1000000,
+                 "top_provider":{"context_length":1000000,"max_completion_tokens":32000}}]}"#,
+        )
+        .unwrap();
+        let m = ModelListing::from(openrouter.data.into_iter().next().unwrap());
+        assert_eq!(m.id, "z-ai/glm-5.2");
+        assert_eq!(m.max_context_tokens, Some(1_000_000));
+        assert_eq!(m.max_output_tokens, Some(32_000));
+
+        // Flat shape: context_window + max_output_tokens.
+        let flat: ListModelsResponse = serde_json::from_str(
+            r#"{"data":[{"id":"m","context_window":128000,"max_output_tokens":16384}]}"#,
+        )
+        .unwrap();
+        let m = ModelListing::from(flat.data.into_iter().next().unwrap());
+        assert_eq!(m.max_context_tokens, Some(128_000));
+        assert_eq!(m.max_output_tokens, Some(16_384));
+
+        // Bare OpenAI shape: id only — everything None, nothing fails.
+        let bare: ListModelsResponse =
+            serde_json::from_str(r#"{"data":[{"id":"gpt-x","object":"model"}]}"#).unwrap();
+        let m = ModelListing::from(bare.data.into_iter().next().unwrap());
+        assert_eq!(m.max_context_tokens, None);
+        assert_eq!(m.max_output_tokens, None);
+    }
 
     #[test]
     fn maps_openai_finish_reasons() {

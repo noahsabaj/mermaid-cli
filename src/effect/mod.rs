@@ -1406,6 +1406,7 @@ async fn dispatch_call_model(
             model_max: sizing.model_max,
             effective: sizing.effective,
             source: sizing.source,
+            max_output: sizing.max_output,
         })
         .await;
     // No-vision-model fallback: if this turn actually carries images, probe the
