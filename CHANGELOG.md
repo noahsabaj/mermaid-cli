@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Optional filesystem write-confinement for shell commands (Linux).**
+  `mermaid --confine-fs …` (or `safety.filesystem = "project"`) confines
+  model-run shell commands with a Landlock ruleset: writes are allowed only
+  beneath the project directory, the system temp directory, and `/dev`; reads
+  and execution stay unrestricted. A failure matching the denial signature
+  while confinement is active is reported with a clear "filesystem sandbox"
+  explanation and the `denied_by_sandbox` marker. `mermaid --sandbox …` is
+  shorthand for `--no-network --confine-fs`. Best-effort by design: kernels
+  without Landlock (pre-5.13) and other platforms degrade to a warned no-op.
+  Off by default.
 - **Optional network kill-switch for shell commands (Linux).** `mermaid
   --no-network …` (or `safety.network = "deny"`) confines model-run shell
   commands with a seccomp-BPF filter that denies internet sockets

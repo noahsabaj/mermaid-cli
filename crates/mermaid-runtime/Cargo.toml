@@ -38,10 +38,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
-# Linux OS sandbox: pure-Rust seccomp-BPF assembler for the network kill-switch.
-# `libc` supplies the syscall/AF_* constants and the fork/socket/waitpid used by
-# the sandbox unit tests. No system library — matches the FFI-free `rustix`
-# style already used by `hardening.rs`.
+# Linux OS sandbox: pure-Rust seccomp-BPF assembler for the network kill-switch,
+# plus the official `landlock` crate for filesystem write-confinement. `libc`
+# supplies the syscall/AF_* constants and the fork/socket/waitpid used by the
+# sandbox unit tests. No system library — matches the FFI-free `rustix` style
+# already used by `hardening.rs`.
 [target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
 libc = "0.2"
 seccompiler = "0.5"

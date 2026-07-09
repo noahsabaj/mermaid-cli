@@ -111,9 +111,13 @@ fn apply_prompt_flags(cli: &Cli, config: &mut mermaid_cli::app::Config) -> Resul
                 )
             })?);
     }
-    // `--no-network`: engage the OS network kill-switch for shell commands.
-    if cli.no_network {
+    // `--no-network` / `--confine-fs` / `--sandbox` (both): engage the OS
+    // sandbox dimensions for shell commands.
+    if cli.no_network || cli.sandbox {
         config.safety.network = mermaid_cli::app::NetworkPolicy::Deny;
+    }
+    if cli.confine_fs || cli.sandbox {
+        config.safety.filesystem = mermaid_cli::app::FilesystemPolicy::Project;
     }
     Ok(())
 }

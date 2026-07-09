@@ -168,6 +168,19 @@ pub enum NetworkPolicy {
     Deny,
 }
 
+/// Where model-driven shell commands may write. `Project` engages Linux
+/// Landlock write-confinement (`--confine-fs`): writes are allowed only beneath
+/// the project directory, the system temp directory, and `/dev`; reads and
+/// execution stay unrestricted. Best-effort (no-op on kernels without Landlock
+/// and on other platforms). Default `Unrestricted` preserves today's behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemPolicy {
+    #[default]
+    Unrestricted,
+    Project,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SafetyConfig {
@@ -177,6 +190,11 @@ pub struct SafetyConfig {
     /// network kill-switch on Linux. See [`NetworkPolicy`].
     #[serde(default)]
     pub network: NetworkPolicy,
+    /// Filesystem write policy for shell commands. `Project` confines writes
+    /// to the project/temp/`/dev` directories on Linux. See
+    /// [`FilesystemPolicy`].
+    #[serde(default)]
+    pub filesystem: FilesystemPolicy,
     #[serde(default)]
     pub overrides: Vec<PolicyOverride>,
     /// Model id the `Auto`-mode safety classifier uses to vet borderline
@@ -202,6 +220,7 @@ impl Default for SafetyConfig {
             mode: SafetyMode::Ask,
             checkpoint_on_mutation: true,
             network: NetworkPolicy::default(),
+            filesystem: FilesystemPolicy::default(),
             overrides: Vec::new(),
             auto_classifier_model: None,
             allow_untrusted_headless_tools: false,

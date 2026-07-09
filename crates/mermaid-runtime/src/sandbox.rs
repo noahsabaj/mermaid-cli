@@ -1,19 +1,29 @@
 //! Optional OS sandboxing for model-driven shell commands.
 //!
-//! Today this is a Linux seccomp-BPF **network kill-switch**. When engaged (via
-//! `--no-network` / `safety.network = "deny"`), creating an internet socket
-//! (`AF_INET` / `AF_INET6`) is denied with `SIGSYS`, while `AF_UNIX` and other
-//! local socket domains keep working so nscd / D-Bus / X11 are unaffected.
-//! `SIGSYS` is a distinctive, catchable signal, which the exec tool maps to a
-//! clear "blocked by the network sandbox" outcome.
+//! Two independent Linux confinement dimensions:
 //!
-//! The filter is applied from the `mermaid __sandbox-exec` launcher — ordinary,
+//! - A seccomp-BPF **network kill-switch**. When engaged (via `--no-network` /
+//!   `safety.network = "deny"`), creating an internet socket (`AF_INET` /
+//!   `AF_INET6`) is denied with `SIGSYS`, while `AF_UNIX` and other local
+//!   socket domains keep working so nscd / D-Bus / X11 are unaffected. `SIGSYS`
+//!   is a distinctive, catchable signal, which the exec tool maps to a clear
+//!   "blocked by the network sandbox" outcome.
+//! - A Landlock **filesystem write-confinement**. When engaged (via
+//!   `--confine-fs` / `safety.filesystem = "project"`), write-class access
+//!   (create / write / truncate / remove / rename) is allowed only beneath an
+//!   explicit set of directories; everything else fails with `EACCES`. Reads
+//!   and execution stay unrestricted. Best-effort by design: a kernel without
+//!   Landlock (pre-5.13) degrades to no-op rather than refusing to run.
+//!
+//! Both are applied from the `mermaid __sandbox-exec` launcher — ordinary,
 //! single-threaded code — just before it `execve`s the real command. seccomp
-//! filters survive `execve` and `fork`, so the command and everything it spawns
-//! inherit the restriction.
+//! filters and Landlock domains survive `execve` and `fork`, so the command and
+//! everything it spawns inherit the restriction.
 //!
 //! No-op on non-Linux (macOS Seatbelt / Windows AppContainer are follow-ups),
 //! mirroring the platform-gating convention in [`crate::hardening`].
+
+use std::path::PathBuf;
 
 /// Apply the network kill-switch to the current process. Inherited across
 /// `execve`/`fork`. Returns an error if the filter cannot be built or installed,
@@ -38,6 +48,39 @@ pub fn network_killswitch_available() -> bool {
     #[cfg(target_os = "linux")]
     {
         linux::network_filter().is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Confine write-class filesystem access of the current process (and everything
+/// it execs/forks) to the given directories via Landlock. Returns `Ok(true)`
+/// when the kernel enforces (fully or partially), `Ok(false)` when it cannot
+/// (no Landlock — best-effort no-op), and `Err` on a real setup failure so the
+/// caller can fail closed. Directories that don't exist are skipped. `Ok(false)`
+/// on non-Linux.
+pub fn apply_fs_confinement(allowed_writes: &[PathBuf]) -> anyhow::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::apply_fs_confinement(allowed_writes)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = allowed_writes;
+        Ok(false)
+    }
+}
+
+/// Whether the filesystem-confinement ruleset assembles on this platform. Like
+/// [`network_killswitch_available`]: a safe, fork-free `self-test` probe that
+/// restricts nothing. (Enforcement remains best-effort at apply time — a
+/// pre-Landlock kernel builds the ruleset but cannot enforce it.)
+pub fn fs_confinement_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::fs_ruleset_builds()
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -95,6 +138,50 @@ mod linux {
         let program = network_filter()?;
         apply_filter(&program).context("seccomp: install network filter")?;
         Ok(())
+    }
+
+    /// Landlock ABI the write-confinement targets. V3 (kernel 6.2) rounds out
+    /// the write set with `Truncate` on top of V2's `Refer` (cross-directory
+    /// rename/link). `CompatLevel::BestEffort` degrades gracefully on older
+    /// kernels.
+    const LANDLOCK_ABI: landlock::ABI = landlock::ABI::V3;
+
+    /// Build + apply the "writes only beneath these directories" Landlock
+    /// ruleset. Only write-class access is handled, so reads and execution stay
+    /// unrestricted everywhere. Returns whether the kernel actually enforces.
+    pub(super) fn apply_fs_confinement(
+        allowed_writes: &[std::path::PathBuf],
+    ) -> anyhow::Result<bool> {
+        use landlock::{
+            AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
+            RulesetStatus, path_beneath_rules,
+        };
+
+        let write_access = AccessFs::from_write(LANDLOCK_ABI);
+        let status = Ruleset::default()
+            .set_compatibility(CompatLevel::BestEffort)
+            .handle_access(write_access)
+            .context("landlock: handle write access")?
+            .create()
+            .context("landlock: create ruleset")?
+            // `path_beneath_rules` silently skips paths that can't be opened,
+            // so a missing allowed dir narrows the sandbox instead of erroring.
+            .add_rules(path_beneath_rules(allowed_writes, write_access))
+            .context("landlock: add write rules")?
+            .restrict_self()
+            .context("landlock: restrict self")?;
+        Ok(status.ruleset != RulesetStatus::NotEnforced)
+    }
+
+    /// Whether the confinement ruleset assembles (fork-free `self-test` probe;
+    /// creates a ruleset fd and drops it without restricting anything).
+    pub(super) fn fs_ruleset_builds() -> bool {
+        use landlock::{AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr};
+        Ruleset::default()
+            .set_compatibility(CompatLevel::BestEffort)
+            .handle_access(AccessFs::from_write(LANDLOCK_ABI))
+            .and_then(|r| r.create())
+            .is_ok()
     }
 
     #[cfg(test)]
@@ -155,6 +242,70 @@ mod linux {
                 libc::WEXITSTATUS(status),
                 0,
                 "AF_UNIX socket must be allowed under the network kill-switch"
+            );
+        }
+
+        #[test]
+        fn fs_confinement_allows_inside_and_denies_outside_writes() {
+            // Two sibling temp dirs; confinement grants writes beneath only one.
+            let base = std::env::temp_dir().join(format!(
+                "mermaid-landlock-test-{}-{}",
+                std::process::id(),
+                // Distinguish parallel test binaries reusing a pid.
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let allowed = base.join("allowed");
+            let outside = base.join("outside");
+            std::fs::create_dir_all(&allowed).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+
+            // Exit codes: 0 = enforced correctly; 42 = kernel can't enforce
+            // (skip); 10 = inside write failed; 11 = outside write succeeded;
+            // 77 = apply failed. Same fork pattern as the seccomp tests above.
+            // SAFETY: the child only runs the confinement setup, two writes,
+            // and `_exit`.
+            let status = unsafe {
+                let pid = libc::fork();
+                assert!(pid >= 0, "fork failed");
+                if pid == 0 {
+                    let code = match apply_fs_confinement(std::slice::from_ref(&allowed)) {
+                        Err(_) => 77,
+                        Ok(false) => 42,
+                        Ok(true) => {
+                            let inside_ok = std::fs::write(allowed.join("in.txt"), b"x").is_ok();
+                            let outside_ok = std::fs::write(outside.join("out.txt"), b"x").is_ok();
+                            match (inside_ok, outside_ok) {
+                                (true, false) => 0,
+                                (false, _) => 10,
+                                (true, true) => 11,
+                            }
+                        },
+                    };
+                    libc::_exit(code);
+                }
+                let mut status: libc::c_int = 0;
+                assert_eq!(libc::waitpid(pid, &mut status, 0), pid, "waitpid failed");
+                status
+            };
+
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert!(
+                libc::WIFEXITED(status),
+                "child should exit, status={status}"
+            );
+            let code = libc::WEXITSTATUS(status);
+            if code == 42 {
+                eprintln!("skipping: kernel does not enforce Landlock");
+                return;
+            }
+            assert_eq!(
+                code, 0,
+                "confined child: 10 = allowed write failed, 11 = outside write \
+                 succeeded, 77 = apply failed"
             );
         }
     }

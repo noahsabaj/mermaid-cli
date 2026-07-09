@@ -141,6 +141,7 @@ mermaid run "fix the tests"                     # Non-interactive mode
 mermaid run "explain main.rs" -f json           # JSON output (single typed object)
 mermaid run "explain main.rs" -f ndjson         # Streaming NDJSON events (SDK/scripting)
 mermaid --no-network run "audit the code"       # Deny network to shell commands (Linux seccomp)
+mermaid --sandbox run "refactor this"           # Also confine writes to the project (Linux Landlock)
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
 mermaid remove <name>                           # Remove a configured MCP server
 mermaid mcp                                     # List configured MCP servers
