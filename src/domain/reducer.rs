@@ -1083,13 +1083,39 @@ fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mo
 }
 
 fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
-    // Ctrl+C is the hard "leave the TUI" path. If work is active,
-    // emit a cancellation first so shutdown does not wait on a live
-    // provider/tool scope before returning the terminal.
-    if mods.ctrl && code == KeyCode::Char('c') {
-        request_exit(state, cmds);
+    // Ctrl+C: press twice to exit. The first press does the useful thing —
+    // interrupts a running turn (like Esc) or clears typed input — and arms a
+    // short confirm window; a second press inside the window exits. This also
+    // makes a stray copy-chord harmless: on terminals without the kitty
+    // protocol Ctrl+Shift+C arrives byte-identical to Ctrl+C, and with the
+    // protocol it arrives with the SHIFT bit — blocked here by `!mods.shift`
+    // and intercepted earlier in the run loop as the copy action. Ctrl+D on
+    // empty input and `/quit` remain immediate exits.
+    if mods.ctrl && !mods.shift && code == KeyCode::Char('c') {
+        if state
+            .ui
+            .exit_armed_until
+            .is_some_and(|deadline| state.now <= deadline)
+        {
+            request_exit(state, cmds);
+            return;
+        }
+        if state.is_busy() {
+            handle_cancel_turn(state, cmds);
+        } else if !state.ui.input_buffer.is_empty() {
+            state.ui.input_buffer.clear();
+            state.ui.input_cursor = 0;
+            state.ui.palette_cursor = None;
+            state.ui.input_history_cursor = None;
+            state.ui.history_draft.clear();
+        }
+        state.ui.exit_armed_until = Some(
+            state.now + chrono::Duration::seconds(crate::constants::UI_EXIT_CONFIRM_WINDOW_SECS),
+        );
         return;
     }
+    // Any other key disarms a pending exit confirmation — the user moved on.
+    state.ui.exit_armed_until = None;
 
     // Ctrl+B: send a running foreground command to the background (it keeps
     // running as a `/processes` entry) instead of waiting on it. Only
@@ -4389,29 +4415,109 @@ mod tests {
         assert!(matches!(cmds[1], Cmd::Exit));
     }
 
-    #[test]
-    fn ctrl_c_on_idle_empty_input_exits() {
-        let state = fresh_state();
-        let msg = Msg::Key(Key {
+    fn ctrl_c() -> Msg {
+        Msg::Key(Key {
             code: KeyCode::Char('c'),
             modifiers: KeyMods::ctrl(),
-        });
-        let (state, cmds) = update(state, msg);
+        })
+    }
+
+    /// Press-twice-to-exit: the first Ctrl+C arms the confirm window, the
+    /// second press inside it exits.
+    #[test]
+    fn ctrl_c_on_idle_empty_input_arms_then_second_press_exits() {
+        let state = fresh_state();
+        let (state, cmds) = update(state, ctrl_c());
+        assert!(!state.should_exit, "first press must not exit");
+        assert!(cmds.is_empty(), "first press on idle is reducer-only");
+        assert!(state.ui.exit_armed_until.is_some(), "first press arms");
+
+        let (state, cmds) = update(state, ctrl_c());
+        assert!(state.should_exit, "second press inside the window exits");
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
+    }
+
+    /// First Ctrl+C with typed input clears the input (Claude Code parity)
+    /// instead of exiting; the second press exits.
+    #[test]
+    fn ctrl_c_on_idle_with_input_clears_then_second_press_exits() {
+        let mut state = fresh_state();
+        state.ui.input_buffer = "partial".to_string();
+        state.ui.input_cursor = 7;
+        let (state, cmds) = update(state, ctrl_c());
+        assert!(!state.should_exit);
+        assert!(state.ui.input_buffer.is_empty(), "first press clears input");
+        assert_eq!(state.ui.input_cursor, 0);
+        assert!(cmds.is_empty());
+
+        let (state, cmds) = update(state, ctrl_c());
         assert!(state.should_exit);
         assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
     }
 
+    /// A second Ctrl+C after the confirm window expired re-arms instead of
+    /// exiting (lazy expiry against `state.now`).
     #[test]
-    fn ctrl_c_on_idle_with_input_exits() {
-        let mut state = fresh_state();
-        state.ui.input_buffer = "partial".to_string();
+    fn armed_exit_expires_after_window() {
+        let state = fresh_state();
+        let (mut state, _) = update(state, ctrl_c());
+        assert!(state.ui.exit_armed_until.is_some());
+        // Advance the injected clock past the deadline.
+        state.now += chrono::Duration::seconds(crate::constants::UI_EXIT_CONFIRM_WINDOW_SECS + 1);
+        let (state, cmds) = update(state, ctrl_c());
+        assert!(!state.should_exit, "expired arm must re-arm, not exit");
+        assert!(cmds.is_empty());
+        assert!(state.ui.exit_armed_until.is_some(), "re-armed");
+    }
+
+    /// Any other key while armed disarms the exit confirmation.
+    #[test]
+    fn any_other_key_disarms_exit_confirmation() {
+        let state = fresh_state();
+        let (state, _) = update(state, ctrl_c());
+        assert!(state.ui.exit_armed_until.is_some());
+        let (state, _) = update(state, key(KeyCode::Char('x')));
+        assert!(state.ui.exit_armed_until.is_none(), "typing disarms");
+        let (state, _) = update(state, ctrl_c());
+        assert!(
+            !state.should_exit,
+            "post-disarm Ctrl+C is a fresh first press"
+        );
+    }
+
+    /// Ctrl+Shift+C is the copy chord (kitty-protocol terminals deliver the
+    /// SHIFT bit) — it must never reach the quit/arm path.
+    #[test]
+    fn ctrl_shift_c_does_not_exit_or_arm() {
+        let state = fresh_state();
         let msg = Msg::Key(Key {
             code: KeyCode::Char('c'),
+            modifiers: KeyMods {
+                ctrl: true,
+                shift: true,
+                ..KeyMods::NONE
+            },
+        });
+        let (state, cmds) = update(state, msg);
+        assert!(!state.should_exit);
+        assert!(
+            state.ui.exit_armed_until.is_none(),
+            "copy chord must not arm"
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::Exit)));
+    }
+
+    /// Uppercase 'C' (however delivered) must not match the quit path either.
+    #[test]
+    fn ctrl_c_uppercase_never_exits() {
+        let state = fresh_state();
+        let msg = Msg::Key(Key {
+            code: KeyCode::Char('C'),
             modifiers: KeyMods::ctrl(),
         });
         let (state, cmds) = update(state, msg);
-        assert!(state.should_exit);
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
+        assert!(!state.should_exit);
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::Exit)));
     }
 
     /// Tool stdout progress lines must NOT append a chat message. Surfacing
@@ -5029,19 +5135,20 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_during_turn_exits_and_cancels_scope() {
+    fn ctrl_c_during_turn_cancels_then_second_press_exits() {
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
-        let msg = Msg::Key(Key {
-            code: KeyCode::Char('c'),
-            modifiers: KeyMods::ctrl(),
-        });
-        let (state, cmds) = update(state, msg);
-        assert!(state.should_exit);
+        // First press: interrupt the running turn (like Esc), don't exit.
+        let (state, cmds) = update(state, ctrl_c());
+        assert!(!state.should_exit, "first press interrupts, not exits");
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, Cmd::CancelScope(TurnId(5))))
         );
+        assert!(matches!(state.turn, TurnState::Cancelling { .. }));
+        // Second press inside the window: exit for real.
+        let (state, cmds) = update(state, ctrl_c());
+        assert!(state.should_exit);
         assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
     }
 

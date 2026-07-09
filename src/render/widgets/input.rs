@@ -88,6 +88,10 @@ pub struct InputWidget<'a> {
     /// Reasoning is currently enabled (any non-`None` level). Drives the
     /// cyan/sage border color cue.
     pub reasoning_active: bool,
+    /// A first Ctrl+C armed the exit confirmation; show the second-press
+    /// hint in the box title while the window is open (idle-state surface —
+    /// the busy-state hint lives in the status line).
+    pub exit_armed: bool,
 }
 
 impl<'a> StatefulWidget for InputWidget<'a> {
@@ -121,6 +125,11 @@ impl<'a> StatefulWidget for InputWidget<'a> {
                 .borders(Borders::TOP | Borders::BOTTOM)
                 .border_style(Style::new().fg(border_color))
                 .title(" Enter Command ")
+        } else if self.exit_armed {
+            Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::new().fg(border_color))
+                .title(" press ctrl+c again to exit ")
         } else {
             Block::default()
                 .borders(Borders::TOP | Borders::BOTTOM)

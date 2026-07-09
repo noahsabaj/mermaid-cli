@@ -28,6 +28,7 @@ pub fn build_status_lines(
     tokens_estimated: bool,
     active_tool: Option<&str>,
     queued_messages: &VecDeque<QueuedMessage>,
+    exit_armed: bool,
     theme: &Theme,
     width: u16,
 ) -> Vec<Line<'static>> {
@@ -70,9 +71,17 @@ pub fn build_status_lines(
         ""
     };
 
+    // A first Ctrl+C armed the exit confirmation: lead the meta with the
+    // second-press hint while the window is open.
+    let exit_hint = if exit_armed {
+        "ctrl+c again to exit • "
+    } else {
+        ""
+    };
+
     let head = format!("{}... ", status_text);
     let meta = format!(
-        "(esc to interrupt{bg_hint} • {}s • {} {}{} tokens)",
+        "({exit_hint}esc to interrupt{bg_hint} • {}s • {} {}{} tokens)",
         elapsed_secs,
         // The counter is generated (received) tokens, so it reads downstream even
         // while tools run — the run total just holds steady between model calls.
@@ -150,6 +159,7 @@ mod tests {
                 "Bash cd /d D:/Code/TestEnv/wordle && npm run dev -- --host 127.0.0.1 --port 5173",
             ),
             &queued,
+            false,
             &theme,
             80,
         );
@@ -177,6 +187,7 @@ mod tests {
             true,
             None,
             &queued,
+            false,
             &theme,
             120,
         );
@@ -205,6 +216,7 @@ mod tests {
             false,
             Some("Edit D:/Code/AI/some/very/deeply/nested/directory/structure/longfilename.rs"),
             &queued,
+            false,
             &theme,
             40,
         );
@@ -228,6 +240,7 @@ mod tests {
             false,
             None,
             &queued,
+            false,
             &theme,
             120,
         );
@@ -248,6 +261,7 @@ mod tests {
             false,
             tool,
             &queued,
+            false,
             &theme,
             100,
         )
@@ -260,12 +274,38 @@ mod tests {
                 false,
                 tool,
                 &queued,
+                false,
                 &theme,
                 100,
             )
             .len();
             assert_eq!(n, n0, "row count must not change as counters tick");
         }
+    }
+
+    #[test]
+    fn armed_exit_shows_second_press_hint() {
+        let theme = Theme::dark();
+        let queued = VecDeque::new();
+        let lines = build_status_lines(
+            GenerationStatus::Streaming,
+            2,
+            10,
+            true,
+            None,
+            &queued,
+            true,
+            &theme,
+            120,
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            text.contains("ctrl+c again to exit"),
+            "armed exit must surface the second-press hint: {text}"
+        );
     }
 
     #[test]
@@ -279,6 +319,7 @@ mod tests {
             false,
             None,
             &queued,
+            false,
             &theme,
             80,
         );

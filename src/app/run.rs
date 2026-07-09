@@ -255,6 +255,13 @@ pub async fn run_interactive_with(
                         // selection — the explicit copy step after a drag-select.
                         // Because the app holds the mouse, the terminal has no
                         // selection of its own and passes the shortcut through.
+                        // The SHIFT bit only arrives when the kitty keyboard
+                        // protocol was negotiated at setup (TerminalGuard); on
+                        // legacy terminals Ctrl+Shift+C is transmitted as the
+                        // identical byte 0x03 as Ctrl+C — physically
+                        // indistinguishable — so there it falls through to the
+                        // reducer's Ctrl+C handling (press-twice-to-exit keeps
+                        // a stray copy-chord harmless).
                         if let crossterm::event::Event::Key(k) = &evt
                             && k.kind == crossterm::event::KeyEventKind::Press
                             && k.modifiers

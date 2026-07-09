@@ -165,6 +165,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             tokens_estimated,
             active_tool.as_deref(),
             &state.ui.queued_messages,
+            exit_armed(state),
             &rstate.theme,
             // Match the 1-cell horizontal pad the status zone is rendered with.
             frame.area().width.saturating_sub(2),
@@ -280,6 +281,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         showing_command_hints: state.ui.input_buffer.starts_with('/'),
         theme: &rstate.theme,
         reasoning_active: state.session.reasoning != ReasoningLevel::None,
+        exit_armed: exit_armed(state),
     };
     let mut input_widget_state = InputState {
         cursor_position: state.ui.input_cursor.min(state.ui.input_buffer.len()),
@@ -443,6 +445,16 @@ fn build_live_messages<'a>(
     } else {
         std::borrow::Cow::Borrowed(committed)
     }
+}
+
+/// True while a first Ctrl+C's exit-confirmation window is open. Expiry is
+/// lazy: compared against the injected `state.now` (stamped every tick), so
+/// the hint disappears on the next tick frame with no reducer state change.
+fn exit_armed(state: &State) -> bool {
+    state
+        .ui
+        .exit_armed_until
+        .is_some_and(|deadline| state.now <= deadline)
 }
 
 /// While tools run, name the first in-flight one so the status line isn't an

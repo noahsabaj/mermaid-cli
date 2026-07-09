@@ -15,16 +15,23 @@ use anyhow::{Context, Result};
 use crossterm::cursor::Show;
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 static TERMINAL_NEEDS_RESTORE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the kitty keyboard-enhancement flags were pushed at setup — they
+/// stack per screen buffer, so `restore_terminal` must pop them (before
+/// leaving the alternate screen) exactly when they were pushed.
+static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 
 /// Owned terminal that restores the shell on drop.
 ///
@@ -53,6 +60,23 @@ impl TerminalGuard {
             return Err(error).context(
                 "failed to enter alternate screen / enable mouse / enable bracketed paste",
             );
+        }
+
+        // Kitty keyboard protocol, minimal tier: with only DISAMBIGUATE, keys
+        // that are ambiguous in the legacy encoding arrive as distinct events
+        // — Ctrl+Shift+C stops being byte-identical to Ctrl+C (so the copy
+        // chord can't hit the quit path) and Esc stops being an Alt- prefix
+        // guess. The probe needs raw mode (already on) and must run before
+        // the main loop takes over the event reader. Terminals without the
+        // protocol answer the probe negatively and keep legacy behavior.
+        if matches!(supports_keyboard_enhancement(), Ok(true))
+            && execute!(
+                io::stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )
+            .is_ok()
+        {
+            KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
         }
 
         let backend = CrosstermBackend::new(stdout);
@@ -103,6 +127,13 @@ impl Drop for TerminalGuard {
 /// dirty.
 fn restore_terminal() {
     let mut stdout = io::stdout();
+    // Pop the keyboard flags BEFORE leaving the alternate screen: kitty keeps
+    // a separate flag stack per screen buffer, so popping after the switch
+    // would pop the main screen's (empty) stack and leave the alt screen's
+    // flags armed for the next full-screen app.
+    if KEYBOARD_ENHANCED.swap(false, Ordering::SeqCst) {
+        let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(
         stdout,
         DisableMouseCapture,
@@ -111,8 +142,11 @@ fn restore_terminal() {
         LeaveAlternateScreen,
         Show,
     );
+    // `\x1b[<u` (pop keyboard flags) rides in the raw fallback unconditionally:
+    // terminals without the kitty protocol ignore the unknown CSI, same as the
+    // mouse-mode resets below.
     let _ = stdout.write_all(
-        b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[0m",
+        b"\x1b[<u\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[0m",
     );
     let _ = stdout.flush();
     let _ = disable_raw_mode();
