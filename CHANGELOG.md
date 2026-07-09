@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI: attention bell, keyboard scrolling, and a shortcut list.** The terminal
+  title now reflects run state (`mermaid · working`, else the conversation
+  title), and Mermaid rings the bell when a run finishes or an approval is
+  waiting while the terminal is unfocused. PageUp/PageDown scroll the transcript
+  (Shift+Up/Down by a line, End jumps back to the newest message), and `/help`
+  now lists the keyboard shortcuts.
 - **Providers & MCP: keyless local servers, env-sourced headers, per-server tool
   filters, raw command servers.** Local OpenAI-compatible endpoints (llama.cpp,
   vLLM, LM Studio) now work with no API key when the base URL is loopback/LAN;

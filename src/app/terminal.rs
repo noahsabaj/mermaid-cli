@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use crossterm::cursor::Show;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -46,6 +47,7 @@ impl TerminalGuard {
             EnterAlternateScreen,
             EnableMouseCapture,
             EnableBracketedPaste,
+            EnableFocusChange,
         ) {
             restore_terminal_once();
             return Err(error).context(
@@ -105,11 +107,12 @@ fn restore_terminal() {
         stdout,
         DisableMouseCapture,
         DisableBracketedPaste,
+        DisableFocusChange,
         LeaveAlternateScreen,
         Show,
     );
     let _ = stdout.write_all(
-        b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[0m",
+        b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[0m",
     );
     let _ = stdout.flush();
     let _ = disable_raw_mode();

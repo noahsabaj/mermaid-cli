@@ -316,6 +316,10 @@ pub enum Msg {
     MouseScroll {
         delta: i16,
     },
+    /// The terminal window gained (`true`) or lost (`false`) focus, from
+    /// terminal focus reporting. The reducer records it in
+    /// `ui.terminal_unfocused` to gate the attention bell.
+    FocusChanged(bool),
     /// Ctrl+Click on an image thumbnail in the chat pane. The
     /// coordinates are absolute screen row/col; the render cache's
     /// `ChatState::find_image_at_screen_pos` maps them to a
@@ -582,6 +586,7 @@ impl Msg {
             Msg::Tick => MsgKind::Tick,
             Msg::Resize { .. } => MsgKind::Resize,
             Msg::MouseScroll { .. } => MsgKind::MouseScroll,
+            Msg::FocusChanged(_) => MsgKind::FocusChanged,
             Msg::OpenImageAt { .. } => MsgKind::OpenImageAt,
             Msg::TransientStatus { .. } => MsgKind::TransientStatus,
             Msg::CopySelection(_) => MsgKind::CopySelection,
@@ -631,6 +636,7 @@ pub enum MsgKind {
     Tick,
     Resize,
     MouseScroll,
+    FocusChanged,
     OpenImageAt,
     TransientStatus,
     CopySelection,

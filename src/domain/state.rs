@@ -895,6 +895,16 @@ pub struct UiState {
     /// pure — it doesn't touch render-layer state, it just publishes
     /// an intent. `i32` wraps at ~2 billion scrolls (never).
     pub mouse_scroll_accum: i32,
+    /// Monotonic "jump to bottom" counter (keyboard `End`). Same
+    /// publish-then-diff pattern as `mouse_scroll_accum`: the reducer bumps it,
+    /// the render layer diffs it against its last-seen value and calls
+    /// `ChatState::resume_auto_scroll` — keeping the reducer pure.
+    pub scroll_to_bottom_seq: u32,
+    /// Whether the terminal window has LOST focus (from terminal focus
+    /// reporting via `Msg::FocusChanged`). Defaults `false` (assume attended, so
+    /// terminals without focus reporting never ding); the attention bell fires
+    /// only while this is `true`.
+    pub terminal_unfocused: bool,
     /// Whether committed reasoning/thinking blocks are expanded in
     /// the chat transcript. Hidden by default to keep the TUI focused
     /// on user-facing work while retaining provider-required history.

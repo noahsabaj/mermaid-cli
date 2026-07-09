@@ -248,6 +248,10 @@ pub enum Cmd {
     /// against `ui.last_title_dispatched` so this only fires on
     /// actual title changes, not every frame.
     SetTerminalTitle(String),
+    /// Ring the terminal bell (BEL) to draw the user's attention — emitted on
+    /// run completion / a pending approval only while the terminal is
+    /// unfocused. Suppressed in headless mode (same gate as the title).
+    AlertUser,
 }
 
 /// Inputs a model needs to generate a turn. Built by the reducer from
@@ -360,6 +364,7 @@ impl Cmd {
             Cmd::CopyToClipboard(_) => "copy_to_clipboard",
             Cmd::Exit => "exit",
             Cmd::SetTerminalTitle(_) => "set_terminal_title",
+            Cmd::AlertUser => "alert_user",
         }
     }
 
@@ -508,6 +513,7 @@ impl Cmd {
             Cmd::CopyToClipboard(t) => format!("copy_to_clipboard(n={})", t.chars().count()),
             Cmd::Exit => "exit".to_string(),
             Cmd::SetTerminalTitle(t) => format!("set_terminal_title({})", t),
+            Cmd::AlertUser => "alert_user".to_string(),
         }
     }
 }

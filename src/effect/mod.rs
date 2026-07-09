@@ -1229,6 +1229,19 @@ impl EffectRunner {
                     let _ = stdout.flush();
                 });
             },
+            Cmd::AlertUser => {
+                if !self.terminal_title_enabled {
+                    return;
+                }
+                // A single BEL nudges the terminal to alert (dock bounce / tab
+                // highlight). Offloaded to the blocking pool like the title.
+                self.detached.spawn_blocking(|| {
+                    use std::io::Write;
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(b"\x07");
+                    let _ = stdout.flush();
+                });
+            },
         }
     }
 

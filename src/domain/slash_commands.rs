@@ -53,6 +53,24 @@ pub const COMMAND_GROUPS: &[SlashCommandGroup] = &[
     SlashCommandGroup::AdvancedRuntime,
 ];
 
+/// Authoritative list of keyboard shortcuts (key → description), surfaced in
+/// `/help` beside the commands and reusable for a future `?` overlay. Kept in
+/// sync by hand with the bindings in `reducer::handle_key`. Plain text only.
+pub const KEYBINDINGS: &[(&str, &str)] = &[
+    ("Enter", "Submit the prompt"),
+    ("Esc", "Interrupt the current turn"),
+    ("Up / Down", "Browse input history"),
+    ("PageUp / PageDown", "Scroll the transcript"),
+    ("Shift+Up / Shift+Down", "Scroll the transcript one line"),
+    ("End", "Jump to the newest message"),
+    ("Ctrl+V", "Paste (including images)"),
+    ("Ctrl+B", "Background a running command"),
+    ("Alt+T", "Cycle reasoning depth"),
+    ("Shift+Tab", "Cycle the safety mode"),
+    ("Ctrl+C", "Cancel, then exit"),
+    ("Ctrl+D", "Quit"),
+];
+
 /// Authoritative registry of all slash commands. Order here is the
 /// order shown in the palette and `/help`.
 pub const COMMAND_REGISTRY: &[SlashCommand] = &[

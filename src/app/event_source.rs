@@ -60,7 +60,8 @@ pub fn event_to_msg(event: CtEvent) -> Option<Msg> {
             width: w,
             height: h,
         }),
-        CtEvent::FocusGained | CtEvent::FocusLost => None,
+        CtEvent::FocusGained => Some(Msg::FocusChanged(true)),
+        CtEvent::FocusLost => Some(Msg::FocusChanged(false)),
     }
 }
 

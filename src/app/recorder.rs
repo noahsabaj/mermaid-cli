@@ -672,6 +672,7 @@ mod tests {
                 | MsgKind::Tick
                 | MsgKind::Resize
                 | MsgKind::MouseScroll
+                | MsgKind::FocusChanged
                 | MsgKind::OpenImageAt
                 | MsgKind::TransientStatus
                 | MsgKind::CopySelection => true,
@@ -890,6 +891,7 @@ mod tests {
                 text: "saved".to_string(),
             },
             Msg::MouseScroll { delta: -3 },
+            Msg::FocusChanged(false),
             Msg::OpenImageAt {
                 message_index: 4,
                 image_index: 0,
@@ -940,6 +942,7 @@ mod tests {
             MsgKind::Tick,
             MsgKind::Resize,
             MsgKind::MouseScroll,
+            MsgKind::FocusChanged,
             MsgKind::OpenImageAt,
             MsgKind::TransientStatus,
             MsgKind::CopySelection,

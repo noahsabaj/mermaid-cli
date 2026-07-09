@@ -65,6 +65,7 @@ const MAX_QUEUED_MESSAGES: usize = 32;
 /// pushed onto `state.ui.pending_msgs`. All emitted `Cmd`s coalesce
 /// into the returned vector.
 pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
+    let turn_active_before = !matches!(state.turn, TurnState::Idle);
     let (new_state, mut cmds) = update_step(state, msg);
     state = new_state;
     let mut depth = 0usize;
@@ -82,6 +83,16 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         state = s;
         cmds.extend(c);
         depth += 1;
+    }
+    // Keep the terminal title in sync with the run state, and ring the bell when
+    // a run finishes while the terminal is unfocused. Only on an active/idle
+    // flip, so Tick/resize stay free; the title emit is diffed (no-op if same).
+    let turn_active_after = !matches!(state.turn, TurnState::Idle);
+    if turn_active_before != turn_active_after {
+        emit_title_if_changed(&mut state, &mut cmds);
+        if !turn_active_after && state.ui.terminal_unfocused {
+            cmds.push(Cmd::AlertUser);
+        }
     }
     (state, cmds)
 }
@@ -439,6 +450,11 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     allowlist_scope,
                     selected_option: 0,
                 });
+            // A gated action is waiting on the user — ring the bell if they're
+            // looking elsewhere.
+            if state.ui.terminal_unfocused {
+                cmds.push(Cmd::AlertUser);
+            }
         },
         Msg::QuestionAsked {
             turn,
@@ -616,6 +632,11 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // delta to ChatState. `saturating_add` never overflows.
             state.ui.mouse_scroll_accum = state.ui.mouse_scroll_accum.saturating_add(delta as i32);
         },
+        Msg::FocusChanged(focused) => {
+            // Track focus so the attention bell only fires when the user is
+            // looking elsewhere. UI-only; never affects the model.
+            state.ui.terminal_unfocused = !focused;
+        },
         Msg::TransientStatus { text } => {
             // Generic async feedback from effect handlers ("clipboard is empty",
             // "config saved", etc.). Routed into the chat transcript instead of
@@ -648,10 +669,25 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
 /// ConfirmAccepted → ClearConversation) — never at the tail of every
 /// update() so `Tick`/resize/etc. stay free.
 fn emit_title_if_changed(state: &mut State, cmds: &mut Vec<Cmd>) {
-    let current = state.session.conversation.title.clone();
-    if state.ui.last_title_dispatched.as_deref() != Some(current.as_str()) {
-        cmds.push(Cmd::SetTerminalTitle(format!("mermaid - {}", current)));
-        state.ui.last_title_dispatched = Some(current);
+    let title = desired_title(state);
+    if state.ui.last_title_dispatched.as_deref() != Some(title.as_str()) {
+        cmds.push(Cmd::SetTerminalTitle(title.clone()));
+        state.ui.last_title_dispatched = Some(title);
+    }
+}
+
+/// The terminal title, reflecting run state: `mermaid · working` while a turn is
+/// in flight, else `mermaid · <conversation title>` (or just `mermaid`). Plain
+/// text with a middot separator — no emoji.
+fn desired_title(state: &State) -> String {
+    if !matches!(state.turn, TurnState::Idle) {
+        return "mermaid · working".to_string();
+    }
+    let conv = state.session.conversation.title.trim();
+    if conv.is_empty() {
+        "mermaid".to_string()
+    } else {
+        format!("mermaid · {conv}")
     }
 }
 
@@ -1052,6 +1088,36 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             cmds.push(Cmd::BackgroundScope(*id));
         }
         return;
+    }
+
+    // Transcript scrolling (keyboard): PageUp/PageDown by a page, Shift+Up/Down
+    // by a line, End to jump back to the newest message. Reuses the pure
+    // publish-then-diff scroll pipeline — the render layer applies the delta,
+    // so the reducer only bumps a counter. Positive accum scrolls toward older
+    // messages (matches `Msg::MouseScroll`).
+    const SCROLL_PAGE: i32 = 10;
+    match code {
+        KeyCode::PageUp => {
+            state.ui.mouse_scroll_accum = state.ui.mouse_scroll_accum.saturating_add(SCROLL_PAGE);
+            return;
+        },
+        KeyCode::PageDown => {
+            state.ui.mouse_scroll_accum = state.ui.mouse_scroll_accum.saturating_sub(SCROLL_PAGE);
+            return;
+        },
+        KeyCode::Up if mods.shift => {
+            state.ui.mouse_scroll_accum = state.ui.mouse_scroll_accum.saturating_add(1);
+            return;
+        },
+        KeyCode::Down if mods.shift => {
+            state.ui.mouse_scroll_accum = state.ui.mouse_scroll_accum.saturating_sub(1);
+            return;
+        },
+        KeyCode::End => {
+            state.ui.scroll_to_bottom_seq = state.ui.scroll_to_bottom_seq.wrapping_add(1);
+            return;
+        },
+        _ => {},
     }
 
     // Inline approval modal: while a tool awaits approval the prompt is
@@ -2295,6 +2361,11 @@ fn help_text() -> String {
                 command.name, suffix, aliases, command.description
             ));
         }
+    }
+    lines.push(String::new());
+    lines.push("Keyboard shortcuts:".to_string());
+    for (keys, desc) in crate::domain::slash_commands::KEYBINDINGS {
+        lines.push(format!("  {keys} - {desc}"));
     }
     lines.join("\n")
 }
@@ -3948,6 +4019,52 @@ mod tests {
             "ollama/test".to_string(),
             chrono::Local::now(),
         )
+    }
+
+    #[test]
+    fn focus_changed_toggles_terminal_unfocused() {
+        let state = fresh_state();
+        assert!(!state.ui.terminal_unfocused); // default: assume attended
+        let (state, _) = update(state, Msg::FocusChanged(false));
+        assert!(state.ui.terminal_unfocused);
+        let (state, _) = update(state, Msg::FocusChanged(true));
+        assert!(!state.ui.terminal_unfocused);
+    }
+
+    #[test]
+    fn keyboard_scroll_publishes_deltas_and_end_jumps() {
+        let key = |code, modifiers| Msg::Key(Key { code, modifiers });
+        let (state, _) = update(fresh_state(), key(KeyCode::PageUp, KeyMods::default()));
+        assert_eq!(state.ui.mouse_scroll_accum, 10);
+        let (state, _) = update(state, key(KeyCode::PageDown, KeyMods::default()));
+        assert_eq!(state.ui.mouse_scroll_accum, 0);
+        let shift = KeyMods {
+            shift: true,
+            ..Default::default()
+        };
+        let (state, _) = update(state, key(KeyCode::Up, shift));
+        assert_eq!(state.ui.mouse_scroll_accum, 1);
+        let before = state.ui.scroll_to_bottom_seq;
+        let (state, _) = update(state, key(KeyCode::End, KeyMods::default()));
+        assert_eq!(state.ui.scroll_to_bottom_seq, before + 1);
+    }
+
+    #[test]
+    fn desired_title_reflects_run_state() {
+        let mut state = fresh_state();
+        // Idle: a mermaid title, but not the "working" status.
+        assert!(desired_title(&state).starts_with("mermaid"));
+        assert!(!desired_title(&state).contains("working"));
+        // Active: the working status.
+        state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
+        assert_eq!(desired_title(&state), "mermaid · working");
+    }
+
+    #[test]
+    fn help_text_lists_keyboard_shortcuts() {
+        let help = help_text();
+        assert!(help.contains("Keyboard shortcuts:"));
+        assert!(help.contains("PageUp"));
     }
 
     #[test]
