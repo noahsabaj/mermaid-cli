@@ -102,8 +102,8 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_cli::app::Config) ->
         ensure_ollama_model(&model_id, &config).await?;
     }
 
-    if cli_model_provided {
-        let _ = persist_last_model(&model_id);
+    if cli_model_provided && let Err(err) = persist_last_model(&model_id) {
+        tracing::warn!(error = %err, "failed to persist last-used model");
     }
 
     // F6 `--reasoning <level>`: overlay onto config so `State::new`
@@ -111,7 +111,9 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_cli::app::Config) ->
     // subsequent sessions without the flag remember the choice.
     if let Some(level) = cli.reasoning {
         config.reasoning_per_model.insert(model_id.clone(), level);
-        let _ = persist_reasoning_for_model(&model_id, level);
+        if let Err(err) = persist_reasoning_for_model(&model_id, level) {
+            tracing::warn!(error = %err, "failed to persist reasoning level for model");
+        }
     }
 
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
@@ -189,14 +191,16 @@ async fn dispatch_non_interactive(
         ensure_ollama_model(&model_id, &config).await?;
     }
 
-    if cli_model_provided {
-        let _ = persist_last_model(&model_id);
+    if cli_model_provided && let Err(err) = persist_last_model(&model_id) {
+        tracing::warn!(error = %err, "failed to persist last-used model");
     }
 
     // F6 `--reasoning <level>`: same overlay as the interactive path.
     if let Some(level) = cli.reasoning {
         config.reasoning_per_model.insert(model_id.clone(), level);
-        let _ = persist_reasoning_for_model(&model_id, level);
+        if let Err(err) = persist_reasoning_for_model(&model_id, level) {
+            tracing::warn!(error = %err, "failed to persist reasoning level for model");
+        }
     }
     // F6 `run --max-tokens <n>`: overlay the config's per-model cap.
     if let Some(n) = max_tokens {
