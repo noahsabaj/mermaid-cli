@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The config file is now written atomically.** `save_config` truncated the
+  config in place, so a crash, kill, or disk-full mid-write could leave an empty
+  or half-written `config.toml` — losing your settings (and inline secrets). It
+  now writes via a temp file + fsync + atomic rename, created `0o600` on Unix so
+  the secret-bearing config is never even briefly world-readable.
 - **Failed background saves now report what went wrong instead of vanishing.**
   Conversation saves, the compaction archive's conversation write, model /
   reasoning / Ollama-preference persistence, the `--record` replay log, the
