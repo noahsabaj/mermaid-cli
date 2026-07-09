@@ -1,11 +1,11 @@
 //! Provisions the sovereign SearXNG bundle so `web_search` needs no container
-//! runtime. The bundle — a portable CPython + a venv with Granian + the SearXNG
-//! source tree — is published per-platform by the `mermaid-searxng` repo as a
-//! checksummed release asset. On the first managed `web_search`, [`ensure_bundle`]
-//! downloads the bundle for this platform, verifies it against `SHA256SUMS`
-//! (the same anchored flow as `install.sh`, done in-process), and unpacks it
-//! under the data dir. Subsequent runs reuse the unpacked tree until the pinned
-//! [`SEARXNG_BUNDLE_VERSION`] changes.
+//! runtime. The bundle — a portable CPython + Granian + the SearXNG app — is
+//! published per-platform by the `mermaid-searxng` repo as a checksummed release
+//! asset. On the first managed `web_search`, [`ensure_bundle`] downloads the
+//! bundle for this platform, verifies it against the sha256 pinned in
+//! [`super::bundle_manifest`] (the trust anchor — a tampered release asset is
+//! rejected), and unpacks it under the data dir. Subsequent runs reuse the
+//! unpacked tree until the pinned version changes.
 //!
 //! Callers serialize through the `SearxngManager` mutex, so this runs exactly
 //! once per process even under concurrent first-searches.
@@ -14,13 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
-/// The `mermaid-searxng` release this build pins. The unpacked bundle carries a
-/// `.version` marker; a mismatch triggers a re-download. Bumped by the
-/// CI-automated PR that a `mermaid-searxng` release opens against this repo, so
-/// bundle updates ride the normal `mermaid update` channel.
-//
-// TODO: real pin lands with the first `mermaid-searxng` release (plan Part B).
-pub const SEARXNG_BUNDLE_VERSION: &str = "v0.1.0";
+use super::bundle_manifest;
 
 /// GitHub repo publishing the bundles.
 const BUNDLE_REPO: &str = "noahsabaj/mermaid-searxng";
@@ -33,16 +27,19 @@ pub async fn ensure_bundle() -> Result<PathBuf> {
     if version_is_current(&marker_contents(&runtime)) {
         return Ok(runtime);
     }
-    let target = target_triple().ok_or_else(|| {
-        anyhow!(
-            "no sovereign SearXNG bundle is available for this platform ({}/{}). \
-             Set OLLAMA_API_KEY, or point `[web] searxng_url` at your own instance.",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        )
-    })?;
-    provision(&asset_name(target), &runtime).await?;
+    let target = target_triple().ok_or_else(unsupported_platform)?;
+    let expected_sha = bundle_manifest::bundle_sha256(target).ok_or_else(unsupported_platform)?;
+    provision(target, expected_sha, &runtime).await?;
     Ok(runtime)
+}
+
+fn unsupported_platform() -> anyhow::Error {
+    anyhow!(
+        "no sovereign SearXNG bundle is available for this platform ({}/{}). \
+         Set OLLAMA_API_KEY, or point `[web] searxng_url` at your own instance.",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
 }
 
 /// Where the unpacked bundle lives: `<data_dir>/searxng/runtime`. Sits under the
@@ -58,7 +55,7 @@ fn marker_contents(runtime: &Path) -> String {
 
 /// Whether an unpacked `.version` marker matches the pinned bundle version.
 fn version_is_current(marker: &str) -> bool {
-    marker.trim() == SEARXNG_BUNDLE_VERSION
+    marker.trim() == bundle_manifest::BUNDLE_VERSION
 }
 
 /// Map the compile target to the release-asset triple. `None` on a platform with
@@ -67,36 +64,36 @@ fn target_triple() -> Option<&'static str> {
     triple_for(std::env::consts::OS, std::env::consts::ARCH)
 }
 
-/// Pure OS/arch → asset-triple mapping. Kept separate from [`target_triple`] so
-/// every supported combination is unit-testable off-host. Triples match the
-/// `mermaid-searxng` release matrix (the same strings as mermaid-cli's own).
+/// Pure OS/arch → asset-triple mapping, unit-testable off-host. Covers exactly
+/// the targets the `mermaid-searxng` release publishes; Windows (SearXNG needs
+/// Unix-only modules) and Intel macOS (CI runner scarcity) are unsupported.
 fn triple_for(os: &str, arch: &str) -> Option<&'static str> {
     Some(match (os, arch) {
         ("linux", "x86_64") => "linux-x86_64",
         ("linux", "aarch64") => "linux-aarch64",
-        ("macos", "x86_64") => "macos-x86_64",
         ("macos", "aarch64") => "macos-aarch64",
-        ("windows", "x86_64") => "windows-x86_64",
         _ => return None,
     })
 }
 
-/// Asset file name for a triple: `.tar.zst` on unix, `.zip` on Windows.
+/// Asset file name for a triple (every published bundle is a `.tar.zst`).
 fn asset_name(target: &str) -> String {
-    let ext = if cfg!(windows) { "zip" } else { "tar.zst" };
-    format!("mermaid-searxng-{target}.{ext}")
+    format!("mermaid-searxng-{target}.tar.zst")
 }
 
-/// Download, verify, and unpack `asset` into `runtime`, replacing any prior tree
-/// atomically.
-async fn provision(asset: &str, runtime: &Path) -> Result<()> {
-    // A visible, non-blocking notice: the bundle is a data payload (not remote
-    // code like `mermaid update`), and the container path pulled its image
-    // silently too — a one-line heads-up is the right middle ground.
+/// Download the bundle for `target`, verify it against the pinned `expected_sha`,
+/// and unpack it into `runtime`, replacing any prior tree atomically.
+async fn provision(target: &str, expected_sha: &str, runtime: &Path) -> Result<()> {
+    let asset = asset_name(target);
+    // A visible, non-blocking notice: the bundle is a data payload, and the
+    // container path pulled its image silently too — a one-line heads-up is the
+    // right middle ground.
     tracing::info!("fetching the local search engine ({asset}) — first run only");
 
-    let base =
-        format!("https://github.com/{BUNDLE_REPO}/releases/download/{SEARXNG_BUNDLE_VERSION}");
+    let url = format!(
+        "https://github.com/{BUNDLE_REPO}/releases/download/{}/{asset}",
+        bundle_manifest::BUNDLE_VERSION
+    );
     let staging = crate::utils::private_temp_dir()
         .context("creating the private staging dir for the SearXNG bundle")?
         .join("searxng-download");
@@ -104,17 +101,13 @@ async fn provision(asset: &str, runtime: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
 
-    // Small manifest first, then the large asset streamed to disk while hashing.
-    let sums = http_get_text(&format!("{base}/SHA256SUMS")).await?;
-    let want = expected_sha256(&sums, asset)
-        .ok_or_else(|| anyhow!("no checksum listed for {asset} in SHA256SUMS"))?
-        .to_owned();
-
-    let archive = staging.join(asset);
-    let got = download_hashing(&format!("{base}/{asset}"), &archive).await?;
-    if !got.eq_ignore_ascii_case(&want) {
+    // Stream the asset to disk while hashing, then compare against the compiled-in
+    // pin — the release's own SHA256SUMS is never trusted.
+    let archive = staging.join(&asset);
+    let got = download_hashing(&url, &archive).await?;
+    if !got.eq_ignore_ascii_case(expected_sha) {
         return Err(anyhow!(
-            "checksum mismatch for {asset}\n  expected: {want}\n  actual:   {got}"
+            "checksum mismatch for {asset}\n  expected: {expected_sha}\n  actual:   {got}"
         ));
     }
 
@@ -124,41 +117,11 @@ async fn provision(asset: &str, runtime: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(&incoming);
     std::fs::create_dir_all(&incoming)?;
     extract(&archive, &incoming).with_context(|| format!("unpacking {asset}"))?;
-    std::fs::write(incoming.join(".version"), SEARXNG_BUNDLE_VERSION)?;
+    std::fs::write(incoming.join(".version"), bundle_manifest::BUNDLE_VERSION)?;
     swap_into_place(&incoming, runtime)?;
 
     let _ = std::fs::remove_dir_all(&staging);
     Ok(())
-}
-
-/// Extract the expected sha256 for `asset` from a `SHA256SUMS` body. Matches the
-/// asset only as the whole final field — the anchored equivalent of install.sh's
-/// `grep " ${asset}$"` — so `mermaid-searxng-linux-x86_64` can never accidentally
-/// match against `...-x86_64-something`. Tolerates the one/two-space and binary
-/// (`*name`) forms `sha256sum`/`shasum` emit.
-fn expected_sha256<'a>(sums: &'a str, asset: &str) -> Option<&'a str> {
-    sums.lines().find_map(|line| {
-        let mut parts = line.split_whitespace();
-        let hash = parts.next()?;
-        let name = parts.next()?.trim_start_matches('*');
-        // Reject lines with trailing junk fields; a valid entry is exactly two.
-        if parts.next().is_some() {
-            return None;
-        }
-        (name == asset).then_some(hash)
-    })
-}
-
-/// GET a small text resource (the `SHA256SUMS` manifest).
-async fn http_get_text(url: &str) -> Result<String> {
-    let resp = reqwest::Client::new()
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("requesting {url}"))?
-        .error_for_status()
-        .with_context(|| format!("fetching {url}"))?;
-    Ok(resp.text().await?)
 }
 
 /// Stream `url` to `dest` while computing its sha256 in one pass, returning the
@@ -198,7 +161,6 @@ fn swap_into_place(from: &Path, to: &Path) -> Result<()> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Remove a stale/partial prior runtime, then move the new tree into place.
     if to.exists() {
         std::fs::remove_dir_all(to)
             .with_context(|| format!("removing the previous bundle at {}", to.display()))?;
@@ -218,16 +180,15 @@ fn extract(archive: &Path, dest: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn extract(archive: &Path, dest: &Path) -> Result<()> {
-    let file = std::fs::File::open(archive)?;
-    zip::ZipArchive::new(file)
-        .context("opening the .zip bundle")?
-        .extract(dest)
-        .context("unpacking the .zip bundle")
+fn extract(_archive: &Path, _dest: &Path) -> Result<()> {
+    // No Windows bundle is published (SearXNG imports Unix-only modules like
+    // `pwd`); ensure_bundle returns the unsupported-platform error long before
+    // this is reachable. Present only so the crate compiles on Windows.
+    Err(anyhow!("SearXNG bundles are not published for Windows"))
 }
 
-/// Lowercase-hex a byte slice, matching the `SHA256SUMS` digest format (mirrors
-/// the idiom in `searxng::random_secret`).
+/// Lowercase-hex a byte slice, matching the pinned digest format (mirrors the
+/// idiom in `searxng::random_secret`).
 fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -237,77 +198,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn triple_covers_every_release_target() {
+    fn triple_covers_the_published_targets() {
         assert_eq!(triple_for("linux", "x86_64"), Some("linux-x86_64"));
         assert_eq!(triple_for("linux", "aarch64"), Some("linux-aarch64"));
-        assert_eq!(triple_for("macos", "x86_64"), Some("macos-x86_64"));
         assert_eq!(triple_for("macos", "aarch64"), Some("macos-aarch64"));
-        assert_eq!(triple_for("windows", "x86_64"), Some("windows-x86_64"));
     }
 
     #[test]
-    fn triple_is_none_for_unsupported_platforms() {
-        assert_eq!(triple_for("windows", "aarch64"), None); // no windows-arm64 asset
+    fn triple_is_none_for_unpublished_platforms() {
+        assert_eq!(triple_for("windows", "x86_64"), None); // SearXNG needs `pwd`
+        assert_eq!(triple_for("macos", "x86_64"), None); // Intel-mac runner scarcity
         assert_eq!(triple_for("freebsd", "x86_64"), None);
-        assert_eq!(triple_for("linux", "riscv64"), None);
     }
 
     #[test]
-    fn asset_name_has_the_platform_extension() {
-        let name = asset_name("linux-x86_64");
-        assert!(name.starts_with("mermaid-searxng-linux-x86_64."));
-        if cfg!(windows) {
-            assert!(name.ends_with(".zip"), "{name}");
-        } else {
-            assert!(name.ends_with(".tar.zst"), "{name}");
+    fn every_published_triple_has_a_pinned_checksum() {
+        // The platform list and the checksum table must not drift apart.
+        for t in ["linux-x86_64", "linux-aarch64", "macos-aarch64"] {
+            let sha = bundle_manifest::bundle_sha256(t).unwrap_or_else(|| panic!("no sha for {t}"));
+            assert_eq!(sha.len(), 64, "{t} sha is not 64 hex chars");
+            assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "{t} sha not hex");
         }
     }
 
     #[test]
-    fn the_current_host_maps_to_a_bundle() {
-        // CI runs on the five supported targets; each must resolve.
-        assert!(target_triple().is_some(), "unmapped host build target");
+    fn the_current_host_target_is_pinned_when_supported() {
+        if let Some(t) = target_triple() {
+            assert!(
+                bundle_manifest::bundle_sha256(t).is_some(),
+                "published target {t} has no pinned checksum"
+            );
+        }
     }
 
     #[test]
-    fn expected_sha256_matches_the_whole_asset_field() {
-        let asset = "mermaid-searxng-linux-x86_64.tar.zst";
-        let sums = format!(
-            "1111111111111111111111111111111111111111111111111111111111111111  other.tar.zst\n\
-             abc0000000000000000000000000000000000000000000000000000000000def  {asset}\n\
-             2222222222222222222222222222222222222222222222222222222222222222  mermaid-searxng-linux-aarch64.tar.zst\n"
-        );
+    fn asset_name_is_tar_zst() {
         assert_eq!(
-            expected_sha256(&sums, asset),
-            Some("abc0000000000000000000000000000000000000000000000000000000000def")
+            asset_name("linux-x86_64"),
+            "mermaid-searxng-linux-x86_64.tar.zst"
         );
-    }
-
-    #[test]
-    fn expected_sha256_never_matches_a_substring_or_prefix() {
-        // A different asset whose name has ours as a prefix must not match.
-        let sums = "9999999999999999999999999999999999999999999999999999999999999999  mermaid-searxng-linux-x86_64.tar.zst.bak\n";
-        assert_eq!(
-            expected_sha256(sums, "mermaid-searxng-linux-x86_64.tar.zst"),
-            None
-        );
-    }
-
-    #[test]
-    fn expected_sha256_tolerates_binary_marker_and_is_absent_when_unlisted() {
-        let asset = "mermaid-searxng-macos-aarch64.zip";
-        let sums = format!("deadbeef00000000000000000000000000000000000000000000000000000000 *{asset}\n");
-        assert_eq!(
-            expected_sha256(&sums, asset),
-            Some("deadbeef00000000000000000000000000000000000000000000000000000000")
-        );
-        assert_eq!(expected_sha256(&sums, "not-listed.zip"), None);
     }
 
     #[test]
     fn version_marker_compare_trims_whitespace() {
-        assert!(version_is_current(SEARXNG_BUNDLE_VERSION));
-        assert!(version_is_current(&format!("  {SEARXNG_BUNDLE_VERSION}\n")));
+        assert!(version_is_current(bundle_manifest::BUNDLE_VERSION));
+        assert!(version_is_current(&format!(
+            "  {}\n",
+            bundle_manifest::BUNDLE_VERSION
+        )));
         assert!(!version_is_current("v0.0.1"));
         assert!(!version_is_current(""));
     }

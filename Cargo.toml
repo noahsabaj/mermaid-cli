@@ -106,9 +106,6 @@ opt-level = 3
 ruzstd = "0.8.3"
 tar = "0.4.46"
 
-[target."cfg(windows)".dependencies]
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
-
 [package.metadata.deb]
 name = "mermaid-cli"
 maintainer = "Noah Sabaj <noahsabaj@gmail.com>"

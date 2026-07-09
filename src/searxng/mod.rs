@@ -11,6 +11,7 @@
 //! and the user configures nothing.
 
 pub mod bundle;
+pub mod bundle_manifest;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -157,8 +158,13 @@ fn spawn_granian(runtime: &Path, port: u16, settings: &Path) -> std::io::Result<
 /// instance — returning the `settings.yml` path to pass as `SEARXNG_SETTINGS_PATH`.
 /// Regenerated each launch so a settings-schema change always propagates (the
 /// container era wrote it once, which stranded stale files).
+///
+/// Written under the DATA dir (beside the unpacked runtime), not the config dir:
+/// the old container backend mounted `<config_dir>/searxng` with `:Z`, which on
+/// SELinux systems relabels it to a container-private context the normal process
+/// can no longer write. The data dir was never container-touched.
 fn write_settings() -> Result<PathBuf> {
-    let dir = crate::app::get_config_dir()?.join("searxng");
+    let dir = crate::runtime::data_dir()?.join("searxng");
     std::fs::create_dir_all(&dir)?;
     let settings = dir.join("settings.yml");
     std::fs::write(&settings, settings_yml())?;
@@ -252,5 +258,42 @@ mod tests {
         assert_eq!(a.len(), 32);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "each secret should be freshly random");
+    }
+
+    /// Full path against the published bundle: download + sha256-verify + unpack,
+    /// spawn Granian, serve the JSON API, then reap. Ignored by default — it
+    /// downloads a ~65-80 MB bundle, writes the data dir, and spawns a real
+    /// server. Run with:
+    ///   `cargo test --lib managed_searxng_end_to_end -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn managed_searxng_end_to_end() {
+        let base = manager()
+            .ensure_running()
+            .await
+            .expect("ensure_running should download the bundle and start Granian");
+        assert!(base.starts_with("http://127.0.0.1:"), "base_url: {base}");
+
+        let probe = format!("{base}/search?q=mermaid&format=json");
+        let resp = reqwest::Client::new()
+            .get(&probe)
+            .send()
+            .await
+            .expect("search probe");
+        assert!(resp.status().is_success(), "status: {}", resp.status());
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert!(body.get("results").is_some(), "no results field in {body}");
+
+        shutdown().await;
+        // After shutdown the port must be released (the Granian tree was reaped).
+        let after = reqwest::Client::new()
+            .get(&probe)
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await;
+        assert!(
+            after.is_err() || !after.unwrap().status().is_success(),
+            "server still answering after shutdown — reap failed"
+        );
     }
 }
