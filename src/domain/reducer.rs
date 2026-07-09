@@ -55,6 +55,11 @@ use super::{COMMAND_GROUPS, COMMAND_REGISTRY};
 /// might enqueue unboundedly.
 const MAX_PENDING_DRAIN: usize = 16;
 
+/// Cap on `state.ui.queued_messages` — the user-typed prompts queued while a
+/// turn is in flight. Holding Enter during a long turn would otherwise grow it
+/// without bound; past the cap the oldest queued prompt is dropped.
+const MAX_QUEUED_MESSAGES: usize = 32;
+
 /// The public reducer entry point. Runs one `update_step` for the
 /// incoming `msg`, then drains any follow-up `Msg`s the handler
 /// pushed onto `state.ui.pending_msgs`. All emitted `Cmd`s coalesce
@@ -1669,6 +1674,16 @@ fn handle_submit_prompt(
     // reducer's StreamDone arm pops the oldest queued message and
     // auto-submits it.
     if !matches!(state.turn, TurnState::Idle) {
+        // Bound the queue: a user holding Enter during a long turn would
+        // otherwise grow it without limit. Past the cap, drop the oldest queued
+        // prompt (mirrors the `pending_msgs` drain cap).
+        if state.ui.queued_messages.len() >= MAX_QUEUED_MESSAGES {
+            state.ui.queued_messages.pop_front();
+            tracing::warn!(
+                max = MAX_QUEUED_MESSAGES,
+                "reducer: queued_messages cap hit — dropped the oldest queued prompt"
+            );
+        }
         state
             .ui
             .queued_messages
@@ -5198,11 +5213,11 @@ mod tests {
     }
 
     #[test]
-    fn submit_prompt_when_busy_is_dropped() {
+    fn submit_prompt_when_busy_is_queued() {
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
         let msg = Msg::SubmitPrompt {
-            text: "ignored".to_string(),
+            text: "queue me".to_string(),
             attachment_ids: vec![],
         };
         let (state, cmds) = update(state, msg);
@@ -5211,7 +5226,34 @@ mod tests {
             TurnState::Generating { id: TurnId(1), .. }
         ));
         assert!(cmds.is_empty());
+        // Not committed to the session — but it IS queued (the old name
+        // `..._is_dropped` was misleading: the message is held, not discarded).
         assert!(state.session.messages().is_empty());
+        assert_eq!(state.ui.queued_messages.len(), 1);
+        assert_eq!(state.ui.queued_messages[0].text, "queue me");
+    }
+
+    #[test]
+    fn queued_messages_are_capped_dropping_oldest() {
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
+        for i in 0..(MAX_QUEUED_MESSAGES + 5) {
+            let (s, _) = update(
+                state,
+                Msg::SubmitPrompt {
+                    text: format!("msg {i}"),
+                    attachment_ids: vec![],
+                },
+            );
+            state = s;
+        }
+        assert_eq!(state.ui.queued_messages.len(), MAX_QUEUED_MESSAGES);
+        // The oldest were dropped: the queue window is the last MAX_QUEUED_MESSAGES.
+        assert_eq!(state.ui.queued_messages.front().unwrap().text, "msg 5");
+        assert_eq!(
+            state.ui.queued_messages.back().unwrap().text,
+            format!("msg {}", MAX_QUEUED_MESSAGES + 4)
+        );
     }
 
     #[test]

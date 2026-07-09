@@ -118,6 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The queued-message FIFO is now bounded.** Prompts typed while a turn is in
+  flight are queued and auto-submitted when it finishes; holding Enter through a
+  long turn could grow that queue without limit. It's now capped at 32, dropping
+  the oldest with a warning.
 - **A misbehaving Ollama stream can't exhaust memory.** The newline-delimited
   JSON reassembly buffer had no cap, so an endpoint that streamed bytes without
   ever sending a newline would grow it until OOM. It now enforces the same 8 MiB
