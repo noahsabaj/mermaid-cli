@@ -601,34 +601,110 @@ impl Default for NonInteractiveConfig {
     }
 }
 
-/// Load configuration from single config file
-/// Priority: config file > defaults (that's it - no merging, no env vars)
+/// Load configuration from the single config file.
+/// Priority: CLI `-c` overrides > config file > defaults.
 pub fn load_config() -> Result<Config> {
-    let config_path = get_config_path()?;
+    Ok(load_config_with_overrides(&[])?.0)
+}
 
-    if config_path.exists() {
-        let toml_str = std::fs::read_to_string(&config_path)
+/// Load the config, applying repeatable `-c KEY=VALUE` CLI overrides on top of
+/// the file before deserializing. Returns the config plus the dotted paths of
+/// any unknown/ignored keys (typo detection), which the startup path warns
+/// about.
+///
+/// This is the seed the future layered-config engine extends: it already folds
+/// (file → CLI overrides) through one `toml::Table` before a single deserialize,
+/// so adding user/project layers becomes a matter of merging more tables here.
+pub fn load_config_with_overrides(overrides: &[String]) -> Result<(Config, Vec<String>)> {
+    let config_path = get_config_path()?;
+    let mut table = if config_path.exists() {
+        let raw = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read {}", config_path.display()))?;
-        let config: Config = toml::from_str(&toml_str).with_context(|| {
+        toml::from_str::<toml::Table>(&raw).with_context(|| {
             format!(
                 "Failed to parse {}. Run 'mermaid init' to regenerate.",
                 config_path.display()
             )
-        })?;
-        Ok(config)
+        })?
     } else {
-        Ok(Config::default())
-    }
+        toml::Table::new()
+    };
+    apply_cli_overrides(&mut table, overrides)?;
+    finalize_config(table)
 }
 
-/// Like [`load_config`] but never fails: if a config file exists yet is
-/// malformed, warn on stderr and fall back to defaults — instead of silently
-/// swallowing the error (#111). An *absent* file is not an error (`load_config`
-/// returns defaults for it), so the warning fires only for a genuine
-/// read/parse failure the user should know about.
+/// Deserialize a (possibly merged) config `Table` into `Config`, collecting the
+/// dotted paths of any keys `Config` doesn't recognize so the caller can warn.
+/// An empty table yields `Config::default()` (every field is `#[serde(default)]`).
+fn finalize_config(table: toml::Table) -> Result<(Config, Vec<String>)> {
+    let mut ignored = Vec::new();
+    let config: Config = serde_ignored::deserialize(toml::Value::Table(table), |path| {
+        ignored.push(path.to_string());
+    })
+    .context("Failed to interpret configuration. Run 'mermaid init' to regenerate.")?;
+    Ok((config, ignored))
+}
+
+/// Apply repeatable `-c KEY=VALUE` overrides onto a config table. `KEY` is a
+/// dotted path (`default_model.model`); `VALUE` is parsed as a TOML scalar so
+/// `true`/`3`/`"x"` keep their types, with a bare word treated as a string.
+fn apply_cli_overrides(table: &mut toml::Table, overrides: &[String]) -> Result<()> {
+    for raw in overrides {
+        let (key, val) = raw
+            .split_once('=')
+            .with_context(|| format!("invalid -c override '{raw}' (expected KEY=VALUE)"))?;
+        let key = key.trim();
+        if key.is_empty() {
+            anyhow::bail!("invalid -c override '{raw}' (empty key)");
+        }
+        deep_set(table, key, parse_override_value(val.trim()))?;
+    }
+    Ok(())
+}
+
+/// Parse an override value as a standalone TOML value, falling back to a plain
+/// string when it isn't valid TOML on its own (e.g. `ollama/qwen`).
+fn parse_override_value(s: &str) -> toml::Value {
+    toml::from_str::<toml::Table>(&format!("x = {s}"))
+        .ok()
+        .and_then(|t| t.get("x").cloned())
+        .unwrap_or_else(|| toml::Value::String(s.to_string()))
+}
+
+/// Set a dotted `key` path in `table` to `value`, creating intermediate tables.
+fn deep_set(table: &mut toml::Table, key: &str, value: toml::Value) -> Result<()> {
+    let parts: Vec<&str> = key.split('.').collect();
+    let mut cur = table;
+    for part in &parts[..parts.len() - 1] {
+        let next = cur
+            .entry((*part).to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        cur = next
+            .as_table_mut()
+            .with_context(|| format!("cannot set '{key}': '{part}' is not a table"))?;
+    }
+    cur.insert(parts[parts.len() - 1].to_string(), value);
+    Ok(())
+}
+
+/// Like [`load_config`] but never fails: on a malformed config, warn on stderr
+/// and fall back to defaults (#111); on success, warn about any unknown keys.
 pub fn load_config_or_warn() -> Config {
-    match load_config() {
-        Ok(config) => config,
+    load_config_or_warn_with_overrides(&[])
+}
+
+/// [`load_config_or_warn`] plus CLI `-c` overrides — the startup entry point.
+/// Unknown top-level or nested keys are reported (typo detection) but tolerated.
+pub fn load_config_or_warn_with_overrides(overrides: &[String]) -> Config {
+    match load_config_with_overrides(overrides) {
+        Ok((config, ignored)) => {
+            for path in &ignored {
+                eprintln!(
+                    "mermaid: warning: unknown config key '{path}' (ignored — check for a typo)"
+                );
+            }
+            config
+        },
         Err(e) => {
             // A TOML parse error renders the offending source line, which can be
             // a secret-bearing one (`extra_headers`/`env`/`api_key_env`); scrub
@@ -821,6 +897,57 @@ fn resolve_model_profile_alias(requested: &str, config: &Config) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finalize_config_flags_unknown_keys() {
+        let table: toml::Table =
+            toml::from_str("unknown_top = 1\n[default_model]\nmax_tokens = 512\nbogus = true\n")
+                .unwrap();
+        let (config, ignored) = finalize_config(table).expect("finalizes despite unknown keys");
+        assert_eq!(config.default_model.max_tokens, 512);
+        assert!(
+            ignored.iter().any(|p| p == "unknown_top"),
+            "got {ignored:?}"
+        );
+        assert!(
+            ignored.iter().any(|p| p.contains("bogus")),
+            "got {ignored:?}"
+        );
+    }
+
+    #[test]
+    fn cli_overrides_beat_file_and_create_nested_tables() {
+        // Override beats the file value...
+        let mut table: toml::Table = toml::from_str("[default_model]\nmax_tokens = 100\n").unwrap();
+        apply_cli_overrides(&mut table, &["default_model.max_tokens=8192".to_string()]).unwrap();
+        let (config, ignored) = finalize_config(table).unwrap();
+        assert_eq!(config.default_model.max_tokens, 8192);
+        assert!(ignored.is_empty());
+        // ...and creates a section absent from the file.
+        let mut empty = toml::Table::new();
+        apply_cli_overrides(&mut empty, &["default_model.max_tokens=256".to_string()]).unwrap();
+        assert_eq!(
+            finalize_config(empty).unwrap().0.default_model.max_tokens,
+            256
+        );
+    }
+
+    #[test]
+    fn parse_override_value_keeps_toml_types_with_string_fallback() {
+        assert_eq!(parse_override_value("true"), toml::Value::Boolean(true));
+        assert_eq!(parse_override_value("42"), toml::Value::Integer(42));
+        assert_eq!(
+            parse_override_value("ollama/qwen"),
+            toml::Value::String("ollama/qwen".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_override_invalid_format_errors() {
+        let mut table = toml::Table::new();
+        assert!(apply_cli_overrides(&mut table, &["noequalssign".to_string()]).is_err());
+        assert!(apply_cli_overrides(&mut table, &["=novalue".to_string()]).is_err());
+    }
 
     /// Configs persisted before Step 4 don't have a `reasoning` field on
     /// `[default_model]`. Loading them must succeed and yield the

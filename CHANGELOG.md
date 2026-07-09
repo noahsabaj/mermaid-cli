@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Config: typo warnings, `-c` overrides, and stdin prompts.** Unknown keys in
+  `config.toml` now warn with their dotted path instead of being silently
+  ignored. A repeatable `-c key.path=value` flag overrides any config value for
+  one invocation (`mermaid -c default_model.max_tokens=8192 run "…"`; the value
+  is parsed as TOML). And `mermaid run` reads its prompt from stdin when given
+  `-` or no prompt (`echo "explain this" | mermaid run -`); piped stdin
+  alongside an explicit prompt is appended as a fenced block.
 - **Sharper prompt + searchable memory.** The system prompt gained a `## Web`
   section (browse for time-sensitive or externally-verifiable facts, prefer
   primary sources, cite inline) and a memory "signal gate" (save a fact only if
