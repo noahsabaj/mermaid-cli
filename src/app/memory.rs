@@ -500,6 +500,62 @@ pub fn entries_with_bodies(cwd: &Path) -> Vec<(MemoryEntry, String)> {
     out
 }
 
+/// One hit from a memory search: the matching entry plus a short excerpt of the
+/// line where the query matched (falling back to the description when the match
+/// is in the name/description rather than the body).
+#[derive(Debug, Clone)]
+pub struct MemorySearchHit {
+    pub entry: MemoryEntry,
+    pub snippet: String,
+}
+
+/// Search all memory across scopes for `query` — a case-insensitive substring
+/// match over each fact's name, description, and body. No embeddings or vectors
+/// (matches Mermaid's stated stance); a plain scan over the already-bounded
+/// memory corpus. Bodies on disk are redacted at write time, so snippets are
+/// safe to surface. Returns an empty vec for a blank query.
+pub fn search(cwd: &Path, query: &str) -> Vec<MemorySearchHit> {
+    search_entries(entries_with_bodies(cwd), query)
+}
+
+/// Core matcher for [`search`], split out so it can be tested over hand-built
+/// entries without touching the real per-user memory directories.
+fn search_entries(entries: Vec<(MemoryEntry, String)>, query: &str) -> Vec<MemorySearchHit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (entry, body) in entries {
+        let body_line = body
+            .lines()
+            .find(|line| line.to_lowercase().contains(&needle));
+        let matches = entry.name.to_lowercase().contains(&needle)
+            || entry.description.to_lowercase().contains(&needle)
+            || body_line.is_some();
+        if !matches {
+            continue;
+        }
+        let raw_snippet = body_line
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .unwrap_or(entry.description.as_str());
+        let snippet = clip_chars(raw_snippet, 160);
+        out.push(MemorySearchHit { entry, snippet });
+    }
+    out
+}
+
+/// Clip `s` to at most `max` characters on a char boundary, appending a single
+/// ellipsis when truncated. Used for search snippets.
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let clipped: String = s.chars().take(max).collect();
+    format!("{clipped}…")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,6 +631,57 @@ mod tests {
         assert_eq!(entries[0].description, "A description");
         assert_eq!(entries[0].path.file_name().unwrap(), "test-fact.md");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_entries_matches_name_description_and_body() {
+        let mk = |name: &str, desc: &str| MemoryEntry {
+            name: name.to_string(),
+            description: desc.to_string(),
+            path: PathBuf::from(format!("/tmp/{name}.md")),
+            scope: MemoryScope::ProjectPrivate,
+            mtime: SystemTime::UNIX_EPOCH,
+        };
+        let entries = vec![
+            (
+                mk("prefer-ripgrep", "Use rg for search"),
+                "Always reach for ripgrep over grep.".to_string(),
+            ),
+            (
+                mk("editor-choice", "Editor preference"),
+                "The user likes neovim.".to_string(),
+            ),
+            (
+                mk("ci-flow", "CI conventions"),
+                "Run just check before every PR.".to_string(),
+            ),
+        ];
+
+        // Body-only match returns the matching line as the snippet.
+        let hits = search_entries(entries.clone(), "neovim");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.name, "editor-choice");
+        assert!(hits[0].snippet.contains("neovim"));
+
+        // Case-insensitive; matches in the name.
+        assert_eq!(search_entries(entries.clone(), "RIPGREP").len(), 1);
+
+        // Description match with no body hit falls back to the description.
+        let desc_hits = search_entries(entries.clone(), "conventions");
+        assert_eq!(desc_hits.len(), 1);
+        assert_eq!(desc_hits[0].snippet, "CI conventions");
+
+        // Blank query and unmatched query both return nothing.
+        assert!(search_entries(entries.clone(), "   ").is_empty());
+        assert!(search_entries(entries, "nonexistent-xyz").is_empty());
+    }
+
+    #[test]
+    fn clip_chars_truncates_on_char_boundary() {
+        assert_eq!(clip_chars("short", 10), "short");
+        let clipped = clip_chars(&"a".repeat(200), 160);
+        assert_eq!(clipped.chars().count(), 161); // 160 kept + one ellipsis
+        assert!(clipped.ends_with('…'));
     }
 
     #[test]

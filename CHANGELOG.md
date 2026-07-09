@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Sharper prompt + searchable memory.** The system prompt gained a `## Web`
+  section (browse for time-sensitive or externally-verifiable facts, prefer
+  primary sources, cite inline) and a memory "signal gate" (save a fact only if
+  a future session would act better for it). The `memory` tool gained a `search`
+  action that substring-matches across fact names, descriptions, and bodies — a
+  targeted read that stays available in every safety mode.
 - **`apply_patch` — robust, multi-file editing.** A new patch-based editor
   (`*** Begin Patch … *** End Patch` with Add / Update / Delete / Move hunks and
   optional `@@` context anchors) backed by a graduated fuzzy matcher that

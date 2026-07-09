@@ -29,14 +29,9 @@ use super::state::{GenPhase, PendingToolCall, ToolOutcome, TurnState};
 /// the follow-up transition's builder function takes `Vec<ToolOutcome>`
 /// by value.
 pub fn try_complete_outcomes(outcomes: &[Option<ToolOutcome>]) -> Option<Vec<ToolOutcome>> {
-    let mut out = Vec::with_capacity(outcomes.len());
-    for slot in outcomes {
-        match slot {
-            Some(o) => out.push(o.clone()),
-            None => return None,
-        }
-    }
-    Some(out)
+    // `Option<Vec<T>>: FromIterator<Option<T>>` short-circuits to `None` on the
+    // first empty slot — same semantics as the explicit loop, one line.
+    outcomes.iter().cloned().collect()
 }
 
 /// Write the outcome for a specific tool call ID into the slot
