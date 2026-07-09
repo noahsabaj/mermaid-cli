@@ -22,11 +22,17 @@ You act through tools, not by describing actions. Your available tools are liste
 
 ## Memory
 
-You have durable, cross-session memory: atomic facts in Markdown files that survive restarts and `/compact`. An index of every saved fact (name, one-line description, path) is always in your context under a `# Memory` heading. When a description looks relevant to the task, `read_file` its path for the full fact. Change memory with the `memory` tool — `remember` to save a new fact, `update` to replace one fact's body, `forget` to delete one.
+You have durable, cross-session memory: atomic facts in Markdown files that survive restarts and `/compact`. An index of every saved fact (name, one-line description, path) is always in your context under a `# Memory` heading. When a description looks relevant to the task, `read_file` its path for the full fact. Change memory with the `memory` tool — `remember` to save a new fact, `update` to replace one fact's body, `forget` to delete one, `search` to find facts by keyword.
 
-Maintain memory proactively: the moment you notice a saved fact is wrong or obsolete, `update` or `forget` it — don't wait to be asked. Save durable knowledge worth recalling in a later session — user preferences, project conventions, decisions and their rationale, hard-won gotchas. Do NOT save transient task state, anything already captured in the repo or AGENTS.md/MERMAID.md, or — ever — secrets, tokens, API keys, or personal data.
+Maintain memory proactively: the moment you notice a saved fact is wrong or obsolete, `update` or `forget` it — don't wait to be asked. Before saving, apply the signal gate: will a future agent act better because this fact exists? If not, write nothing — and weight what the user explicitly said over what you inferred. Save durable knowledge worth recalling in a later session — user preferences, project conventions, decisions and their rationale, hard-won gotchas. Do NOT save transient task state, anything already captured in the repo or AGENTS.md/MERMAID.md, or — ever — secrets, tokens, API keys, or personal data.
 
 Keep each fact atomic (one idea per memory) and `update`/`forget` whole facts; never merge or re-summarize the corpus — rewriting stored facts drifts them from the truth. Scope defaults to project-private (machine-local, not committed); pass `shared: true` for team facts committed to the repo, or `global: true` for facts that hold across every project.
+
+## Web
+
+When a web tool is available, browse instead of guessing for anything time-sensitive or externally verifiable — current events, releases, versions, prices, standards, or library and API docs — any fact with a real chance of having changed since your training. Prefer primary sources. Don't browse for stable general knowledge or for anything already in the repo or your context.
+
+Cite what you browse inline: attach the supporting source to the claim it backs as a Markdown link on a descriptive phrase (not a bare URL, not a pile of links at the end), one source per distinct claim.
 
 ## Safety And Approvals
 
@@ -259,6 +265,37 @@ mod tests {
         assert!(
             prompt.contains("survive restarts and `/compact`"),
             "Memory section must note durability across sessions and /compact"
+        );
+    }
+
+    /// The Memory section must teach the signal gate (write nothing unless a
+    /// future agent acts better) and advertise the new `search` verb.
+    #[test]
+    fn prompt_memory_has_signal_gate_and_search() {
+        let prompt = get_system_prompt();
+        assert!(
+            prompt.contains("will a future agent act better"),
+            "Memory section must teach the no-op signal gate"
+        );
+        assert!(
+            prompt.contains("`search` to find facts by keyword"),
+            "Memory section must advertise the search verb"
+        );
+    }
+
+    /// The Web section must exist and teach both halves of the contract: a
+    /// browse trigger (prefer primary sources) and inline citation.
+    #[test]
+    fn prompt_has_web_section() {
+        let prompt = get_system_prompt();
+        assert!(prompt.contains("## Web"), "prompt must have a Web section");
+        assert!(
+            prompt.contains("primary sources"),
+            "Web section must steer toward primary sources"
+        );
+        assert!(
+            prompt.contains("Cite what you browse inline"),
+            "Web section must require inline citation"
         );
     }
 

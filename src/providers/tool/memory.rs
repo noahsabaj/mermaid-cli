@@ -70,8 +70,9 @@ impl ToolExecutor for MemoryTool {
     fn schema(&self) -> ToolDefinition {
         ToolDefinition {
             name: "memory".to_string(),
-            description: "Manage your durable, cross-session memory of semantic facts: preferences, project conventions, decisions and their rationale, and hard-won gotchas. The memory index is always in your context; use this tool to change it. \
-                `action=remember` saves a new fact; `action=update` replaces one fact's body (pass its `id`); `action=forget` deletes a fact (pass its `id`). \
+            description: "Manage your durable, cross-session memory of semantic facts: preferences, project conventions, decisions and their rationale, and hard-won gotchas. The memory index is always in your context; use this tool to change or search it. \
+                Before saving, apply the signal gate: will a future agent act better because this fact exists? If not, write nothing. The highest-signal facts are user-stated preferences and decisions, project conventions, and gotchas that cost real time — weight what the user explicitly said over what you inferred. \
+                `action=remember` saves a new fact; `action=update` replaces one fact's body (pass its `id`); `action=forget` deletes a fact (pass its `id`); `action=search` finds facts by keyword (pass `query`) across names, descriptions, and bodies. \
                 Keep each fact atomic — one idea per memory — and never merge or re-summarize the whole corpus. \
                 Default scope is project-private (machine-local, not committed); set `shared=true` for team facts committed to the repo's .mermaid/memory, or `global=true` for facts that apply across all projects. \
                 Save durable knowledge, not transient task state, and never store secrets, tokens, or PII."
@@ -81,8 +82,12 @@ impl ToolExecutor for MemoryTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["remember", "update", "forget"],
+                        "enum": ["remember", "update", "forget", "search"],
                         "description": "What to do."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Keyword(s) to search for across memory names, descriptions, and bodies. Required for search."
                     },
                     "name": {
                         "type": "string",
@@ -122,6 +127,19 @@ impl ToolExecutor for MemoryTool {
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let start = std::time::Instant::now();
         let action = str_arg(&args, "action").unwrap_or_default();
+
+        // `search` is a pure read (a targeted alternative to scanning the
+        // always-loaded index), so it runs before the mutation gate below and
+        // stays available in every safety mode, including read-only.
+        if action == "search" {
+            let Some(query) = str_arg(&args, "query") else {
+                return ToolOutcome::error(
+                    "memory search requires 'query'",
+                    start.elapsed().as_secs_f64(),
+                );
+            };
+            return run_search(&ctx.workdir, &query, start);
+        }
 
         // Ungated except read-only: this returns `Some(block)` only when the
         // policy denies (read-only mode); it never touches the approval broker.
@@ -262,4 +280,29 @@ fn finish(
         },
         ..ToolRunMetadata::default()
     })
+}
+
+/// Handle the read-only `search` action: substring-match memory and return the
+/// hits (name, scope, path, and a one-line snippet) as a compact text block.
+fn run_search(workdir: &std::path::Path, query: &str, start: std::time::Instant) -> ToolOutcome {
+    let hits = memory::search(workdir, query);
+    let secs = start.elapsed().as_secs_f64();
+    if hits.is_empty() {
+        return ToolOutcome::success(
+            format!("No memory matched '{query}'."),
+            format!("search '{query}': 0 hits"),
+            secs,
+        );
+    }
+    let mut body = format!("{} memory hit(s) for '{query}':\n", hits.len());
+    for hit in &hits {
+        body.push_str(&format!(
+            "- {} [{}] ({}) — {}\n",
+            hit.entry.name,
+            hit.entry.scope.as_str(),
+            hit.entry.path.display(),
+            hit.snippet,
+        ));
+    }
+    ToolOutcome::success(body, format!("search '{query}': {} hits", hits.len()), secs)
 }
