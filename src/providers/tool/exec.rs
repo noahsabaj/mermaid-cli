@@ -283,13 +283,29 @@ impl ToolExecutor for ExecuteCommandTool {
             // — inconsistent with a truly backgrounded process (#F16).
             .kill_on_drop(false);
 
-        // Unix: lead a new process group so cancel can signal the whole group.
+        // Unix: lead a new SESSION, not just a new process group. `setsid()`
+        // still makes the child a group leader (sid == pgid == pid), so the
+        // cancel/timeout group-kill in `terminate_tree` is unchanged — but a
+        // new session has no controlling terminal, so a child that tries to
+        // open `/dev/tty` (a `sudo` password prompt, an ssh passphrase read)
+        // fails instantly instead of painting its prompt over the TUI and
+        // hanging until timeout. `setsid` is async-signal-safe, so a pre_exec
+        // closure is fine here (unlike the seccomp/Landlock setup, which needs
+        // the `__sandbox-exec` re-exec — see `app::sandbox_exec`). Must NOT be
+        // combined with `process_group(0)`: setpgid runs before pre_exec, and
+        // `setsid` fails with EPERM for an existing group leader.
         // (Windows kills the tree by pid via `taskkill /T`, no group needed.)
         #[cfg(unix)]
-        cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                rustix::process::setsid()?;
+                Ok(())
+            });
+        }
 
         cmd.current_dir(&effective_workdir);
         scrub_secret_env(&mut cmd);
+        harden_noninteractive_env(&mut cmd);
 
         // The timeout now lives INSIDE `run_command`'s select (alongside the
         // Esc-cancel and Ctrl+B arms), so a timed-out command is tree-killed and
@@ -592,6 +608,7 @@ printf '%s\n' "$!""#,
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     scrub_secret_env(&mut launcher);
+    harden_noninteractive_env(&mut launcher);
 
     let output = launcher
         .output()
@@ -642,6 +659,7 @@ async fn launch_background_process(
         .stderr(Stdio::from(log_err))
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     scrub_secret_env(&mut launcher);
+    harden_noninteractive_env(&mut launcher);
     let child = launcher
         .spawn()
         .map_err(|e| format!("failed to launch background command: {e}"))?;
@@ -1026,6 +1044,16 @@ const SECRET_ENV_VARS: &[&str] = &[
     "TOGETHER_API_KEY",
     "MERMAID_DAEMON_TOKEN",
 ];
+
+/// Tell child processes they have no human to talk to. A spawned command runs
+/// session-detached with stdin on `/dev/null`, so any interactive credential
+/// prompt can only fail or hang — git is the one common tool that would
+/// otherwise sit on a prompt until the command timeout. Set unconditionally:
+/// any other value guarantees a hang in this environment. (Same value the
+/// plugin git hooks already use — see `mermaid-runtime`'s plugin module.)
+fn harden_noninteractive_env(cmd: &mut Command) {
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+}
 
 /// Remove secret-bearing environment variables from a child command. Uses a
 /// denylist (known provider keys + name patterns) rather than an allowlist so
@@ -1560,6 +1588,68 @@ mod tests {
             .await;
         assert!(outcome.is_success(), "expected success: {:?}", outcome);
         assert!(outcome.output().contains("hello world"));
+    }
+
+    /// The foreground child must be a session leader (sid == its own pid).
+    /// This is the non-vacuous half of the /dev/tty fix: a new session has no
+    /// controlling terminal, so `sudo`-style prompts fail instead of writing
+    /// over the TUI. Linux-only: probes /proc (field 6 of stat is the sid).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn foreground_child_runs_in_new_session() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": r#"test "$(awk '{print $6}' /proc/$$/stat)" = "$$" && echo NEW_SESSION_OK || echo "NOT_A_SESSION_LEADER sid=$(awk '{print $6}' /proc/$$/stat) pid=$$""#,
+                }),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
+        assert!(
+            outcome.output().contains("NEW_SESSION_OK"),
+            "child shell is not a session leader: {}",
+            outcome.output()
+        );
+    }
+
+    /// Direct regression for the sudo incident: a child that opens `/dev/tty`
+    /// must fail. Only meaningful where the test process itself has a
+    /// controlling terminal — CI runners have none (the open fails for
+    /// everyone there), so skip explicitly rather than pass vacuously.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_child_cannot_open_dev_tty() {
+        if std::fs::File::open("/dev/tty").is_err() {
+            eprintln!("skipped: no controlling terminal in test environment");
+            return;
+        }
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": "if echo x > /dev/tty 2>/dev/null; then echo TTY_OPEN_OK; else echo TTY_OPEN_DENIED; fi",
+                }),
+                ctx,
+            )
+            .await;
+        assert!(
+            outcome.output().contains("TTY_OPEN_DENIED"),
+            "session-detached child could still open /dev/tty: {}",
+            outcome.output()
+        );
+    }
+
+    #[test]
+    fn harden_env_sets_git_terminal_prompt() {
+        let mut cmd = Command::new("sh");
+        harden_noninteractive_env(&mut cmd);
+        let set = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v.is_some_and(|v| v == "0"));
+        assert!(set, "GIT_TERMINAL_PROMPT=0 must be injected");
     }
 
     #[tokio::test]

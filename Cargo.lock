@@ -1765,6 +1765,7 @@ dependencies = [
  "rpassword",
  "rusqlite",
  "rustc-hash",
+ "rustix",
  "ruzstd",
  "serde",
  "serde_ignored",
