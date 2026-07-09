@@ -900,6 +900,15 @@ pub struct UiState {
     /// the render layer diffs it against its last-seen value and calls
     /// `ChatState::resume_auto_scroll` — keeping the reducer pure.
     pub scroll_to_bottom_seq: u32,
+    /// Monotonic "repaint everything" counter. Same publish-then-diff pattern
+    /// as `scroll_to_bottom_seq`: the reducer bumps it, the run loop diffs it
+    /// against its last-seen value and calls `Terminal::clear()` before the
+    /// next draw. Needed because ratatui diff-renders against its back buffer:
+    /// bytes some OTHER process wrote to the tty (a child that opened
+    /// `/dev/tty`, a stray `printf` from another terminal) are invisible to
+    /// that buffer and would otherwise persist as ghost cells. Bumped when a
+    /// shell command finishes and on Ctrl+L.
+    pub full_redraw_seq: u32,
     /// Whether the terminal window has LOST focus (from terminal focus
     /// reporting via `Msg::FocusChanged`). Defaults `false` (assume attended, so
     /// terminals without focus reporting never ding); the attention bell fires
