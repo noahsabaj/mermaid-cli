@@ -69,7 +69,10 @@ impl ApprovalBroker {
 
     /// True if the user already chose "don't ask again" for this key.
     pub fn is_allowlisted(&self, key: &str) -> bool {
-        self.allowlist.lock().unwrap().contains(key)
+        self.allowlist
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(key)
     }
 
     /// Prompt the user and block until they answer (or the turn is cancelled).
@@ -90,13 +93,16 @@ impl ApprovalBroker {
         let (tx, rx) = oneshot::channel();
         // Register the sender. The guard drops at the end of this statement —
         // never held across the awaits below.
-        self.pending.lock().unwrap().insert(
-            call_id,
-            PendingEntry {
-                tx,
-                allowlist_key: allowlist_key.clone(),
-            },
-        );
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                call_id,
+                PendingEntry {
+                    tx,
+                    allowlist_key: allowlist_key.clone(),
+                },
+            );
 
         let sent = self
             .msg_tx
@@ -112,14 +118,17 @@ impl ApprovalBroker {
             .await;
         if sent.is_err() {
             // Reducer is gone — clean up and deny.
-            self.pending.lock().unwrap().remove(&call_id);
+            self.pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&call_id);
             return ApprovalDecision::Deny;
         }
 
         tokio::select! {
             biased;
             _ = token.cancelled() => {
-                self.pending.lock().unwrap().remove(&call_id);
+                self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&call_id);
                 ApprovalDecision::Deny
             }
             decision = rx => decision.unwrap_or(ApprovalDecision::Deny),
@@ -129,13 +138,20 @@ impl ApprovalBroker {
     /// Deliver the user's decision to the parked task. On `ApproveAlways`,
     /// remember the key so future matching actions skip the prompt this session.
     pub fn resolve(&self, call_id: ToolCallId, decision: ApprovalDecision) {
-        let entry = self.pending.lock().unwrap().remove(&call_id);
+        let entry = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&call_id);
         if let Some(entry) = entry {
             // An empty key marks a non-allowlistable action (content-bearing
             // external tools): never persist it, so "approve always" can't be
             // recorded for them even if the choice somehow arrives (#6, #31).
             if decision == ApprovalDecision::ApproveAlways && !entry.allowlist_key.is_empty() {
-                self.allowlist.lock().unwrap().insert(entry.allowlist_key);
+                self.allowlist
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(entry.allowlist_key);
             }
             let _ = entry.tx.send(decision);
         }
