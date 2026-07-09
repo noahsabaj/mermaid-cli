@@ -1184,9 +1184,23 @@ async fn probe_configured_provider_models(config: &Config) -> Result<()> {
         let Some(api_key) = resolve_api_key(env, None) else {
             continue;
         };
-        let base_url = user_cfg
-            .and_then(|c| c.base_url.clone())
-            .unwrap_or_else(|| profile.base_url.to_string());
+        let Some(base_url) = crate::providers::factory::discovery_base_url(
+            profile,
+            user_cfg.and_then(|c| c.base_url.clone()),
+        ) else {
+            // cloudflare with a token but no CLOUDFLARE_ACCOUNT_ID: there is no
+            // real endpoint to probe — record the misconfiguration instead of a
+            // guaranteed 404 against the registry placeholder.
+            record_provider_probe(
+                profile.name,
+                "*",
+                "models_availability",
+                "failed",
+                "failed",
+                Some("CLOUDFLARE_ACCOUNT_ID not set".to_string()),
+            );
+            continue;
+        };
         let url = format!("{}/models", base_url.trim_end_matches('/'));
         let mut request = client.get(&url).bearer_auth(api_key);
         for (name, value) in profile.extra_headers {
@@ -2158,9 +2172,16 @@ fn show_provider_status(config: &Config) {
         )
         .is_some();
         if api_key_present {
-            let url = user_cfg
-                .and_then(|c| c.base_url.clone())
-                .unwrap_or_else(|| profile.base_url.to_string());
+            let url = crate::providers::factory::discovery_base_url(
+                profile,
+                user_cfg.and_then(|c| c.base_url.clone()),
+            )
+            // cloudflare with a token but no account id: show the actual
+            // misconfiguration, not the registry's ACCOUNT_ID placeholder.
+            .unwrap_or_else(|| {
+                "CLOUDFLARE_ACCOUNT_ID not set — set it or [providers.cloudflare].base_url"
+                    .to_string()
+            });
             configured.push((profile.name.to_string(), url));
         }
     }

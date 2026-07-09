@@ -303,12 +303,12 @@ pub const REGISTRY: &[ProviderProfile] = &[
     },
     ProviderProfile {
         name: "cloudflare",
-        // Documentary placeholder only. Cloudflare Workers AI's real endpoint
-        // embeds a per-account id; `providers::factory` synthesizes the actual
-        // base_url at runtime from `CLOUDFLARE_ACCOUNT_ID` (or a
-        // `[providers.cloudflare].base_url` override). This literal is never used
-        // for chat requests — only by discovery surfaces (`status`, the
-        // best-effort `/models` probe).
+        // Documentary placeholder only — never sent a request. Cloudflare Workers
+        // AI's real endpoint embeds a per-account id; `providers::factory`
+        // synthesizes the actual base_url at runtime from `CLOUDFLARE_ACCOUNT_ID`
+        // (or a `[providers.cloudflare].base_url` override) for chat requests AND
+        // for discovery surfaces (`doctor`, the best-effort `/models` probe) via
+        // `factory::discovery_base_url`.
         base_url: "https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1",
         api_key_env: "CLOUDFLARE_API_TOKEN",
         key_hint: Some(
