@@ -1776,6 +1776,23 @@ async fn fire_plugin_hooks(event: &'static str, payload: serde_json::Value) {
         .await;
 }
 
+/// Run hooks for an event whose responses GATE the action, returning the
+/// aggregated verdict. Infrastructure failures (store/spawn errors, a panicked
+/// blocking task) yield an empty gate — fail open; explicit hook denials
+/// always deny.
+async fn run_plugin_hooks_gated(
+    event: &'static str,
+    payload: serde_json::Value,
+) -> crate::runtime::HookGate {
+    tokio::task::spawn_blocking(move || {
+        crate::runtime::run_plugin_hooks(event, &payload)
+            .map(crate::runtime::aggregate_hook_responses)
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 async fn run_provider_error_hook(model_id: &str, error: &crate::models::UserFacingError) {
     fire_plugin_hooks(
         "provider_error",
@@ -2414,12 +2431,52 @@ async fn dispatch_execute_tool(
         questions,
     );
     ctx.background = background;
+    // `before_tool_use` is the one DECISION event: an enabled plugin hook may
+    // deny the call, rewrite its arguments, or inject context for the next
+    // model request. Every other event stays fire-and-forget.
     let before_payload = serde_json::json!({
         "turn_id": turn.0,
         "call_id": call_id.0,
         "tool": tool_key,
+        "arguments": args,
     });
-    fire_plugin_hooks("before_tool_use", before_payload).await;
+    let gate = run_plugin_hooks_gated("before_tool_use", before_payload).await;
+    if !gate.context.is_empty() {
+        // Injected context flows into transcripts/model input — scrub
+        // credential-shaped content on the way in.
+        let texts = gate
+            .context
+            .iter()
+            .map(|t| crate::utils::redact_secrets(t))
+            .collect();
+        let _ = msg_tx.send(Msg::HookContext { turn, texts }).await;
+    }
+    if let Some((plugin, reason)) = gate.deny {
+        // Mirror the unknown-tool arm: synthesize an error outcome and unwind.
+        // Dropping `ctx` closes the progress channel so the relay terminates
+        // before the join below.
+        drop(ctx);
+        let reason = crate::utils::redact_secrets(&reason);
+        let outcome = crate::domain::ToolOutcome::error(
+            format!("Denied by plugin hook ({plugin}): {reason}"),
+            0.0,
+        );
+        finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
+        join_logged(progress_relay.take(), "tool_progress_relay").await;
+        let _ = msg_tx
+            .send(Msg::ToolFinished {
+                turn,
+                call_id,
+                outcome,
+            })
+            .await;
+        return;
+    }
+    // A rewritten input is deliberately NOT redacted (it becomes executable
+    // args — corrupting them would be worse), and it cannot launder a blocked
+    // action: the policy gate runs inside `tool.execute` and vets the
+    // rewritten call exactly like an original one.
+    let args = gate.updated_input.unwrap_or(args);
     let outcome = tool.execute(args, ctx).await;
     let after_payload = serde_json::json!({
         "turn_id": turn.0,

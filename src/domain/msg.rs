@@ -259,6 +259,16 @@ pub enum Msg {
         name: String,
     },
 
+    /// Context strings returned by `before_tool_use` plugin hooks
+    /// (`additionalContext`). The reducer buffers them (capped) and the next
+    /// dispatched model request carries them in the instructions channel,
+    /// consumed exactly once. Turn-scoped so a stale hook's context can't
+    /// leak into a later run.
+    HookContext {
+        turn: TurnId,
+        texts: Vec<String>,
+    },
+
     // ── Persistence (from effect::persistence) ──────────────────────
     /// `MERMAID.md` loaded / changed / removed since last check.
     InstructionsChanged(Option<LoadedInstructions>),
@@ -541,7 +551,8 @@ impl Msg {
             | Msg::ToolProgress { turn, .. }
             | Msg::ToolFinished { turn, .. }
             | Msg::ApprovalRequested { turn, .. }
-            | Msg::QuestionAsked { turn, .. } => Some(*turn),
+            | Msg::QuestionAsked { turn, .. }
+            | Msg::HookContext { turn, .. } => Some(*turn),
             Msg::TurnCancelled(turn) => Some(*turn),
             _ => None,
         }
@@ -581,6 +592,7 @@ impl Msg {
             Msg::McpServerReady { .. }
             | Msg::McpServerErrored { .. }
             | Msg::McpServerStopped { .. } => MsgKind::Mcp,
+            Msg::HookContext { .. } => MsgKind::HookContext,
             Msg::InstructionsChanged(_) => MsgKind::InstructionsChanged,
             Msg::MemoryChanged(_) => MsgKind::MemoryChanged,
             Msg::SessionSaved => MsgKind::SessionSaved,
@@ -638,6 +650,7 @@ pub enum MsgKind {
     TurnCancelled,
     Mcp,
     InstructionsChanged,
+    HookContext,
     MemoryChanged,
     SessionSaved,
     ConversationLoaded,

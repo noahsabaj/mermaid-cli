@@ -294,6 +294,35 @@ On Windows, `mermaidd.exe` serves the same JSONL control surface over a named pi
 
 Release builds keep the existing `.tar.gz`/`.zip` archives and add Linux `.deb`/`.rpm` artifacts for x86_64 and aarch64. The distro packages install `mermaid`, `mermaidd`, docs, and a reference systemd user unit at `/usr/lib/systemd/user/mermaidd.service`; they do not auto-enable or start the daemon.
 
+### Plugin hooks
+
+Enabled plugins' hooks receive lifecycle events as JSON on stdin (`MERMAID_HOOK_EVENT` names the
+event). Most events are observe-only, but on **`before_tool_use`** a hook can gate the call by
+printing one JSON object on stdout (Claude Code-compatible), or deny by exiting with code 2
+(stderr becomes the reason):
+
+```sh
+#!/bin/sh
+# deny-etc-writes: block any tool call whose arguments mention /etc
+payload=$(cat)
+case "$payload" in
+  *'/etc'*) cat <<'EOF'
+{"hookSpecificOutput": {"hookEventName": "PreToolUse",
+  "permissionDecision": "deny",
+  "permissionDecisionReason": "writes under /etc are not allowed here"}}
+EOF
+  ;;
+esac
+```
+
+The response may also carry `updatedInput` (a full replacement tool-arguments object — still
+vetted by the safety policy exactly like the original) and `additionalContext` (a string surfaced
+to the model on its next request). The legacy `{"decision": "block", "reason": "..."}` shape is
+accepted too. Across plugins: the first deny wins, the last `updatedInput` wins, and context
+strings concatenate. Failure semantics are asymmetric by design: an explicit deny always denies,
+while infrastructure failures (unparseable output, a timeout, a crash) log a warning and allow —
+a buggy hook must not lock you out of every tool call.
+
 ## Configuration
 
 Config file: `~/.config/mermaid/config.toml` (Linux) or platform equivalent via `directories` crate.
