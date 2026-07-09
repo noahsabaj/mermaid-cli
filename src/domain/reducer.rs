@@ -3416,11 +3416,15 @@ fn handle_stream_done(
         tool_calls.is_empty() && matches!(stop_reason, Some(crate::models::FinishReason::Length));
     if !dry_truncation {
         state.runtime.truncation_recoveries = 0;
+        state.runtime.continue_recoveries = 0;
     }
 
     // Set when a length-truncation is recoverable: instead of ending the run with
     // a hint, compact the conversation and resume (handled after the save below).
     let mut recovering = false;
+    // Set when an OUTPUT-cap truncation left visible content: instead of ending
+    // the run, continue the reply in a fresh turn (handled after the save below).
+    let mut continuing = false;
 
     // Surface a terminal stop reason that would otherwise leave the response
     // silently incomplete. (A refusal with no content is turned into an error
@@ -3449,10 +3453,24 @@ fn handle_stream_done(
                     crate::constants::COMPACTION_MIN_RESPONSE_RESERVE_TOKENS,
                 ) {
                     crate::domain::compaction::LengthCause::OutputCapped => {
-                        // Never compact for an output-cap stop; say what
-                        // actually happened. (Auto-continue is the follow-up.)
-                        let hint = output_cap_hint(state);
-                        push_system(state, cmds, hint);
+                        // Never compact for an output-cap stop — the input
+                        // isn't the problem. If the cut left visible content
+                        // and the model wasn't cut off mid-reasoning, continue
+                        // the reply in a fresh turn (bounded per run);
+                        // otherwise stop with the accurate hint.
+                        let mid_reasoning = usage.as_ref().is_some_and(|u| {
+                            u.completion_tokens > 0
+                                && u.reasoning_output_tokens.saturating_mul(10)
+                                    >= u.completion_tokens.saturating_mul(9)
+                        });
+                        let under_cap = state.runtime.continue_recoveries
+                            < crate::constants::MAX_OUTPUT_CONTINUATIONS;
+                        if !no_visible_output && !mid_reasoning && under_cap {
+                            continuing = true;
+                        } else {
+                            let hint = output_cap_hint(state);
+                            push_system(state, cmds, hint);
+                        }
                     },
                     crate::domain::compaction::LengthCause::ContextFull
                     | crate::domain::compaction::LengthCause::Unknown => {
@@ -3579,6 +3597,31 @@ fn handle_stream_done(
                 build_chat_request(state),
                 CompactionTrigger::TruncationRecovery,
             ),
+        });
+        return;
+    }
+
+    // Output-cap continuation: the response hit the provider's per-response
+    // output ceiling with window room to spare, so compaction can't help —
+    // continue the reply in a fresh turn instead. The committed partial rides
+    // in history, so the model sees exactly where it stopped; the system note
+    // (which rides in the next request) nudges it to resume rather than
+    // restart. Bounded by MAX_OUTPUT_CONTINUATIONS per run so a model that
+    // restarts or re-truncates can't loop; portable across providers (no
+    // assistant-prefill dependency). Returning keeps the run alive.
+    if continuing {
+        state.runtime.continue_recoveries += 1;
+        push_system(
+            state,
+            cmds,
+            "The response hit the model's per-response output limit — continuing. Resume \
+             exactly where the previous message stopped; do not repeat text already sent.",
+        );
+        let next_turn = state.ids.fresh_turn();
+        state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
+        cmds.push(Cmd::CallModel {
+            turn: next_turn,
+            request: build_chat_request(state),
         });
         return;
     }
@@ -6066,11 +6109,11 @@ mod tests {
     }
 
     #[test]
-    fn length_output_cap_stops_with_accurate_hint_not_compaction() {
+    fn length_output_cap_continues_in_fresh_turn_not_compaction() {
         // The GLM-5.2 case: a length-stop with usage present and the window
         // unknown (the normal remote-provider state) is the per-response
-        // OUTPUT cap — compacting the input can't help, so the run must stop
-        // with an accurate message instead of futilely compacting.
+        // OUTPUT cap — compacting the input can't help. With visible content
+        // committed, the run now CONTINUES the reply in a fresh turn.
         let mut state = fresh_state();
         state
             .session
@@ -6081,21 +6124,28 @@ mod tests {
         state.turn = truncating_turn("here is the audit so f");
         let (state, cmds) = update(state, length_done_with_usage(16_600, 4_000));
 
-        assert!(matches!(state.turn, TurnState::Idle), "must not compact");
+        assert!(
+            matches!(state.turn, TurnState::Generating { .. }),
+            "output-cap with content continues in a fresh turn"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+            "the continuation model call is dispatched"
+        );
         assert!(
             !cmds
                 .iter()
                 .any(|c| matches!(c, Cmd::CompactConversation { .. })),
             "output-cap truncation must never dispatch a compaction"
         );
-        assert_eq!(state.runtime.truncation_recoveries, 0);
+        assert_eq!(state.runtime.continue_recoveries, 1);
         assert!(
             state
                 .session
                 .messages()
                 .iter()
-                .any(|m| m.content.contains("per-response output limit")),
-            "the accurate output-cap hint is shown"
+                .any(|m| m.content.contains("continuing")),
+            "the continuation note rides in history to nudge the model"
         );
         assert!(
             !state
@@ -6105,6 +6155,89 @@ mod tests {
                 .any(|m| m.content.contains("Context window full")),
             "the misdiagnosed window-full message is gone"
         );
+    }
+
+    #[test]
+    fn length_output_cap_mid_reasoning_stops_with_hint() {
+        // Cut off mid-think (nearly all completion tokens were reasoning): a
+        // continuation can't stitch a hidden trace, so stop with the accurate
+        // hint instead.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("audit the widget"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("exploring the code"), state.now);
+        state.turn = truncating_turn("here is");
+        let usage =
+            crate::models::TokenUsage::provider(16_600, 4_000, 20_600).with_reasoning_output(3_900);
+        let (state, cmds) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: Some(usage),
+                thinking_signature: None,
+                stop_reason: Some(crate::models::FinishReason::Length),
+            },
+        );
+
+        assert!(matches!(state.turn, TurnState::Idle), "no continuation");
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
+        assert_eq!(state.runtime.continue_recoveries, 0);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("per-response output limit")),
+            "the accurate output-cap hint is shown"
+        );
+    }
+
+    #[test]
+    fn length_output_cap_respects_continuation_cap() {
+        // At the per-run continuation cap the run stops with the hint instead
+        // of looping forever on a model that keeps re-truncating.
+        let mut state = fresh_state();
+        state.runtime.continue_recoveries = crate::constants::MAX_OUTPUT_CONTINUATIONS;
+        state
+            .session
+            .append(ChatMessage::user("audit the widget"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("exploring the code"), state.now);
+        state.turn = truncating_turn("here is the audit so f");
+        let (state, cmds) = update(state, length_done_with_usage(16_600, 4_000));
+
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("per-response output limit")),
+        );
+    }
+
+    #[test]
+    fn continue_recoveries_reset_when_run_makes_progress() {
+        // Any non-truncation ending is progress — the continuation guard only
+        // counts consecutive output-cap truncations.
+        let mut state = fresh_state();
+        state.runtime.continue_recoveries = 3;
+        state.turn = truncating_turn("a clean final answer");
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+        assert_eq!(state.runtime.continue_recoveries, 0);
     }
 
     #[test]

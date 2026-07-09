@@ -376,6 +376,13 @@ pub struct RuntimeState {
     /// hint. Reset on a fresh run and whenever a turn makes progress. Session-only.
     #[serde(skip)]
     pub empty_continuations: u32,
+    /// Consecutive auto-continuations in the current run after a response hit
+    /// the provider's per-response OUTPUT cap with window room to spare
+    /// (compaction can't help those — the reply is continued in a fresh turn
+    /// instead). Bounded by `MAX_OUTPUT_CONTINUATIONS`; reset whenever a turn
+    /// ends any other way. Session-only.
+    #[serde(skip)]
+    pub continue_recoveries: u32,
 }
 
 impl RuntimeState {
@@ -395,6 +402,7 @@ impl RuntimeState {
             run_committed_tokens: 0,
             truncation_recoveries: 0,
             empty_continuations: 0,
+            continue_recoveries: 0,
         }
     }
 
