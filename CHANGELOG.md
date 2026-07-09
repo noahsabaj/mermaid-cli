@@ -196,6 +196,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still releases the held submit instead of wedging it, and a normal terminal
   paste is never mistaken for a Ctrl+V read.
 
+### Security
+
+- **`open_url` (background-mode browser launch) now validates the URL scheme and
+  no longer routes through a shell on Windows.** The model-supplied `open_url`
+  was passed unvalidated — and on Windows via `cmd /C start`, so shell
+  metacharacters (`& | > ^`) in the URL could execute arbitrary commands, while a
+  `file:` / `javascript:` URL could reach the desktop handler on any OS. It is
+  now rejected unless it is `http`/`https`, and launched on Windows via
+  `rundll32` (a real executable, single argv — no shell re-parse). Loopback URLs
+  stay allowed so opening a just-started local dev server still works.
+
 ## [0.16.0] - 2026-07-04
 
 ### Added
