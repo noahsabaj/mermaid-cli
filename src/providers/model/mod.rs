@@ -17,8 +17,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::domain::{ChatRequest, TurnId};
+use crate::models::adapters::ModelLimits;
 use crate::models::adapters::ollama_sizing::NumCtxSource;
 use crate::models::{ModelError, Result, TokenUsage};
+use crate::runtime::{NewProviderProbe, RuntimeStore};
 
 use super::capabilities::Capabilities;
 use super::ctx::{FinalResponse, StreamContext, StreamEvent};
@@ -165,7 +167,7 @@ pub use ollama::OllamaProvider;
 pub use openai_compat::OpenAICompatProvider;
 
 /// True when a `provider_probes` row is older than the probe TTL (shared by
-/// the Ollama context probe and the OpenAI-compat limits probe). An
+/// the Ollama context probe and the per-provider limits probes). An
 /// unparseable timestamp is treated as stale so it re-probes.
 pub(crate) fn probe_is_stale(probed_at: &str) -> bool {
     use chrono::{DateTime, Utc};
@@ -174,9 +176,272 @@ pub(crate) fn probe_is_stale(probed_at: &str) -> bool {
             Utc::now()
                 .signed_duration_since(t.with_timezone(&Utc))
                 .num_days()
-                >= crate::constants::OLLAMA_PROBE_TTL_DAYS
+                >= crate::constants::PROVIDER_PROBE_TTL_DAYS
         },
         // Unparseable timestamp → treat as stale and re-probe.
         Err(_) => true,
+    }
+}
+
+/// Limits learned from one live probe of a provider's models endpoint, cached
+/// per (provider, model) in `provider_probes`. A successful fetch WITHOUT
+/// limit metadata (or a definitive "model not listed") is cached too — as
+/// `None`s — so providers that don't expose limits aren't re-fetched every
+/// turn. Fetch *failures* are never cached.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct CachedLimits {
+    pub(crate) max_context_tokens: Option<usize>,
+    pub(crate) max_output_tokens: Option<usize>,
+}
+
+pub(crate) const LIMITS_PROBE_KEY: &str = "limits_probe";
+
+/// Load fresh cached limits, off the async runtime. Best-effort → `None`.
+pub(crate) async fn load_limits_from_db(provider: String, model: String) -> Option<CachedLimits> {
+    tokio::task::spawn_blocking(move || {
+        let store = RuntimeStore::open_default().ok()?;
+        let rec = store
+            .provider_probes()
+            .get(&provider, &model, LIMITS_PROBE_KEY)
+            .ok()??;
+        if probe_is_stale(&rec.probed_at) {
+            return None;
+        }
+        serde_json::from_str::<CachedLimits>(&rec.capability_value).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Persist probed limits for subsequent sessions. Best-effort.
+pub(crate) async fn save_limits_to_db(provider: String, model: String, limits: &CachedLimits) {
+    let value = match serde_json::to_string(limits) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let _ = tokio::task::spawn_blocking(move || -> Option<()> {
+        let store = RuntimeStore::open_default().ok()?;
+        store
+            .provider_probes()
+            .upsert(NewProviderProbe {
+                provider,
+                model_id: model,
+                capability_key: LIMITS_PROBE_KEY.into(),
+                capability_value: value,
+                confidence: "probed".into(),
+                error: None,
+            })
+            .ok()?;
+        Some(())
+    })
+    .await;
+}
+
+/// Cache-first limit resolution: return fresh cached limits when present,
+/// otherwise run `fetch` against the provider's models endpoint. A successful
+/// fetch is cached even when all-`None` (definitive "provider exposes
+/// nothing"); a failed fetch is NOT cached and resolves to `None` so the next
+/// turn retries.
+pub(crate) async fn resolve_limits_cached<F, Fut>(
+    provider: &str,
+    model: &str,
+    fetch: F,
+) -> Option<CachedLimits>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<ModelLimits>>,
+{
+    if let Some(cached) = load_limits_from_db(provider.to_string(), model.to_string()).await {
+        return Some(cached);
+    }
+    match fetch().await {
+        Ok(limits) => {
+            let cached = CachedLimits {
+                max_context_tokens: limits.max_context_tokens,
+                max_output_tokens: limits.max_output_tokens,
+            };
+            save_limits_to_db(provider.to_string(), model.to_string(), &cached).await;
+            Some(cached)
+        },
+        // Network/parse failure: don't cache; caller falls back to static.
+        Err(_) => None,
+    }
+}
+
+/// Extract a model's real per-response output ceiling from a provider's 400
+/// rejection body. Fires ONLY on unambiguous output-cap wordings:
+///
+/// - Ollama Cloud / MiniMax: `max_tokens (521276) exceeds model's maximum
+///   output tokens (131072) for model …`
+/// - OpenAI-compat: `max_tokens is too large: … This model supports at most
+///   16384 completion tokens …`
+///
+/// Anything else — in particular context-limit wordings ("prompt is too
+/// long", "maximum context length") — returns `None`: learning a window as
+/// an output cap would poison the cache, and a missed match just means
+/// today's behavior (the error surfaces). Values outside a sanity range are
+/// rejected as parser noise.
+pub(crate) fn parse_output_cap_message(body: &str) -> Option<usize> {
+    let cap = if let Some(rest) = text_after(body, "exceeds model's maximum output tokens") {
+        leading_integer(rest)
+    } else if body.contains("max_tokens is too large") {
+        text_after(body, "supports at most").and_then(leading_integer)
+    } else {
+        None
+    }?;
+    (1_024..10_000_000).contains(&cap).then_some(cap)
+}
+
+/// The slice of `haystack` after the first occurrence of `marker`.
+fn text_after<'a>(haystack: &'a str, marker: &str) -> Option<&'a str> {
+    haystack.find(marker).map(|i| &haystack[i + marker.len()..])
+}
+
+/// The first integer in `s`, required to start within a few characters —
+/// both documented wordings put the number right after the marker (`" ("` /
+/// `" "`), and a distant number would belong to something else.
+fn leading_integer(s: &str) -> Option<usize> {
+    let start = s.find(|c: char| c.is_ascii_digit()).filter(|&i| i <= 8)?;
+    s[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+/// Decide the output cap for a one-shot retry after learning `learned` from
+/// a 400. AUTO (`requested == 0`, including "field omitted") retries at the
+/// learned cap; an explicit ask above the cap retries clamped to it; an ask
+/// already within the cap returns `None` — the 400 was about something else,
+/// so retrying the same request would loop.
+pub(crate) fn retry_cap(requested: usize, learned: usize) -> Option<usize> {
+    (requested == 0 || requested > learned).then_some(learned)
+}
+
+/// `parse_output_cap_message` gated to actual HTTP 400s — the only status
+/// where the body names a rejected parameter rather than a transient fault.
+pub(crate) fn output_cap_from_error(err: &ModelError) -> Option<usize> {
+    match err {
+        ModelError::Backend(crate::models::BackendError::HttpError {
+            status: 400,
+            message,
+        }) => parse_output_cap_message(message),
+        _ => None,
+    }
+}
+
+/// Persist an output cap learned from a provider's 400 rejection (the error
+/// body names the model's real ceiling). Merges into any existing cached
+/// row — reading it raw, ignoring the TTL, since a stale window is still
+/// better than dropping it — and upserts as "probed". Best-effort.
+pub(crate) async fn learn_output_cap(provider: String, model: String, cap: usize) {
+    let _ = tokio::task::spawn_blocking(move || -> Option<()> {
+        let store = RuntimeStore::open_default().ok()?;
+        let existing = store
+            .provider_probes()
+            .get(&provider, &model, LIMITS_PROBE_KEY)
+            .ok()
+            .flatten()
+            .and_then(|rec| serde_json::from_str::<CachedLimits>(&rec.capability_value).ok());
+        let merged = CachedLimits {
+            max_context_tokens: existing.and_then(|l| l.max_context_tokens),
+            max_output_tokens: Some(cap),
+        };
+        let value = serde_json::to_string(&merged).ok()?;
+        store
+            .provider_probes()
+            .upsert(NewProviderProbe {
+                provider,
+                model_id: model,
+                capability_key: LIMITS_PROBE_KEY.into(),
+                capability_value: value,
+                confidence: "probed".into(),
+                error: None,
+            })
+            .ok()?;
+        Some(())
+    })
+    .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The incident wording (Ollama Cloud, minimax-m3), raw and JSON-wrapped.
+    const MINIMAX_RAW: &str =
+        "max_tokens (521276) exceeds model's maximum output tokens (131072) for model minimax-m3";
+    const MINIMAX_JSON: &str = r#"{"error":"max_tokens (521276) exceeds model's maximum output tokens (131072) for model minimax-m3 (ref: a05c9ffb-168f)"}"#;
+    const OPENAI_STYLE: &str = r#"{"error":{"message":"max_tokens is too large: 200000. This model supports at most 16384 completion tokens, whereas you provided 200000.","type":"invalid_request_error"}}"#;
+
+    #[test]
+    fn parse_output_cap_matches_documented_wordings() {
+        assert_eq!(parse_output_cap_message(MINIMAX_RAW), Some(131_072));
+        assert_eq!(parse_output_cap_message(MINIMAX_JSON), Some(131_072));
+        assert_eq!(parse_output_cap_message(OPENAI_STYLE), Some(16_384));
+    }
+
+    #[test]
+    fn parse_output_cap_never_matches_context_limit_wordings() {
+        // Learning a context window as an output cap would poison the cache —
+        // these must all be None even though they mention token limits.
+        for body in [
+            "prompt is too long: 210000 tokens > 200000 maximum",
+            "This model's maximum context length is 128000 tokens",
+            "input length and max_tokens exceed context limit: 190000 + 20000 > 200000",
+            "the request exceeds the maximum context window of 131072 tokens",
+            "rate limit exceeded, try again in 20s",
+            "",
+        ] {
+            assert_eq!(parse_output_cap_message(body), None, "matched: {body}");
+        }
+    }
+
+    #[test]
+    fn parse_output_cap_rejects_nonsense_values() {
+        // Sub-1024 and absurd values are parser noise, not real ceilings.
+        assert_eq!(
+            parse_output_cap_message("exceeds model's maximum output tokens (512)"),
+            None
+        );
+        assert_eq!(
+            parse_output_cap_message("exceeds model's maximum output tokens (99999999999)"),
+            None
+        );
+        // A number too far from the marker belongs to something else.
+        assert_eq!(
+            parse_output_cap_message(
+                "exceeds model's maximum output tokens for this deployment tier which is 131072"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn retry_cap_triple() {
+        // AUTO (0 / omitted) → retry at the learned cap.
+        assert_eq!(retry_cap(0, 131_072), Some(131_072));
+        // Explicit ask above the cap → clamp.
+        assert_eq!(retry_cap(521_276, 131_072), Some(131_072));
+        // Ask already within the cap → the 400 was about something else.
+        assert_eq!(retry_cap(4_096, 131_072), None);
+    }
+
+    #[test]
+    fn output_cap_from_error_gates_on_http_400() {
+        let err_400 = ModelError::Backend(crate::models::BackendError::HttpError {
+            status: 400,
+            message: MINIMAX_JSON.to_string(),
+        });
+        assert_eq!(output_cap_from_error(&err_400), Some(131_072));
+        // Same body on a 500 is a transient fault, not a learned limit.
+        let err_500 = ModelError::Backend(crate::models::BackendError::HttpError {
+            status: 500,
+            message: MINIMAX_JSON.to_string(),
+        });
+        assert_eq!(output_cap_from_error(&err_500), None);
+        assert_eq!(output_cap_from_error(&ModelError::Cancelled), None);
     }
 }

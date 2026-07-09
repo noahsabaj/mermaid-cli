@@ -39,6 +39,7 @@ use crate::models::stream::{StreamCallback, StreamEvent};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 
+use super::ModelLimits;
 use super::output_budget::{OutputBudgetInputs, OutputCapMode, resolve_output_budget};
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
 use crate::utils::drain_sse_events;
@@ -205,20 +206,12 @@ fn legacy_budget_for(level: ReasoningLevel, max_tokens: usize) -> Option<u32> {
     Some(proposed.min(ceiling).max(1024))
 }
 
-/// Documented per-response output ceiling from the capability catalog.
-/// Anthropic REQUIRES `max_tokens` on every request, so AUTO resolves to the
-/// model's real documented ceiling rather than a guessed constant.
-/// Unknown/legacy ids get a conservative 8192.
-pub fn anthropic_max_output_tokens(model: &str) -> usize {
-    crate::models::catalog::lookup(model)
-        .max_output_tokens
-        .unwrap_or(8_192)
-}
-
-/// Anthropic's documented context window (tokens) — 200k across the current
-/// lineup. Bounds `max_tokens` so `input + max_tokens` can't overrun the
-/// window (the API 400s on that).
-const ANTHROPIC_CONTEXT_WINDOW_TOKENS: usize = 200_000;
+/// Floor for AUTO `max_tokens` when live discovery didn't resolve an output
+/// ceiling (models endpoint unreachable, or a gateway id it doesn't list).
+/// Anthropic REQUIRES `max_tokens`, so some concrete value must go on the
+/// wire; every current Claude model accepts 8192. Escape hatch for capped
+/// gateway ids: an explicit user `max_tokens`.
+const ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS: usize = 8_192;
 
 /// Rough prompt-token estimate (≈4 chars/token, mirroring the Ollama sizing
 /// estimator); only used to bound `max_tokens` to the window room.
@@ -486,11 +479,11 @@ impl AnthropicAdapter {
                 ReasoningLevel::Max,
                 ReasoningLevel::XHigh,
             ]),
-            // Documented values, advertised so the default
-            // `resolve_context_window` reports them live (window + output
-            // ceiling) without a bespoke provider override.
-            max_context_tokens: Some(ANTHROPIC_CONTEXT_WINDOW_TOKENS),
-            max_output_tokens: Some(anthropic_max_output_tokens(&model_name)),
+            // Unknown until live discovery: the provider wrapper's
+            // `resolve_context_window` fetches real per-model limits from
+            // the Models API (cache-first). No static pins — they rot.
+            max_context_tokens: None,
+            max_output_tokens: None,
         };
 
         Ok(Self {
@@ -511,15 +504,23 @@ impl AnthropicAdapter {
         let system = config.system_prompt.clone().or(system_from_msgs);
 
         // Anthropic REQUIRES `max_tokens`. AUTO (config.max_tokens == 0) sends
-        // the model's documented output ceiling; an explicit user cap is
-        // honored. Both are bounded by the room the window leaves after the
+        // the model's live-discovered output ceiling (`resolved_max_output`,
+        // from the Models API via the effect layer) or a conservative floor
+        // when discovery didn't resolve; an explicit user cap is honored.
+        // Both are bounded by the room the discovered window leaves after the
         // prompt, so `input + max_tokens` can't overrun the window (a 400).
+        // `window: None` (unknown) applies no window clamp — the API's own
+        // limit is the real gate.
         let max_tokens = resolve_output_budget(
             &OutputBudgetInputs {
                 requested_cap: config.max_tokens,
-                window: Some(ANTHROPIC_CONTEXT_WINDOW_TOKENS),
+                window: config.resolved_context_window,
                 prompt_estimate: estimate_prompt_tokens(messages, system.as_deref()),
-                provider_max_output: Some(anthropic_max_output_tokens(&self.model_name)),
+                provider_max_output: Some(
+                    config
+                        .resolved_max_output
+                        .unwrap_or(ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS),
+                ),
                 // Slop for the chars/4 estimate + structural JSON overhead.
                 margin: 1_024,
                 floor: 1,
@@ -689,6 +690,45 @@ impl AnthropicAdapter {
                 })
         })
         .await
+    }
+
+    /// GET `{base_url}/models/{model}` — the Models API reports each model's
+    /// real limits (`max_input_tokens` = context window, `max_tokens` =
+    /// output ceiling). A 404 is a definitive "id not in the catalog"
+    /// (gateway alias, fine-tune) → `Ok` all-`None` so callers can cache the
+    /// absence; transport/auth/5xx failures are `Err` (never cached).
+    pub async fn fetch_model_limits(&self) -> Result<ModelLimits> {
+        let url = format!(
+            "{}/models/{}",
+            self.base_url.trim_end_matches('/'),
+            self.model_name
+        );
+        let response = self
+            .client
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .send()
+            .await
+            .map_err(|e| {
+                ModelError::Backend(BackendError::ConnectionFailed {
+                    backend: "anthropic".to_string(),
+                    url: url.clone(),
+                    reason: e.to_string(),
+                })
+            })?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(ModelLimits::default());
+        }
+        if !response.status().is_success() {
+            return Err(http_error_from_response(response).await);
+        }
+        let info: AnthropicModelInfo =
+            response.json().await.map_err(|e| ModelError::ParseError {
+                message: format!("Failed to parse Anthropic model info: {}", e),
+                raw: None,
+            })?;
+        Ok(info.into())
     }
 
     /// Decode a single non-streaming response into `ModelResponse`.
@@ -1135,8 +1175,10 @@ impl Model for AnthropicAdapter {
         &self.capabilities
     }
 
-    /// Anthropic doesn't expose a public model-listing endpoint. Surface
-    /// the static fact rather than 404.
+    /// Anthropic DOES expose `GET /v1/models` these days — mermaid uses the
+    /// per-model variant for limit discovery (`fetch_model_limits`) — but
+    /// interactive model listing stays registry/config-driven, so this stub
+    /// remains Unsupported rather than growing a third listing path.
     async fn list_models(&self) -> Result<Vec<String>> {
         Err(ModelError::Unsupported {
             feature: "list_models (anthropic)".to_string(),
@@ -1165,6 +1207,27 @@ impl Model for AnthropicAdapter {
 }
 
 // ===== Wire types =====
+
+/// `GET /v1/models/{id}` response — only the limit fields matter here.
+/// `max_input_tokens` is the context window; `max_tokens` is the per-response
+/// output ceiling. Both `#[serde(default)]` so an API that stops reporting
+/// one degrades to `None` (unknown) instead of a parse error.
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicModelInfo {
+    #[serde(default)]
+    max_input_tokens: Option<usize>,
+    #[serde(default)]
+    max_tokens: Option<usize>,
+}
+
+impl From<AnthropicModelInfo> for ModelLimits {
+    fn from(info: AnthropicModelInfo) -> Self {
+        ModelLimits {
+            max_context_tokens: info.max_input_tokens,
+            max_output_tokens: info.max_tokens,
+        }
+    }
+}
 
 /// Non-streaming response shape (`POST /v1/messages` without `stream`).
 #[derive(Debug, Deserialize)]
@@ -1292,6 +1355,35 @@ mod tests {
                 })
                 .unwrap_or(false)
         })
+    }
+
+    #[test]
+    fn model_info_parses_documented_limit_fields() {
+        // Documented `GET /v1/models/{id}` shape (Models API): the limit
+        // fields ride alongside identity fields we ignore.
+        let body = r#"{
+            "id": "claude-sonnet-4-6",
+            "type": "model",
+            "display_name": "Claude Sonnet 4.6",
+            "created_at": "2026-02-01T00:00:00Z",
+            "max_input_tokens": 1000000,
+            "max_tokens": 128000
+        }"#;
+        let info: AnthropicModelInfo = serde_json::from_str(body).expect("parse");
+        let limits: ModelLimits = info.into();
+        assert_eq!(limits.max_context_tokens, Some(1_000_000));
+        assert_eq!(limits.max_output_tokens, Some(128_000));
+    }
+
+    #[test]
+    fn model_info_missing_limit_fields_degrade_to_none() {
+        // An API that stops reporting limits must degrade to unknown, not a
+        // parse error (which would be treated as a failed — uncached — fetch).
+        let body = r#"{"id": "claude-sonnet-4-6", "type": "model"}"#;
+        let info: AnthropicModelInfo = serde_json::from_str(body).expect("parse");
+        let limits: ModelLimits = info.into();
+        assert_eq!(limits.max_context_tokens, None);
+        assert_eq!(limits.max_output_tokens, None);
     }
 
     #[test]
@@ -1693,40 +1785,50 @@ mod tests {
     }
 
     #[test]
-    fn auto_max_tokens_resolves_documented_ceiling() {
-        // AUTO (max_tokens == 0) sends the model's documented output ceiling —
-        // never the old hardcoded 4096. test_adapter is claude-sonnet-4-6
-        // (64k), and a tiny prompt leaves the 200k window's room above it.
+    fn auto_max_tokens_uses_live_discovered_ceiling() {
+        // AUTO (max_tokens == 0) sends the live-discovered output ceiling —
+        // a 1M-window / 128k-ceiling model gets the full 128k, and a tiny
+        // prompt leaves the window's room above it.
+        let adapter = test_adapter();
+        let config = ModelConfig {
+            max_tokens: 0,
+            resolved_context_window: Some(1_000_000),
+            resolved_max_output: Some(128_000),
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&[ChatMessage::user("Hello")], &config);
+        assert_eq!(body["max_tokens"], 128_000);
+    }
+
+    #[test]
+    fn auto_max_tokens_floors_when_discovery_unresolved() {
+        // Discovery failed (both resolved_* None): Anthropic still REQUIRES
+        // max_tokens, so AUTO falls back to the conservative 8192 floor and
+        // applies no window clamp.
         let adapter = test_adapter();
         let config = ModelConfig {
             max_tokens: 0,
             ..Default::default()
         };
         let body = adapter.build_request_body(&[ChatMessage::user("Hello")], &config);
-        assert_eq!(body["max_tokens"], 64_000);
+        assert_eq!(body["max_tokens"], 8_192);
     }
 
     #[test]
-    fn output_ceiling_table_matches_documented_values() {
-        assert_eq!(
-            anthropic_max_output_tokens("claude-3-5-sonnet-20241022"),
-            8_192
-        );
-        // Opus 4 (date-suffixed) and Opus 4.1 → 32k.
-        assert_eq!(
-            anthropic_max_output_tokens("claude-opus-4-20250514"),
-            32_000
-        );
-        assert_eq!(
-            anthropic_max_output_tokens("claude-opus-4-1-20250805"),
-            32_000
-        );
-        // The 4.5+ lines and Fable/Mythos → 64k.
-        assert_eq!(anthropic_max_output_tokens("claude-opus-4-8"), 64_000);
-        assert_eq!(anthropic_max_output_tokens("claude-sonnet-4-6"), 64_000);
-        assert_eq!(anthropic_max_output_tokens("claude-fable-5"), 64_000);
-        // Unknown ids get the conservative floor.
-        assert_eq!(anthropic_max_output_tokens("some-future-model"), 8_192);
+    fn auto_max_tokens_clamps_to_window_room() {
+        // A tight discovered window bounds AUTO below the output ceiling:
+        // room = window − prompt_estimate − margin. Pin a tiny system prompt
+        // so the estimate is deterministic: ("Hello" 5 + "sys" 3) / 4 = 2.
+        let adapter = test_adapter();
+        let config = ModelConfig {
+            max_tokens: 0,
+            system_prompt: Some("sys".to_string()),
+            resolved_context_window: Some(16_384),
+            resolved_max_output: Some(128_000),
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&[ChatMessage::user("Hello")], &config);
+        assert_eq!(body["max_tokens"], 16_384 - 2 - 1_024);
     }
 
     #[test]

@@ -101,14 +101,10 @@ pub struct ModelCapEntry {
     /// `derive_capabilities` only (anthropic/gemini hardcode true; ollama
     /// probes `/api/show`). Never gates the send.
     pub vision: bool,
-    /// Documented static context window — consumed by the domain's
-    /// `ProviderCapabilitySnapshot` (with per-provider fallbacks: anthropic
-    /// 200k, gemini 1M) before live discovery refreshes it.
+    /// Documented static context window — ONLY for models whose provider
+    /// API exposes no limits (OpenAI's gpt rows). Everything else resolves
+    /// live via `resolve_context_window`; `None` = unknown until discovery.
     pub context_window: Option<usize>,
-    /// Documented per-response output ceiling — consumed by the anthropic
-    /// adapter's AUTO `max_tokens` resolution and the domain snapshot's
-    /// anthropic branch (other providers discover it live from `/models`).
-    pub max_output_tokens: Option<usize>,
 }
 
 /// Shorthand for a row that only marks vision support (the generic
@@ -121,13 +117,13 @@ const fn vision_marker(marker: &'static str) -> ModelCapEntry {
     }
 }
 
-/// Shorthand for an anthropic-family row (vision, 200k window).
+/// Shorthand for an anthropic-family row (vision; window/output resolved
+/// live from the Models API — no static pins, they rot).
 const fn claude(
     rule: MatchRule,
     thinking: ThinkingShape,
     supports_temperature: bool,
     effort_ceiling: EffortCeiling,
-    max_output_tokens: usize,
 ) -> ModelCapEntry {
     ModelCapEntry {
         rule,
@@ -135,13 +131,12 @@ const fn claude(
         supports_temperature,
         effort_ceiling,
         vision: true,
-        context_window: Some(200_000),
-        max_output_tokens: Some(max_output_tokens),
+        context_window: None,
     }
 }
 
 /// The default row for models no rule matches: provider-default thinking,
-/// temperature accepted, no effort, no vision, no static window/ceiling.
+/// temperature accepted, no effort, no vision, no static window.
 pub const UNKNOWN_MODEL: ModelCapEntry = ModelCapEntry {
     rule: MatchRule::Substring(""),
     thinking: ThinkingShape::ProviderDefault,
@@ -149,7 +144,6 @@ pub const UNKNOWN_MODEL: ModelCapEntry = ModelCapEntry {
     effort_ceiling: EffortCeiling::None,
     vision: false,
     context_window: None,
-    max_output_tokens: None,
 };
 
 use EffortCeiling as E;
@@ -168,135 +162,87 @@ pub const CATALOG: &[ModelCapEntry] = &[
         T::AnthropicAdaptive,
         false,
         E::XHigh,
-        64_000,
     ),
     claude(
         Prefix("claude-opus-4-8"),
         T::AnthropicAdaptive,
         false,
         E::XHigh,
-        64_000,
     ),
     claude(
         Prefix("claude-fable-5"),
         T::AnthropicAdaptive,
         false,
         E::XHigh,
-        64_000,
     ),
     claude(
         Prefix("claude-mythos"),
         T::AnthropicAdaptive,
         false,
         E::XHigh,
-        64_000,
     ),
     claude(
         Prefix("claude-opus-4-6"),
         T::AnthropicAdaptive,
         true,
         E::Max,
-        64_000,
     ),
     claude(
         Prefix("claude-sonnet-4-6"),
         T::AnthropicAdaptive,
         true,
         E::Max,
-        64_000,
     ),
-    claude(
-        Prefix("claude-opus-4-5"),
-        T::AnthropicBudget,
-        true,
-        E::High,
-        64_000,
-    ),
+    claude(Prefix("claude-opus-4-5"), T::AnthropicBudget, true, E::High),
     claude(
         Prefix("claude-sonnet-4-5"),
         T::AnthropicBudget,
         true,
         E::None,
-        64_000,
     ),
     claude(
         Prefix("claude-haiku-4-5"),
         T::AnthropicBudget,
         true,
         E::None,
-        64_000,
     ),
     // Opus 4.1, and (via the "-2" prefix) date-suffixed Opus 4 ids like
     // claude-opus-4-20250514 — both document a 32k output ceiling.
-    claude(
-        Prefix("claude-opus-4-1"),
-        T::AnthropicBudget,
-        true,
-        E::None,
-        32_000,
-    ),
-    claude(
-        Prefix("claude-opus-4-2"),
-        T::AnthropicBudget,
-        true,
-        E::None,
-        32_000,
-    ),
+    claude(Prefix("claude-opus-4-1"), T::AnthropicBudget, true, E::None),
+    claude(Prefix("claude-opus-4-2"), T::AnthropicBudget, true, E::None),
     // Claude 3.5 family: 8k output ceiling.
-    claude(
-        Prefix("claude-3-5"),
-        T::AnthropicBudget,
-        true,
-        E::None,
-        8_192,
-    ),
+    claude(Prefix("claude-3-5"), T::AnthropicBudget, true, E::None),
     // --- Claude via gateways (full-id substrings; the vision-marker set) ---
     claude(
         Substring("claude-opus-4"),
         T::AnthropicBudget,
         true,
         E::None,
-        64_000,
     ),
     claude(
         Substring("claude-sonnet-4"),
         T::AnthropicBudget,
         true,
         E::None,
-        64_000,
     ),
     claude(
         Substring("claude-haiku-4"),
         T::AnthropicBudget,
         true,
         E::None,
-        64_000,
     ),
-    claude(
-        Substring("claude-3"),
-        T::AnthropicBudget,
-        true,
-        E::None,
-        64_000,
-    ),
-    claude(
-        Substring("claude-4"),
-        T::AnthropicBudget,
-        true,
-        E::None,
-        64_000,
-    ),
+    claude(Substring("claude-3"), T::AnthropicBudget, true, E::None),
+    claude(Substring("claude-4"), T::AnthropicBudget, true, E::None),
     // Bare catch-all for any other anthropic-direct id (claude-2, future
-    // names): 64k documented ceiling, but NOT in the gateway vision-marker
-    // set (claude-2 was never advertised as vision-capable).
+    // names) — NOT in the gateway vision-marker set (claude-2 was never
+    // advertised as vision-capable).
     ModelCapEntry {
         rule: Prefix("claude-"),
         thinking: T::AnthropicBudget,
         supports_temperature: true,
         effort_ceiling: E::None,
         vision: false,
-        context_window: Some(200_000),
-        max_output_tokens: Some(64_000),
+        context_window: None,
     },
     // --- OpenAI reasoning models (temperature rejected) ---
     ModelCapEntry {
@@ -310,6 +256,22 @@ pub const CATALOG: &[ModelCapEntry] = &[
     ModelCapEntry {
         rule: Prefix("o4"),
         ..OPENAI_REASONING
+    },
+    // gpt-5.6 rows must stay ABOVE the gpt-5 rows — they share the prefix
+    // and first match wins. OpenAI's /v1/models exposes no limits, so these
+    // windows are static-but-documented (1.5M).
+    ModelCapEntry {
+        rule: Prefix("gpt-5.6"),
+        supports_temperature: false,
+        vision: true,
+        context_window: Some(1_500_000),
+        ..UNKNOWN_MODEL
+    },
+    ModelCapEntry {
+        rule: Substring("gpt-5.6"),
+        vision: true,
+        context_window: Some(1_500_000),
+        ..UNKNOWN_MODEL
     },
     ModelCapEntry {
         rule: Prefix("gpt-5"),
@@ -405,7 +367,6 @@ const OPENAI_REASONING: ModelCapEntry = ModelCapEntry {
     effort_ceiling: E::None,
     vision: false,
     context_window: None,
-    max_output_tokens: None,
 };
 
 /// Look up the capability row for a model id (bare or `provider/`-prefixed,
@@ -431,7 +392,6 @@ mod tests {
         assert_eq!(entry.effort_ceiling, E::None);
         assert!(!entry.vision);
         assert_eq!(entry.context_window, None);
-        assert_eq!(entry.max_output_tokens, None);
     }
 
     #[test]
@@ -476,22 +436,32 @@ mod tests {
         // Specific family rows win over the bare catch-all…
         assert_eq!(lookup("claude-opus-4-7").effort_ceiling, E::XHigh);
         assert_eq!(
-            lookup("claude-3-5-sonnet-20241022").max_output_tokens,
-            Some(8_192)
+            lookup("claude-3-5-sonnet-20241022").thinking,
+            T::AnthropicBudget
         );
-        // …the date-suffix trick still lands Opus 4 on the 32k row…
-        assert_eq!(
-            lookup("claude-opus-4-20250514").max_output_tokens,
-            Some(32_000)
-        );
-        assert_eq!(
-            lookup("claude-opus-4-1-20250805").max_output_tokens,
-            Some(32_000)
-        );
-        // …and the catch-all covers the rest with 64k and NO vision marker.
+        // …the date-suffix trick still lands Opus 4 on its own row (vision)…
+        assert!(lookup("claude-opus-4-20250514").vision);
+        // …and the catch-all covers the rest with NO vision marker and no
+        // static window (limits resolve live).
         let catch_all = lookup("claude-2.1");
-        assert_eq!(catch_all.max_output_tokens, Some(64_000));
         assert!(!catch_all.vision);
+        assert_eq!(catch_all.context_window, None);
+    }
+
+    #[test]
+    fn ordering_gpt56_before_gpt5() {
+        // gpt-5.6 rows sit above the gpt-5 rows (shared prefix, first match
+        // wins): 1.5M window, temperature rejected on the bare-name prefix.
+        let bare = lookup("gpt-5.6");
+        assert!(!bare.supports_temperature);
+        assert!(bare.vision);
+        assert_eq!(bare.context_window, Some(1_500_000));
+        // A gateway id hits the Substring row: temperature kept, same window.
+        let gateway = lookup("openai/some-gpt-5.6-variant");
+        assert!(gateway.supports_temperature);
+        assert_eq!(gateway.context_window, Some(1_500_000));
+        // Plain gpt-5 still lands on the 400k rows.
+        assert_eq!(lookup("gpt-5-mini").context_window, Some(400_000));
     }
 
     #[test]
@@ -512,10 +482,6 @@ mod tests {
         // gateway-nested provider segment.
         assert!(lookup("qwen/qwen2.5-vl-7b-instruct").vision);
         assert!(lookup("openrouter/anthropic/claude-sonnet-4.5").vision);
-        assert_eq!(
-            lookup("openrouter/anthropic/claude-sonnet-4.5").context_window,
-            Some(200_000)
-        );
     }
 
     #[test]

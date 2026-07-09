@@ -74,6 +74,8 @@ use crate::models::traits::Model;
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
 use crate::utils::drain_sse_events;
 
+use super::ModelLimits;
+
 const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
 
 /// Append `chunk` to `buf`, char-boundary-safe truncation at `cap` bytes.
@@ -508,6 +510,44 @@ impl GeminiAdapter {
                 })
         })
         .await
+    }
+
+    /// GET `{base_url}/models/{model}` — Gemini's models endpoint reports
+    /// each model's real limits (`inputTokenLimit` = context window,
+    /// `outputTokenLimit` = per-response output ceiling). A 404 is a
+    /// definitive "id not in the catalog" → `Ok` all-`None` so callers can
+    /// cache the absence; transport/auth/5xx failures are `Err` (never
+    /// cached).
+    pub async fn fetch_model_limits(&self) -> Result<ModelLimits> {
+        let url = format!(
+            "{}/models/{}",
+            self.base_url.trim_end_matches('/'),
+            self.model_name
+        );
+        let response = self
+            .client
+            .get(&url)
+            .header("x-goog-api-key", &self.api_key)
+            .send()
+            .await
+            .map_err(|e| {
+                ModelError::Backend(BackendError::ConnectionFailed {
+                    backend: "gemini".to_string(),
+                    url: url.clone(),
+                    reason: e.to_string(),
+                })
+            })?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(ModelLimits::default());
+        }
+        if !response.status().is_success() {
+            return Err(http_error_from_response(response).await);
+        }
+        let info: GeminiModelInfo = response.json().await.map_err(|e| ModelError::ParseError {
+            message: format!("Failed to parse Gemini model info: {}", e),
+            raw: None,
+        })?;
+        Ok(info.into())
     }
 
     /// Decode a non-streaming response into `ModelResponse`.
@@ -959,6 +999,26 @@ impl Model for GeminiAdapter {
 
 // ===== Wire types =====
 
+/// `GET {base}/models/{id}` response — only the limit fields matter here.
+/// Both `#[serde(default)]` so an API that stops reporting one degrades to
+/// `None` (unknown) instead of a parse error.
+#[derive(Debug, Default, Deserialize)]
+struct GeminiModelInfo {
+    #[serde(default, rename = "inputTokenLimit")]
+    input_token_limit: Option<usize>,
+    #[serde(default, rename = "outputTokenLimit")]
+    output_token_limit: Option<usize>,
+}
+
+impl From<GeminiModelInfo> for ModelLimits {
+    fn from(info: GeminiModelInfo) -> Self {
+        ModelLimits {
+            max_context_tokens: info.input_token_limit,
+            max_output_tokens: info.output_token_limit,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct GeminiResponse {
     #[serde(default)]
@@ -1077,6 +1137,32 @@ async fn http_error_from_response(response: reqwest::Response) -> ModelError {
 mod tests {
     use super::*;
     use crate::models::tool_call::{FunctionCall, ToolCall};
+
+    #[test]
+    fn model_info_parses_documented_limit_fields() {
+        // Documented `GET {base}/models/{id}` shape: the token-limit fields
+        // ride alongside identity fields we ignore.
+        let body = r#"{
+            "name": "models/gemini-2.5-pro",
+            "displayName": "Gemini 2.5 Pro",
+            "inputTokenLimit": 1048576,
+            "outputTokenLimit": 65536,
+            "supportedGenerationMethods": ["generateContent"]
+        }"#;
+        let info: GeminiModelInfo = serde_json::from_str(body).expect("parse");
+        let limits: ModelLimits = info.into();
+        assert_eq!(limits.max_context_tokens, Some(1_048_576));
+        assert_eq!(limits.max_output_tokens, Some(65_536));
+    }
+
+    #[test]
+    fn model_info_missing_limit_fields_degrade_to_none() {
+        let body = r#"{"name": "models/gemini-2.5-pro"}"#;
+        let info: GeminiModelInfo = serde_json::from_str(body).expect("parse");
+        let limits: ModelLimits = info.into();
+        assert_eq!(limits.max_context_tokens, None);
+        assert_eq!(limits.max_output_tokens, None);
+    }
 
     #[test]
     fn candidate_without_content_deserializes() {

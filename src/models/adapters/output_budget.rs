@@ -44,8 +44,9 @@ pub struct OutputBudgetInputs {
     pub window: Option<usize>,
     /// Estimated prompt tokens already occupying the window.
     pub prompt_estimate: usize,
-    /// The model's documented per-response output ceiling, if known (used only
-    /// by `Required` providers that must send a concrete number).
+    /// The model's real per-response output ceiling, if known (live-discovered
+    /// or learned from a 400). Bounds every resolved value — sending above it
+    /// is a guaranteed rejection on providers that enforce one.
     pub provider_max_output: Option<usize>,
     /// Tokens held back from the window for prompt-estimate slop / safety.
     pub margin: usize,
@@ -64,9 +65,13 @@ pub fn resolve_output_budget(inputs: &OutputBudgetInputs, mode: OutputCapMode) -
             .saturating_sub(inputs.margin)
     });
 
-    // Explicit hard cap: honor it, bounded by the room that actually fits.
+    // Explicit hard cap: honor it, bounded by the room that actually fits and
+    // by the model's known output ceiling (above it is a guaranteed 400).
     if inputs.requested_cap > 0 {
-        let capped = room.map_or(inputs.requested_cap, |r| inputs.requested_cap.min(r));
+        let mut capped = room.map_or(inputs.requested_cap, |r| inputs.requested_cap.min(r));
+        if let Some(ceiling) = inputs.provider_max_output {
+            capped = capped.min(ceiling);
+        }
         return Some(match mode {
             OutputCapMode::NumPredict => capped.max(inputs.floor),
             OutputCapMode::Required => capped.max(1),
@@ -75,11 +80,19 @@ pub fn resolve_output_budget(inputs: &OutputBudgetInputs, mode: OutputCapMode) -
 
     // AUTO.
     match mode {
-        // Ollama must be told a number when the window is known (else it runs to
-        // the window edge and truncates); omit when the window is unknown.
-        OutputCapMode::NumPredict => room.map(|r| r.max(inputs.floor)),
-        // A required field: the model's documented ceiling, clamped to what
-        // fits. Downstream (`anthropic::legacy_budget_for`) handles the
+        // Ollama must be told a number when the window is known (else it runs
+        // to the window edge and truncates), bounded by any known ceiling
+        // (Ollama Cloud enforces one — the minimax incident). A known ceiling
+        // with an unknown window is still sent: it's the one number that
+        // prevents the 400. Both unknown → omit (Ollama's own default).
+        OutputCapMode::NumPredict => match (room, inputs.provider_max_output) {
+            (Some(r), Some(ceiling)) => Some(r.min(ceiling).max(inputs.floor)),
+            (Some(r), None) => Some(r.max(inputs.floor)),
+            (None, Some(ceiling)) => Some(ceiling.max(inputs.floor)),
+            (None, None) => None,
+        },
+        // A required field: the model's real ceiling, clamped to what fits.
+        // Downstream (`anthropic::legacy_budget_for`) handles the
         // thinking-budget fit against this value.
         OutputCapMode::Required => {
             let ceiling = inputs

@@ -14,16 +14,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::domain::ChatRequest;
+use crate::models::adapters::ModelLimits;
 use crate::models::adapters::openai_compat::OpenAICompatAdapter;
 use crate::models::{
     Model, ModelConfig, ModelError, ProviderProfile, ReasoningChunk, Result, StreamCallback,
     StreamEvent as ModelStreamEvent,
 };
-use crate::runtime::{NewProviderProbe, RuntimeStore};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::{ContextSizing, ModelProvider, probe_is_stale};
+use super::{
+    ContextSizing, ModelProvider, learn_output_cap, output_cap_from_error, resolve_limits_cached,
+    retry_cap,
+};
 
 pub struct OpenAICompatProvider {
     adapter: OpenAICompatAdapter,
@@ -48,60 +51,6 @@ impl OpenAICompatProvider {
     }
 }
 
-/// Limits learned from one `/models` probe, cached per (provider, model) in
-/// `provider_probes`. A successful listing WITHOUT limit metadata (or with the
-/// model absent) is cached too — as `None`s — so providers that don't expose
-/// limits aren't re-fetched every turn. Fetch *failures* are never cached.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CachedLimits {
-    max_context_tokens: Option<usize>,
-    max_output_tokens: Option<usize>,
-}
-
-const LIMITS_PROBE_KEY: &str = "limits_probe";
-
-/// Load fresh cached limits, off the async runtime. Best-effort → `None`.
-async fn load_limits_from_db(provider: String, model: String) -> Option<CachedLimits> {
-    tokio::task::spawn_blocking(move || {
-        let store = RuntimeStore::open_default().ok()?;
-        let rec = store
-            .provider_probes()
-            .get(&provider, &model, LIMITS_PROBE_KEY)
-            .ok()??;
-        if probe_is_stale(&rec.probed_at) {
-            return None;
-        }
-        serde_json::from_str::<CachedLimits>(&rec.capability_value).ok()
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
-/// Persist probed limits for subsequent sessions. Best-effort.
-async fn save_limits_to_db(provider: String, model: String, limits: &CachedLimits) {
-    let value = match serde_json::to_string(limits) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let _ = tokio::task::spawn_blocking(move || -> Option<()> {
-        let store = RuntimeStore::open_default().ok()?;
-        store
-            .provider_probes()
-            .upsert(NewProviderProbe {
-                provider,
-                model_id: model,
-                capability_key: LIMITS_PROBE_KEY.into(),
-                capability_value: value,
-                confidence: "probed".into(),
-                error: None,
-            })
-            .ok()?;
-        Some(())
-    })
-    .await;
-}
-
 #[async_trait]
 impl ModelProvider for OpenAICompatProvider {
     fn capabilities(&self) -> &Capabilities {
@@ -118,22 +67,15 @@ impl ModelProvider for OpenAICompatProvider {
         let _ = request;
         let provider = self.adapter.provider_name().to_string();
         let model = Model::name(&self.adapter).to_string();
-        let limits = match load_limits_from_db(provider.clone(), model.clone()).await {
-            Some(cached) => Some(cached),
-            None => match self.adapter.list_models_detailed().await {
-                Ok(listings) => {
-                    let found = listings.into_iter().find(|m| m.id == model);
-                    let limits = CachedLimits {
-                        max_context_tokens: found.as_ref().and_then(|m| m.max_context_tokens),
-                        max_output_tokens: found.as_ref().and_then(|m| m.max_output_tokens),
-                    };
-                    save_limits_to_db(provider, model, &limits).await;
-                    Some(limits)
-                },
-                // Network/parse failure: don't cache; fall back to static.
-                Err(_) => None,
-            },
-        };
+        let limits = resolve_limits_cached(&provider, &model, || async {
+            let listings = self.adapter.list_models_detailed().await?;
+            let found = listings.into_iter().find(|m| m.id == model);
+            Ok(ModelLimits {
+                max_context_tokens: found.as_ref().and_then(|m| m.max_context_tokens),
+                max_output_tokens: found.as_ref().and_then(|m| m.max_output_tokens),
+            })
+        })
+        .await;
         let window = limits.as_ref().and_then(|l| l.max_context_tokens);
         ContextSizing {
             model_max: window,
@@ -154,9 +96,42 @@ impl ModelProvider for OpenAICompatProvider {
         let config = build_model_config(&request);
         let (relay_tx, relay_handle) = super::stream_bridge::ordered_relay(ctx.sink.clone());
         let callback = forward_callback(relay_tx.clone());
-        let chat_fut = self
-            .adapter
-            .chat(&request.messages, &config, Some(callback));
+        let chat_fut = async {
+            match self
+                .adapter
+                .chat(&request.messages, &config, Some(callback.clone()))
+                .await
+            {
+                Ok(response) => Ok(response),
+                Err(err) => {
+                    // Learn-from-400 parity with the Ollama wrapper. AUTO
+                    // omits max_tokens here, so this fires mainly for
+                    // explicit user caps above the model's real ceiling:
+                    // learn the cap (persisted for later sizing), clamp,
+                    // retry ONCE. A 400 streamed no events, so the relay is
+                    // untouched and reusable.
+                    let Some(cap) = output_cap_from_error(&err) else {
+                        return Err(err);
+                    };
+                    let Some(clamped) = retry_cap(config.max_tokens, cap) else {
+                        return Err(err);
+                    };
+                    let provider = self.adapter.provider_name().to_string();
+                    let model = Model::name(&self.adapter).to_string();
+                    learn_output_cap(provider, model.clone(), cap).await;
+                    let _ = relay_tx.send(StreamEvent::Status(format!(
+                        "{model} rejected the output budget; learned its {cap}-token cap and retrying"
+                    )));
+                    let retry_config = ModelConfig {
+                        max_tokens: clamped,
+                        ..config.clone()
+                    };
+                    self.adapter
+                        .chat(&request.messages, &retry_config, Some(callback.clone()))
+                        .await
+                },
+            }
+        };
 
         let response = tokio::select! {
             biased;
@@ -243,6 +218,8 @@ mod tests {
 
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
         };
         let cfg = build_model_config(&req);
         assert_eq!(cfg.model, "groq/llama-3.3-70b-versatile");

@@ -83,10 +83,11 @@ pub const NVIDIA_SMI_TIMEOUT_SECS: u64 = 3;
 /// chat client has no global timeout (streaming), so the probe sets its own so a
 /// slow/hung Ollama never stalls the turn.
 pub const OLLAMA_PROBE_TIMEOUT_SECS: u64 = 3;
-/// How long a cached `/api/show` probe stays valid in `provider_probes`. Model
-/// dimensions are static per tag; the TTL just lets a re-pulled model under the
-/// same tag refresh.
-pub const OLLAMA_PROBE_TTL_DAYS: i64 = 30;
+/// How long a cached `provider_probes` row stays valid — shared by the Ollama
+/// `/api/show` probe and the per-provider limits probes (`limits_probe`).
+/// Model dimensions are static per id; the TTL just lets re-pulled/updated
+/// models refresh.
+pub const PROVIDER_PROBE_TTL_DAYS: i64 = 30;
 
 // Web Content
 /// Maximum characters to keep when truncating fetched web content

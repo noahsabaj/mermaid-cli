@@ -1397,6 +1397,13 @@ async fn dispatch_call_model(
     let max_context_tokens = sizing.effective.or_else(|| {
         crate::domain::runtime::infer_static_context_window_for_model_id(&request.model_id)
     });
+    // Ride the discovered limits on the request itself so adapters size
+    // `max_tokens` against the model's REAL window/ceiling (Anthropic
+    // requires a concrete max_tokens; sizing it from a stale table either
+    // wastes the ceiling or 400s). Set before the auto-compaction block so
+    // `CompactionRequest::auto` inherits them for its summary calls.
+    request.resolved_context_window = sizing.effective.or(sizing.model_max);
+    request.resolved_max_output = sizing.max_output;
     // Report the resolved window to the reducer for the `/context` display +
     // truncation quick-fix. Harmless for non-Ollama (source is None → no extra
     // detail shown).
@@ -1922,6 +1929,8 @@ async fn consolidate_memory(
         tools: Vec::new(),
         ollama_num_ctx: None,
         ollama_allow_ram_offload: None,
+        resolved_context_window: None,
+        resolved_max_output: None,
     };
 
     let provider = match factory.resolve(&model_id).await {
@@ -2033,7 +2042,7 @@ async fn dispatch_compact_conversation(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
     turn: TurnId,
-    request: CompactionRequest,
+    mut request: CompactionRequest,
     token: tokio_util::sync::CancellationToken,
 ) {
     let Some(factory) = providers else {
@@ -2063,7 +2072,14 @@ async fn dispatch_compact_conversation(
         },
     };
 
-    let max_context_tokens = provider.capabilities().max_context_tokens.or_else(|| {
+    // Resolve the window live (cache-first, so a manual /compact right after
+    // a turn is a pure cache read). Static capabilities are `None` for
+    // providers that discover limits at turn time (Anthropic/Gemini) — using
+    // them here would regress manual /compact to "unknown window".
+    let sizing = provider.resolve_context_window(&request.chat).await;
+    request.chat.resolved_context_window = sizing.effective.or(sizing.model_max);
+    request.chat.resolved_max_output = sizing.max_output;
+    let max_context_tokens = request.chat.resolved_context_window.or_else(|| {
         crate::domain::runtime::infer_static_context_window_for_model_id(&request.chat.model_id)
     });
     let before_snapshot =
@@ -3017,6 +3033,8 @@ mod tests {
 
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -3041,6 +3059,8 @@ mod tests {
 
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -3118,6 +3138,8 @@ mod tests {
 
                 ollama_num_ctx: None,
                 ollama_allow_ram_offload: None,
+                resolved_context_window: None,
+                resolved_max_output: None,
             },
         });
         assert_eq!(r.scope_count(), 1);
@@ -3145,6 +3167,8 @@ mod tests {
             tools: vec![],
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
         };
         let turn = TurnId(123);
 

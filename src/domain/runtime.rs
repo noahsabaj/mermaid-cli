@@ -80,12 +80,10 @@ impl ProviderCapabilitySnapshot {
             _ => (true, false, "effort".to_string()),
         };
 
-        let max_context_tokens = infer_static_context_window(&provider, &model);
-        // Anthropic's output ceilings are documented per family; other
-        // providers start unknown and are refreshed live from `/models`
-        // metadata via `ProviderContextResolved`.
-        let max_output_tokens = (provider == "anthropic")
-            .then(|| crate::models::adapters::anthropic::anthropic_max_output_tokens(&model));
+        let max_context_tokens = infer_static_context_window(&model);
+        // Output ceilings start unknown everywhere and are refreshed live
+        // from provider models endpoints via `ProviderContextResolved`.
+        let max_output_tokens = None;
 
         Self {
             provider,
@@ -99,29 +97,21 @@ impl ProviderCapabilitySnapshot {
     }
 }
 
-fn infer_static_context_window(provider: &str, model: &str) -> Option<usize> {
-    // Per-model documented windows from the capability catalog (claude 200k,
-    // gpt-5/gpt-4.1 400k — the latter now through ANY provider, not just
-    // "openai": a deliberate accuracy widening), then per-provider fallbacks
-    // for models the catalog doesn't know.
-    let fallback = match provider {
-        "anthropic" => Some(200_000),
-        "gemini" => Some(1_000_000),
-        _ => None,
-    };
-    crate::models::catalog::lookup(model)
-        .context_window
-        .or(fallback)
+fn infer_static_context_window(model: &str) -> Option<usize> {
+    // Per-model documented windows from the capability catalog — ONLY for
+    // providers whose API exposes no limits (OpenAI's gpt rows). Providers
+    // with a models endpoint (Anthropic, Gemini, Ollama, most OpenAI-compat)
+    // resolve live via `resolve_context_window`; `None` here means "unknown
+    // until discovery", never a guessed fallback.
+    crate::models::catalog::lookup(model).context_window
 }
 
 pub fn infer_static_context_window_for_model_id(model_id: &str) -> Option<usize> {
-    let (provider, model) = match model_id.split_once('/') {
-        Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
-            (provider.to_ascii_lowercase(), model.to_string())
-        },
-        _ => ("ollama".to_string(), model_id.to_string()),
+    let model = match model_id.split_once('/') {
+        Some((provider, model)) if !provider.is_empty() && !model.is_empty() => model,
+        _ => model_id,
     };
-    infer_static_context_window(&provider, &model)
+    infer_static_context_window(model)
 }
 
 /// Background process status tracked by Mermaid after launching a
@@ -469,19 +459,20 @@ mod tests {
 
     #[test]
     fn static_context_windows_pin_the_known_matrix() {
-        // Per-model catalog rows + per-provider fallbacks, exactly as before
-        // the catalog migration (plus the documented widening: gpt-4.1/gpt-5
-        // get 400k through any provider now).
+        // ONLY the OpenAI gpt rows keep static windows (their /v1/models
+        // exposes no limits). Everything else is None — unknown until live
+        // discovery via `resolve_context_window` fills it.
         for (id, want) in [
-            ("anthropic/claude-sonnet-4-6", Some(200_000)),
-            ("gemini/gemini-2.5-pro", Some(1_000_000)),
             ("openai/gpt-4.1", Some(400_000)),
             ("openai/gpt-5-mini", Some(400_000)),
-            ("openrouter/anthropic/claude-sonnet-4.5", Some(200_000)),
+            ("openai/gpt-5.6", Some(1_500_000)),
+            ("anthropic/claude-sonnet-4-6", None),
+            ("gemini/gemini-2.5-pro", None),
+            ("openrouter/anthropic/claude-sonnet-4.5", None),
             ("openai/gpt-4o", None),
             ("ollama/qwen3-coder:30b", None),
-            ("anthropic/claude-future-99", Some(200_000)), // claude- catch-all row
-            ("anthropic/nova-experimental", Some(200_000)), // provider fallback
+            ("anthropic/claude-future-99", None),
+            ("anthropic/nova-experimental", None),
         ] {
             assert_eq!(
                 infer_static_context_window_for_model_id(id),
@@ -492,9 +483,16 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_snapshot_reports_documented_output_ceiling() {
+    fn snapshot_limits_start_unknown_before_discovery() {
+        // Pre-discovery snapshots carry no window/ceiling for providers
+        // with a limits endpoint — `ProviderContextResolved` refreshes them
+        // on the first turn. No static pins to rot.
         let snap = ProviderCapabilitySnapshot::from_model_id("anthropic/claude-fable-5");
-        assert_eq!(snap.max_output_tokens, Some(64_000));
+        assert_eq!(snap.max_context_tokens, None);
+        assert_eq!(snap.max_output_tokens, None);
+        let snap = ProviderCapabilitySnapshot::from_model_id("gemini/gemini-2.5-pro");
+        assert_eq!(snap.max_context_tokens, None);
+        assert_eq!(snap.max_output_tokens, None);
         let snap = ProviderCapabilitySnapshot::from_model_id("openai/gpt-4o");
         assert_eq!(snap.max_output_tokens, None);
     }

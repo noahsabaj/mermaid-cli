@@ -65,6 +65,18 @@ pub struct ModelConfig {
     /// this directly, no internal registry.
     #[serde(skip)]
     pub tools: Vec<serde_json::Value>,
+
+    /// The model's real context window from cache-first live discovery,
+    /// copied off `ChatRequest.resolved_context_window` by provider
+    /// wrappers. Runtime-only; `None` = unknown (no window clamp).
+    #[serde(skip)]
+    pub resolved_context_window: Option<usize>,
+
+    /// The model's real per-response output ceiling, copied off
+    /// `ChatRequest.resolved_max_output`. Runtime-only; `None` = unknown
+    /// (adapters that require `max_tokens` fall back to a floor).
+    #[serde(skip)]
+    pub resolved_max_output: Option<usize>,
 }
 
 impl Default for ModelConfig {
@@ -81,6 +93,8 @@ impl Default for ModelConfig {
             hide_reasoning_trace: false,
             backend_options: HashMap::new(),
             tools: Vec::new(),
+            resolved_context_window: None,
+            resolved_max_output: None,
         }
     }
 }

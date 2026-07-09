@@ -122,6 +122,8 @@ async fn effect_runner_cancels_scope_on_command() {
         tools: vec![],
         ollama_num_ctx: None,
         ollama_allow_ram_offload: None,
+        resolved_context_window: None,
+        resolved_max_output: None,
     };
     runner.dispatch(Cmd::CallModel {
         turn: TurnId(1),

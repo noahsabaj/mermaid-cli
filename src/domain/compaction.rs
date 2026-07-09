@@ -366,6 +366,8 @@ pub fn build_summary_request(
         tools: Vec::new(),
         ollama_num_ctx: base.ollama_num_ctx,
         ollama_allow_ram_offload: base.ollama_allow_ram_offload,
+        resolved_context_window: base.resolved_context_window,
+        resolved_max_output: base.resolved_max_output,
     }
 }
 
@@ -392,6 +394,8 @@ pub fn build_verification_request(
         tools: Vec::new(),
         ollama_num_ctx: base.ollama_num_ctx,
         ollama_allow_ram_offload: base.ollama_allow_ram_offload,
+        resolved_context_window: base.resolved_context_window,
+        resolved_max_output: base.resolved_max_output,
     }
 }
 
@@ -785,6 +789,8 @@ mod tests {
             tools: Vec::new(),
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
         }
     }
 
@@ -812,6 +818,29 @@ mod tests {
             classify_length_stop(Some(&usage), Some(24_000), 4_000),
             LengthCause::ContextFull
         );
+    }
+
+    #[test]
+    fn summary_and_verification_requests_copy_resolved_limits() {
+        // The summarizer calls the same model — its request must inherit the
+        // live-discovered limits or Anthropic AUTO would fall to the 8192
+        // floor mid-compaction.
+        let mut base = request_with(vec![ChatMessage::user("hello")]);
+        base.resolved_context_window = Some(1_000_000);
+        base.resolved_max_output = Some(128_000);
+        let prepared = PreparedCompaction {
+            archived_messages: vec![ChatMessage::user("old")],
+            preserved_messages: vec![],
+            previous_summary: None,
+            history_excerpt: "excerpt".to_string(),
+        };
+        let policy = CompactionPolicy::default();
+        let summary = build_summary_request(&base, &prepared, None, policy);
+        assert_eq!(summary.resolved_context_window, Some(1_000_000));
+        assert_eq!(summary.resolved_max_output, Some(128_000));
+        let verify = build_verification_request(&base, &prepared, "draft", None, policy);
+        assert_eq!(verify.resolved_context_window, Some(1_000_000));
+        assert_eq!(verify.resolved_max_output, Some(128_000));
     }
 
     #[test]
