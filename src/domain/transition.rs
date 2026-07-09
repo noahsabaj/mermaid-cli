@@ -344,7 +344,29 @@ fn action_details_for(
 
 fn diff_success_summary(diff: &str, duration: Option<f64>) -> String {
     let (added, removed) = diff_counts(diff);
-    success_summary(format!("+{} -{}", added, removed), duration)
+    let changes = format_line_changes(added, removed);
+    match duration {
+        Some(seconds) => format!("{}, took {}", changes, format_duration(seconds)),
+        None => changes,
+    }
+}
+
+/// Claude-Code-style line-change phrasing: "Added N lines", "Removed N lines",
+/// or "Added N lines, removed M lines". Deliberately omits the "Success," prefix
+/// the shared `success_summary` adds — the diff line reads as a plain statement.
+fn format_line_changes(added: usize, removed: usize) -> String {
+    match (added, removed) {
+        (0, 0) => "No changes".to_string(),
+        (a, 0) => format!("Added {} {}", a, pluralize("line", a)),
+        (0, r) => format!("Removed {} {}", r, pluralize("line", r)),
+        (a, r) => format!(
+            "Added {} {}, removed {} {}",
+            a,
+            pluralize("line", a),
+            r,
+            pluralize("line", r),
+        ),
+    }
 }
 
 fn diff_counts(diff: &str) -> (usize, usize) {
@@ -661,7 +683,9 @@ mod tests {
         );
         match action.details {
             ActionDetails::Diff { summary, diff } => {
-                assert!(summary.contains("+2 -0"));
+                assert!(summary.contains("Added 2 lines"), "got {summary}");
+                assert!(!summary.contains("Success"), "no Success prefix: {summary}");
+                assert!(summary.contains(", took "), "timing is kept: {summary}");
                 assert!(diff.contains("+ a"));
                 assert!(!diff.contains("+++"), "no diff header clutter");
             },
@@ -698,6 +722,25 @@ mod tests {
             "overwriting an existing file reads as Update"
         );
         assert_eq!(action.target, "metadata.json");
+        match action.details {
+            ActionDetails::Diff { summary, .. } => {
+                assert!(
+                    summary.contains("Added 1 line, removed 1 line"),
+                    "got {summary}"
+                );
+            },
+            other => panic!("expected diff details, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn format_line_changes_reads_like_claude_code() {
+        assert_eq!(format_line_changes(49, 0), "Added 49 lines");
+        assert_eq!(format_line_changes(1, 0), "Added 1 line");
+        assert_eq!(format_line_changes(0, 9), "Removed 9 lines");
+        assert_eq!(format_line_changes(0, 1), "Removed 1 line");
+        assert_eq!(format_line_changes(7, 1), "Added 7 lines, removed 1 line");
+        assert_eq!(format_line_changes(0, 0), "No changes");
     }
 
     #[test]

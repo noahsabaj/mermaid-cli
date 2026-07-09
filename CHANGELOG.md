@@ -135,6 +135,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `created` flag the write tool already records, so it's accurate even when the
   model rewrites a whole file with `write_file` instead of `edit_file`.
 
+- **File-diff summaries read as words, like Claude Code.** The `⎿` line under a
+  `Write` / `Update` now reads `Added 49 lines, took 25ms` or
+  `Added 7 lines, removed 1 line, took 25ms` (and `Removed 9 lines, took 25ms`),
+  replacing the terse `Success, +49 -0, took 25ms`. Empty clauses are dropped and
+  `line`/`lines` agree with the count; the timing is kept, the redundant
+  `Success,` prefix removed.
+
 - **`mermaid list` and `mermaid models` no longer start Ollama.** All four
   read-only verbs (`list` / `models` / `status` / `doctor`) now enumerate
   with auto-start hard-off: observing state never mutates it, so a
