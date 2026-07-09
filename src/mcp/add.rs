@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-use crate::app::{Config, McpServerConfig, load_config, save_config};
+use crate::app::{McpServerConfig, load_config, remove_user_config_key, update_user_config_key};
 
 use super::registry;
 
@@ -25,7 +25,7 @@ pub async fn add_server(
     env_pairs: Vec<String>,
 ) -> Result<()> {
     // Check if already configured
-    let mut config = load_config()?;
+    let config = load_config()?;
     if config.mcp_servers.contains_key(name) {
         print!("'{}' is already configured. Overwrite? [y/N]: ", name);
         io::stdout().flush()?;
@@ -39,7 +39,7 @@ pub async fn add_server(
 
     // Raw command server: skip the whole registry resolution chain.
     if let Some(cmd) = command {
-        return add_command_server(config, name, cmd, command_args, env_pairs).await;
+        return add_command_server(name, cmd, command_args, env_pairs).await;
     }
 
     println!("\nResolving '{}'...", name);
@@ -131,9 +131,9 @@ pub async fn add_server(
         ..Default::default()
     };
 
-    // Save to config
-    config.mcp_servers.insert(name.to_string(), server_config);
-    save_config(&config, None)?;
+    // Save to config: rewrite only this server's key, so unknown keys and the
+    // rest of the user file survive untouched.
+    save_server(name, &server_config)?;
 
     let config_path = crate::app::get_config_dir()?.join("config.toml");
     println!(
@@ -145,10 +145,17 @@ pub async fn add_server(
     Ok(())
 }
 
+/// Persist one MCP server entry into the user config file.
+fn save_server(name: &str, server_config: &McpServerConfig) -> Result<()> {
+    update_user_config_key(
+        &["mcp_servers", name],
+        toml::Value::try_from(server_config)?,
+    )
+}
+
 /// Register a raw command MCP server (no registry resolution): validate by
 /// spawning `command args...` exactly, then save it verbatim to config.
 async fn add_command_server(
-    mut config: Config,
     name: &str,
     command: String,
     args: Vec<String>,
@@ -168,8 +175,7 @@ async fn add_command_server(
         env,
         ..Default::default()
     };
-    config.mcp_servers.insert(name.to_string(), server_config);
-    save_config(&config, None)?;
+    save_server(name, &server_config)?;
 
     let config_path = crate::app::get_config_dir()?.join("config.toml");
     println!(
@@ -193,13 +199,11 @@ fn parse_env_pairs(pairs: &[String]) -> Result<HashMap<String, String>> {
 
 /// Remove an MCP server from the config.
 pub async fn remove_server(name: &str) -> Result<()> {
-    let mut config = load_config()?;
-
-    if config.mcp_servers.remove(name).is_some() {
-        save_config(&config, None)?;
+    if remove_user_config_key(&["mcp_servers", name])? {
         println!("Removed MCP server '{}' from config.", name);
     } else {
         println!("MCP server '{}' is not configured.", name);
+        let config = load_config()?;
         if !config.mcp_servers.is_empty() {
             println!(
                 "Configured servers: {}",

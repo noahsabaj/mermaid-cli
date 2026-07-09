@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Layered config engine.** Configuration now merges as ordered layers —
+  built-in defaults < `~/.config/mermaid/config.toml` < session flags (`-c`
+  plus `--no-network`/`--confine-fs`/`--sandbox`, `run --max-tokens`,
+  `run --allow-untrusted-tools`) — through one recursive TOML deep-merge and a
+  single typed deserialize. Unknown-key warnings name the layer that contains
+  the typo, and in-app settings changes now rewrite only their own keys in the
+  user file: unrecognized keys survive persists, defaults are no longer frozen
+  into the file, and per-model entries whose ids contain dots
+  (`gemini/gemini-2.5-pro`) persist correctly. A corrupt config file degrades
+  to defaults while the session flags still apply.
 - **Long responses auto-continue across the model's per-response output cap.**
   When a reply is cut by the provider's per-response output ceiling with
   context-window room to spare, mermaid now continues it in a fresh turn (the
