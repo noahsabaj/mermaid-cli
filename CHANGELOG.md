@@ -292,6 +292,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rundll32` (a real executable, single argv — no shell re-parse). Loopback URLs
   stay allowed so opening a just-started local dev server still works.
 
+### Infrastructure
+
+- **Repo hygiene: `AGENTS.md`, a `justfile`, CI source guards, nextest, and
+  CHANGELOG-driven releases.** A root `AGENTS.md` encodes the real invariants
+  (MVU purity, no emojis, no back-compat shims) and a `justfile` provides the
+  one-command pre-PR gate (`just check`). CI gained two dependency-free guards —
+  no emoji/pictographs in source, and `src/domain` stays a pure MVU core (no
+  I/O, no wall clock) — plus a daemon-integration + `self-test` job, and switched
+  the test runner to `cargo-nextest` (retries auto-heal the Windows cancellation
+  flake). Releases now build their notes from the curated CHANGELOG section
+  (failing if the tag has none) and smoke-test each built binary (`version` +
+  `self-test`) and the published install script.
+
 ## [0.16.0] - 2026-07-04
 
 ### Added

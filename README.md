@@ -442,6 +442,29 @@ Set the appropriate environment variable (or override via `[providers.<name>].ap
 
 Ollama Cloud models authenticate via `OLLAMA_API_KEY`. The web tools don't require it: `web_fetch` is native, and `web_search` defaults to `auto` — Ollama Cloud when the key is set, otherwise a mermaid-managed local SearXNG (see [Web tool backends](#web-tool-backends)). Use `mermaid cloud-setup` from your shell to set the key for cloud models; `/cloud-setup` in the TUI points back to that shell command.
 
+## Development
+
+Contributor guardrails live in [`AGENTS.md`](AGENTS.md) (MVU purity, the no-emoji
+rule, no back-compat shims). The one-command pre-PR gate — exactly what CI runs —
+is:
+
+```
+just check    # cargo fmt --check + clippy -D warnings + cargo nextest run
+```
+
+Or run the pieces directly if you don't have [`just`](https://github.com/casey/just)
+/ [`cargo-nextest`](https://nexte.st):
+
+```
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo nextest run --workspace   # or: cargo test --workspace
+```
+
+CI additionally runs two dependency-free source guards (`.github/scripts/`): no
+emoji/pictographs in source, and `src/domain` stays a pure MVU core (no I/O, no
+wall clock).
+
 ## License
 
 MIT OR Apache-2.0
