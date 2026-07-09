@@ -37,6 +37,9 @@ pub struct ProviderProfile {
     pub base_url: &'static str,
     /// Default env var holding the API key. User config can override.
     pub api_key_env: &'static str,
+    /// Where to get an API key, appended to the "missing key" error so the
+    /// message is actionable. `None` falls back to just naming the env var.
+    pub key_hint: Option<&'static str>,
     /// Headers always sent in addition to `Authorization: Bearer ...`.
     /// OpenRouter requires `HTTP-Referer` + `X-Title` for its analytics
     /// dashboard; everyone else uses an empty list.
@@ -201,6 +204,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         name: "openai",
         base_url: "https://api.openai.com/v1",
         api_key_env: "OPENAI_API_KEY",
+        key_hint: Some("create one at https://platform.openai.com/api-keys"),
         extra_headers: &[],
         reasoning_strategy: ReasoningStrategy::Effort,
         // Chat Completions doesn't stream reasoning content for o-series
@@ -214,6 +218,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         name: "groq",
         base_url: "https://api.groq.com/openai/v1",
         api_key_env: "GROQ_API_KEY",
+        key_hint: Some("create one at https://console.groq.com/keys"),
         extra_headers: &[],
         reasoning_strategy: ReasoningStrategy::Effort,
         // Default `reasoning_format=parsed` routes reasoning to its own
@@ -226,6 +231,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         name: "openrouter",
         base_url: "https://openrouter.ai/api/v1",
         api_key_env: "OPENROUTER_API_KEY",
+        key_hint: Some("create one at https://openrouter.ai/keys"),
         extra_headers: &[
             ("HTTP-Referer", "https://github.com/noahsabaj/mermaid-cli"),
             // Canonical attribution header as of April 2026. OpenRouter
@@ -242,6 +248,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         name: "cerebras",
         base_url: "https://api.cerebras.ai/v1",
         api_key_env: "CEREBRAS_API_KEY",
+        key_hint: Some("create one at https://cloud.cerebras.ai"),
         extra_headers: &[],
         // Effort-style request param. `gpt-oss-120b` and `zai-glm-4.7`
         // honor it (the latter accepts `none` to disable); other models
@@ -255,6 +262,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         name: "deepinfra",
         base_url: "https://api.deepinfra.com/v1/openai",
         api_key_env: "DEEPINFRA_API_KEY",
+        key_hint: Some("create one at https://deepinfra.com/dash/api_keys"),
         extra_headers: &[],
         // Pass-through; reasoning shape per upstream model. Most R1-style
         // models on DeepInfra emit `delta.reasoning_content`.
@@ -267,6 +275,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         name: "together",
         base_url: "https://api.together.xyz/v1",
         api_key_env: "TOGETHER_API_KEY",
+        key_hint: Some("create one at https://api.together.ai/settings/api-keys"),
         extra_headers: &[],
         reasoning_strategy: ReasoningStrategy::None,
         // DeepSeek-R1 and friends on Together emit `<think>...</think>`
@@ -279,6 +288,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         name: "nvidia",
         base_url: "https://integrate.api.nvidia.com/v1",
         api_key_env: "NVIDIA_API_KEY",
+        key_hint: Some("create one at https://build.nvidia.com"),
         extra_headers: &[],
         // NVIDIA NIM is a plain OpenAI-compatible endpoint. Its own snippets
         // send no reasoning param, so `None` keeps the request to exactly what

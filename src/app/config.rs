@@ -364,6 +364,12 @@ pub struct UserProviderConfig {
     /// Extra HTTP headers sent on every request to this provider.
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
+    /// Extra HTTP headers whose VALUES come from environment variables
+    /// (map is header name -> env var name), resolved at request-build time so
+    /// a secret header (e.g. a gateway token) never has to live in config.toml.
+    /// A missing env var is skipped.
+    #[serde(default)]
+    pub env_headers: HashMap<String, String>,
     /// For fully custom providers (no built-in registry entry), declares
     /// which OpenAI-compatible shape the endpoint speaks. Ignored when
     /// the provider name matches a built-in registry entry. Values:
@@ -379,7 +385,7 @@ pub struct UserProviderConfig {
 }
 
 /// MCP server configuration
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Command to execute (e.g., "npx", "node", "python")
     pub command: String,
@@ -389,6 +395,24 @@ pub struct McpServerConfig {
     /// Environment variables for the server process
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// If non-empty, only these tool names are exposed to the model.
+    #[serde(default)]
+    pub enabled_tools: Vec<String>,
+    /// Tool names hidden from the model. Takes precedence over `enabled_tools`.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
+}
+
+impl McpServerConfig {
+    /// Whether `tool_name` should be exposed to the model: hidden when listed in
+    /// `disabled_tools` (which wins), else allowed when `enabled_tools` is empty
+    /// (allow-all) or names it.
+    pub fn tool_allowed(&self, tool_name: &str) -> bool {
+        if self.disabled_tools.iter().any(|t| t == tool_name) {
+            return false;
+        }
+        self.enabled_tools.is_empty() || self.enabled_tools.iter().any(|t| t == tool_name)
+    }
 }
 
 /// Mask a header/env map for `Debug`: keys are kept (so you can still see which
@@ -418,6 +442,9 @@ impl std::fmt::Debug for McpServerConfig {
                     .collect::<Vec<_>>(),
             )
             .field("env", &debug_masked_map(&self.env))
+            // Tool allow/deny lists are plain tool names, not secrets.
+            .field("enabled_tools", &self.enabled_tools)
+            .field("disabled_tools", &self.disabled_tools)
             .finish()
     }
 }
@@ -428,6 +455,8 @@ impl std::fmt::Debug for UserProviderConfig {
             .field("base_url", &self.base_url)
             .field("api_key_env", &self.api_key_env)
             .field("extra_headers", &debug_masked_map(&self.extra_headers))
+            // Values are env var NAMES (not secrets), so render them.
+            .field("env_headers", &self.env_headers)
             .field("compat", &self.compat)
             .field("default_model", &self.default_model)
             .finish()
@@ -947,6 +976,28 @@ mod tests {
         let mut table = toml::Table::new();
         assert!(apply_cli_overrides(&mut table, &["noequalssign".to_string()]).is_err());
         assert!(apply_cli_overrides(&mut table, &["=novalue".to_string()]).is_err());
+    }
+
+    #[test]
+    fn mcp_tool_allowed_honors_enabled_and_disabled() {
+        // Default (both empty) allows everything.
+        let cfg = McpServerConfig::default();
+        assert!(cfg.tool_allowed("anything"));
+        // enabled_tools acts as an allowlist.
+        let cfg = McpServerConfig {
+            enabled_tools: vec!["read".into(), "search".into()],
+            ..Default::default()
+        };
+        assert!(cfg.tool_allowed("read"));
+        assert!(!cfg.tool_allowed("write"));
+        // disabled_tools wins over enabled_tools.
+        let cfg = McpServerConfig {
+            enabled_tools: vec!["read".into(), "write".into()],
+            disabled_tools: vec!["write".into()],
+            ..Default::default()
+        };
+        assert!(cfg.tool_allowed("read"));
+        assert!(!cfg.tool_allowed("write"));
     }
 
     /// Configs persisted before Step 4 don't have a `reasoning` field on

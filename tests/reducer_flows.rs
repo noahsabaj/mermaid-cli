@@ -844,6 +844,7 @@ fn configured_mcp_servers_seed_state_and_ready_updates() {
             command: "npx".to_string(),
             args: vec!["-y".to_string(), "@upstash/context7-mcp".to_string()],
             env: std::collections::HashMap::new(),
+            ..Default::default()
         },
     );
     let state = State::new(

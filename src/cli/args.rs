@@ -236,13 +236,24 @@ pub enum Commands {
     },
     /// Add an MCP server (e.g., mermaid add context7)
     Add {
-        /// MCP server name (e.g., context7, git, filesystem)
+        /// MCP server name (registry key, or a label when using --command)
         name: String,
         /// Skip the confirmation prompt before fetching and running a package
         /// that is not in the built-in registry (for scripted/CI use). Without
         /// this, adding an unknown package fails closed when there is no TTY.
         #[arg(long)]
         yes: bool,
+        /// Register a raw command server instead of resolving from the registry:
+        /// the executable to run (e.g. `uvx`, `node`, `/path/to/mcp-server`).
+        #[arg(long)]
+        command: Option<String>,
+        /// Argument for --command, repeatable and order-preserving
+        /// (e.g. `--arg mcp-server-git --arg --repository --arg .`).
+        #[arg(long = "arg")]
+        arg: Vec<String>,
+        /// Environment variable for --command: repeatable `KEY=VALUE`.
+        #[arg(long = "env")]
+        env: Vec<String>,
     },
     /// Remove a configured MCP server
     Remove {

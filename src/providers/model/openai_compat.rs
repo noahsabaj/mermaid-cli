@@ -33,7 +33,7 @@ impl OpenAICompatProvider {
     pub fn new(
         profile: &'static ProviderProfile,
         base_url: String,
-        api_key: String,
+        api_key: Option<String>,
         model_name: String,
         extra_headers: HashMap<String, String>,
     ) -> Result<Self> {

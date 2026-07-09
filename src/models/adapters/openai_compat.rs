@@ -145,9 +145,12 @@ pub struct OpenAICompatAdapter {
     client: Client,
     profile: &'static ProviderProfile,
     base_url: String,
-    api_key: String,
+    /// `None` for keyless local endpoints (loopback/LAN OpenAI-compatible
+    /// servers like llama.cpp / vLLM) — no `Authorization` header is sent.
+    api_key: Option<String>,
     model_name: String,
-    /// Includes both the profile's `extra_headers` and any user overrides.
+    /// The merged header set: the profile's static `extra_headers`, then user
+    /// `extra_headers` overrides, then any env-sourced `env_headers`.
     extra_headers: HashMap<String, String>,
     capabilities: ModelCapabilities,
 }
@@ -173,12 +176,12 @@ fn random_idempotency_key() -> String {
 
 impl OpenAICompatAdapter {
     /// Create a new adapter. `base_url` is the resolved URL (registry
-    /// default OR user override); `api_key` is already resolved (caller
-    /// uses `crate::utils::resolve_api_key`).
+    /// default OR user override); `api_key` is already resolved (caller uses
+    /// `crate::utils::resolve_api_key`), or `None` for a keyless local endpoint.
     pub fn new(
         profile: &'static ProviderProfile,
         base_url: String,
-        api_key: String,
+        api_key: Option<String>,
         model_name: String,
         extra_headers: HashMap<String, String>,
     ) -> Result<Self> {
@@ -412,9 +415,11 @@ impl OpenAICompatAdapter {
             let mut req = self
                 .client
                 .post(&url)
-                .bearer_auth(&self.api_key)
                 .header("Idempotency-Key", &idempotency_key)
                 .json(body);
+            if let Some(key) = &self.api_key {
+                req = req.bearer_auth(key);
+            }
             for (name, value) in &self.extra_headers {
                 req = req.header(name, value);
             }
@@ -911,7 +916,10 @@ impl Model for OpenAICompatAdapter {
 
     async fn list_models(&self) -> Result<Vec<String>> {
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
-        let mut req = self.client.get(&url).bearer_auth(&self.api_key);
+        let mut req = self.client.get(&url);
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
         for (name, value) in &self.extra_headers {
             req = req.header(name, value);
         }
@@ -1416,7 +1424,7 @@ mod tests {
         OpenAICompatAdapter::new(
             test_profile(),
             "https://api.openai.com/v1".to_string(),
-            "test-key".to_string(),
+            Some("test-key".to_string()),
             "gpt-5-mini".to_string(),
             HashMap::new(),
         )
@@ -1586,7 +1594,7 @@ mod tests {
         let adapter = OpenAICompatAdapter::new(
             together,
             together.base_url.to_string(),
-            "k".to_string(),
+            Some("k".to_string()),
             "deepseek-r1".to_string(),
             HashMap::new(),
         )
@@ -1766,7 +1774,7 @@ mod tests {
         let adapter = OpenAICompatAdapter::new(
             test_profile(),
             "https://api.openai.com/v1".to_string(),
-            "test-key".to_string(),
+            Some("test-key".to_string()),
             "gpt-4o".to_string(),
             HashMap::new(),
         )
@@ -1782,7 +1790,7 @@ mod tests {
         let adapter = OpenAICompatAdapter::new(
             cerebras,
             cerebras.base_url.to_string(),
-            "k".to_string(),
+            Some("k".to_string()),
             "gpt-oss-120b".to_string(),
             HashMap::new(),
         )
@@ -1803,7 +1811,7 @@ mod tests {
         let adapter = OpenAICompatAdapter::new(
             cerebras,
             cerebras.base_url.to_string(),
-            "k".to_string(),
+            Some("k".to_string()),
             "gpt-oss-120b".to_string(),
             HashMap::new(),
         )
@@ -1830,7 +1838,7 @@ mod tests {
         let adapter = OpenAICompatAdapter::new(
             together,
             together.base_url.to_string(),
-            "k".to_string(),
+            Some("k".to_string()),
             "deepseek-r1".to_string(),
             HashMap::new(),
         )
@@ -1899,7 +1907,7 @@ mod tests {
         let adapter = OpenAICompatAdapter::new(
             openrouter,
             openrouter.base_url.to_string(),
-            "k".to_string(),
+            Some("k".to_string()),
             "anthropic/claude-3.7-sonnet".to_string(),
             HashMap::new(),
         )
@@ -1922,7 +1930,7 @@ mod tests {
         let adapter = OpenAICompatAdapter::new(
             openrouter,
             openrouter.base_url.to_string(),
-            "k".to_string(),
+            Some("k".to_string()),
             "anthropic/claude-3.7-sonnet".to_string(),
             HashMap::new(),
         )

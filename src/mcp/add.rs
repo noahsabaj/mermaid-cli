@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-use crate::app::{McpServerConfig, load_config, save_config};
+use crate::app::{Config, McpServerConfig, load_config, save_config};
 
 use super::registry;
 
@@ -15,8 +15,15 @@ use super::registry;
 ///
 /// Resolution chain: built-in registry → convention → npm search.
 /// Prompts for required env vars, validates by spawning the server,
-/// then saves to config.toml.
-pub async fn add_server(name: &str, assume_yes: bool) -> Result<()> {
+/// then saves to config.toml. When `command` is set, skips registry
+/// resolution and registers that raw command verbatim instead.
+pub async fn add_server(
+    name: &str,
+    assume_yes: bool,
+    command: Option<String>,
+    command_args: Vec<String>,
+    env_pairs: Vec<String>,
+) -> Result<()> {
     // Check if already configured
     let mut config = load_config()?;
     if config.mcp_servers.contains_key(name) {
@@ -28,6 +35,11 @@ pub async fn add_server(name: &str, assume_yes: bool) -> Result<()> {
             println!("Cancelled.");
             return Ok(());
         }
+    }
+
+    // Raw command server: skip the whole registry resolution chain.
+    if let Some(cmd) = command {
+        return add_command_server(config, name, cmd, command_args, env_pairs).await;
     }
 
     println!("\nResolving '{}'...", name);
@@ -116,6 +128,7 @@ pub async fn add_server(name: &str, assume_yes: bool) -> Result<()> {
         command: resolved.command.clone(),
         args,
         env,
+        ..Default::default()
     };
 
     // Save to config
@@ -130,6 +143,52 @@ pub async fn add_server(name: &str, assume_yes: bool) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Register a raw command MCP server (no registry resolution): validate by
+/// spawning `command args...` exactly, then save it verbatim to config.
+async fn add_command_server(
+    mut config: Config,
+    name: &str,
+    command: String,
+    args: Vec<String>,
+    env_pairs: Vec<String>,
+) -> Result<()> {
+    let env = parse_env_pairs(&env_pairs)?;
+
+    println!("\nValidating '{name}' ({command})...");
+    match registry::validate_argv(&command, &args, &env).await {
+        Ok(tools) => println!("Server ready: {} tool(s) available", tools.len()),
+        Err(e) => return Err(anyhow!("Server '{name}' failed to start: {e}")),
+    }
+
+    let server_config = McpServerConfig {
+        command,
+        args,
+        env,
+        ..Default::default()
+    };
+    config.mcp_servers.insert(name.to_string(), server_config);
+    save_config(&config, None)?;
+
+    let config_path = crate::app::get_config_dir()?.join("config.toml");
+    println!(
+        "\nSaved to {}\nThe '{name}' tools will be available next time you start mermaid.",
+        config_path.display()
+    );
+    Ok(())
+}
+
+/// Parse repeatable `KEY=VALUE` env pairs into a map.
+fn parse_env_pairs(pairs: &[String]) -> Result<HashMap<String, String>> {
+    let mut env = HashMap::new();
+    for pair in pairs {
+        let (k, v) = pair
+            .split_once('=')
+            .ok_or_else(|| anyhow!("invalid --env '{pair}' (expected KEY=VALUE)"))?;
+        env.insert(k.trim().to_string(), v.to_string());
+    }
+    Ok(env)
 }
 
 /// Remove an MCP server from the config.
@@ -155,4 +214,22 @@ pub async fn remove_server(name: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_env_pairs_splits_on_first_equals() {
+        let env = parse_env_pairs(&["A=1".to_string(), "B=x=y".to_string()]).unwrap();
+        assert_eq!(env.get("A").map(String::as_str), Some("1"));
+        // Only the first '=' splits, so the value may itself contain '='.
+        assert_eq!(env.get("B").map(String::as_str), Some("x=y"));
+    }
+
+    #[test]
+    fn parse_env_pairs_rejects_missing_equals() {
+        assert!(parse_env_pairs(&["NOEQUALS".to_string()]).is_err());
+    }
 }

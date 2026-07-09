@@ -868,15 +868,19 @@ fn apply_live_mcp(
             continue;
         }
         entry.status = crate::domain::McpServerStatus::Ready;
-        entry.tools = live_tools
+        let cfg = &entry.config;
+        let tools: Vec<crate::domain::McpToolSpec> = live_tools
             .iter()
             .filter(|(server, _)| server == name)
+            // Honor the per-server enabled_tools/disabled_tools filter.
+            .filter(|(_, def)| cfg.tool_allowed(&def.name))
             .map(|(_, def)| crate::domain::McpToolSpec {
                 name: def.name.clone(),
                 description: def.description.clone(),
                 input_schema: def.input_schema.clone(),
             })
             .collect();
+        entry.tools = tools;
     }
 }
 
@@ -1024,11 +1028,7 @@ mod tests {
     fn apply_live_mcp_marks_running_servers_ready_with_their_tools() {
         use crate::domain::{McpServerEntry, McpServerStatus};
         let entry = || McpServerEntry {
-            config: crate::app::McpServerConfig {
-                command: String::new(),
-                args: Vec::new(),
-                env: std::collections::HashMap::new(),
-            },
+            config: crate::app::McpServerConfig::default(),
             status: McpServerStatus::Starting,
             tools: Vec::new(),
         };

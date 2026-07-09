@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Providers & MCP: keyless local servers, env-sourced headers, per-server tool
+  filters, raw command servers.** Local OpenAI-compatible endpoints (llama.cpp,
+  vLLM, LM Studio) now work with no API key when the base URL is loopback/LAN;
+  a missing key for a public provider gives an actionable "get a key at …" hint.
+  Providers can source secret headers from env vars (`[providers.x] env_headers`)
+  instead of writing them into config. Each MCP server accepts `enabled_tools` /
+  `disabled_tools` to scope which of its tools reach the model. And `mermaid add
+  --command <cmd> --arg … --env K=V` registers an arbitrary command MCP server
+  without going through the package registry. (Also fixes a latent bug where a
+  built-in provider's static analytics headers were dropped.)
 - **Config: typo warnings, `-c` overrides, and stdin prompts.** Unknown keys in
   `config.toml` now warn with their dotted path instead of being silently
   ignored. A repeatable `-c key.path=value` flag overrides any config value for

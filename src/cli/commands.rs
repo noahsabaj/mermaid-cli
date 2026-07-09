@@ -145,8 +145,14 @@ pub async fn handle_command(
             handle_qa(command, config, cwd)?;
             Ok(true)
         },
-        Commands::Add { name, yes } => {
-            crate::mcp::add_server(name, *yes).await?;
+        Commands::Add {
+            name,
+            yes,
+            command,
+            arg,
+            env,
+        } => {
+            crate::mcp::add_server(name, *yes, command.clone(), arg.clone(), env.clone()).await?;
             Ok(true)
         },
         Commands::Remove { name } => {

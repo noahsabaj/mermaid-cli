@@ -368,6 +368,7 @@ mod tests {
                 command: "echo".to_string(),
                 args: vec![],
                 env: std::collections::HashMap::new(),
+                ..Default::default()
             },
         );
         let cmds = bootstrap_cmds(&cfg);
