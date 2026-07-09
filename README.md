@@ -139,7 +139,10 @@ mermaid self-test                               # Fast deterministic Mermaid sel
 mermaid init                                    # Create default config file
 mermaid cloud-setup                             # Configure Ollama Cloud API key
 mermaid run "fix the tests"                     # Non-interactive mode
-mermaid run "explain main.rs" -f json           # JSON output
+mermaid run "explain main.rs" -f json           # JSON output (single typed object)
+mermaid run "explain main.rs" -f ndjson         # Streaming NDJSON events (SDK/scripting)
+mermaid --no-network run "audit the code"       # Deny network to shell commands (Linux seccomp)
+mermaid --sandbox run "refactor this"           # Also confine writes to the project (Linux Landlock)
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
 mermaid remove <name>                           # Remove a configured MCP server
 mermaid mcp                                     # List configured MCP servers
@@ -291,6 +294,39 @@ Release builds keep the existing `.tar.gz`/`.zip` archives and add Linux `.deb`/
 
 Config file: `~/.config/mermaid/config.toml` (Linux) or platform equivalent via `directories` crate.
 
+Configuration is assembled from layers, later layers winning key-by-key through one recursive
+TOML deep-merge (tables merge; scalars and arrays replace):
+
+1. built-in defaults
+2. the user config file above
+3. the project config: `<git-root>/.mermaid/config.toml`, located from the working directory
+   (`-p /repo` adopts that repo's project config)
+4. session flags: repeatable `-c key.path=value` plus the dedicated flags (`--no-network`,
+   `--confine-fs`, `--sandbox`, `run --max-tokens`, `run --allow-untrusted-tools`), with a
+   dedicated flag beating a contradictory `-c`
+
+Unknown-key warnings name the layer they came from, and in-app settings changes (`/model`,
+Alt+T, `/context`, `mermaid add`) rewrite only their own keys in the user file — unrecognized
+keys in the file survive, and defaults are never frozen in.
+
+### Project config
+
+A repo can commit shared defaults in `.mermaid/config.toml` — model choice, profiles,
+per-model reasoning, web/UX knobs. Loading needs no trust ceremony because safety is
+structural:
+
+- Only these top-level sections are honored: `default_model`, `model_profiles`,
+  `reasoning_per_model`, `ollama`, `ollama_num_ctx_per_model`, `web`, `compaction`,
+  `computer_use`, `memory`, `non_interactive`, and a `safety` subset. Anything else —
+  `mcp_servers` (spawns commands), `providers` (redirects traffic/credentials), `agents`,
+  `daemon` — is ignored with a warning, as are `web.searxng_url` and `ollama.host`/`port`
+  (traffic-redirect vectors) inside otherwise-allowed tables.
+- `safety.mode`, `safety.network`, and `safety.filesystem` are clamped tighten-only against
+  your user config: a project can turn the sandbox on or drop to `read_only`, but can never
+  loosen what you configured. Session flags (you, at the keyboard) still override everything.
+- Startup prints `mermaid: using project config <path> (<n> keys)` whenever the layer
+  contributes.
+
 Run `mermaid init` to create a default config. Important fields in the current config schema:
 
 ```toml
@@ -301,7 +337,7 @@ last_used_model = "ollama/qwen3-coder:30b"
 provider = "ollama"
 name = "qwen3-coder:30b"
 temperature = 0.7
-max_tokens = 4096
+max_tokens = 0        # 0 = auto (model-scaled output budget); positive = hard cap
 reasoning = "medium"  # none | minimal | low | medium | high | xhigh | max
 
 [ollama]
@@ -343,7 +379,7 @@ checkpoint_on_mutation = true
 # These fields remain in the schema for compatibility but are not the
 # source of truth for `mermaid run`.
 output_format = "text"
-max_tokens = 4096
+max_tokens = 0        # 0 = auto (model-scaled); positive = hard cap
 no_execute = false
 
 # Durable agent memory (the `memory` tool, the always-loaded index, and

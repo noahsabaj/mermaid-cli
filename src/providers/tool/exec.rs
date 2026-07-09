@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
+use crate::app::{FilesystemPolicy, NetworkPolicy};
 use crate::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 use crate::domain::{
     ManagedProcess, ManagedProcessStatus, ToolDefinition, ToolMetadata, ToolOutcome,
@@ -240,14 +241,35 @@ impl ToolExecutor for ExecuteCommandTool {
         // Spawn + wait. `run_command`'s select races four outcomes: subprocess
         // exit, timeout, Esc-cancel, and Ctrl+B detach — the timeout and cancel
         // arms both tree-kill before returning.
-        let mut cmd = Command::new(if cfg!(target_os = "windows") {
-            "cmd"
-        } else {
-            "sh"
+        //
+        // When network access is denied (Linux `safety.network = "deny"` /
+        // `--no-network`) and/or writes are confined (`safety.filesystem =
+        // "project"` / `--confine-fs`), the shell is wrapped in the
+        // `__sandbox-exec` launcher, which installs the seccomp network
+        // kill-switch / Landlock write rules on itself and then execs it — so a
+        // network attempt dies with SIGSYS and an out-of-bounds write fails
+        // with EACCES, which the completion arm below maps to clear denials. A
+        // no-op elsewhere.
+        let sandbox_network =
+            cfg!(target_os = "linux") && matches!(ctx.config.safety.network, NetworkPolicy::Deny);
+        let sandbox_fs = cfg!(target_os = "linux")
+            && matches!(ctx.config.safety.filesystem, FilesystemPolicy::Project);
+        // Write allowlist: the project root (so a build in a subdir can still
+        // write repo-root artifacts), the effective workdir (out-of-project
+        // commands, separately gated by policy), the system temp dir, and /dev
+        // (shell redirects like `>/dev/null` are writes).
+        let confine_writes: Option<Vec<PathBuf>> = sandbox_fs.then(|| {
+            let mut dirs = vec![
+                ctx.workdir.clone(),
+                effective_workdir.clone(),
+                std::env::temp_dir(),
+                PathBuf::from("/dev"),
+            ];
+            dirs.dedup();
+            dirs
         });
-        cmd.arg(if cfg!(target_os = "windows") { "/C" } else { "-c" })
-            .arg(&command)
-            .stdin(Stdio::null())
+        let mut cmd = build_sandboxed_shell(&command, sandbox_network, confine_writes.as_deref());
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // NOT kill-on-drop: the cancel and timeout arms of `run_command`
@@ -261,13 +283,29 @@ impl ToolExecutor for ExecuteCommandTool {
             // — inconsistent with a truly backgrounded process (#F16).
             .kill_on_drop(false);
 
-        // Unix: lead a new process group so cancel can signal the whole group.
+        // Unix: lead a new SESSION, not just a new process group. `setsid()`
+        // still makes the child a group leader (sid == pgid == pid), so the
+        // cancel/timeout group-kill in `terminate_tree` is unchanged — but a
+        // new session has no controlling terminal, so a child that tries to
+        // open `/dev/tty` (a `sudo` password prompt, an ssh passphrase read)
+        // fails instantly instead of painting its prompt over the TUI and
+        // hanging until timeout. `setsid` is async-signal-safe, so a pre_exec
+        // closure is fine here (unlike the seccomp/Landlock setup, which needs
+        // the `__sandbox-exec` re-exec — see `app::sandbox_exec`). Must NOT be
+        // combined with `process_group(0)`: setpgid runs before pre_exec, and
+        // `setsid` fails with EPERM for an existing group leader.
         // (Windows kills the tree by pid via `taskkill /T`, no group needed.)
         #[cfg(unix)]
-        cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                rustix::process::setsid()?;
+                Ok(())
+            });
+        }
 
         cmd.current_dir(&effective_workdir);
         scrub_secret_env(&mut cmd);
+        harden_noninteractive_env(&mut cmd);
 
         // The timeout now lives INSIDE `run_command`'s select (alongside the
         // Esc-cancel and Ctrl+B arms), so a timed-out command is tree-killed and
@@ -285,20 +323,49 @@ impl ToolExecutor for ExecuteCommandTool {
             Ok(CommandRunResult::Completed(run)) => {
                 let duration_secs = start.elapsed().as_secs_f64();
                 let output_len = run.output.len();
-                ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
-                    .with_metadata(command_metadata(CommandMetadataInput {
-                        command: command.clone(),
-                        working_dir: Some(effective_workdir.display().to_string()),
-                        exit_code: run.exit_code,
-                        timed_out: false,
-                        background: false,
-                        stdout_lines: run.stdout_lines,
-                        stderr_lines: run.stderr_lines,
-                        detected_urls: all_urls(&run.output),
-                        pid: None,
-                        log_path: None,
-                        byte_count: Some(output_len),
-                    }))
+                let mut metadata = command_metadata(CommandMetadataInput {
+                    command: command.clone(),
+                    working_dir: Some(effective_workdir.display().to_string()),
+                    exit_code: run.exit_code,
+                    timed_out: false,
+                    background: false,
+                    stdout_lines: run.stdout_lines,
+                    stderr_lines: run.stderr_lines,
+                    detected_urls: all_urls(&run.output),
+                    pid: None,
+                    log_path: None,
+                    byte_count: Some(output_len),
+                });
+                if sandbox_network && is_network_denial(&run) {
+                    // The seccomp kill-switch stopped a network attempt. Surface a
+                    // clear, actionable error instead of a confusing "killed".
+                    if let ToolMetadata::ExecuteCommand {
+                        denied_by_sandbox, ..
+                    } = &mut metadata.detail
+                    {
+                        *denied_by_sandbox = true;
+                    }
+                    ToolOutcome::error(NETWORK_DENIED_MESSAGE.to_string(), duration_secs)
+                        .with_metadata(metadata)
+                } else if sandbox_fs && is_fs_denial(&run) {
+                    // Landlock denials are errno-based (EACCES), so this is a
+                    // signature match, not a certainty — keep the original
+                    // output attached and hedge the wording accordingly.
+                    if let ToolMetadata::ExecuteCommand {
+                        denied_by_sandbox, ..
+                    } = &mut metadata.detail
+                    {
+                        *denied_by_sandbox = true;
+                    }
+                    let message = format!(
+                        "{FS_DENIED_MESSAGE}\n\n--- original output ---\n{}",
+                        run.output
+                    );
+                    ToolOutcome::error(message, duration_secs).with_metadata(metadata)
+                } else {
+                    ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
+                        .with_metadata(metadata)
+                }
             },
             Ok(CommandRunResult::Detached { pid, log_path }) => {
                 // Ctrl+B moved this command to the background.
@@ -541,6 +608,7 @@ printf '%s\n' "$!""#,
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     scrub_secret_env(&mut launcher);
+    harden_noninteractive_env(&mut launcher);
 
     let output = launcher
         .output()
@@ -591,6 +659,7 @@ async fn launch_background_process(
         .stderr(Stdio::from(log_err))
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     scrub_secret_env(&mut launcher);
+    harden_noninteractive_env(&mut launcher);
     let child = launcher
         .spawn()
         .map_err(|e| format!("failed to launch background command: {e}"))?;
@@ -782,10 +851,84 @@ fn command_metadata(input: CommandMetadataInput) -> ToolRunMetadata {
             detected_urls: input.detected_urls,
             pid: input.pid,
             log_path: input.log_path,
+            // Set by the completion arm when a sandbox denial is detected; the
+            // metadata builder itself never sees the terminating signal.
+            denied_by_sandbox: false,
         },
         line_count: Some(input.stdout_lines + input.stderr_lines),
         byte_count: input.byte_count,
         ..ToolRunMetadata::default()
+    }
+}
+
+/// SIGSYS on Linux (x86_64/aarch64) — the signal the seccomp kill-switch raises.
+const SANDBOX_KILL_SIGNAL: i32 = 31;
+
+/// Message shown when the network kill-switch blocks a command. States the cause
+/// and the three ways to allow it. No emojis.
+const NETWORK_DENIED_MESSAGE: &str = "Blocked by the network sandbox: this command tried to open an internet socket, which is denied because network access is off (safety.network = \"deny\" / --no-network). Re-run without --no-network, approve the command, or use full-access mode to allow network access.";
+
+/// Whether a completed command was terminated by the network kill-switch: the
+/// shell itself died with SIGSYS, or (more often) it reaped a SIGSYS-killed
+/// child and exited `128 + SIGSYS`. Callers must gate on "the sandbox was active
+/// for this spawn" so an ordinary `exit 159` is never mislabeled.
+fn is_network_denial(run: &CommandRunOutput) -> bool {
+    run.signal == Some(SANDBOX_KILL_SIGNAL) || run.exit_code == Some(128 + SANDBOX_KILL_SIGNAL)
+}
+
+/// Message shown when a command's failure matches the filesystem-sandbox denial
+/// signature. Hedged ("likely") because Landlock denials surface as ordinary
+/// EACCES, unlike the unambiguous SIGSYS of the network kill-switch. No emojis.
+const FS_DENIED_MESSAGE: &str = "Command failed with a permission error while the filesystem sandbox was active (safety.filesystem = \"project\" / --confine-fs); a write outside the project directory, the system temp directory, or /dev was likely denied. Write inside the project, or re-run without --confine-fs to allow it.";
+
+/// Whether a completed command's failure looks like a Landlock write denial:
+/// non-zero exit plus the shell/tool permission-error text. A signature match,
+/// not a proof — callers must gate on "the filesystem sandbox was active for
+/// this spawn", and the surfaced message hedges accordingly.
+fn is_fs_denial(run: &CommandRunOutput) -> bool {
+    let failed = matches!(run.exit_code, Some(code) if code != 0);
+    failed
+        && (run.output.contains("Permission denied")
+            || run.output.contains("Operation not permitted"))
+}
+
+/// Build the shell `Command` for a model command, optionally wrapped in the
+/// `__sandbox-exec` launcher (Linux) for the network kill-switch and/or
+/// Landlock write-confinement. The caller sets stdio, process group, cwd, and
+/// env scrubbing on the returned command.
+fn build_sandboxed_shell(
+    command: &str,
+    sandbox_network: bool,
+    confine_writes: Option<&[PathBuf]>,
+) -> Command {
+    if sandbox_network || confine_writes.is_some() {
+        // `mermaid __sandbox-exec [--no-network] [--confine-writes <dir>]… --
+        // sh -c <command>`: the launcher installs the requested confinement on
+        // itself, then execs the shell.
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mermaid"));
+        let mut cmd = Command::new(exe);
+        cmd.arg("__sandbox-exec");
+        if sandbox_network {
+            cmd.arg("--no-network");
+        }
+        for dir in confine_writes.unwrap_or_default() {
+            cmd.arg("--confine-writes").arg(dir);
+        }
+        cmd.args(["--", "sh", "-c"]).arg(command);
+        cmd
+    } else {
+        let mut cmd = Command::new(if cfg!(target_os = "windows") {
+            "cmd"
+        } else {
+            "sh"
+        });
+        cmd.arg(if cfg!(target_os = "windows") {
+            "/C"
+        } else {
+            "-c"
+        })
+        .arg(command);
+        cmd
     }
 }
 
@@ -863,6 +1006,10 @@ async fn open_browser_url(url: &str) -> Result<(), String> {
 struct CommandRunOutput {
     output: String,
     exit_code: Option<i32>,
+    /// Terminating signal (Unix), when the process was killed by one — e.g.
+    /// SIGSYS from the seccomp network kill-switch. `None` on a normal exit or
+    /// on non-Unix.
+    signal: Option<i32>,
     stdout_lines: usize,
     stderr_lines: usize,
 }
@@ -897,6 +1044,16 @@ const SECRET_ENV_VARS: &[&str] = &[
     "TOGETHER_API_KEY",
     "MERMAID_DAEMON_TOKEN",
 ];
+
+/// Tell child processes they have no human to talk to. A spawned command runs
+/// session-detached with stdin on `/dev/null`, so any interactive credential
+/// prompt can only fail or hang — git is the one common tool that would
+/// otherwise sit on a prompt until the command timeout. Set unconditionally:
+/// any other value guarantees a hang in this environment. (Same value the
+/// plugin git hooks already use — see `mermaid-runtime`'s plugin module.)
+fn harden_noninteractive_env(cmd: &mut Command) {
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+}
 
 /// Remove secret-bearing environment variables from a child command. Uses a
 /// denylist (known provider keys + name patterns) rather than an allowlist so
@@ -1139,9 +1296,20 @@ async fn run_command(
                     status.code().unwrap_or(-1)
                 ));
             }
+            // Preserve the terminating signal so the caller can distinguish a
+            // seccomp SIGSYS denial from an ordinary failure (mirrors
+            // `mcp/transport.rs`). `None` on non-Unix / normal exit.
+            #[cfg(unix)]
+            let signal = {
+                use std::os::unix::process::ExitStatusExt;
+                status.signal()
+            };
+            #[cfg(not(unix))]
+            let signal = None;
             Ok(CommandRunResult::Completed(CommandRunOutput {
                 output: full_output,
                 exit_code: status.code(),
+                signal,
                 stdout_lines,
                 stderr_lines,
             }))
@@ -1180,6 +1348,95 @@ mod tests {
     use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use std::path::PathBuf;
+
+    #[test]
+    fn network_denial_detects_sigsys_and_reaped_child_exit() {
+        let out = |exit: Option<i32>, signal: Option<i32>| CommandRunOutput {
+            output: String::new(),
+            exit_code: exit,
+            signal,
+            stdout_lines: 0,
+            stderr_lines: 0,
+        };
+        // The shell itself was SIGSYS-killed.
+        assert!(is_network_denial(&out(None, Some(31))));
+        // The shell reaped a SIGSYS-killed child and exited 128 + 31.
+        assert!(is_network_denial(&out(Some(159), None)));
+        // Ordinary failures / success / a different signal are not denials.
+        assert!(!is_network_denial(&out(Some(1), None)));
+        assert!(!is_network_denial(&out(Some(0), None)));
+        assert!(!is_network_denial(&out(None, Some(11)))); // SIGSEGV, not SIGSYS
+    }
+
+    #[test]
+    fn fs_denial_requires_failure_and_permission_signature() {
+        let out = |exit: Option<i32>, output: &str| CommandRunOutput {
+            output: output.to_string(),
+            exit_code: exit,
+            signal: None,
+            stdout_lines: 0,
+            stderr_lines: 0,
+        };
+        // Non-zero exit + the permission-error text ⇒ denial signature.
+        assert!(is_fs_denial(&out(
+            Some(1),
+            "sh: line 1: /etc/nope: Permission denied"
+        )));
+        assert!(is_fs_denial(&out(
+            Some(2),
+            "touch: Operation not permitted"
+        )));
+        // A successful command mentioning the phrase is not a denial…
+        assert!(!is_fs_denial(&out(
+            Some(0),
+            "grep found: Permission denied"
+        )));
+        // …nor is an ordinary failure without it, or a signal death.
+        assert!(!is_fs_denial(&out(Some(1), "some other failure")));
+        assert!(!is_fs_denial(&out(None, "Permission denied")));
+    }
+
+    #[test]
+    fn sandboxed_shell_wraps_only_when_requested() {
+        let plain = build_sandboxed_shell("echo hi", false, None);
+        let plain_prog = plain.as_std().get_program().to_string_lossy().into_owned();
+        assert!(
+            plain_prog.ends_with("sh") || plain_prog.ends_with("cmd"),
+            "plain shell program: {plain_prog}"
+        );
+
+        let wrapped = build_sandboxed_shell("echo hi", true, None);
+        let args: Vec<String> = wrapped
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.first().map(String::as_str), Some("__sandbox-exec"));
+        assert!(args.contains(&"--no-network".to_string()));
+        assert!(!args.contains(&"--confine-writes".to_string()));
+        assert!(args.contains(&"sh".to_string()));
+    }
+
+    #[test]
+    fn sandboxed_shell_passes_confine_writes_dirs() {
+        let dirs = vec![PathBuf::from("/proj"), PathBuf::from("/dev")];
+        let wrapped = build_sandboxed_shell("echo hi", false, Some(&dirs));
+        let args: Vec<String> = wrapped
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.first().map(String::as_str), Some("__sandbox-exec"));
+        assert!(!args.contains(&"--no-network".to_string()));
+        // Each dir rides its own `--confine-writes`.
+        assert_eq!(
+            args.iter().filter(|a| *a == "--confine-writes").count(),
+            2,
+            "args: {args:?}"
+        );
+        assert!(args.contains(&"/proj".to_string()));
+        assert!(args.contains(&"/dev".to_string()));
+    }
 
     #[tokio::test]
     async fn tee_log_is_capped() {
@@ -1331,6 +1588,68 @@ mod tests {
             .await;
         assert!(outcome.is_success(), "expected success: {:?}", outcome);
         assert!(outcome.output().contains("hello world"));
+    }
+
+    /// The foreground child must be a session leader (sid == its own pid).
+    /// This is the non-vacuous half of the /dev/tty fix: a new session has no
+    /// controlling terminal, so `sudo`-style prompts fail instead of writing
+    /// over the TUI. Linux-only: probes /proc (field 6 of stat is the sid).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn foreground_child_runs_in_new_session() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": r#"test "$(awk '{print $6}' /proc/$$/stat)" = "$$" && echo NEW_SESSION_OK || echo "NOT_A_SESSION_LEADER sid=$(awk '{print $6}' /proc/$$/stat) pid=$$""#,
+                }),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
+        assert!(
+            outcome.output().contains("NEW_SESSION_OK"),
+            "child shell is not a session leader: {}",
+            outcome.output()
+        );
+    }
+
+    /// Direct regression for the sudo incident: a child that opens `/dev/tty`
+    /// must fail. Only meaningful where the test process itself has a
+    /// controlling terminal — CI runners have none (the open fails for
+    /// everyone there), so skip explicitly rather than pass vacuously.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_child_cannot_open_dev_tty() {
+        if std::fs::File::open("/dev/tty").is_err() {
+            eprintln!("skipped: no controlling terminal in test environment");
+            return;
+        }
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": "if echo x > /dev/tty 2>/dev/null; then echo TTY_OPEN_OK; else echo TTY_OPEN_DENIED; fi",
+                }),
+                ctx,
+            )
+            .await;
+        assert!(
+            outcome.output().contains("TTY_OPEN_DENIED"),
+            "session-detached child could still open /dev/tty: {}",
+            outcome.output()
+        );
+    }
+
+    #[test]
+    fn harden_env_sets_git_terminal_prompt() {
+        let mut cmd = Command::new("sh");
+        harden_noninteractive_env(&mut cmd);
+        let set = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v.is_some_and(|v| v == "0"));
+        assert!(set, "GIT_TERMINAL_PROMPT=0 must be injected");
     }
 
     #[tokio::test]

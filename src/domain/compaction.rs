@@ -83,10 +83,66 @@ impl Default for CompactionPolicy {
 }
 
 impl CompactionPolicy {
-    pub fn response_reserve(self, request_max_tokens: usize) -> usize {
-        request_max_tokens
+    /// Window room to hold back for the model's response when sizing
+    /// compaction. Decoupled from the on-wire output cap: an explicit user cap
+    /// is the best reserve estimate, but AUTO (`max_tokens == 0`) reserves the
+    /// baseline plus the reasoning headroom the level implies — a High/Max
+    /// turn needs more room before the window counts as "full".
+    pub fn response_reserve(self, request: &ChatRequest) -> usize {
+        let desired = if request.max_tokens > 0 {
+            request.max_tokens
+        } else {
+            self.min_response_reserve_tokens
+                + crate::models::adapters::output_budget::reasoning_output_reserve(
+                    request.reasoning,
+                )
+        };
+        desired
             .max(self.min_response_reserve_tokens)
             .min(self.max_response_reserve_tokens)
+    }
+}
+
+/// Why a `FinishReason::Length` stop happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LengthCause {
+    /// The per-response output cap was hit while the context window still had
+    /// room — compacting the *input* cannot help.
+    OutputCapped,
+    /// The context window itself is (nearly) full — compaction can help.
+    ContextFull,
+    /// No usage data to classify with; callers should keep the legacy
+    /// compact-and-continue behavior.
+    Unknown,
+}
+
+/// Classify a `FinishReason::Length` stop from the response usage and the
+/// known context window. The discriminator that holds even for providers whose
+/// window is unknown: a length-stop with window room to spare (or no known
+/// window at all — the normal remote-provider case) is the per-response output
+/// cap, not a full window. `usage == None` (common on tool follow-ups) stays
+/// `Unknown` so the caller preserves the legacy recovery path.
+pub fn classify_length_stop(
+    usage: Option<&TokenUsage>,
+    window: Option<usize>,
+    reserve: usize,
+) -> LengthCause {
+    let Some(u) = usage else {
+        return LengthCause::Unknown;
+    };
+    match window {
+        None => LengthCause::OutputCapped,
+        Some(w) => {
+            if u.prompt_tokens
+                .saturating_add(u.completion_tokens)
+                .saturating_add(reserve)
+                >= w
+            {
+                LengthCause::ContextFull
+            } else {
+                LengthCause::OutputCapped
+            }
+        },
     }
 }
 
@@ -206,7 +262,7 @@ pub fn should_auto_compact(
         return Err(CompactionSkip::NoKnownContextLimit);
     }
 
-    let reserve = policy.response_reserve(request.max_tokens);
+    let reserve = policy.response_reserve(request);
     let over_percent = snapshot
         .used_percent
         .is_some_and(|p| p >= policy.auto_threshold_percent);
@@ -228,7 +284,7 @@ pub fn context_exceeds_hard_limit(
     let Some(max_tokens) = snapshot.max_tokens else {
         return false;
     };
-    let reserve = policy.response_reserve(request.max_tokens);
+    let reserve = policy.response_reserve(request);
     snapshot.used_tokens.saturating_add(reserve) >= max_tokens
 }
 
@@ -275,7 +331,7 @@ pub fn prepare_compaction(
         .map(|m| m.content.clone());
 
     let max_input_tokens = max_context_tokens
-        .map(|max| max.saturating_sub(request.policy.response_reserve(request.chat.max_tokens)))
+        .map(|max| max.saturating_sub(request.policy.response_reserve(&request.chat)))
         .filter(|max| *max > 0)
         .unwrap_or(request.policy.summarizer_input_token_budget)
         .min(request.policy.summarizer_input_token_budget);
@@ -730,6 +786,58 @@ mod tests {
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
         }
+    }
+
+    #[test]
+    fn classify_length_stop_discriminates_output_cap_from_context_full() {
+        let usage = TokenUsage::provider(16_600, 4_000, 20_600);
+        // No usage → Unknown (legacy recovery path preserved).
+        assert_eq!(
+            classify_length_stop(None, Some(100_000), 4_000),
+            LengthCause::Unknown
+        );
+        // Unknown window + usage → the per-response output cap (the normal
+        // remote-provider case — the GLM-5.2 misdiagnosis this fixes).
+        assert_eq!(
+            classify_length_stop(Some(&usage), None, 4_000),
+            LengthCause::OutputCapped
+        );
+        // Window with plenty of room → still the output cap.
+        assert_eq!(
+            classify_length_stop(Some(&usage), Some(1_000_000), 4_000),
+            LengthCause::OutputCapped
+        );
+        // prompt + completion + reserve reaching the window → genuinely full.
+        assert_eq!(
+            classify_length_stop(Some(&usage), Some(24_000), 4_000),
+            LengthCause::ContextFull
+        );
+    }
+
+    #[test]
+    fn response_reserve_is_reasoning_aware_on_auto() {
+        let policy = CompactionPolicy::default();
+        let mut req = request_with(vec![ChatMessage::user("hello")]);
+
+        // AUTO: the reserve scales with the reasoning level instead of
+        // mirroring a send-cap that no longer exists.
+        req.max_tokens = 0;
+        req.reasoning = ReasoningLevel::None;
+        let base = policy.response_reserve(&req);
+        assert_eq!(base, policy.min_response_reserve_tokens);
+        req.reasoning = ReasoningLevel::Max;
+        let deep = policy.response_reserve(&req);
+        assert!(deep > base, "a Max-reasoning turn must reserve more room");
+        assert!(deep <= policy.max_response_reserve_tokens);
+
+        // An explicit cap is the best reserve estimate — honored (clamped).
+        req.max_tokens = 12_000;
+        assert_eq!(policy.response_reserve(&req), 12_000);
+        req.max_tokens = 1_000_000;
+        assert_eq!(
+            policy.response_reserve(&req),
+            policy.max_response_reserve_tokens
+        );
     }
 
     #[test]

@@ -155,17 +155,30 @@ pub async fn run_interactive_with(
     // child cleanup / pending-save drains (the terminal is still restored by
     // `TerminalGuard::Drop` regardless).
     let mut exit_result: Result<()> = Ok(());
+    // Last-seen `full_redraw_seq`. When the reducer bumps it (shell command
+    // finished, Ctrl+L), `Terminal::clear()` resets ratatui's back buffer so
+    // the next draw repaints every cell — the only way to overwrite bytes
+    // some other process wrote directly to the tty (ghost cells).
+    let mut seen_redraw_seq = state.ui.full_redraw_seq;
     loop {
         // Render the current state. ratatui's draw closure captures
         // &state, so we don't thread &mut state through the renderer.
-        if let Err(err) = terminal
-            .as_mut()
-            .expect("terminal guard is alive while the render loop runs")
-            .inner_mut()
-            .draw(|f| render(&state, &mut rstate, f))
         {
-            exit_result = Err(err.into());
-            break;
+            let term = terminal
+                .as_mut()
+                .expect("terminal guard is alive while the render loop runs")
+                .inner_mut();
+            if state.ui.full_redraw_seq != seen_redraw_seq {
+                seen_redraw_seq = state.ui.full_redraw_seq;
+                if let Err(err) = term.clear() {
+                    exit_result = Err(err.into());
+                    break;
+                }
+            }
+            if let Err(err) = term.draw(|f| render(&state, &mut rstate, f)) {
+                exit_result = Err(err.into());
+                break;
+            }
         }
 
         // Drain any msgs queued by a prior burst-coalesce before blocking

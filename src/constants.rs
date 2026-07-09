@@ -12,7 +12,11 @@ pub const UI_MOUSE_SCROLL_LINES: u16 = 3;
 
 // Default Model Configuration
 pub const DEFAULT_TEMPERATURE: f32 = 0.7;
-pub const DEFAULT_MAX_TOKENS: usize = 4096;
+/// The pre-AUTO default output cap (the config default was 4096 until the
+/// model-scaled budget landed; `0` = AUTO is the default now). Kept ONLY so
+/// config loading can recognize the frozen legacy value on disk and migrate it
+/// to AUTO — never used to cap a request.
+pub const LEGACY_DEFAULT_MAX_TOKENS: usize = 4096;
 
 // Context Management
 /// Auto-compact once the fully-enriched request reaches this percentage
@@ -36,6 +40,11 @@ pub const COMPACTION_MAX_RESPONSE_RESERVE_TOKENS: usize = 20_000;
 /// context-window truncation, before the run stops and shows the manual levers.
 /// The counter resets whenever the run makes progress; `0` means uncapped.
 pub const COMPACTION_MAX_TRUNCATION_RECOVERIES: u8 = 3;
+/// Cap on consecutive auto-continuations after a response hits the provider's
+/// per-response OUTPUT cap (window room to spare). Each continuation resumes
+/// the reply in a fresh turn; the cap bounds a model that restarts or
+/// re-truncates instead of finishing. Reset whenever a turn ends another way.
+pub const MAX_OUTPUT_CONTINUATIONS: u32 = 4;
 
 // Ollama auto-sizing
 // Mermaid probes an Ollama model's real context window (`/api/show`) and sizes

@@ -25,7 +25,7 @@ use crate::runtime::{NewProviderProbe, RuntimeStore};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::{ContextSizing, ModelPlacement, ModelProvider};
+use super::{ContextSizing, ModelPlacement, ModelProvider, probe_is_stale};
 
 /// Ollama adapter fronted by `ModelProvider`.
 pub struct OllamaProvider {
@@ -148,12 +148,15 @@ impl ModelProvider for OllamaProvider {
                 model_max,
                 effective: Some(r.value),
                 source: Some(r.source),
+                // Ollama has no per-response ceiling — num_predict is ours.
+                max_output: None,
             },
             // No model_max and nothing configured → omit num_ctx (Ollama default).
             None => ContextSizing {
                 model_max,
                 effective: None,
                 source: None,
+                max_output: None,
             },
         }
     }
@@ -277,20 +280,20 @@ fn build_model_config(
     if let Some(n) = num_ctx {
         mc.set_backend_option("ollama".into(), "num_ctx".into(), n.to_string());
     }
-    // Output cap: max_tokens + reasoning headroom, bounded by the room left in
-    // num_ctx. Without this Ollama generates unbounded and only stops when the
-    // window fills — the truncation bug.
-    let num_predict = default_ollama_num_predict(
-        request.max_tokens,
-        request.reasoning,
-        num_ctx,
-        estimate_prompt_tokens(request),
-    );
-    mc.set_backend_option(
-        "ollama".into(),
-        "num_predict".into(),
-        num_predict.to_string(),
-    );
+    // Output cap: AUTO (max_tokens == 0) gets the full room num_ctx leaves
+    // after the prompt; an explicit max_tokens is an exact cap bounded by that
+    // room. Without a cap Ollama generates unbounded and only stops when the
+    // window fills — the truncation bug. `None` = AUTO with an unknown window →
+    // omit num_predict so Ollama applies its own default.
+    if let Some(num_predict) =
+        default_ollama_num_predict(request.max_tokens, num_ctx, estimate_prompt_tokens(request))
+    {
+        mc.set_backend_option(
+            "ollama".into(),
+            "num_predict".into(),
+            num_predict.to_string(),
+        );
+    }
 
     // F11: forward Ollama hardware options from the user's app config (num_ctx is
     // now handled above via the resolver).
@@ -358,20 +361,6 @@ async fn save_probe_to_db(model: String, info: OllamaModelInfo) {
         Some(())
     })
     .await;
-}
-
-fn probe_is_stale(probed_at: &str) -> bool {
-    use chrono::{DateTime, Utc};
-    match DateTime::parse_from_rfc3339(probed_at) {
-        Ok(t) => {
-            Utc::now()
-                .signed_duration_since(t.with_timezone(&Utc))
-                .num_days()
-                >= crate::constants::OLLAMA_PROBE_TTL_DAYS
-        },
-        // Unparseable timestamp → treat as stale and re-probe.
-        Err(_) => true,
-    }
 }
 
 /// Build a `StreamCallback` that forwards `ModelStreamEvent`s from the
@@ -472,8 +461,8 @@ mod tests {
         assert!(opts.num_predict.is_some(), "num_predict is always derived");
     }
 
-    /// `num_predict` is derived from max_tokens + the reasoning headroom, bounded
-    /// by the room left in num_ctx.
+    /// An explicit `max_tokens` is an exact cap, bounded by the room left in
+    /// num_ctx (no reasoning reserve added — hard means hard).
     #[test]
     fn build_model_config_derives_num_predict() {
         let req = ChatRequest {
@@ -490,8 +479,8 @@ mod tests {
             ollama_allow_ram_offload: None,
         };
         let cfg = build_model_config(&req, &crate::app::Config::default(), Some(131_072));
-        // 4096 + 8192 (Max reserve), plenty of room in a 131072 window.
-        assert_eq!(cfg.ollama_options().num_predict, Some(12_288));
+        // Exactly the 4096 cap; plenty of room in a 131072 window.
+        assert_eq!(cfg.ollama_options().num_predict, Some(4_096));
     }
 
     #[tokio::test]

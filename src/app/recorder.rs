@@ -745,6 +745,7 @@ mod tests {
                 model_max: Some(131_072),
                 effective: Some(32_768),
                 source: None,
+                max_output: Some(64_000),
             },
             Msg::OllamaPlacementResolved {
                 model_id: "m".to_string(),

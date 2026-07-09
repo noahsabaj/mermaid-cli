@@ -76,8 +76,51 @@ pub struct Cli {
     #[arg(short = 'c', long = "config", value_name = "KEY=VALUE", global = true)]
     pub config_overrides: Vec<String>,
 
+    /// Deny network access for model-run shell commands this session. On Linux a
+    /// seccomp kill-switch blocks internet sockets (`AF_INET`/`AF_INET6`); a
+    /// no-op on other platforms. Equivalent to `-c safety.network=deny`.
+    #[arg(long, global = true)]
+    pub no_network: bool,
+
+    /// Confine model-run shell commands' writes to the project directory (plus
+    /// the system temp directory and `/dev`) this session. Linux Landlock,
+    /// best-effort; a no-op on other platforms and pre-5.13 kernels. Equivalent
+    /// to `-c safety.filesystem=project`.
+    #[arg(long, global = true)]
+    pub confine_fs: bool,
+
+    /// Full OS sandbox for model-run shell commands: shorthand for
+    /// `--no-network --confine-fs`.
+    #[arg(long, global = true)]
+    pub sandbox: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
+}
+
+impl Cli {
+    /// Collect this invocation's config-shaped flags into the `Session`
+    /// config layer's inputs: the repeatable `-c` overrides plus the dedicated
+    /// flags (`--no-network`/`--confine-fs`/`--sandbox`, and `run`'s
+    /// `--max-tokens`/`--allow-untrusted-tools`). Prompt flags and
+    /// `--reasoning` stay outside the layer merge — see `apply_prompt_flags`.
+    pub fn session_flags(&self) -> crate::app::SessionFlags {
+        let (max_tokens, allow_untrusted_tools) = match &self.command {
+            Some(Commands::Run {
+                max_tokens,
+                allow_untrusted_tools,
+                ..
+            }) => (*max_tokens, *allow_untrusted_tools),
+            _ => (None, false),
+        };
+        crate::app::SessionFlags {
+            overrides: self.config_overrides.clone(),
+            deny_network: self.no_network || self.sandbox,
+            confine_fs: self.confine_fs || self.sandbox,
+            max_tokens,
+            allow_untrusted_tools,
+        }
+    }
 }
 
 const TOP_LEVEL_HELP_AFTER: &str = "\
@@ -278,7 +321,7 @@ pub enum Commands {
         /// piped stdin alongside a prompt is appended as a fenced block.
         prompt: Option<String>,
 
-        /// Output format (text, json, markdown)
+        /// Output format (text, json, markdown, ndjson)
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
 
@@ -433,10 +476,13 @@ pub enum QaCommand {
 pub enum OutputFormat {
     /// Plain text output
     Text,
-    /// JSON structured output
+    /// JSON structured output (a single object)
     Json,
     /// Markdown formatted output
     Markdown,
+    /// Streaming newline-delimited JSON (one `RunEvent` per line) — the
+    /// scripting / SDK surface for `mermaid run`.
+    Ndjson,
 }
 
 /// Reject an empty or whitespace-only `run` prompt at parse time, so
@@ -515,6 +561,34 @@ mod tests {
         let cli = Cli::try_parse_from(["mermaid", "run", "x", "-c", "c=true"])
             .expect("global -c parses after the subcommand");
         assert_eq!(cli.config_overrides, vec!["c=true"]);
+    }
+
+    #[test]
+    fn session_flags_collect_sandbox_and_run_flags() {
+        let cli = Cli::try_parse_from([
+            "mermaid",
+            "--sandbox",
+            "-c",
+            "a=1",
+            "run",
+            "x",
+            "--max-tokens",
+            "512",
+            "--allow-untrusted-tools",
+        ])
+        .expect("parses");
+        let flags = cli.session_flags();
+        assert!(flags.deny_network && flags.confine_fs);
+        assert_eq!(flags.max_tokens, Some(512));
+        assert!(flags.allow_untrusted_tools);
+        assert_eq!(flags.overrides, vec!["a=1"]);
+
+        // Without `run`, the run-scoped flags stay unset.
+        let cli = Cli::try_parse_from(["mermaid", "--no-network"]).expect("parses");
+        let flags = cli.session_flags();
+        assert!(flags.deny_network && !flags.confine_fs);
+        assert_eq!(flags.max_tokens, None);
+        assert!(!flags.allow_untrusted_tools);
     }
 
     #[test]

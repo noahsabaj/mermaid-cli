@@ -440,6 +440,7 @@ async fn show_doctor(
 fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        OutputFormat::Ndjson => println!("{}", serde_json::to_string(report)?),
         OutputFormat::Markdown => {
             println!("# Mermaid Doctor\n");
             print_doctor_text(report);
@@ -556,12 +557,25 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
         },
     };
 
+    let sandbox_available = crate::runtime::network_killswitch_available();
+    let fs_sandbox_available = crate::runtime::fs_confinement_available();
     let checks = vec![
         "compact smoke exercises reducer compaction path".to_string(),
         "compact smoke persists conversation and archive artifacts".to_string(),
         "local runtime store opens without daemon".to_string(),
+        format!(
+            "network kill-switch builds on this platform: {}",
+            if sandbox_available { "yes" } else { "no" }
+        ),
+        format!(
+            "filesystem confinement ruleset builds on this platform: {}",
+            if fs_sandbox_available { "yes" } else { "no" }
+        ),
     ];
-    let ok = compact_smoke.ok && runtime_store.status == "ok";
+    let ok = compact_smoke.ok
+        && runtime_store.status == "ok"
+        && sandbox_available
+        && fs_sandbox_available;
     let report = SelfTestReport {
         ok,
         workspace: workspace.display().to_string(),
@@ -582,6 +596,7 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
 fn print_self_test_report(report: &SelfTestReport, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        OutputFormat::Ndjson => println!("{}", serde_json::to_string(report)?),
         OutputFormat::Markdown => {
             println!("# Mermaid Self-Test\n");
             print_self_test_text(report);
@@ -864,6 +879,9 @@ fn print_qa_compact_report(report: &QaCompactSmokeReport, format: OutputFormat) 
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(report)?);
         },
+        OutputFormat::Ndjson => {
+            println!("{}", serde_json::to_string(report)?);
+        },
         OutputFormat::Text => {
             println!(
                 "qa compact smoke: {}",
@@ -1125,6 +1143,13 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
         context_tokens
             .map(|n| n.to_string())
             .unwrap_or_else(|| "unknown".to_string())
+    );
+    println!(
+        "Output limit: {}",
+        snapshot
+            .max_output_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown (discovered live from /models when exposed)".to_string())
     );
     if let Some(profile) = lookup_provider(&snapshot.provider) {
         for (key, value) in [

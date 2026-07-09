@@ -405,6 +405,7 @@ impl GeminiAdapter {
                 ReasoningLevel::XHigh,
             ]),
             max_context_tokens: None,
+            max_output_tokens: None,
         };
 
         Ok(Self {
@@ -1416,6 +1417,19 @@ mod tests {
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[0]["parts"][0]["text"], "hi");
         assert!(body["generationConfig"].is_object());
+    }
+
+    #[test]
+    fn auto_max_tokens_omits_max_output_tokens() {
+        // `max_tokens == 0` is AUTO: omit `maxOutputTokens` so Gemini applies
+        // the model's own per-response maximum.
+        let adapter = test_adapter();
+        let config = ModelConfig {
+            max_tokens: 0,
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config);
+        assert!(body["generationConfig"].get("maxOutputTokens").is_none());
     }
 
     #[test]

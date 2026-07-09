@@ -35,6 +35,11 @@ pub struct ContextSizing {
     pub effective: Option<usize>,
     /// How `effective` was chosen (Ollama only). `None` for static/advertised.
     pub source: Option<NumCtxSource>,
+    /// The model's per-response output ceiling, when the provider exposes one
+    /// (`/models` metadata, or a documented static table). Rides the same
+    /// resolve→reducer pipeline as the window so `provider_capabilities` can be
+    /// refreshed live.
+    pub max_output: Option<usize>,
 }
 
 /// Where a loaded model actually sits in memory, from a post-turn probe (Ollama
@@ -76,6 +81,7 @@ pub trait ModelProvider: Send + Sync {
             model_max: max,
             effective: max,
             source: None,
+            max_output: self.capabilities().max_output_tokens,
         }
     }
 
@@ -157,3 +163,20 @@ pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;
 pub use ollama::OllamaProvider;
 pub use openai_compat::OpenAICompatProvider;
+
+/// True when a `provider_probes` row is older than the probe TTL (shared by
+/// the Ollama context probe and the OpenAI-compat limits probe). An
+/// unparseable timestamp is treated as stale so it re-probes.
+pub(crate) fn probe_is_stale(probed_at: &str) -> bool {
+    use chrono::{DateTime, Utc};
+    match DateTime::parse_from_rfc3339(probed_at) {
+        Ok(t) => {
+            Utc::now()
+                .signed_duration_since(t.with_timezone(&Utc))
+                .num_days()
+                >= crate::constants::OLLAMA_PROBE_TTL_DAYS
+        },
+        // Unparseable timestamp → treat as stale and re-probe.
+        Err(_) => true,
+    }
+}

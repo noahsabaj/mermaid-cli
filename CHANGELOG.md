@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Shell commands can no longer grab the terminal.** Model-run commands now
+  start in their own session (`setsid`) with no controlling terminal, so a
+  child that opens `/dev/tty` — a `sudo` password prompt, an ssh passphrase
+  read — fails instantly instead of painting its prompt over the TUI and
+  hanging until the command timeout. Git is additionally told never to prompt
+  (`GIT_TERMINAL_PROMPT=0`) in foreground and background commands alike.
+  Esc-cancel, timeout tree-kill, and Ctrl+B backgrounding semantics are
+  unchanged; no behavior change on Windows.
+- **The TUI now recovers from stray writes to the terminal.** ratatui only
+  repaints cells it knows changed, so bytes another process wrote directly to
+  the tty (e.g. a child that opened `/dev/tty`) used to persist as ghost
+  characters that typing couldn't dislodge. The screen now fully repaints
+  after each shell command finishes, and Ctrl+L forces an immediate repaint
+  at any time.
+
 ### Added
 
 - **Cloudflare Workers AI is now a built-in provider.** Reach Cloudflare-hosted
@@ -20,6 +37,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use the same account-scoped URL and report a missing account id instead of
   probing a placeholder; a setup missing both env vars gets one error naming
   both.
+- **Project-local config.** A repo can now commit `.mermaid/config.toml` at its
+  git root; it layers between your user config and session flags. Safe by
+  construction, with no trust prompt: security-sensitive keys (`mcp_servers`,
+  `providers`, `agents`, `daemon`, `last_used_model`, `web.searxng_url`,
+  `ollama.host`/`port`, and most of `safety`) are stripped with a warning, and
+  the allowed `safety.mode`/`network`/`filesystem` can only TIGHTEN your user
+  settings — a cloned repo can pick models and UX defaults but can never spawn
+  commands, redirect prompt traffic, or relax approvals. Startup prints a
+  one-line notice whenever a project config contributes keys, and runtime
+  memory-setting re-reads honor the project layer too.
+
+- **Layered config engine.** Configuration now merges as ordered layers —
+  built-in defaults < `~/.config/mermaid/config.toml` < session flags (`-c`
+  plus `--no-network`/`--confine-fs`/`--sandbox`, `run --max-tokens`,
+  `run --allow-untrusted-tools`) — through one recursive TOML deep-merge and a
+  single typed deserialize. Unknown-key warnings name the layer that contains
+  the typo, and in-app settings changes now rewrite only their own keys in the
+  user file: unrecognized keys survive persists, defaults are no longer frozen
+  into the file, and per-model entries whose ids contain dots
+  (`gemini/gemini-2.5-pro`) persist correctly. A corrupt config file degrades
+  to defaults while the session flags still apply.
+- **Long responses auto-continue across the model's per-response output cap.**
+  When a reply is cut by the provider's per-response output ceiling with
+  context-window room to spare, mermaid now continues it in a fresh turn (the
+  committed partial rides in history and a note nudges the model to resume, not
+  restart), bounded per run so a re-truncating model can't loop. A mid-reasoning
+  cutoff or a capped run still stops with the accurate output-limit message. So
+  an answer that "wants 40000 tokens" completes even on providers that cap
+  single responses lower.
+- **Live model-limit discovery — `Context: unknown` gets real numbers.** Most
+  OpenAI-compatible providers attach the model's context window and output
+  ceiling to their `/models` metadata (OpenRouter, Cloudflare, …); mermaid
+  previously threw that data away. It's now parsed, cached across sessions in
+  `provider_probes`, and refreshed into the live capability snapshot — so the
+  status bar shows a real window for remote models, proactive auto-compaction
+  works for them, the truncation classifier gets real windows, and
+  `mermaid model-info` gains an `Output limit:` line. Anthropic models report
+  their documented window/ceiling statically.
+- **Truncation is now diagnosed correctly — no more false "Context window
+  full".** A `length` stop is classified from the response usage: hitting the
+  per-response output cap (window still has room — the common case on remote
+  providers) now stops with an accurate message naming the real limit, instead
+  of misreporting a full window and looping through futile conversation
+  compactions that couldn't help. A genuinely full window still compacts and
+  continues exactly as before.
+- **Model-scaled output budget — the hardcoded 4096-token cap is gone.**
+  `default_model.max_tokens` now defaults to `0` = **auto**: OpenAI-compatible
+  providers and Gemini get no cap at all (the provider applies the model's own
+  per-response maximum), Ollama's `num_predict` gets the full room the context
+  window leaves after the prompt, and Anthropic (which requires `max_tokens`)
+  gets the model's documented output ceiling clamped to the window. Reasoning
+  models like GLM-5.2 can finally emit tens of thousands of thinking tokens
+  without tripping a stale 2024-era limit. A positive `max_tokens` remains an
+  explicit hard cap (cost control); existing config files carrying the frozen
+  legacy `4096` are migrated to auto on load. Compaction's response reserve is
+  now reasoning-aware instead of mirroring the send-cap.
+- **Optional filesystem write-confinement for shell commands (Linux).**
+  `mermaid --confine-fs …` (or `safety.filesystem = "project"`) confines
+  model-run shell commands with a Landlock ruleset: writes are allowed only
+  beneath the project directory, the system temp directory, and `/dev`; reads
+  and execution stay unrestricted. A failure matching the denial signature
+  while confinement is active is reported with a clear "filesystem sandbox"
+  explanation and the `denied_by_sandbox` marker. `mermaid --sandbox …` is
+  shorthand for `--no-network --confine-fs`. Best-effort by design: kernels
+  without Landlock (pre-5.13) and other platforms degrade to a warned no-op.
+  Off by default.
+- **Optional network kill-switch for shell commands (Linux).** `mermaid
+  --no-network …` (or `safety.network = "deny"`) confines model-run shell
+  commands with a seccomp-BPF filter that denies internet sockets
+  (`AF_INET`/`AF_INET6`) while leaving `AF_UNIX` and local IPC working, so a
+  sandboxed command can't reach the network but ordinary local work still runs.
+  A blocked attempt is reported with a clear "blocked by the network sandbox"
+  message and a `denied_by_sandbox` marker instead of a confusing crash. Applied
+  via a hidden `__sandbox-exec` re-exec launcher; a no-op on macOS/Windows
+  (Seatbelt/AppContainer are follow-ups). Off by default.
+- **Typed NDJSON event stream for `mermaid run`.** `mermaid run --format ndjson`
+  streams the run lifecycle as one JSON object per line — `session_started`,
+  `text`/`reasoning` deltas, `tool_started`/`tool_finished`, `approval_required`,
+  `turn_done`, and a terminal `result` — so `mermaid run` can be driven as an
+  SDK/subprocess. The event shape is a stable, versioned contract
+  (`protocol_version`) pinned by a golden serialization test; `--format json`
+  now emits that same typed `result` object.
 - **Startup process hardening + per-turn timing.** On Linux, Mermaid now disables
   core dumps (`RLIMIT_CORE=0`) and ptrace attachment (`PR_SET_DUMPABLE=0`) at
   startup, so a crash can't leave a core file carrying secrets and the process
@@ -170,6 +269,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `line`/`lines` agree with the count; the timing is kept, the redundant
   `Success,` prefix removed.
 
+- **`apply_patch` reads as `Update`, and `Success` is dropped from result lines.**
+  An `apply_patch` call now shows `● Update(<file>)` — or `Write` / `Delete` by
+  operation, `Update(N files)` for a multi-file patch — instead of the model's raw
+  `Apply patch()` with empty parens, matching the `Write` / `Update` / `Delete`
+  vocabulary. Separately, the redundant `Success` prefix is gone from every result
+  line (a failure renders differently, so a plain success needs no label): e.g.
+  `3 lines read, took 1.2s`, and a delete shows just `took 35ms`.
+
 - **`mermaid list` and `mermaid models` no longer start Ollama.** All four
   read-only verbs (`list` / `models` / `status` / `doctor`) now enumerate
   with auto-start hard-off: observing state never mutates it, so a
@@ -182,6 +289,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Read-only shell commands prefixed with `cd` are no longer blocked.** A
+  `cd DIR && <read>` command (e.g. `cd repo && git status`) classified as a
+  mutation because `cd` wasn't a recognized read-only head, so read_only mode
+  blocked the whole compound command. `cd`/`pushd`/`popd`/`dirs` (plus
+  `base64`/`seq`) now classify as read-only, and the read-only git allowlist
+  gained the pure-read subcommands `rev-list`/`merge-base`/`show-ref`/
+  `for-each-ref`/`name-rev`/`show-branch`/`count-objects`/`version`. The
+  worst-segment rule still catches any real mutation in a later segment.
+- **The model no longer believes it's still in `read_only` after switching to a
+  looser mode.** A mutation denied in read_only left a `blocked by policy:
+  read-only safety mode …` tool-result in the conversation, which was re-sent
+  every turn; after switching to `full_access` the model trusted those stale
+  errors over the (correct, live) mode and kept refusing edits — or claimed the
+  runtime was "still read-only." Superseded read-only denials are now rewritten
+  to a past-tense note once the live mode is looser, and loosening the mode past
+  such a denial surfaces a one-line confirmation.
 - **Command, tool, and web output truncation keeps the tail.** Output past the
   cap is truncated in the middle (head + tail with an elision marker) instead of
   head-only, so a failing command's actual error — which lives at the end — is

@@ -213,6 +213,7 @@ impl OllamaAdapter {
                     ReasoningLevel::High,
                 ]),
                 max_context_tokens: None,
+                max_output_tokens: None,
             }
         } else {
             ModelCapabilities::ollama_default()

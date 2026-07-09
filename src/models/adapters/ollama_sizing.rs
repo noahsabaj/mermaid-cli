@@ -13,12 +13,12 @@
 //! disagree between what Ollama is told and what compaction/the status bar
 //! assume.
 
+use super::output_budget::{OutputBudgetInputs, OutputCapMode, resolve_output_budget};
 use crate::constants::{
     DEFAULT_OLLAMA_MAX_AUTO_NUM_CTX, OLLAMA_KV_DTYPE_BYTES, OLLAMA_MEMORY_BUDGET_FRACTION,
     OLLAMA_MIN_AUTO_NUM_CTX, OLLAMA_MIN_NUM_PREDICT, OLLAMA_NUM_CTX_ROUNDING,
     OLLAMA_NUM_PREDICT_MARGIN,
 };
-use crate::models::reasoning::ReasoningLevel;
 
 /// How the effective `num_ctx` was chosen — surfaced in `/context` and the
 /// quick-fix hints.
@@ -261,57 +261,29 @@ fn round_down_to(v: usize, step: usize) -> usize {
     (v / step) * step
 }
 
-/// Output tokens reserved for reasoning/thinking so a thinking model doesn't burn
-/// the whole answer budget before responding. Scales with the effort level.
-pub fn reasoning_output_reserve(level: ReasoningLevel) -> usize {
-    match level {
-        ReasoningLevel::None | ReasoningLevel::Minimal => 0,
-        ReasoningLevel::Low => 1_024,
-        ReasoningLevel::Medium => 4_096,
-        ReasoningLevel::High | ReasoningLevel::XHigh | ReasoningLevel::Max => 8_192,
-    }
-}
-
-/// Resolve `num_predict` (Ollama's output cap). Every other adapter forwards
-/// `max_tokens`; Ollama is the only one that left output unbounded, so a small
-/// `num_ctx` was the only stopping condition. This maps `max_tokens` →
-/// `num_predict` plus reasoning headroom, capped by the room left in `num_ctx`
-/// after the prompt, floored at `min_output`.
-pub fn resolve_ollama_num_predict(
-    max_tokens: usize,
-    reasoning: ReasoningLevel,
-    num_ctx: Option<usize>,
-    prompt_estimate: usize,
-    min_output: usize,
-    margin: usize,
-) -> i32 {
-    let desired = max_tokens.saturating_add(reasoning_output_reserve(reasoning));
-    let bounded = match num_ctx {
-        Some(ctx) => {
-            let room = ctx.saturating_sub(prompt_estimate).saturating_sub(margin);
-            desired.min(room).max(min_output)
-        },
-        None => desired,
-    };
-    bounded.min(i32::MAX as usize) as i32
-}
-
-/// Convenience wrapper applying the repo's default floor/margin to
-/// [`resolve_ollama_num_predict`].
+/// Resolve Ollama's `num_predict` (its output cap) from the request's
+/// `max_tokens` (`0` = AUTO) and the room `num_ctx` leaves after the prompt.
+/// `Some(n)` = send `n`; `None` = omit `num_predict` so Ollama applies its own
+/// default. A thin wrapper over the shared [`resolve_output_budget`] with
+/// Ollama's floor/margin — AUTO hands over the full remaining window room, a
+/// positive `max_tokens` is an exact cap bounded by that room.
 pub fn default_ollama_num_predict(
     max_tokens: usize,
-    reasoning: ReasoningLevel,
     num_ctx: Option<usize>,
     prompt_estimate: usize,
-) -> i32 {
-    resolve_ollama_num_predict(
-        max_tokens,
-        reasoning,
-        num_ctx,
-        prompt_estimate,
-        OLLAMA_MIN_NUM_PREDICT,
-        OLLAMA_NUM_PREDICT_MARGIN,
+) -> Option<i32> {
+    resolve_output_budget(
+        &OutputBudgetInputs {
+            requested_cap: max_tokens,
+            window: num_ctx,
+            prompt_estimate,
+            provider_max_output: None,
+            margin: OLLAMA_NUM_PREDICT_MARGIN,
+            floor: OLLAMA_MIN_NUM_PREDICT,
+        },
+        OutputCapMode::NumPredict,
     )
+    .map(|v| v.min(i32::MAX as usize) as i32)
 }
 
 #[cfg(test)]
@@ -600,39 +572,40 @@ mod tests {
     }
 
     #[test]
-    fn num_predict_adds_reasoning_reserve() {
-        // Plenty of room → max_tokens + reserve.
-        let np =
-            resolve_ollama_num_predict(4_096, ReasoningLevel::Max, Some(131_072), 1_000, 512, 256);
-        assert_eq!(np, 4_096 + 8_192);
+    fn num_predict_auto_uses_full_room() {
+        // AUTO (max_tokens 0) → all the room the window leaves.
+        assert_eq!(
+            default_ollama_num_predict(0, Some(131_072), 1_000),
+            Some(131_072 - 1_000 - 256)
+        );
     }
 
     #[test]
-    fn num_predict_no_reserve_for_none() {
-        let np =
-            resolve_ollama_num_predict(4_096, ReasoningLevel::None, Some(131_072), 1_000, 512, 256);
-        assert_eq!(np, 4_096);
+    fn num_predict_auto_omits_without_ctx() {
+        // Unknown window → omit num_predict so Ollama applies its own default.
+        assert_eq!(default_ollama_num_predict(0, None, 1_000), None);
     }
 
     #[test]
-    fn num_predict_capped_by_remaining_room() {
-        // num_ctx 8k, prompt 7k, margin 256 → room ≈ 744 → capped (above floor).
-        let np =
-            resolve_ollama_num_predict(4_096, ReasoningLevel::Medium, Some(8_192), 7_000, 512, 256);
-        assert_eq!(np, 8_192 - 7_000 - 256);
+    fn num_predict_hard_cap_is_exact_and_room_bounded() {
+        // Explicit cap with plenty of room → exactly the cap (no reserve added).
+        assert_eq!(
+            default_ollama_num_predict(4_096, Some(131_072), 1_000),
+            Some(4_096)
+        );
+        // num_ctx 8k, prompt 7k, margin 256 → bounded by the remaining room.
+        assert_eq!(
+            default_ollama_num_predict(4_096, Some(8_192), 7_000),
+            Some(8_192 - 7_000 - 256)
+        );
     }
 
     #[test]
     fn num_predict_floored_when_room_tiny() {
-        // Prompt nearly fills the window → fall back to the floor, not negative.
-        let np =
-            resolve_ollama_num_predict(4_096, ReasoningLevel::High, Some(8_192), 8_100, 512, 256);
-        assert_eq!(np, 512);
-    }
-
-    #[test]
-    fn num_predict_passthrough_without_ctx() {
-        let np = resolve_ollama_num_predict(4_096, ReasoningLevel::Low, None, 1_000, 512, 256);
-        assert_eq!(np, 4_096 + 1_024);
+        // Prompt nearly fills the window → the floor, not zero/negative.
+        assert_eq!(
+            default_ollama_num_predict(4_096, Some(8_192), 8_100),
+            Some(512)
+        );
     }
 }

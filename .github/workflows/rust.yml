@@ -129,5 +129,9 @@ jobs:
         run: cargo build --workspace
       - name: Daemon integration tests (ignored)
         run: cargo test --test daemon_integration -- --ignored
+      - name: Sandbox network kill-switch (ignored, Linux)
+        run: cargo test --test sandbox_network -- --ignored
+      - name: Sandbox filesystem confinement (ignored, Linux)
+        run: cargo test --test sandbox_fs -- --ignored
       - name: Self-test (deterministic, model-free)
         run: cargo run --bin mermaid -- self-test --format json

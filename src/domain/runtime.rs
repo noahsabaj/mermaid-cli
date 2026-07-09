@@ -54,6 +54,10 @@ pub struct ProviderCapabilitySnapshot {
     pub supports_vision: bool,
     pub reasoning: String,
     pub max_context_tokens: Option<usize>,
+    /// Per-response output ceiling, when known (static table at model-switch
+    /// time; refreshed live via `ProviderContextResolved`).
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
 }
 
 impl ProviderCapabilitySnapshot {
@@ -77,6 +81,11 @@ impl ProviderCapabilitySnapshot {
         };
 
         let max_context_tokens = infer_static_context_window(&provider, &model);
+        // Anthropic's output ceilings are documented per family; other
+        // providers start unknown and are refreshed live from `/models`
+        // metadata via `ProviderContextResolved`.
+        let max_output_tokens = (provider == "anthropic")
+            .then(|| crate::models::adapters::anthropic::anthropic_max_output_tokens(&model));
 
         Self {
             provider,
@@ -85,6 +94,7 @@ impl ProviderCapabilitySnapshot {
             supports_vision,
             reasoning,
             max_context_tokens,
+            max_output_tokens,
         }
     }
 }
@@ -222,6 +232,11 @@ pub enum ToolMetadata {
         detected_urls: Vec<String>,
         pid: Option<u32>,
         log_path: Option<String>,
+        /// The command was terminated by the OS sandbox (e.g. it tried to
+        /// reach the network under `--no-network`). Additive; `#[serde(default)]`
+        /// keeps older recordings/rows deserializable.
+        #[serde(default)]
+        denied_by_sandbox: bool,
     },
     ComputerUse {
         action: String,
@@ -361,6 +376,13 @@ pub struct RuntimeState {
     /// hint. Reset on a fresh run and whenever a turn makes progress. Session-only.
     #[serde(skip)]
     pub empty_continuations: u32,
+    /// Consecutive auto-continuations in the current run after a response hit
+    /// the provider's per-response OUTPUT cap with window room to spare
+    /// (compaction can't help those — the reply is continued in a fresh turn
+    /// instead). Bounded by `MAX_OUTPUT_CONTINUATIONS`; reset whenever a turn
+    /// ends any other way. Session-only.
+    #[serde(skip)]
+    pub continue_recoveries: u32,
 }
 
 impl RuntimeState {
@@ -380,6 +402,7 @@ impl RuntimeState {
             run_committed_tokens: 0,
             truncation_recoveries: 0,
             empty_continuations: 0,
+            continue_recoveries: 0,
         }
     }
 

@@ -804,7 +804,7 @@ impl EffectRunner {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
                 self.detached.spawn(async move {
-                    let cfg = crate::app::load_config().unwrap_or_default().memory;
+                    let cfg = crate::app::load_project_scoped_config(&workdir).memory;
                     let text = match crate::app::memory::load(&workdir, &cfg) {
                         Some(mem) => mem.index,
                         None => "No memories saved yet. Durable facts (yours or mine) show up here — use `/remember <fact>` or just ask me to remember something.".to_string(),
@@ -816,7 +816,7 @@ impl EffectRunner {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
                 self.detached.spawn(async move {
-                    let cfg = crate::app::load_config().unwrap_or_default().memory;
+                    let cfg = crate::app::load_project_scoped_config(&workdir).memory;
                     let name = memory_title_from_text(&text);
                     let status = match crate::app::memory::write_memory(
                         &workdir,
@@ -838,7 +838,7 @@ impl EffectRunner {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
                 self.detached.spawn(async move {
-                    let cfg = crate::app::load_config().unwrap_or_default().memory;
+                    let cfg = crate::app::load_project_scoped_config(&workdir).memory;
                     let status = match crate::app::memory::delete_memory(&workdir, &id) {
                         Ok(Some(_)) => format!("Forgot: {id}"),
                         Ok(None) => format!("No memory named '{id}'"),
@@ -1406,6 +1406,7 @@ async fn dispatch_call_model(
             model_max: sizing.model_max,
             effective: sizing.effective,
             source: sizing.source,
+            max_output: sizing.max_output,
         })
         .await;
     // No-vision-model fallback: if this turn actually carries images, probe the
@@ -1988,7 +1989,7 @@ async fn consolidate_memory(
         }
     }
 
-    let cfg = crate::app::load_config().unwrap_or_default().memory;
+    let cfg = crate::app::load_project_scoped_config(&workdir).memory;
     let (loaded, _) = crate::app::memory::refresh(None, &workdir, &cfg);
     let _ = tx.send(Msg::MemoryChanged(loaded)).await;
 

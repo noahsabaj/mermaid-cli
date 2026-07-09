@@ -3,7 +3,7 @@
 //! Replaces the fragmented app::Config + models::ModelConfig split
 //! with a single, coherent, backend-agnostic configuration structure.
 
-use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE};
+use crate::constants::DEFAULT_TEMPERATURE;
 use crate::models::reasoning::ReasoningLevel;
 use crate::prompts;
 use serde::{Deserialize, Serialize};
@@ -186,10 +186,10 @@ pub struct OllamaOptions {
     pub num_gpu: Option<i32>,
     pub num_thread: Option<i32>,
     pub num_ctx: Option<i32>,
-    /// Output token cap (`num_predict`). Every other adapter forwards
-    /// `max_tokens`; Ollama left output unbounded, so a small `num_ctx` was the
-    /// only stop condition. Derived in `build_model_config` (see
-    /// `ollama_sizing::resolve_ollama_num_predict`).
+    /// Output token cap (`num_predict`). Ollama left output unbounded, so a
+    /// small `num_ctx` was the only stop condition. Derived in
+    /// `build_model_config` (see `ollama_sizing::default_ollama_num_predict`):
+    /// AUTO gets the full window room, an explicit `max_tokens` is exact.
     pub num_predict: Option<i32>,
     pub numa: Option<bool>,
 }
@@ -233,7 +233,9 @@ fn default_temperature() -> f32 {
 }
 
 fn default_max_tokens() -> usize {
-    DEFAULT_MAX_TOKENS
+    // 0 = AUTO: adapters size the output budget to the model (see
+    // `adapters::output_budget`). A positive value is an explicit hard cap.
+    0
 }
 
 fn default_ollama_url() -> String {

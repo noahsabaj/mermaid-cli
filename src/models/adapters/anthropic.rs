@@ -38,6 +38,8 @@ use crate::models::reasoning::{
 use crate::models::stream::{StreamCallback, StreamEvent};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
+
+use super::output_budget::{OutputBudgetInputs, OutputCapMode, resolve_output_budget};
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
 use crate::utils::drain_sse_events;
 
@@ -242,6 +244,39 @@ fn legacy_budget_for(level: ReasoningLevel, max_tokens: usize) -> Option<u32> {
     }
     let ceiling = max_tokens.saturating_sub(1024) as u32;
     Some(proposed.min(ceiling).max(1024))
+}
+
+/// Documented per-response output ceilings — the `max_tokens` upper bound from
+/// the models-overview table, per model family. Anthropic REQUIRES `max_tokens`
+/// on every request, so AUTO resolves to the model's real documented ceiling
+/// rather than a guessed constant. Unknown/legacy ids get a conservative 8192.
+pub fn anthropic_max_output_tokens(model: &str) -> usize {
+    let m = model.to_lowercase();
+    if m.starts_with("claude-3-5") {
+        8_192
+    } else if m.starts_with("claude-opus-4-1") || m.starts_with("claude-opus-4-2") {
+        // Opus 4 (date-suffixed ids like claude-opus-4-20250514) and Opus 4.1.
+        32_000
+    } else if m.starts_with("claude-") {
+        // Claude 3.7+, the Sonnet/Haiku/Opus 4.5+ lines, Fable 5, and Mythos
+        // all document a 64k output ceiling.
+        64_000
+    } else {
+        8_192
+    }
+}
+
+/// Anthropic's documented context window (tokens) — 200k across the current
+/// lineup. Bounds `max_tokens` so `input + max_tokens` can't overrun the
+/// window (the API 400s on that).
+const ANTHROPIC_CONTEXT_WINDOW_TOKENS: usize = 200_000;
+
+/// Rough prompt-token estimate (≈4 chars/token, mirroring the Ollama sizing
+/// estimator); only used to bound `max_tokens` to the window room.
+fn estimate_prompt_tokens(messages: &[ChatMessage], system: Option<&str>) -> usize {
+    let chars =
+        messages.iter().map(|m| m.content.len()).sum::<usize>() + system.map_or(0, str::len);
+    chars / 4
 }
 
 /// Models that accept `effort: "max"` per the April 2026 effort-doc
@@ -538,7 +573,11 @@ impl AnthropicAdapter {
                 ReasoningLevel::Max,
                 ReasoningLevel::XHigh,
             ]),
-            max_context_tokens: None,
+            // Documented values, advertised so the default
+            // `resolve_context_window` reports them live (window + output
+            // ceiling) without a bespoke provider override.
+            max_context_tokens: Some(ANTHROPIC_CONTEXT_WINDOW_TOKENS),
+            max_output_tokens: Some(anthropic_max_output_tokens(&model_name)),
         };
 
         Ok(Self {
@@ -558,10 +597,28 @@ impl AnthropicAdapter {
         // to whatever convert_messages found.
         let system = config.system_prompt.clone().or(system_from_msgs);
 
+        // Anthropic REQUIRES `max_tokens`. AUTO (config.max_tokens == 0) sends
+        // the model's documented output ceiling; an explicit user cap is
+        // honored. Both are bounded by the room the window leaves after the
+        // prompt, so `input + max_tokens` can't overrun the window (a 400).
+        let max_tokens = resolve_output_budget(
+            &OutputBudgetInputs {
+                requested_cap: config.max_tokens,
+                window: Some(ANTHROPIC_CONTEXT_WINDOW_TOKENS),
+                prompt_estimate: estimate_prompt_tokens(messages, system.as_deref()),
+                provider_max_output: Some(anthropic_max_output_tokens(&self.model_name)),
+                // Slop for the chars/4 estimate + structural JSON overhead.
+                margin: 1_024,
+                floor: 1,
+            },
+            OutputCapMode::Required,
+        )
+        .expect("Required mode always resolves a concrete max_tokens");
+
         let mut body = json!({
             "model": self.model_name,
             "messages": anthropic_messages,
-            "max_tokens": if config.max_tokens > 0 { config.max_tokens } else { 4096 },
+            "max_tokens": max_tokens,
             "stream": true,
         });
 
@@ -682,10 +739,7 @@ impl AnthropicAdapter {
                 }
             },
             ThinkingFormat::Legacy => {
-                if let Some(budget) = legacy_budget_for(
-                    effective_reasoning,
-                    body["max_tokens"].as_u64().unwrap_or(4096) as usize,
-                ) {
+                if let Some(budget) = legacy_budget_for(effective_reasoning, max_tokens) {
                     body["thinking"] = json!({
                         "type": "enabled",
                         "budget_tokens": budget,
@@ -1721,6 +1775,43 @@ mod tests {
         assert_eq!(body["stream"], true);
         assert!(body["max_tokens"].is_u64());
         assert!(body["messages"].is_array());
+    }
+
+    #[test]
+    fn auto_max_tokens_resolves_documented_ceiling() {
+        // AUTO (max_tokens == 0) sends the model's documented output ceiling —
+        // never the old hardcoded 4096. test_adapter is claude-sonnet-4-6
+        // (64k), and a tiny prompt leaves the 200k window's room above it.
+        let adapter = test_adapter();
+        let config = ModelConfig {
+            max_tokens: 0,
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&[ChatMessage::user("Hello")], &config);
+        assert_eq!(body["max_tokens"], 64_000);
+    }
+
+    #[test]
+    fn output_ceiling_table_matches_documented_values() {
+        assert_eq!(
+            anthropic_max_output_tokens("claude-3-5-sonnet-20241022"),
+            8_192
+        );
+        // Opus 4 (date-suffixed) and Opus 4.1 → 32k.
+        assert_eq!(
+            anthropic_max_output_tokens("claude-opus-4-20250514"),
+            32_000
+        );
+        assert_eq!(
+            anthropic_max_output_tokens("claude-opus-4-1-20250805"),
+            32_000
+        );
+        // The 4.5+ lines and Fable/Mythos → 64k.
+        assert_eq!(anthropic_max_output_tokens("claude-opus-4-8"), 64_000);
+        assert_eq!(anthropic_max_output_tokens("claude-sonnet-4-6"), 64_000);
+        assert_eq!(anthropic_max_output_tokens("claude-fable-5"), 64_000);
+        // Unknown ids get the conservative floor.
+        assert_eq!(anthropic_max_output_tokens("some-future-model"), 8_192);
     }
 
     #[test]

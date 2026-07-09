@@ -116,6 +116,11 @@ pub enum Msg {
         model_max: Option<usize>,
         effective: Option<usize>,
         source: Option<crate::models::adapters::ollama_sizing::NumCtxSource>,
+        /// The model's per-response output ceiling when the provider exposes
+        /// one (`/models` metadata / documented table). `#[serde(default)]` so
+        /// recordings from before this field replay unchanged.
+        #[serde(default)]
+        max_output: Option<usize>,
     },
     /// Effect runner verified the loaded model's memory placement after a turn
     /// (Ollama `/api/ps`). `size_vram_bytes < total_bytes` ⇒ the model spilled

@@ -691,7 +691,7 @@ fn plural(count: usize, singular: &'static str, plural: &'static str) -> &'stati
 
 pub(super) fn diff_summary(added: usize, removed: usize, duration_secs: f64) -> String {
     format!(
-        "Success, +{} -{}, took {}",
+        "+{} -{}, took {}",
         added,
         removed,
         format_duration_for_diff(duration_secs)

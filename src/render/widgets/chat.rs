@@ -965,12 +965,12 @@ fn render_context_checkpoint_event(msg: &ChatMessage, theme: &Theme) -> Option<V
     let mut result = match (before_tokens, after_tokens) {
         (Some(before), Some(after)) => {
             format!(
-                "Success, {} -> {} tokens",
+                "{} -> {} tokens",
                 format_compact_count(before),
                 format_compact_count(after)
             )
         },
-        _ => "Success".to_string(),
+        _ => "Context compacted".to_string(),
     };
 
     if let Some(count) = archived_messages {
@@ -1112,7 +1112,7 @@ fn render_actions(
                 let result_msg = match &action.details {
                     ActionDetails::FileContent { line_count, .. } => {
                         let base = format!(
-                            "Success, {} {} written",
+                            "{} {} written",
                             line_count,
                             if *line_count == 1 { "line" } else { "lines" }
                         );
@@ -1120,12 +1120,11 @@ fn render_actions(
                     },
                     ActionDetails::Diff { summary, .. } => summary.clone(),
                     ActionDetails::Preview { text, .. } => text.clone(),
-                    ActionDetails::Simple => match action.action_type.as_str() {
-                        "Delete" => append_action_duration(
-                            format!("Success, deleted {}", action.target),
-                            action.duration_seconds,
-                        ),
-                        _ => append_action_duration("Success".to_string(), action.duration_seconds),
+                    // Success is already implied (an error renders differently),
+                    // so a plain success needs no label — the header shows the
+                    // action + target; the line just carries the timing.
+                    ActionDetails::Simple => {
+                        append_action_duration(String::new(), action.duration_seconds)
                     },
                 };
 
@@ -1264,7 +1263,12 @@ fn render_actions(
 
 fn append_action_duration(mut text: String, duration_seconds: Option<f64>) -> String {
     if let Some(seconds) = duration_seconds {
-        text.push_str(", took ");
+        // An empty base (a plain success with no detail) becomes just
+        // "took Xms" — no leading comma.
+        if !text.is_empty() {
+            text.push_str(", ");
+        }
+        text.push_str("took ");
         text.push_str(&format_action_duration(seconds));
     }
     text
@@ -2235,5 +2239,22 @@ mod tests {
             !state.last_rendered_rows.is_empty(),
             "memo hit must preserve last_rendered_rows from the miss"
         );
+    }
+
+    #[test]
+    fn append_action_duration_handles_empty_base() {
+        // A plain success with no detail (e.g. the Delete line) → just "took Xms",
+        // no leading comma.
+        assert_eq!(
+            append_action_duration(String::new(), Some(0.035)),
+            "took 35ms"
+        );
+        // A detail line keeps its text before the timing.
+        assert_eq!(
+            append_action_duration("3 lines read".to_string(), Some(1.25)),
+            "3 lines read, took 1.2s"
+        );
+        // No duration → text unchanged (empty stays empty → renders no line).
+        assert_eq!(append_action_duration(String::new(), None), "");
     }
 }

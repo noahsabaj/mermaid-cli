@@ -27,7 +27,6 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
-use crate::constants::DEFAULT_MAX_TOKENS;
 use crate::models::{ChatMessage, MessageRole};
 use crate::prompts::get_system_prompt;
 use crate::runtime::TaskStatus;
@@ -215,11 +214,23 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             model_max,
             effective,
             source,
+            max_output,
         } => {
             // Drop a probe that landed after a `/model` switch (it describes the
             // previous model, not the one now active) — mirrors
             // OllamaPlacementResolved.
             if model_id == state.session.model_id {
+                // Refresh the capability snapshot with the live values (the
+                // vision-probe pattern): a discovered window turns `Context:
+                // unknown` into a real number and re-enables proactive
+                // auto-compaction for remote providers; a discovered output
+                // ceiling feeds the truncation classifier and `model-info`.
+                if let Some(window) = effective.or(model_max) {
+                    state.runtime.provider_capabilities.max_context_tokens = Some(window);
+                }
+                if max_output.is_some() {
+                    state.runtime.provider_capabilities.max_output_tokens = max_output;
+                }
                 state.runtime.ollama_context = Some(crate::domain::runtime::OllamaContextInfo {
                     model_max,
                     effective,
@@ -1090,6 +1101,15 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Ctrl+L: force a full repaint (the universal readline "redraw screen"
+    // chord). Recovers from anything that scribbled on the terminal behind
+    // ratatui's back buffer. Meta-level like Ctrl+C/Ctrl+B — deliberately
+    // above the modal handlers so a repaint works with a modal open too.
+    if mods.ctrl && code == KeyCode::Char('l') {
+        state.ui.full_redraw_seq = state.ui.full_redraw_seq.wrapping_add(1);
+        return;
+    }
+
     // Transcript scrolling (keyboard): PageUp/PageDown by a page, Shift+Up/Down
     // by a line, End to jump back to the newest message. Reuses the pure
     // publish-then-diff scroll pipeline — the render layer applies the delta,
@@ -1273,8 +1293,18 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // so a session never silently inherits a more-permissive mode from a
     // previous run. Mirrors the Alt+T reasoning cycle above.
     if code == KeyCode::BackTab {
-        let next = cycle_safety(state.session.safety_mode);
+        let previous = state.session.safety_mode;
+        let next = cycle_safety(previous);
         state.session.safety_mode = next;
+        // A loosening switch (e.g. read_only → …) leaves earlier read-only
+        // denials in history contradicting the new mode. When there's actually
+        // such a denial to supersede, surface a one-line note; `build_chat_request`
+        // additionally rewrites the stale denials for the model.
+        if next.permissiveness() > previous.permissiveness()
+            && history_has_readonly_denial(state.session.messages())
+        {
+            push_system(state, cmds, safety_loosened_note(next));
+        }
         // Persist now so `--resume`/`--continue` restore this mode even if the
         // user changes it and quits without sending another message.
         cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
@@ -1871,7 +1901,15 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::Safety(Some(mode)) => {
             // Session-scoped (mirrors Shift+Tab) — not written to the config.
+            let previous = state.session.safety_mode;
             state.session.safety_mode = mode;
+            // Loosening past a stale read-only denial: announce it (and let
+            // `build_chat_request` rewrite the denials). See the Shift+Tab handler.
+            if mode.permissiveness() > previous.permissiveness()
+                && history_has_readonly_denial(state.session.messages())
+            {
+                push_system(state, cmds, safety_loosened_note(mode));
+            }
             // Persist so `--resume`/`--continue` restore this mode (see the
             // Shift+Tab handler).
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
@@ -2551,13 +2589,15 @@ fn context_text(state: &State) -> String {
         }
         let num_predict = crate::models::adapters::ollama_sizing::default_ollama_num_predict(
             request.max_tokens,
-            request.reasoning,
             ctx.effective,
             next_snapshot.used_tokens,
         );
         lines.push(format!(
             "Output budget (num_predict): {}",
-            format_compact_count(num_predict as usize)
+            match num_predict {
+                Some(n) => format_compact_count(n as usize),
+                None => "auto (provider default)".to_string(),
+            }
         ));
         lines.push(format!(
             "RAM offload: {} (toggle with /context offload on|off)",
@@ -2592,7 +2632,7 @@ fn context_text(state: &State) -> String {
     }
 
     let policy = CompactionPolicy::default();
-    let response_reserve = policy.response_reserve(request.max_tokens);
+    let response_reserve = policy.response_reserve(&request);
     let usage_summary = match (next_snapshot.used_percent, next_snapshot.max_tokens) {
         (Some(percent), Some(_)) if percent >= policy.auto_threshold_percent => {
             format!("high ({percent}% used)")
@@ -3254,6 +3294,25 @@ fn truncation_hint(state: &State) -> String {
     msg
 }
 
+/// Hint for an output-cap length stop (the window had room). With AUTO
+/// budgeting mermaid no longer imposes its own cap, so the stop was either the
+/// user's explicit `max_tokens` hard cap or the model/provider's own
+/// per-response ceiling.
+fn output_cap_hint(state: &State) -> String {
+    let cap = state.settings.default_model.max_tokens;
+    if cap > 0 {
+        format!(
+            "Response truncated — hit your configured max_tokens cap ({}). Raise it, or set \
+             `default_model.max_tokens = 0` (auto) to lift it.",
+            format_compact_count(cap)
+        )
+    } else {
+        "Response truncated — the model's per-response output limit was reached. Ask it to \
+         continue from where it stopped."
+            .to_string()
+    }
+}
+
 /// Per-run cap on automatic retries of a turn that produced no visible output.
 /// One nudged re-attempt recovers the common case (a reasoning-heavy model that
 /// stalled without replying) without letting a persistently-empty model loop and
@@ -3366,11 +3425,15 @@ fn handle_stream_done(
         tool_calls.is_empty() && matches!(stop_reason, Some(crate::models::FinishReason::Length));
     if !dry_truncation {
         state.runtime.truncation_recoveries = 0;
+        state.runtime.continue_recoveries = 0;
     }
 
     // Set when a length-truncation is recoverable: instead of ending the run with
     // a hint, compact the conversation and resume (handled after the save below).
     let mut recovering = false;
+    // Set when an OUTPUT-cap truncation left visible content: instead of ending
+    // the run, continue the reply in a fresh turn (handled after the save below).
+    let mut continuing = false;
 
     // Surface a terminal stop reason that would otherwise leave the response
     // silently incomplete. (A refusal with no content is turned into an error
@@ -3382,21 +3445,63 @@ fn handle_stream_done(
     if tool_calls.is_empty() && !auto_retry_empty {
         match stop_reason {
             Some(crate::models::FinishReason::Length) => {
-                // The window filled mid-turn. If there's history to compact and
-                // we're under the per-run cap, recover (compact + continue) rather
-                // than stopping; otherwise fall back to the manual-levers hint.
-                let cap = state.settings.compaction.max_truncation_recoveries;
-                let under_cap = cap == 0 || state.runtime.truncation_recoveries < cap as u32;
-                if under_cap && state.session.messages().len() >= 3 {
-                    recovering = true;
-                    push_system(
-                        state,
-                        cmds,
-                        "Context window full — compacting the conversation to continue.",
-                    );
-                } else {
-                    let hint = truncation_hint(state);
-                    push_system(state, cmds, hint);
+                // Classify before deciding: a length-stop is either the window
+                // filling mid-turn (compaction helps) or the per-response
+                // OUTPUT cap (it can't — compacting the input is futile; GLM-5.2
+                // at deep reasoning hit this with a 1M window at 2% used and
+                // looped through pointless compactions).
+                let window = state
+                    .session
+                    .context_usage
+                    .as_ref()
+                    .and_then(|s| s.max_tokens)
+                    .or(state.runtime.provider_capabilities.max_context_tokens);
+                match crate::domain::compaction::classify_length_stop(
+                    usage.as_ref(),
+                    window,
+                    crate::constants::COMPACTION_MIN_RESPONSE_RESERVE_TOKENS,
+                ) {
+                    crate::domain::compaction::LengthCause::OutputCapped => {
+                        // Never compact for an output-cap stop — the input
+                        // isn't the problem. If the cut left visible content
+                        // and the model wasn't cut off mid-reasoning, continue
+                        // the reply in a fresh turn (bounded per run);
+                        // otherwise stop with the accurate hint.
+                        let mid_reasoning = usage.as_ref().is_some_and(|u| {
+                            u.completion_tokens > 0
+                                && u.reasoning_output_tokens.saturating_mul(10)
+                                    >= u.completion_tokens.saturating_mul(9)
+                        });
+                        let under_cap = state.runtime.continue_recoveries
+                            < crate::constants::MAX_OUTPUT_CONTINUATIONS;
+                        if !no_visible_output && !mid_reasoning && under_cap {
+                            continuing = true;
+                        } else {
+                            let hint = output_cap_hint(state);
+                            push_system(state, cmds, hint);
+                        }
+                    },
+                    crate::domain::compaction::LengthCause::ContextFull
+                    | crate::domain::compaction::LengthCause::Unknown => {
+                        // The window filled mid-turn (or usage was absent and we
+                        // assume so). If there's history to compact and we're
+                        // under the per-run cap, recover (compact + continue)
+                        // rather than stopping; else the manual-levers hint.
+                        let cap = state.settings.compaction.max_truncation_recoveries;
+                        let under_cap =
+                            cap == 0 || state.runtime.truncation_recoveries < cap as u32;
+                        if under_cap && state.session.messages().len() >= 3 {
+                            recovering = true;
+                            push_system(
+                                state,
+                                cmds,
+                                "Context window full — compacting the conversation to continue.",
+                            );
+                        } else {
+                            let hint = truncation_hint(state);
+                            push_system(state, cmds, hint);
+                        }
+                    },
                 }
             },
             Some(crate::models::FinishReason::ContentFilter) => push_system(
@@ -3501,6 +3606,31 @@ fn handle_stream_done(
                 build_chat_request(state),
                 CompactionTrigger::TruncationRecovery,
             ),
+        });
+        return;
+    }
+
+    // Output-cap continuation: the response hit the provider's per-response
+    // output ceiling with window room to spare, so compaction can't help —
+    // continue the reply in a fresh turn instead. The committed partial rides
+    // in history, so the model sees exactly where it stopped; the system note
+    // (which rides in the next request) nudges it to resume rather than
+    // restart. Bounded by MAX_OUTPUT_CONTINUATIONS per run so a model that
+    // restarts or re-truncates can't loop; portable across providers (no
+    // assistant-prefill dependency). Returning keeps the run alive.
+    if continuing {
+        state.runtime.continue_recoveries += 1;
+        push_system(
+            state,
+            cmds,
+            "The response hit the model's per-response output limit — continuing. Resume \
+             exactly where the previous message stopped; do not repeat text already sent.",
+        );
+        let next_turn = state.ids.fresh_turn();
+        state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
+        cmds.push(Cmd::CallModel {
+            turn: next_turn,
+            request: build_chat_request(state),
         });
         return;
     }
@@ -3787,6 +3917,14 @@ fn handle_tool_finished(
             // Attach action display to the last assistant message so
             // the renderer can show it.
             if let Some(call) = calls.iter().find(|c| c.call_id == call_id) {
+                // A finished shell command may have scribbled on the terminal
+                // (a child that opened /dev/tty writes straight past ratatui's
+                // back buffer). Request a full repaint. Exec only: read/edit/
+                // search tools can't touch the tty, and clearing on every tool
+                // would flash during rapid tool loops.
+                if call.source.function.name == "execute_command" {
+                    state.ui.full_redraw_seq = state.ui.full_redraw_seq.wrapping_add(1);
+                }
                 let action = action_display_for(call, &outcome);
                 if let Some(process) = action
                     .metadata
@@ -3851,15 +3989,15 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // (deterministic / greedy decoding). `ModelSettings::default()` supplies
     // `DEFAULT_TEMPERATURE`, so a `0.0` reaching here is always a deliberate
     // choice, never "unset"; the old `> 0.0` guard silently clobbered it to
-    // `0.7`. (`max_tokens` keeps its `> 0` guard below: unlike temperature, `0`
-    // is not a meaningful generation cap, so it falls back to the default.)
+    // `0.7`.
     let settings = &state.settings.default_model;
     let temperature = settings.temperature;
-    let max_tokens = if settings.max_tokens > 0 {
-        settings.max_tokens
-    } else {
-        DEFAULT_MAX_TOKENS
-    };
+    // `max_tokens == 0` is AUTO: pass it through so each adapter applies the
+    // model-scaled output budget — OpenAI-compat/Gemini omit the field (the
+    // provider uses its own per-response max), Ollama sizes to `num_ctx`, and
+    // Anthropic resolves its documented per-model ceiling. A positive value is
+    // the user's explicit hard cap.
+    let max_tokens = settings.max_tokens;
 
     // MCP tools the model should see — each advertised by a Ready
     // server, fully-qualified as `mcp__<server>__<tool>`. The effect
@@ -3909,6 +4047,11 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
             .cloned()
             .collect(),
     );
+    // The user loosening the safety mode (read_only → …) leaves the model's own
+    // earlier read-only denials in history, contradicting the now-current mode;
+    // rewrite them so the wire history matches the live mode (else the model
+    // keeps refusing edits / claims "still read-only" after a switch up).
+    neutralize_superseded_policy_denials(&mut messages, state.session.safety_mode);
     super::compaction::normalize_history(&mut messages);
 
     ChatRequest {
@@ -4001,6 +4144,91 @@ fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
         }
     }
     messages
+}
+
+/// The user loosening the safety mode (e.g. read_only → full_access) leaves the
+/// *old* read-only denials sitting in the conversation history, still asserting
+/// verbatim that mutations are blocked. A model trusts those concrete
+/// tool-results over the (correct, live) system-prompt line and so refuses to
+/// act or claims the runtime "is still read-only". Rewrite each superseded
+/// read-only denial to a past-tense, mode-aware note so the wire history stops
+/// contradicting the current mode.
+///
+/// Scope guards keep this surgical:
+/// - only tool-result messages (`MessageRole::Tool`) are considered, so a user
+///   message or model turn that merely quotes the phrase is untouched;
+/// - the match is the *contiguous* denial signature (`blocked by policy:` +
+///   [`crate::runtime::READ_ONLY_DENIAL_MARKER`]), so a `grep` hit that happens
+///   to contain the marker text is not rewritten;
+/// - it is a no-op in read_only (the denials still apply) and self-corrects if
+///   the user toggles back down.
+///
+/// Runs on the CLONED request vec (like [`evict_stale_screenshots`]); the
+/// on-screen transcript is untouched, and only `content` changes so the
+/// tool_use/tool_result pairing is preserved.
+fn neutralize_superseded_policy_denials(
+    messages: &mut [ChatMessage],
+    mode: crate::runtime::SafetyMode,
+) {
+    use crate::runtime::SafetyMode;
+    if mode == SafetyMode::ReadOnly {
+        return;
+    }
+    let signature = readonly_denial_signature();
+    for msg in messages.iter_mut() {
+        if msg.role != MessageRole::Tool || !msg.content.contains(&signature) {
+            continue;
+        }
+        // Keep the action summary (everything before " blocked by policy: ") so
+        // the model still knows WHAT was blocked; drop the standing-rule reason.
+        let summary = msg
+            .content
+            .split_once(" blocked by policy: ")
+            .map(|(head, _)| head.trim_end())
+            .filter(|head| !head.is_empty())
+            .unwrap_or("The action");
+        msg.content = format!(
+            "{summary} was blocked earlier while safety mode was read_only. \
+             Safety mode is now {} — that restriction no longer applies; \
+             re-run it if it is still needed.",
+            mode.as_str()
+        );
+    }
+}
+
+/// The `content` infix that marks a persisted **read-only** policy denial: the
+/// gate wraps a `PolicyDecision::Deny` as `"{summary} blocked by policy:
+/// {reason}"`, and every read-only reason starts with
+/// [`crate::runtime::READ_ONLY_DENIAL_MARKER`]. Matching the *contiguous* phrase
+/// (not the bare marker) avoids rewriting a `grep` hit that merely contains the
+/// marker text.
+fn readonly_denial_signature() -> String {
+    format!(
+        "blocked by policy: {}",
+        crate::runtime::READ_ONLY_DENIAL_MARKER
+    )
+}
+
+/// True if the conversation still carries a read-only policy denial (a tool
+/// result matching [`readonly_denial_signature`]) — used to decide whether a
+/// loosening mode-switch is worth announcing.
+fn history_has_readonly_denial(messages: &[ChatMessage]) -> bool {
+    let signature = readonly_denial_signature();
+    messages
+        .iter()
+        .any(|m| m.role == MessageRole::Tool && m.content.contains(&signature))
+}
+
+/// One-line note pushed when the user loosens the safety mode while stale
+/// read-only denials are in history, so both the user and the model see those
+/// blocks are lifted. Pairs with `neutralize_superseded_policy_denials`, which
+/// rewrites the denials themselves.
+fn safety_loosened_note(mode: crate::runtime::SafetyMode) -> String {
+    format!(
+        "Safety mode is now {}; earlier read-only policy blocks no longer apply. \
+         Re-attempt gated actions instead of assuming they'll fail.",
+        mode.as_str()
+    )
 }
 
 #[cfg(test)]
@@ -5884,6 +6112,184 @@ mod tests {
         assert_eq!(state.runtime.truncation_recoveries, 0);
     }
 
+    fn length_done_with_usage(prompt: usize, completion: usize) -> Msg {
+        Msg::StreamDone {
+            turn: TurnId(5),
+            usage: Some(crate::models::TokenUsage::provider(
+                prompt,
+                completion,
+                prompt + completion,
+            )),
+            thinking_signature: None,
+            stop_reason: Some(crate::models::FinishReason::Length),
+        }
+    }
+
+    #[test]
+    fn length_output_cap_continues_in_fresh_turn_not_compaction() {
+        // The GLM-5.2 case: a length-stop with usage present and the window
+        // unknown (the normal remote-provider state) is the per-response
+        // OUTPUT cap — compacting the input can't help. With visible content
+        // committed, the run now CONTINUES the reply in a fresh turn.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("audit the widget"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("exploring the code"), state.now);
+        state.turn = truncating_turn("here is the audit so f");
+        let (state, cmds) = update(state, length_done_with_usage(16_600, 4_000));
+
+        assert!(
+            matches!(state.turn, TurnState::Generating { .. }),
+            "output-cap with content continues in a fresh turn"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+            "the continuation model call is dispatched"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::CompactConversation { .. })),
+            "output-cap truncation must never dispatch a compaction"
+        );
+        assert_eq!(state.runtime.continue_recoveries, 1);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("continuing")),
+            "the continuation note rides in history to nudge the model"
+        );
+        assert!(
+            !state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Context window full")),
+            "the misdiagnosed window-full message is gone"
+        );
+    }
+
+    #[test]
+    fn length_output_cap_mid_reasoning_stops_with_hint() {
+        // Cut off mid-think (nearly all completion tokens were reasoning): a
+        // continuation can't stitch a hidden trace, so stop with the accurate
+        // hint instead.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("audit the widget"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("exploring the code"), state.now);
+        state.turn = truncating_turn("here is");
+        let usage =
+            crate::models::TokenUsage::provider(16_600, 4_000, 20_600).with_reasoning_output(3_900);
+        let (state, cmds) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: Some(usage),
+                thinking_signature: None,
+                stop_reason: Some(crate::models::FinishReason::Length),
+            },
+        );
+
+        assert!(matches!(state.turn, TurnState::Idle), "no continuation");
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
+        assert_eq!(state.runtime.continue_recoveries, 0);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("per-response output limit")),
+            "the accurate output-cap hint is shown"
+        );
+    }
+
+    #[test]
+    fn length_output_cap_respects_continuation_cap() {
+        // At the per-run continuation cap the run stops with the hint instead
+        // of looping forever on a model that keeps re-truncating.
+        let mut state = fresh_state();
+        state.runtime.continue_recoveries = crate::constants::MAX_OUTPUT_CONTINUATIONS;
+        state
+            .session
+            .append(ChatMessage::user("audit the widget"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("exploring the code"), state.now);
+        state.turn = truncating_turn("here is the audit so f");
+        let (state, cmds) = update(state, length_done_with_usage(16_600, 4_000));
+
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("per-response output limit")),
+        );
+    }
+
+    #[test]
+    fn continue_recoveries_reset_when_run_makes_progress() {
+        // Any non-truncation ending is progress — the continuation guard only
+        // counts consecutive output-cap truncations.
+        let mut state = fresh_state();
+        state.runtime.continue_recoveries = 3;
+        state.turn = truncating_turn("a clean final answer");
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+        assert_eq!(state.runtime.continue_recoveries, 0);
+    }
+
+    #[test]
+    fn length_with_usage_near_known_window_still_compacts() {
+        // With usage AND a known window that prompt+completion+reserve reaches,
+        // the window genuinely filled — the legacy compact-and-continue
+        // recovery is still correct.
+        let mut state = fresh_state();
+        state.runtime.provider_capabilities.max_context_tokens = Some(20_000);
+        state
+            .session
+            .append(ChatMessage::user("build a site"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("ok, writing files"), state.now);
+        state.turn = truncating_turn("let me fix the");
+        let (state, cmds) = update(state, length_done_with_usage(18_000, 1_500));
+
+        assert!(
+            matches!(
+                state.turn,
+                TurnState::Compacting {
+                    trigger: CompactionTrigger::TruncationRecovery,
+                    ..
+                }
+            ),
+            "a genuinely full window still recovers via compaction"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::CompactConversation { .. })),
+            "compaction dispatched"
+        );
+    }
+
     fn fake_recovery_result(replacement: Vec<ChatMessage>) -> CompactionResult {
         let snap = crate::domain::state::ContextUsageSnapshot::from_estimate(
             crate::domain::state::PromptTokenBreakdown::default(),
@@ -6677,11 +7083,22 @@ mod tests {
                 model_max: Some(262_144),
                 effective: Some(12_288),
                 source: Some(NumCtxSource::Auto),
+                max_output: Some(64_000),
             },
         );
         let ctx = state.runtime.ollama_context.expect("stored");
         assert_eq!(ctx.model_max, Some(262_144));
         assert_eq!(ctx.effective, Some(12_288));
+        // The live values also refresh the capability snapshot (this is what
+        // turns `Context: unknown` into a real number for remote providers).
+        assert_eq!(
+            state.runtime.provider_capabilities.max_context_tokens,
+            Some(12_288)
+        );
+        assert_eq!(
+            state.runtime.provider_capabilities.max_output_tokens,
+            Some(64_000)
+        );
     }
 
     #[test]
@@ -6697,9 +7114,15 @@ mod tests {
                 model_max: Some(262_144),
                 effective: Some(12_288),
                 source: Some(NumCtxSource::Auto),
+                max_output: Some(64_000),
             },
         );
         assert!(state.runtime.ollama_context.is_none());
+        // The stale probe must not leak into the capability snapshot either.
+        assert_ne!(
+            state.runtime.provider_capabilities.max_output_tokens,
+            Some(64_000)
+        );
     }
 
     // A spill with no fitting smaller window (weights-bound) → the warn path.
@@ -6933,6 +7356,194 @@ mod tests {
             Msg::Slash(SlashCmd::Safety(Some(crate::runtime::SafetyMode::Auto))),
         );
         assert_eq!(state.session.safety_mode, crate::runtime::SafetyMode::Auto);
+    }
+
+    /// A tool-result shaped exactly like a real read-only policy denial
+    /// (`{summary} blocked by policy: {marker} blocks …`), built from the shared
+    /// marker so the test exercises the real detection path.
+    fn readonly_denial_message(summary: &str) -> ChatMessage {
+        ChatMessage::tool(
+            "call-x",
+            "execute_command",
+            format!(
+                "{summary} blocked by policy: {} blocks mutations and control actions",
+                crate::runtime::READ_ONLY_DENIAL_MARKER
+            ),
+        )
+    }
+
+    #[test]
+    fn superseded_readonly_denial_is_rewritten_when_mode_loosened() {
+        use crate::runtime::SafetyMode;
+        let mut msgs = vec![readonly_denial_message("write_file(main.qml)")];
+        neutralize_superseded_policy_denials(&mut msgs, SafetyMode::FullAccess);
+        let content = &msgs[0].content;
+        assert!(
+            !content.contains("blocked by policy"),
+            "standing denial phrasing should be gone: {content:?}"
+        );
+        assert!(
+            content.contains("write_file(main.qml)"),
+            "action summary must be kept: {content:?}"
+        );
+        assert!(
+            content.contains("no longer applies"),
+            "should read as lifted: {content:?}"
+        );
+        assert!(
+            content.contains("full_access"),
+            "should name the now-current mode: {content:?}"
+        );
+    }
+
+    #[test]
+    fn readonly_denial_preserved_in_read_only_mode() {
+        use crate::runtime::SafetyMode;
+        let original = readonly_denial_message("write_file(x)");
+        let mut msgs = vec![original.clone()];
+        neutralize_superseded_policy_denials(&mut msgs, SafetyMode::ReadOnly);
+        assert_eq!(
+            msgs[0].content, original.content,
+            "a still-valid denial must be untouched in read_only"
+        );
+    }
+
+    #[test]
+    fn neutralizer_ignores_non_tool_and_non_denial_messages() {
+        use crate::runtime::SafetyMode;
+        // Role gate: a USER message quoting the full signature is left alone.
+        let quote = ChatMessage::user(format!(
+            "it said: blocked by policy: {} blocks mutations and control actions",
+            crate::runtime::READ_ONLY_DENIAL_MARKER
+        ));
+        // Contiguous-signature gate: a tool result that merely contains the
+        // marker text (e.g. a grep of the source) is not a denial.
+        let grep = ChatMessage::tool(
+            "c",
+            "execute_command",
+            format!(
+                "policy.rs: const MARKER = {:?};",
+                crate::runtime::READ_ONLY_DENIAL_MARKER
+            ),
+        );
+        let mut msgs = vec![quote.clone(), grep.clone()];
+        neutralize_superseded_policy_denials(&mut msgs, SafetyMode::FullAccess);
+        assert_eq!(msgs[0].content, quote.content, "user message untouched");
+        assert_eq!(
+            msgs[1].content, grep.content,
+            "non-denial tool result untouched"
+        );
+    }
+
+    #[test]
+    fn loosening_past_a_stale_denial_announces_the_switch() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::ReadOnly;
+        state
+            .session
+            .append(readonly_denial_message("write_file(x)"), state.now);
+        let (state, _) = update(state, key(KeyCode::BackTab));
+        assert_eq!(state.session.safety_mode, SafetyMode::Ask);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.role == MessageRole::System
+                    && m.content.contains("Safety mode is now ask")),
+            "loosening past a stale denial should announce it",
+        );
+    }
+
+    #[test]
+    fn clean_mode_cycle_stays_silent() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::ReadOnly;
+        let (state, _) = update(state, key(KeyCode::BackTab));
+        assert_eq!(state.session.safety_mode, SafetyMode::Ask);
+        assert!(
+            !state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Safety mode is now")),
+            "a clean mode cycle must not add a banner",
+        );
+    }
+
+    #[test]
+    fn slash_safety_loosening_announces_when_denial_present() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::ReadOnly;
+        state
+            .session
+            .append(readonly_denial_message("edit(main.qml)"), state.now);
+        let (state, _) = update(
+            state,
+            Msg::Slash(SlashCmd::Safety(Some(SafetyMode::FullAccess))),
+        );
+        assert_eq!(state.session.safety_mode, SafetyMode::FullAccess);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.role == MessageRole::System
+                    && m.content.contains("Safety mode is now full_access")),
+        );
+    }
+
+    #[test]
+    fn build_chat_request_neutralizes_a_superseded_denial() {
+        use crate::runtime::SafetyMode;
+        // Full production path: a read_only denial sits in history behind a valid
+        // tool_use/tool_result pair (so `normalize_history` keeps it); once the
+        // live mode is looser, `build_chat_request` must hand the model a
+        // rewritten, non-standing note rather than the original block.
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::FullAccess;
+        let call = crate::models::tool_call::ToolCall {
+            id: Some("call-1".to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({ "path": "main.qml" }),
+            },
+        };
+        state.session.append(
+            ChatMessage::assistant("editing").with_tool_calls(vec![call]),
+            state.now,
+        );
+        state.session.append(
+            ChatMessage::tool(
+                "call-1",
+                "write_file",
+                format!(
+                    "write_file(main.qml) blocked by policy: {} blocks mutations and control actions",
+                    crate::runtime::READ_ONLY_DENIAL_MARKER
+                ),
+            ),
+            state.now,
+        );
+
+        let req = build_chat_request(&state);
+        let tool_msg = req
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Tool)
+            .expect("the tool_result should survive into the request");
+        assert!(
+            !tool_msg.content.contains("blocked by policy"),
+            "build_chat_request must neutralize the stale denial: {:?}",
+            tool_msg.content
+        );
+        assert!(
+            tool_msg.content.contains("no longer applies"),
+            "rewritten note expected: {:?}",
+            tool_msg.content
+        );
     }
 
     /// State with one queued approval (turn must accept the message, so put
@@ -7414,6 +8025,114 @@ mod tests {
         // Tool result message was appended.
         let last = state.session.messages().last().unwrap();
         assert_eq!(last.role, MessageRole::Tool);
+    }
+
+    /// A finished `execute_command` must request a full repaint — a shell
+    /// child may have scribbled on the terminal behind ratatui's back buffer.
+    #[test]
+    fn exec_tool_finished_bumps_full_redraw_seq() {
+        let mut state = fresh_state();
+        let call = PendingToolCall {
+            call_id: super::super::ids::ToolCallId(1),
+            source: crate::models::tool_call::ToolCall {
+                id: Some("c1".to_string()),
+                function: crate::models::tool_call::FunctionCall {
+                    name: "execute_command".to_string(),
+                    arguments: serde_json::json!({"command": "echo hi"}),
+                },
+            },
+        };
+        state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
+        let before = state.ui.full_redraw_seq;
+
+        let (state, _cmds) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(3),
+                call_id: super::super::ids::ToolCallId(1),
+                outcome: ToolOutcome::success("hi", "hi", 0.01),
+            },
+        );
+
+        assert_eq!(
+            state.ui.full_redraw_seq,
+            before.wrapping_add(1),
+            "execute_command completion must bump the repaint counter"
+        );
+    }
+
+    /// Tools that can't touch the tty must NOT trigger a repaint — clearing
+    /// on every tool completion would flash during rapid read/edit loops.
+    #[test]
+    fn non_exec_tool_finished_does_not_bump_full_redraw_seq() {
+        let mut state = fresh_state();
+        let call = PendingToolCall {
+            call_id: super::super::ids::ToolCallId(1),
+            source: crate::models::tool_call::ToolCall {
+                id: Some("c1".to_string()),
+                function: crate::models::tool_call::FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "foo"}),
+                },
+            },
+        };
+        state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
+        let before = state.ui.full_redraw_seq;
+
+        let (state, _cmds) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(3),
+                call_id: super::super::ids::ToolCallId(1),
+                outcome: ToolOutcome::success("contents", "contents", 0.01),
+            },
+        );
+
+        assert_eq!(state.ui.full_redraw_seq, before);
+    }
+
+    #[test]
+    fn ctrl_l_bumps_full_redraw_seq() {
+        let state = fresh_state();
+        let before = state.ui.full_redraw_seq;
+        let (state, cmds) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('l'),
+                modifiers: KeyMods {
+                    ctrl: true,
+                    ..KeyMods::NONE
+                },
+            }),
+        );
+        assert_eq!(state.ui.full_redraw_seq, before.wrapping_add(1));
+        assert!(!state.should_exit, "Ctrl+L must not exit");
+        assert!(cmds.is_empty(), "Ctrl+L is reducer-only: {cmds:?}");
+    }
+
+    /// Ctrl+L is meta-level (like Ctrl+C/Ctrl+B): it must work — and only
+    /// repaint — while an approval modal is open.
+    #[test]
+    fn ctrl_l_works_during_approval_modal() {
+        let state = pending_approval_state();
+        let before = state.ui.full_redraw_seq;
+        let (state, cmds) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('l'),
+                modifiers: KeyMods {
+                    ctrl: true,
+                    ..KeyMods::NONE
+                },
+            }),
+        );
+        assert_eq!(state.ui.full_redraw_seq, before.wrapping_add(1));
+        assert_eq!(
+            state.pending_approval.len(),
+            1,
+            "the approval must remain queued, not be resolved by Ctrl+L"
+        );
+        assert!(cmds.is_empty());
     }
 
     fn test_attachment(id: u64) -> crate::domain::Attachment {

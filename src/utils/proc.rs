@@ -2,9 +2,12 @@
 //! (taking a spawned child *and its descendants* down) and bounded,
 //! kill-on-timeout subprocess execution.
 //!
-//! Every tree we manage is spawned as a process-group leader (`process_group(0)`
-//! on Unix; `mode=background` uses `setsid`; Windows kills the tree by pid via
-//! `taskkill /T`). Terminating the whole group reaches a grandchild that a bare
+//! Every tree we manage is spawned as a process-group leader (the exec tool's
+//! foreground path uses a `setsid` pre_exec — a new *session*, whose leader is
+//! also a group leader, so the child additionally loses the controlling
+//! terminal; `mode=background` uses `setsid(1)`; mermaid-managed servers use
+//! `process_group(0)`; Windows kills the tree by pid via `taskkill /T`).
+//! Terminating the whole group reaches a grandchild that a bare
 //! per-pid signal would orphan — the bug this module centralizes the fix for: the
 //! Esc-cancel path already group-killed, but the foreground timeout, the
 //! Ctrl+B-detached cleanup, and the daemon's `/stop`/`/restart` each signalled a
