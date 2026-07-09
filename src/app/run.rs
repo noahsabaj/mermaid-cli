@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use crossterm::event::EventStream;
 use futures::{FutureExt, StreamExt};
+use ratatui::layout::Rect;
 use tokio::time::{Duration, interval};
 
 use crate::app::Config;
@@ -157,7 +158,17 @@ pub async fn run_interactive_with(
                 .inner_mut();
             if state.ui.full_redraw_seq != seen_redraw_seq {
                 seen_redraw_seq = state.ui.full_redraw_seq;
-                if let Err(err) = term.clear() {
+                // NOT `Terminal::clear()`: it snapshots the cursor with an
+                // ESC[6n round-trip, and the reply never arrives — the
+                // `EventStream` reader thread is parked holding crossterm's
+                // internal reader mutex and swallows it — so the query dies
+                // fatally after crossterm's 2s deadline. `resize()` to the
+                // current size performs the same full clear + back-buffer
+                // reset for a Fullscreen viewport without querying the tty.
+                let repaint = term
+                    .size()
+                    .and_then(|size| term.resize(Rect::new(0, 0, size.width, size.height)));
+                if let Err(err) = repaint {
                     exit_result = Err(err.into());
                     break;
                 }

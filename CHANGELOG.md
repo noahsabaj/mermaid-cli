@@ -47,6 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The full repaint no longer kills the TUI.** The post-shell-command
+  repaint (and Ctrl+L) queried the terminal for the cursor position, and the
+  reply raced the input reader thread — the first shell command the model
+  ran could exit the app with "The cursor position could not be read within
+  a normal duration". The repaint now clears and redraws without ever
+  querying the terminal.
 - **Headless runs no longer truncate auto-continued replies.** `mermaid run
   -p … --output text/markdown/json` returned only the final continuation
   segment; it now joins the whole chain, echo-trimmed.
