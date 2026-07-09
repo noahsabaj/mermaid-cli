@@ -138,7 +138,8 @@ mermaid self-test                               # Fast deterministic Mermaid sel
 mermaid init                                    # Create default config file
 mermaid cloud-setup                             # Configure Ollama Cloud API key
 mermaid run "fix the tests"                     # Non-interactive mode
-mermaid run "explain main.rs" -f json           # JSON output
+mermaid run "explain main.rs" -f json           # JSON output (single typed object)
+mermaid run "explain main.rs" -f ndjson         # Streaming NDJSON events (SDK/scripting)
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
 mermaid remove <name>                           # Remove a configured MCP server
 mermaid mcp                                     # List configured MCP servers

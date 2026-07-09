@@ -228,6 +228,7 @@ async fn dispatch_non_interactive(
         RunOptions {
             no_execute,
             task_id: runtime_task_id.clone(),
+            stream_ndjson: matches!(format, OutputFormat::Ndjson),
             ..RunOptions::default()
         },
     )
@@ -256,7 +257,11 @@ async fn dispatch_non_interactive(
         },
     }
     let result = run_result?;
-    println!("{}", format_result(&result, format));
+    // NDJSON was streamed live during the run; the other formats print the
+    // final payload here.
+    if !matches!(format, OutputFormat::Ndjson) {
+        println!("{}", format_result(&result, format));
+    }
 
     if !result.errors.is_empty() {
         std::process::exit(1);

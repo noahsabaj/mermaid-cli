@@ -440,6 +440,7 @@ async fn show_doctor(
 fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        OutputFormat::Ndjson => println!("{}", serde_json::to_string(report)?),
         OutputFormat::Markdown => {
             println!("# Mermaid Doctor\n");
             print_doctor_text(report);
@@ -582,6 +583,7 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
 fn print_self_test_report(report: &SelfTestReport, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        OutputFormat::Ndjson => println!("{}", serde_json::to_string(report)?),
         OutputFormat::Markdown => {
             println!("# Mermaid Self-Test\n");
             print_self_test_text(report);
@@ -863,6 +865,9 @@ fn print_qa_compact_report(report: &QaCompactSmokeReport, format: OutputFormat) 
     match format {
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(report)?);
+        },
+        OutputFormat::Ndjson => {
+            println!("{}", serde_json::to_string(report)?);
         },
         OutputFormat::Text => {
             println!(
