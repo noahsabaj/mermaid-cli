@@ -45,12 +45,6 @@ fn classify_args<I: IntoIterator<Item = String>>(args: I) -> CliAction {
     }
 }
 
-/// Retention window for the startup GC (#130): archived approvals/checkpoints,
-/// the events of long-finished tasks, and on-disk checkpoint dirs older than this
-/// are pruned. Generous so nothing recently useful is dropped.
-#[cfg(any(unix, windows))]
-const RUNTIME_RETENTION_DAYS: i64 = 30;
-
 /// The daemon task scheduler. `run` requests only *enqueue*; the drain loop
 /// executes queued tasks bounded by `daemon.max_concurrent_tasks` permits, so
 /// a burst of runs proceeds serially (or up to the configured width) instead
@@ -271,7 +265,7 @@ async fn execute_claimed_task(
     };
     // F20: persist the terminal status DURABLY (see persist_terminal_status).
     persist_terminal_status(&task.id, status, &report).await;
-    record_terminal_outcome(&task.id, status);
+    record_terminal_outcome(&task, status);
     let _ = mermaid_cli::runtime::run_plugin_hooks(
         "task_stop",
         &serde_json::json!({
@@ -288,6 +282,7 @@ async fn execute_claimed_task(
 /// live daemon. All best-effort.
 #[cfg(any(unix, windows))]
 fn startup_recovery() {
+    let daemon = mermaid_cli::app::load_config().unwrap_or_default().daemon;
     if let Ok(store) = mermaid_cli::runtime::RuntimeStore::open_default() {
         match store.reconcile_after_restart() {
             Ok((tasks, claims)) if tasks + claims > 0 => {
@@ -300,13 +295,13 @@ fn startup_recovery() {
             Ok(_) => {},
             Err(error) => tracing::warn!(error = %error, "startup reconcile failed"),
         }
-        match store.gc(RUNTIME_RETENTION_DAYS) {
+        match store.gc(daemon.retention_days, daemon.outcomes_retention_days) {
             Ok(removed) if removed > 0 => tracing::info!(removed, "gc pruned old runtime rows"),
             Ok(_) => {},
             Err(error) => tracing::warn!(error = %error, "startup gc failed"),
         }
     }
-    if let Ok(removed) = mermaid_cli::runtime::gc_old_checkpoint_dirs(RUNTIME_RETENTION_DAYS)
+    if let Ok(removed) = mermaid_cli::runtime::gc_old_checkpoint_dirs(daemon.retention_days)
         && removed > 0
     {
         tracing::info!(removed, "gc removed old checkpoint directories");
@@ -1120,7 +1115,10 @@ async fn persist_terminal_status(
 /// user edit/accept preference pairs) attach to the same `outcomes` table as the
 /// run lifecycle grows hooks for them.
 #[cfg(any(unix, windows))]
-fn record_terminal_outcome(task_id: &str, status: mermaid_cli::runtime::TaskStatus) {
+fn record_terminal_outcome(
+    task: &mermaid_cli::runtime::TaskRecord,
+    status: mermaid_cli::runtime::TaskStatus,
+) {
     use mermaid_cli::runtime::{
         NewOutcome, OUTCOME_LABEL_FAILURE, OUTCOME_LABEL_SUCCESS, OUTCOME_LABEL_UNKNOWN,
         OUTCOME_SOURCE_SYSTEM, RuntimeStore, TaskStatus,
@@ -1132,24 +1130,34 @@ fn record_terminal_outcome(task_id: &str, status: mermaid_cli::runtime::TaskStat
         // rather than silently skip anything else.
         _ => (OUTCOME_LABEL_UNKNOWN, 0.0),
     };
+    // Denormalize the task's training context into the outcome so it stays a
+    // usable example after the `tasks` row is pruned on the shorter GC window
+    // (`outcomes.task_id` is `ON DELETE SET NULL`, so the link is lost then).
+    let detail_json = serde_json::to_string(&serde_json::json!({
+        "prompt": task.prompt,
+        "model_id": task.model_id,
+        "conversation_id": task.conversation_id,
+        "label": label,
+    }))
+    .ok();
     let store = match RuntimeStore::open_default() {
         Ok(store) => store,
         Err(error) => {
-            tracing::warn!(task_id, error = %error, "failed to open store to record terminal outcome");
+            tracing::warn!(task_id = %task.id, error = %error, "failed to open store to record terminal outcome");
             return;
         },
     };
     if let Err(error) = store.outcomes().record(NewOutcome {
         id: None,
-        task_id: Some(task_id.to_string()),
+        task_id: Some(task.id.clone()),
         tool_run_id: None,
         kind: "task_terminal".to_string(),
         label: label.to_string(),
         reward: Some(reward),
         source: OUTCOME_SOURCE_SYSTEM.to_string(),
-        detail_json: None,
+        detail_json,
     }) {
-        tracing::warn!(task_id, error = %error, "failed to record terminal outcome");
+        tracing::warn!(task_id = %task.id, error = %error, "failed to record terminal outcome");
     }
 }
 
