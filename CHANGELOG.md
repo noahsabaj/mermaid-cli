@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`mermaid run` is session-addressable.** Every headless run now surfaces
+  its session id — a new `session_id` field on the ndjson `session_started`
+  and `result` lines and the json result (protocol stays v1; the fields are
+  additive), plus a `session: <id>` line on stderr for the text/markdown
+  formats — and accepts `--resume <id>` / `--continue` to seed the run from a
+  saved session, appending to the same session file so repeated resumes chain.
+  Headless runs also stamp git branch/SHA/CLI-version provenance like the
+  interactive path, a run that ends in a provider error still persists its
+  session (the emitted id never dangles), and a script that names a missing
+  session or asks for `--continue` with none saved gets a hard error instead
+  of a silent fresh session.
+
 ### Fixed
 
 - **Shell commands can no longer grab the terminal.** Model-run commands now

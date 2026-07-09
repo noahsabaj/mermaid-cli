@@ -85,23 +85,7 @@ pub async fn run_interactive_with(
         // `State::seed_conversation` so both build the same starting state.
         state.seed_conversation(history);
     }
-    // Stamp the git branch for the `--resume` picker. Done here (impure
-    // startup) rather than in `ConversationHistory::new` so the reducer stays
-    // deterministic for `--replay`. Only fills a blank — a resumed session
-    // keeps the branch it was saved with; an older session with no stored
-    // branch gets backfilled on its next save.
-    if state.session.conversation.git_branch.is_none() {
-        state.session.conversation.git_branch = crate::session::detect_git_branch(&cwd);
-    }
-    // Same impure-startup backfill for the rest of the session provenance: the
-    // git SHA at creation and the CLI version. Only fills blanks so a resumed
-    // session keeps what it was saved with.
-    if state.session.conversation.git_sha.is_none() {
-        state.session.conversation.git_sha = crate::session::detect_git_sha(&cwd);
-    }
-    if state.session.conversation.cli_version.is_none() {
-        state.session.conversation.cli_version = Some(env!("CARGO_PKG_VERSION").to_string());
-    }
+    crate::app::stamp_session_provenance(&mut state, &cwd);
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
     let tools = ToolRegistry::build(
         &config,
