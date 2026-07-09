@@ -222,6 +222,11 @@ pub enum ToolMetadata {
         detected_urls: Vec<String>,
         pid: Option<u32>,
         log_path: Option<String>,
+        /// The command was terminated by the OS sandbox (e.g. it tried to
+        /// reach the network under `--no-network`). Additive; `#[serde(default)]`
+        /// keeps older recordings/rows deserializable.
+        #[serde(default)]
+        denied_by_sandbox: bool,
     },
     ComputerUse {
         action: String,

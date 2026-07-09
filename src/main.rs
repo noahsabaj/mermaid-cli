@@ -14,13 +14,28 @@ use mermaid_cli::{
     utils::init_logger,
 };
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Best-effort process hardening (no core dumps, no ptrace attach) before we
     // parse args or touch config — a crash must not write a core file carrying
     // secrets, and the process shouldn't be trivially attachable.
     mermaid_cli::runtime::hardening::harden_process();
 
+    // The `__sandbox-exec` launcher applies OS confinement to this process and
+    // execve's the wrapped command. It must run before the async runtime spawns
+    // worker threads so the seccomp filter covers a single-threaded image. It
+    // returns only on failure (on success execve replaces the process image).
+    if let Some(code) = mermaid_cli::app::sandbox_exec::maybe_dispatch(std::env::args_os()) {
+        std::process::exit(code);
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to build the async runtime")?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     let cli = Cli::parse();
     init_logger(cli.verbose);
 
@@ -95,6 +110,10 @@ fn apply_prompt_flags(cli: &Cli, config: &mut mermaid_cli::app::Config) -> Resul
                     path.display()
                 )
             })?);
+    }
+    // `--no-network`: engage the OS network kill-switch for shell commands.
+    if cli.no_network {
+        config.safety.network = mermaid_cli::app::NetworkPolicy::Deny;
     }
     Ok(())
 }

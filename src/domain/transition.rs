@@ -914,6 +914,7 @@ mod tests {
                     detected_urls: vec!["http://127.0.0.1:5173".to_string()],
                     pid: Some(123),
                     log_path: Some("/tmp/mermaid-bg.log".to_string()),
+                    denied_by_sandbox: false,
                 },
                 process: Some(ManagedProcess {
                     id: "bg-123".to_string(),

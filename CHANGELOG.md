@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Optional network kill-switch for shell commands (Linux).** `mermaid
+  --no-network …` (or `safety.network = "deny"`) confines model-run shell
+  commands with a seccomp-BPF filter that denies internet sockets
+  (`AF_INET`/`AF_INET6`) while leaving `AF_UNIX` and local IPC working, so a
+  sandboxed command can't reach the network but ordinary local work still runs.
+  A blocked attempt is reported with a clear "blocked by the network sandbox"
+  message and a `denied_by_sandbox` marker instead of a confusing crash. Applied
+  via a hidden `__sandbox-exec` re-exec launcher; a no-op on macOS/Windows
+  (Seatbelt/AppContainer are follow-ups). Off by default.
 - **Typed NDJSON event stream for `mermaid run`.** `mermaid run --format ndjson`
   streams the run lifecycle as one JSON object per line — `session_started`,
   `text`/`reasoning` deltas, `tool_started`/`tool_finished`, `approval_required`,

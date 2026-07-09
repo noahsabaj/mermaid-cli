@@ -14,6 +14,7 @@ pub mod hardening;
 mod pathguard;
 pub mod plugin;
 pub mod policy;
+pub mod sandbox;
 pub mod storage;
 
 /// Lowercase hex encoding of a byte slice. Shared by the SHA-256 hashing sites
@@ -52,6 +53,7 @@ pub use policy::{
     ActionRequest, PolicyDecision, PolicyEngine, PolicyOverride, PolicyOverrideDecision,
     READ_ONLY_DENIAL_MARKER, RiskClass, SafetyMode, ToolCategory, is_destructive_command,
 };
+pub use sandbox::{apply_network_killswitch, network_killswitch_available};
 pub use storage::{
     ApprovalRecord, ApprovalsRepo, CheckpointRecord, CheckpointsRepo, CompactionRecord,
     CompactionsRepo, MessageRecord, MessagesRepo, NewApproval, NewCheckpoint, NewCompaction,

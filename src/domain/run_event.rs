@@ -389,6 +389,7 @@ mod tests {
                     detected_urls: vec![],
                     pid: None,
                     log_path: None,
+                    denied_by_sandbox: false,
                 },
                 ..ToolRunMetadata::default()
             }),
