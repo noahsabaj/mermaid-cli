@@ -55,11 +55,14 @@ async fn async_main() -> Result<()> {
     // remove, mcp, version). Returns Ok(true) when the subcommand
     // handled the invocation and we should exit.
     //
-    // The config is the layered merge: defaults < user file < session flags
+    // The config is the layered merge: defaults < user file < project file
+    // (`<git-root>/.mermaid/config.toml`, located from cwd — so `-p /repo`
+    // adopts that repo's project config, consistent with how `.mermaid/`
+    // memory and conversations key off the same root) < session flags
     // (`-c` + the dedicated sandbox/run flags, collected by `session_flags`).
-    let mut config = load_layered_config_or_warn(&cli.session_flags());
-    apply_prompt_flags(&cli, &mut config)?;
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
+    let mut config = load_layered_config_or_warn(Some(&cwd), &cli.session_flags());
+    apply_prompt_flags(&cli, &mut config)?;
     if let Some(cmd) = &cli.command
         && mermaid_cli::cli::handle_command(cmd, &config, &cwd, cli.model.as_deref()).await?
     {

@@ -298,13 +298,33 @@ TOML deep-merge (tables merge; scalars and arrays replace):
 
 1. built-in defaults
 2. the user config file above
-3. session flags: repeatable `-c key.path=value` plus the dedicated flags (`--no-network`,
+3. the project config: `<git-root>/.mermaid/config.toml`, located from the working directory
+   (`-p /repo` adopts that repo's project config)
+4. session flags: repeatable `-c key.path=value` plus the dedicated flags (`--no-network`,
    `--confine-fs`, `--sandbox`, `run --max-tokens`, `run --allow-untrusted-tools`), with a
    dedicated flag beating a contradictory `-c`
 
 Unknown-key warnings name the layer they came from, and in-app settings changes (`/model`,
 Alt+T, `/context`, `mermaid add`) rewrite only their own keys in the user file — unrecognized
 keys in the file survive, and defaults are never frozen in.
+
+### Project config
+
+A repo can commit shared defaults in `.mermaid/config.toml` — model choice, profiles,
+per-model reasoning, web/UX knobs. Loading needs no trust ceremony because safety is
+structural:
+
+- Only these top-level sections are honored: `default_model`, `model_profiles`,
+  `reasoning_per_model`, `ollama`, `ollama_num_ctx_per_model`, `web`, `compaction`,
+  `computer_use`, `memory`, `non_interactive`, and a `safety` subset. Anything else —
+  `mcp_servers` (spawns commands), `providers` (redirects traffic/credentials), `agents`,
+  `daemon` — is ignored with a warning, as are `web.searxng_url` and `ollama.host`/`port`
+  (traffic-redirect vectors) inside otherwise-allowed tables.
+- `safety.mode`, `safety.network`, and `safety.filesystem` are clamped tighten-only against
+  your user config: a project can turn the sandbox on or drop to `read_only`, but can never
+  loosen what you configured. Session flags (you, at the keyboard) still override everything.
+- Startup prints `mermaid: using project config <path> (<n> keys)` whenever the layer
+  contributes.
 
 Run `mermaid init` to create a default config. Important fields in the current config schema:
 
