@@ -45,12 +45,6 @@ fn classify_args<I: IntoIterator<Item = String>>(args: I) -> CliAction {
     }
 }
 
-/// Retention window for the startup GC (#130): archived approvals/checkpoints,
-/// the events of long-finished tasks, and on-disk checkpoint dirs older than this
-/// are pruned. Generous so nothing recently useful is dropped.
-#[cfg(any(unix, windows))]
-const RUNTIME_RETENTION_DAYS: i64 = 30;
-
 /// The daemon task scheduler. `run` requests only *enqueue*; the drain loop
 /// executes queued tasks bounded by `daemon.max_concurrent_tasks` permits, so
 /// a burst of runs proceeds serially (or up to the configured width) instead
@@ -244,34 +238,10 @@ async fn execute_claimed_task(
     // The run has ended; `_running_guard` removes the token from the running map
     // when this function returns. Map the outcome to a terminal status + report
     // — an explicit cancel wins over whatever the interrupted run returned.
-    let (status, report, hook_status) = if token.is_cancelled() {
-        (
-            mermaid_cli::runtime::TaskStatus::Cancelled,
-            "cancelled by user".to_string(),
-            "cancelled",
-        )
-    } else {
-        match result {
-            Ok(result) if result.errors.is_empty() => (
-                mermaid_cli::runtime::TaskStatus::Completed,
-                result.response,
-                "completed",
-            ),
-            Ok(result) => (
-                mermaid_cli::runtime::TaskStatus::Failed,
-                result.errors.join("\n"),
-                "failed",
-            ),
-            Err(err) => (
-                mermaid_cli::runtime::TaskStatus::Failed,
-                err.to_string(),
-                "failed",
-            ),
-        }
-    };
+    let (status, report, hook_status) = classify_run_result(token.is_cancelled(), result);
     // F20: persist the terminal status DURABLY (see persist_terminal_status).
     persist_terminal_status(&task.id, status, &report).await;
-    record_terminal_outcome(&task.id, status);
+    record_terminal_outcome(&task, status);
     let _ = mermaid_cli::runtime::run_plugin_hooks(
         "task_stop",
         &serde_json::json!({
@@ -288,6 +258,7 @@ async fn execute_claimed_task(
 /// live daemon. All best-effort.
 #[cfg(any(unix, windows))]
 fn startup_recovery() {
+    let daemon = mermaid_cli::app::load_config().unwrap_or_default().daemon;
     if let Ok(store) = mermaid_cli::runtime::RuntimeStore::open_default() {
         match store.reconcile_after_restart() {
             Ok((tasks, claims)) if tasks + claims > 0 => {
@@ -300,17 +271,62 @@ fn startup_recovery() {
             Ok(_) => {},
             Err(error) => tracing::warn!(error = %error, "startup reconcile failed"),
         }
-        match store.gc(RUNTIME_RETENTION_DAYS) {
+        match store.gc(daemon.retention_days, daemon.outcomes_retention_days) {
             Ok(removed) if removed > 0 => tracing::info!(removed, "gc pruned old runtime rows"),
             Ok(_) => {},
             Err(error) => tracing::warn!(error = %error, "startup gc failed"),
         }
     }
-    if let Ok(removed) = mermaid_cli::runtime::gc_old_checkpoint_dirs(RUNTIME_RETENTION_DAYS)
+    if let Ok(removed) = mermaid_cli::runtime::gc_old_checkpoint_dirs(daemon.retention_days)
         && removed > 0
     {
         tracing::info!(removed, "gc removed old checkpoint directories");
     }
+    if let Ok(removed) = sweep_stale_bg_logs(daemon.retention_days)
+        && removed > 0
+    {
+        tracing::info!(removed, "reaped stale background-command logs");
+    }
+}
+
+/// Reap background-command tee logs (`mermaid-bg-<pid>-<nanos>.log`) left in the
+/// private temp dir by detached (Ctrl+B) commands of prior sessions. A live
+/// detached process keeps appending to its log, so an mtime older than the
+/// retention window means the writer is long gone.
+#[cfg(any(unix, windows))]
+fn sweep_stale_bg_logs(retention_days: i64) -> std::io::Result<u64> {
+    sweep_stale_bg_logs_in(&mermaid_cli::utils::private_temp_dir()?, retention_days)
+}
+
+/// The `sweep_stale_bg_logs` body over an explicit directory, for testing.
+/// Best-effort: files it can't stat or remove (e.g. one a live process still
+/// holds open on Windows) are skipped.
+#[cfg(any(unix, windows))]
+fn sweep_stale_bg_logs_in(dir: &std::path::Path, retention_days: i64) -> std::io::Result<u64> {
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(
+            retention_days.max(0) as u64 * 24 * 60 * 60,
+        ))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut removed = 0u64;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !(name.starts_with("mermaid-bg-") && name.ends_with(".log")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|mtime| mtime < cutoff)
+            .unwrap_or(false);
+        if stale && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(unix)]
@@ -1113,6 +1129,40 @@ async fn persist_terminal_status(
     );
 }
 
+/// Map a finished run to its terminal `(status, report, hook_status)`. An
+/// explicit cancel wins over whatever the interrupted run returned. Otherwise a
+/// run with no errors AND a non-empty response is a success; a run with no
+/// errors but an EMPTY response produced nothing — for a headless task that is a
+/// failure, not a success. Recording the empty case as `Completed` would stamp a
+/// false `task_terminal` success/1.0 into the `outcomes` training corpus (the
+/// signal the self-improving loop learns from), so it is mapped to `Failed`.
+#[cfg(any(unix, windows))]
+fn classify_run_result<E: std::fmt::Display>(
+    cancelled: bool,
+    result: std::result::Result<mermaid_cli::app::RunResult, E>,
+) -> (mermaid_cli::runtime::TaskStatus, String, &'static str) {
+    use mermaid_cli::runtime::TaskStatus;
+    if cancelled {
+        return (
+            TaskStatus::Cancelled,
+            "cancelled by user".to_string(),
+            "cancelled",
+        );
+    }
+    match result {
+        Ok(run) if run.errors.is_empty() && !run.response.trim().is_empty() => {
+            (TaskStatus::Completed, run.response, "completed")
+        },
+        Ok(run) if run.errors.is_empty() => (
+            TaskStatus::Failed,
+            "model returned an empty response".to_string(),
+            "failed",
+        ),
+        Ok(run) => (TaskStatus::Failed, run.errors.join("\n"), "failed"),
+        Err(err) => (TaskStatus::Failed, err.to_string(), "failed"),
+    }
+}
+
 /// Record a coarse `task_terminal` outcome for a finished daemon run — the
 /// cheapest reward signal available today (did the whole trajectory succeed?).
 /// Best-effort: a lost outcome must never fail the run, so failures are logged,
@@ -1120,7 +1170,10 @@ async fn persist_terminal_status(
 /// user edit/accept preference pairs) attach to the same `outcomes` table as the
 /// run lifecycle grows hooks for them.
 #[cfg(any(unix, windows))]
-fn record_terminal_outcome(task_id: &str, status: mermaid_cli::runtime::TaskStatus) {
+fn record_terminal_outcome(
+    task: &mermaid_cli::runtime::TaskRecord,
+    status: mermaid_cli::runtime::TaskStatus,
+) {
     use mermaid_cli::runtime::{
         NewOutcome, OUTCOME_LABEL_FAILURE, OUTCOME_LABEL_SUCCESS, OUTCOME_LABEL_UNKNOWN,
         OUTCOME_SOURCE_SYSTEM, RuntimeStore, TaskStatus,
@@ -1132,24 +1185,34 @@ fn record_terminal_outcome(task_id: &str, status: mermaid_cli::runtime::TaskStat
         // rather than silently skip anything else.
         _ => (OUTCOME_LABEL_UNKNOWN, 0.0),
     };
+    // Denormalize the task's training context into the outcome so it stays a
+    // usable example after the `tasks` row is pruned on the shorter GC window
+    // (`outcomes.task_id` is `ON DELETE SET NULL`, so the link is lost then).
+    let detail_json = serde_json::to_string(&serde_json::json!({
+        "prompt": task.prompt,
+        "model_id": task.model_id,
+        "conversation_id": task.conversation_id,
+        "label": label,
+    }))
+    .ok();
     let store = match RuntimeStore::open_default() {
         Ok(store) => store,
         Err(error) => {
-            tracing::warn!(task_id, error = %error, "failed to open store to record terminal outcome");
+            tracing::warn!(task_id = %task.id, error = %error, "failed to open store to record terminal outcome");
             return;
         },
     };
     if let Err(error) = store.outcomes().record(NewOutcome {
         id: None,
-        task_id: Some(task_id.to_string()),
+        task_id: Some(task.id.clone()),
         tool_run_id: None,
         kind: "task_terminal".to_string(),
         label: label.to_string(),
         reward: Some(reward),
         source: OUTCOME_SOURCE_SYSTEM.to_string(),
-        detail_json: None,
+        detail_json,
     }) {
-        tracing::warn!(task_id, error = %error, "failed to record terminal outcome");
+        tracing::warn!(task_id = %task.id, error = %error, "failed to record terminal outcome");
     }
 }
 
@@ -1197,6 +1260,90 @@ mod tests {
             classify_args(["--bogus".to_string()]),
             CliAction::Unknown("--bogus".to_string())
         );
+    }
+
+    #[test]
+    fn classify_run_result_maps_empty_response_to_failure() {
+        use super::classify_run_result;
+        use mermaid_cli::app::RunResult;
+        use mermaid_cli::runtime::TaskStatus;
+
+        // A real response with no errors → success.
+        let (status, report, hook) = classify_run_result::<String>(
+            false,
+            Ok(RunResult {
+                response: "here is the answer".to_string(),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(status, TaskStatus::Completed);
+        assert_eq!(report, "here is the answer");
+        assert_eq!(hook, "completed");
+
+        // No errors but an EMPTY (whitespace-only) response → failure, NOT a
+        // false success/1.0 in the outcomes signal.
+        let (status, report, hook) = classify_run_result::<String>(
+            false,
+            Ok(RunResult {
+                response: "   \n".to_string(),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(status, TaskStatus::Failed);
+        assert_eq!(report, "model returned an empty response");
+        assert_eq!(hook, "failed");
+
+        // Tool/action errors → failure carrying the joined errors.
+        let (status, report, _) = classify_run_result::<String>(
+            false,
+            Ok(RunResult {
+                errors: vec!["exec: boom".to_string()],
+                ..Default::default()
+            }),
+        );
+        assert_eq!(status, TaskStatus::Failed);
+        assert_eq!(report, "exec: boom");
+
+        // A run error → failure carrying the error text.
+        let (status, report, _) =
+            classify_run_result(false, Err::<RunResult, _>("provider exploded"));
+        assert_eq!(status, TaskStatus::Failed);
+        assert_eq!(report, "provider exploded");
+
+        // An explicit cancel wins over the run result, even a good one.
+        let (status, _, hook) = classify_run_result::<String>(
+            true,
+            Ok(RunResult {
+                response: "ignored".to_string(),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(status, TaskStatus::Cancelled);
+        assert_eq!(hook, "cancelled");
+    }
+
+    #[test]
+    fn sweep_stale_bg_logs_targets_only_old_bg_logs() {
+        let dir = std::env::temp_dir().join(format!("mermaidd_bg_sweep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bg = dir.join("mermaid-bg-1234-99.log");
+        std::fs::write(&bg, b"old log").unwrap();
+        let keep = dir.join("notes.txt");
+        std::fs::write(&keep, b"keep me").unwrap();
+        let other_log = dir.join("mermaidd.log");
+        std::fs::write(&other_log, b"daemon log").unwrap();
+
+        // retention 0 → the cutoff is "now", captured after the files were
+        // written, so the just-created bg log counts as stale and is reaped;
+        // non-matching names survive.
+        let removed = super::sweep_stale_bg_logs_in(&dir, 0).expect("sweep");
+        assert_eq!(removed, 1);
+        assert!(!bg.exists(), "the bg tee log must be reaped");
+        assert!(keep.exists(), "unrelated files must survive");
+        assert!(other_log.exists(), "non-bg logs must survive");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn temp_db(name: &str) -> std::path::PathBuf {

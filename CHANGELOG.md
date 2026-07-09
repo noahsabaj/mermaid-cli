@@ -126,6 +126,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (e.g. an MCP server error) is now inserted before a pending tool call rather
   than wedged between a `tool_use` and its `tool_result`, which some providers
   reject on the next request.
+- **The daemon reaps orphaned background-command logs on startup.** Ctrl+B-
+  detached commands leave a tee log (capped at 64 MiB each) in the private temp
+  dir; across many restarts with backgrounded processes these accumulated
+  forever. The daemon's startup recovery now sweeps `mermaid-bg-*.log` files
+  older than `[daemon] retention_days` (a live detached process keeps its log
+  fresh, so an old mtime means the writer is long gone).
+- **The daemon's `outcomes` and finished-`tasks` tables no longer grow without
+  bound.** The startup GC now prunes terminal tasks (with their events) and the
+  append-only `outcomes` reward table, which #148's durable queue would otherwise
+  keep — with their full prompts — forever. `outcomes` (the self-improving-loop
+  training corpus) is retained on its own, deliberately longer window so a large
+  training history survives the shorter task/session retention, and each outcome
+  is stamped with its task's context so it stays usable after that task is
+  pruned. New `[daemon] retention_days` (default 30) and
+  `[daemon] outcomes_retention_days` (default 180) tune the two windows.
+- **A daemon task that produces an empty response is recorded as a failure, not
+  a success.** A run that returned no error but also no text was mapped to
+  `Completed` and stamped a `task_terminal` success/1.0 into the `outcomes`
+  training corpus — a false positive the self-improving loop would learn from. It
+  is now a `Failed` task with a clear report, so the reward signal reflects that
+  nothing was produced.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
