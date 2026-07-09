@@ -2184,10 +2184,17 @@ fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) 
     // bonus the assistant message stays last, so in-flight tool actions/images
     // still attach to it. Anywhere else, plain append.
     let messages = &state.session.conversation.messages;
-    let would_split = matches!(state.turn, TurnState::ExecutingTools { .. })
-        && messages
-            .last()
-            .is_some_and(|m| m.role == MessageRole::Assistant && m.tool_calls.is_some());
+    // Also guard `Compacting`: a `ContextLimitRetry`/`TruncationRecovery`
+    // compaction keeps a trailing unpaired `tool_use` (see `preserve_pending_tail`),
+    // so a mid-compaction `push_system` (e.g. `McpServerErrored`) must insert
+    // before it too — otherwise the next request wedges a system note between the
+    // `tool_use` and its `tool_result`.
+    let would_split = matches!(
+        state.turn,
+        TurnState::ExecutingTools { .. } | TurnState::Compacting { .. }
+    ) && messages
+        .last()
+        .is_some_and(|m| m.role == MessageRole::Assistant && m.tool_calls.is_some());
     if would_split {
         let pos = messages.len() - 1;
         state
@@ -2975,9 +2982,10 @@ fn handle_compaction_finished(
     turn: TurnId,
     result: CompactionResult,
 ) {
-    // Manual `/compact` ends the turn; a truncation recovery resumes the run; a
-    // pre-turn auto-compaction (still `Generating`) just swaps in the compacted
-    // messages and lets the in-flight stream continue in the effect.
+    // Manual `/compact` ends the turn; a truncation recovery or context-limit
+    // retry resumes the run; a pre-turn auto-compaction (still `Generating`)
+    // just swaps in the compacted messages and lets the in-flight stream
+    // continue in the effect.
     enum Outcome {
         Manual,
         Recovery,
@@ -2985,7 +2993,14 @@ fn handle_compaction_finished(
     }
     let outcome = match state.turn {
         TurnState::Compacting { id, trigger, .. } if id == turn => match trigger {
-            CompactionTrigger::TruncationRecovery => Outcome::Recovery,
+            // A context-limit compaction (the provider rejected the request
+            // mid-stream for length; emitted from effect/mod.rs via
+            // `is_context_limit_error`) must RESUME the interrupted request, just
+            // like a truncation recovery — not silently end the turn as the old
+            // `_ => Manual` arm did.
+            CompactionTrigger::ContextLimitRetry | CompactionTrigger::TruncationRecovery => {
+                Outcome::Recovery
+            },
             _ => Outcome::Manual,
         },
         TurnState::Generating { id, .. } if id == turn => Outcome::AutoMidTurn,
@@ -5764,6 +5779,38 @@ mod tests {
     }
 
     #[test]
+    fn finished_context_limit_retry_resumes_the_run() {
+        // D6: a context-limit compaction must resume the interrupted request,
+        // exactly like a truncation recovery — not silently drop the turn to Idle.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("original prompt"), state.now);
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::ContextLimitRetry,
+        };
+        let result = fake_recovery_result(vec![ChatMessage::user("compacted context")]);
+        let (state, cmds) = update(
+            state,
+            Msg::CompactionFinished {
+                turn: TurnId(7),
+                result,
+            },
+        );
+
+        assert!(
+            matches!(state.turn, TurnState::Generating { .. }),
+            "context-limit retry resumes generating with the compacted context"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+            "re-dispatches the model call to finish the interrupted work"
+        );
+    }
+
+    #[test]
     fn finished_manual_compaction_still_goes_idle() {
         // Regression guard: only TruncationRecovery resumes; manual /compact ends.
         let mut state = fresh_state();
@@ -7114,6 +7161,53 @@ mod tests {
                 .last()
                 .is_some_and(|m| m.content.contains("MCP server s1 errored: exit 1")),
             "the MCP error must be posted to the chat transcript"
+        );
+    }
+
+    #[test]
+    fn push_system_during_compacting_inserts_before_tool_call_pair() {
+        // D1: while Compacting with a trailing committed `assistant(tool_calls)`
+        // (a context-limit compaction preserves the unpaired tool_use), an
+        // `McpServerErrored` note must be inserted BEFORE that assistant message,
+        // not appended after it — keeping the tool_use adjacent to its tool_result.
+        let mut state = fresh_state();
+        let source = crate::models::tool_call::ToolCall {
+            id: Some("call-1".to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "foo"}),
+            },
+        };
+        state.session.append(
+            ChatMessage::assistant("running a tool").with_tool_calls(vec![source]),
+            state.now,
+        );
+        state.turn = TurnState::Compacting {
+            id: TurnId(9),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::ContextLimitRetry,
+        };
+
+        let (state, _) = update(
+            state,
+            Msg::McpServerErrored {
+                name: "s1".to_string(),
+                reason: "exit 1".to_string(),
+            },
+        );
+
+        let messages = state.session.messages();
+        let n = messages.len();
+        assert!(
+            n >= 2
+                && messages[n - 1].role == MessageRole::Assistant
+                && messages[n - 1].tool_calls.is_some(),
+            "the assistant(tool_calls) must stay last so its tool_result can follow"
+        );
+        assert!(
+            messages[n - 2].role == MessageRole::System
+                && messages[n - 2].content.contains("MCP server s1 errored"),
+            "the system note sits directly before the tool-call pair, not after it"
         );
     }
 
