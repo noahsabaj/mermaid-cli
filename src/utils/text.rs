@@ -53,6 +53,49 @@ pub fn truncate_web_content(content: &str) -> String {
     truncate_middle(content, WEB_CONTENT_MAX_CHARS)
 }
 
+/// How far back into the previous chunk's tail to search for an echo. Bounds
+/// the cost of [`continuation_overlap`] and keeps a coincidental match deep
+/// inside the previous text from being mistaken for a resume-echo.
+const CONTINUATION_OVERLAP_WINDOW_BYTES: usize = 400;
+/// Minimum echo length worth trimming. Short exact matches ("the ", "- ", a
+/// repeated word) are as likely to be legitimate new prose as an echo, and
+/// trimming a false positive silently deletes real output — so anything under
+/// this threshold is kept verbatim.
+const CONTINUATION_OVERLAP_MIN_BYTES: usize = 16;
+
+/// Length in bytes of the longest exact overlap between the tail of `prev`
+/// and the head of `continuation` — the "resume echo" a model sometimes emits
+/// when continuing a reply that was cut by a per-response output cap.
+///
+/// Deliberately conservative: exact match only, bounded search window,
+/// minimum overlap threshold. Used for DISPLAY/output joining only — the
+/// canonical conversation history is never trimmed — so a false negative
+/// costs a few repeated words on screen, while a false positive would delete
+/// real content. Returns a char-boundary-safe byte offset into `continuation`.
+pub fn continuation_overlap(prev: &str, continuation: &str) -> usize {
+    // Window into prev's tail, aligned to a char boundary.
+    let mut window_start = prev.len().saturating_sub(CONTINUATION_OVERLAP_WINDOW_BYTES);
+    while window_start < prev.len() && !prev.is_char_boundary(window_start) {
+        window_start += 1;
+    }
+    let tail = &prev[window_start..];
+    let max_len = tail.len().min(continuation.len());
+    if max_len < CONTINUATION_OVERLAP_MIN_BYTES {
+        return 0;
+    }
+    // Longest suffix-of-prev == prefix-of-continuation, on char boundaries.
+    for len in (CONTINUATION_OVERLAP_MIN_BYTES..=max_len).rev() {
+        if !continuation.is_char_boundary(len) {
+            continue;
+        }
+        let head = &continuation[..len];
+        if tail.ends_with(head) {
+            return len;
+        }
+    }
+    0
+}
+
 /// Format a duration in seconds as a human-readable string.
 ///
 /// Uses decimal precision for sub-minute durations (e.g., "12.3s"),
@@ -93,6 +136,56 @@ mod tests {
         assert_eq!(format_duration(3600.0), "1h 0m 0s");
         assert_eq!(format_duration(86400.0), "1d 0h 0m 0s");
         assert_eq!(format_duration(90061.0), "1d 1h 1m 1s");
+    }
+
+    #[test]
+    fn continuation_overlap_trims_a_resume_echo() {
+        // The model repeats the tail of the cut reply before continuing.
+        let prev = "The resolver clamps the budget to the window room";
+        let cont = "to the window room, then omits the field entirely.";
+        assert_eq!(continuation_overlap(prev, cont), "to the window room".len());
+    }
+
+    #[test]
+    fn continuation_overlap_keeps_short_ambiguous_matches() {
+        // "the " is as likely legitimate prose as an echo — below the minimum
+        // threshold nothing is trimmed (a false trim deletes real output).
+        assert_eq!(
+            continuation_overlap("…and then the ", "the answer is 42"),
+            0
+        );
+        // No overlap at all.
+        assert_eq!(continuation_overlap("first half", "second half"), 0);
+        // Empty inputs.
+        assert_eq!(continuation_overlap("", "anything"), 0);
+        assert_eq!(continuation_overlap("anything", ""), 0);
+    }
+
+    #[test]
+    fn continuation_overlap_prefers_the_longest_echo() {
+        // Both "cap. " and the full sentence match; take the longest.
+        let prev = "It hit the cap. It hit the cap. ";
+        let cont = "It hit the cap. Continuing now.";
+        assert_eq!(continuation_overlap(prev, cont), "It hit the cap. ".len());
+    }
+
+    #[test]
+    fn continuation_overlap_is_window_bounded() {
+        // An echo of text further back than the search window is not found —
+        // deep coincidental matches must not trigger trimming.
+        let echo = "a distinctive sentence that repeats";
+        let prev = format!("{echo}{}", "x".repeat(500));
+        assert_eq!(continuation_overlap(&prev, echo), 0);
+    }
+
+    #[test]
+    fn continuation_overlap_respects_char_boundaries() {
+        // Multi-byte content: the returned offset must be sliceable.
+        let prev = "código con acentuación específica";
+        let cont = "acentuación específica y más contenido";
+        let n = continuation_overlap(prev, cont);
+        assert_eq!(&cont[..n], "acentuación específica");
+        let _ = &cont[n..]; // must not panic
     }
 
     #[test]

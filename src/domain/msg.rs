@@ -337,6 +337,13 @@ pub enum Msg {
     OpenImageAt {
         message_index: usize,
         image_index: usize,
+        /// The clicked image's stable global `[Image #N]` number, when known.
+        /// Preferred over the positional pair: the display transcript can be
+        /// stitched (continuation merge, hidden nudges), so display indices
+        /// need not match committed history. `default` so pre-stitch
+        /// recordings replay.
+        #[serde(default)]
+        image_number: Option<u64>,
     },
     /// Copy the current chat text selection to the system clipboard. The main
     /// loop reads the selected text from the render layer (`rstate.chat`) and

@@ -272,15 +272,54 @@ fn build_result(state: &State) -> RunResult {
         }
     }
 
-    if let Some(last) = state
-        .session
-        .messages()
+    // The final reply may span an auto-continue chain: the last assistant
+    // message plus any `Continuation`-kind messages leading up to it. Walk
+    // back to the chain's head, then join the segments in order with the
+    // same conservative resume-echo trim the transcript stitch uses —
+    // otherwise `--output text/json` silently dropped everything before the
+    // last continuation.
+    let messages = state.session.messages();
+    if let Some(last_idx) = messages
         .iter()
-        .rev()
-        .find(|m| m.role == MessageRole::Assistant)
+        .rposition(|m| m.role == MessageRole::Assistant)
     {
-        out.response = last.content.clone();
-        out.reasoning = last.thinking.clone();
+        let mut head_idx = last_idx;
+        while head_idx > 0
+            && messages[head_idx].kind == crate::models::ChatMessageKind::Continuation
+            && let Some(prev_idx) = messages[..head_idx]
+                .iter()
+                .rposition(|m| m.role == MessageRole::Assistant)
+            // Only step onto a real bubble: a compaction checkpoint or the
+            // empty error-carrier is never part of the reply chain.
+            && matches!(
+                messages[prev_idx].kind,
+                crate::models::ChatMessageKind::Normal
+                    | crate::models::ChatMessageKind::Continuation
+            )
+            && messages[prev_idx].tool_calls.is_none()
+        {
+            head_idx = prev_idx;
+        }
+        let mut response = String::new();
+        let mut reasoning: Option<String> = None;
+        for msg in messages[head_idx..=last_idx]
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+        {
+            let skip = crate::utils::continuation_overlap(&response, &msg.content);
+            response.push_str(&msg.content[skip..]);
+            if let Some(t) = &msg.thinking {
+                match &mut reasoning {
+                    Some(r) => {
+                        r.push_str("\n\n");
+                        r.push_str(t);
+                    },
+                    None => reasoning = Some(t.clone()),
+                }
+            }
+        }
+        out.response = response;
+        out.reasoning = reasoning;
     }
 
     out
@@ -337,7 +376,57 @@ fn drive_should_stop(idle: bool, queue_empty: bool, cancelling: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::drive_should_stop;
+    use super::{build_result, drive_should_stop};
+
+    #[test]
+    fn build_result_joins_an_auto_continued_reply() {
+        use crate::models::{ChatMessage, ChatMessageKind};
+        let mut state = crate::domain::State::new(
+            crate::app::Config::default(),
+            std::path::PathBuf::from("/tmp/p"),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
+        state
+            .session
+            .append(ChatMessage::user("audit the widget"), state.now);
+        state.session.append(
+            ChatMessage::assistant("part one covers the resolver internals"),
+            state.now,
+        );
+        // The continuation echoes the tail of part one — joined output must
+        // carry it exactly once.
+        let mut cont = ChatMessage::assistant("the resolver internals, part two the adapters.");
+        cont.kind = ChatMessageKind::Continuation;
+        state.session.append(cont, state.now);
+
+        let result = build_result(&state);
+        assert_eq!(
+            result.response, "part one covers the resolver internals, part two the adapters.",
+            "headless output joins the whole chain, echo trimmed"
+        );
+    }
+
+    #[test]
+    fn build_result_without_chain_takes_the_last_reply() {
+        use crate::models::ChatMessage;
+        let mut state = crate::domain::State::new(
+            crate::app::Config::default(),
+            std::path::PathBuf::from("/tmp/p"),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
+        state.session.append(ChatMessage::user("first"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("earlier reply"), state.now);
+        state.session.append(ChatMessage::user("second"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("final reply"), state.now);
+        let result = build_result(&state);
+        assert_eq!(result.response, "final reply");
+    }
 
     #[test]
     fn drive_keeps_running_until_idle() {

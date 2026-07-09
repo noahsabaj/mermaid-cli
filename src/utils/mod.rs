@@ -40,5 +40,7 @@ pub(crate) use retry::jitter;
 pub use retry::{RetryConfig, retry_async, retry_async_if};
 pub use sse::drain_sse_events;
 pub(crate) use task::{AbortOnDrop, join_logged, spawn_guarded};
-pub use text::{format_duration, truncate_content, truncate_middle, truncate_web_content};
+pub use text::{
+    continuation_overlap, format_duration, truncate_content, truncate_middle, truncate_web_content,
+};
 pub use timestamp::format_relative_timestamp;

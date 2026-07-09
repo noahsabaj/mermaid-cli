@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Headless runs no longer truncate auto-continued replies.** `mermaid run
+  -p … --output text/markdown/json` returned only the final continuation
+  segment; it now joins the whole chain, echo-trimmed.
+- **Image clicks resolve by their stable `[Image #N]` number.** Ctrl+Click
+  previously mapped through the display position, which the transcript
+  stitch can shift; the global number now wins, with the positional pair as
+  fallback for pre-numbering sessions.
+- **A run that ended at the auto-continue cap no longer starts the next run
+  with an empty continuation budget** (the counter now resets on submit,
+  like its truncation/empty-turn siblings).
 - **Shell commands can no longer grab the terminal.** Model-run commands now
   start in their own session (`setsid`) with no controlling terminal, so a
   child that opens `/dev/tty` — a `sudo` password prompt, an ssh passphrase
@@ -54,6 +64,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Auto-continued replies are now seamless.** A reply that crosses the
+  model's per-response output cap reads as ONE uninterrupted assistant
+  bubble: the transcript stitches the continuation into its bubble (a code
+  fence cut open at the seam renders as a single intact block), a
+  conservative overlap trim drops the resume-echo some models emit, and the
+  in-flight continuation streams into the same bubble live. The "continuing"
+  system note is gone from view and — once its one request has gone out —
+  retired from history entirely, so it can never steer a later, unrelated
+  turn (the stalled-turn retry nudge gets the same treatment). Canonical
+  history still stores the true wire-level messages (provider-correct,
+  thinking-signature-safe); the stitch is display-only.
 - **Data-driven model-capability catalog.** Thinking wire shape (anthropic
   adaptive-vs-budget, gemini level-vs-budget floors, gpt-oss think-string),
   temperature support, effort-tier ceiling, vision markers, static context

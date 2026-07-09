@@ -896,6 +896,7 @@ mod tests {
             Msg::OpenImageAt {
                 message_index: 4,
                 image_index: 0,
+                image_number: None,
             },
             Msg::CopySelection("copied".to_string()),
         ];

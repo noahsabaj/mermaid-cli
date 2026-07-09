@@ -207,6 +207,7 @@ pub async fn run_interactive_with(
                                 .map(|target| Msg::OpenImageAt {
                                     message_index: target.message_index,
                                     image_index: target.image_index,
+                                    image_number: target.image_number,
                                 }),
                             // Plain (no-modifier) left drag selects chat text.
                             // Handled render-side so wheel-scroll + Ctrl+Click
