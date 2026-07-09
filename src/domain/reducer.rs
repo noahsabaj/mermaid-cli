@@ -1101,6 +1101,15 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Ctrl+L: force a full repaint (the universal readline "redraw screen"
+    // chord). Recovers from anything that scribbled on the terminal behind
+    // ratatui's back buffer. Meta-level like Ctrl+C/Ctrl+B — deliberately
+    // above the modal handlers so a repaint works with a modal open too.
+    if mods.ctrl && code == KeyCode::Char('l') {
+        state.ui.full_redraw_seq = state.ui.full_redraw_seq.wrapping_add(1);
+        return;
+    }
+
     // Transcript scrolling (keyboard): PageUp/PageDown by a page, Shift+Up/Down
     // by a line, End to jump back to the newest message. Reuses the pure
     // publish-then-diff scroll pipeline — the render layer applies the delta,
@@ -3908,6 +3917,14 @@ fn handle_tool_finished(
             // Attach action display to the last assistant message so
             // the renderer can show it.
             if let Some(call) = calls.iter().find(|c| c.call_id == call_id) {
+                // A finished shell command may have scribbled on the terminal
+                // (a child that opened /dev/tty writes straight past ratatui's
+                // back buffer). Request a full repaint. Exec only: read/edit/
+                // search tools can't touch the tty, and clearing on every tool
+                // would flash during rapid tool loops.
+                if call.source.function.name == "execute_command" {
+                    state.ui.full_redraw_seq = state.ui.full_redraw_seq.wrapping_add(1);
+                }
                 let action = action_display_for(call, &outcome);
                 if let Some(process) = action
                     .metadata
@@ -8008,6 +8025,114 @@ mod tests {
         // Tool result message was appended.
         let last = state.session.messages().last().unwrap();
         assert_eq!(last.role, MessageRole::Tool);
+    }
+
+    /// A finished `execute_command` must request a full repaint — a shell
+    /// child may have scribbled on the terminal behind ratatui's back buffer.
+    #[test]
+    fn exec_tool_finished_bumps_full_redraw_seq() {
+        let mut state = fresh_state();
+        let call = PendingToolCall {
+            call_id: super::super::ids::ToolCallId(1),
+            source: crate::models::tool_call::ToolCall {
+                id: Some("c1".to_string()),
+                function: crate::models::tool_call::FunctionCall {
+                    name: "execute_command".to_string(),
+                    arguments: serde_json::json!({"command": "echo hi"}),
+                },
+            },
+        };
+        state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
+        let before = state.ui.full_redraw_seq;
+
+        let (state, _cmds) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(3),
+                call_id: super::super::ids::ToolCallId(1),
+                outcome: ToolOutcome::success("hi", "hi", 0.01),
+            },
+        );
+
+        assert_eq!(
+            state.ui.full_redraw_seq,
+            before.wrapping_add(1),
+            "execute_command completion must bump the repaint counter"
+        );
+    }
+
+    /// Tools that can't touch the tty must NOT trigger a repaint — clearing
+    /// on every tool completion would flash during rapid read/edit loops.
+    #[test]
+    fn non_exec_tool_finished_does_not_bump_full_redraw_seq() {
+        let mut state = fresh_state();
+        let call = PendingToolCall {
+            call_id: super::super::ids::ToolCallId(1),
+            source: crate::models::tool_call::ToolCall {
+                id: Some("c1".to_string()),
+                function: crate::models::tool_call::FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "foo"}),
+                },
+            },
+        };
+        state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
+        let before = state.ui.full_redraw_seq;
+
+        let (state, _cmds) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(3),
+                call_id: super::super::ids::ToolCallId(1),
+                outcome: ToolOutcome::success("contents", "contents", 0.01),
+            },
+        );
+
+        assert_eq!(state.ui.full_redraw_seq, before);
+    }
+
+    #[test]
+    fn ctrl_l_bumps_full_redraw_seq() {
+        let state = fresh_state();
+        let before = state.ui.full_redraw_seq;
+        let (state, cmds) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('l'),
+                modifiers: KeyMods {
+                    ctrl: true,
+                    ..KeyMods::NONE
+                },
+            }),
+        );
+        assert_eq!(state.ui.full_redraw_seq, before.wrapping_add(1));
+        assert!(!state.should_exit, "Ctrl+L must not exit");
+        assert!(cmds.is_empty(), "Ctrl+L is reducer-only: {cmds:?}");
+    }
+
+    /// Ctrl+L is meta-level (like Ctrl+C/Ctrl+B): it must work — and only
+    /// repaint — while an approval modal is open.
+    #[test]
+    fn ctrl_l_works_during_approval_modal() {
+        let state = pending_approval_state();
+        let before = state.ui.full_redraw_seq;
+        let (state, cmds) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('l'),
+                modifiers: KeyMods {
+                    ctrl: true,
+                    ..KeyMods::NONE
+                },
+            }),
+        );
+        assert_eq!(state.ui.full_redraw_seq, before.wrapping_add(1));
+        assert_eq!(
+            state.pending_approval.len(),
+            1,
+            "the approval must remain queued, not be resolved by Ctrl+L"
+        );
+        assert!(cmds.is_empty());
     }
 
     fn test_attachment(id: u64) -> crate::domain::Attachment {

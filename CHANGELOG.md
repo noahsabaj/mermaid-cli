@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`GIT_TERMINAL_PROMPT=0`) in foreground and background commands alike.
   Esc-cancel, timeout tree-kill, and Ctrl+B backgrounding semantics are
   unchanged; no behavior change on Windows.
+- **The TUI now recovers from stray writes to the terminal.** ratatui only
+  repaints cells it knows changed, so bytes another process wrote directly to
+  the tty (e.g. a child that opened `/dev/tty`) used to persist as ghost
+  characters that typing couldn't dislodge. The screen now fully repaints
+  after each shell command finishes, and Ctrl+L forces an immediate repaint
+  at any time.
 
 ### Added
 
