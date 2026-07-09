@@ -55,6 +55,11 @@ use super::{COMMAND_GROUPS, COMMAND_REGISTRY};
 /// might enqueue unboundedly.
 const MAX_PENDING_DRAIN: usize = 16;
 
+/// Cap on `state.ui.queued_messages` — the user-typed prompts queued while a
+/// turn is in flight. Holding Enter during a long turn would otherwise grow it
+/// without bound; past the cap the oldest queued prompt is dropped.
+const MAX_QUEUED_MESSAGES: usize = 32;
+
 /// The public reducer entry point. Runs one `update_step` for the
 /// incoming `msg`, then drains any follow-up `Msg`s the handler
 /// pushed onto `state.ui.pending_msgs`. All emitted `Cmd`s coalesce
@@ -526,11 +531,15 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // their parked approval requests could never be answered either (#2).
             if let Some(id) = state.turn.id() {
                 cmds.push(Cmd::CancelScope(id));
-                state.pending_approval.clear();
+                // Drop the cancelled turn's parked approval/question modals and
+                // its stale running-tool indicators — the tasks behind them are
+                // being torn down.
+                clear_parked_tool_requests(&mut state);
+                state.ui.live_tool_status.clear();
             }
             // Messages queued against the *previous* conversation must not
             // auto-submit into the one being loaded — drop them (mirrors the
-            // `pending_approval` clear above).
+            // clears above).
             state.ui.queued_messages.clear();
             state.session.conversation = history;
             state.turn = TurnState::Idle;
@@ -1665,6 +1674,16 @@ fn handle_submit_prompt(
     // reducer's StreamDone arm pops the oldest queued message and
     // auto-submits it.
     if !matches!(state.turn, TurnState::Idle) {
+        // Bound the queue: a user holding Enter during a long turn would
+        // otherwise grow it without limit. Past the cap, drop the oldest queued
+        // prompt (mirrors the `pending_msgs` drain cap).
+        if state.ui.queued_messages.len() >= MAX_QUEUED_MESSAGES {
+            state.ui.queued_messages.pop_front();
+            tracing::warn!(
+                max = MAX_QUEUED_MESSAGES,
+                "reducer: queued_messages cap hit — dropped the oldest queued prompt"
+            );
+        }
         state
             .ui
             .queued_messages
@@ -2180,10 +2199,17 @@ fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) 
     // bonus the assistant message stays last, so in-flight tool actions/images
     // still attach to it. Anywhere else, plain append.
     let messages = &state.session.conversation.messages;
-    let would_split = matches!(state.turn, TurnState::ExecutingTools { .. })
-        && messages
-            .last()
-            .is_some_and(|m| m.role == MessageRole::Assistant && m.tool_calls.is_some());
+    // Also guard `Compacting`: a `ContextLimitRetry`/`TruncationRecovery`
+    // compaction keeps a trailing unpaired `tool_use` (see `preserve_pending_tail`),
+    // so a mid-compaction `push_system` (e.g. `McpServerErrored`) must insert
+    // before it too — otherwise the next request wedges a system note between the
+    // `tool_use` and its `tool_result`.
+    let would_split = matches!(
+        state.turn,
+        TurnState::ExecutingTools { .. } | TurnState::Compacting { .. }
+    ) && messages
+        .last()
+        .is_some_and(|m| m.role == MessageRole::Assistant && m.tool_calls.is_some());
     if would_split {
         let pos = messages.len() - 1;
         state
@@ -2845,6 +2871,17 @@ fn seal_orphaned_tool_calls(state: &mut State) {
     }
 }
 
+/// Release both parked-tool-request queues together. `pending_approval` and
+/// `pending_question` are drained only by the user answering — `ResolveApproval`
+/// / `ResolveQuestion` — but a cancelled `TurnScope` tears down the parked tool
+/// task, so those replies can never come. Left behind, a stale approval or
+/// question modal survives `/load`, `/clear`, Ctrl+C, and quit with nothing to
+/// answer it (D2/D3/D4). Every turn-cancel/reset site clears both through here.
+fn clear_parked_tool_requests(state: &mut State) {
+    state.pending_approval.clear();
+    state.pending_question.clear();
+}
+
 fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
     let Some(id) = state.turn.id() else {
         return;
@@ -2854,9 +2891,9 @@ fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
         return;
     }
     cmds.push(Cmd::CancelScope(id));
-    // The cancelled turn's tool tasks are aborted; their parked approval
-    // requests can never be answered, so drop any queued prompts.
-    state.pending_approval.clear();
+    // The cancelled turn's tool tasks are aborted; their parked approval and
+    // question requests can never be answered, so drop both.
+    clear_parked_tool_requests(state);
     // If tools were mid-flight, close the tool_use/tool_result pairing before
     // leaving `ExecutingTools`, or the next request would be malformed.
     seal_orphaned_tool_calls(state);
@@ -2875,7 +2912,7 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     }
     state.should_exit = true;
     state.ui.pending_msgs.clear();
-    state.pending_approval.clear();
+    clear_parked_tool_requests(state);
     // Quitting mid-stream: preserve whatever the model already produced so
     // `--continue` shows what was on screen. Commit the in-flight partial
     // as an assistant message with an interrupted marker before saving.
@@ -2924,7 +2961,10 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             // never be answered, so drop them too.
             if let Some(id) = state.turn.id() {
                 cmds.push(Cmd::CancelScope(id));
-                state.pending_approval.clear();
+                // Drop the cancelled turn's parked approval/question modals and
+                // stale running-tool indicators before wiping the conversation.
+                clear_parked_tool_requests(state);
+                state.ui.live_tool_status.clear();
             }
             // A message queued mid-turn belonged to the conversation being
             // wiped — don't let it auto-submit into the fresh one.
@@ -2957,9 +2997,10 @@ fn handle_compaction_finished(
     turn: TurnId,
     result: CompactionResult,
 ) {
-    // Manual `/compact` ends the turn; a truncation recovery resumes the run; a
-    // pre-turn auto-compaction (still `Generating`) just swaps in the compacted
-    // messages and lets the in-flight stream continue in the effect.
+    // Manual `/compact` ends the turn; a truncation recovery or context-limit
+    // retry resumes the run; a pre-turn auto-compaction (still `Generating`)
+    // just swaps in the compacted messages and lets the in-flight stream
+    // continue in the effect.
     enum Outcome {
         Manual,
         Recovery,
@@ -2967,7 +3008,14 @@ fn handle_compaction_finished(
     }
     let outcome = match state.turn {
         TurnState::Compacting { id, trigger, .. } if id == turn => match trigger {
-            CompactionTrigger::TruncationRecovery => Outcome::Recovery,
+            // A context-limit compaction (the provider rejected the request
+            // mid-stream for length; emitted from effect/mod.rs via
+            // `is_context_limit_error`) must RESUME the interrupted request, just
+            // like a truncation recovery — not silently end the turn as the old
+            // `_ => Manual` arm did.
+            CompactionTrigger::ContextLimitRetry | CompactionTrigger::TruncationRecovery => {
+                Outcome::Recovery
+            },
             _ => Outcome::Manual,
         },
         TurnState::Generating { id, .. } if id == turn => Outcome::AutoMidTurn,
@@ -4653,6 +4701,73 @@ mod tests {
     }
 
     #[test]
+    fn cancel_and_reset_paths_clear_pending_question() {
+        // RC-1 (D2/D3/D4): a parked `ask_user_question` modal must not survive a
+        // turn cancel/reset — the tool task behind it is torn down, so the modal
+        // would be permanently unanswerable. Every cancel/reset path clears it.
+        use super::super::ids::ToolCallId;
+
+        let parked = || {
+            let mut state = fresh_state();
+            state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
+            let (state, _) = update(
+                state,
+                Msg::QuestionAsked {
+                    turn: TurnId(5),
+                    call_id: ToolCallId(1),
+                    questions: vec![],
+                },
+            );
+            assert_eq!(
+                state.pending_question.len(),
+                1,
+                "precondition: a question is parked mid-turn"
+            );
+            state
+        };
+
+        // Esc / CancelTurn.
+        let (state, _) = update(parked(), Msg::CancelTurn);
+        assert!(
+            state.pending_question.is_empty(),
+            "CancelTurn must clear the parked question"
+        );
+
+        // Ctrl+C quit (request_exit).
+        let (state, _) = update(
+            parked(),
+            Msg::Key(Key {
+                code: KeyCode::Char('c'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        assert!(
+            state.pending_question.is_empty(),
+            "Ctrl+C quit must clear the parked question"
+        );
+
+        // `/load` a conversation mid-turn.
+        let history = fresh_state().session.conversation.clone();
+        let (state, _) = update(parked(), Msg::ConversationLoaded(history));
+        assert!(
+            state.pending_question.is_empty(),
+            "ConversationLoaded must clear the parked question"
+        );
+
+        // `/clear` (confirmed) mid-turn.
+        let mut state = parked();
+        state.confirm = Some(super::super::state::Confirmation {
+            prompt: "Clear conversation history?".to_string(),
+            accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
+        });
+        let (state, _) = update(state, Msg::ConfirmAccepted);
+        assert!(
+            state.pending_question.is_empty(),
+            "ClearConversation must clear the parked question"
+        );
+    }
+
+    #[test]
     fn load_conversation_mid_turn_cancels_orphaned_scope() {
         // `/load` while a turn is generating must cancel the in-flight scope,
         // not silently overwrite `state.turn` and orphan the running tasks (#2).
@@ -5104,11 +5219,11 @@ mod tests {
     }
 
     #[test]
-    fn submit_prompt_when_busy_is_dropped() {
+    fn submit_prompt_when_busy_is_queued() {
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
         let msg = Msg::SubmitPrompt {
-            text: "ignored".to_string(),
+            text: "queue me".to_string(),
             attachment_ids: vec![],
         };
         let (state, cmds) = update(state, msg);
@@ -5117,7 +5232,34 @@ mod tests {
             TurnState::Generating { id: TurnId(1), .. }
         ));
         assert!(cmds.is_empty());
+        // Not committed to the session — but it IS queued (the old name
+        // `..._is_dropped` was misleading: the message is held, not discarded).
         assert!(state.session.messages().is_empty());
+        assert_eq!(state.ui.queued_messages.len(), 1);
+        assert_eq!(state.ui.queued_messages[0].text, "queue me");
+    }
+
+    #[test]
+    fn queued_messages_are_capped_dropping_oldest() {
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
+        for i in 0..(MAX_QUEUED_MESSAGES + 5) {
+            let (s, _) = update(
+                state,
+                Msg::SubmitPrompt {
+                    text: format!("msg {i}"),
+                    attachment_ids: vec![],
+                },
+            );
+            state = s;
+        }
+        assert_eq!(state.ui.queued_messages.len(), MAX_QUEUED_MESSAGES);
+        // The oldest were dropped: the queue window is the last MAX_QUEUED_MESSAGES.
+        assert_eq!(state.ui.queued_messages.front().unwrap().text, "msg 5");
+        assert_eq!(
+            state.ui.queued_messages.back().unwrap().text,
+            format!("msg {}", MAX_QUEUED_MESSAGES + 4)
+        );
     }
 
     #[test]
@@ -5681,6 +5823,38 @@ mod tests {
         assert!(
             cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
             "re-dispatches the model call to finish the work"
+        );
+    }
+
+    #[test]
+    fn finished_context_limit_retry_resumes_the_run() {
+        // D6: a context-limit compaction must resume the interrupted request,
+        // exactly like a truncation recovery — not silently drop the turn to Idle.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("original prompt"), state.now);
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::ContextLimitRetry,
+        };
+        let result = fake_recovery_result(vec![ChatMessage::user("compacted context")]);
+        let (state, cmds) = update(
+            state,
+            Msg::CompactionFinished {
+                turn: TurnId(7),
+                result,
+            },
+        );
+
+        assert!(
+            matches!(state.turn, TurnState::Generating { .. }),
+            "context-limit retry resumes generating with the compacted context"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+            "re-dispatches the model call to finish the interrupted work"
         );
     }
 
@@ -7035,6 +7209,53 @@ mod tests {
                 .last()
                 .is_some_and(|m| m.content.contains("MCP server s1 errored: exit 1")),
             "the MCP error must be posted to the chat transcript"
+        );
+    }
+
+    #[test]
+    fn push_system_during_compacting_inserts_before_tool_call_pair() {
+        // D1: while Compacting with a trailing committed `assistant(tool_calls)`
+        // (a context-limit compaction preserves the unpaired tool_use), an
+        // `McpServerErrored` note must be inserted BEFORE that assistant message,
+        // not appended after it — keeping the tool_use adjacent to its tool_result.
+        let mut state = fresh_state();
+        let source = crate::models::tool_call::ToolCall {
+            id: Some("call-1".to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "foo"}),
+            },
+        };
+        state.session.append(
+            ChatMessage::assistant("running a tool").with_tool_calls(vec![source]),
+            state.now,
+        );
+        state.turn = TurnState::Compacting {
+            id: TurnId(9),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::ContextLimitRetry,
+        };
+
+        let (state, _) = update(
+            state,
+            Msg::McpServerErrored {
+                name: "s1".to_string(),
+                reason: "exit 1".to_string(),
+            },
+        );
+
+        let messages = state.session.messages();
+        let n = messages.len();
+        assert!(
+            n >= 2
+                && messages[n - 1].role == MessageRole::Assistant
+                && messages[n - 1].tool_calls.is_some(),
+            "the assistant(tool_calls) must stay last so its tool_result can follow"
+        );
+        assert!(
+            messages[n - 2].role == MessageRole::System
+                && messages[n - 2].content.contains("MCP server s1 errored"),
+            "the system note sits directly before the tool-call pair, not after it"
         );
     }
 

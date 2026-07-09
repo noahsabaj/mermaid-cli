@@ -122,6 +122,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (deterministic / greedy decoding) was silently overridden with the `0.7`
   default — a leftover `> 0.0` guard treated a deliberate zero as "unset." It now
   passes through verbatim.
+- **Calling a stopped MCP server now returns a clear error.** After
+  `stop_server`, a later `call_tool` hit the dead server and surfaced a
+  broken-pipe transport error instead of saying the server was stopped. The
+  client is now flagged on shutdown and the manager returns a clean
+  "MCP server '…' has been stopped" message.
+- **The queued-message FIFO is now bounded.** Prompts typed while a turn is in
+  flight are queued and auto-submitted when it finishes; holding Enter through a
+  long turn could grow that queue without limit. It's now capped at 32, dropping
+  the oldest with a warning.
+- **A misbehaving Ollama stream can't exhaust memory.** The newline-delimited
+  JSON reassembly buffer had no cap, so an endpoint that streamed bytes without
+  ever sending a newline would grow it until OOM. It now enforces the same 8 MiB
+  reassembly cap the SSE (Anthropic/Gemini/OpenAI) streams already had.
+- **The config file is now written atomically.** `save_config` truncated the
+  config in place, so a crash, kill, or disk-full mid-write could leave an empty
+  or half-written `config.toml` — losing your settings (and inline secrets). It
+  now writes via a temp file + fsync + atomic rename, created `0o600` on Unix so
+  the secret-bearing config is never even briefly world-readable.
+- **Failed background saves now report what went wrong instead of vanishing.**
+  Conversation saves, the compaction archive's conversation write, model /
+  reasoning / Ollama-preference persistence, the `--record` replay log, the
+  daemon's TCP hint file, and the `ask_user_question` "remember this answer"
+  store all dropped their error on failure (some logged a bare "failed" with no
+  detail). Each now logs the underlying error, and the answer-prefs write is
+  atomic so a crash mid-save can't truncate it.
+- **Cancelling or resetting a turn no longer leaves a dead question modal on
+  screen.** An `ask_user_question` prompt parked mid-turn survived `/load`,
+  `/clear`, Ctrl+C, and quit — the tool task behind it was torn down, so the
+  modal could never be answered. All four paths now clear it (and the stale
+  running-tool indicator) alongside the pending approval they already dropped.
+- **A context-limit compaction no longer silently drops your turn.** When a
+  provider rejected a request mid-stream for length, Mermaid compacted the
+  conversation but then ended the turn instead of resuming — abandoning the work
+  you asked for. It now resumes the request after compacting, exactly like a
+  truncation recovery. Relatedly, a system note posted *during* a compaction
+  (e.g. an MCP server error) is now inserted before a pending tool call rather
+  than wedged between a `tool_use` and its `tool_result`, which some providers
+  reject on the next request.
+- **The daemon reaps orphaned background-command logs on startup.** Ctrl+B-
+  detached commands leave a tee log (capped at 64 MiB each) in the private temp
+  dir; across many restarts with backgrounded processes these accumulated
+  forever. The daemon's startup recovery now sweeps `mermaid-bg-*.log` files
+  older than `[daemon] retention_days` (a live detached process keeps its log
+  fresh, so an old mtime means the writer is long gone).
+- **The daemon's `outcomes` and finished-`tasks` tables no longer grow without
+  bound.** The startup GC now prunes terminal tasks (with their events) and the
+  append-only `outcomes` reward table, which #148's durable queue would otherwise
+  keep — with their full prompts — forever. `outcomes` (the self-improving-loop
+  training corpus) is retained on its own, deliberately longer window so a large
+  training history survives the shorter task/session retention, and each outcome
+  is stamped with its task's context so it stays usable after that task is
+  pruned. New `[daemon] retention_days` (default 30) and
+  `[daemon] outcomes_retention_days` (default 180) tune the two windows.
+- **A daemon task that produces an empty response is recorded as a failure, not
+  a success.** A run that returned no error but also no text was mapped to
+  `Completed` and stamped a `task_terminal` success/1.0 into the `outcomes`
+  training corpus — a false positive the self-improving loop would learn from. It
+  is now a `Failed` task with a clear report, so the reward signal reflects that
+  nothing was produced.
 - **Pasting an image and immediately pressing Enter no longer drops the image.**
   Ctrl+V reads the clipboard asynchronously, so a fast paste-then-Enter could
   submit the message before the image arrived — sending it with no image (and
