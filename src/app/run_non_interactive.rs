@@ -15,7 +15,7 @@ use tokio::time::timeout;
 use crate::app::Config;
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::cli::OutputFormat;
-use crate::domain::{Msg, State, TurnState, update};
+use crate::domain::{Msg, RUN_EVENT_PROTOCOL_VERSION, RunEvent, State, TurnState, update};
 use crate::effect::EffectRunner;
 use crate::models::MessageRole;
 use crate::providers::ToolRegistry;
@@ -51,6 +51,11 @@ pub struct RunOptions {
     /// Wall-clock budget override. `None` keeps the built-in 20-minute
     /// deadline.
     pub deadline: Option<Duration>,
+    /// When true, the driver streams the run lifecycle to stdout as
+    /// newline-delimited `RunEvent` JSON (`mermaid run --format ndjson`). Off
+    /// for the daemon scheduler and every other caller, which own their own
+    /// output.
+    pub stream_ndjson: bool,
 }
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
@@ -78,6 +83,10 @@ pub async fn run_non_interactive_with(
         EffectRunner::pair_from_with_task(cwd.clone(), providers, tools, opts.task_id.clone());
     runner = runner.without_terminal_title();
 
+    // Captured before `model_id` is moved into `State`, for the NDJSON stream.
+    let stream_ndjson = opts.stream_ndjson;
+    let event_model = model_id.clone();
+
     let mut state = State::new(config.clone(), cwd.clone(), model_id, chrono::Local::now());
     let mut lifecycle = RuntimeLifecycle::new();
 
@@ -101,6 +110,16 @@ pub async fn run_non_interactive_with(
         runner.dispatch(crate::domain::Cmd::InitMcpServers(
             config.mcp_servers.clone(),
         ));
+    }
+
+    // First line of the NDJSON stream: protocol + run identity.
+    if stream_ndjson {
+        emit_run_event(&RunEvent::SessionStarted {
+            protocol_version: RUN_EVENT_PROTOCOL_VERSION,
+            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            model: event_model,
+            task_id: opts.task_id.clone(),
+        });
     }
 
     // Seed the turn.
@@ -172,6 +191,11 @@ pub async fn run_non_interactive_with(
             if let Msg::TransientStatus { text } = &msg {
                 eprintln!("{text}");
             }
+            // Project the lifecycle message onto the public NDJSON stream before
+            // `update` consumes it. Most messages have no projection.
+            if stream_ndjson && let Some(event) = RunEvent::from_msg(&msg) {
+                emit_run_event(&event);
+            }
             state.now = chrono::Local::now();
             let (new_state, cmds) = update(state, msg);
             state = new_state;
@@ -193,7 +217,22 @@ pub async fn run_non_interactive_with(
     })?;
 
     runner.shutdown().await;
-    Ok(build_result(&final_state))
+    let result = build_result(&final_state);
+    // Terminal line of the NDJSON stream: the aggregated result.
+    if stream_ndjson {
+        emit_run_event(&RunEvent::Result {
+            response: result.response.clone(),
+            reasoning: result.reasoning.clone(),
+            total_tokens: result.total_tokens as u64,
+            errors: result.errors.clone(),
+        });
+    }
+    Ok(result)
+}
+
+/// Write one `RunEvent` as a JSON line to stdout (the NDJSON SDK stream).
+fn emit_run_event(event: &RunEvent) {
+    println!("{}", serde_json::to_string(event).unwrap_or_default());
 }
 
 /// Walk the committed message history and pull out the last
@@ -248,13 +287,19 @@ pub fn format_result(result: &RunResult, format: OutputFormat) -> String {
             out
         },
         OutputFormat::Json => {
-            let json = serde_json::json!({
-                "response": result.response,
-                "reasoning": result.reasoning,
-                "total_tokens": result.total_tokens,
-                "errors": result.errors,
-            });
-            serde_json::to_string_pretty(&json).unwrap_or_default()
+            // Typed single-object form — the same shape as the streamed terminal
+            // `RunEvent::Result`, so the golden test pins this output too.
+            let event = RunEvent::Result {
+                response: result.response.clone(),
+                reasoning: result.reasoning.clone(),
+                total_tokens: result.total_tokens as u64,
+                errors: result.errors.clone(),
+            };
+            serde_json::to_string_pretty(&event).unwrap_or_default()
+        },
+        OutputFormat::Ndjson => {
+            // Events were streamed live during the run; nothing to print here.
+            String::new()
         },
     }
 }

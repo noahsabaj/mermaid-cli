@@ -18,6 +18,7 @@ pub mod image_token;
 pub mod msg;
 pub mod question;
 pub mod reducer;
+pub mod run_event;
 pub mod runtime;
 pub mod slash_commands;
 pub mod state;
@@ -40,6 +41,7 @@ pub use question::{
     QuestionResolution, QuestionSelection, TextValidate, rank_order, validate_input,
 };
 pub use reducer::{build_chat_request, update};
+pub use run_event::{RUN_EVENT_PROTOCOL_VERSION, RunEvent};
 pub use runtime::{
     ManagedProcess, ManagedProcessStatus, ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState,
     RuntimeTimelineEvent, RuntimeTimelineKind, ToolArtifact, ToolMetadata, ToolRunMetadata,

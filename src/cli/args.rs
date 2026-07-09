@@ -278,7 +278,7 @@ pub enum Commands {
         /// piped stdin alongside a prompt is appended as a fenced block.
         prompt: Option<String>,
 
-        /// Output format (text, json, markdown)
+        /// Output format (text, json, markdown, ndjson)
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
 
@@ -433,10 +433,13 @@ pub enum QaCommand {
 pub enum OutputFormat {
     /// Plain text output
     Text,
-    /// JSON structured output
+    /// JSON structured output (a single object)
     Json,
     /// Markdown formatted output
     Markdown,
+    /// Streaming newline-delimited JSON (one `RunEvent` per line) — the
+    /// scripting / SDK surface for `mermaid run`.
+    Ndjson,
 }
 
 /// Reject an empty or whitespace-only `run` prompt at parse time, so

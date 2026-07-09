@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed NDJSON event stream for `mermaid run`.** `mermaid run --format ndjson`
+  streams the run lifecycle as one JSON object per line — `session_started`,
+  `text`/`reasoning` deltas, `tool_started`/`tool_finished`, `approval_required`,
+  `turn_done`, and a terminal `result` — so `mermaid run` can be driven as an
+  SDK/subprocess. The event shape is a stable, versioned contract
+  (`protocol_version`) pinned by a golden serialization test; `--format json`
+  now emits that same typed `result` object.
 - **Startup process hardening + per-turn timing.** On Linux, Mermaid now disables
   core dumps (`RLIMIT_CORE=0`) and ptrace attachment (`PR_SET_DUMPABLE=0`) at
   startup, so a crash can't leave a core file carrying secrets and the process
