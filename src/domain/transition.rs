@@ -171,12 +171,22 @@ pub fn action_display_for(call: &PendingToolCall, outcome: &ToolOutcome) -> Acti
     // write — relabel it so the transcript reads "Update" (as Claude Code does),
     // reserving "Write" for a genuinely new file. The tool records which case it
     // was in its outcome metadata; the pending call couldn't know yet.
-    let action_type = match &outcome.metadata.detail {
+    let (action_type, target) = match &outcome.metadata.detail {
         ToolMetadata::WriteFile {
             created: Some(false),
             ..
-        } => "Update".to_string(),
-        _ => action_type,
+        } => ("Update".to_string(), target),
+        // `apply_patch` is the model's tool name; the transcript should read the
+        // action verb + the file(s) it touched, derived from the outcome's
+        // per-file A/M/D/R lists (unknown at call time, filled in post-exec).
+        ToolMetadata::ApplyPatch {
+            added,
+            modified,
+            deleted,
+            renamed,
+            ..
+        } => apply_patch_action(added, modified, deleted, renamed).unwrap_or((action_type, target)),
+        _ => (action_type, target),
     };
     let duration = outcome.duration_secs;
     let result = if outcome.is_success() {
@@ -301,8 +311,11 @@ fn action_details_for(
                     diff,
                 }
             } else {
+                // Fallback when a patch produced no display diff (effectively
+                // never — apply_patch always sets one). `outcome.summary` already
+                // carries its own timing, so use it directly (no re-wrap).
                 ActionDetails::Preview {
-                    text: success_summary(outcome.summary.clone(), duration),
+                    text: outcome.summary.clone(),
                     line_count: None,
                 }
             }
@@ -342,6 +355,33 @@ fn action_details_for(
     }
 }
 
+/// Verb + target for an `apply_patch` outcome, derived from the files it
+/// actually touched. A single-file patch reads with the operation-specific verb
+/// (like `write_file`/`delete_file`); a multi-file patch folds to
+/// `Update(N files)` (the diff body lists each file). `None` on an empty patch
+/// so the caller keeps the original label.
+fn apply_patch_action(
+    added: &[String],
+    modified: &[String],
+    deleted: &[String],
+    renamed: &[(String, String)],
+) -> Option<(String, String)> {
+    match added.len() + modified.len() + deleted.len() + renamed.len() {
+        0 => None,
+        1 => modified
+            .first()
+            .map(|p| ("Update".to_string(), p.clone()))
+            .or_else(|| added.first().map(|p| ("Write".to_string(), p.clone())))
+            .or_else(|| deleted.first().map(|p| ("Delete".to_string(), p.clone())))
+            .or_else(|| {
+                renamed
+                    .first()
+                    .map(|(_, dst)| ("Update".to_string(), dst.clone()))
+            }),
+        n => Some(("Update".to_string(), format!("{n} files"))),
+    }
+}
+
 fn diff_success_summary(diff: &str, duration: Option<f64>) -> String {
     let (added, removed) = diff_counts(diff);
     let changes = format_line_changes(added, removed);
@@ -352,8 +392,7 @@ fn diff_success_summary(diff: &str, duration: Option<f64>) -> String {
 }
 
 /// Claude-Code-style line-change phrasing: "Added N lines", "Removed N lines",
-/// or "Added N lines, removed M lines". Deliberately omits the "Success," prefix
-/// the shared `success_summary` adds — the diff line reads as a plain statement.
+/// or "Added N lines, removed M lines" — a plain statement, no status prefix.
 fn format_line_changes(added: usize, removed: usize) -> String {
     match (added, removed) {
         (0, 0) => "No changes".to_string(),
@@ -405,8 +444,8 @@ fn metadata_result_count(metadata: &ToolMetadata) -> Option<usize> {
 
 fn success_summary(detail: String, duration: Option<f64>) -> String {
     match duration {
-        Some(seconds) => format!("Success, {}, took {}", detail, format_duration(seconds)),
-        None => format!("Success, {}", detail),
+        Some(seconds) => format!("{}, took {}", detail, format_duration(seconds)),
+        None => detail,
     }
 }
 
@@ -612,7 +651,7 @@ mod tests {
         let action = action_display_for(&call, &outcome);
         match &action.details {
             ActionDetails::Preview { text, .. } => {
-                assert!(text.starts_with("Success"), "got {text}");
+                assert!(!text.contains("Success"), "no Success prefix: {text}");
                 assert!(text.contains("12.3k tokens"), "got {text}");
                 assert!(text.contains("ollama/minimax-m3"), "got {text}");
                 assert!(text.contains("a3"), "the continuation handle shows: {text}");
@@ -648,7 +687,8 @@ mod tests {
         match action.details {
             ActionDetails::Preview { text, line_count } => {
                 assert_eq!(line_count, Some(3));
-                assert!(text.contains("Success, 3 lines read"));
+                assert!(text.contains("3 lines read"));
+                assert!(!text.contains("Success"), "no Success prefix: {text}");
                 assert!(text.contains("took 1.2s"));
             },
             other => panic!("expected preview details, got {:?}", other),
@@ -744,6 +784,51 @@ mod tests {
     }
 
     #[test]
+    fn apply_patch_action_labels_by_operation() {
+        let files = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        let no_files: Vec<String> = vec![];
+        let no_renames: Vec<(String, String)> = vec![];
+
+        // single-file patch → operation-specific verb + that file's path
+        assert_eq!(
+            apply_patch_action(&no_files, &files(&["a.rs"]), &no_files, &no_renames),
+            Some(("Update".to_string(), "a.rs".to_string()))
+        );
+        assert_eq!(
+            apply_patch_action(&files(&["new.rs"]), &no_files, &no_files, &no_renames),
+            Some(("Write".to_string(), "new.rs".to_string()))
+        );
+        assert_eq!(
+            apply_patch_action(&no_files, &no_files, &files(&["gone.rs"]), &no_renames),
+            Some(("Delete".to_string(), "gone.rs".to_string()))
+        );
+        assert_eq!(
+            apply_patch_action(
+                &no_files,
+                &no_files,
+                &no_files,
+                &[("old.rs".to_string(), "new.rs".to_string())]
+            ),
+            Some(("Update".to_string(), "new.rs".to_string()))
+        );
+        // multi-file patch → Update(N files)
+        assert_eq!(
+            apply_patch_action(
+                &files(&["a.rs"]),
+                &files(&["b.rs", "c.rs"]),
+                &no_files,
+                &no_renames
+            ),
+            Some(("Update".to_string(), "3 files".to_string()))
+        );
+        // empty patch → None (caller keeps the original label)
+        assert_eq!(
+            apply_patch_action(&no_files, &no_files, &no_files, &no_renames),
+            None
+        );
+    }
+
+    #[test]
     fn action_display_apply_patch_carries_display_diff_when_available() {
         let call = sample_call_args(
             1,
@@ -766,7 +851,8 @@ mod tests {
                 }),
         );
 
-        assert_eq!(action.action_type, "Apply patch");
+        assert_eq!(action.action_type, "Update");
+        assert_eq!(action.target, "src/main.rs");
         match action.details {
             ActionDetails::Diff { diff, .. } => {
                 assert!(diff.contains("- old"));
@@ -796,7 +882,8 @@ mod tests {
 
         match action.details {
             ActionDetails::Preview { text, .. } => {
-                assert!(text.contains("Success, 2 results returned"));
+                assert!(text.contains("2 results returned"));
+                assert!(!text.contains("Success"), "no Success prefix: {text}");
                 assert!(text.contains("took 15s"));
             },
             other => panic!("expected preview details, got {:?}", other),
@@ -843,7 +930,8 @@ mod tests {
 
         match action.details {
             ActionDetails::Preview { text, .. } => {
-                assert!(text.contains("Success, background process started"));
+                assert!(text.contains("background process started"));
+                assert!(!text.contains("Success"), "no Success prefix: {text}");
                 assert!(text.contains("PID: 123"));
                 assert!(text.contains("Log: /tmp/mermaid-bg.log"));
                 assert!(text.contains("Detected URL: http://127.0.0.1:5173"));

@@ -159,6 +159,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `line`/`lines` agree with the count; the timing is kept, the redundant
   `Success,` prefix removed.
 
+- **`apply_patch` reads as `Update`, and `Success` is dropped from result lines.**
+  An `apply_patch` call now shows `● Update(<file>)` — or `Write` / `Delete` by
+  operation, `Update(N files)` for a multi-file patch — instead of the model's raw
+  `Apply patch()` with empty parens, matching the `Write` / `Update` / `Delete`
+  vocabulary. Separately, the redundant `Success` prefix is gone from every result
+  line (a failure renders differently, so a plain success needs no label): e.g.
+  `3 lines read, took 1.2s`, and a delete shows just `took 35ms`.
+
 - **`mermaid list` and `mermaid models` no longer start Ollama.** All four
   read-only verbs (`list` / `models` / `status` / `doctor`) now enumerate
   with auto-start hard-off: observing state never mutates it, so a
