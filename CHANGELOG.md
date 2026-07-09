@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   characters that typing couldn't dislodge. The screen now fully repaints
   after each shell command finishes, and Ctrl+L forces an immediate repaint
   at any time.
+- **Ctrl+Shift+C no longer quits — it copies the selection.** Mermaid now
+  negotiates the kitty keyboard protocol (disambiguated key encoding) where
+  the terminal supports it, so Ctrl+Shift+C arrives distinct from Ctrl+C and
+  triggers the existing drag-select copy instead of the quit path; Esc
+  reporting also becomes unambiguous. On terminals without the protocol the
+  two chords are physically identical on the wire — there the new press-twice
+  behavior below keeps a stray copy attempt harmless.
+
+### Changed
+
+- **Ctrl+C now requires a second press to exit.** The first Ctrl+C does the
+  useful thing — interrupts a running turn (like Esc) or clears typed input —
+  and shows "press ctrl+c again to exit" for 3 seconds; a second press inside
+  the window exits. Ctrl+D on empty input and `/quit` still exit immediately.
 
 ### Added
 

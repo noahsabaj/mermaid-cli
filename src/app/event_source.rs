@@ -315,6 +315,29 @@ mod tests {
                 assert_eq!(k.code, KeyCode::Char('c'));
                 assert!(k.modifiers.ctrl);
                 assert!(!k.modifiers.alt);
+                assert!(!k.modifiers.shift);
+            },
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// With the kitty keyboard protocol negotiated, Ctrl+Shift+C arrives as a
+    /// distinct event; the SHIFT bit must survive translation so the reducer
+    /// can tell the copy chord apart from the quit chord.
+    #[test]
+    fn translates_ctrl_shift_c_with_shift_intact() {
+        let ev = CtEvent::Key(crossterm::event::KeyEvent {
+            code: CtKeyCode::Char('c'),
+            modifiers: CtMods::CONTROL | CtMods::SHIFT,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        let msg = event_to_msg(ev).expect("msg");
+        match msg {
+            Msg::Key(k) => {
+                assert_eq!(k.code, KeyCode::Char('c'));
+                assert!(k.modifiers.ctrl);
+                assert!(k.modifiers.shift);
             },
             _ => panic!("wrong variant"),
         }

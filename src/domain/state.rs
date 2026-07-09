@@ -909,6 +909,13 @@ pub struct UiState {
     /// that buffer and would otherwise persist as ghost cells. Bumped when a
     /// shell command finishes and on Ctrl+L.
     pub full_redraw_seq: u32,
+    /// Ctrl+C exit arming (press-twice-to-exit). `Some(deadline)` after a
+    /// first Ctrl+C: a second press at or before the deadline exits; any
+    /// other key disarms; past the deadline the next Ctrl+C re-arms. Expiry
+    /// is lazy — compared against `state.now`, so the render hint vanishes on
+    /// the next tick with no state change. Ctrl+D on empty input and `/quit`
+    /// still exit immediately.
+    pub exit_armed_until: Option<DateTime<Local>>,
     /// Whether the terminal window has LOST focus (from terminal focus
     /// reporting via `Msg::FocusChanged`). Defaults `false` (assume attended, so
     /// terminals without focus reporting never ding); the attention bell fires

@@ -9,6 +9,11 @@ pub const COMMAND_MAX_TIMEOUT_SECS: u64 = 300;
 
 // UI Configuration
 pub const UI_MOUSE_SCROLL_LINES: u16 = 3;
+/// How long a first Ctrl+C keeps exit armed: a second press inside this
+/// window exits, after it the press re-arms instead. Long enough to read the
+/// "press ctrl+c again to exit" hint, short enough that a stray press doesn't
+/// leave the app one keystroke from quitting minutes later.
+pub const UI_EXIT_CONFIRM_WINDOW_SECS: i64 = 3;
 
 // Default Model Configuration
 pub const DEFAULT_TEMPERATURE: f32 = 0.7;

@@ -10,7 +10,7 @@ const EXIT_MARKER: &str = "__MERMAID_EXITED__:";
 const INJECTED_MOUSE_REPORT: &[u8] = b"\x1b[<35;24;54M";
 
 #[test]
-fn ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
+fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
     let binary = env!("CARGO_BIN_EXE_mermaid");
     let sandbox = test_sandbox("mermaid-pty-exit");
     let home = sandbox.join("home");
@@ -82,14 +82,21 @@ fn ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
         .expect("write injected mouse report");
     writer.flush().expect("flush mouse report");
     std::thread::sleep(Duration::from_millis(50));
-    writer.write_all(&[0x03]).expect("write Ctrl+C");
-    writer.flush().expect("flush Ctrl+C");
+    // Press-twice-to-exit: the first Ctrl+C arms the confirm window, the
+    // second (inside the 3s window) exits. The gap must be long enough that
+    // the two bytes can't coalesce into one read burst, short enough to stay
+    // inside the window even on a slow runner.
+    writer.write_all(&[0x03]).expect("write first Ctrl+C");
+    writer.flush().expect("flush first Ctrl+C");
+    std::thread::sleep(Duration::from_millis(150));
+    writer.write_all(&[0x03]).expect("write second Ctrl+C");
+    writer.flush().expect("flush second Ctrl+C");
 
-    let status = wait_for_child(&mut child, Duration::from_secs(5))
+    let status = wait_for_child(&mut child, Duration::from_secs(8))
         .unwrap_or_else(|| {
             let _ = child.kill();
             panic!(
-                "Mermaid did not exit after one Ctrl+C. Output:\n{}",
+                "Mermaid did not exit after double Ctrl+C. Output:\n{}",
                 output_text(&output)
             );
         })
