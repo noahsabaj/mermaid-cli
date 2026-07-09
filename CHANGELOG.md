@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cloudflare Workers AI is now a built-in provider.** Reach Cloudflare-hosted
+  models through their OpenAI-compatible endpoint with
+  `mermaid --model cloudflare/@cf/<vendor>/<model>` — for example
+  `cloudflare/@cf/zai-org/glm-5.2` (GLM-5.2). Set `CLOUDFLARE_API_TOKEN` and
+  `CLOUDFLARE_ACCOUNT_ID` (the account id is spliced into the endpoint URL), or
+  point `[providers.cloudflare].base_url` at a full account-scoped URL / AI
+  Gateway endpoint. Exposes the reasoning-level selector and streams GLM-5.2's
+  thinking trace. Discovery surfaces (`doctor`, the best-effort `/models` probe)
+  use the same account-scoped URL and report a missing account id instead of
+  probing a placeholder; a setup missing both env vars gets one error naming
+  both.
 - **Project-local config.** A repo can now commit `.mermaid/config.toml` at its
   git root; it layers between your user config and session flags. Safe by
   construction, with no trust prompt: security-sensitive keys (`mcp_servers`,

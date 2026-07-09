@@ -218,6 +218,53 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
         return Ok(Box::new(p));
     }
 
+    // 3.5. Cloudflare Workers AI — OpenAI-compatible, but the endpoint URL embeds a
+    // per-account id, so the base_url is synthesized at runtime from
+    // CLOUDFLARE_ACCOUNT_ID (or a full [providers.cloudflare].base_url override, e.g.
+    // AI Gateway). Must precede the generic registry branch below, which would
+    // otherwise route it through the placeholder profile.base_url.
+    if provider_lc == "cloudflare" {
+        let user_cfg = config.providers.get("cloudflare");
+        let profile = lookup_provider("cloudflare").expect("cloudflare is in the registry");
+        let api_key_env = user_cfg
+            .and_then(|c| c.api_key_env.as_deref())
+            .unwrap_or(profile.api_key_env);
+        let base_url = match user_cfg.and_then(|c| c.base_url.clone()) {
+            // Override present (AI Gateway / proxy): validate + warn like any built-in
+            // override. The account id isn't needed in this case.
+            Some(url) => {
+                validate_provider_base_url(&url)?;
+                warn_overridden_provider_host("cloudflare", &url);
+                url
+            },
+            // Standard path: synthesize the account-scoped endpoint from env. A fresh
+            // setup missing the token as well gets one error naming both vars, not
+            // two fix-and-retry round-trips.
+            None => match require_cloudflare_account_id() {
+                Ok(id) => cloudflare_base_url(&id),
+                Err(_) if resolve_api_key(api_key_env, None).is_none() => {
+                    return Err(ModelError::Authentication(format!(
+                        "cloudflare requires env vars {api_key_env} and CLOUDFLARE_ACCOUNT_ID — \
+                         create a token at https://dash.cloudflare.com/profile/api-tokens; the \
+                         account id is on your Cloudflare dashboard (or set \
+                         [providers.cloudflare].base_url)"
+                    )));
+                },
+                Err(e) => return Err(e),
+            },
+        };
+        let api_key = resolve_optional_key(&provider_lc, api_key_env, &base_url, profile.key_hint)?;
+        let extra_headers = merged_headers(profile, user_cfg);
+        let p = OpenAICompatProvider::new(
+            profile,
+            base_url,
+            api_key,
+            model_name.to_string(),
+            extra_headers,
+        )?;
+        return Ok(Box::new(p));
+    }
+
     // 4 + 5. OpenAI-compatible registry or user-custom.
     if let Some(profile) = lookup_provider(&provider_lc) {
         let user_cfg = config.providers.get(&provider_lc);
@@ -384,6 +431,56 @@ fn user_profile_to_static(
     let leaked: &'static ProviderProfile = Box::leak(profile);
     cache.insert(cache_key, leaked);
     Some(leaked)
+}
+
+/// Build Cloudflare Workers AI's account-scoped OpenAI-compatible base URL. The
+/// adapter appends `/chat/completions`, so this ends at `/ai/v1`. Kept pure and
+/// separate so it's directly unit-testable (a built provider exposes no base_url
+/// getter).
+fn cloudflare_base_url(account_id: &str) -> String {
+    format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/ai/v1",
+        account_id.trim()
+    )
+}
+
+/// Best-effort `base_url` for *discovery* surfaces (`doctor`'s provider list,
+/// the `/models` probe) — chat requests never use this; `build_provider` has its
+/// own resolution. A user override wins for any provider; cloudflare synthesizes
+/// its account-scoped URL from `CLOUDFLARE_ACCOUNT_ID` and yields `None` when
+/// the var is unset (there is no real endpoint then — probing the registry
+/// placeholder would just guarantee a 404); everything else uses the profile's
+/// static default.
+pub(crate) fn discovery_base_url(
+    profile: &crate::models::ProviderProfile,
+    override_url: Option<String>,
+) -> Option<String> {
+    if override_url.is_some() {
+        return override_url;
+    }
+    if profile.name == "cloudflare" {
+        return require_cloudflare_account_id()
+            .ok()
+            .map(|id| cloudflare_base_url(&id));
+    }
+    Some(profile.base_url.to_string())
+}
+
+/// Resolve the Cloudflare account id from `CLOUDFLARE_ACCOUNT_ID` (trimmed,
+/// non-empty), or a clear actionable error. It isn't a secret, but it's required
+/// to construct the account-scoped Workers AI endpoint; `resolve_api_key` is
+/// reused only for its empty→None handling.
+fn require_cloudflare_account_id() -> Result<String> {
+    resolve_api_key("CLOUDFLARE_ACCOUNT_ID", None)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ModelError::Authentication(
+                "cloudflare requires env var CLOUDFLARE_ACCOUNT_ID (your Cloudflare account id) — \
+                 find it on your Cloudflare dashboard, or set [providers.cloudflare].base_url"
+                    .to_string(),
+            )
+        })
 }
 
 /// Validate a provider `base_url` before it's handed an API key. Requires
@@ -557,6 +654,87 @@ mod tests {
         assert!(validate_provider_base_url("http://192.168.1.5:8080").is_err());
         assert!(validate_provider_base_url("http://169.254.169.254").is_err());
     }
+
+    #[test]
+    fn cloudflare_base_url_synthesizes_account_scoped_endpoint() {
+        assert_eq!(
+            cloudflare_base_url("acct123"),
+            "https://api.cloudflare.com/client/v4/accounts/acct123/ai/v1"
+        );
+        // Trims surrounding whitespace (e.g. a trailing newline from `export`).
+        assert_eq!(
+            cloudflare_base_url("  acct123\n"),
+            "https://api.cloudflare.com/client/v4/accounts/acct123/ai/v1"
+        );
+    }
+
+    #[test]
+    fn cloudflare_account_id_required_and_non_blank() {
+        // Unset → clear, actionable error naming the env var.
+        temp_env::with_var("CLOUDFLARE_ACCOUNT_ID", None::<&str>, || {
+            let err = require_cloudflare_account_id().expect_err("must error when unset");
+            assert!(format!("{err}").contains("CLOUDFLARE_ACCOUNT_ID"));
+        });
+        // Whitespace-only is treated as unset.
+        temp_env::with_var("CLOUDFLARE_ACCOUNT_ID", Some("   "), || {
+            assert!(require_cloudflare_account_id().is_err());
+        });
+        // A real value resolves, trimmed.
+        temp_env::with_var("CLOUDFLARE_ACCOUNT_ID", Some(" acct123 "), || {
+            assert_eq!(require_cloudflare_account_id().unwrap(), "acct123");
+        });
+    }
+
+    #[test]
+    fn discovery_base_url_resolves_per_provider() {
+        let cf = lookup_provider("cloudflare").expect("cloudflare is in the registry");
+        let openai = lookup_provider("openai").expect("openai is in the registry");
+        // A user override always wins, for any provider.
+        assert_eq!(
+            discovery_base_url(cf, Some("https://gw.example/v1".to_string())),
+            Some("https://gw.example/v1".to_string())
+        );
+        // Non-cloudflare: the static registry default.
+        assert_eq!(
+            discovery_base_url(openai, None),
+            Some(openai.base_url.to_string())
+        );
+        // Cloudflare synthesizes the account-scoped URL from env...
+        temp_env::with_var("CLOUDFLARE_ACCOUNT_ID", Some("acct123"), || {
+            assert_eq!(
+                discovery_base_url(cf, None),
+                Some("https://api.cloudflare.com/client/v4/accounts/acct123/ai/v1".to_string())
+            );
+        });
+        // ...and yields None when it's unset — nothing real to probe.
+        temp_env::with_var("CLOUDFLARE_ACCOUNT_ID", None::<&str>, || {
+            assert_eq!(discovery_base_url(cf, None), None);
+        });
+    }
+
+    #[tokio::test]
+    async fn cloudflare_missing_both_env_vars_is_one_combined_error() {
+        temp_env::async_with_vars(
+            [
+                ("CLOUDFLARE_ACCOUNT_ID", None::<&str>),
+                ("CLOUDFLARE_API_TOKEN", None),
+            ],
+            async {
+                let f = ProviderFactory::new(Config::default());
+                let err = match f.resolve("cloudflare/@cf/zai-org/glm-5.2").await {
+                    Ok(_) => panic!("must fail with neither env var set"),
+                    Err(e) => e,
+                };
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains("CLOUDFLARE_API_TOKEN") && msg.contains("CLOUDFLARE_ACCOUNT_ID"),
+                    "one error must name both missing vars, got: {msg}"
+                );
+            },
+        )
+        .await;
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn unique_env(prefix: &str) -> String {
