@@ -3,6 +3,7 @@
 
 pub(crate) mod adapters; // Provider adapters (Ollama, OpenAI-compatible) — wrapped by providers/model/*
 mod capabilities; // Per-model capability flags
+pub mod catalog; // Data-driven model-capability catalog (first-match-wins const table)
 pub(crate) mod config; // Unified configuration
 mod error; // Structured error types
 mod providers; // OpenAI-compatible provider profiles + registry

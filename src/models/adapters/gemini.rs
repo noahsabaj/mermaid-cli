@@ -130,9 +130,9 @@ fn stream_closed_abnormally(finish_reason: Option<&FinishReason>) -> bool {
 
 /// Translate `ReasoningLevel` to Gemini 2.5's `thinkingBudget` (int
 /// tokens). `-1` means adaptive (Gemini decides up to the model's
-/// ceiling); `0` means disabled. Per-model floors are applied
-/// separately by `gemini_thinking_dispatch` — this function returns the
-/// raw mapping which gets clamped before going on the wire.
+/// ceiling); `0` means disabled. Per-model floors come from the catalog's
+/// `GeminiBudget` row — this function returns the raw mapping which gets
+/// clamped before going on the wire.
 fn thinking_budget_for(level: ReasoningLevel) -> i32 {
     match level {
         ReasoningLevel::None => 0,
@@ -160,60 +160,14 @@ fn thinking_level_for(level: ReasoningLevel) -> &'static str {
     }
 }
 
-/// Per-model thinking dispatch — the right-shaped `thinkingConfig`
-/// payload depends on the model line. Gemini 3 swapped from the integer
-/// `thinkingBudget` to a `thinkingLevel` enum (verified at
-/// `ai.google.dev/gemini-api/docs/thinking`); older models don't
-/// support thinking at all and would 400 if we sent one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GeminiThinkingDispatch {
-    /// Model doesn't support thinking — omit `thinkingConfig` entirely
-    /// (sending it causes a syntax error per the official docs).
-    Disabled,
-    /// Gemini 3.x: emit `thinkingLevel` (enum string).
-    Level,
-    /// Gemini 2.5: emit `thinkingBudget` (int) clamped to the model's
-    /// supported range. `min` is the lowest non-zero budget the model
-    /// accepts; `can_disable` is whether `thinkingBudget: 0` is valid.
-    Budget { min: i32, can_disable: bool },
-}
-
-/// Pick the right thinking dispatch for the given Gemini model. Per-
-/// model floors and disable-rules from `ai.google.dev/gemini-api/docs/
-/// thinking`:
-/// - Gemini 3.x → `thinkingLevel` enum (cannot truly disable).
-/// - Gemini 2.5 Pro → `thinkingBudget`, range 128–32768, can't disable.
-/// - Gemini 2.5 Flash → `thinkingBudget`, range 0–24576, can disable.
-/// - Gemini 2.5 Flash Lite → `thinkingBudget`, range 512–24576 OR 0,
-///   can disable (hard min 512 when on).
-/// - Older models (2.0 and earlier) → no thinking; sending
-///   `thinkingConfig` causes a syntax error per the docs.
-fn gemini_thinking_dispatch(model: &str) -> GeminiThinkingDispatch {
-    let m = model.to_lowercase();
-    if m.starts_with("gemini-3") {
-        return GeminiThinkingDispatch::Level;
-    }
-    if m.starts_with("gemini-2.5-pro") {
-        return GeminiThinkingDispatch::Budget {
-            min: 128,
-            can_disable: false,
-        };
-    }
-    // Flash-Lite must come BEFORE Flash since it shares the prefix.
-    if m.starts_with("gemini-2.5-flash-lite") {
-        return GeminiThinkingDispatch::Budget {
-            min: 512,
-            can_disable: true,
-        };
-    }
-    if m.starts_with("gemini-2.5-flash") {
-        return GeminiThinkingDispatch::Budget {
-            min: 0,
-            can_disable: true,
-        };
-    }
-    GeminiThinkingDispatch::Disabled
-}
+// Per-model thinking dispatch lives in the capability catalog
+// (`crate::models::catalog`): Gemini 3.x rows carry
+// `ThinkingShape::GeminiLevel` (the `thinkingLevel` enum — cannot truly
+// disable), Gemini 2.5 rows carry `ThinkingShape::GeminiBudget {min,
+// can_disable}` (integer `thinkingBudget` with the per-model floor/disable
+// rules from `ai.google.dev/gemini-api/docs/thinking`), and everything else
+// — including 2.0 and earlier, which 400 on any `thinkingConfig` — falls to
+// `ProviderDefault`, meaning the field is omitted entirely.
 
 /// Convert Mermaid's OpenAI-shaped tool definitions to Gemini's nested
 /// `[{functionDeclarations: [{name, description, parameters}]}]` shape.
@@ -461,22 +415,19 @@ impl GeminiAdapter {
             _ => config.reasoning,
         };
 
-        // Per-model thinking dispatch (Step 5c bug fix). Gemini 3 uses
-        // `thinkingLevel` enum; 2.5 uses `thinkingBudget` int with per-
-        // model floors + can-disable rules; older models don't support
+        // Per-model thinking dispatch from the capability catalog. Gemini 3
+        // uses the `thinkingLevel` enum; 2.5 uses `thinkingBudget` int with
+        // per-model floors + can-disable rules; older models don't support
         // thinkingConfig at all and would 400 if we sent one.
-        match gemini_thinking_dispatch(&self.model_name) {
-            GeminiThinkingDispatch::Disabled => {
-                // Don't set thinkingConfig — this model would 400.
-            },
-            GeminiThinkingDispatch::Level => {
+        match crate::models::catalog::lookup(&self.model_name).thinking {
+            crate::models::catalog::ThinkingShape::GeminiLevel => {
                 let level_str = thinking_level_for(effective_reasoning);
                 gen_config["thinkingConfig"] = json!({
                     "thinkingLevel": level_str,
                     "includeThoughts": effective_reasoning != ReasoningLevel::None,
                 });
             },
-            GeminiThinkingDispatch::Budget { min, can_disable } => {
+            crate::models::catalog::ThinkingShape::GeminiBudget { min, can_disable } => {
                 let raw = thinking_budget_for(effective_reasoning);
                 let budget = if effective_reasoning == ReasoningLevel::None {
                     // None: disable entirely if the model allows;
@@ -495,6 +446,9 @@ impl GeminiAdapter {
                     "includeThoughts": budget != 0,
                 });
             },
+            // No gemini thinking shape for this model (2.0 and earlier, or a
+            // non-gemini id) — omit thinkingConfig entirely; sending it 400s.
+            _ => {},
         }
         body["generationConfig"] = gen_config;
 
@@ -1608,51 +1562,36 @@ mod tests {
         );
     }
 
-    // --- gemini_thinking_dispatch ---
+    // --- catalog thinking dispatch (the old gemini_thinking_dispatch pins) ---
 
     #[test]
     fn dispatch_is_level_for_gemini_3_models() {
-        assert_eq!(
-            gemini_thinking_dispatch("gemini-3-pro"),
-            GeminiThinkingDispatch::Level
-        );
-        assert_eq!(
-            gemini_thinking_dispatch("gemini-3-flash"),
-            GeminiThinkingDispatch::Level
-        );
-        assert_eq!(
-            gemini_thinking_dispatch("gemini-3-flash-lite"),
-            GeminiThinkingDispatch::Level
-        );
+        use crate::models::catalog::{ThinkingShape, lookup};
+        for m in ["gemini-3-pro", "gemini-3-flash", "gemini-3-flash-lite"] {
+            assert_eq!(lookup(m).thinking, ThinkingShape::GeminiLevel, "{m}");
+        }
     }
 
     #[test]
-    fn dispatch_is_budget_with_min_128_no_disable_for_gemini_2_5_pro() {
+    fn dispatch_budgets_pin_per_model_floors_and_disable_rules() {
+        use crate::models::catalog::{ThinkingShape, lookup};
         assert_eq!(
-            gemini_thinking_dispatch("gemini-2.5-pro"),
-            GeminiThinkingDispatch::Budget {
+            lookup("gemini-2.5-pro").thinking,
+            ThinkingShape::GeminiBudget {
                 min: 128,
                 can_disable: false
             }
         );
-    }
-
-    #[test]
-    fn dispatch_is_budget_with_min_512_can_disable_for_gemini_2_5_flash_lite() {
         assert_eq!(
-            gemini_thinking_dispatch("gemini-2.5-flash-lite"),
-            GeminiThinkingDispatch::Budget {
+            lookup("gemini-2.5-flash-lite").thinking,
+            ThinkingShape::GeminiBudget {
                 min: 512,
                 can_disable: true
             }
         );
-    }
-
-    #[test]
-    fn dispatch_is_budget_with_min_0_can_disable_for_gemini_2_5_flash() {
         assert_eq!(
-            gemini_thinking_dispatch("gemini-2.5-flash"),
-            GeminiThinkingDispatch::Budget {
+            lookup("gemini-2.5-flash").thinking,
+            ThinkingShape::GeminiBudget {
                 min: 0,
                 can_disable: true
             }
@@ -1660,14 +1599,17 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_is_disabled_for_legacy_gemini_models() {
+    fn dispatch_is_provider_default_for_legacy_gemini_models() {
+        use crate::models::catalog::{ThinkingShape, lookup};
+        // 2.0 and earlier get no thinkingConfig (the build path omits the
+        // field for ProviderDefault — pinned end-to-end by the request test).
         assert_eq!(
-            gemini_thinking_dispatch("gemini-2.0-flash"),
-            GeminiThinkingDispatch::Disabled
+            lookup("gemini-2.0-flash").thinking,
+            ThinkingShape::ProviderDefault
         );
         assert_eq!(
-            gemini_thinking_dispatch("gemini-1.5-pro"),
-            GeminiThinkingDispatch::Disabled
+            lookup("gemini-1.5-pro").thinking,
+            ThinkingShape::ProviderDefault
         );
     }
 
