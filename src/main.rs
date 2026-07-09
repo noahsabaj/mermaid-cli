@@ -3,11 +3,11 @@ use clap::Parser;
 
 use mermaid_cli::{
     app::{
-        InteractiveOptions, RunOptions, format_result, load_config_or_warn, persist_last_model,
-        persist_reasoning_for_model, resolve_model_id, run_interactive_with,
+        InteractiveOptions, RunOptions, format_result, load_config_or_warn_with_overrides,
+        persist_last_model, persist_reasoning_for_model, resolve_model_id, run_interactive_with,
         run_non_interactive_with,
     },
-    cli::{Cli, Commands, OutputFormat},
+    cli::{Cli, Commands, OutputFormat, resolve_run_prompt},
     ollama::ensure_model as ensure_ollama_model,
     runtime::{NewTask, RuntimeStore, TaskStatus},
     session::{ConversationManager, SessionEntry, select_conversation},
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     // Handle stand-alone subcommands first (init, list, status, add,
     // remove, mcp, version). Returns Ok(true) when the subcommand
     // handled the invocation and we should exit.
-    let mut config = load_config_or_warn();
+    let mut config = load_config_or_warn_with_overrides(&cli.config_overrides);
     apply_prompt_flags(&cli, &mut config)?;
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
     if let Some(cmd) = &cli.command
@@ -178,12 +178,13 @@ fn load_seed_conversation(
 async fn dispatch_non_interactive(
     cli: &Cli,
     mut config: mermaid_cli::app::Config,
-    prompt: String,
+    prompt: Option<String>,
     format: OutputFormat,
     max_tokens: Option<usize>,
     no_execute: bool,
     allow_untrusted_tools: bool,
 ) -> Result<()> {
+    let prompt = resolve_prompt_from_stdin(prompt)?;
     let cli_model_provided = cli.model.is_some();
     let model_id = resolve_model_id(cli.model.as_deref(), &config).await?;
 
@@ -256,6 +257,22 @@ async fn dispatch_non_interactive(
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Resolve the run prompt, reading piped stdin when the CLI arg is `-`/absent.
+/// The pure decision lives in `cli::resolve_run_prompt`; this only does the I/O
+/// (never reads a TTY, so an interactive `mermaid run` with no prompt errors
+/// cleanly instead of blocking).
+fn resolve_prompt_from_stdin(prompt: Option<String>) -> Result<String> {
+    use std::io::{IsTerminal, Read};
+    let stdin_text = if std::io::stdin().is_terminal() {
+        None
+    } else {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf).ok();
+        Some(buf)
+    };
+    resolve_run_prompt(prompt.as_deref(), stdin_text).map_err(anyhow::Error::msg)
 }
 
 fn create_run_task(

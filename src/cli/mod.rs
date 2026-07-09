@@ -5,6 +5,6 @@ mod daemon;
 
 pub use args::{
     Cli, Commands, DaemonCommand, GitHost, OutputFormat, PairCommand, PluginCommand, PrCommand,
-    QaCommand,
+    QaCommand, resolve_run_prompt,
 };
 pub use commands::{handle_command, list_models, show_version};

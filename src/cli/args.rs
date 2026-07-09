@@ -69,6 +69,13 @@ pub struct Cli {
     #[arg(long, value_name = "FILE", global = true)]
     pub append_system_prompt_file: Option<PathBuf>,
 
+    /// Override a config value: repeatable `-c key.path=value` applied on top
+    /// of the config file (value parsed as TOML, so `true`/`3`/`"x"` keep their
+    /// types; a bare word is a string). Example:
+    /// `-c default_model.max_tokens=8192 -c safety.mode=full_access`.
+    #[arg(short = 'c', long = "config", value_name = "KEY=VALUE", global = true)]
+    pub config_overrides: Vec<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -256,9 +263,9 @@ pub enum Commands {
     CloudSetup,
     /// Run a single prompt non-interactively
     Run {
-        /// The prompt to execute
-        #[arg(value_parser = non_empty_prompt)]
-        prompt: String,
+        /// Prompt to execute. Omit or pass `-` to read it from piped stdin;
+        /// piped stdin alongside a prompt is appended as a fenced block.
+        prompt: Option<String>,
 
         /// Output format (text, json, markdown)
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
@@ -422,15 +429,26 @@ pub enum OutputFormat {
 }
 
 /// Reject an empty or whitespace-only `run` prompt at parse time, so
-/// `mermaid run ""` fails with a clear usage error instead of silently
-/// producing nothing. Only the emptiness check trims — the original string
-/// is preserved on success, since leading/trailing whitespace can be
-/// meaningful prompt content.
-fn non_empty_prompt(s: &str) -> Result<String, String> {
-    if s.trim().is_empty() {
-        Err("prompt cannot be empty".to_string())
-    } else {
-        Ok(s.to_string())
+/// Resolve the effective `run` prompt from the CLI arg and any piped stdin.
+/// `stdin` is `Some(text)` when stdin was piped (non-TTY), else `None`. Pure so
+/// it can be unit-tested; the caller does the terminal check + stdin read.
+///
+/// - No prompt (or `-`): use stdin; error if nothing was piped.
+/// - A prompt plus piped stdin: append the stdin as a fenced block.
+/// - A prompt alone: use it. Empty results are rejected with a usage error.
+pub fn resolve_run_prompt(prompt: Option<&str>, stdin: Option<String>) -> Result<String, String> {
+    let piped = stdin
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match prompt.map(str::trim) {
+        None | Some("-") => {
+            piped.ok_or_else(|| "no prompt given: pass a prompt or pipe text on stdin".to_string())
+        },
+        Some("") => Err("prompt must not be empty".to_string()),
+        Some(text) => Ok(match piped {
+            Some(extra) => format!("{text}\n\n```\n{extra}\n```"),
+            None => text.to_string(),
+        }),
     }
 }
 
@@ -440,28 +458,52 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn non_empty_prompt_rejects_blank() {
-        assert!(non_empty_prompt("").is_err());
-        assert!(non_empty_prompt("   ").is_err());
-        assert!(non_empty_prompt("\t\n ").is_err());
+    fn resolve_run_prompt_reads_stdin_when_dash_or_missing() {
+        assert_eq!(
+            resolve_run_prompt(None, Some("piped work".to_string())).unwrap(),
+            "piped work"
+        );
+        assert_eq!(
+            resolve_run_prompt(Some("-"), Some("  piped  ".to_string())).unwrap(),
+            "piped"
+        );
     }
 
     #[test]
-    fn non_empty_prompt_preserves_content_including_surrounding_space() {
-        assert_eq!(non_empty_prompt("hello").unwrap(), "hello");
-        assert_eq!(non_empty_prompt("  hi  ").unwrap(), "  hi  ");
+    fn resolve_run_prompt_errors_without_prompt_or_stdin() {
+        assert!(resolve_run_prompt(None, None).is_err());
+        assert!(resolve_run_prompt(Some("-"), None).is_err());
+        assert!(resolve_run_prompt(Some(""), None).is_err());
+        assert!(resolve_run_prompt(None, Some("   ".to_string())).is_err());
     }
 
     #[test]
-    fn cli_run_rejects_empty_prompt() {
-        let err = Cli::try_parse_from(["mermaid", "run", ""])
-            .expect_err("empty prompt must be rejected at parse time");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    fn resolve_run_prompt_appends_piped_stdin_to_explicit_prompt() {
+        let out = resolve_run_prompt(Some("summarize"), Some("file body".to_string())).unwrap();
+        assert!(out.starts_with("summarize"));
+        assert!(out.contains("file body"));
     }
 
     #[test]
-    fn cli_run_accepts_normal_prompt() {
+    fn cli_run_allows_missing_prompt_and_normal_prompt() {
+        // The prompt is optional now (stdin fallback); parsing succeeds with no
+        // positional, and emptiness is enforced later by `resolve_run_prompt`.
+        assert!(Cli::try_parse_from(["mermaid", "run"]).is_ok());
         assert!(Cli::try_parse_from(["mermaid", "run", "do a thing"]).is_ok());
+    }
+
+    #[test]
+    fn cli_config_overrides_are_repeatable() {
+        let cli = Cli::try_parse_from(["mermaid", "-c", "a.b=1", "-c", "c=true", "run", "x"])
+            .expect("repeatable -c parses");
+        assert_eq!(cli.config_overrides, vec!["a.b=1", "c=true"]);
+    }
+
+    #[test]
+    fn cli_config_override_after_subcommand_is_global() {
+        let cli = Cli::try_parse_from(["mermaid", "run", "x", "-c", "c=true"])
+            .expect("global -c parses after the subcommand");
+        assert_eq!(cli.config_overrides, vec!["c=true"]);
     }
 
     #[test]
