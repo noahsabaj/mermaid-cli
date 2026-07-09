@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Calling a stopped MCP server now returns a clear error.** After
+  `stop_server`, a later `call_tool` hit the dead server and surfaced a
+  broken-pipe transport error instead of saying the server was stopped. The
+  client is now flagged on shutdown and the manager returns a clean
+  "MCP server '…' has been stopped" message.
 - **The queued-message FIFO is now bounded.** Prompts typed while a turn is in
   flight are queued and auto-submitted when it finishes; holding Enter through a
   long turn could grow that queue without limit. It's now capped at 32, dropping
