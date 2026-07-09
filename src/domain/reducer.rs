@@ -1273,8 +1273,18 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // so a session never silently inherits a more-permissive mode from a
     // previous run. Mirrors the Alt+T reasoning cycle above.
     if code == KeyCode::BackTab {
-        let next = cycle_safety(state.session.safety_mode);
+        let previous = state.session.safety_mode;
+        let next = cycle_safety(previous);
         state.session.safety_mode = next;
+        // A loosening switch (e.g. read_only → …) leaves earlier read-only
+        // denials in history contradicting the new mode. When there's actually
+        // such a denial to supersede, surface a one-line note; `build_chat_request`
+        // additionally rewrites the stale denials for the model.
+        if next.permissiveness() > previous.permissiveness()
+            && history_has_readonly_denial(state.session.messages())
+        {
+            push_system(state, cmds, safety_loosened_note(next));
+        }
         // Persist now so `--resume`/`--continue` restore this mode even if the
         // user changes it and quits without sending another message.
         cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
@@ -1871,7 +1881,15 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::Safety(Some(mode)) => {
             // Session-scoped (mirrors Shift+Tab) — not written to the config.
+            let previous = state.session.safety_mode;
             state.session.safety_mode = mode;
+            // Loosening past a stale read-only denial: announce it (and let
+            // `build_chat_request` rewrite the denials). See the Shift+Tab handler.
+            if mode.permissiveness() > previous.permissiveness()
+                && history_has_readonly_denial(state.session.messages())
+            {
+                push_system(state, cmds, safety_loosened_note(mode));
+            }
             // Persist so `--resume`/`--continue` restore this mode (see the
             // Shift+Tab handler).
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
@@ -3909,6 +3927,11 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
             .cloned()
             .collect(),
     );
+    // The user loosening the safety mode (read_only → …) leaves the model's own
+    // earlier read-only denials in history, contradicting the now-current mode;
+    // rewrite them so the wire history matches the live mode (else the model
+    // keeps refusing edits / claims "still read-only" after a switch up).
+    neutralize_superseded_policy_denials(&mut messages, state.session.safety_mode);
     super::compaction::normalize_history(&mut messages);
 
     ChatRequest {
@@ -4001,6 +4024,91 @@ fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
         }
     }
     messages
+}
+
+/// The user loosening the safety mode (e.g. read_only → full_access) leaves the
+/// *old* read-only denials sitting in the conversation history, still asserting
+/// verbatim that mutations are blocked. A model trusts those concrete
+/// tool-results over the (correct, live) system-prompt line and so refuses to
+/// act or claims the runtime "is still read-only". Rewrite each superseded
+/// read-only denial to a past-tense, mode-aware note so the wire history stops
+/// contradicting the current mode.
+///
+/// Scope guards keep this surgical:
+/// - only tool-result messages (`MessageRole::Tool`) are considered, so a user
+///   message or model turn that merely quotes the phrase is untouched;
+/// - the match is the *contiguous* denial signature (`blocked by policy:` +
+///   [`crate::runtime::READ_ONLY_DENIAL_MARKER`]), so a `grep` hit that happens
+///   to contain the marker text is not rewritten;
+/// - it is a no-op in read_only (the denials still apply) and self-corrects if
+///   the user toggles back down.
+///
+/// Runs on the CLONED request vec (like [`evict_stale_screenshots`]); the
+/// on-screen transcript is untouched, and only `content` changes so the
+/// tool_use/tool_result pairing is preserved.
+fn neutralize_superseded_policy_denials(
+    messages: &mut [ChatMessage],
+    mode: crate::runtime::SafetyMode,
+) {
+    use crate::runtime::SafetyMode;
+    if mode == SafetyMode::ReadOnly {
+        return;
+    }
+    let signature = readonly_denial_signature();
+    for msg in messages.iter_mut() {
+        if msg.role != MessageRole::Tool || !msg.content.contains(&signature) {
+            continue;
+        }
+        // Keep the action summary (everything before " blocked by policy: ") so
+        // the model still knows WHAT was blocked; drop the standing-rule reason.
+        let summary = msg
+            .content
+            .split_once(" blocked by policy: ")
+            .map(|(head, _)| head.trim_end())
+            .filter(|head| !head.is_empty())
+            .unwrap_or("The action");
+        msg.content = format!(
+            "{summary} was blocked earlier while safety mode was read_only. \
+             Safety mode is now {} — that restriction no longer applies; \
+             re-run it if it is still needed.",
+            mode.as_str()
+        );
+    }
+}
+
+/// The `content` infix that marks a persisted **read-only** policy denial: the
+/// gate wraps a `PolicyDecision::Deny` as `"{summary} blocked by policy:
+/// {reason}"`, and every read-only reason starts with
+/// [`crate::runtime::READ_ONLY_DENIAL_MARKER`]. Matching the *contiguous* phrase
+/// (not the bare marker) avoids rewriting a `grep` hit that merely contains the
+/// marker text.
+fn readonly_denial_signature() -> String {
+    format!(
+        "blocked by policy: {}",
+        crate::runtime::READ_ONLY_DENIAL_MARKER
+    )
+}
+
+/// True if the conversation still carries a read-only policy denial (a tool
+/// result matching [`readonly_denial_signature`]) — used to decide whether a
+/// loosening mode-switch is worth announcing.
+fn history_has_readonly_denial(messages: &[ChatMessage]) -> bool {
+    let signature = readonly_denial_signature();
+    messages
+        .iter()
+        .any(|m| m.role == MessageRole::Tool && m.content.contains(&signature))
+}
+
+/// One-line note pushed when the user loosens the safety mode while stale
+/// read-only denials are in history, so both the user and the model see those
+/// blocks are lifted. Pairs with `neutralize_superseded_policy_denials`, which
+/// rewrites the denials themselves.
+fn safety_loosened_note(mode: crate::runtime::SafetyMode) -> String {
+    format!(
+        "Safety mode is now {}; earlier read-only policy blocks no longer apply. \
+         Re-attempt gated actions instead of assuming they'll fail.",
+        mode.as_str()
+    )
 }
 
 #[cfg(test)]
@@ -6933,6 +7041,194 @@ mod tests {
             Msg::Slash(SlashCmd::Safety(Some(crate::runtime::SafetyMode::Auto))),
         );
         assert_eq!(state.session.safety_mode, crate::runtime::SafetyMode::Auto);
+    }
+
+    /// A tool-result shaped exactly like a real read-only policy denial
+    /// (`{summary} blocked by policy: {marker} blocks …`), built from the shared
+    /// marker so the test exercises the real detection path.
+    fn readonly_denial_message(summary: &str) -> ChatMessage {
+        ChatMessage::tool(
+            "call-x",
+            "execute_command",
+            format!(
+                "{summary} blocked by policy: {} blocks mutations and control actions",
+                crate::runtime::READ_ONLY_DENIAL_MARKER
+            ),
+        )
+    }
+
+    #[test]
+    fn superseded_readonly_denial_is_rewritten_when_mode_loosened() {
+        use crate::runtime::SafetyMode;
+        let mut msgs = vec![readonly_denial_message("write_file(main.qml)")];
+        neutralize_superseded_policy_denials(&mut msgs, SafetyMode::FullAccess);
+        let content = &msgs[0].content;
+        assert!(
+            !content.contains("blocked by policy"),
+            "standing denial phrasing should be gone: {content:?}"
+        );
+        assert!(
+            content.contains("write_file(main.qml)"),
+            "action summary must be kept: {content:?}"
+        );
+        assert!(
+            content.contains("no longer applies"),
+            "should read as lifted: {content:?}"
+        );
+        assert!(
+            content.contains("full_access"),
+            "should name the now-current mode: {content:?}"
+        );
+    }
+
+    #[test]
+    fn readonly_denial_preserved_in_read_only_mode() {
+        use crate::runtime::SafetyMode;
+        let original = readonly_denial_message("write_file(x)");
+        let mut msgs = vec![original.clone()];
+        neutralize_superseded_policy_denials(&mut msgs, SafetyMode::ReadOnly);
+        assert_eq!(
+            msgs[0].content, original.content,
+            "a still-valid denial must be untouched in read_only"
+        );
+    }
+
+    #[test]
+    fn neutralizer_ignores_non_tool_and_non_denial_messages() {
+        use crate::runtime::SafetyMode;
+        // Role gate: a USER message quoting the full signature is left alone.
+        let quote = ChatMessage::user(format!(
+            "it said: blocked by policy: {} blocks mutations and control actions",
+            crate::runtime::READ_ONLY_DENIAL_MARKER
+        ));
+        // Contiguous-signature gate: a tool result that merely contains the
+        // marker text (e.g. a grep of the source) is not a denial.
+        let grep = ChatMessage::tool(
+            "c",
+            "execute_command",
+            format!(
+                "policy.rs: const MARKER = {:?};",
+                crate::runtime::READ_ONLY_DENIAL_MARKER
+            ),
+        );
+        let mut msgs = vec![quote.clone(), grep.clone()];
+        neutralize_superseded_policy_denials(&mut msgs, SafetyMode::FullAccess);
+        assert_eq!(msgs[0].content, quote.content, "user message untouched");
+        assert_eq!(
+            msgs[1].content, grep.content,
+            "non-denial tool result untouched"
+        );
+    }
+
+    #[test]
+    fn loosening_past_a_stale_denial_announces_the_switch() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::ReadOnly;
+        state
+            .session
+            .append(readonly_denial_message("write_file(x)"), state.now);
+        let (state, _) = update(state, key(KeyCode::BackTab));
+        assert_eq!(state.session.safety_mode, SafetyMode::Ask);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.role == MessageRole::System
+                    && m.content.contains("Safety mode is now ask")),
+            "loosening past a stale denial should announce it",
+        );
+    }
+
+    #[test]
+    fn clean_mode_cycle_stays_silent() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::ReadOnly;
+        let (state, _) = update(state, key(KeyCode::BackTab));
+        assert_eq!(state.session.safety_mode, SafetyMode::Ask);
+        assert!(
+            !state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Safety mode is now")),
+            "a clean mode cycle must not add a banner",
+        );
+    }
+
+    #[test]
+    fn slash_safety_loosening_announces_when_denial_present() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::ReadOnly;
+        state
+            .session
+            .append(readonly_denial_message("edit(main.qml)"), state.now);
+        let (state, _) = update(
+            state,
+            Msg::Slash(SlashCmd::Safety(Some(SafetyMode::FullAccess))),
+        );
+        assert_eq!(state.session.safety_mode, SafetyMode::FullAccess);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.role == MessageRole::System
+                    && m.content.contains("Safety mode is now full_access")),
+        );
+    }
+
+    #[test]
+    fn build_chat_request_neutralizes_a_superseded_denial() {
+        use crate::runtime::SafetyMode;
+        // Full production path: a read_only denial sits in history behind a valid
+        // tool_use/tool_result pair (so `normalize_history` keeps it); once the
+        // live mode is looser, `build_chat_request` must hand the model a
+        // rewritten, non-standing note rather than the original block.
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::FullAccess;
+        let call = crate::models::tool_call::ToolCall {
+            id: Some("call-1".to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({ "path": "main.qml" }),
+            },
+        };
+        state.session.append(
+            ChatMessage::assistant("editing").with_tool_calls(vec![call]),
+            state.now,
+        );
+        state.session.append(
+            ChatMessage::tool(
+                "call-1",
+                "write_file",
+                format!(
+                    "write_file(main.qml) blocked by policy: {} blocks mutations and control actions",
+                    crate::runtime::READ_ONLY_DENIAL_MARKER
+                ),
+            ),
+            state.now,
+        );
+
+        let req = build_chat_request(&state);
+        let tool_msg = req
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Tool)
+            .expect("the tool_result should survive into the request");
+        assert!(
+            !tool_msg.content.contains("blocked by policy"),
+            "build_chat_request must neutralize the stale denial: {:?}",
+            tool_msg.content
+        );
+        assert!(
+            tool_msg.content.contains("no longer applies"),
+            "rewritten note expected: {:?}",
+            tool_msg.content
+        );
     }
 
     /// State with one queued approval (turn must accept the message, so put

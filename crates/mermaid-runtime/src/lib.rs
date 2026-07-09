@@ -49,8 +49,8 @@ pub use plugin::{
     run_plugin_hooks, validate_plugin_manifest, write_plugin_lockfile,
 };
 pub use policy::{
-    ActionRequest, PolicyDecision, PolicyEngine, PolicyOverride, PolicyOverrideDecision, RiskClass,
-    SafetyMode, ToolCategory, is_destructive_command,
+    ActionRequest, PolicyDecision, PolicyEngine, PolicyOverride, PolicyOverrideDecision,
+    READ_ONLY_DENIAL_MARKER, RiskClass, SafetyMode, ToolCategory, is_destructive_command,
 };
 pub use storage::{
     ApprovalRecord, ApprovalsRepo, CheckpointRecord, CheckpointsRepo, CompactionRecord,

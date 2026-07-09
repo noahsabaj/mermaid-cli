@@ -35,7 +35,7 @@ impl SafetyMode {
 
     /// Permissiveness rank for combining modes: read_only is strictest,
     /// full_access loosest.
-    fn permissiveness(self) -> u8 {
+    pub fn permissiveness(self) -> u8 {
         match self {
             SafetyMode::ReadOnly => 0,
             SafetyMode::Ask => 1,
@@ -278,7 +278,7 @@ impl PolicyEngine {
             return match self.mode {
                 SafetyMode::ReadOnly => PolicyDecision::Deny {
                     risk,
-                    reason: "read-only safety mode blocks memory writes".to_string(),
+                    reason: format!("{READ_ONLY_DENIAL_MARKER} blocks memory writes"),
                 },
                 _ => PolicyDecision::Allow {
                     risk,
@@ -319,8 +319,9 @@ impl PolicyEngine {
                 } else {
                     PolicyDecision::Deny {
                         risk,
-                        reason: "read-only safety mode blocks mutations and control actions"
-                            .to_string(),
+                        reason: format!(
+                            "{READ_ONLY_DENIAL_MARKER} blocks mutations and control actions"
+                        ),
                     }
                 }
             },
@@ -457,6 +458,12 @@ fn classify(request: &ActionRequest) -> RiskClass {
     }
 }
 
+/// Marker embedded verbatim in every read-only policy-denial `reason` (see
+/// `PolicyEngine::decide`). Exposed so the message-history layer can detect a
+/// denial that a since-loosened safety mode has superseded, without
+/// re-hardcoding the wording in a second place.
+pub const READ_ONLY_DENIAL_MARKER: &str = "read-only safety mode";
+
 /// Command heads (argv[0] basenames) that only read state and are safe to
 /// auto-run. Anything NOT in this set is treated as at least a mutation — the
 /// safe default is "unknown ⇒ requires approval", inverting the old
@@ -558,6 +565,19 @@ const READ_ONLY_BINARIES: &[&str] = &[
     "lsusb",
     "lspci",
     "tty",
+    // Shell navigation / no-op builtins: they change only the shell's own CWD
+    // (ephemeral in a one-shot `sh -c`) or print it — they cannot read file
+    // contents or mutate anything. Without these, the ubiquitous `cd DIR &&
+    // <read>` shape classified as a mutation (unknown head) and blocked the
+    // whole compound command in read_only.
+    "cd",
+    "pushd",
+    "popd",
+    "dirs",
+    // Pure encode/compute utilities: read stdin/args and write only to stdout
+    // (a `>` redirect is caught separately, like every other read tool here).
+    "base64",
+    "seq",
 ];
 
 /// `git` subcommands that only read repository state. Deliberately excludes
@@ -580,6 +600,17 @@ const GIT_READ_ONLY: &[&str] = &[
     "reflog",
     "whatchanged",
     "grep",
+    // Additional pure-read subcommands with no mutating flag form. Still
+    // excludes `symbolic-ref` (writes with two args / `-d`) and `ls-remote`
+    // (network), consistent with the `config`/`branch`/`tag` exclusions above.
+    "rev-list",
+    "merge-base",
+    "show-ref",
+    "for-each-ref",
+    "name-rev",
+    "show-branch",
+    "count-objects",
+    "version",
 ];
 
 /// Binaries that reach the network — never auto-run outside FullAccess.
@@ -1656,6 +1687,77 @@ mod tests {
             assert!(
                 matches!(decision, PolicyDecision::Allow { .. }),
                 "expected Allow for {cmd:?}, got {decision:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn cd_and_nav_builtins_do_not_poison_read_only_commands() {
+        // The reported bug: `cd DIR && <read>` classified as a mutation because
+        // `cd` was an unknown head, blocking the whole command in read_only.
+        for cmd in [
+            "cd /home/x/proj && git status",
+            "cd /home/x/proj && git log --oneline -20",
+            "cd .. && ls -la",
+            "pushd /tmp && cat notes.txt",
+            "base64 -d data.txt",
+            "seq 1 10",
+        ] {
+            let decision = PolicyEngine::new(SafetyMode::ReadOnly).decide(&shell(cmd));
+            assert!(
+                matches!(decision, PolicyDecision::Allow { .. }),
+                "read_only should allow {cmd:?}, got {decision:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn cd_prefix_still_cannot_smuggle_a_mutation() {
+        // `cd` being read-only must not let a later mutating segment through:
+        // the worst-segment rule still classifies the whole command.
+        for cmd in ["cd /tmp && git commit -m x", "cd /repo && rm -rf junk"] {
+            let ro = PolicyEngine::new(SafetyMode::ReadOnly).decide(&shell(cmd));
+            assert!(
+                matches!(ro, PolicyDecision::Deny { .. }),
+                "read_only must still deny {cmd:?}, got {ro:?}",
+            );
+        }
+        // A destructive tail stays hard-denied even in full_access.
+        let fa = PolicyEngine::new(SafetyMode::FullAccess).decide(&shell("cd /tmp && rm -rf /"));
+        assert!(
+            matches!(fa, PolicyDecision::Deny { .. }),
+            "full_access must still hard-deny a destructive tail, got {fa:?}",
+        );
+    }
+
+    #[test]
+    fn expanded_read_only_git_subcommands_are_allowed() {
+        for cmd in [
+            "git rev-list HEAD",
+            "git merge-base main feature",
+            "git show-ref",
+            "git for-each-ref",
+            "git name-rev HEAD",
+            "git show-branch",
+            "git count-objects -v",
+            "git version",
+        ] {
+            let decision = PolicyEngine::new(SafetyMode::ReadOnly).decide(&shell(cmd));
+            assert!(
+                matches!(decision, PolicyDecision::Allow { .. }),
+                "read_only should allow {cmd:?}, got {decision:?}",
+            );
+        }
+        // Deliberately-excluded git subcommands remain gated: `symbolic-ref`
+        // writes with two args / `-d`, and `ls-remote` reaches the network.
+        for cmd in [
+            "git symbolic-ref HEAD refs/heads/main",
+            "git ls-remote origin",
+        ] {
+            let decision = PolicyEngine::new(SafetyMode::ReadOnly).decide(&shell(cmd));
+            assert!(
+                matches!(decision, PolicyDecision::Deny { .. }),
+                "read_only must still deny {cmd:?}, got {decision:?}",
             );
         }
     }
