@@ -190,6 +190,11 @@ impl State {
         self.session.cumulative_token_usage = history.cumulative_token_usage;
         self.session.context_usage = history.context_usage.clone();
         self.session.conversation = history;
+        // A session persisted mid-tool (an assistant `tool_use` with no committed
+        // result, or a result whose call was archived out) would otherwise resume
+        // with an orphan and 400 the first request. Repair pairing on the loaded
+        // prefix so both the transcript and the next request are valid.
+        crate::domain::compaction::normalize_history(&mut self.session.conversation.messages);
         // Continue global image numbering past the highest number already in the
         // loaded transcript, so `[Image #16]` keeps referring to that same image
         // across --resume/--continue. Sessions saved before image numbering (no

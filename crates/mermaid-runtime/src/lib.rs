@@ -5,6 +5,7 @@
 //! here. The first slice is SQLite-backed state for tasks, approvals,
 //! processes, and the future provider/memory/checkpoint tables.
 
+pub mod apply_patch;
 pub mod approval;
 pub mod atomic;
 pub mod checkpoint;

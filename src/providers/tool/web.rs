@@ -194,7 +194,7 @@ impl ToolExecutor for WebSearchTool {
         // Cap the aggregate output. Per-result content is already truncated to
         // WEB_CONTENT_MAX_CHARS, but many results across many queries can still
         // bloat context (and memory) past what any single result's cap bounds (#28).
-        let combined = crate::utils::truncate_content(
+        let combined = crate::utils::truncate_middle(
             &combined,
             crate::constants::WEB_SEARCH_AGGREGATE_MAX_CHARS,
         );

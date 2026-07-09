@@ -89,6 +89,12 @@ pub const WEB_SEARCH_AGGREGATE_MAX_CHARS: usize = 30_000;
 /// Prevents unbounded memory growth from runaway model responses.
 pub const MAX_RESPONSE_CHARS: usize = 400_000;
 
+/// Largest file `apply_patch` will read to apply a patch against. Deliberately
+/// well above `MAX_RESPONSE_CHARS` (which caps model-visible output) so a
+/// legitimately large source file stays patchable; a file past this is refused
+/// rather than patched from a partial read.
+pub const MAX_PATCH_FILE_BYTES: usize = 5 * 1024 * 1024;
+
 // Tool execution limits
 /// Maximum bytes of combined stdout/stderr captured from a single
 /// `execute_command` invocation. Past this the capture stops and a

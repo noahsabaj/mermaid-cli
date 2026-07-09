@@ -90,7 +90,7 @@ concrete paths, names, and findings.";
 const CHILD_TOOL_NAMES: &[&str] = &[
     "read_file",
     "write_file",
-    "edit_file",
+    "apply_patch",
     "delete_file",
     "create_directory",
     "execute_command",
@@ -901,7 +901,7 @@ fn build_child_registry(
     web: &crate::app::WebConfig,
 ) -> Arc<ToolRegistry> {
     use super::{
-        computer_use, exec, filesystem, mcp,
+        apply_patch, computer_use, exec, filesystem, mcp,
         web::{web_fetch_tool, web_search_tool},
     };
     let allowed = |name: &str| tools.is_none_or(|t| t.iter().any(|x| x == name));
@@ -912,8 +912,8 @@ fn build_child_registry(
     if allowed("write_file") {
         r.register(Arc::new(filesystem::WriteFileTool));
     }
-    if allowed("edit_file") {
-        r.register(Arc::new(filesystem::EditFileTool));
+    if allowed("apply_patch") {
+        r.register(Arc::new(apply_patch::ApplyPatchTool));
     }
     if allowed("delete_file") {
         r.register(Arc::new(filesystem::DeleteFileTool));
@@ -1314,7 +1314,7 @@ mod tests {
         assert!(r.get("execute_command").is_some());
         for tool in [
             "write_file",
-            "edit_file",
+            "apply_patch",
             "delete_file",
             "create_directory",
             "mcp_proxy",

@@ -15,12 +15,14 @@
 //! name + JSON schema the model sees cannot drift from the handler
 //! that runs when the model calls it. Single source of truth.
 
+pub mod apply_patch;
 pub mod ask_user_question;
 pub mod computer_use;
 pub mod exec;
 pub mod filesystem;
 pub mod mcp;
 pub mod memory;
+pub mod path_lock;
 pub mod path_safety;
 pub mod policy_gate;
 pub mod subagent;
@@ -119,7 +121,7 @@ impl Default for ToolRegistry {
         let mut r = Self::new();
         r.register(Arc::new(filesystem::ReadFileTool));
         r.register(Arc::new(filesystem::WriteFileTool));
-        r.register(Arc::new(filesystem::EditFileTool));
+        r.register(Arc::new(apply_patch::ApplyPatchTool));
         r.register(Arc::new(filesystem::DeleteFileTool));
         r.register(Arc::new(filesystem::CreateDirectoryTool));
         r.register(Arc::new(exec::ExecuteCommandTool));
@@ -191,7 +193,7 @@ impl ToolRegistry {
         let mut r = Self::new();
         r.register(Arc::new(filesystem::ReadFileTool));
         r.register(Arc::new(filesystem::WriteFileTool));
-        r.register(Arc::new(filesystem::EditFileTool));
+        r.register(Arc::new(apply_patch::ApplyPatchTool));
         r.register(Arc::new(filesystem::DeleteFileTool));
         r.register(Arc::new(filesystem::CreateDirectoryTool));
         r.register(Arc::new(exec::ExecuteCommandTool));
@@ -238,7 +240,7 @@ mod tests {
         for name in &[
             "read_file",
             "write_file",
-            "edit_file",
+            "apply_patch",
             "delete_file",
             "create_directory",
             "execute_command",
