@@ -100,14 +100,18 @@ impl ProviderCapabilitySnapshot {
 }
 
 fn infer_static_context_window(provider: &str, model: &str) -> Option<usize> {
-    let model = model.to_ascii_lowercase();
-    match provider {
+    // Per-model documented windows from the capability catalog (claude 200k,
+    // gpt-5/gpt-4.1 400k — the latter now through ANY provider, not just
+    // "openai": a deliberate accuracy widening), then per-provider fallbacks
+    // for models the catalog doesn't know.
+    let fallback = match provider {
         "anthropic" => Some(200_000),
         "gemini" => Some(1_000_000),
-        "openai" if model.contains("gpt-4.1") || model.contains("gpt-5") => Some(400_000),
-        "openrouter" if model.contains("claude") => Some(200_000),
         _ => None,
-    }
+    };
+    crate::models::catalog::lookup(model)
+        .context_window
+        .or(fallback)
 }
 
 pub fn infer_static_context_window_for_model_id(model_id: &str) -> Option<usize> {
@@ -462,6 +466,38 @@ impl Default for RuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_context_windows_pin_the_known_matrix() {
+        // Per-model catalog rows + per-provider fallbacks, exactly as before
+        // the catalog migration (plus the documented widening: gpt-4.1/gpt-5
+        // get 400k through any provider now).
+        for (id, want) in [
+            ("anthropic/claude-sonnet-4-6", Some(200_000)),
+            ("gemini/gemini-2.5-pro", Some(1_000_000)),
+            ("openai/gpt-4.1", Some(400_000)),
+            ("openai/gpt-5-mini", Some(400_000)),
+            ("openrouter/anthropic/claude-sonnet-4.5", Some(200_000)),
+            ("openai/gpt-4o", None),
+            ("ollama/qwen3-coder:30b", None),
+            ("anthropic/claude-future-99", Some(200_000)), // claude- catch-all row
+            ("anthropic/nova-experimental", Some(200_000)), // provider fallback
+        ] {
+            assert_eq!(
+                infer_static_context_window_for_model_id(id),
+                want,
+                "window for {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_snapshot_reports_documented_output_ceiling() {
+        let snap = ProviderCapabilitySnapshot::from_model_id("anthropic/claude-fable-5");
+        assert_eq!(snap.max_output_tokens, Some(64_000));
+        let snap = ProviderCapabilitySnapshot::from_model_id("openai/gpt-4o");
+        assert_eq!(snap.max_output_tokens, None);
+    }
 
     #[test]
     fn timeline_is_bounded_and_keeps_most_recent() {

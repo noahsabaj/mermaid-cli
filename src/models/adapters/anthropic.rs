@@ -163,59 +163,18 @@ enum ThinkingFormat {
     Legacy,
 }
 
-/// True for the 4.6+ "adaptive thinking" line — these models require
-/// `thinking: {type: "adaptive"}` and REJECT legacy `budget_tokens` with a
-/// 400 (Fable 5 / Opus 4.8 / 4.7), or have it deprecated (Opus 4.6 /
-/// Sonnet 4.6). Covers Opus 4.6/4.7/4.8, Sonnet 4.6, Fable 5, and Mythos.
-fn is_adaptive_thinking_model(model: &str) -> bool {
-    let m = model.to_lowercase();
-    m.starts_with("claude-opus-4-6")
-        || m.starts_with("claude-opus-4-7")
-        || m.starts_with("claude-opus-4-8")
-        || m.starts_with("claude-sonnet-4-6")
-        || m.starts_with("claude-fable-5")
-        || m.starts_with("claude-mythos")
-}
-
-/// Pick the thinking-config shape this Claude model accepts. The 4.6+ line
-/// uses adaptive; the 4.5 family (Sonnet 4.5 / Opus 4.5 / Haiku 4.5) uses
-/// legacy `budget_tokens`. Defaults to `Legacy` for genuinely unknown models —
-/// if a future model rejects legacy, the API's 400 names the fix, and this
-/// table should be extended when that model is added (the previous version of
-/// this table predated Opus 4.8 / Fable 5 and wrongly sent them legacy → 400).
+/// Pick the thinking-config shape this Claude model accepts, from the
+/// capability catalog. The 4.6+ line uses adaptive; the 4.5 family
+/// (Sonnet 4.5 / Opus 4.5 / Haiku 4.5) uses legacy `budget_tokens`.
+/// Defaults to `Legacy` for genuinely unknown models — if a future model
+/// rejects legacy, the API's 400 names the fix, and the catalog should gain
+/// a row when that model is added (the pre-catalog table predated Opus 4.8 /
+/// Fable 5 and wrongly sent them legacy → 400).
 fn thinking_format_for(model: &str) -> ThinkingFormat {
-    if is_adaptive_thinking_model(model) {
-        ThinkingFormat::Adaptive
-    } else {
-        ThinkingFormat::Legacy
+    match crate::models::catalog::lookup(model).thinking {
+        crate::models::catalog::ThinkingShape::AnthropicAdaptive => ThinkingFormat::Adaptive,
+        _ => ThinkingFormat::Legacy,
     }
-}
-
-/// Whether this model still accepts a top-level `temperature`. The 4.6+
-/// adaptive line removed sampling params: `temperature`/`top_p`/`top_k` return
-/// a 400 on Opus 4.7/4.8, Fable 5, and Mythos. Opus 4.6 / Sonnet 4.6 / the 4.5
-/// family still accept it. Sending temperature to a model that rejects it fails
-/// every request, so gate the emission rather than send it unconditionally.
-fn supports_temperature(model: &str) -> bool {
-    let m = model.to_lowercase();
-    !(m.starts_with("claude-opus-4-7")
-        || m.starts_with("claude-opus-4-8")
-        || m.starts_with("claude-fable-5")
-        || m.starts_with("claude-mythos"))
-}
-
-/// Whether this model accepts `output_config.effort` at all. Per the effort
-/// doc it's Fable 5, Opus 4.5/4.6/4.7/4.8, Sonnet 4.6, and Mythos; it ERRORS on
-/// Sonnet 4.5 / Haiku 4.5 and older, so those must get no effort field.
-fn supports_effort(model: &str) -> bool {
-    let m = model.to_lowercase();
-    m.starts_with("claude-opus-4-5")
-        || m.starts_with("claude-opus-4-6")
-        || m.starts_with("claude-opus-4-7")
-        || m.starts_with("claude-opus-4-8")
-        || m.starts_with("claude-sonnet-4-6")
-        || m.starts_with("claude-fable-5")
-        || m.starts_with("claude-mythos")
 }
 
 /// Translate `ReasoningLevel` to a legacy `budget_tokens` value, clamped
@@ -246,24 +205,14 @@ fn legacy_budget_for(level: ReasoningLevel, max_tokens: usize) -> Option<u32> {
     Some(proposed.min(ceiling).max(1024))
 }
 
-/// Documented per-response output ceilings — the `max_tokens` upper bound from
-/// the models-overview table, per model family. Anthropic REQUIRES `max_tokens`
-/// on every request, so AUTO resolves to the model's real documented ceiling
-/// rather than a guessed constant. Unknown/legacy ids get a conservative 8192.
+/// Documented per-response output ceiling from the capability catalog.
+/// Anthropic REQUIRES `max_tokens` on every request, so AUTO resolves to the
+/// model's real documented ceiling rather than a guessed constant.
+/// Unknown/legacy ids get a conservative 8192.
 pub fn anthropic_max_output_tokens(model: &str) -> usize {
-    let m = model.to_lowercase();
-    if m.starts_with("claude-3-5") {
-        8_192
-    } else if m.starts_with("claude-opus-4-1") || m.starts_with("claude-opus-4-2") {
-        // Opus 4 (date-suffixed ids like claude-opus-4-20250514) and Opus 4.1.
-        32_000
-    } else if m.starts_with("claude-") {
-        // Claude 3.7+, the Sonnet/Haiku/Opus 4.5+ lines, Fable 5, and Mythos
-        // all document a 64k output ceiling.
-        64_000
-    } else {
-        8_192
-    }
+    crate::models::catalog::lookup(model)
+        .max_output_tokens
+        .unwrap_or(8_192)
 }
 
 /// Anthropic's documented context window (tokens) — 200k across the current
@@ -279,53 +228,23 @@ fn estimate_prompt_tokens(messages: &[ChatMessage], system: Option<&str>) -> usi
     chars / 4
 }
 
-/// Models that accept `effort: "max"` per the April 2026 effort-doc
-/// table: Mythos Preview, Opus 4.7, Opus 4.6, Sonnet 4.6. For the 4.5
-/// family (Sonnet 4.5, Opus 4.5, Haiku 4.5) `max` is not in the accepted
-/// set and may 400 — we snap to `"high"` instead. Matching is
-/// case-insensitive and prefix-based.
-fn supports_max_effort(model: &str) -> bool {
-    let m = model.to_lowercase();
-    m.starts_with("claude-opus-4-6")
-        || m.starts_with("claude-opus-4-7")
-        || m.starts_with("claude-opus-4-8")
-        || m.starts_with("claude-sonnet-4-6")
-        || m.starts_with("claude-fable-5")
-        || m.starts_with("claude-mythos")
-}
-
-/// Models that accept `effort: "xhigh"` — added on Opus 4.7 and carried to
-/// Opus 4.8, Fable 5, and Mythos. Sending `xhigh` elsewhere would 400.
-fn supports_xhigh_effort(model: &str) -> bool {
-    let m = model.to_lowercase();
-    m.starts_with("claude-opus-4-7")
-        || m.starts_with("claude-opus-4-8")
-        || m.starts_with("claude-fable-5")
-        || m.starts_with("claude-mythos")
-}
-
-/// Translate `ReasoningLevel` to Anthropic's `effort` string. The
-/// `effort` parameter applies to ALL Anthropic models — it's a separate
-/// knob from the `thinking` field per the official docs:
-/// `platform.claude.com/docs/en/build-with-claude/effort` "The effort
-/// parameter is supported by Claude Mythos Preview, Claude Opus 4.7,
-/// Claude Opus 4.6, Claude Sonnet 4.6, and Claude Opus 4.5." It shapes
-/// overall token spend including text + tool calls (not just thinking).
+/// Translate `ReasoningLevel` to Anthropic's `effort` string, gated by the
+/// catalog's per-model [`EffortCeiling`]. The `effort` parameter shapes
+/// overall token spend including text + tool calls (not just thinking); per
+/// the official effort doc it's accepted by Mythos, Fable 5, Opus 4.5–4.8,
+/// and Sonnet 4.6 — it ERRORS on Sonnet 4.5 / Haiku 4.5 and older, so those
+/// get no effort field at all.
 ///
-/// Per-tier model gating:
-/// - `"xhigh"` is Opus 4.7 only — send elsewhere and you get a 400.
-/// - `"max"` accepted by Mythos Preview, Opus 4.7, Opus 4.6, Sonnet 4.6.
-///   The 4.5 family (Sonnet 4.5, Opus 4.5, Haiku 4.5) snaps `Max` to
-///   `"high"` to avoid a potential 400 from the effort endpoint.
-///
-/// `XHigh` sits BETWEEN `High` and `Max` semantically — when a model
-/// doesn't support `xhigh` verbatim we snap DOWN to `"high"`, never UP
-/// to `"max"`. The user picked something below max; delivering max
-/// would over-spend their intent.
+/// Snap semantics: `XHigh` sits BETWEEN `High` and `Max` — when a model's
+/// ceiling doesn't cover the requested tier we snap DOWN to `"high"`, never
+/// UP (the user picked something below max; delivering max would over-spend
+/// their intent).
 fn adaptive_effort_for(level: ReasoningLevel, model: &str) -> Option<&'static str> {
-    // Models that don't accept `effort` at all (Sonnet 4.5 / Haiku 4.5 / older)
-    // must get no effort field — sending one 400s the request.
-    if !supports_effort(model) {
+    use crate::models::catalog::EffortCeiling;
+    let ceiling = crate::models::catalog::lookup(model).effort_ceiling;
+    // Models that don't accept `effort` at all must get no effort field —
+    // sending one 400s the request.
+    if ceiling == EffortCeiling::None {
         return None;
     }
     match level {
@@ -334,22 +253,16 @@ fn adaptive_effort_for(level: ReasoningLevel, model: &str) -> Option<&'static st
         ReasoningLevel::Medium => Some("medium"),
         ReasoningLevel::High => Some("high"),
         ReasoningLevel::XHigh => {
-            if supports_xhigh_effort(model) {
+            if ceiling >= EffortCeiling::XHigh {
                 Some("xhigh")
             } else {
-                // Snap DOWN to high (XHigh < Max in our enum). Even on
-                // models that support `max`, we don't upgrade — the user
-                // explicitly picked the between-tier.
                 Some("high")
             }
         },
         ReasoningLevel::Max => {
-            if supports_max_effort(model) {
+            if ceiling >= EffortCeiling::Max {
                 Some("max")
             } else {
-                // 4.5-family gate: `max` isn't in the effort table for
-                // these models. Snap to the highest tier they do
-                // support.
                 Some("high")
             }
         },
@@ -660,7 +573,9 @@ impl AnthropicAdapter {
         // config doesn't get a 400. The 4.6+ adaptive line removed sampling
         // params entirely (Opus 4.7/4.8, Fable 5, Mythos) — sending any
         // temperature there is itself a 400, so only emit it where accepted.
-        if supports_temperature(&self.model_name) {
+        // The 4.6+ adaptive line removed sampling params — temperature 400s
+        // on Opus 4.7/4.8, Fable 5, and Mythos (catalog column).
+        if crate::models::catalog::lookup(&self.model_name).supports_temperature {
             let temp = config.temperature.clamp(0.0, 1.0);
             body["temperature"] = json!(temp);
         }

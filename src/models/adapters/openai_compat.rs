@@ -127,14 +127,6 @@ fn stream_closed_abnormally(stop_reason: Option<&FinishReason>) -> bool {
     stop_reason.is_none()
 }
 
-/// OpenAI reasoning models (the `o1`/`o3`/`o4` families and `gpt-5`) reject any
-/// non-default `temperature` with a 400, so the request builder omits it for
-/// them (#124). Matches the bare model id (any `provider/` prefix stripped).
-fn is_reasoning_model(model_name: &str) -> bool {
-    let m = model_name.rsplit('/').next().unwrap_or(model_name);
-    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-5")
-}
-
 /// OpenAI-compatible model adapter.
 ///
 /// Constructed via `OpenAICompatAdapter::new` from `providers::factory::ProviderFactory` once the
@@ -338,10 +330,12 @@ impl OpenAICompatAdapter {
             "messages": json_messages,
             "stream": stream,
         });
+        // Temperature is sent only for models that accept it (catalog column):
         // OpenAI o-series / gpt-5 reasoning models reject any non-default
-        // `temperature` with a 400, so it's sent only for models that accept it
-        // (#124). Clamp to the accepted 0..=2 (a stale config value otherwise 400s).
-        if !is_reasoning_model(&self.model_name) {
+        // `temperature` with a 400 (#124), and gateway-served claude-opus-4-7+
+        // ids reject sampling params the same way. Clamp to the accepted 0..=2
+        // (a stale config value otherwise 400s).
+        if crate::models::catalog::lookup(&self.model_name).supports_temperature {
             body["temperature"] = json!(config.temperature.clamp(0.0, 2.0));
         }
 
@@ -815,50 +809,6 @@ impl OpenAICompatAdapter {
     }
 }
 
-/// Best-effort per-model vision detection for OpenAI-compatible endpoints.
-/// Vision is a property of the MODEL, not the provider, so this matches known
-/// image-capable families by substring (the same model appears under many ids,
-/// e.g. `gpt-4o`, `openai/gpt-4o`, `anthropic/claude-3.5-sonnet`). Conservative:
-/// an unknown id is treated as text-only. The adapter serializes image parts
-/// unconditionally, so this only governs the capability we ADVERTISE (which
-/// `/doctor` and the no-vision warning read) — it never gates the send.
-fn model_supports_vision(model_name: &str) -> bool {
-    let m = model_name.to_ascii_lowercase();
-    const VISION_MARKERS: &[&str] = &[
-        // OpenAI
-        "gpt-4o",
-        "gpt-4.1",
-        "gpt-4-turbo",
-        "gpt-4-vision",
-        "gpt-5",
-        "chatgpt-4o",
-        // Anthropic (via OpenRouter / OpenAI-compat gateways)
-        "claude-3",
-        "claude-4",
-        "claude-opus-4",
-        "claude-sonnet-4",
-        "claude-haiku-4",
-        // Google
-        "gemini",
-        // Open multimodal families and generic vision markers
-        "-vision",
-        "-vl",
-        "vl-",
-        "llava",
-        "pixtral",
-        "internvl",
-        "molmo",
-        "llama-3.2-11b",
-        "llama-3.2-90b",
-        "llama-4",
-        "phi-3.5-vision",
-        "phi-4-multimodal",
-        "mistral-small-3",
-        "gemma-3",
-    ];
-    VISION_MARKERS.iter().any(|marker| m.contains(marker))
-}
-
 /// Derive `ModelCapabilities` from a `ProviderProfile` and model id. Reasoning
 /// support follows from the strategy:
 /// - `Effort` (OpenAI Chat Completions, Groq, Cerebras, Fireworks) advertises
@@ -898,7 +848,12 @@ fn derive_capabilities(profile: &ProviderProfile, model_name: &str) -> ModelCapa
     };
     ModelCapabilities {
         supports_tools: true,
-        supports_vision: model_supports_vision(model_name),
+        // Vision is a property of the MODEL, not the provider — the catalog's
+        // substring markers match known image-capable families under any id
+        // (`gpt-4o`, `openai/gpt-4o`, `anthropic/claude-3.5-sonnet`).
+        // Conservative: an unknown id is treated as text-only. This only
+        // governs the capability we ADVERTISE — it never gates the send.
+        supports_vision: crate::models::catalog::lookup(model_name).vision,
         supports_reasoning,
         // Unknown statically; discovered live from `/models` metadata by the
         // provider wrapper's `resolve_context_window` override.
@@ -1549,7 +1504,8 @@ mod tests {
     }
 
     #[test]
-    fn is_reasoning_model_matches_o_series_and_gpt5() {
+    fn reasoning_models_omit_temperature_per_catalog() {
+        use crate::models::catalog::lookup;
         for m in [
             "o1",
             "o1-mini",
@@ -1559,12 +1515,15 @@ mod tests {
             "gpt-5",
             "gpt-5-mini",
         ] {
-            assert!(is_reasoning_model(m), "{m} should be a reasoning model");
+            assert!(
+                !lookup(m).supports_temperature,
+                "{m} should omit temperature"
+            );
         }
         for m in ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "chatgpt-4o-latest"] {
             assert!(
-                !is_reasoning_model(m),
-                "{m} should not be a reasoning model"
+                lookup(m).supports_temperature,
+                "{m} should send temperature"
             );
         }
     }
@@ -1675,7 +1634,7 @@ mod tests {
             "meta-llama/llama-4-scout",
         ] {
             assert!(
-                model_supports_vision(vision),
+                crate::models::catalog::lookup(vision).vision,
                 "{vision} should be detected as vision-capable"
             );
         }
@@ -1687,7 +1646,7 @@ mod tests {
             "qwen/qwen2.5-coder-32b",
         ] {
             assert!(
-                !model_supports_vision(text_only),
+                !crate::models::catalog::lookup(text_only).vision,
                 "{text_only} should be detected as text-only"
             );
         }

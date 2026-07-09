@@ -40,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Data-driven model-capability catalog.** Thinking wire shape (anthropic
+  adaptive-vs-budget, gemini level-vs-budget floors, gpt-oss think-string),
+  temperature support, effort-tier ceiling, vision markers, static context
+  windows, and documented output ceilings now live in one first-match-wins
+  const table (`src/models/catalog.rs`) instead of model-name string gates
+  scattered across four adapters and the domain. Every known model's behavior
+  is pinned unchanged by table-driven tests; Ollama's `/api/show` probe stays
+  authoritative for local models. Two deliberate accuracy fixes: matching is
+  uniformly case-insensitive, and gpt-5/gpt-4.1's 400k static window now
+  applies through any provider (previously `openai/` only).
 - **Cloudflare Workers AI is now a built-in provider.** Reach Cloudflare-hosted
   models through their OpenAI-compatible endpoint with
   `mermaid --model cloudflare/@cf/<vendor>/<model>` — for example

@@ -133,11 +133,15 @@ pub struct OllamaAdapter {
     status_notify: Option<StreamCallback>,
 }
 
-/// True if the given model name is a gpt-oss variant. Matching is
-/// case-insensitive and prefix-based so tagged variants (`gpt-oss:20b`,
-/// `gpt-oss:120b-cloud`) and unknown future sizes all route correctly.
-fn is_gpt_oss(model_name: &str) -> bool {
-    model_name.to_lowercase().starts_with("gpt-oss")
+/// True if this model takes the gpt-oss `think: "low"|"medium"|"high"` string
+/// enum instead of Ollama's usual `think: bool` — per the capability catalog
+/// (case-insensitive prefix, so tagged variants like `gpt-oss:20b` and
+/// `gpt-oss:120b-cloud` all route correctly).
+fn uses_effort_string_think(model_name: &str) -> bool {
+    matches!(
+        crate::models::catalog::lookup(model_name).thinking,
+        crate::models::catalog::ThinkingShape::OllamaEffortString
+    )
 }
 
 /// Render the `think` field for an Ollama request.
@@ -158,7 +162,7 @@ fn think_for_ollama(
     level: ReasoningLevel,
     supports_thinking: bool,
 ) -> Option<serde_json::Value> {
-    if is_gpt_oss(model_name) {
+    if uses_effort_string_think(model_name) {
         let effort = match level {
             // gpt-oss can't truly disable thinking. `None` collapses to
             // `"low"` (the closest-to-off tier) rather than silently
@@ -202,7 +206,7 @@ impl OllamaAdapter {
         // Ollama's usual binary `think: bool`. Advertising `Levels` here
         // routes `ReasoningLevel::XHigh` / `Max` through `nearest_effort`
         // → `High`, which `think_for_ollama` then renders as `"high"`.
-        let capabilities = if is_gpt_oss(model_name) {
+        let capabilities = if uses_effort_string_think(model_name) {
             ModelCapabilities {
                 supports_tools: true,
                 supports_vision: false,
@@ -678,7 +682,7 @@ impl OllamaAdapter {
             "think reasoning={:?} supports_thinking={} shape={}",
             config.reasoning,
             supports_thinking,
-            if is_gpt_oss(&self.model_name) {
+            if uses_effort_string_think(&self.model_name) {
                 "string"
             } else {
                 "bool"
@@ -1140,7 +1144,7 @@ fn normalize_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TRUNCATION_MARKER, is_gpt_oss, normalize_url, push_capped};
+    use super::{TRUNCATION_MARKER, normalize_url, push_capped, uses_effort_string_think};
 
     // --- push_capped: response-size cap for streaming accumulators ---
 
@@ -1564,12 +1568,12 @@ mod tests {
     }
 
     #[test]
-    fn is_gpt_oss_matches_prefix_case_insensitive() {
-        assert!(is_gpt_oss("gpt-oss:20b"));
-        assert!(is_gpt_oss("gpt-oss:120b-cloud"));
-        assert!(is_gpt_oss("GPT-OSS:20b"));
-        assert!(!is_gpt_oss("qwen3-coder:30b"));
-        assert!(!is_gpt_oss("gpt-4o"));
+    fn gpt_oss_effort_string_matches_prefix_case_insensitive() {
+        assert!(uses_effort_string_think("gpt-oss:20b"));
+        assert!(uses_effort_string_think("gpt-oss:120b-cloud"));
+        assert!(uses_effort_string_think("GPT-OSS:20b"));
+        assert!(!uses_effort_string_think("qwen3-coder:30b"));
+        assert!(!uses_effort_string_think("gpt-4o"));
     }
 
     #[test]
