@@ -301,6 +301,30 @@ pub const REGISTRY: &[ProviderProfile] = &[
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
     },
+    ProviderProfile {
+        name: "cloudflare",
+        // Documentary placeholder only. Cloudflare Workers AI's real endpoint
+        // embeds a per-account id; `providers::factory` synthesizes the actual
+        // base_url at runtime from `CLOUDFLARE_ACCOUNT_ID` (or a
+        // `[providers.cloudflare].base_url` override). This literal is never used
+        // for chat requests — only by discovery surfaces (`status`, the
+        // best-effort `/models` probe).
+        base_url: "https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1",
+        api_key_env: "CLOUDFLARE_API_TOKEN",
+        key_hint: Some(
+            "create a token at https://dash.cloudflare.com/profile/api-tokens and set \
+             CLOUDFLARE_ACCOUNT_ID",
+        ),
+        extra_headers: &[],
+        // GLM-5.2 accepts `reasoning_effort` (Cloudflare documents it), so expose the
+        // reasoning-level selector via Effort — the same shape Cerebras uses. Non-reasoning
+        // Cloudflare models silently ignore the field.
+        reasoning_strategy: ReasoningStrategy::Effort,
+        // GLM-5.2 streams its thinking in `delta.reasoning_content`, like NVIDIA/DeepInfra.
+        reasoning_extraction: ReasoningExtraction::DeltaContentField("reasoning_content"),
+        max_tokens_param: MaxTokensParam::MaxTokens,
+        disable_parallel_tool_calls_for: &[],
+    },
 ];
 
 /// Look up a built-in provider by name. Case-insensitive.
@@ -337,6 +361,21 @@ mod tests {
     }
 
     #[test]
+    fn lookup_cloudflare_provider() {
+        let p = lookup_provider("cloudflare").expect("cloudflare is in the registry");
+        assert_eq!(p.name, "cloudflare");
+        assert_eq!(p.api_key_env, "CLOUDFLARE_API_TOKEN");
+        // Effort so the reasoning-level selector actually drives GLM-5.2 on Cloudflare
+        // (contrast the nvidia entry, which is None and inert).
+        assert_eq!(p.reasoning_strategy, ReasoningStrategy::Effort);
+        // GLM-5.2 streams its reasoning trace in `delta.reasoning_content`.
+        assert_eq!(
+            p.reasoning_extraction,
+            ReasoningExtraction::DeltaContentField("reasoning_content")
+        );
+    }
+
+    #[test]
     fn lookup_is_case_insensitive() {
         assert!(lookup_provider("OpenAI").is_some());
         assert!(lookup_provider("OPENROUTER").is_some());
@@ -348,8 +387,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_seven_providers() {
-        assert_eq!(REGISTRY.len(), 7);
+    fn registry_has_eight_providers() {
+        assert_eq!(REGISTRY.len(), 8);
     }
 
     #[test]

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cloudflare Workers AI is now a built-in provider.** Reach Cloudflare-hosted
+  models through their OpenAI-compatible endpoint with
+  `mermaid --model cloudflare/@cf/<vendor>/<model>` — for example
+  `cloudflare/@cf/zai-org/glm-5.2` (GLM-5.2). Set `CLOUDFLARE_API_TOKEN` and
+  `CLOUDFLARE_ACCOUNT_ID` (the account id is spliced into the endpoint URL), or
+  point `[providers.cloudflare].base_url` at a full account-scoped URL / AI
+  Gateway endpoint. Exposes the reasoning-level selector and streams GLM-5.2's
+  thinking trace.
 - **Startup process hardening + per-turn timing.** On Linux, Mermaid now disables
   core dumps (`RLIMIT_CORE=0`) and ptrace attachment (`PR_SET_DUMPABLE=0`) at
   startup, so a crash can't leave a core file carrying secrets and the process

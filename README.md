@@ -4,7 +4,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 
 ## Features
 
-- **Multi-Provider** — Ollama (local/cloud), Anthropic Claude, Google Gemini, OpenAI, Groq, OpenRouter, Cerebras, DeepInfra, Together, NVIDIA NIM, plus fully-custom OpenAI-compatible endpoints
+- **Multi-Provider** — Ollama (local/cloud), Anthropic Claude, Google Gemini, OpenAI, Groq, OpenRouter, Cerebras, DeepInfra, Together, NVIDIA NIM, Cloudflare Workers AI, plus fully-custom OpenAI-compatible endpoints
 - **Native Tool Calling** — read, write, edit, delete, create directories, execute commands, search the web, spawn subagents, and call configured MCP tools
 - **Computer Use** — screenshot, click, type, press keys, scroll, move the mouse, and list windows on supported interactive GUI backends
 - **Subagents** — spawn parallel autonomous agents for independent tasks; built-in `general` and read-only `explore` types (plus user-defined ones), per-call model override, and continuation handles to follow up with a child that kept its context
@@ -124,6 +124,7 @@ mermaid --model gemini/<model>                  # Gemini (requires GOOGLE_API_KE
 mermaid --model openai/<model>                  # OpenAI (requires OPENAI_API_KEY)
 mermaid --model groq/<model>                    # Groq (requires GROQ_API_KEY)
 mermaid --model nvidia/z-ai/glm-5.2             # NVIDIA NIM (requires NVIDIA_API_KEY)
+mermaid --model cloudflare/@cf/zai-org/glm-5.2  # Cloudflare Workers AI (CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID)
 mermaid --reasoning high                        # Override default reasoning depth
 mermaid --path /path/to/project                  # Run against a specific project directory
 mermaid --record /tmp/session.jsonl              # Record reducer events for replay/debugging
@@ -438,7 +439,10 @@ Set the appropriate environment variable (or override via `[providers.<name>].ap
 | DeepInfra | `DEEPINFRA_API_KEY` | `deepinfra/<vendor>/<model>` |
 | Together | `TOGETHER_API_KEY` | `together/<vendor>/<model>` |
 | NVIDIA NIM | `NVIDIA_API_KEY` | `nvidia/<vendor>/<model>` |
+| Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | `cloudflare/@cf/<vendor>/<model>` |
 | Ollama Cloud | `OLLAMA_API_KEY` | `ollama/<model>:cloud` |
+
+Cloudflare Workers AI needs both `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` (the account id is spliced into the account-scoped endpoint URL); alternatively set `[providers.cloudflare].base_url` to a full account-scoped URL or an AI Gateway endpoint. Example model: `cloudflare/@cf/zai-org/glm-5.2`.
 
 Ollama Cloud models authenticate via `OLLAMA_API_KEY`. The web tools don't require it: `web_fetch` is native, and `web_search` defaults to `auto` — Ollama Cloud when the key is set, otherwise a mermaid-managed local SearXNG (see [Web tool backends](#web-tool-backends)). Use `mermaid cloud-setup` from your shell to set the key for cloud models; `/cloud-setup` in the TUI points back to that shell command.
 
