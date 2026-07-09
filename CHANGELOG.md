@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Render snapshot suite.** Nine curated TUI scenes (idle, transcript,
+  streaming, tool execution with a queued message, approval modal, question
+  modal, conversation picker, slash palette, system notice + compaction
+  checkpoint) are now pinned as full-frame `insta` snapshots at 80x24 and
+  120x40, with a determinism self-check. Any unintended visual drift fails CI
+  with a diff; deliberate changes are reviewed with `just snapshots` and the
+  updated `.snap` files ride in the same PR.
+
 - **Context windows and output caps are now discovered live, not hardcoded.**
   Anthropic and Gemini turns fetch the model's real limits from their models
   endpoints (`max_input_tokens`/`max_tokens`, `inputTokenLimit`/

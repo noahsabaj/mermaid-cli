@@ -96,6 +96,9 @@ htmd = "0.5.4"
 temp-env = { version = "0.3", features = ["async_closure"] }
 # Real pseudo-terminal harness for exit/terminal-mode regression tests.
 portable-pty = "0.9"
+# Snapshot suite for `render()` — pins full TUI frames for curated scenes
+# (src/render/snapshots.rs); review drift with `just snapshots`.
+insta = "1"
 
 [profile.release]
 lto = true

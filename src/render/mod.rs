@@ -684,6 +684,38 @@ fn supported_reasoning_for(_state: &State) -> Option<ReasoningCapability> {
     None
 }
 
+/// Render one frame into a plain-text character grid at the given size.
+/// Test-only: shared by the unit tests below and the snapshot suite
+/// (`snapshots.rs`), which needs to control both the frame size and the
+/// `RenderCache` (pinned hostname/username).
+#[cfg(test)]
+pub(crate) fn render_frame(
+    state: &State,
+    rstate: &mut RenderCache,
+    width: u16,
+    height: u16,
+) -> String {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal.draw(|f| render(state, rstate, f)).expect("draw");
+    let buf = terminal.backend().buffer();
+    let mut out = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+// TZ-sensitive (`temp_env` TZ pinning) and fixture scripts assume unix paths;
+// the unit tests above already cover Windows-relevant logic.
+#[cfg(all(test, unix))]
+mod snapshots;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,21 +735,7 @@ mod tests {
     }
 
     fn render_to_string(state: &State) -> String {
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        let mut rstate = RenderCache::new();
-        terminal
-            .draw(|f| render(state, &mut rstate, f))
-            .expect("draw");
-        let buf = terminal.backend().buffer();
-        let mut out = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                out.push_str(buf[(x, y)].symbol());
-            }
-            out.push('\n');
-        }
-        out
+        render_frame(state, &mut RenderCache::new(), 80, 24)
     }
 
     fn render_to_buffer(state: &State) -> ratatui::buffer::Buffer {

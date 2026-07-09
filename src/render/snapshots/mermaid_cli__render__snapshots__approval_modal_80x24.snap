@@ -1,0 +1,28 @@
+---
+source: src/render/snapshots.rs
+expression: frame
+---
+ > clean the workspace                              January 2nd, 2026 at 3:04am 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+────────────────────────────────────────────────────────────────────────────────
+>                                                                               
+────────────────────────────────────────────────────────────────────────────────
+┌Approval required — execute_command  [destructive]────────────────────────────┐
+│rm -rf target/                                                                │
+│                                                                              │
+│  1. Yes                                                                      │
+│  2. Yes, and don't ask again for `execute_command(rm)`                       │
+│  3. No  (Esc)                                                                │
+└──────────────────────────────────────────────────────────────────────────────┘
