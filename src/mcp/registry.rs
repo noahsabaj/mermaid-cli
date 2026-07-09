@@ -282,10 +282,20 @@ pub async fn validate_server(
     env: &HashMap<String, String>,
 ) -> Result<Vec<String>> {
     let args = build_launch_args(command, package, extra_args)?;
+    validate_argv(command, &args, env).await
+}
 
+/// Spawn `command argv`, MCP-initialize, list tools, then shut the child down on
+/// every path. Shared by registry validation and raw `--command` registration
+/// (which passes its verbatim argv, bypassing the package-launcher conventions).
+pub async fn validate_argv(
+    command: &str,
+    argv: &[String],
+    env: &HashMap<String, String>,
+) -> Result<Vec<String>> {
     let transport = tokio::time::timeout(
         Duration::from_secs(60),
-        StdioTransport::spawn(command, &args, env),
+        StdioTransport::spawn(command, argv, env),
     )
     .await
     .map_err(|_| {

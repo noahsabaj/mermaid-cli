@@ -473,11 +473,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     e.tools = tools.clone();
                 })
                 .or_insert_with(|| McpServerEntry {
-                    config: crate::app::McpServerConfig {
-                        command: String::new(),
-                        args: Vec::new(),
-                        env: std::collections::HashMap::new(),
-                    },
+                    config: crate::app::McpServerConfig::default(),
                     status: McpServerStatus::Ready,
                     tools,
                 });
@@ -492,11 +488,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 .entry(name.clone())
                 .and_modify(|e| e.status = status.clone())
                 .or_insert_with(|| McpServerEntry {
-                    config: crate::app::McpServerConfig {
-                        command: String::new(),
-                        args: Vec::new(),
-                        env: std::collections::HashMap::new(),
-                    },
+                    config: crate::app::McpServerConfig::default(),
                     status,
                     tools: Vec::new(),
                 });
@@ -3822,6 +3814,8 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
             entry
                 .tools
                 .iter()
+                // Honor the per-server enabled_tools/disabled_tools filter.
+                .filter(move |tool| entry.config.tool_allowed(&tool.name))
                 .map(move |tool| crate::domain::ToolDefinition {
                     name: format!("mcp__{}__{}", server_name, tool.name),
                     description: tool.description.clone(),
@@ -7126,6 +7120,7 @@ mod tests {
                     command: "echo".to_string(),
                     args: vec![],
                     env: std::collections::HashMap::new(),
+                    ..Default::default()
                 },
                 status: McpServerStatus::Starting,
                 tools: vec![],
@@ -7157,6 +7152,7 @@ mod tests {
                         command: "echo".to_string(),
                         args: vec![],
                         env: std::collections::HashMap::new(),
+                        ..Default::default()
                     },
                     status: McpServerStatus::Ready,
                     tools: vec![crate::domain::state::McpToolSpec {
@@ -7192,6 +7188,7 @@ mod tests {
                     command: "echo".to_string(),
                     args: vec![],
                     env: std::collections::HashMap::new(),
+                    ..Default::default()
                 },
                 status: McpServerStatus::Starting,
                 tools: vec![],

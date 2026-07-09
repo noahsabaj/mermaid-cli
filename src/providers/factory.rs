@@ -40,6 +40,69 @@ fn require_key_with_fallback(
     })
 }
 
+/// Resolve an API key, or `None` when the key is absent AND the endpoint is a
+/// loopback/LAN host — local OpenAI-compatible servers (llama.cpp, vLLM, LM
+/// Studio) legitimately run without auth. A missing key for a public endpoint
+/// is a hard error carrying the provider's `hint` so the message is actionable.
+fn resolve_optional_key(
+    provider: &str,
+    env_var: &str,
+    base_url: &str,
+    hint: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(key) = resolve_api_key(env_var, None) {
+        return Ok(Some(key));
+    }
+    if base_url_is_local(base_url) {
+        return Ok(None);
+    }
+    let mut msg = format!("{provider} requires env var {env_var}");
+    if let Some(h) = hint {
+        msg.push_str(" — ");
+        msg.push_str(h);
+    }
+    Err(ModelError::Authentication(msg))
+}
+
+/// True when `base_url`'s host is a loopback or private/LAN address — where a
+/// local model server legitimately runs without auth.
+fn base_url_is_local(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| crate::utils::classify_host(h).is_internal())
+        })
+        .unwrap_or(false)
+}
+
+/// The header set sent on every request: the profile's static `extra_headers`
+/// first, then user `extra_headers` overrides, then env-sourced `env_headers`
+/// (header name -> env var, resolved now since env is process-static). This
+/// restores the profile's static headers (e.g. OpenRouter analytics) that the
+/// prior registry path dropped.
+fn merged_headers(
+    profile: &crate::models::ProviderProfile,
+    user_cfg: Option<&crate::app::UserProviderConfig>,
+) -> std::collections::HashMap<String, String> {
+    let mut headers: std::collections::HashMap<String, String> = profile
+        .extra_headers
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    if let Some(cfg) = user_cfg {
+        for (k, v) in &cfg.extra_headers {
+            headers.insert(k.clone(), v.clone());
+        }
+        for (header, env_var) in &cfg.env_headers {
+            if let Ok(val) = std::env::var(env_var) {
+                headers.insert(header.clone(), val);
+            }
+        }
+    }
+    headers
+}
+
 use super::model::{
     AnthropicProvider, GeminiProvider, ModelProvider, OllamaProvider, OpenAICompatProvider,
 };
@@ -166,10 +229,11 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
         let api_key_env = user_cfg
             .and_then(|c| c.api_key_env.as_deref())
             .unwrap_or(profile.api_key_env);
-        let api_key = require_key(&provider_lc, api_key_env)?;
-        let extra_headers = user_cfg
-            .map(|c| c.extra_headers.clone())
-            .unwrap_or_default();
+        // Keyless when the key is unset and the endpoint is local (a registry
+        // provider pointed at a loopback/LAN base_url); otherwise a clear,
+        // hint-carrying auth error.
+        let api_key = resolve_optional_key(&provider_lc, api_key_env, &base_url, profile.key_hint)?;
+        let extra_headers = merged_headers(profile, user_cfg);
         let p = OpenAICompatProvider::new(
             profile,
             base_url,
@@ -191,20 +255,33 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
                 provider_lc
             ))
         })?;
-        validate_provider_base_url(&base_url)?;
-        let api_key_env = user_cfg.api_key_env.as_deref().ok_or_else(|| {
-            ModelError::InvalidRequest(format!(
-                "custom provider '{}' requires api_key_env in config",
-                provider_lc
-            ))
-        })?;
-        let api_key = require_key(&provider_lc, api_key_env)?;
+        // api_key_env is optional: a local (loopback/LAN) endpoint may run
+        // keyless. When a key IS used, harden the URL so it can't be sent in
+        // cleartext; a keyless endpoint must be local (no secret to leak).
+        let api_key_env = user_cfg.api_key_env.as_deref();
+        let api_key = match api_key_env.and_then(|env| resolve_api_key(env, None)) {
+            Some(key) => {
+                validate_provider_base_url(&base_url)?;
+                Some(key)
+            },
+            None if base_url_is_local(&base_url) => None,
+            None => {
+                let reason = match api_key_env {
+                    Some(env) => format!("requires env var {env} (or a loopback/LAN base_url)"),
+                    None => "requires api_key_env, or a loopback/LAN base_url".to_string(),
+                };
+                return Err(ModelError::Authentication(format!(
+                    "custom provider '{provider_lc}' {reason}"
+                )));
+            },
+        };
+        let extra_headers = merged_headers(profile, Some(user_cfg));
         let p = OpenAICompatProvider::new(
             profile,
             base_url,
             api_key,
             model_name.to_string(),
-            user_cfg.extra_headers.clone(),
+            extra_headers,
         )?;
         return Ok(Box::new(p));
     }
@@ -297,6 +374,7 @@ fn user_profile_to_static(
         name: Box::leak(name.to_string().into_boxed_str()),
         base_url: Box::leak(base_url.into_boxed_str()),
         api_key_env: Box::leak(api_key_env.into_boxed_str()),
+        key_hint: None,
         extra_headers: &[],
         reasoning_strategy: strategy,
         reasoning_extraction: ReasoningExtraction::None,
@@ -412,6 +490,57 @@ fn should_warn_once(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_url_is_local_classifies_hosts() {
+        assert!(base_url_is_local("http://127.0.0.1:8000/v1"));
+        assert!(base_url_is_local("http://localhost:1234/v1"));
+        assert!(base_url_is_local("http://192.168.1.5:8000/v1"));
+        assert!(!base_url_is_local("https://api.openai.com/v1"));
+        assert!(!base_url_is_local("not a url"));
+    }
+
+    #[test]
+    fn merged_headers_keeps_static_profile_headers_and_user_overrides() {
+        let profile = crate::models::lookup_provider("openrouter").unwrap();
+        // No user config: the static profile headers survive (the latent-bug fix).
+        let base = merged_headers(profile, None);
+        assert_eq!(
+            base.get("X-OpenRouter-Title").map(String::as_str),
+            Some("Mermaid")
+        );
+        assert!(base.contains_key("HTTP-Referer"));
+        // User extra_headers merge on top and can override a static one.
+        let mut cfg = crate::app::UserProviderConfig::default();
+        cfg.extra_headers.insert("X-Custom".into(), "v".into());
+        cfg.extra_headers
+            .insert("X-OpenRouter-Title".into(), "Override".into());
+        let merged = merged_headers(profile, Some(&cfg));
+        assert_eq!(merged.get("X-Custom").map(String::as_str), Some("v"));
+        assert_eq!(
+            merged.get("X-OpenRouter-Title").map(String::as_str),
+            Some("Override")
+        );
+        assert!(merged.contains_key("HTTP-Referer"));
+    }
+
+    #[test]
+    fn merged_headers_resolves_env_headers_and_skips_missing() {
+        let profile = crate::models::lookup_provider("openai").unwrap();
+        let mut cfg = crate::app::UserProviderConfig::default();
+        cfg.env_headers
+            .insert("X-Gateway-Token".into(), "MERMAID_TEST_GW_TOKEN".into());
+        temp_env::with_var("MERMAID_TEST_GW_TOKEN", Some("secret123"), || {
+            let merged = merged_headers(profile, Some(&cfg));
+            assert_eq!(
+                merged.get("X-Gateway-Token").map(String::as_str),
+                Some("secret123")
+            );
+        });
+        temp_env::with_var("MERMAID_TEST_GW_TOKEN", None::<&str>, || {
+            assert!(!merged_headers(profile, Some(&cfg)).contains_key("X-Gateway-Token"));
+        });
+    }
 
     #[test]
     fn base_url_requires_https_for_remote_hosts() {
