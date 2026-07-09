@@ -432,6 +432,16 @@ impl OllamaAdapter {
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| ModelError::StreamError(e.to_string()))?;
+            // A stream that never sends a newline would otherwise grow
+            // `line_buffer` without bound. At this point it holds only the
+            // un-terminated residue from the previous drain, so this never trips
+            // on legitimately buffered complete lines — mirrors the SSE cap (R5).
+            if line_buffer.len() > crate::constants::MAX_SSE_BUFFER_BYTES {
+                return Err(ModelError::StreamError(format!(
+                    "NDJSON stream exceeded {} byte reassembly cap without a complete line",
+                    crate::constants::MAX_SSE_BUFFER_BYTES
+                )));
+            }
             line_buffer.extend_from_slice(&chunk);
 
             for line in drain_complete_lines(&mut line_buffer) {

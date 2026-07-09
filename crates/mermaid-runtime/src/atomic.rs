@@ -27,24 +27,36 @@ const STALE_TEMP_SECS: u64 = 3600;
 /// `sync_all` → rename over the destination. The rename is atomic on the same
 /// filesystem (and replaces an existing target on both Unix and Windows).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_inner(path, bytes, None)
+}
+
+/// Like [`write_atomic`], but create the temp file with the given Unix
+/// permission `mode` (e.g. `0o600`) so the renamed destination is never even
+/// briefly world-readable. `mode` is ignored on non-Unix, where directory ACLs
+/// scope the file. Use this for secret-bearing files such as the config.
+pub fn write_atomic_with_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    write_atomic_inner(path, bytes, Some(mode))
+}
+
+fn write_atomic_inner(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 
     let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
 
     // Best-effort: clear temp siblings stranded by a previous crashed write to
-    // this same target. A crash between the `File::create(tmp)` and `rename`
-    // below leaves `.<stem>.<pid>.<n>.tmp` behind forever (cleanup otherwise runs
-    // only on rename-error or success), so without this repeated crashes would
-    // litter the directory. The sweep only removes clearly abandoned (stale) temps
-    // and never the destination or a fresh/in-flight temp.
+    // this same target. A crash between the temp create and `rename` below leaves
+    // `.<stem>.<pid>.<n>.tmp` behind forever (cleanup otherwise runs only on
+    // rename-error or success), so without this repeated crashes would litter the
+    // directory. The sweep only removes clearly abandoned (stale) temps and never
+    // the destination or a fresh/in-flight temp.
     sweep_stale_temps(parent, stem, Duration::from_secs(STALE_TEMP_SECS));
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".{}.{}.{}.tmp", stem, std::process::id(), n));
 
     {
-        let mut f = File::create(&tmp)?;
+        let mut f = create_temp(&tmp, mode)?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
@@ -60,6 +72,29 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+/// Create the temp file, honoring an explicit Unix `mode` when given so a secret
+/// file is written 0600 from the start rather than at the process umask.
+#[cfg(unix)]
+fn create_temp(tmp: &Path, mode: Option<u32>) -> std::io::Result<File> {
+    match mode {
+        Some(mode) => {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(mode)
+                .open(tmp)
+        },
+        None => File::create(tmp),
+    }
+}
+
+#[cfg(not(unix))]
+fn create_temp(tmp: &Path, _mode: Option<u32>) -> std::io::Result<File> {
+    File::create(tmp)
 }
 
 /// Best-effort sweep of orphaned temp siblings for the target named `stem` in
@@ -167,6 +202,40 @@ mod tests {
         sweep_stale_temps(&dir, "conv.json", Duration::from_secs(STALE_TEMP_SECS));
 
         assert!(fresh.exists(), "a fresh/in-flight temp must not be swept");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_atomic_with_mode_creates_0600_and_leaves_no_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("mermaid_atomic_mode_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+        let target = dir.join("config.toml");
+
+        write_atomic_with_mode(&target, b"secret = true", 0o600).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "secret = true");
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config must be created 0600, not at umask");
+
+        // Overwriting a world-readable pre-existing file re-creates it 0600 (the
+        // renamed 0600 temp replaces the old file).
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic_with_mode(&target, b"secret = false", 0o600).unwrap();
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "an overwrite must not leave the file world-readable"
+        );
+
+        let leftovers = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0, "no temp left behind");
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

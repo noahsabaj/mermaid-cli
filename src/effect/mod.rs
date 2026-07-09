@@ -51,6 +51,7 @@ use crate::models::{ModelError, TokenUsage};
 use crate::providers::ctx::{ExecContext, StreamContext};
 use crate::providers::model::ModelProvider;
 use crate::providers::{ProviderFactory, StreamEvent, ToolRegistry};
+use crate::utils::{join_logged, spawn_guarded};
 
 pub use middleware::{DEFAULT_MAX_ATTEMPTS, retry_transient_http};
 pub use turn_scope::TurnScope;
@@ -662,12 +663,20 @@ impl EffectRunner {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
                 self.detached.spawn(async move {
-                    if let Ok(manager) = crate::session::ConversationManager::new(&workdir)
-                        && manager.save_conversation(&history).is_ok()
-                    {
-                        let _ = tx.send(Msg::SessionSaved).await;
-                    } else {
-                        tracing::warn!("SaveConversation: failed to write to disk");
+                    match crate::session::ConversationManager::new(&workdir) {
+                        Ok(manager) => match manager.save_conversation(&history) {
+                            Ok(_) => {
+                                let _ = tx.send(Msg::SessionSaved).await;
+                            },
+                            Err(err) => tracing::warn!(
+                                error = %err,
+                                "SaveConversation: failed to write conversation to disk"
+                            ),
+                        },
+                        Err(err) => tracing::warn!(
+                            error = %err,
+                            "SaveConversation: failed to open the conversation manager"
+                        ),
                     }
                 });
             },
@@ -714,12 +723,13 @@ impl EffectRunner {
                                 )
                                 .await;
                             }
-                            if manager.save_conversation(&conversation).is_ok() {
-                                let _ = tx.send(Msg::SessionSaved).await;
-                            } else {
+                            if let Err(err) = manager.save_conversation(&conversation) {
                                 tracing::warn!(
+                                    error = %err,
                                     "SaveCompactionArchive: archive persisted but conversation save failed"
                                 );
+                            } else {
+                                let _ = tx.send(Msg::SessionSaved).await;
                             }
                         },
                         Err(err) => {
@@ -762,22 +772,32 @@ impl EffectRunner {
             },
             Cmd::PersistLastModel(model) => {
                 self.detached.spawn(async move {
-                    let _ = crate::app::persist_last_model(&model);
+                    if let Err(err) = crate::app::persist_last_model(&model) {
+                        tracing::warn!(error = %err, "failed to persist last-used model");
+                    }
                 });
             },
             Cmd::PersistReasoningFor { model_id, level } => {
                 self.detached.spawn(async move {
-                    let _ = crate::app::persist_reasoning_for_model(&model_id, level);
+                    if let Err(err) = crate::app::persist_reasoning_for_model(&model_id, level) {
+                        tracing::warn!(error = %err, "failed to persist reasoning level for model");
+                    }
                 });
             },
             Cmd::PersistOllamaNumCtxFor { model_id, num_ctx } => {
                 self.detached.spawn(async move {
-                    let _ = crate::app::persist_ollama_num_ctx_for_model(&model_id, num_ctx);
+                    if let Err(err) =
+                        crate::app::persist_ollama_num_ctx_for_model(&model_id, num_ctx)
+                    {
+                        tracing::warn!(error = %err, "failed to persist Ollama num_ctx for model");
+                    }
                 });
             },
             Cmd::PersistOllamaOffload(enabled) => {
                 self.detached.spawn(async move {
-                    let _ = crate::app::persist_ollama_allow_ram_offload(enabled);
+                    if let Err(err) = crate::app::persist_ollama_allow_ram_offload(enabled) {
+                        tracing::warn!(error = %err, "failed to persist Ollama RAM-offload setting");
+                    }
                 });
             },
             Cmd::ListMemory => {
@@ -1294,48 +1314,6 @@ impl EffectRunner {
 /// cached) and streams its events onto the Msg channel. Without a
 /// bound `ProviderFactory` (unit tests), emits a single
 /// `UpstreamError` so the reducer ends the turn cleanly.
-/// Await a sibling relay task's handle, logging a panic (but not a normal
-/// post-cancellation abort). These relays run alongside the provider/tool call
-/// for streaming backpressure; awaiting their handle keeps a stray panic from
-/// vanishing the way a bare `let _ = handle.await` would (#58, #60).
-async fn join_logged(handle: tokio::task::JoinHandle<()>, what: &str) {
-    if let Err(e) = handle.await
-        && !e.is_cancelled()
-    {
-        tracing::warn!(error = %e, task = what, "effect: sibling relay task panicked");
-    }
-}
-
-/// Owns a sibling relay task so it cannot outlive its parent future as a detached
-/// task: if the parent is dropped before it `take()`s the handle for
-/// `join_logged`, the guard aborts the task on drop (#F39). On the normal path the
-/// handle is taken and awaited, so the drop is a no-op. The relay is already
-/// bounded by the turn `CancellationToken`; this makes the "every turn task is
-/// owned" invariant hold structurally rather than only behaviorally.
-struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
-
-impl AbortOnDrop {
-    fn take(mut self) -> tokio::task::JoinHandle<()> {
-        self.0.take().expect("AbortOnDrop::take called once")
-    }
-}
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.0 {
-            handle.abort();
-        }
-    }
-}
-
-/// `tokio::spawn` a relay, wrapped in an [`AbortOnDrop`] so the parent owns it.
-fn spawn_guarded<F>(fut: F) -> AbortOnDrop
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    AbortOnDrop(Some(tokio::spawn(fut)))
-}
-
 async fn dispatch_call_model(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
