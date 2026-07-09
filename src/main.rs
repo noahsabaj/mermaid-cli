@@ -142,10 +142,10 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_cli::app::Config) ->
 
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
 
-    // F6 `--continue` / `--sessions`: optionally load a prior
+    // F6 `--continue` / `--resume [id]`: optionally load a prior
     // conversation and seed the State with its history before the
     // first frame. Mutual exclusion is enforced by clap on Cli.
-    let seed_conversation = load_seed_conversation(&cwd, cli.continue_session, cli.resume)?;
+    let seed_conversation = load_seed_conversation(&cwd, cli.continue_session, &cli.resume, true)?;
 
     let recorder = match cli.record.as_ref() {
         Some(path) => Some(mermaid_cli::app::Recorder::open(path.clone())?),
@@ -163,40 +163,64 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_cli::app::Config) ->
     .await
 }
 
-/// Resolve `--continue` / `--sessions` into an optional seeded
-/// conversation. Returns `Ok(None)` when neither flag is set or no
-/// saved session is available.
+/// Resolve `--continue` / `--resume [id]` into an optional seeded
+/// conversation, shared by the interactive and headless dispatches.
+/// Returns `Ok(None)` when neither flag is set or no saved session is
+/// available. Bare `--resume` (the searchable picker) is interactive-only;
+/// the headless caller passes `interactive = false` and gets a clear error
+/// telling it to supply the id.
 fn load_seed_conversation(
     cwd: &std::path::Path,
     continue_session: bool,
-    resume_picker: bool,
+    resume: &Option<Option<String>>,
+    interactive: bool,
 ) -> Result<Option<mermaid_cli::session::ConversationHistory>> {
-    if !continue_session && !resume_picker {
-        return Ok(None);
-    }
-    let manager = ConversationManager::new(cwd)?;
     if continue_session {
-        return manager.load_last_conversation();
+        return ConversationManager::new(cwd)?.load_last_conversation();
     }
-    // --resume: the searchable picker. `select_conversation` owns its own
-    // mini-TUI — entering it before the main run loop keeps the two terminal
-    // modes from fighting. Pair each conversation with its on-disk size for
-    // the meta line; a stat failure just shows 0B rather than dropping the row.
-    let entries: Vec<SessionEntry> = manager
-        .list_conversations()?
-        .into_iter()
-        .map(|history| {
-            let path = manager
-                .conversations_dir()
-                .join(format!("{}.json", history.id));
-            let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            SessionEntry {
-                history,
-                size_bytes,
-            }
-        })
-        .collect();
-    select_conversation(entries, &manager, chrono::Local::now())
+    match resume {
+        None => Ok(None),
+        // --resume <id>: direct load, both modes. A missing/invalid id is a
+        // hard error — a caller that named a session must not silently start
+        // a fresh one.
+        Some(Some(id)) => {
+            let manager = ConversationManager::new(cwd)?;
+            let history = manager.load_conversation(id).map_err(|e| {
+                anyhow::anyhow!(
+                    "session {id} not found under {}/.mermaid/conversations: {e}",
+                    cwd.display()
+                )
+            })?;
+            Ok(Some(history))
+        },
+        Some(None) if !interactive => anyhow::bail!(
+            "--resume without a session id opens an interactive picker; \
+             pass --resume <session-id> or use --continue"
+        ),
+        // Bare --resume: the searchable picker. `select_conversation` owns its
+        // own mini-TUI — entering it before the main run loop keeps the two
+        // terminal modes from fighting. Pair each conversation with its
+        // on-disk size for the meta line; a stat failure just shows 0B rather
+        // than dropping the row.
+        Some(None) => {
+            let manager = ConversationManager::new(cwd)?;
+            let entries: Vec<SessionEntry> = manager
+                .list_conversations()?
+                .into_iter()
+                .map(|history| {
+                    let path = manager
+                        .conversations_dir()
+                        .join(format!("{}.json", history.id));
+                    let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    SessionEntry {
+                        history,
+                        size_bytes,
+                    }
+                })
+                .collect();
+            select_conversation(entries, &manager, chrono::Local::now())
+        },
+    }
 }
 
 async fn dispatch_non_interactive(
@@ -226,6 +250,13 @@ async fn dispatch_non_interactive(
         }
     }
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
+    // `--resume <id>` / `--continue` also work headless. A script asking for
+    // continuity must not silently start fresh, so `--continue` with no saved
+    // session is an error here (interactive mode tolerates it).
+    let seed = load_seed_conversation(&cwd, cli.continue_session, &cli.resume, false)?;
+    if cli.continue_session && seed.is_none() {
+        anyhow::bail!("--continue: no saved session found for {}", cwd.display());
+    }
     let runtime_task_id = create_run_task(&cwd, &model_id, &prompt, no_execute);
     let run_result = run_non_interactive_with(
         config,
@@ -236,6 +267,7 @@ async fn dispatch_non_interactive(
             no_execute,
             task_id: runtime_task_id.clone(),
             stream_ndjson: matches!(format, OutputFormat::Ndjson),
+            seed,
             ..RunOptions::default()
         },
     )
@@ -268,6 +300,11 @@ async fn dispatch_non_interactive(
     // final payload here.
     if !matches!(format, OutputFormat::Ndjson) {
         println!("{}", format_result(&result, format));
+    }
+    // Surface the session id for the plain-text formats on STDERR — stdout is
+    // the response payload scripts pipe (json/ndjson carry the id in-band).
+    if matches!(format, OutputFormat::Text | OutputFormat::Markdown) {
+        eprintln!("session: {}", result.session_id);
     }
 
     if !result.errors.is_empty() {

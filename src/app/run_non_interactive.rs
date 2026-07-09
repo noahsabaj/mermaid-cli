@@ -27,6 +27,9 @@ pub struct RunResult {
     pub reasoning: Option<String>,
     pub total_tokens: usize,
     pub errors: Vec<String>,
+    /// Conversation/session id that owns this run — resumable with
+    /// `mermaid run --resume <id>`.
+    pub session_id: String,
 }
 
 /// Per-invocation options for `run_non_interactive`.
@@ -56,6 +59,10 @@ pub struct RunOptions {
     /// for the daemon scheduler and every other caller, which own their own
     /// output.
     pub stream_ndjson: bool,
+    /// Saved conversation to seed the session with (`--resume <id>` /
+    /// `--continue`). The run appends to the SAME session id, so repeated
+    /// `--resume <id>` invocations chain naturally.
+    pub seed: Option<crate::session::ConversationHistory>,
 }
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
@@ -88,6 +95,16 @@ pub async fn run_non_interactive_with(
     let event_model = model_id.clone();
 
     let mut state = State::new(config.clone(), cwd.clone(), model_id, chrono::Local::now());
+    // `--resume <id>` / `--continue`: seed the session from the saved
+    // conversation (same machinery as the interactive path — meters restored,
+    // orphan tool pairs repaired via normalize_history), then backfill
+    // provenance blanks. The seeded id survives, so the run appends to the
+    // same `.mermaid/conversations/<id>.json`.
+    if let Some(history) = opts.seed.clone() {
+        state.seed_conversation(history);
+    }
+    crate::app::stamp_session_provenance(&mut state, &cwd);
+    let session_id = state.session.conversation.id.clone();
     let mut lifecycle = RuntimeLifecycle::new();
 
     // Load project instructions + the memory index synchronously. The
@@ -119,6 +136,7 @@ pub async fn run_non_interactive_with(
             cli_version: env!("CARGO_PKG_VERSION").to_string(),
             model: event_model,
             task_id: opts.task_id.clone(),
+            session_id: session_id.clone(),
         });
     }
 
@@ -225,6 +243,7 @@ pub async fn run_non_interactive_with(
             reasoning: result.reasoning.clone(),
             total_tokens: result.total_tokens as u64,
             errors: result.errors.clone(),
+            session_id: result.session_id.clone(),
         });
     }
     Ok(result)
@@ -240,6 +259,7 @@ fn emit_run_event(event: &RunEvent) {
 fn build_result(state: &State) -> RunResult {
     let mut out = RunResult {
         total_tokens: state.session.cumulative_token_usage.total_tokens,
+        session_id: state.session.conversation.id.clone(),
         ..RunResult::default()
     };
 
@@ -294,6 +314,7 @@ pub fn format_result(result: &RunResult, format: OutputFormat) -> String {
                 reasoning: result.reasoning.clone(),
                 total_tokens: result.total_tokens as u64,
                 errors: result.errors.clone(),
+                session_id: result.session_id.clone(),
             };
             serde_json::to_string_pretty(&event).unwrap_or_default()
         },

@@ -141,6 +141,10 @@ mermaid cloud-setup                             # Configure Ollama Cloud API key
 mermaid run "fix the tests"                     # Non-interactive mode
 mermaid run "explain main.rs" -f json           # JSON output (single typed object)
 mermaid run "explain main.rs" -f ndjson         # Streaming NDJSON events (SDK/scripting)
+mermaid --resume <id> run "and now the tests"   # Continue a saved session headless (id from
+                                                #   ndjson session_started/result, json result,
+                                                #   or the `session:` line on stderr)
+mermaid --continue run "keep going"             # Resume this directory's most recent session
 mermaid --no-network run "audit the code"       # Deny network to shell commands (Linux seccomp)
 mermaid --sandbox run "refactor this"           # Also confine writes to the project (Linux Landlock)
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)

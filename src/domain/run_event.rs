@@ -38,6 +38,11 @@ pub enum RunEvent {
         /// Durable runtime task id, when the run is task-backed.
         #[serde(default)]
         task_id: Option<String>,
+        /// Conversation/session id owning this run — pass it to
+        /// `mermaid run --resume <id>` to continue the session. Additive
+        /// (defaulted) so pre-existing recordings still deserialize.
+        #[serde(default)]
+        session_id: String,
     },
     /// A chunk of assistant answer text.
     Text {
@@ -107,6 +112,11 @@ pub enum RunEvent {
         total_tokens: u64,
         /// Errors encountered during the run (empty on success).
         errors: Vec<String>,
+        /// Conversation/session id owning this run (same as the
+        /// `session_started` line; repeated here so a consumer that only
+        /// reads the terminal line still gets it). Additive (defaulted).
+        #[serde(default)]
+        session_id: String,
     },
 }
 
@@ -221,6 +231,7 @@ mod tests {
                 cli_version: "9.9.9".to_string(),
                 model: "anthropic/claude-x".to_string(),
                 task_id: None,
+                session_id: "20260709_120000_000".to_string(),
             },
             RunEvent::Text {
                 delta: "hello".to_string(),
@@ -256,6 +267,7 @@ mod tests {
                 reasoning: None,
                 total_tokens: 1234,
                 errors: vec![],
+                session_id: "20260709_120000_000".to_string(),
             },
         ]
     }
@@ -266,7 +278,7 @@ mod tests {
     fn golden(ev: &RunEvent) -> &'static str {
         match ev {
             RunEvent::SessionStarted { .. } => {
-                r#"{"type":"session_started","protocol_version":1,"cli_version":"9.9.9","model":"anthropic/claude-x","task_id":null}"#
+                r#"{"type":"session_started","protocol_version":1,"cli_version":"9.9.9","model":"anthropic/claude-x","task_id":null,"session_id":"20260709_120000_000"}"#
             },
             RunEvent::Text { .. } => r#"{"type":"text","delta":"hello"}"#,
             RunEvent::Reasoning { .. } => r#"{"type":"reasoning","delta":"thinking"}"#,
@@ -282,7 +294,7 @@ mod tests {
                 r#"{"type":"turn_done","total_tokens":1234,"stop_reason":"stop"}"#
             },
             RunEvent::Result { .. } => {
-                r#"{"type":"result","response":"Hi there","reasoning":null,"total_tokens":1234,"errors":[]}"#
+                r#"{"type":"result","response":"Hi there","reasoning":null,"total_tokens":1234,"errors":[],"session_id":"20260709_120000_000"}"#
             },
         }
     }

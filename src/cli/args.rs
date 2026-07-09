@@ -27,10 +27,18 @@ pub struct Cli {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// Pick a past conversation to resume from a searchable list (this
-    /// directory's sessions). Like `claude --resume`.
-    #[arg(long, conflicts_with = "continue_session")]
-    pub resume: bool,
+    /// Resume a past conversation. Bare `--resume` opens a searchable picker
+    /// (interactive only); `--resume <SESSION_ID>` loads that session directly
+    /// and also works headless with `mermaid run`. Like `claude --resume`.
+    /// `None` = flag absent; `Some(None)` = bare (picker);
+    /// `Some(Some(id))` = direct load.
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        num_args = 0..=1,
+        conflicts_with = "continue_session"
+    )]
+    pub resume: Option<Option<String>>,
 
     /// Resume the most recent conversation in this directory. Like
     /// `claude --continue`.
@@ -593,12 +601,19 @@ mod tests {
 
     #[test]
     fn resume_and_continue_flags_parse_and_conflict() {
-        // Claude Code parity: `--resume` (picker) and `--continue` (last) both
-        // exist and are mutually exclusive. The old `--sessions` is gone.
+        // Claude Code parity: `--resume` (picker), `--resume <id>` (direct),
+        // and `--continue` (last) all exist; resume/continue are mutually
+        // exclusive. The old `--sessions` is gone.
         let resume = Cli::try_parse_from(["mermaid", "--resume"]).expect("--resume parses");
-        assert!(resume.resume && !resume.continue_session);
+        assert_eq!(resume.resume, Some(None));
+        assert!(!resume.continue_session);
+        let direct = Cli::try_parse_from(["mermaid", "--resume", "20260709_120000_000"])
+            .expect("--resume <id> parses");
+        assert_eq!(direct.resume, Some(Some("20260709_120000_000".to_string())));
+        let absent = Cli::try_parse_from(["mermaid"]).expect("no flag parses");
+        assert_eq!(absent.resume, None);
         let cont = Cli::try_parse_from(["mermaid", "--continue"]).expect("--continue parses");
-        assert!(cont.continue_session && !cont.resume);
+        assert!(cont.continue_session && cont.resume.is_none());
         assert!(
             Cli::try_parse_from(["mermaid", "--resume", "--continue"]).is_err(),
             "--resume and --continue must conflict"

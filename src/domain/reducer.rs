@@ -402,7 +402,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             );
         },
         Msg::UpstreamError { turn, error } => {
-            handle_upstream_error(&mut state, turn, error);
+            handle_upstream_error(&mut state, &mut cmds, turn, error);
         },
         Msg::TurnCancelled(turn) => {
             handle_turn_cancelled(&mut state, turn);
@@ -3783,7 +3783,12 @@ fn drain_next_queued_message(state: &mut State) {
     }
 }
 
-fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::UserFacingError) {
+fn handle_upstream_error(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    turn: TurnId,
+    error: crate::models::UserFacingError,
+) {
     // Defense in depth (F4): even though the stale-filter at the top of
     // `update_step` gates on `turn_id()`, re-check here so a future
     // refactor that weakens the filter can't silently wipe the active
@@ -3836,9 +3841,14 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
     };
     state.session.append(msg, state.now);
 
-    // A provider error ends the turn just like a normal completion — drain the
-    // queued-message FIFO so a message the user typed mid-turn isn't stranded
-    // until their next manual submit (it would otherwise run out of order).
+    // A provider error ends the turn just like a normal completion — persist
+    // the session too, so an errored headless run's emitted session id points
+    // at a real file (`mermaid run --resume <id>` after a failed run).
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+
+    // Drain the queued-message FIFO so a message the user typed mid-turn isn't
+    // stranded until their next manual submit (it would otherwise run out of
+    // order).
     drain_next_queued_message(state);
 }
 
@@ -6842,7 +6852,8 @@ mod tests {
             category: crate::models::ErrorCategory::Temporary,
             recoverable: true,
         };
-        super::handle_upstream_error(&mut state, TurnId(999), err);
+        let mut cmds = Vec::new();
+        super::handle_upstream_error(&mut state, &mut cmds, TurnId(999), err);
         // Active turn must be untouched and no error message committed.
         assert!(matches!(
             state.turn,
@@ -6862,7 +6873,7 @@ mod tests {
             category: crate::models::ErrorCategory::Temporary,
             recoverable: true,
         };
-        let (state, _) = update(
+        let (state, cmds) = update(
             state,
             Msg::UpstreamError {
                 turn: TurnId(1),
@@ -6870,6 +6881,12 @@ mod tests {
             },
         );
         assert!(matches!(state.turn, TurnState::Idle));
+        // The errored turn persists the session — a headless run's emitted
+        // session id must point at a real file even when the provider failed.
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
+            "upstream error must save the conversation"
+        );
         assert_eq!(state.session.messages().len(), 1);
         let m = &state.session.messages()[0];
         // Error surfaces through the ActionDisplay only — content is

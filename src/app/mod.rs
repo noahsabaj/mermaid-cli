@@ -34,3 +34,22 @@ pub use replay::{ReplayReport, replay_recording, run_replay};
 pub use run::{InteractiveOptions, run_interactive_with};
 pub use run_non_interactive::{RunOptions, RunResult, format_result, run_non_interactive_with};
 pub use terminal::TerminalGuard;
+
+/// Impure startup backfill of session provenance — the git branch (for the
+/// `--resume` picker), the git SHA at creation, and the CLI version. Done here
+/// rather than in `ConversationHistory::new` so the reducer stays
+/// deterministic for `--replay`. Only fills blanks: a resumed session keeps
+/// what it was saved with; an older session with no stored values gets
+/// backfilled on its next save. Shared by the interactive and headless paths.
+pub(crate) fn stamp_session_provenance(state: &mut crate::domain::State, cwd: &std::path::Path) {
+    let conversation = &mut state.session.conversation;
+    if conversation.git_branch.is_none() {
+        conversation.git_branch = crate::session::detect_git_branch(cwd);
+    }
+    if conversation.git_sha.is_none() {
+        conversation.git_sha = crate::session::detect_git_sha(cwd);
+    }
+    if conversation.cli_version.is_none() {
+        conversation.cli_version = Some(env!("CARGO_PKG_VERSION").to_string());
+    }
+}
