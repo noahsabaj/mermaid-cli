@@ -1,4 +1,4 @@
-use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERATURE};
+use crate::constants::{DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERATURE, LEGACY_DEFAULT_MAX_TOKENS};
 use crate::models::ReasoningLevel;
 use crate::runtime::{PolicyOverride, SafetyMode};
 use anyhow::{Context, Result};
@@ -522,7 +522,10 @@ impl Default for ModelSettings {
             provider: String::new(),
             name: String::new(),
             temperature: DEFAULT_TEMPERATURE,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            // 0 = AUTO: the model-scaled output budget (adapters omit the cap so
+            // the provider decides, or size it to the context window). A positive
+            // value set by the user is an explicit hard cap.
+            max_tokens: 0,
             reasoning: ReasoningLevel::default(),
         }
     }
@@ -659,7 +662,8 @@ impl Default for NonInteractiveConfig {
     fn default() -> Self {
         Self {
             output_format: String::from("text"),
-            max_tokens: DEFAULT_MAX_TOKENS,
+            // 0 = AUTO (see `ModelSettings::max_tokens`).
+            max_tokens: 0,
             no_execute: false,
         }
     }
@@ -693,8 +697,28 @@ pub fn load_config_with_overrides(overrides: &[String]) -> Result<(Config, Vec<S
     } else {
         toml::Table::new()
     };
+    migrate_legacy_max_tokens(&mut table);
     apply_cli_overrides(&mut table, overrides)?;
     finalize_config(table)
+}
+
+/// One-time migration for the AUTO output-budget change. Existing config files
+/// froze the old `default_model.max_tokens = 4096` default to disk (`save_config`
+/// serializes every field), which would otherwise pin the stale cap forever.
+/// Coerce that legacy value to `0` (AUTO) so upgraded users get the model-scaled
+/// budget. Applied to the on-disk table *before* CLI overrides, so an explicit
+/// `-c default_model.max_tokens=4096` still wins. The only unpreserved case is a
+/// user who hand-wrote exactly `4096` in config.toml — an unusual deliberate
+/// value, and AUTO is the better default regardless.
+fn migrate_legacy_max_tokens(table: &mut toml::Table) {
+    if let Some(dm) = table
+        .get_mut("default_model")
+        .and_then(|v| v.as_table_mut())
+        && dm.get("max_tokens").and_then(|v| v.as_integer())
+            == Some(LEGACY_DEFAULT_MAX_TOKENS as i64)
+    {
+        dm.insert("max_tokens".to_string(), toml::Value::Integer(0));
+    }
 }
 
 /// Deserialize a (possibly merged) config `Table` into `Config`, collecting the
@@ -961,6 +985,29 @@ fn resolve_model_profile_alias(requested: &str, config: &Config) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_default_max_tokens_migrates_to_auto() {
+        // The frozen pre-AUTO default (4096) on disk is coerced to 0 = AUTO…
+        let mut table: toml::Table =
+            toml::from_str("[default_model]\nmax_tokens = 4096\n").unwrap();
+        migrate_legacy_max_tokens(&mut table);
+        let (config, _) = finalize_config(table).unwrap();
+        assert_eq!(config.default_model.max_tokens, 0);
+
+        // …while any other explicit cap is preserved.
+        let mut table: toml::Table =
+            toml::from_str("[default_model]\nmax_tokens = 8192\n").unwrap();
+        migrate_legacy_max_tokens(&mut table);
+        let (config, _) = finalize_config(table).unwrap();
+        assert_eq!(config.default_model.max_tokens, 8192);
+
+        // A config without the key is untouched (stays the 0 default).
+        let mut table = toml::Table::new();
+        migrate_legacy_max_tokens(&mut table);
+        let (config, _) = finalize_config(table).unwrap();
+        assert_eq!(config.default_model.max_tokens, 0);
+    }
 
     #[test]
     fn finalize_config_flags_unknown_keys() {

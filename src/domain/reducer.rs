@@ -27,7 +27,6 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
-use crate::constants::DEFAULT_MAX_TOKENS;
 use crate::models::{ChatMessage, MessageRole};
 use crate::prompts::get_system_prompt;
 use crate::runtime::TaskStatus;
@@ -2569,13 +2568,15 @@ fn context_text(state: &State) -> String {
         }
         let num_predict = crate::models::adapters::ollama_sizing::default_ollama_num_predict(
             request.max_tokens,
-            request.reasoning,
             ctx.effective,
             next_snapshot.used_tokens,
         );
         lines.push(format!(
             "Output budget (num_predict): {}",
-            format_compact_count(num_predict as usize)
+            match num_predict {
+                Some(n) => format_compact_count(n as usize),
+                None => "auto (provider default)".to_string(),
+            }
         ));
         lines.push(format!(
             "RAM offload: {} (toggle with /context offload on|off)",
@@ -2610,7 +2611,7 @@ fn context_text(state: &State) -> String {
     }
 
     let policy = CompactionPolicy::default();
-    let response_reserve = policy.response_reserve(request.max_tokens);
+    let response_reserve = policy.response_reserve(&request);
     let usage_summary = match (next_snapshot.used_percent, next_snapshot.max_tokens) {
         (Some(percent), Some(_)) if percent >= policy.auto_threshold_percent => {
             format!("high ({percent}% used)")
@@ -3869,15 +3870,15 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // (deterministic / greedy decoding). `ModelSettings::default()` supplies
     // `DEFAULT_TEMPERATURE`, so a `0.0` reaching here is always a deliberate
     // choice, never "unset"; the old `> 0.0` guard silently clobbered it to
-    // `0.7`. (`max_tokens` keeps its `> 0` guard below: unlike temperature, `0`
-    // is not a meaningful generation cap, so it falls back to the default.)
+    // `0.7`.
     let settings = &state.settings.default_model;
     let temperature = settings.temperature;
-    let max_tokens = if settings.max_tokens > 0 {
-        settings.max_tokens
-    } else {
-        DEFAULT_MAX_TOKENS
-    };
+    // `max_tokens == 0` is AUTO: pass it through so each adapter applies the
+    // model-scaled output budget — OpenAI-compat/Gemini omit the field (the
+    // provider uses its own per-response max), Ollama sizes to `num_ctx`, and
+    // Anthropic resolves its documented per-model ceiling. A positive value is
+    // the user's explicit hard cap.
+    let max_tokens = settings.max_tokens;
 
     // MCP tools the model should see — each advertised by a Ready
     // server, fully-qualified as `mcp__<server>__<tool>`. The effect

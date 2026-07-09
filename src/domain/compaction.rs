@@ -83,8 +83,21 @@ impl Default for CompactionPolicy {
 }
 
 impl CompactionPolicy {
-    pub fn response_reserve(self, request_max_tokens: usize) -> usize {
-        request_max_tokens
+    /// Window room to hold back for the model's response when sizing
+    /// compaction. Decoupled from the on-wire output cap: an explicit user cap
+    /// is the best reserve estimate, but AUTO (`max_tokens == 0`) reserves the
+    /// baseline plus the reasoning headroom the level implies — a High/Max
+    /// turn needs more room before the window counts as "full".
+    pub fn response_reserve(self, request: &ChatRequest) -> usize {
+        let desired = if request.max_tokens > 0 {
+            request.max_tokens
+        } else {
+            self.min_response_reserve_tokens
+                + crate::models::adapters::output_budget::reasoning_output_reserve(
+                    request.reasoning,
+                )
+        };
+        desired
             .max(self.min_response_reserve_tokens)
             .min(self.max_response_reserve_tokens)
     }
@@ -206,7 +219,7 @@ pub fn should_auto_compact(
         return Err(CompactionSkip::NoKnownContextLimit);
     }
 
-    let reserve = policy.response_reserve(request.max_tokens);
+    let reserve = policy.response_reserve(request);
     let over_percent = snapshot
         .used_percent
         .is_some_and(|p| p >= policy.auto_threshold_percent);
@@ -228,7 +241,7 @@ pub fn context_exceeds_hard_limit(
     let Some(max_tokens) = snapshot.max_tokens else {
         return false;
     };
-    let reserve = policy.response_reserve(request.max_tokens);
+    let reserve = policy.response_reserve(request);
     snapshot.used_tokens.saturating_add(reserve) >= max_tokens
 }
 
@@ -275,7 +288,7 @@ pub fn prepare_compaction(
         .map(|m| m.content.clone());
 
     let max_input_tokens = max_context_tokens
-        .map(|max| max.saturating_sub(request.policy.response_reserve(request.chat.max_tokens)))
+        .map(|max| max.saturating_sub(request.policy.response_reserve(&request.chat)))
         .filter(|max| *max > 0)
         .unwrap_or(request.policy.summarizer_input_token_budget)
         .min(request.policy.summarizer_input_token_budget);
@@ -730,6 +743,32 @@ mod tests {
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
         }
+    }
+
+    #[test]
+    fn response_reserve_is_reasoning_aware_on_auto() {
+        let policy = CompactionPolicy::default();
+        let mut req = request_with(vec![ChatMessage::user("hello")]);
+
+        // AUTO: the reserve scales with the reasoning level instead of
+        // mirroring a send-cap that no longer exists.
+        req.max_tokens = 0;
+        req.reasoning = ReasoningLevel::None;
+        let base = policy.response_reserve(&req);
+        assert_eq!(base, policy.min_response_reserve_tokens);
+        req.reasoning = ReasoningLevel::Max;
+        let deep = policy.response_reserve(&req);
+        assert!(deep > base, "a Max-reasoning turn must reserve more room");
+        assert!(deep <= policy.max_response_reserve_tokens);
+
+        // An explicit cap is the best reserve estimate — honored (clamped).
+        req.max_tokens = 12_000;
+        assert_eq!(policy.response_reserve(&req), 12_000);
+        req.max_tokens = 1_000_000;
+        assert_eq!(
+            policy.response_reserve(&req),
+            policy.max_response_reserve_tokens
+        );
     }
 
     #[test]

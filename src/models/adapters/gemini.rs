@@ -1419,6 +1419,19 @@ mod tests {
     }
 
     #[test]
+    fn auto_max_tokens_omits_max_output_tokens() {
+        // `max_tokens == 0` is AUTO: omit `maxOutputTokens` so Gemini applies
+        // the model's own per-response maximum.
+        let adapter = test_adapter();
+        let config = ModelConfig {
+            max_tokens: 0,
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config);
+        assert!(body["generationConfig"].get("maxOutputTokens").is_none());
+    }
+
+    #[test]
     fn build_request_body_wraps_system_in_content_object() {
         let adapter = test_adapter();
         let messages = vec![ChatMessage::user("hi")];

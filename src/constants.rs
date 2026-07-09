@@ -12,7 +12,11 @@ pub const UI_MOUSE_SCROLL_LINES: u16 = 3;
 
 // Default Model Configuration
 pub const DEFAULT_TEMPERATURE: f32 = 0.7;
-pub const DEFAULT_MAX_TOKENS: usize = 4096;
+/// The pre-AUTO default output cap (the config default was 4096 until the
+/// model-scaled budget landed; `0` = AUTO is the default now). Kept ONLY so
+/// config loading can recognize the frozen legacy value on disk and migrate it
+/// to AUTO — never used to cap a request.
+pub const LEGACY_DEFAULT_MAX_TOKENS: usize = 4096;
 
 // Context Management
 /// Auto-compact once the fully-enriched request reaches this percentage
