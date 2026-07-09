@@ -23,6 +23,8 @@ pub struct Capabilities {
     pub supports_reasoning: ReasoningCapability,
     /// Maximum context window in tokens, if the adapter knows.
     pub max_context_tokens: Option<usize>,
+    /// The model's per-response output ceiling in tokens, if known.
+    pub max_output_tokens: Option<usize>,
     /// Does the provider emit a verifiable "thinking signature" that
     /// must round-trip on the next request (Anthropic's extended
     /// thinking)? When true, the reducer preserves the signature on
@@ -40,6 +42,7 @@ impl Capabilities {
             supports_vision: caps.supports_vision,
             supports_reasoning: caps.supports_reasoning.clone(),
             max_context_tokens: caps.max_context_tokens,
+            max_output_tokens: caps.max_output_tokens,
             // Only Anthropic emits signatures; we can't tell from
             // `ModelCapabilities` alone. Adapters set this explicitly.
             emits_thinking_signature: false,
@@ -64,11 +67,13 @@ mod tests {
             supports_vision: true,
             supports_reasoning: ReasoningCapability::Binary,
             max_context_tokens: Some(32_000),
+            max_output_tokens: Some(8_192),
         };
         let caps = Capabilities::from_legacy(&legacy);
         assert!(caps.supports_tools);
         assert!(caps.supports_vision);
         assert_eq!(caps.max_context_tokens, Some(32_000));
+        assert_eq!(caps.max_output_tokens, Some(8_192));
         assert!(!caps.emits_thinking_signature);
     }
 

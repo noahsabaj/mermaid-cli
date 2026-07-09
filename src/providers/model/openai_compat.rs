@@ -19,10 +19,11 @@ use crate::models::{
     Model, ModelConfig, ModelError, ProviderProfile, ReasoningChunk, Result, StreamCallback,
     StreamEvent as ModelStreamEvent,
 };
+use crate::runtime::{NewProviderProbe, RuntimeStore};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::ModelProvider;
+use super::{ContextSizing, ModelProvider, probe_is_stale};
 
 pub struct OpenAICompatProvider {
     adapter: OpenAICompatAdapter,
@@ -47,10 +48,99 @@ impl OpenAICompatProvider {
     }
 }
 
+/// Limits learned from one `/models` probe, cached per (provider, model) in
+/// `provider_probes`. A successful listing WITHOUT limit metadata (or with the
+/// model absent) is cached too — as `None`s — so providers that don't expose
+/// limits aren't re-fetched every turn. Fetch *failures* are never cached.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedLimits {
+    max_context_tokens: Option<usize>,
+    max_output_tokens: Option<usize>,
+}
+
+const LIMITS_PROBE_KEY: &str = "limits_probe";
+
+/// Load fresh cached limits, off the async runtime. Best-effort → `None`.
+async fn load_limits_from_db(provider: String, model: String) -> Option<CachedLimits> {
+    tokio::task::spawn_blocking(move || {
+        let store = RuntimeStore::open_default().ok()?;
+        let rec = store
+            .provider_probes()
+            .get(&provider, &model, LIMITS_PROBE_KEY)
+            .ok()??;
+        if probe_is_stale(&rec.probed_at) {
+            return None;
+        }
+        serde_json::from_str::<CachedLimits>(&rec.capability_value).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Persist probed limits for subsequent sessions. Best-effort.
+async fn save_limits_to_db(provider: String, model: String, limits: &CachedLimits) {
+    let value = match serde_json::to_string(limits) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let _ = tokio::task::spawn_blocking(move || -> Option<()> {
+        let store = RuntimeStore::open_default().ok()?;
+        store
+            .provider_probes()
+            .upsert(NewProviderProbe {
+                provider,
+                model_id: model,
+                capability_key: LIMITS_PROBE_KEY.into(),
+                capability_value: value,
+                confidence: "probed".into(),
+                error: None,
+            })
+            .ok()?;
+        Some(())
+    })
+    .await;
+}
+
 #[async_trait]
 impl ModelProvider for OpenAICompatProvider {
     fn capabilities(&self) -> &Capabilities {
         &self.capabilities
+    }
+
+    /// Live limit discovery: most OpenAI-compatible providers attach the
+    /// model's context window / output ceiling to their `/models` metadata
+    /// (OpenRouter, Cloudflare, …) — data mermaid previously discarded.
+    /// Cache-first via `provider_probes` (TTL-bounded), one live fetch on a
+    /// miss, static fallback (all `None`) when the provider exposes nothing or
+    /// the fetch fails.
+    async fn resolve_context_window(&self, request: &ChatRequest) -> ContextSizing {
+        let _ = request;
+        let provider = self.adapter.provider_name().to_string();
+        let model = Model::name(&self.adapter).to_string();
+        let limits = match load_limits_from_db(provider.clone(), model.clone()).await {
+            Some(cached) => Some(cached),
+            None => match self.adapter.list_models_detailed().await {
+                Ok(listings) => {
+                    let found = listings.into_iter().find(|m| m.id == model);
+                    let limits = CachedLimits {
+                        max_context_tokens: found.as_ref().and_then(|m| m.max_context_tokens),
+                        max_output_tokens: found.as_ref().and_then(|m| m.max_output_tokens),
+                    };
+                    save_limits_to_db(provider, model, &limits).await;
+                    Some(limits)
+                },
+                // Network/parse failure: don't cache; fall back to static.
+                Err(_) => None,
+            },
+        };
+        let window = limits.as_ref().and_then(|l| l.max_context_tokens);
+        ContextSizing {
+            model_max: window,
+            effective: window,
+            source: None,
+            max_output: limits.as_ref().and_then(|l| l.max_output_tokens),
+        }
     }
 
     async fn supports_vision(&self) -> Option<bool> {
