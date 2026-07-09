@@ -565,20 +565,28 @@ async fn maybe_spawn_tcp_listener() {
             if let Ok(local_addr) = listener.local_addr() {
                 if let Ok(dir) = mermaid_cli::runtime::data_dir() {
                     let tcp_file = dir.join("mermaidd.tcp");
-                    if std::fs::write(&tcp_file, local_addr.to_string()).is_ok() {
-                        // The hint file holds a loopback address, not a secret, so
-                        // a chmod failure warns rather than killing the listener.
-                        // (Windows: the per-user profile dir's ACL already scopes it.)
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            if let Err(err) = std::fs::set_permissions(
-                                &tcp_file,
-                                std::fs::Permissions::from_mode(0o600),
-                            ) {
-                                tracing::warn!(file = %tcp_file.display(), error = %err, "failed to lock tcp hint file to 0600");
+                    match std::fs::write(&tcp_file, local_addr.to_string()) {
+                        Ok(()) => {
+                            // The hint file holds a loopback address, not a secret,
+                            // so a chmod failure warns rather than killing the
+                            // listener. (Windows: the per-user profile dir's ACL
+                            // already scopes it.)
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                if let Err(err) = std::fs::set_permissions(
+                                    &tcp_file,
+                                    std::fs::Permissions::from_mode(0o600),
+                                ) {
+                                    tracing::warn!(file = %tcp_file.display(), error = %err, "failed to lock tcp hint file to 0600");
+                                }
                             }
-                        }
+                        },
+                        Err(err) => tracing::warn!(
+                            file = %tcp_file.display(),
+                            error = %err,
+                            "failed to write tcp hint file; remote attach may not find the daemon"
+                        ),
                     }
                 }
                 println!("mermaidd tcp listening on {}", local_addr);
