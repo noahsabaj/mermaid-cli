@@ -250,7 +250,7 @@ searxng_url = "http://localhost:8080"
 ```
 
 - **`web_fetch` defaults to `native`**: it fetches the URL directly from your machine and converts the HTML to markdown — no API key, no third party. Set `fetch_backend = "ollama"` to route through Ollama Cloud's server-side fetch instead (handles JS-heavy pages and bot-walls better; needs `OLLAMA_API_KEY`).
-- **`web_search` defaults to `auto`**, which just works with zero setup: if `OLLAMA_API_KEY` is set it uses Ollama Cloud; otherwise mermaid **auto-starts and manages a local [SearXNG](https://github.com/searxng/searxng) container** (via podman or docker) on your first search and tears it down when it exits — you install and configure nothing. The first search pulls the SearXNG image once; after that startup is a few seconds. Force a backend with `search_backend = "ollama"` (Ollama Cloud) or `"searxng"` (your own instance at `searxng_url`, which must have `json` in its `search.formats`).
+- **`web_search` defaults to `auto`**, which just works with zero setup: if `OLLAMA_API_KEY` is set it uses Ollama Cloud; otherwise mermaid **downloads and runs a self-contained local [SearXNG](https://github.com/searxng/searxng) bundle** on your first search and tears it down when it exits — no Docker, no Podman, nothing to install. The bundle (a portable Python plus the [Granian](https://github.com/emmett-framework/granian) server and SearXNG) is fetched once from [mermaid-searxng](https://github.com/noahsabaj/mermaid-searxng), sha256-verified, and cached under your data dir; after that startup is a couple of seconds. Force a backend with `search_backend = "ollama"` (Ollama Cloud) or `"searxng"` (your own instance at `searxng_url`, which must have `json` in its `search.formats`).
 
 ## Project Instructions
 

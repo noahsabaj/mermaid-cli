@@ -77,16 +77,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Anything that *acts* on the network keeps the `network` category and stays
   blocked.
 
-- **`web_search` starts the podman machine on Windows/macOS.** On the
-  VM-backed platforms, a stopped podman machine previously made the managed
-  SearXNG backend fail with "Cannot connect to Podman". The first search now
-  starts the machine transparently (same philosophy as the Ollama server
-  auto-start). A machine that was never created is *not* silently
-  initialized — `podman machine init` downloads a VM image — and the error
-  now says exactly that, plus the container-free alternative (set
-  `OLLAMA_API_KEY` for Ollama's hosted search); a corrupted machine gets the
-  three-command rebuild recipe in the error instead of a bare connect
-  failure.
+- **`web_search`'s managed backend is now sovereign — no Docker or Podman.**
+  The default `auto` backend (when `OLLAMA_API_KEY` is unset) no longer runs a
+  SearXNG container. Instead the first search downloads a self-contained,
+  sha256-verified bundle — a portable CPython plus the Granian server and
+  SearXNG — from [mermaid-searxng](https://github.com/noahsabaj/mermaid-searxng),
+  unpacks it under the data dir, and runs Granian bound to loopback, reaped on
+  mermaid exit. No container runtime, no VM, nothing to install; the bundle is
+  fetched once and cached. Forcing your own instance (`search_backend =
+  "searxng"` / `searxng_url`) or Ollama Cloud (`OLLAMA_API_KEY`) is unchanged.
 
 - **The Ollama auto-start is no longer silent.** At the moment mermaid
   commits to spawning `ollama serve`, one line — "Starting the local Ollama
