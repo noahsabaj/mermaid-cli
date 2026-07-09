@@ -118,6 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`temperature = 0.0` is now honored.** Setting an explicit `0.0`
+  (deterministic / greedy decoding) was silently overridden with the `0.7`
+  default — a leftover `> 0.0` guard treated a deliberate zero as "unset." It now
+  passes through verbatim.
 - **Calling a stopped MCP server now returns a clear error.** After
   `stop_server`, a later `call_tool` hit the dead server and surfaced a
   broken-pipe transport error instead of saying the server was stopped. The

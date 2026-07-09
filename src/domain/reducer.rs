@@ -27,7 +27,7 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
-use crate::constants::{DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE};
+use crate::constants::DEFAULT_MAX_TOKENS;
 use crate::models::{ChatMessage, MessageRole};
 use crate::prompts::get_system_prompt;
 use crate::runtime::TaskStatus;
@@ -3784,17 +3784,14 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         (None, None) => None,
     };
 
-    // Pass user-configured values verbatim. `ModelSettings::default()`
-    // already supplies `DEFAULT_TEMPERATURE` / `DEFAULT_MAX_TOKENS`,
-    // so config never has a real "zero" — the old `.max(DEFAULT_*)`
-    // was clobbering low user settings (e.g. temperature=0.1 became
-    // 0.7).
+    // Pass the user's temperature verbatim — including an explicit `0.0`
+    // (deterministic / greedy decoding). `ModelSettings::default()` supplies
+    // `DEFAULT_TEMPERATURE`, so a `0.0` reaching here is always a deliberate
+    // choice, never "unset"; the old `> 0.0` guard silently clobbered it to
+    // `0.7`. (`max_tokens` keeps its `> 0` guard below: unlike temperature, `0`
+    // is not a meaningful generation cap, so it falls back to the default.)
     let settings = &state.settings.default_model;
-    let temperature = if settings.temperature > 0.0 {
-        settings.temperature
-    } else {
-        DEFAULT_TEMPERATURE
-    };
+    let temperature = settings.temperature;
     let max_tokens = if settings.max_tokens > 0 {
         settings.max_tokens
     } else {
@@ -5088,6 +5085,15 @@ mod tests {
         assert_eq!(state.runtime.provider_capabilities.provider, "anthropic");
         assert!(state.runtime.provider_capabilities.supports_vision);
         assert!(cmds.iter().any(|c| matches!(c, Cmd::PersistLastModel(_))));
+    }
+
+    #[test]
+    fn build_chat_request_preserves_explicit_zero_temperature() {
+        // D5: an explicit temperature of 0.0 (deterministic decoding) must reach
+        // the request as 0.0, not be silently clobbered to DEFAULT_TEMPERATURE.
+        let mut state = fresh_state();
+        state.settings.default_model.temperature = 0.0;
+        assert_eq!(build_chat_request(&state).temperature, 0.0);
     }
 
     #[test]
