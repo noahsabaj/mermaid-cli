@@ -320,23 +320,26 @@ pub fn refresh(
     }
 }
 
-/// Load project instructions + the durable memory index for a one-shot,
-/// watcher-less run (`mermaid run` and subagents). The interactive TUI gets
-/// these from the config watcher's first poll; the headless and subagent
-/// drivers have no watcher, so they must load synchronously before the first
-/// model call — otherwise the request goes out with no MERMAID.md/AGENTS.md and
-/// no memory index, which is exactly the context `mermaid doctor` reports as
-/// loaded.
+/// Load project instructions + the durable memory index + the skills index
+/// for a one-shot, watcher-less run (`mermaid run` and subagents). The
+/// interactive TUI gets instructions/memory from the config watcher's first
+/// poll (and loads skills once at startup); the headless and subagent drivers
+/// have no watcher, so they must load synchronously before the first model
+/// call — otherwise the request goes out with no MERMAID.md/AGENTS.md, no
+/// memory index, and no skills, which is exactly the context `mermaid doctor`
+/// reports as loaded.
 pub fn load_project_context(
     cwd: &Path,
     mem_cfg: &crate::app::MemoryConfig,
 ) -> (
     Option<LoadedInstructions>,
     Option<crate::app::memory::LoadedMemory>,
+    Option<crate::app::skills::LoadedSkills>,
 ) {
     let (instructions, _) = refresh(None, cwd);
     let (memory, _) = crate::app::memory::refresh(None, cwd, mem_cfg);
-    (instructions, memory)
+    let skills = crate::app::skills::load(cwd);
+    (instructions, memory, skills)
 }
 
 /// Separator inserted between labeled instruction sections in the combined body.
@@ -659,7 +662,7 @@ mod tests {
         let dir = temp_dir("project_context");
         fs::create_dir(dir.join(".git")).unwrap();
         fs::write(dir.join("MERMAID.md"), "sync-loaded instructions").unwrap();
-        let (instructions, _memory) =
+        let (instructions, _memory, _skills) =
             load_project_context(&dir, &crate::app::MemoryConfig::default());
         let content = instructions
             .expect("instructions must load synchronously")

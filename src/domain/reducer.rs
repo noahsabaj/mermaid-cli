@@ -4149,6 +4149,9 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     if let Some(m) = state.memory.as_ref() {
         instruction_parts.push(m.index.clone());
     }
+    if let Some(s) = state.skills.as_ref() {
+        instruction_parts.push(s.index.clone());
+    }
     if !state.pending_hook_context.is_empty() {
         instruction_parts.push(format!(
             "# Hook Context\n\n{}",
@@ -5829,6 +5832,29 @@ mod tests {
             .expect("memory index should populate the instructions suffix");
         assert!(instr.contains("# Memory"));
         assert!(instr.contains("[pnpm] use pnpm"));
+    }
+
+    #[test]
+    fn build_chat_request_injects_skill_index() {
+        let mut state = fresh_state();
+        // No skills discovered → no skills block in the dynamic suffix.
+        assert!(
+            !build_chat_request(&state)
+                .instructions
+                .map(|i| i.contains("# Skills"))
+                .unwrap_or(false)
+        );
+        // With skills → the pre-rendered index is composed into the suffix.
+        state.skills = Some(crate::app::skills::LoadedSkills {
+            entries: Vec::new(),
+            index: "# Skills\n\n- [deploy] Ship a release — /s/deploy/SKILL.md (project)\n"
+                .to_string(),
+        });
+        let instr = build_chat_request(&state)
+            .instructions
+            .expect("skill index should populate the instructions suffix");
+        assert!(instr.contains("# Skills"));
+        assert!(instr.contains("[deploy] Ship a release"));
     }
 
     #[test]
