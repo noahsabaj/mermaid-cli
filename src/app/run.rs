@@ -93,6 +93,15 @@ pub async fn run_interactive_with(
     if state.session.conversation.git_branch.is_none() {
         state.session.conversation.git_branch = crate::session::detect_git_branch(&cwd);
     }
+    // Same impure-startup backfill for the rest of the session provenance: the
+    // git SHA at creation and the CLI version. Only fills blanks so a resumed
+    // session keeps what it was saved with.
+    if state.session.conversation.git_sha.is_none() {
+        state.session.conversation.git_sha = crate::session::detect_git_sha(&cwd);
+    }
+    if state.session.conversation.cli_version.is_none() {
+        state.session.conversation.cli_version = Some(env!("CARGO_PKG_VERSION").to_string());
+    }
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
     let tools = ToolRegistry::build(
         &config,

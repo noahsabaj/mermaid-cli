@@ -121,6 +121,18 @@ pub struct ConversationHistory {
     pub cumulative_token_usage: crate::domain::TokenUsageTotals,
     #[serde(default)]
     pub context_usage: Option<crate::domain::ContextUsageSnapshot>,
+    /// Session lineage / provenance, all `#[serde(default)]` (older files omit
+    /// them). Stamped in the impure startup path, never the pure reducer.
+    /// `forked_from`/`parent_session` are set when a session is branched from
+    /// another; `cli_version` and `git_sha` record the environment at creation.
+    #[serde(default)]
+    pub forked_from: Option<String>,
+    #[serde(default)]
+    pub parent_session: Option<String>,
+    #[serde(default)]
+    pub cli_version: Option<String>,
+    #[serde(default)]
+    pub git_sha: Option<String>,
 }
 
 /// Best-effort current git branch of `dir`, for labelling `--resume` rows.
@@ -139,6 +151,52 @@ pub fn detect_git_branch(dir: &Path) -> Option<String> {
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     // A detached HEAD reports the literal "HEAD"; treat that as no branch.
     (!branch.is_empty() && branch != "HEAD").then_some(branch)
+}
+
+/// Best-effort short git SHA of `dir`'s HEAD, for session provenance. `None`
+/// outside a git work tree or when git is absent. Impure — stamped at startup
+/// alongside `detect_git_branch`, never in the reducer.
+pub fn detect_git_sha(dir: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
+/// Lightweight session metadata, persisted as an `<id>.meta` sidecar so listing
+/// sessions doesn't have to parse every full transcript. The `<id>.json` stays
+/// the source of truth; a session without a sidecar (older, or pre-sidecar) is
+/// listed by fully parsing it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationMeta {
+    pub id: String,
+    pub title: String,
+    pub updated_at: DateTime<Local>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub message_count: usize,
+    #[serde(default)]
+    pub forked_from: Option<String>,
+}
+
+impl ConversationMeta {
+    fn from_history(h: &ConversationHistory) -> Self {
+        Self {
+            id: h.id.clone(),
+            title: h.title.clone(),
+            updated_at: h.updated_at,
+            git_branch: h.git_branch.clone(),
+            message_count: h.messages.len(),
+            forked_from: h.forked_from.clone(),
+        }
+    }
 }
 
 impl ConversationHistory {
@@ -172,6 +230,11 @@ impl ConversationHistory {
             last_token_usage: None,
             cumulative_token_usage: crate::domain::TokenUsageTotals::default(),
             context_usage: None,
+            // Lineage/provenance filled in by the impure startup path.
+            forked_from: None,
+            parent_session: None,
+            cli_version: None,
+            git_sha: None,
         }
     }
 
@@ -412,6 +475,17 @@ impl ConversationManager {
         // process compares against our own write, not the pre-save state.
         self.record_stamp(&conversation.id, &path);
 
+        // Write a tiny `<id>.meta` sidecar so `list_conversation_metas` can list
+        // sessions without parsing this whole transcript. Best-effort: a failed
+        // sidecar must never fail the save (the `.json` is the source of truth).
+        let meta = ConversationMeta::from_history(conversation);
+        if let Ok(meta_json) = serde_json::to_string(&meta) {
+            let meta_path = self
+                .conversations_dir
+                .join(format!("{}.meta", conversation.id));
+            let _ = crate::runtime::write_atomic_with_mode(&meta_path, meta_json.as_bytes(), 0o600);
+        }
+
         Ok(())
     }
 
@@ -546,15 +620,53 @@ impl ConversationManager {
         Ok(conversations)
     }
 
-    /// Delete a conversation
+    /// Fast session list: read each `<id>.meta` sidecar; for a session that
+    /// lacks a (valid) one — older, or written by a pre-sidecar build — fall
+    /// back to fully parsing its `<id>.json`. Message-less sessions are skipped.
+    /// Newest-first. Cheaper than [`list_conversations`] for display-only paths.
+    pub fn list_conversation_metas(&self) -> Result<Vec<ConversationMeta>> {
+        let mut metas = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let Ok(entries) = fs::read_dir(&self.conversations_dir) else {
+            return Ok(metas);
+        };
+        let paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        // Fast path: `<id>.meta` sidecars.
+        for path in &paths {
+            if path.extension().is_some_and(|e| e == "meta")
+                && let Ok(raw) = fs::read_to_string(path)
+                && let Ok(meta) = serde_json::from_str::<ConversationMeta>(&raw)
+                && meta.message_count > 0
+            {
+                seen.insert(meta.id.clone());
+                metas.push(meta);
+            }
+        }
+        // Fallback: any `<id>.json` without a valid sidecar.
+        for path in &paths {
+            if path.extension().is_some_and(|e| e == "json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && !seen.contains(stem)
+                && let Ok(json) = read_conversation_capped(path)
+                && let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json)
+                && !conv.messages.is_empty()
+            {
+                metas.push(ConversationMeta::from_history(&conv));
+            }
+        }
+        metas.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
+        Ok(metas)
+    }
+
+    /// Delete a conversation (and its metadata sidecar).
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
         validate_conversation_id(id)?;
-        let filename = format!("{}.json", id);
-        let path = self.conversations_dir.join(filename);
-
+        let path = self.conversations_dir.join(format!("{}.json", id));
         if path.exists() {
             fs::remove_file(path)?;
         }
+        // Best-effort sidecar cleanup — its absence is harmless.
+        let _ = fs::remove_file(self.conversations_dir.join(format!("{}.meta", id)));
 
         Ok(())
     }
@@ -822,6 +934,75 @@ mod tests {
         }
         assert_eq!(conv.input_history.len(), 100);
         assert_eq!(conv.input_history.front().unwrap(), "msg10");
+    }
+
+    #[test]
+    fn sidecar_powers_metadata_listing() {
+        let dir = std::env::temp_dir().join("mermaid_test_meta_sidecar");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+        let mut conv = ConversationHistory::new("/tmp/proj".into(), "model".into(), Local::now());
+        conv.title = "My session".into();
+        conv.add_messages(
+            &[ChatMessage::user("hi"), ChatMessage::user("there")],
+            Local::now(),
+        );
+        manager.save_conversation(&conv).unwrap();
+
+        assert!(
+            manager
+                .conversations_dir()
+                .join(format!("{}.meta", conv.id))
+                .exists()
+        );
+        let metas = manager.list_conversation_metas().unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].id, conv.id);
+        assert_eq!(metas[0].title, "My session");
+        assert_eq!(metas[0].message_count, 2);
+
+        // Deleting the session removes its sidecar too.
+        manager.delete_conversation(&conv.id).unwrap();
+        assert!(
+            !manager
+                .conversations_dir()
+                .join(format!("{}.meta", conv.id))
+                .exists()
+        );
+        assert!(manager.list_conversation_metas().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_listing_falls_back_to_full_parse_without_sidecar() {
+        let dir = std::env::temp_dir().join("mermaid_test_meta_fallback");
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConversationManager::new(&dir).unwrap();
+        let mut conv = ConversationHistory::new("/tmp".into(), "model".into(), Local::now());
+        conv.add_messages(&[ChatMessage::user("hi")], Local::now());
+        manager.save_conversation(&conv).unwrap();
+        // Simulate a pre-sidecar session by removing the sidecar.
+        fs::remove_file(
+            manager
+                .conversations_dir()
+                .join(format!("{}.meta", conv.id)),
+        )
+        .unwrap();
+        let metas = manager.list_conversation_metas().unwrap();
+        assert_eq!(metas.len(), 1, "falls back to parsing the .json");
+        assert_eq!(metas[0].message_count, 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lineage_fields_default_on_old_sessions() {
+        // A transcript persisted before the lineage fields existed still loads.
+        let json = r#"{"id":"x","title":"t","messages":[],"model_name":"m","project_path":"/p","created_at":"2026-01-01T00:00:00+00:00","updated_at":"2026-01-01T00:00:00+00:00","total_tokens":null}"#;
+        let conv: ConversationHistory = serde_json::from_str(json).unwrap();
+        assert!(conv.git_sha.is_none());
+        assert!(conv.cli_version.is_none());
+        assert!(conv.forked_from.is_none());
+        assert!(conv.parent_session.is_none());
     }
 
     #[test]
