@@ -171,6 +171,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Read-only shell commands prefixed with `cd` are no longer blocked.** A
+  `cd DIR && <read>` command (e.g. `cd repo && git status`) classified as a
+  mutation because `cd` wasn't a recognized read-only head, so read_only mode
+  blocked the whole compound command. `cd`/`pushd`/`popd`/`dirs` (plus
+  `base64`/`seq`) now classify as read-only, and the read-only git allowlist
+  gained the pure-read subcommands `rev-list`/`merge-base`/`show-ref`/
+  `for-each-ref`/`name-rev`/`show-branch`/`count-objects`/`version`. The
+  worst-segment rule still catches any real mutation in a later segment.
+- **The model no longer believes it's still in `read_only` after switching to a
+  looser mode.** A mutation denied in read_only left a `blocked by policy:
+  read-only safety mode …` tool-result in the conversation, which was re-sent
+  every turn; after switching to `full_access` the model trusted those stale
+  errors over the (correct, live) mode and kept refusing edits — or claimed the
+  runtime was "still read-only." Superseded read-only denials are now rewritten
+  to a past-tense note once the live mode is looser, and loosening the mode past
+  such a denial surfaces a one-line confirmation.
 - **Command, tool, and web output truncation keeps the tail.** Output past the
   cap is truncated in the middle (head + tail with an elision marker) instead of
   head-only, so a failing command's actual error — which lives at the end — is
