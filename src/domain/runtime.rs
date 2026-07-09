@@ -186,9 +186,12 @@ pub enum ToolMetadata {
         byte_count: usize,
         created: Option<bool>,
     },
-    EditFile {
-        path: String,
-        replacements: usize,
+    ApplyPatch {
+        added: Vec<String>,
+        modified: Vec<String>,
+        deleted: Vec<String>,
+        renamed: Vec<(String, String)>,
+        fuzzy: bool,
     },
     DeleteFile {
         path: String,

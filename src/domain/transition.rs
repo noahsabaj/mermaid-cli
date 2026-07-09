@@ -299,7 +299,7 @@ fn action_details_for(
                 .or_else(|| metadata_line_count(&outcome.metadata.detail))
                 .or_else(|| Some(outcome.output().lines().count())),
         },
-        "edit_file" => {
+        "apply_patch" => {
             if let Some(diff) = outcome.metadata.display_diff.clone() {
                 ActionDetails::Diff {
                     summary: diff_success_summary(&diff, duration),
@@ -474,11 +474,10 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
             ("Read".to_string(), target)
         },
         "write_file" => ("Write".to_string(), string_arg("path").unwrap_or_default()),
-        // `edit_file` always modifies a file that already exists — that's an
-        // update. (`write_file` is disambiguated create-vs-update from its
-        // outcome metadata in `action_display_for`, which the bare call can't
-        // see here.)
-        "edit_file" => ("Update".to_string(), string_arg("path").unwrap_or_default()),
+        // `apply_patch` can touch several files in one call, so the bare call has
+        // no single target here — the per-file A/M/D/R summary rides in the diff
+        // detail (`action_details_for`).
+        "apply_patch" => ("Apply patch".to_string(), String::new()),
         "delete_file" => ("Delete".to_string(), string_arg("path").unwrap_or_default()),
         "create_directory" => (
             "Bash".to_string(),
@@ -707,33 +706,31 @@ mod tests {
     }
 
     #[test]
-    fn action_display_edit_carries_display_diff_when_available() {
+    fn action_display_apply_patch_carries_display_diff_when_available() {
         let call = sample_call_args(
             1,
-            "edit_file",
-            serde_json::json!({"path": "src/main.rs", "old_string": "old", "new_string": "new"}),
+            "apply_patch",
+            serde_json::json!({"patch": "*** Begin Patch\n*** Update File: src/main.rs\n-old\n+new\n*** End Patch"}),
         );
         let action = action_display_for(
             &call,
-            &ToolOutcome::success("Edited src/main.rs", "+1 -1", 0.05).with_metadata(
-                ToolRunMetadata {
-                    detail: ToolMetadata::EditFile {
-                        path: "src/main.rs".to_string(),
-                        replacements: 1,
+            &ToolOutcome::success("Applied patch: 1 file(s)\nM src/main.rs", "+1 -1", 0.05)
+                .with_metadata(ToolRunMetadata {
+                    detail: ToolMetadata::ApplyPatch {
+                        added: vec![],
+                        modified: vec!["src/main.rs".to_string()],
+                        deleted: vec![],
+                        renamed: vec![],
+                        fuzzy: false,
                     },
-                    display_diff: Some("   1 - old\n   1 + new".to_string()),
+                    display_diff: Some("=== M src/main.rs ===\n   1 - old\n   1 + new".to_string()),
                     ..ToolRunMetadata::default()
-                },
-            ),
+                }),
         );
 
-        assert_eq!(
-            action.action_type, "Update",
-            "edit_file reads as Update, matching Claude Code"
-        );
+        assert_eq!(action.action_type, "Apply patch");
         match action.details {
-            ActionDetails::Diff { summary, diff } => {
-                assert!(summary.contains("+1 -1"));
+            ActionDetails::Diff { diff, .. } => {
                 assert!(diff.contains("- old"));
                 assert!(diff.contains("+ new"));
             },

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`apply_patch` — robust, multi-file editing.** A new patch-based editor
+  (`*** Begin Patch … *** End Patch` with Add / Update / Delete / Move hunks and
+  optional `@@` context anchors) backed by a graduated fuzzy matcher that
+  tolerates whitespace and curly-quote drift, so an edit no longer fails on a
+  stray trailing space. It edits several files in one call under a single
+  checkpoint, and warns when a hunk matched fuzzily. Replaces `edit_file` (the
+  old single exact-match replacement is removed).
 - **The daemon now schedules its tasks instead of stampeding.** `run` requests
   enqueue; a scheduler executes queued tasks bounded by
   `[daemon] max_concurrent_tasks` (default 1 — one agent run at a time, honest
@@ -118,6 +125,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Command, tool, and web output truncation keeps the tail.** Output past the
+  cap is truncated in the middle (head + tail with an elision marker) instead of
+  head-only, so a failing command's actual error — which lives at the end — is
+  no longer discarded before the model sees it.
+- **Sessions saved mid-tool-call resume cleanly.** `tool_use`/`tool_result`
+  pairing is normalized before every request and when a session is loaded, so a
+  session persisted while a tool was in flight no longer resumes into an
+  unrecoverable provider 400.
+- **OpenAI-compatible vision is reported truthfully.** `supports_vision` is now
+  derived from the model id instead of hardcoded `false`, so `/doctor` and
+  `/model` no longer under-report vision for capable models and the no-vision
+  warning fires for genuinely text-only models.
 - **The approval and question brokers recover from a poisoned lock instead of
   cascading panics.** They took `Mutex::lock().unwrap()`, so a panic while
   holding the (tiny, synchronous) lock would poison it and every subsequent
@@ -203,6 +222,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The debug log and conversation store are owner-only and redacted.**
+  `~/.mermaid/mermaid.log` and the saved conversation/compaction transcripts are
+  now written `0600` and scrubbed of credential-shaped strings, so a `read_file`
+  of `.env` or an API error echoing a key can't sit in cleartext in a
+  world-readable file.
+- **Concurrent same-path file edits are serialized.** A per-path async lock
+  prevents two file-mutating tool calls in one turn from silently clobbering
+  each other (last-writer-wins) or racing a read-modify-write.
 - **`web_fetch` now pins DNS resolution against rebinding.** The native fetch
   resolved a URL's host and vetted the addresses, then let the HTTP client
   re-resolve at connect time — a TOCTOU a hostile DNS server could exploit to

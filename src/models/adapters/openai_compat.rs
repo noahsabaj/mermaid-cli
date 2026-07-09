@@ -199,7 +199,7 @@ impl OpenAICompatAdapter {
                 })
             })?;
 
-        let capabilities = derive_capabilities(profile);
+        let capabilities = derive_capabilities(profile, &model_name);
 
         Ok(Self {
             client,
@@ -810,8 +810,52 @@ impl OpenAICompatAdapter {
     }
 }
 
-/// Derive `ModelCapabilities` from a `ProviderProfile`. Reasoning support
-/// follows from the strategy:
+/// Best-effort per-model vision detection for OpenAI-compatible endpoints.
+/// Vision is a property of the MODEL, not the provider, so this matches known
+/// image-capable families by substring (the same model appears under many ids,
+/// e.g. `gpt-4o`, `openai/gpt-4o`, `anthropic/claude-3.5-sonnet`). Conservative:
+/// an unknown id is treated as text-only. The adapter serializes image parts
+/// unconditionally, so this only governs the capability we ADVERTISE (which
+/// `/doctor` and the no-vision warning read) — it never gates the send.
+fn model_supports_vision(model_name: &str) -> bool {
+    let m = model_name.to_ascii_lowercase();
+    const VISION_MARKERS: &[&str] = &[
+        // OpenAI
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-4-turbo",
+        "gpt-4-vision",
+        "gpt-5",
+        "chatgpt-4o",
+        // Anthropic (via OpenRouter / OpenAI-compat gateways)
+        "claude-3",
+        "claude-4",
+        "claude-opus-4",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+        // Google
+        "gemini",
+        // Open multimodal families and generic vision markers
+        "-vision",
+        "-vl",
+        "vl-",
+        "llava",
+        "pixtral",
+        "internvl",
+        "molmo",
+        "llama-3.2-11b",
+        "llama-3.2-90b",
+        "llama-4",
+        "phi-3.5-vision",
+        "phi-4-multimodal",
+        "mistral-small-3",
+        "gemma-3",
+    ];
+    VISION_MARKERS.iter().any(|marker| m.contains(marker))
+}
+
+/// Derive `ModelCapabilities` from a `ProviderProfile` and model id. Reasoning
+/// support follows from the strategy:
 /// - `Effort` (OpenAI Chat Completions, Groq, Cerebras, Fireworks) advertises
 ///   the full enum including `Minimal` because OpenAI GPT-5 has a real
 ///   `minimal` tier and the wire field accepts it. Other models on this
@@ -820,7 +864,7 @@ impl OpenAICompatAdapter {
 ///   OpenRouter's normalized object has no `minimal` — `Minimal` requests
 ///   snap to `Low` via `nearest_effort`.
 /// - `None` advertises `Unsupported`.
-fn derive_capabilities(profile: &ProviderProfile) -> ModelCapabilities {
+fn derive_capabilities(profile: &ProviderProfile, model_name: &str) -> ModelCapabilities {
     use ReasoningCapability as Cap;
     let supports_reasoning = match profile.reasoning_strategy {
         ReasoningStrategy::None => Cap::Unsupported,
@@ -849,7 +893,7 @@ fn derive_capabilities(profile: &ProviderProfile) -> ModelCapabilities {
     };
     ModelCapabilities {
         supports_tools: true,
-        supports_vision: false,
+        supports_vision: model_supports_vision(model_name),
         supports_reasoning,
         max_context_tokens: None,
     }
@@ -1492,13 +1536,47 @@ mod tests {
         let adapter = test_adapter();
         let caps = adapter.capabilities();
         assert!(caps.supports_tools);
-        assert!(!caps.supports_vision);
+        // gpt-5-mini (the test model) is vision-capable — the flag is now
+        // model-driven and reflects that, rather than being hardcoded false.
+        assert!(caps.supports_vision);
         match &caps.supports_reasoning {
             ReasoningCapability::Levels(levels) => {
                 assert!(levels.contains(&ReasoningLevel::Medium));
                 assert!(levels.contains(&ReasoningLevel::Max));
             },
             other => panic!("expected Levels for openai, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn model_vision_detection_is_model_driven() {
+        for vision in [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-5-mini",
+            "openai/gpt-4.1",
+            "anthropic/claude-3.5-sonnet",
+            "google/gemini-2.0-flash",
+            "qwen/qwen2.5-vl-7b-instruct",
+            "mistralai/pixtral-12b",
+            "meta-llama/llama-4-scout",
+        ] {
+            assert!(
+                model_supports_vision(vision),
+                "{vision} should be detected as vision-capable"
+            );
+        }
+        for text_only in [
+            "gpt-3.5-turbo",
+            "groq/llama-3.3-70b-versatile",
+            "deepseek-r1",
+            "mistralai/mistral-7b-instruct",
+            "qwen/qwen2.5-coder-32b",
+        ] {
+            assert!(
+                !model_supports_vision(text_only),
+                "{text_only} should be detected as text-only"
+            );
         }
     }
 

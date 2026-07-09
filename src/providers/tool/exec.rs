@@ -951,8 +951,15 @@ async fn read_capped<R: AsyncRead + Unpin>(
     log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 ) -> (String, bool) {
     let mut buf = [0u8; 8192];
-    let mut bytes: Vec<u8> = Vec::new();
-    let mut truncated = false;
+    // Keep the HEAD (up to head_cap) and a bounded TAIL ring: command output puts
+    // the actual error / exit summary at the END, which head-only truncation used
+    // to discard. head_cap + tail_cap == cap, so any total <= cap reconstructs
+    // exactly (no marker); only a genuine overflow drops the middle.
+    let head_cap = cap / 2;
+    let tail_cap = cap - head_cap;
+    let mut head: Vec<u8> = Vec::new();
+    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+    let mut total: usize = 0;
     let mut logged: usize = 0;
     let mut log_capped = false;
     loop {
@@ -986,23 +993,33 @@ async fn read_capped<R: AsyncRead + Unpin>(
                         }
                     }
                 }
-                if bytes.len() < cap {
-                    let take = (cap - bytes.len()).min(n);
-                    bytes.extend_from_slice(&buf[..take]);
-                    if take < n {
-                        truncated = true;
+                total += n;
+                let mut chunk = &buf[..n];
+                // Fill the head first; everything past head_cap flows into the
+                // bounded tail ring so the last tail_cap bytes always survive.
+                if head.len() < head_cap {
+                    let take = (head_cap - head.len()).min(chunk.len());
+                    head.extend_from_slice(&chunk[..take]);
+                    chunk = &chunk[take..];
+                }
+                if !chunk.is_empty() {
+                    tail.extend(chunk.iter().copied());
+                    while tail.len() > tail_cap {
+                        tail.pop_front();
                     }
-                } else {
-                    truncated = true;
                 }
             },
             Err(_) => break,
         }
     }
-    let mut out = String::from_utf8_lossy(&bytes).into_owned();
+    let truncated = total > cap;
+    let tail_bytes: Vec<u8> = tail.into_iter().collect();
+    let mut out = String::from_utf8_lossy(&head).into_owned();
     if truncated {
-        out.push_str(&format!("\n…[output truncated at {} bytes]…", cap));
+        let dropped = total - head.len() - tail_bytes.len();
+        out.push_str(&format!("\n…[output truncated, {dropped} bytes elided]…\n"));
     }
+    out.push_str(&String::from_utf8_lossy(&tail_bytes));
     (out, truncated)
 }
 
@@ -1566,5 +1583,26 @@ mod tests {
         assert!(!contains_dangerous_command("bash build.sh"));
         assert!(!contains_dangerous_command("echo done > /dev/null"));
         assert!(!contains_dangerous_command("grep -rf patterns.txt src"));
+    }
+
+    #[tokio::test]
+    async fn read_capped_keeps_head_and_tail_on_overflow() {
+        // The tail (where a failing command's actual error lives) must survive.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"HEAD_START");
+        data.extend(std::iter::repeat_n(b'x', 5000));
+        data.extend_from_slice(b"TAIL_ERROR_HERE");
+        let (out, truncated) = read_capped(&data[..], 100, 10_000, None, None).await;
+        assert!(truncated, "oversized output must be marked truncated");
+        assert!(out.contains("HEAD_START"), "head must survive: {out}");
+        assert!(out.contains("TAIL_ERROR_HERE"), "tail must survive: {out}");
+        assert!(out.contains("elided"), "must mark the elision: {out}");
+    }
+
+    #[tokio::test]
+    async fn read_capped_small_output_is_verbatim() {
+        let (out, truncated) = read_capped(&b"short output"[..], 100, 10_000, None, None).await;
+        assert!(!truncated, "small output must not be truncated");
+        assert_eq!(out, "short output");
     }
 }

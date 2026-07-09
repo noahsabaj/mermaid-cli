@@ -18,7 +18,6 @@ use async_trait::async_trait;
 
 use crate::constants::MAX_RESPONSE_CHARS as MAX_FILE_READ_BYTES;
 use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
-use crate::render::diff::{DIFF_ADDED_MARKER, DIFF_REMOVED_MARKER};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
@@ -127,9 +126,9 @@ impl ToolExecutor for ReadFileTool {
         // at MAX_RESPONSE_CHARS by read_one, but a batch of files can still sum to
         // ~12.8 MB in one tool result — past any sane context budget. Only the
         // multi-file accumulation needs this (single-file output is already
-        // bounded); truncate_content appends a clear "...[truncated]" marker.
+        // bounded); truncate_middle keeps the head AND tail with an elision marker.
         if paths.len() > 1 && combined.len() > MAX_READ_AGGREGATE_CHARS {
-            combined = crate::utils::truncate_content(&combined, MAX_READ_AGGREGATE_CHARS);
+            combined = crate::utils::truncate_middle(&combined, MAX_READ_AGGREGATE_CHARS);
             any_truncated = true;
         }
 
@@ -160,130 +159,6 @@ impl ToolExecutor for ReadFileTool {
             byte_count: Some(byte_count),
             ..ToolRunMetadata::default()
         })
-    }
-}
-
-/// `edit_file` — exact-match string replacement. Used for targeted
-/// edits rather than full file rewrites. Errors if the `old_string`
-/// doesn't appear exactly once.
-pub struct EditFileTool;
-
-#[async_trait]
-impl ToolExecutor for EditFileTool {
-    fn name(&self) -> &'static str {
-        "edit_file"
-    }
-
-    fn schema(&self) -> ToolDefinition {
-        defn(
-            "edit_file",
-            "Replace exactly one occurrence of `old_string` with `new_string` in the file at `path`. Fails if `old_string` doesn't appear or appears more than once — add surrounding context until the match is unique.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "old_string": { "type": "string", "description": "Exact text to replace. Must appear exactly once." },
-                    "new_string": { "type": "string", "description": "Replacement text." }
-                },
-                "required": ["path", "old_string", "new_string"]
-            }),
-        )
-    }
-
-    async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
-        let Some(raw_path) = args.get("path").and_then(|v| v.as_str()) else {
-            return err("edit_file requires 'path'", 0.0);
-        };
-        let Some(old_string) = args.get("old_string").and_then(|v| v.as_str()) else {
-            return err("edit_file requires 'old_string'", 0.0);
-        };
-        let Some(new_string) = args.get("new_string").and_then(|v| v.as_str()) else {
-            return err("edit_file requires 'new_string'", 0.0);
-        };
-
-        let start = std::time::Instant::now();
-        let abs = match resolve_path_safe(&ctx.workdir, raw_path) {
-            Ok(p) => p,
-            Err(e) => return err(&format!("edit_file: {}", e), 0.0),
-        };
-        let rel = match relative_within(&ctx.workdir, raw_path) {
-            Ok(r) => r,
-            Err(e) => return err(&format!("edit_file: {}", e), 0.0),
-        };
-        let pending_action = serde_json::json!({
-            "tool": "edit_file",
-            "args": {
-                "path": raw_path,
-                "old_string": old_string,
-                "new_string": new_string,
-            },
-            "workdir": ctx.workdir.display().to_string(),
-            "turn_id": ctx.turn.0,
-            "call_id": ctx.call_id.0,
-            "task_id": ctx.task_id.clone(),
-        });
-        if let Some(outcome) = mutation_policy_outcome(
-            &ctx,
-            "edit_file",
-            raw_path,
-            std::slice::from_ref(&abs),
-            pending_action,
-        )
-        .await
-        {
-            return outcome;
-        }
-        if ctx.config.safety.checkpoint_on_mutation
-            && let Err(e) = crate::runtime::create_checkpoint_for_task(
-                &ctx.workdir,
-                std::slice::from_ref(&abs),
-                Some(serde_json::json!({
-                    "tool": "edit_file",
-                    "path": raw_path,
-                })),
-                ctx.task_id.clone(),
-            )
-        {
-            return err(&format!("edit_file checkpoint failed: {}", e), 0.0);
-        }
-        let old_owned = old_string.to_string();
-        let new_owned = new_string.to_string();
-        let workdir = ctx.workdir.clone();
-        let display_path = raw_path.to_string();
-
-        tokio::select! {
-            biased;
-            _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || edit_blocking(&workdir, &rel, &old_owned, &new_owned)) => {
-                match result {
-                    Ok(Ok(edit)) => {
-                        let duration_secs = start.elapsed().as_secs_f64();
-                        after_file_mutation(&ctx, "edit_file", &display_path);
-                        ToolOutcome::success(
-                            format!("Edited {} ({} replacement{})",
-                            display_path,
-                            edit.replacements,
-                            if edit.replacements == 1 { "" } else { "s" }),
-                            diff_summary(edit.added, edit.removed, duration_secs),
-                            duration_secs,
-                        )
-                        .with_metadata(ToolRunMetadata {
-                            detail: ToolMetadata::EditFile {
-                                path: display_path,
-                                replacements: edit.replacements,
-                            },
-                            display_diff: Some(edit.display_diff),
-                            diff_truncated: edit.truncated,
-                            ..ToolRunMetadata::default()
-                        })
-                    },
-                    Ok(Err(e)) => err(&format!("edit_file({}): {}", display_path, e),
-                                       start.elapsed().as_secs_f64()),
-                    Err(e) => err(&format!("edit_file join error: {}", e),
-                                   start.elapsed().as_secs_f64()),
-                }
-            }
-        }
     }
 }
 
@@ -342,6 +217,15 @@ impl ToolExecutor for DeleteFileTool {
         {
             return outcome;
         }
+        // Serialize writers to this canonical path: sibling tool calls in the same
+        // turn run concurrently, so without this the checkpoint + delete could race
+        // another writer to the same file. Distinct paths still overlap. Raced
+        // against cancellation so a contended lock stays Ctrl+C-responsive.
+        let _write_guard = tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
+            g = super::path_lock::lock_path(&abs) => g,
+        };
         if ctx.config.safety.checkpoint_on_mutation
             && let Err(e) = crate::runtime::create_checkpoint_for_task(
                 &ctx.workdir,
@@ -439,6 +323,13 @@ impl ToolExecutor for CreateDirectoryTool {
         {
             return outcome;
         }
+        // Serialize writers to this canonical path (see delete_file). mkdir -p is
+        // idempotent, but a uniform gate keeps ordering consistent and cheap.
+        let _write_guard = tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
+            g = super::path_lock::lock_path(&abs) => g,
+        };
         if ctx.config.safety.checkpoint_on_mutation
             && let Err(e) = crate::runtime::create_checkpoint_for_task(
                 &ctx.workdir,
@@ -544,6 +435,15 @@ impl ToolExecutor for WriteFileTool {
         {
             return outcome;
         }
+        // Serialize writers to this canonical path: two write_file/edit calls to
+        // the same file in one turn run concurrently, so without this the last
+        // atomic rename silently wins (lost update). Distinct paths still overlap.
+        // The owned guard is Send and held across the spawn_blocking below.
+        let _write_guard = tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
+            g = super::path_lock::lock_path(&abs_path) => g,
+        };
         if ctx.config.safety.checkpoint_on_mutation
             && let Err(e) = crate::runtime::create_checkpoint_for_task(
                 &ctx.workdir,
@@ -689,7 +589,7 @@ fn write_one_blocking(workdir: &Path, rel: &Path, content: &str) -> std::io::Res
 struct WriteResult {
     line_count: usize,
     created: bool,
-    diff: DisplayDiff,
+    diff: crate::render::diff::DisplayDiff,
 }
 
 /// Write `content` and build the display diff against the prior file in ONE
@@ -715,7 +615,7 @@ fn write_with_diff_blocking(
             Err(_) => (String::new(), false, true),
         };
     let diff = if elide_diff {
-        DisplayDiff {
+        crate::render::diff::DisplayDiff {
             display_diff: format!(
                 "[diff preview skipped: existing file exceeds the {}-byte cap]",
                 MAX_FILE_READ_BYTES
@@ -725,7 +625,7 @@ fn write_with_diff_blocking(
             truncated: true,
         }
     } else {
-        generate_display_diff(&old_content, content)
+        crate::render::diff::generate_display_diff(&old_content, content)
     };
     let line_count = write_one_blocking(workdir, rel, content)?;
     Ok(WriteResult {
@@ -735,7 +635,7 @@ fn write_with_diff_blocking(
     })
 }
 
-async fn mutation_policy_outcome(
+pub(super) async fn mutation_policy_outcome(
     ctx: &ExecContext,
     tool: &str,
     path: &str,
@@ -768,7 +668,7 @@ async fn mutation_policy_outcome(
     }
 }
 
-fn after_file_mutation(ctx: &ExecContext, tool: &str, path: &str) {
+pub(super) fn after_file_mutation(ctx: &ExecContext, tool: &str, path: &str) {
     let _ = crate::runtime::run_plugin_hooks(
         "after_file_mutation",
         &serde_json::json!({
@@ -781,56 +681,6 @@ fn after_file_mutation(ctx: &ExecContext, tool: &str, path: &str) {
     );
 }
 
-struct EditResult {
-    replacements: usize,
-    display_diff: String,
-    added: usize,
-    removed: usize,
-    truncated: bool,
-}
-
-/// Read-modify-write `rel` beneath `workdir` entirely through the
-/// symlink-confined helpers, so both halves bind to the inode the kernel
-/// resolved under `RESOLVE_BENEATH` — a swapped-in symlink can't redirect either
-/// (#77). The write is atomic (temp + `renameat`), so an interrupted edit leaves
-/// the ORIGINAL file intact rather than a truncated one.
-fn edit_blocking(
-    workdir: &Path,
-    rel: &Path,
-    old_string: &str,
-    new_string: &str,
-) -> std::io::Result<EditResult> {
-    let current = {
-        let mut file =
-            crate::runtime::open_beneath(workdir, rel, crate::runtime::OpenIntent::Read)?;
-        let mut s = String::new();
-        std::io::Read::read_to_string(&mut file, &mut s)?;
-        s
-    };
-    let count = current.matches(old_string).count();
-    if count == 0 {
-        return Err(std::io::Error::other(
-            "old_string not found (is the snippet correct? use read_file to verify)",
-        ));
-    }
-    if count > 1 {
-        return Err(std::io::Error::other(format!(
-            "old_string appears {} times — add more context so the match is unique",
-            count
-        )));
-    }
-    let updated = current.replacen(old_string, new_string, 1);
-    let diff = generate_display_diff(&current, &updated);
-    crate::runtime::write_atomic_beneath(workdir, rel, updated.as_bytes())?;
-    Ok(EditResult {
-        replacements: 1,
-        display_diff: diff.display_diff,
-        added: diff.added,
-        removed: diff.removed,
-        truncated: diff.truncated,
-    })
-}
-
 fn err(msg: &str, duration_secs: f64) -> ToolOutcome {
     ToolOutcome::error(msg, duration_secs)
 }
@@ -839,103 +689,7 @@ fn plural(count: usize, singular: &'static str, plural: &'static str) -> &'stati
     if count == 1 { singular } else { plural }
 }
 
-#[derive(Debug, Clone)]
-struct DisplayDiff {
-    display_diff: String,
-    added: usize,
-    removed: usize,
-    truncated: bool,
-}
-
-const DIFF_CONTEXT_LINES: usize = 3;
-const MAX_DISPLAY_DIFF_LINES: usize = 220;
-
-fn generate_display_diff(old: &str, new: &str) -> DisplayDiff {
-    let old_lines: Vec<&str> = old.lines().collect();
-    let new_lines: Vec<&str> = new.lines().collect();
-    let mut prefix = 0usize;
-    let min_len = old_lines.len().min(new_lines.len());
-    while prefix < min_len && old_lines[prefix] == new_lines[prefix] {
-        prefix += 1;
-    }
-
-    let mut suffix = 0usize;
-    while suffix < min_len.saturating_sub(prefix)
-        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-
-    let old_changed_end = old_lines.len().saturating_sub(suffix);
-    let new_changed_end = new_lines.len().saturating_sub(suffix);
-    let old_changed = &old_lines[prefix..old_changed_end];
-    let new_changed = &new_lines[prefix..new_changed_end];
-    let added = new_changed.len();
-    let removed = old_changed.len();
-
-    let context_start = prefix.saturating_sub(DIFF_CONTEXT_LINES);
-    let context_end_old = (old_changed_end + DIFF_CONTEXT_LINES).min(old_lines.len());
-    // No unified-diff header lines (`---`/`+++`/`@@`) — they're visual clutter
-    // in the transcript. Each body line already carries its own line number +
-    // marker, which is all the renderer needs.
-    let mut lines = Vec::new();
-
-    let mut truncated = false;
-    let push_line = |line: String, lines: &mut Vec<String>, truncated: &mut bool| {
-        if lines.len() < MAX_DISPLAY_DIFF_LINES {
-            lines.push(line);
-        } else {
-            *truncated = true;
-        }
-    };
-
-    for (idx, line) in old_lines[context_start..prefix].iter().enumerate() {
-        push_line(
-            format!("{:>4}   {}", context_start + idx + 1, line),
-            &mut lines,
-            &mut truncated,
-        );
-    }
-    for (idx, line) in old_changed.iter().enumerate() {
-        push_line(
-            format!("{:>4}{}{}", prefix + idx + 1, DIFF_REMOVED_MARKER, line),
-            &mut lines,
-            &mut truncated,
-        );
-    }
-    for (idx, line) in new_changed.iter().enumerate() {
-        push_line(
-            format!("{:>4}{}{}", prefix + idx + 1, DIFF_ADDED_MARKER, line),
-            &mut lines,
-            &mut truncated,
-        );
-    }
-    for (idx, line) in old_lines[old_changed_end..context_end_old]
-        .iter()
-        .enumerate()
-    {
-        push_line(
-            format!("{:>4}   {}", old_changed_end + idx + 1, line),
-            &mut lines,
-            &mut truncated,
-        );
-    }
-    if truncated {
-        lines.push(format!(
-            "... diff truncated after {} display lines",
-            MAX_DISPLAY_DIFF_LINES
-        ));
-    }
-
-    DisplayDiff {
-        display_diff: lines.join("\n"),
-        added,
-        removed,
-        truncated,
-    }
-}
-
-fn diff_summary(added: usize, removed: usize, duration_secs: f64) -> String {
+pub(super) fn diff_summary(added: usize, removed: usize, duration_secs: f64) -> String {
     format!(
         "Success, +{} -{}, took {}",
         added,
@@ -1063,8 +817,8 @@ mod tests {
             output.len()
         );
         assert!(
-            output.contains("...[truncated]"),
-            "expected aggregate truncation marker"
+            output.contains("elided"),
+            "expected aggregate head+tail elision marker"
         );
         match &outcome.metadata.detail {
             ToolMetadata::ReadFile { truncated, .. } => {
@@ -1176,6 +930,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_write_file_same_path_serializes_cleanly() {
+        // The per-path write gate must let two writes to the same file in one turn
+        // both succeed and leave the file as exactly one clean write (never a
+        // corrupt interleave), and must not deadlock.
+        let dir = temp_root("write_race");
+        let (ctx1, _r1) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let (ctx2, _r2) = test_exec_context(TurnId(1), ToolCallId(2), dir.clone());
+        let a = "AAAA\nAAAA\n";
+        let b = "BBBB\nBBBB\n";
+        let (o1, o2) = tokio::join!(
+            WriteFileTool.execute(serde_json::json!({"path": "race.txt", "content": a}), ctx1),
+            WriteFileTool.execute(serde_json::json!({"path": "race.txt", "content": b}), ctx2),
+        );
+        assert!(o1.is_success(), "first write failed: {o1:?}");
+        assert!(o2.is_success(), "second write failed: {o2:?}");
+        let final_content = fs::read_to_string(dir.join("race.txt")).expect("read");
+        assert!(
+            final_content == a || final_content == b,
+            "file must be exactly one clean write, got {final_content:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn write_file_new_file_records_added_display_diff() {
         let dir = temp_root("write_new_diff");
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
@@ -1221,36 +999,6 @@ mod tests {
             .expect("display diff");
         assert!(diff.contains("- old"));
         assert!(diff.contains("+ new"));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn edit_file_records_display_diff() {
-        let dir = temp_root("edit_diff");
-        fs::write(dir.join("main.py"), "alpha\nold\nomega\n").expect("write fixture");
-        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
-        let outcome = EditFileTool
-            .execute(
-                serde_json::json!({
-                    "path": "main.py",
-                    "old_string": "old",
-                    "new_string": "new",
-                }),
-                ctx,
-            )
-            .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
-        let diff = outcome
-            .metadata
-            .display_diff
-            .as_deref()
-            .expect("display diff");
-        assert!(diff.contains("- old"));
-        assert!(diff.contains("+ new"));
-        assert!(
-            !diff.contains("@@"),
-            "diff should not carry hunk headers: {diff}"
-        );
         let _ = fs::remove_dir_all(&dir);
     }
 

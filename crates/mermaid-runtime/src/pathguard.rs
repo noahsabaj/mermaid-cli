@@ -294,7 +294,7 @@ mod linux {
 
         // Preserve the destination's existing permission bits. The replaced
         // `open_beneath(WriteTruncate)` kept them (O_TRUNC doesn't touch an
-        // existing file's mode), so without this an `edit_file` on a `0o755`
+        // existing file's mode), so without this an `apply_patch` on a `0o755`
         // script or a `0o600` secret would silently reset it to `0o644`. A fresh
         // file keeps the `0o644` default. Statted under the confined parent fd.
         let existing_mode = statat(&parent_fd, Path::new(leaf), AtFlags::empty())
@@ -637,7 +637,7 @@ mod confined_tests {
         let rel = Path::new("script.sh");
         write_atomic_beneath(&root, rel, b"#!/bin/sh\n").unwrap();
         // Make it executable, then rewrite it: the atomic swap must keep 0o755
-        // rather than resetting to the temp's 0o644 (an edit_file on a script
+        // rather than resetting to the temp's 0o644 (an apply_patch on a script
         // must not strip the executable bit).
         std::fs::set_permissions(
             root.join("script.sh"),
