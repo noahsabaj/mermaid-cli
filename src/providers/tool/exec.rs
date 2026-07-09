@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
+use crate::app::NetworkPolicy;
 use crate::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 use crate::domain::{
     ManagedProcess, ManagedProcessStatus, ToolDefinition, ToolMetadata, ToolOutcome,
@@ -240,14 +241,16 @@ impl ToolExecutor for ExecuteCommandTool {
         // Spawn + wait. `run_command`'s select races four outcomes: subprocess
         // exit, timeout, Esc-cancel, and Ctrl+B detach — the timeout and cancel
         // arms both tree-kill before returning.
-        let mut cmd = Command::new(if cfg!(target_os = "windows") {
-            "cmd"
-        } else {
-            "sh"
-        });
-        cmd.arg(if cfg!(target_os = "windows") { "/C" } else { "-c" })
-            .arg(&command)
-            .stdin(Stdio::null())
+        //
+        // When network access is denied (Linux `safety.network = "deny"` /
+        // `--no-network`), the shell is wrapped in the `__sandbox-exec` launcher,
+        // which installs the seccomp network kill-switch and then execs it — so a
+        // network attempt inside the command dies with SIGSYS, which the
+        // completion arm below maps to a clear denial. A no-op elsewhere.
+        let sandbox_network =
+            cfg!(target_os = "linux") && matches!(ctx.config.safety.network, NetworkPolicy::Deny);
+        let mut cmd = build_sandboxed_shell(&command, sandbox_network);
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // NOT kill-on-drop: the cancel and timeout arms of `run_command`
@@ -285,20 +288,34 @@ impl ToolExecutor for ExecuteCommandTool {
             Ok(CommandRunResult::Completed(run)) => {
                 let duration_secs = start.elapsed().as_secs_f64();
                 let output_len = run.output.len();
-                ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
-                    .with_metadata(command_metadata(CommandMetadataInput {
-                        command: command.clone(),
-                        working_dir: Some(effective_workdir.display().to_string()),
-                        exit_code: run.exit_code,
-                        timed_out: false,
-                        background: false,
-                        stdout_lines: run.stdout_lines,
-                        stderr_lines: run.stderr_lines,
-                        detected_urls: all_urls(&run.output),
-                        pid: None,
-                        log_path: None,
-                        byte_count: Some(output_len),
-                    }))
+                let mut metadata = command_metadata(CommandMetadataInput {
+                    command: command.clone(),
+                    working_dir: Some(effective_workdir.display().to_string()),
+                    exit_code: run.exit_code,
+                    timed_out: false,
+                    background: false,
+                    stdout_lines: run.stdout_lines,
+                    stderr_lines: run.stderr_lines,
+                    detected_urls: all_urls(&run.output),
+                    pid: None,
+                    log_path: None,
+                    byte_count: Some(output_len),
+                });
+                if sandbox_network && is_network_denial(&run) {
+                    // The seccomp kill-switch stopped a network attempt. Surface a
+                    // clear, actionable error instead of a confusing "killed".
+                    if let ToolMetadata::ExecuteCommand {
+                        denied_by_sandbox, ..
+                    } = &mut metadata.detail
+                    {
+                        *denied_by_sandbox = true;
+                    }
+                    ToolOutcome::error(NETWORK_DENIED_MESSAGE.to_string(), duration_secs)
+                        .with_metadata(metadata)
+                } else {
+                    ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
+                        .with_metadata(metadata)
+                }
             },
             Ok(CommandRunResult::Detached { pid, log_path }) => {
                 // Ctrl+B moved this command to the background.
@@ -782,10 +799,56 @@ fn command_metadata(input: CommandMetadataInput) -> ToolRunMetadata {
             detected_urls: input.detected_urls,
             pid: input.pid,
             log_path: input.log_path,
+            // Set by the completion arm when a sandbox denial is detected; the
+            // metadata builder itself never sees the terminating signal.
+            denied_by_sandbox: false,
         },
         line_count: Some(input.stdout_lines + input.stderr_lines),
         byte_count: input.byte_count,
         ..ToolRunMetadata::default()
+    }
+}
+
+/// SIGSYS on Linux (x86_64/aarch64) — the signal the seccomp kill-switch raises.
+const SANDBOX_KILL_SIGNAL: i32 = 31;
+
+/// Message shown when the network kill-switch blocks a command. States the cause
+/// and the three ways to allow it. No emojis.
+const NETWORK_DENIED_MESSAGE: &str = "Blocked by the network sandbox: this command tried to open an internet socket, which is denied because network access is off (safety.network = \"deny\" / --no-network). Re-run without --no-network, approve the command, or use full-access mode to allow network access.";
+
+/// Whether a completed command was terminated by the network kill-switch: the
+/// shell itself died with SIGSYS, or (more often) it reaped a SIGSYS-killed
+/// child and exited `128 + SIGSYS`. Callers must gate on "the sandbox was active
+/// for this spawn" so an ordinary `exit 159` is never mislabeled.
+fn is_network_denial(run: &CommandRunOutput) -> bool {
+    run.signal == Some(SANDBOX_KILL_SIGNAL) || run.exit_code == Some(128 + SANDBOX_KILL_SIGNAL)
+}
+
+/// Build the shell `Command` for a model command, optionally wrapped in the
+/// `__sandbox-exec` network kill-switch launcher (Linux). The caller sets stdio,
+/// process group, cwd, and env scrubbing on the returned command.
+fn build_sandboxed_shell(command: &str, sandbox_network: bool) -> Command {
+    if sandbox_network {
+        // `mermaid __sandbox-exec --no-network -- sh -c <command>`: the launcher
+        // installs the seccomp filter on itself, then execs the shell.
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mermaid"));
+        let mut cmd = Command::new(exe);
+        cmd.args(["__sandbox-exec", "--no-network", "--", "sh", "-c"])
+            .arg(command);
+        cmd
+    } else {
+        let mut cmd = Command::new(if cfg!(target_os = "windows") {
+            "cmd"
+        } else {
+            "sh"
+        });
+        cmd.arg(if cfg!(target_os = "windows") {
+            "/C"
+        } else {
+            "-c"
+        })
+        .arg(command);
+        cmd
     }
 }
 
@@ -863,6 +926,10 @@ async fn open_browser_url(url: &str) -> Result<(), String> {
 struct CommandRunOutput {
     output: String,
     exit_code: Option<i32>,
+    /// Terminating signal (Unix), when the process was killed by one — e.g.
+    /// SIGSYS from the seccomp network kill-switch. `None` on a normal exit or
+    /// on non-Unix.
+    signal: Option<i32>,
     stdout_lines: usize,
     stderr_lines: usize,
 }
@@ -1139,9 +1206,20 @@ async fn run_command(
                     status.code().unwrap_or(-1)
                 ));
             }
+            // Preserve the terminating signal so the caller can distinguish a
+            // seccomp SIGSYS denial from an ordinary failure (mirrors
+            // `mcp/transport.rs`). `None` on non-Unix / normal exit.
+            #[cfg(unix)]
+            let signal = {
+                use std::os::unix::process::ExitStatusExt;
+                status.signal()
+            };
+            #[cfg(not(unix))]
+            let signal = None;
             Ok(CommandRunResult::Completed(CommandRunOutput {
                 output: full_output,
                 exit_code: status.code(),
+                signal,
                 stdout_lines,
                 stderr_lines,
             }))
@@ -1180,6 +1258,45 @@ mod tests {
     use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use std::path::PathBuf;
+
+    #[test]
+    fn network_denial_detects_sigsys_and_reaped_child_exit() {
+        let out = |exit: Option<i32>, signal: Option<i32>| CommandRunOutput {
+            output: String::new(),
+            exit_code: exit,
+            signal,
+            stdout_lines: 0,
+            stderr_lines: 0,
+        };
+        // The shell itself was SIGSYS-killed.
+        assert!(is_network_denial(&out(None, Some(31))));
+        // The shell reaped a SIGSYS-killed child and exited 128 + 31.
+        assert!(is_network_denial(&out(Some(159), None)));
+        // Ordinary failures / success / a different signal are not denials.
+        assert!(!is_network_denial(&out(Some(1), None)));
+        assert!(!is_network_denial(&out(Some(0), None)));
+        assert!(!is_network_denial(&out(None, Some(11)))); // SIGSEGV, not SIGSYS
+    }
+
+    #[test]
+    fn sandboxed_shell_wraps_only_when_requested() {
+        let plain = build_sandboxed_shell("echo hi", false);
+        let plain_prog = plain.as_std().get_program().to_string_lossy().into_owned();
+        assert!(
+            plain_prog.ends_with("sh") || plain_prog.ends_with("cmd"),
+            "plain shell program: {plain_prog}"
+        );
+
+        let wrapped = build_sandboxed_shell("echo hi", true);
+        let args: Vec<String> = wrapped
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.first().map(String::as_str), Some("__sandbox-exec"));
+        assert!(args.contains(&"--no-network".to_string()));
+        assert!(args.contains(&"sh".to_string()));
+    }
 
     #[tokio::test]
     async fn tee_log_is_capped() {

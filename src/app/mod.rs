@@ -11,15 +11,17 @@ pub mod recorder;
 pub mod replay;
 pub mod run;
 pub mod run_non_interactive;
+pub mod sandbox_exec;
 pub mod terminal;
 
 // Public re-exports - the ONLY way to access app functionality
 pub use config::{
     AgentTypeConfig, AgentsConfig, CompactionConfig, Config, FetchBackend, McpServerConfig,
-    MemoryConfig, SafetyConfig, SearchBackend, UserProviderConfig, WebConfig, get_config_dir,
-    init_config, load_config, load_config_or_warn, load_config_or_warn_with_overrides,
-    persist_default_reasoning, persist_last_model, persist_ollama_allow_ram_offload,
-    persist_ollama_num_ctx_for_model, persist_reasoning_for_model, resolve_model_id, save_config,
+    MemoryConfig, NetworkPolicy, SafetyConfig, SearchBackend, UserProviderConfig, WebConfig,
+    get_config_dir, init_config, load_config, load_config_or_warn,
+    load_config_or_warn_with_overrides, persist_default_reasoning, persist_last_model,
+    persist_ollama_allow_ram_offload, persist_ollama_num_ctx_for_model,
+    persist_reasoning_for_model, resolve_model_id, save_config,
 };
 pub use event_source::{event_to_msg, parse_slash_command};
 pub use lifecycle::RuntimeLifecycle;

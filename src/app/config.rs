@@ -157,11 +157,26 @@ impl PromptConfig {
     }
 }
 
+/// Whether model-driven shell commands may reach the network. `Deny` engages
+/// the Linux seccomp network kill-switch (`--no-network`); a no-op on other
+/// platforms. Default `Allow` preserves today's behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPolicy {
+    #[default]
+    Allow,
+    Deny,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SafetyConfig {
     pub mode: SafetyMode,
     pub checkpoint_on_mutation: bool,
+    /// Network access policy for shell commands. `Deny` installs the OS
+    /// network kill-switch on Linux. See [`NetworkPolicy`].
+    #[serde(default)]
+    pub network: NetworkPolicy,
     #[serde(default)]
     pub overrides: Vec<PolicyOverride>,
     /// Model id the `Auto`-mode safety classifier uses to vet borderline
@@ -186,6 +201,7 @@ impl Default for SafetyConfig {
             // everything. FullAccess remains available via config.
             mode: SafetyMode::Ask,
             checkpoint_on_mutation: true,
+            network: NetworkPolicy::default(),
             overrides: Vec::new(),
             auto_classifier_model: None,
             allow_untrusted_headless_tools: false,
