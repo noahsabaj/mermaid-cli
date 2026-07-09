@@ -103,6 +103,49 @@ impl CompactionPolicy {
     }
 }
 
+/// Why a `FinishReason::Length` stop happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LengthCause {
+    /// The per-response output cap was hit while the context window still had
+    /// room — compacting the *input* cannot help.
+    OutputCapped,
+    /// The context window itself is (nearly) full — compaction can help.
+    ContextFull,
+    /// No usage data to classify with; callers should keep the legacy
+    /// compact-and-continue behavior.
+    Unknown,
+}
+
+/// Classify a `FinishReason::Length` stop from the response usage and the
+/// known context window. The discriminator that holds even for providers whose
+/// window is unknown: a length-stop with window room to spare (or no known
+/// window at all — the normal remote-provider case) is the per-response output
+/// cap, not a full window. `usage == None` (common on tool follow-ups) stays
+/// `Unknown` so the caller preserves the legacy recovery path.
+pub fn classify_length_stop(
+    usage: Option<&TokenUsage>,
+    window: Option<usize>,
+    reserve: usize,
+) -> LengthCause {
+    let Some(u) = usage else {
+        return LengthCause::Unknown;
+    };
+    match window {
+        None => LengthCause::OutputCapped,
+        Some(w) => {
+            if u.prompt_tokens
+                .saturating_add(u.completion_tokens)
+                .saturating_add(reserve)
+                >= w
+            {
+                LengthCause::ContextFull
+            } else {
+                LengthCause::OutputCapped
+            }
+        },
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CompactionRequest {
     pub chat: ChatRequest,
@@ -743,6 +786,32 @@ mod tests {
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
         }
+    }
+
+    #[test]
+    fn classify_length_stop_discriminates_output_cap_from_context_full() {
+        let usage = TokenUsage::provider(16_600, 4_000, 20_600);
+        // No usage → Unknown (legacy recovery path preserved).
+        assert_eq!(
+            classify_length_stop(None, Some(100_000), 4_000),
+            LengthCause::Unknown
+        );
+        // Unknown window + usage → the per-response output cap (the normal
+        // remote-provider case — the GLM-5.2 misdiagnosis this fixes).
+        assert_eq!(
+            classify_length_stop(Some(&usage), None, 4_000),
+            LengthCause::OutputCapped
+        );
+        // Window with plenty of room → still the output cap.
+        assert_eq!(
+            classify_length_stop(Some(&usage), Some(1_000_000), 4_000),
+            LengthCause::OutputCapped
+        );
+        // prompt + completion + reserve reaching the window → genuinely full.
+        assert_eq!(
+            classify_length_stop(Some(&usage), Some(24_000), 4_000),
+            LengthCause::ContextFull
+        );
     }
 
     #[test]
