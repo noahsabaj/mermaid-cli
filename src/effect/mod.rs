@@ -1133,7 +1133,7 @@ impl EffectRunner {
                     // Emit a Ready or Errored per server based on
                     // what came up. Zero-tool servers are still ready
                     // if the manager has an active client for them.
-                    for (name, _cfg) in configs.iter() {
+                    for name in configs.keys() {
                         let server_tools: Vec<crate::domain::McpToolSpec> = manager
                             .get_all_tools()
                             .iter()
