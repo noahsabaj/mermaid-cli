@@ -54,7 +54,10 @@ impl QuestionBroker {
         let (tx, rx) = oneshot::channel();
         // Register the sender; the guard drops at the end of this statement —
         // never held across the awaits below.
-        self.pending.lock().unwrap().insert(call_id, tx);
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(call_id, tx);
 
         let sent = self
             .msg_tx
@@ -66,14 +69,17 @@ impl QuestionBroker {
             .await;
         if sent.is_err() {
             // Reducer is gone — clean up and dismiss.
-            self.pending.lock().unwrap().remove(&call_id);
+            self.pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&call_id);
             return QuestionResolution::Dismissed;
         }
 
         tokio::select! {
             biased;
             _ = token.cancelled() => {
-                self.pending.lock().unwrap().remove(&call_id);
+                self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&call_id);
                 QuestionResolution::Dismissed
             }
             resolution = rx => resolution.unwrap_or(QuestionResolution::Dismissed),
@@ -82,7 +88,11 @@ impl QuestionBroker {
 
     /// Deliver the user's answers to the parked task.
     pub fn resolve(&self, call_id: ToolCallId, resolution: QuestionResolution) {
-        let entry = self.pending.lock().unwrap().remove(&call_id);
+        let entry = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&call_id);
         if let Some(tx) = entry {
             let _ = tx.send(resolution);
         }
@@ -140,7 +150,12 @@ mod tests {
                 },
             );
             tokio::task::yield_now().await;
-            if broker.pending.lock().unwrap().is_empty() {
+            if broker
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+            {
                 break;
             }
         }

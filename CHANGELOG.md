@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The approval and question brokers recover from a poisoned lock instead of
+  cascading panics.** They took `Mutex::lock().unwrap()`, so a panic while
+  holding the (tiny, synchronous) lock would poison it and every subsequent
+  access would panic in turn. They now recover the guard on poison, matching the
+  pattern already used elsewhere in the codebase.
 - **The streaming relay task can no longer leak on cancel.** Each provider's
   stream bridge spawned a relay task whose handle was dropped (not aborted) when
   a turn was cancelled; parked on a full downstream sink, it could outlive the
