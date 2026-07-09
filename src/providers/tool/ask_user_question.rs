@@ -194,8 +194,21 @@ fn load_prefs_at(path: &Path) -> HashMap<String, StoredAnswer> {
 }
 
 fn save_prefs_at(path: &Path, map: &HashMap<String, StoredAnswer>) {
-    if let Ok(json) = serde_json::to_string_pretty(map) {
-        let _ = std::fs::write(path, json);
+    let json = match serde_json::to_string_pretty(map) {
+        Ok(json) => json,
+        Err(err) => {
+            tracing::warn!(error = %err, "ask_user_question: failed to serialize answer prefs");
+            return;
+        },
+    };
+    // Atomic write so a crash mid-save can't truncate the prefs file, and log on
+    // failure instead of silently losing the user's "remember this answer" choice.
+    if let Err(err) = crate::runtime::write_atomic(path, json.as_bytes()) {
+        tracing::warn!(
+            error = %err,
+            path = %path.display(),
+            "ask_user_question: failed to persist answer prefs"
+        );
     }
 }
 
