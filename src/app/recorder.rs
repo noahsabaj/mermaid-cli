@@ -661,6 +661,7 @@ mod tests {
                 | MsgKind::QuestionAsked
                 | MsgKind::TurnCancelled
                 | MsgKind::Mcp
+                | MsgKind::HookContext
                 | MsgKind::InstructionsChanged
                 | MsgKind::MemoryChanged
                 | MsgKind::SessionSaved
@@ -698,6 +699,10 @@ mod tests {
                 attachment_ids: vec![1],
             },
             Msg::Slash(SlashCmd::Model(Some("anthropic/opus".to_string()))),
+            Msg::HookContext {
+                turn: TurnId(2),
+                texts: vec!["hook says hi".to_string()],
+            },
             Msg::Slash(SlashCmd::Compact(None)),
             Msg::CancelTurn,
             Msg::ConfirmAccepted,
@@ -933,6 +938,7 @@ mod tests {
             MsgKind::ApprovalRequested,
             MsgKind::TurnCancelled,
             MsgKind::Mcp,
+            MsgKind::HookContext,
             MsgKind::InstructionsChanged,
             MsgKind::MemoryChanged,
             MsgKind::SessionSaved,

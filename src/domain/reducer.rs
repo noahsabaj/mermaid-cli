@@ -532,6 +532,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
 
         // ── Persistence / misc ─────────────────────────────────────
+        Msg::HookContext { turn, texts } => {
+            handle_hook_context(&mut state, turn, texts);
+        },
         Msg::InstructionsChanged(loaded) => {
             state.instructions = loaded;
         },
@@ -1879,10 +1882,7 @@ fn handle_submit_prompt(
     state.runtime.empty_continuations = 0;
     state.runtime.continue_recoveries = 0;
     state.turn = start_generating(turn, std::time::SystemTime::from(state.now));
-    cmds.push(Cmd::CallModel {
-        turn,
-        request: build_chat_request(state),
-    });
+    push_call_model(state, cmds, turn);
 }
 
 fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
@@ -3256,10 +3256,7 @@ fn handle_compaction_finished(
                 std::time::SystemTime::from(state.now),
                 resume_continuation,
             );
-            cmds.push(Cmd::CallModel {
-                turn: next_turn,
-                request: build_chat_request(state),
-            });
+            push_call_model(state, cmds, next_turn);
         },
         // Pre-turn auto-compaction: the stream is still live in the effect, which
         // already retried with the compacted messages — nothing to do here.
@@ -3728,10 +3725,7 @@ fn handle_stream_done(
             std::time::SystemTime::from(state.now),
             true,
         );
-        cmds.push(Cmd::CallModel {
-            turn: next_turn,
-            request: build_chat_request(state),
-        });
+        push_call_model(state, cmds, next_turn);
         return;
     }
 
@@ -3759,10 +3753,7 @@ fn handle_stream_done(
             std::time::SystemTime::from(state.now),
             continuation,
         );
-        cmds.push(Cmd::CallModel {
-            turn: next_turn,
-            request: build_chat_request(state),
-        });
+        push_call_model(state, cmds, next_turn);
         return;
     }
 
@@ -4107,29 +4098,71 @@ fn handle_tool_finished(
         }
         let next_turn = state.ids.fresh_turn();
         state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
-        cmds.push(Cmd::CallModel {
-            turn: next_turn,
-            request: build_chat_request(state),
-        });
+        push_call_model(state, cmds, next_turn);
     }
 }
 
 /// Construct the request the model sees for this turn, pulling in the
 /// current message log + the active `MERMAID.md` suffix + the
 /// reasoning choice + the tools surface.
+/// Byte cap on buffered hook context; excess strings are dropped with the
+/// count noted in the log (never sent to the model unbounded).
+const MAX_HOOK_CONTEXT_BYTES: usize = 16 * 1024;
+
+/// Buffer `additionalContext` strings from `before_tool_use` hooks for the
+/// next dispatched model request. Turn-gated (the stale filter already drops
+/// mismatched turns; re-check here for defense in depth, like
+/// `handle_upstream_error`).
+fn handle_hook_context(state: &mut State, turn: TurnId, texts: Vec<String>) {
+    if state.turn.id() != Some(turn) {
+        return;
+    }
+    for text in texts {
+        let used: usize = state.pending_hook_context.iter().map(String::len).sum();
+        if used + text.len() > MAX_HOOK_CONTEXT_BYTES {
+            tracing::warn!("dropping hook context over the {MAX_HOOK_CONTEXT_BYTES}-byte cap");
+            break;
+        }
+        state.pending_hook_context.push(text);
+    }
+}
+
+/// Dispatch a model call: build the request (which folds in any pending hook
+/// context), then CLEAR the hook-context buffer — it is consumed exactly once,
+/// by the next real dispatch. Display-only builders (`/context` estimates) and
+/// the compaction request call `build_chat_request` directly and do not clear.
+fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
+    let request = build_chat_request(state);
+    state.pending_hook_context.clear();
+    cmds.push(Cmd::CallModel { turn, request });
+}
+
 pub fn build_chat_request(state: &State) -> ChatRequest {
-    // Project instructions + the always-loaded memory index compose into the
-    // single dynamic suffix. The memory block carries its own `# Memory`
-    // header, so it stays clearly separated from AGENTS.md/MERMAID.md and the
-    // model adapters need no changes.
-    let instructions = match (
-        state.instructions.as_ref().map(|i| i.content.clone()),
-        state.memory.as_ref().map(|m| m.index.clone()),
-    ) {
-        (Some(i), Some(m)) => Some(format!("{i}\n\n{m}")),
-        (Some(i), None) => Some(i),
-        (None, Some(m)) => Some(m),
-        (None, None) => None,
+    // Project instructions + the always-loaded memory index + any pending
+    // hook context compose into the single dynamic suffix. Each block carries
+    // its own header (`# Memory`, `# Hook Context`), so the parts stay clearly
+    // separated from AGENTS.md/MERMAID.md and the model adapters need no
+    // changes.
+    let mut instruction_parts: Vec<String> = Vec::new();
+    if let Some(i) = state.instructions.as_ref() {
+        instruction_parts.push(i.content.clone());
+    }
+    if let Some(m) = state.memory.as_ref() {
+        instruction_parts.push(m.index.clone());
+    }
+    if let Some(s) = state.skills.as_ref() {
+        instruction_parts.push(s.index.clone());
+    }
+    if !state.pending_hook_context.is_empty() {
+        instruction_parts.push(format!(
+            "# Hook Context\n\n{}",
+            state.pending_hook_context.join("\n\n")
+        ));
+    }
+    let instructions = if instruction_parts.is_empty() {
+        None
+    } else {
+        Some(instruction_parts.join("\n\n"))
     };
 
     // Pass the user's temperature verbatim — including an explicit `0.0`
@@ -5721,6 +5754,68 @@ mod tests {
     }
 
     #[test]
+    fn hook_context_buffers_caps_and_clears_on_dispatch() {
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
+        // Buffer context for the CURRENT turn…
+        let (state, _) = update(
+            state,
+            Msg::HookContext {
+                turn: TurnId(1),
+                texts: vec!["remember: staging only".to_string()],
+            },
+        );
+        assert_eq!(state.pending_hook_context.len(), 1);
+        // …a stale turn's context is dropped (defense in depth + stale filter)…
+        let (mut state2, _) = update(
+            state,
+            Msg::HookContext {
+                turn: TurnId(999),
+                texts: vec!["stale".to_string()],
+            },
+        );
+        assert_eq!(state2.pending_hook_context.len(), 1);
+        // …the byte cap bounds the buffer…
+        let big = "x".repeat(super::MAX_HOOK_CONTEXT_BYTES);
+        super::handle_hook_context(&mut state2, TurnId(1), vec![big]);
+        assert_eq!(
+            state2.pending_hook_context.len(),
+            1,
+            "over-cap context must be dropped"
+        );
+        // …the request carries the hook block and dispatch consumes it once.
+        let mut cmds = Vec::new();
+        super::push_call_model(&mut state2, &mut cmds, TurnId(2));
+        let Some(Cmd::CallModel { request, .. }) =
+            cmds.iter().find(|c| matches!(c, Cmd::CallModel { .. }))
+        else {
+            panic!("expected a CallModel");
+        };
+        let instr = request.instructions.clone().expect("instructions present");
+        assert!(instr.contains("# Hook Context"));
+        assert!(instr.contains("remember: staging only"));
+        assert!(
+            state2.pending_hook_context.is_empty(),
+            "dispatch must consume the buffer"
+        );
+        // A second dispatch has no hook block.
+        let mut cmds = Vec::new();
+        super::push_call_model(&mut state2, &mut cmds, TurnId(3));
+        let Some(Cmd::CallModel { request, .. }) =
+            cmds.iter().find(|c| matches!(c, Cmd::CallModel { .. }))
+        else {
+            panic!("expected a CallModel");
+        };
+        assert!(
+            !request
+                .instructions
+                .clone()
+                .unwrap_or_default()
+                .contains("# Hook Context")
+        );
+    }
+
+    #[test]
     fn build_chat_request_injects_memory_index() {
         let mut state = fresh_state();
         // No memory loaded → no memory block in the dynamic suffix.
@@ -5742,6 +5837,29 @@ mod tests {
             .expect("memory index should populate the instructions suffix");
         assert!(instr.contains("# Memory"));
         assert!(instr.contains("[pnpm] use pnpm"));
+    }
+
+    #[test]
+    fn build_chat_request_injects_skill_index() {
+        let mut state = fresh_state();
+        // No skills discovered → no skills block in the dynamic suffix.
+        assert!(
+            !build_chat_request(&state)
+                .instructions
+                .map(|i| i.contains("# Skills"))
+                .unwrap_or(false)
+        );
+        // With skills → the pre-rendered index is composed into the suffix.
+        state.skills = Some(crate::app::skills::LoadedSkills {
+            entries: Vec::new(),
+            index: "# Skills\n\n- [deploy] Ship a release — /s/deploy/SKILL.md (project)\n"
+                .to_string(),
+        });
+        let instr = build_chat_request(&state)
+            .instructions
+            .expect("skill index should populate the instructions suffix");
+        assert!(instr.contains("# Skills"));
+        assert!(instr.contains("[deploy] Ship a release"));
     }
 
     #[test]

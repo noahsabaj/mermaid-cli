@@ -86,6 +86,9 @@ pub async fn run_interactive_with(
         state.seed_conversation(history);
     }
     crate::app::stamp_session_provenance(&mut state, &cwd);
+    // Skills load once at startup (authored artifacts, no watcher); the config
+    // watcher below keeps only instructions/memory fresh.
+    state.skills = crate::app::skills::load(&cwd);
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
     let tools = ToolRegistry::build(
         &config,

@@ -32,6 +32,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   up front. The parser is deliberately strict: context-limit wordings never
   match, so a window can't be mislearned as an output cap.
 
+- **Skills: SKILL.md playbooks with progressive disclosure.** Mermaid now
+  discovers task-specific playbooks at startup — project
+  (`<git-root>/.mermaid/skills/<name>/SKILL.md`), user
+  (`~/.config/mermaid/skills/`), and enabled plugins (the manifest's `skills`
+  list, containment-checked like hooks) — and injects a compact index (name,
+  one-line description, path) into the system prompt. Same-named skills dedupe
+  with project > user > plugin precedence; the index caps at 64 skills / 8 KiB
+  with an overflow line. The model activates a skill by reading its SKILL.md
+  with the existing policy-gated `read_file`, so activation is visible in the
+  transcript and idle skills cost no per-request tool schema. Headless runs
+  and subagents load the same index; `mermaid doctor` reports the count.
+
+- **Plugin hooks can now gate tool calls.** On `before_tool_use`, an enabled
+  plugin hook may deny the call, rewrite its arguments, or inject context for
+  the model's next request via a Claude Code-compatible JSON response on
+  stdout (`permissionDecision` allow/deny/ask, the legacy `decision: block`
+  shape, plus mermaid's `updatedInput` and `additionalContext` extensions);
+  exiting with code 2 also denies, with stderr as the reason. First deny wins
+  across plugins, the last rewrite wins, context strings concatenate, and a
+  rewritten call is still vetted by the safety policy. Intent fails closed
+  (explicit denials always deny) while infrastructure fails open (a hook that
+  times out or prints garbage logs a warning and allows) — a buggy hook can't
+  lock you out of every tool. All other events remain observe-only.
+
 - **`mermaid run` is session-addressable.** Every headless run now surfaces
   its session id — a new `session_id` field on the ndjson `session_started`
   and `result` lines and the json result (protocol stays v1; the fields are

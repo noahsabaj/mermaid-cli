@@ -375,6 +375,12 @@ async fn show_doctor(
             config.mcp_servers.len()
         ));
     }
+    if let Some(skills) = crate::app::skills::load(cwd) {
+        tools.push(format!(
+            "{} skill(s) discovered (SKILL.md playbooks)",
+            skills.entries.len()
+        ));
+    }
 
     let mut next_steps = Vec::new();
     if active_model.is_none() {

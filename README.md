@@ -264,6 +264,21 @@ searxng_url = "http://localhost:8080"
 
 Create an `AGENTS.md` (the cross-tool open standard) and/or a `MERMAID.md` (mermaid-specific) at your project root with conventions, tool versions, naming patterns, and run commands. Both are loaded from the nearest matching directory — `AGENTS.md` first, then `MERMAID.md`, so MERMAID.md overrides on conflict. They auto-reload when the files change (one `stat` per turn, no filesystem watcher). The walk stops at the `.git` root or `$HOME`.
 
+## Skills
+
+Skills are task-specific playbooks the agent loads on demand (progressive disclosure). Each skill is a directory holding a `SKILL.md` with Claude Code-compatible frontmatter:
+
+```markdown
+---
+name: deploy
+description: Cut a release — version bump, changelog, tag, publish
+---
+
+Step-by-step instructions the model follows when this skill applies...
+```
+
+At startup mermaid discovers skills from three places — project (`<git-root>/.mermaid/skills/<name>/SKILL.md`, shared with your team), user (`~/.config/mermaid/skills/<name>/SKILL.md`, all your projects), and enabled plugins (declared in the plugin manifest's `skills` list) — and injects a compact index (name, description, path) into the system prompt. Same-named skills dedupe with project > user > plugin precedence. When a task matches a description, the model reads the full `SKILL.md` with `read_file`, so activation is visible in the transcript and idle skills cost almost nothing per request. The index caps at 64 skills / 8 KiB; edits to skill files are picked up on the next session start. `mermaid doctor` reports the discovered count.
+
 ```markdown
 # Project: foo-service
 
@@ -293,6 +308,35 @@ On Linux, install a per-user systemd unit with `mermaid daemon install --start`.
 On Windows, `mermaidd.exe` serves the same JSONL control surface over a named pipe at `\\.\pipe\mermaidd-<your-user-SID>` instead of a Unix socket. The pipe carries an explicit owner-only security descriptor (LocalSystem + your user, nothing else) and rejects remote pipe clients, mirroring the `0600` socket + peer-uid check on Unix; the same pairing-token rules apply on top. There is no service installer yet — start `mermaidd.exe` directly or wire it into Task Scheduler; `mermaid daemon install` remains Linux/systemd-only.
 
 Release builds keep the existing `.tar.gz`/`.zip` archives and add Linux `.deb`/`.rpm` artifacts for x86_64 and aarch64. The distro packages install `mermaid`, `mermaidd`, docs, and a reference systemd user unit at `/usr/lib/systemd/user/mermaidd.service`; they do not auto-enable or start the daemon.
+
+### Plugin hooks
+
+Enabled plugins' hooks receive lifecycle events as JSON on stdin (`MERMAID_HOOK_EVENT` names the
+event). Most events are observe-only, but on **`before_tool_use`** a hook can gate the call by
+printing one JSON object on stdout (Claude Code-compatible), or deny by exiting with code 2
+(stderr becomes the reason):
+
+```sh
+#!/bin/sh
+# deny-etc-writes: block any tool call whose arguments mention /etc
+payload=$(cat)
+case "$payload" in
+  *'/etc'*) cat <<'EOF'
+{"hookSpecificOutput": {"hookEventName": "PreToolUse",
+  "permissionDecision": "deny",
+  "permissionDecisionReason": "writes under /etc are not allowed here"}}
+EOF
+  ;;
+esac
+```
+
+The response may also carry `updatedInput` (a full replacement tool-arguments object — still
+vetted by the safety policy exactly like the original) and `additionalContext` (a string surfaced
+to the model on its next request). The legacy `{"decision": "block", "reason": "..."}` shape is
+accepted too. Across plugins: the first deny wins, the last `updatedInput` wins, and context
+strings concatenate. Failure semantics are asymmetric by design: an explicit deny always denies,
+while infrastructure failures (unparseable output, a timeout, a crash) log a warning and allow —
+a buggy hook must not lock you out of every tool call.
 
 ## Configuration
 

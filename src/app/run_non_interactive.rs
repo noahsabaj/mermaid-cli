@@ -113,10 +113,11 @@ pub async fn run_non_interactive_with(
     // model call would go out with no MERMAID.md/AGENTS.md and no memory, while
     // `mermaid doctor` reports them loaded. `build_chat_request` reads them off
     // `state`, so they must be in place before the seed below.
-    let (instructions, memory) =
+    let (instructions, memory, skills) =
         crate::app::instructions::load_project_context(&cwd, &config.memory);
     state.instructions = instructions;
     state.memory = memory;
+    state.skills = skills;
 
     // Bootstrap effects (MCP init) before the first prompt.
     //

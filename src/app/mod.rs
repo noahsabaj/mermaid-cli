@@ -13,6 +13,7 @@ pub mod replay;
 pub mod run;
 pub mod run_non_interactive;
 pub mod sandbox_exec;
+pub mod skills;
 pub mod terminal;
 
 // Public re-exports - the ONLY way to access app functionality

@@ -53,6 +53,15 @@ pub struct State {
     /// refreshed per turn like `instructions`. Its index is injected into the
     /// model prompt alongside project instructions.
     pub memory: Option<crate::app::memory::LoadedMemory>,
+    /// Discovered SKILL.md playbooks (project/user/plugin) plus the rendered
+    /// index injected into the model prompt alongside instructions and memory.
+    /// Loaded once at startup — skills are authored artifacts, not live state.
+    pub skills: Option<crate::app::skills::LoadedSkills>,
+    /// Context strings injected by `before_tool_use` plugin hooks
+    /// (`additionalContext`), buffered until the next dispatched model
+    /// request consumes them (see `push_call_model`). Byte-capped; transient
+    /// (never persisted with the session).
+    pub pending_hook_context: Vec<String>,
     /// Current working directory. Captured once at startup; tools
     /// receive it via `ExecContext::workdir` and spawned subprocesses
     /// inherit it. Centralized here so tests can inject a fake cwd.
@@ -156,6 +165,8 @@ impl State {
             settings,
             instructions: None,
             memory: None,
+            skills: None,
+            pending_hook_context: Vec::new(),
             cwd,
             temp_dir: std::env::temp_dir(),
             ids: IdAllocatorBundle::default(),
