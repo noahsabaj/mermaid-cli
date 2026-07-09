@@ -18,7 +18,7 @@ use crate::models::{
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::ModelProvider;
+use super::{ContextSizing, ModelProvider, resolve_limits_cached};
 
 pub struct GeminiProvider {
     adapter: GeminiAdapter,
@@ -40,6 +40,24 @@ impl GeminiProvider {
 impl ModelProvider for GeminiProvider {
     fn capabilities(&self) -> &Capabilities {
         &self.capabilities
+    }
+
+    /// Live limit discovery via Gemini's models endpoint (`GET {base}/models/
+    /// {id}` → `inputTokenLimit` window + `outputTokenLimit` output ceiling).
+    /// Cache-first via `provider_probes` (TTL-bounded), one live fetch on a
+    /// miss; a fetch failure resolves all-`None`.
+    async fn resolve_context_window(&self, request: &ChatRequest) -> ContextSizing {
+        let _ = request;
+        let model = Model::name(&self.adapter).to_string();
+        let limits =
+            resolve_limits_cached("gemini", &model, || self.adapter.fetch_model_limits()).await;
+        let window = limits.as_ref().and_then(|l| l.max_context_tokens);
+        ContextSizing {
+            model_max: window,
+            effective: window,
+            source: None,
+            max_output: limits.as_ref().and_then(|l| l.max_output_tokens),
+        }
     }
 
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
@@ -133,6 +151,8 @@ mod tests {
 
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
         };
         let cfg = build_model_config(&req);
         assert_eq!(cfg.reasoning, crate::models::ReasoningLevel::High);

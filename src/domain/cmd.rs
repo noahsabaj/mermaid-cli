@@ -284,6 +284,15 @@ pub struct ChatRequest {
     /// `None` falls back to the persisted `[ollama] allow_ram_offload`. Ignored
     /// by non-Ollama providers.
     pub ollama_allow_ram_offload: Option<bool>,
+    /// The model's real context window, filled by the effect layer from
+    /// cache-first live discovery (`resolve_context_window`) just before
+    /// dispatch. The reducer always initializes it `None`; `None` at the
+    /// adapter means "unknown" (no window clamp).
+    pub resolved_context_window: Option<usize>,
+    /// The model's real per-response output ceiling, filled alongside
+    /// `resolved_context_window`. `None` means unknown — adapters that
+    /// require a concrete `max_tokens` (Anthropic) fall back to a floor.
+    pub resolved_max_output: Option<usize>,
 }
 
 /// Provider-agnostic tool definition sent in the request. Concrete
@@ -536,6 +545,8 @@ mod tests {
 
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
         };
         assert!(
             Cmd::CallModel {

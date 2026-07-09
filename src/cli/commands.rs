@@ -1091,19 +1091,40 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
     let store = RuntimeStore::open_default()?;
     let provider = snapshot.provider.clone();
 
-    // The static snapshot has no context window for Ollama. Probe `/api/show` for
-    // the model's real one so this reports a real number, not "unknown".
+    // The static snapshot has no limits for providers that discover them live.
+    // Resolve through the same provider path a real turn uses — cache-first
+    // via `provider_probes`, one live fetch on a miss (Ollama `/api/show`,
+    // Anthropic/Gemini models endpoints, OpenAI-compat `/models` metadata) —
+    // so this reports real numbers, not "unknown". Falls back to the static
+    // snapshot when the provider can't be built (e.g. no API key configured).
     let mut context_tokens = snapshot.max_context_tokens;
     let mut context_confidence = "static";
-    if provider == "ollama" {
-        let backend = std::sync::Arc::new(crate::providers::factory::ollama_backend_config(config));
-        if let Ok(adapter) =
-            crate::models::adapters::ollama::OllamaAdapter::new(&snapshot.model, backend).await
-            && let Some(info) = adapter.show_model_info().await
-            && let Some(ctx) = info.context_length
-        {
-            context_tokens = Some(ctx);
+    let mut output_tokens = snapshot.max_output_tokens;
+    let mut output_confidence = "static";
+    let factory = crate::providers::ProviderFactory::new(config.clone());
+    if let Ok(live) = factory.resolve(model).await {
+        let probe_request = ChatRequest {
+            model_id: model.to_string(),
+            messages: vec![],
+            system_prompt: String::new(),
+            instructions: None,
+            reasoning: crate::models::ReasoningLevel::None,
+            temperature: 0.0,
+            max_tokens: 0,
+            tools: vec![],
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
+        };
+        let sizing = live.resolve_context_window(&probe_request).await;
+        if let Some(window) = sizing.model_max.or(sizing.effective) {
+            context_tokens = Some(window);
             context_confidence = "probed";
+        }
+        if let Some(output) = sizing.max_output {
+            output_tokens = Some(output);
+            output_confidence = "probed";
         }
     }
 
@@ -1141,15 +1162,17 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
     println!(
         "Context: {}",
         context_tokens
-            .map(|n| n.to_string())
+            .map(|n| format!("{n} ({context_confidence})"))
             .unwrap_or_else(|| "unknown".to_string())
     );
     println!(
         "Output limit: {}",
-        snapshot
-            .max_output_tokens
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "unknown (discovered live from /models when exposed)".to_string())
+        output_tokens
+            .map(|n| format!("{n} ({output_confidence})"))
+            .unwrap_or_else(|| {
+                "unknown (discovered live from the provider's models endpoint when exposed)"
+                    .to_string()
+            })
     );
     if let Some(profile) = lookup_provider(&snapshot.provider) {
         for (key, value) in [

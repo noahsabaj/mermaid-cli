@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Context windows and output caps are now discovered live, not hardcoded.**
+  Anthropic and Gemini turns fetch the model's real limits from their models
+  endpoints (`max_input_tokens`/`max_tokens`, `inputTokenLimit`/
+  `outputTokenLimit`) — cache-first in `provider_probes` with the same 30-day
+  TTL the Ollama probe uses, one same-host GET per (provider, model) on a
+  miss. Claude turns now see their real 1M-token windows and 128K output
+  ceilings instead of the rotted 200K/64K pins (auto-compaction was firing
+  ~5x too early), the stale per-family output table is deleted outright, and
+  `mermaid model-info` reports the discovered numbers with a `probed`
+  confidence. GPT-5.6 (1.5M) joins the static catalog — OpenAI's `/v1/models`
+  exposes no limits, so OpenAI stays static-but-corrected. Edge case: an
+  Anthropic-compatible gateway id the Models API 404s on falls back to a
+  conservative 8192 output floor on AUTO; set an explicit `max_tokens` to
+  override.
+- **Mermaid learns output caps from provider 400s and retries.** When a
+  provider rejects a turn naming the model's real per-response ceiling
+  (Ollama Cloud's `exceeds model's maximum output tokens (N)` — the
+  minimax-m3 incident — or the OpenAI-style `max_tokens is too large`), the
+  cap is persisted to the limits cache, the request is clamped, and the turn
+  retries once instead of dying. Every later turn sizes below the learned cap
+  up front. The parser is deliberately strict: context-limit wordings never
+  match, so a window can't be mislearned as an output cap.
+
 - **`mermaid run` is session-addressable.** Every headless run now surfaces
   its session id — a new `session_id` field on the ndjson `session_started`
   and `result` lines and the json result (protocol stays v1; the fields are

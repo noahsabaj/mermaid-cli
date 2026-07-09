@@ -25,7 +25,10 @@ use crate::runtime::{NewProviderProbe, RuntimeStore};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::{ContextSizing, ModelPlacement, ModelProvider, probe_is_stale};
+use super::{
+    ContextSizing, ModelPlacement, ModelProvider, learn_output_cap, load_limits_from_db,
+    output_cap_from_error, probe_is_stale, retry_cap,
+};
 
 /// Ollama adapter fronted by `ModelProvider`.
 pub struct OllamaProvider {
@@ -143,20 +146,27 @@ impl ModelProvider for OllamaProvider {
             )
             .await;
         let model_max = inputs.model_max;
+        // Local Ollama imposes no per-response ceiling (num_predict is ours),
+        // but Ollama Cloud maps num_predict → max_tokens and 400s above the
+        // model's real cap. A cap learned from such a 400 lives in the limits
+        // cache; feed it forward so sizing computes min(window room, cap).
+        let max_output =
+            load_limits_from_db("ollama".to_string(), Model::name(&self.adapter).to_string())
+                .await
+                .and_then(|l| l.max_output_tokens);
         match resolve_ollama_num_ctx(&inputs) {
             Some(r) => ContextSizing {
                 model_max,
                 effective: Some(r.value),
                 source: Some(r.source),
-                // Ollama has no per-response ceiling — num_predict is ours.
-                max_output: None,
+                max_output,
             },
             // No model_max and nothing configured → omit num_ctx (Ollama default).
             None => ContextSizing {
                 model_max,
                 effective: None,
                 source: None,
-                max_output: None,
+                max_output,
             },
         }
     }
@@ -198,8 +208,9 @@ impl ModelProvider for OllamaProvider {
         // Resolve the effective window first (cache-first probe). Idempotent with
         // the effect layer's call — both read the same cached probe + memory, so
         // what we send as num_ctx matches what compaction assumes.
-        let effective = self.resolve_context_window(&request).await.effective;
-        let config = build_model_config(&request, &self.config, effective);
+        let sizing = self.resolve_context_window(&request).await;
+        let config =
+            build_model_config(&request, &self.config, sizing.effective, sizing.max_output);
         // Ordered relay (F2): the adapter's sync callback pushes into an
         // `UnboundedSender` (synchronous, FIFO). A single relay task drains
         // into the bounded sink in order, avoiding the per-event `tokio::
@@ -214,9 +225,42 @@ impl ModelProvider for OllamaProvider {
         // `check_interrupt` polling: the adapter doesn't need to
         // know anything about turn IDs — the sink either drains or
         // doesn't, and the tokens handle everything else.
-        let chat_fut = self
-            .adapter
-            .chat(&request.messages, &config, Some(callback));
+        let chat_fut = async {
+            match self
+                .adapter
+                .chat(&request.messages, &config, Some(callback.clone()))
+                .await
+            {
+                Ok(response) => Ok(response),
+                Err(err) => {
+                    // Learn-from-400: Ollama Cloud rejects a num_predict above
+                    // the model's real output cap and names the cap in the
+                    // body. Learn it (persisted — later turns size below it up
+                    // front), clamp, retry ONCE. A request that 400s streamed
+                    // no events, so the relay is untouched and reusable.
+                    let Some(cap) = output_cap_from_error(&err) else {
+                        return Err(err);
+                    };
+                    let sent = config
+                        .ollama_options()
+                        .num_predict
+                        .map_or(0, |v| v.max(0) as usize);
+                    if retry_cap(sent, cap).is_none() {
+                        return Err(err);
+                    }
+                    let model = Model::name(&self.adapter).to_string();
+                    learn_output_cap("ollama".to_string(), model.clone(), cap).await;
+                    let _ = relay_tx.send(StreamEvent::Status(format!(
+                        "{model} rejected the output budget; learned its {cap}-token cap and retrying"
+                    )));
+                    let retry_config =
+                        build_model_config(&request, &self.config, sizing.effective, Some(cap));
+                    self.adapter
+                        .chat(&request.messages, &retry_config, Some(callback.clone()))
+                        .await
+                },
+            }
+        };
 
         let response = tokio::select! {
             biased;
@@ -261,10 +305,13 @@ impl ModelProvider for OllamaProvider {
 /// `num_ctx` is the resolved effective window (auto-fitted, or override/global);
 /// passing it here keeps a single source of truth — the direct `config.ollama.
 /// num_ctx` forward is gone because the resolver already considered it.
+/// `provider_max_output` is a known per-response ceiling (learned from an
+/// Ollama Cloud 400), bounding the derived `num_predict`.
 fn build_model_config(
     request: &ChatRequest,
     app_config: &crate::app::Config,
     num_ctx: Option<usize>,
+    provider_max_output: Option<usize>,
 ) -> ModelConfig {
     let mut mc = ModelConfig {
         model: request.model_id.clone(),
@@ -285,9 +332,12 @@ fn build_model_config(
     // room. Without a cap Ollama generates unbounded and only stops when the
     // window fills — the truncation bug. `None` = AUTO with an unknown window →
     // omit num_predict so Ollama applies its own default.
-    if let Some(num_predict) =
-        default_ollama_num_predict(request.max_tokens, num_ctx, estimate_prompt_tokens(request))
-    {
+    if let Some(num_predict) = default_ollama_num_predict(
+        request.max_tokens,
+        num_ctx,
+        estimate_prompt_tokens(request),
+        provider_max_output,
+    ) {
         mc.set_backend_option(
             "ollama".into(),
             "num_predict".into(),
@@ -412,9 +462,11 @@ mod tests {
 
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
         };
         let app_cfg = crate::app::Config::default();
-        let cfg = build_model_config(&req, &app_cfg, None);
+        let cfg = build_model_config(&req, &app_cfg, None, None);
         assert_eq!(cfg.model, "ollama/test");
         assert_eq!(cfg.temperature, 0.3);
         assert_eq!(cfg.max_tokens, 2048);
@@ -445,6 +497,8 @@ mod tests {
 
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
         };
         let mut app_cfg = crate::app::Config::default();
         app_cfg.ollama.num_gpu = Some(10);
@@ -452,7 +506,7 @@ mod tests {
         app_cfg.ollama.numa = Some(true);
 
         // The effective num_ctx (8192) is passed in by the resolver.
-        let cfg = build_model_config(&req, &app_cfg, Some(8192));
+        let cfg = build_model_config(&req, &app_cfg, Some(8192), None);
         let opts = cfg.ollama_options();
         assert_eq!(opts.num_ctx, Some(8192));
         assert_eq!(opts.num_gpu, Some(10));
@@ -477,10 +531,42 @@ mod tests {
 
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
         };
-        let cfg = build_model_config(&req, &crate::app::Config::default(), Some(131_072));
+        let cfg = build_model_config(&req, &crate::app::Config::default(), Some(131_072), None);
         // Exactly the 4096 cap; plenty of room in a 131072 window.
         assert_eq!(cfg.ollama_options().num_predict, Some(4_096));
+    }
+
+    /// The minimax incident, recomputed: a learned provider cap bounds the
+    /// AUTO num_predict below the full window room, so the retry (and every
+    /// later turn) sends a value Ollama Cloud accepts.
+    #[test]
+    fn build_model_config_caps_num_predict_at_learned_ceiling() {
+        let req = ChatRequest {
+            model_id: "ollama/minimax-m3:cloud".to_string(),
+            messages: vec![],
+            system_prompt: String::new(),
+            instructions: None,
+            reasoning: crate::models::ReasoningLevel::Medium,
+            temperature: 0.7,
+            max_tokens: 0, // AUTO — the incident's configuration
+            tools: vec![],
+
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
+            resolved_context_window: None,
+            resolved_max_output: None,
+        };
+        let app_cfg = crate::app::Config::default();
+        // Without a learned cap, AUTO hands over the full window room —
+        // 524_288 minus margin — which Ollama Cloud 400s for minimax-m3.
+        let uncapped = build_model_config(&req, &app_cfg, Some(524_288), None);
+        assert!(uncapped.ollama_options().num_predict.unwrap() > 131_072);
+        // With the learned 131_072 cap, sizing stays at the ceiling.
+        let capped = build_model_config(&req, &app_cfg, Some(524_288), Some(131_072));
+        assert_eq!(capped.ollama_options().num_predict, Some(131_072));
     }
 
     #[tokio::test]

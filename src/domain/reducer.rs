@@ -2650,6 +2650,7 @@ fn context_text(state: &State) -> String {
             request.max_tokens,
             ctx.effective,
             next_snapshot.used_tokens,
+            state.runtime.provider_capabilities.max_output_tokens,
         );
         lines.push(format!(
             "Output budget (num_predict): {}",
@@ -4226,6 +4227,10 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         // Live offload toggle — carry the current setting so `/context offload`
         // applies next turn without rebuilding the (startup-frozen) provider.
         ollama_allow_ram_offload: Some(state.settings.ollama.allow_ram_offload),
+        // Filled by the effect layer from cache-first live discovery just
+        // before dispatch — the reducer never awaits a probe.
+        resolved_context_window: None,
+        resolved_max_output: None,
     }
 }
 

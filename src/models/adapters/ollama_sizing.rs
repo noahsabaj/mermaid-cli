@@ -267,17 +267,23 @@ fn round_down_to(v: usize, step: usize) -> usize {
 /// default. A thin wrapper over the shared [`resolve_output_budget`] with
 /// Ollama's floor/margin — AUTO hands over the full remaining window room, a
 /// positive `max_tokens` is an exact cap bounded by that room.
+///
+/// `provider_max_output` is the model's real per-response ceiling when one is
+/// known — local Ollama imposes none, but Ollama Cloud maps `num_predict` →
+/// `max_tokens` and 400s above the model's cap (learned from such a 400 and
+/// cached). It bounds both AUTO and explicit asks.
 pub fn default_ollama_num_predict(
     max_tokens: usize,
     num_ctx: Option<usize>,
     prompt_estimate: usize,
+    provider_max_output: Option<usize>,
 ) -> Option<i32> {
     resolve_output_budget(
         &OutputBudgetInputs {
             requested_cap: max_tokens,
             window: num_ctx,
             prompt_estimate,
-            provider_max_output: None,
+            provider_max_output,
             margin: OLLAMA_NUM_PREDICT_MARGIN,
             floor: OLLAMA_MIN_NUM_PREDICT,
         },
@@ -575,7 +581,7 @@ mod tests {
     fn num_predict_auto_uses_full_room() {
         // AUTO (max_tokens 0) → all the room the window leaves.
         assert_eq!(
-            default_ollama_num_predict(0, Some(131_072), 1_000),
+            default_ollama_num_predict(0, Some(131_072), 1_000, None),
             Some(131_072 - 1_000 - 256)
         );
     }
@@ -583,19 +589,19 @@ mod tests {
     #[test]
     fn num_predict_auto_omits_without_ctx() {
         // Unknown window → omit num_predict so Ollama applies its own default.
-        assert_eq!(default_ollama_num_predict(0, None, 1_000), None);
+        assert_eq!(default_ollama_num_predict(0, None, 1_000, None), None);
     }
 
     #[test]
     fn num_predict_hard_cap_is_exact_and_room_bounded() {
         // Explicit cap with plenty of room → exactly the cap (no reserve added).
         assert_eq!(
-            default_ollama_num_predict(4_096, Some(131_072), 1_000),
+            default_ollama_num_predict(4_096, Some(131_072), 1_000, None),
             Some(4_096)
         );
         // num_ctx 8k, prompt 7k, margin 256 → bounded by the remaining room.
         assert_eq!(
-            default_ollama_num_predict(4_096, Some(8_192), 7_000),
+            default_ollama_num_predict(4_096, Some(8_192), 7_000, None),
             Some(8_192 - 7_000 - 256)
         );
     }
@@ -604,7 +610,7 @@ mod tests {
     fn num_predict_floored_when_room_tiny() {
         // Prompt nearly fills the window → the floor, not zero/negative.
         assert_eq!(
-            default_ollama_num_predict(4_096, Some(8_192), 8_100),
+            default_ollama_num_predict(4_096, Some(8_192), 8_100, None),
             Some(512)
         );
     }
