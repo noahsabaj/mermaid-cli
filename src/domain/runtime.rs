@@ -106,6 +106,11 @@ fn infer_static_context_window(provider: &str, model: &str) -> Option<usize> {
         "gemini" => Some(1_000_000),
         "openai" if model.contains("gpt-4.1") || model.contains("gpt-5") => Some(400_000),
         "openrouter" if model.contains("claude") => Some(200_000),
+        // GLM-5.2's 1M window (nvidia: `z-ai/glm-5.2`, cloudflare:
+        // `@cf/zai-org/glm-5.2`) — matches what NVIDIA's `/models` metadata
+        // reports as `context_length`, for surfaces shown before the live
+        // refresh lands.
+        "nvidia" | "cloudflare" if model.contains("glm-5.2") => Some(1_000_000),
         _ => None,
     }
 }
@@ -462,6 +467,25 @@ impl Default for RuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_context_window_knows_glm_5_2() {
+        // Both provider spellings of GLM-5.2 resolve to the 1M window.
+        assert_eq!(
+            infer_static_context_window_for_model_id("nvidia/z-ai/glm-5.2"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            infer_static_context_window_for_model_id("cloudflare/@cf/zai-org/glm-5.2"),
+            Some(1_000_000)
+        );
+        // Other models on those providers stay unknown (live /models refresh
+        // remains the source of truth for them).
+        assert_eq!(
+            infer_static_context_window_for_model_id("nvidia/meta/llama-4-behemoth"),
+            None
+        );
+    }
 
     #[test]
     fn timeline_is_bounded_and_keeps_most_recent() {

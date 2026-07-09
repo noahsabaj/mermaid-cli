@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`model-info` knows GLM-5.2's 1M context window.** `nvidia/z-ai/glm-5.2`
+  and `cloudflare/@cf/zai-org/glm-5.2` no longer show `Context: unknown`
+  before the live `/models` refresh lands — the static capability snapshot
+  now carries their 1,000,000-token window.
 - **Shell commands can no longer grab the terminal.** Model-run commands now
   start in their own session (`setsid`) with no controlling terminal, so a
   child that opens `/dev/tty` — a `sudo` password prompt, an ssh passphrase
