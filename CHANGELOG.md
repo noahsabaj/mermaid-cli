@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Long responses auto-continue across the model's per-response output cap.**
+  When a reply is cut by the provider's per-response output ceiling with
+  context-window room to spare, mermaid now continues it in a fresh turn (the
+  committed partial rides in history and a note nudges the model to resume, not
+  restart), bounded per run so a re-truncating model can't loop. A mid-reasoning
+  cutoff or a capped run still stops with the accurate output-limit message. So
+  an answer that "wants 40000 tokens" completes even on providers that cap
+  single responses lower.
 - **Live model-limit discovery — `Context: unknown` gets real numbers.** Most
   OpenAI-compatible providers attach the model's context window and output
   ceiling to their `/models` metadata (OpenRouter, Cloudflare, …); mermaid
