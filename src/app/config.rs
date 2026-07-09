@@ -780,26 +780,86 @@ pub fn load_config() -> Result<Config> {
     Ok(finalize_config(table)?.0)
 }
 
-/// Load the full layered configuration: defaults < user file < session flags.
-/// (The project layer slots in between once the project-config loader lands.)
-/// Returns the config plus layer-attributed unknown-key warnings.
-pub fn load_layered_config(flags: &SessionFlags) -> Result<(Config, Vec<String>)> {
+/// A completed layered load: the merged config plus the messages the startup
+/// path surfaces.
+pub struct LayeredLoad {
+    /// The merged, typed configuration.
+    pub config: Config,
+    /// Layer-attributed unknown-key and project-sanitizer warnings.
+    pub warnings: Vec<String>,
+    /// Informational lines (e.g. "using project config …").
+    pub notices: Vec<String>,
+}
+
+/// Load the full layered configuration:
+/// defaults < user file < project file < session flags.
+/// `cwd` locates the project layer (`<git-root>/.mermaid/config.toml`,
+/// sanitized + safety-clamped); pass `None` to skip it (daemon, tests).
+pub fn load_layered_config(
+    cwd: Option<&std::path::Path>,
+    flags: &SessionFlags,
+) -> Result<LayeredLoad> {
     let config_path = get_config_path()?;
     let mut user_table = read_config_table(&config_path)?;
     migrate_legacy_max_tokens(&mut user_table);
-    let layers = vec![
-        LayerSource {
+    let mut layers = vec![LayerSource {
+        layer: ConfigLayer::User,
+        origin: config_path.display().to_string(),
+        table: user_table.clone(),
+    }];
+    let mut sanitizer_warnings = Vec::new();
+    let mut notices = Vec::new();
+    if let Some(cwd) = cwd {
+        // The tighten-only safety clamp compares against the user-scope
+        // (defaults + user file) values.
+        let base_safety = finalize_config(user_table)?.0.safety;
+        let (layer, warnings, notice) =
+            super::project_config::load_project_layer(cwd, &base_safety);
+        sanitizer_warnings.extend(warnings);
+        notices.extend(notice);
+        if let Some(layer) = layer {
+            layers.push(layer);
+        }
+    }
+    layers.push(LayerSource {
+        layer: ConfigLayer::Session,
+        origin: "command line".to_string(),
+        table: flags.to_table()?,
+    });
+    let (config, unknown_key_warnings) = merge_layers(layers)?;
+    // Sanitizer warnings first: they explain keys that will also be absent
+    // from the merged result.
+    sanitizer_warnings.extend(unknown_key_warnings);
+    Ok(LayeredLoad {
+        config,
+        warnings: sanitizer_warnings,
+        notices,
+    })
+}
+
+/// The project-scoped view (defaults + user + project, NO session flags) for
+/// runtime re-reads keyed to a workdir — e.g. the memory settings consulted
+/// per operation. Never fails and never prints; warnings/notices were already
+/// surfaced by the startup load.
+pub fn load_project_scoped_config(cwd: &std::path::Path) -> Config {
+    fn load(cwd: &std::path::Path) -> Result<Config> {
+        let config_path = get_config_path()?;
+        let mut user_table = read_config_table(&config_path)?;
+        migrate_legacy_max_tokens(&mut user_table);
+        let base_safety = finalize_config(user_table.clone())?.0.safety;
+        let mut layers = vec![LayerSource {
             layer: ConfigLayer::User,
             origin: config_path.display().to_string(),
             table: user_table,
-        },
-        LayerSource {
-            layer: ConfigLayer::Session,
-            origin: "command line".to_string(),
-            table: flags.to_table()?,
-        },
-    ];
-    merge_layers(layers)
+        }];
+        let (layer, _warnings, _notice) =
+            super::project_config::load_project_layer(cwd, &base_safety);
+        if let Some(layer) = layer {
+            layers.push(layer);
+        }
+        Ok(merge_layers(layers)?.0)
+    }
+    load(cwd).unwrap_or_default()
 }
 
 /// Like [`load_config`] (user scope, no session flags) but never fails: on a
@@ -816,7 +876,7 @@ pub fn load_config_or_warn() -> Config {
 }
 
 /// Read and parse one layer's TOML file; a missing file is an empty table.
-fn read_config_table(path: &std::path::Path) -> Result<toml::Table> {
+pub(crate) fn read_config_table(path: &std::path::Path) -> Result<toml::Table> {
     if !path.exists() {
         return Ok(toml::Table::new());
     }
@@ -973,7 +1033,7 @@ fn deep_set_segments(table: &mut toml::Table, path: &[&str], value: toml::Value)
 /// Remove a pre-split `path` from `table`. Returns whether a value was
 /// actually removed. Never creates intermediate tables; a missing parent
 /// simply means there was nothing to remove.
-fn deep_remove_segments(table: &mut toml::Table, path: &[&str]) -> bool {
+pub(crate) fn deep_remove_segments(table: &mut toml::Table, path: &[&str]) -> bool {
     let Some((leaf, parents)) = path.split_last() else {
         return false;
     };
@@ -988,17 +1048,20 @@ fn deep_remove_segments(table: &mut toml::Table, path: &[&str]) -> bool {
 }
 
 /// Like [`load_layered_config`] but never fails — the startup entry point.
-/// On success, prints layer-attributed unknown-key warnings to stderr. On a
+/// On success, prints notices and layer-attributed warnings to stderr. On a
 /// malformed layer, warns (secret-redacted, #F13) and degrades: the session
 /// flags are re-applied over bare defaults so `--no-network`/`-c` survive a
 /// corrupt user file rather than being silently dropped with it.
-pub fn load_layered_config_or_warn(flags: &SessionFlags) -> Config {
-    match load_layered_config(flags) {
-        Ok((config, warnings)) => {
-            for warning in &warnings {
+pub fn load_layered_config_or_warn(cwd: Option<&std::path::Path>, flags: &SessionFlags) -> Config {
+    match load_layered_config(cwd, flags) {
+        Ok(load) => {
+            for notice in &load.notices {
+                eprintln!("mermaid: {notice}");
+            }
+            for warning in &load.warnings {
                 eprintln!("mermaid: warning: {warning}");
             }
-            config
+            load.config
         },
         Err(e) => {
             // A TOML parse error renders the offending source line, which can be
@@ -1449,6 +1512,39 @@ mod tests {
         ])
         .expect("later layer repairs the earlier one");
         assert_eq!(config.safety.mode, SafetyMode::Ask);
+    }
+
+    #[test]
+    fn project_layer_beats_user_and_loses_to_session() {
+        let user: toml::Table = toml::from_str("last_used_model = \"ollama/user\"\n").unwrap();
+        let project: toml::Table = toml::from_str(
+            "last_used_model = \"ollama/project\"\n[default_model]\nreasoning = \"low\"\n",
+        )
+        .unwrap();
+        let session: toml::Table =
+            toml::from_str("last_used_model = \"ollama/session\"\n").unwrap();
+        let (config, _) = merge_layers(vec![
+            LayerSource {
+                layer: ConfigLayer::User,
+                origin: "user".to_string(),
+                table: user,
+            },
+            LayerSource {
+                layer: ConfigLayer::Project,
+                origin: "project".to_string(),
+                table: project,
+            },
+            LayerSource {
+                layer: ConfigLayer::Session,
+                origin: "command line".to_string(),
+                table: session,
+            },
+        ])
+        .expect("merges");
+        // Session beats project beats user for the contested key…
+        assert_eq!(config.last_used_model.as_deref(), Some("ollama/session"));
+        // …while the project's uncontested key lands.
+        assert_eq!(config.default_model.reasoning, ReasoningLevel::Low);
     }
 
     #[test]

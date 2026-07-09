@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Project-local config.** A repo can now commit `.mermaid/config.toml` at its
+  git root; it layers between your user config and session flags. Safe by
+  construction, with no trust prompt: security-sensitive keys (`mcp_servers`,
+  `providers`, `agents`, `daemon`, `last_used_model`, `web.searxng_url`,
+  `ollama.host`/`port`, and most of `safety`) are stripped with a warning, and
+  the allowed `safety.mode`/`network`/`filesystem` can only TIGHTEN your user
+  settings — a cloned repo can pick models and UX defaults but can never spawn
+  commands, redirect prompt traffic, or relax approvals. Startup prints a
+  one-line notice whenever a project config contributes keys, and runtime
+  memory-setting re-reads honor the project layer too.
+
 - **Layered config engine.** Configuration now merges as ordered layers —
   built-in defaults < `~/.config/mermaid/config.toml` < session flags (`-c`
   plus `--no-network`/`--confine-fs`/`--sandbox`, `run --max-tokens`,
