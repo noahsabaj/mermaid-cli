@@ -207,6 +207,15 @@ pub struct DaemonConfig {
     /// batch work a shorter (or longer) leash. A task over budget is failed
     /// with a timeout report.
     pub task_timeout_minutes: Option<u64>,
+    /// Days to retain finished runtime rows (terminal tasks, stale sessions,
+    /// finished tool runs, old compactions, …) before the startup GC prunes
+    /// them. Active data is never pruned regardless of this value.
+    pub retention_days: i64,
+    /// Days to retain `outcomes` reward rows — the self-improving-loop training
+    /// corpus. Deliberately longer than `retention_days` so a large training
+    /// history survives the shorter task/session window; each outcome's
+    /// denormalized context keeps it usable after its task row is pruned.
+    pub outcomes_retention_days: i64,
 }
 
 impl Default for DaemonConfig {
@@ -214,6 +223,8 @@ impl Default for DaemonConfig {
         Self {
             max_concurrent_tasks: 1,
             task_timeout_minutes: None,
+            retention_days: 30,
+            outcomes_retention_days: 180,
         }
     }
 }
@@ -665,31 +676,17 @@ pub fn save_config(config: &Config, path: Option<PathBuf>) -> Result<()> {
 
     // The config can carry literal secrets — `mcp_servers[].env`,
     // `mcp_servers[].args`, and `providers[].extra_headers` all accept inline
-    // credential values — so it must not be left world-readable at umask. On
-    // Unix, create it 0600 from the start (and tighten an already-existing
-    // file, whose perms a fresh `mode()` would not touch). Windows uses ACLs;
-    // leave its default.
+    // credential values — so it must not be left world-readable, and a crash
+    // mid-write must not truncate it. Write atomically (temp → fsync → rename),
+    // creating the temp 0600 on Unix so the renamed file is never even briefly
+    // world-readable (this also tightens a pre-existing config, since the new
+    // file replaces the old one). Windows relies on the per-user profile ACL.
     #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("Failed to write config to {}", path.display()))?;
-        // `mode()` only applies on create; tighten a pre-existing config too.
-        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-        file.write_all(toml_string.as_bytes())
-            .with_context(|| format!("Failed to write config to {}", path.display()))?;
-    }
+    crate::runtime::write_atomic_with_mode(&path, toml_string.as_bytes(), 0o600)
+        .with_context(|| format!("Failed to write config to {}", path.display()))?;
     #[cfg(not(unix))]
-    {
-        std::fs::write(&path, toml_string)
-            .with_context(|| format!("Failed to write config to {}", path.display()))?;
-    }
+    crate::runtime::write_atomic(&path, toml_string.as_bytes())
+        .with_context(|| format!("Failed to write config to {}", path.display()))?;
 
     Ok(())
 }
