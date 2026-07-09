@@ -220,7 +220,7 @@ The model uses these autonomously via native tool calling:
 |------|-------------|
 | `read_file` | Read files (text, PDF, images) |
 | `write_file` | Create or overwrite files (timestamped backup if file exists) |
-| `edit_file` | Targeted text replacement with diff |
+| `apply_patch` | Multi-hunk, context-anchored file edits with a diff (fuzzy-tolerant) |
 | `delete_file` | Delete files (timestamped backup) |
 | `create_directory` | Create directories |
 | `execute_command` | Run shell commands; background mode registers PID/log/URL metadata for GUI apps and dev servers |

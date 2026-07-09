@@ -319,7 +319,7 @@ impl Default for AgentsConfig {
 #[serde(default)]
 pub struct AgentTypeConfig {
     /// Tool names the child registry is filtered to. Valid names:
-    /// `read_file`, `write_file`, `edit_file`, `delete_file`,
+    /// `read_file`, `write_file`, `apply_patch`, `delete_file`,
     /// `create_directory`, `execute_command`, `web_search`, `web_fetch`,
     /// `mcp`. Omit for the full child set.
     pub tools: Option<Vec<String>>,

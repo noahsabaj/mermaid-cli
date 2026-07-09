@@ -47,6 +47,18 @@ pub(crate) async fn lock_path(canonical: &Path) -> OwnedMutexGuard<()> {
     lock_for(canonical).lock_owned().await
 }
 
+/// Acquire write locks for several paths at once (e.g. a multi-file
+/// `apply_patch`). The caller MUST pass a **sorted, de-duplicated** slice: a
+/// single global acquisition order is what keeps two overlapping multi-path
+/// operations from deadlocking.
+pub(crate) async fn lock_paths(sorted_unique: &[PathBuf]) -> Vec<OwnedMutexGuard<()>> {
+    let mut guards = Vec::with_capacity(sorted_unique.len());
+    for path in sorted_unique {
+        guards.push(lock_for(path).lock_owned().await);
+    }
+    guards
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

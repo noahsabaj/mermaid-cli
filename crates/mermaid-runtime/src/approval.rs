@@ -198,16 +198,14 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
                 workdir.join(&rel).display()
             ))
         },
-        "edit_file" => {
-            let path = string_arg(args, "path")?;
-            let old = string_arg(args, "old_string")?;
-            let new = string_arg(args, "new_string")?;
-            let rel = crate::pathguard::relative_within(&workdir, path)?;
-            replay_edit(&workdir, &rel, old, new)?;
-            Ok(format!(
-                "replayed edit_file {}",
-                workdir.join(&rel).display()
-            ))
+        "apply_patch" => {
+            let patch = string_arg(args, "patch")?;
+            let hunks = crate::apply_patch::parse_patch(patch)
+                .map_err(|e| anyhow::anyhow!("apply_patch replay: {e}"))?;
+            for hunk in &hunks {
+                replay_apply_hunk(&workdir, hunk)?;
+            }
+            Ok(format!("replayed apply_patch ({} hunk(s))", hunks.len()))
         },
         "delete_file" => {
             let path = string_arg(args, "path")?;
@@ -318,26 +316,63 @@ fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<St
     ))
 }
 
-fn replay_edit(root: &Path, rel: &Path, old_string: &str, new_string: &str) -> Result<()> {
-    // Read AND write through the confined fd helpers so a symlinked leaf inside
-    // the root can neither leak an outside file's contents nor have the rewrite
-    // redirected onto it (#F5).
-    let mut current = String::new();
-    {
-        use std::io::Read;
-        let mut file =
-            crate::pathguard::open_beneath(root, rel, crate::pathguard::OpenIntent::Read)?;
-        file.read_to_string(&mut current)?;
+/// Re-apply one parsed patch hunk beneath `root` for approval replay, using the
+/// SAME confined pathguard helpers as the live tool so a symlinked leaf inside
+/// the root can neither leak an outside file nor redirect a write (#F5).
+fn replay_apply_hunk(root: &Path, hunk: &crate::apply_patch::Hunk) -> Result<()> {
+    use crate::apply_patch::Hunk;
+    match hunk {
+        Hunk::AddFile { path, contents } => {
+            let rel = crate::pathguard::relative_within(root, &path.to_string_lossy())?;
+            replay_ensure_parent(root, &rel)?;
+            crate::pathguard::write_atomic_beneath(root, &rel, contents.as_bytes())?;
+        },
+        Hunk::DeleteFile { path } => {
+            let rel = crate::pathguard::relative_within(root, &path.to_string_lossy())?;
+            crate::pathguard::remove_file_beneath(root, &rel)?;
+        },
+        Hunk::UpdateFile {
+            path,
+            move_path,
+            chunks,
+        } => {
+            let src_rel = crate::pathguard::relative_within(root, &path.to_string_lossy())?;
+            let original = replay_read_beneath(root, &src_rel)?;
+            let applied = crate::apply_patch::derive_new_contents(&original, chunks)
+                .map_err(|e| anyhow::anyhow!("apply_patch replay for {}: {e}", path.display()))?;
+            let dst_rel = match move_path {
+                Some(mv) => crate::pathguard::relative_within(root, &mv.to_string_lossy())?,
+                None => src_rel.clone(),
+            };
+            replay_ensure_parent(root, &dst_rel)?;
+            crate::pathguard::write_atomic_beneath(
+                root,
+                &dst_rel,
+                applied.new_contents.as_bytes(),
+            )?;
+            if src_rel != dst_rel {
+                crate::pathguard::remove_file_beneath(root, &src_rel)?;
+            }
+        },
     }
-    let count = current.matches(old_string).count();
-    anyhow::ensure!(count > 0, "old_string not found during approval replay");
-    anyhow::ensure!(
-        count == 1,
-        "old_string appears {count} times during approval replay"
-    );
-    let updated = current.replacen(old_string, new_string, 1);
-    crate::pathguard::write_atomic_beneath(root, rel, updated.as_bytes())?;
     Ok(())
+}
+
+fn replay_ensure_parent(root: &Path, rel: &Path) -> Result<()> {
+    if let Some(parent) = rel.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        crate::pathguard::create_dir_all_beneath(root, parent)?;
+    }
+    Ok(())
+}
+
+fn replay_read_beneath(root: &Path, rel: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut file = crate::pathguard::open_beneath(root, rel, crate::pathguard::OpenIntent::Read)?;
+    let mut s = String::new();
+    file.read_to_string(&mut s)?;
+    Ok(s)
 }
 
 fn string_arg<'a>(args: &'a serde_json::Value, name: &str) -> Result<&'a str> {
