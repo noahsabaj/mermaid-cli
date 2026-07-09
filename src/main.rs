@@ -16,6 +16,11 @@ use mermaid_cli::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Best-effort process hardening (no core dumps, no ptrace attach) before we
+    // parse args or touch config — a crash must not write a core file carrying
+    // secrets, and the process shouldn't be trivially attachable.
+    mermaid_cli::runtime::hardening::harden_process();
+
     let cli = Cli::parse();
     init_logger(cli.verbose);
 

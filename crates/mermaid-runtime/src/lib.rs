@@ -10,6 +10,7 @@ pub mod approval;
 pub mod atomic;
 pub mod checkpoint;
 pub mod daemon;
+pub mod hardening;
 mod pathguard;
 pub mod plugin;
 pub mod policy;

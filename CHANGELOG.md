@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Startup process hardening + per-turn timing.** On Linux, Mermaid now disables
+  core dumps (`RLIMIT_CORE=0`) and ptrace attachment (`PR_SET_DUMPABLE=0`) at
+  startup, so a crash can't leave a core file carrying secrets and the process
+  isn't trivially attachable. Each model turn also emits a structured timing
+  event (turn id, model, elapsed) to the log / diagnostic bundle.
 - **Faster session listing + session provenance.** Each saved session now writes
   a tiny `<id>.meta` sidecar, so listing sessions (`/list`) reads metadata
   instead of parsing every transcript (older sessions fall back to a full read).
