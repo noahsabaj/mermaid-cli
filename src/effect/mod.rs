@@ -1657,6 +1657,26 @@ async fn dispatch_call_model(
     }
 }
 
+/// Drop-based per-turn model-call timer: emits a structured `tracing` event with
+/// the elapsed wall time when the stream dispatch returns (success, error, or
+/// cancel). Impure-shell only — lands in the log / TRACE bundle.
+struct TurnTimer {
+    turn: TurnId,
+    model_id: String,
+    started: std::time::Instant,
+}
+
+impl Drop for TurnTimer {
+    fn drop(&mut self) {
+        tracing::debug!(
+            turn = %self.turn,
+            model = %self.model_id,
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            "model turn complete"
+        );
+    }
+}
+
 async fn dispatch_provider_stream(
     msg_tx: MsgSender,
     provider: Arc<dyn ModelProvider>,
@@ -1664,6 +1684,11 @@ async fn dispatch_provider_stream(
     request: crate::domain::ChatRequest,
     token: tokio_util::sync::CancellationToken,
 ) {
+    let _turn_timer = TurnTimer {
+        turn,
+        model_id: request.model_id.clone(),
+        started: std::time::Instant::now(),
+    };
     let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
     let ctx = StreamContext::new(token.clone(), stream_tx, turn);
     let relay_tx = msg_tx.clone();
