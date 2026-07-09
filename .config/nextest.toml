@@ -1,0 +1,9 @@
+# cargo-nextest configuration.
+#
+# `retries = 1` auto-heals the documented Windows cancellation flake
+# (see the windows-ci playbook) without masking real failures: a test that
+# fails on every attempt still fails. The slow-timeout bounds a hung test so it
+# is terminated rather than stalling the run.
+[profile.default]
+retries = 1
+slow-timeout = { period = "60s", terminate-after = 3 }

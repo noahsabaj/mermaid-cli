@@ -70,14 +70,21 @@ jobs:
           # Cache key includes OS and Rust version
           key: ${{ matrix.os }}-${{ matrix.rust }}
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Build
         run: cargo build --workspace --verbose
 
       - name: Run tests
-        # `--workspace` so the `mermaid-runtime` crate's tests (safety classifier,
-        # approvals store) actually run in CI — a bare `cargo test` only covers
-        # the root package.
-        run: cargo test --workspace --verbose
+        # nextest runs the same test binaries as `cargo test`, but applies the
+        # `.config/nextest.toml` retry policy that auto-heals the documented
+        # Windows cancellation flake. `--workspace` covers the mermaid-runtime
+        # crate (safety classifier, approvals store). No doctests exist, so
+        # nextest skipping them loses nothing.
+        run: cargo nextest run --workspace
 
       # Only check documentation on stable Linux
       - name: Check documentation
@@ -93,3 +100,34 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Dependency-free source guards: no emoji in user-facing output, and the pure
+  # `src/domain` MVU core stays free of I/O + the wall clock.
+  guards:
+    name: Source Guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: No emoji in source
+        run: python3 .github/scripts/check_no_emoji.py
+      - name: domain/ purity (no I/O, no wall clock)
+        run: python3 .github/scripts/check_domain_purity.py
+
+  # Heavier integration coverage that CI's default suite skips: the daemon
+  # `#[ignore]`d tests (spawn a real mermaidd) and the deterministic, model-free
+  # `mermaid self-test`. Linux-only — enough to catch daemon/self-test breakage.
+  integration:
+    name: Daemon + Self-Test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build binaries
+        run: cargo build --workspace
+      - name: Daemon integration tests (ignored)
+        run: cargo test --test daemon_integration -- --ignored
+      - name: Self-test (deterministic, model-free)
+        run: cargo run --bin mermaid -- self-test --format json

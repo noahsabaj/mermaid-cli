@@ -113,6 +113,18 @@ jobs:
           fi
           cargo build --verbose --release --target ${{ matrix.platform.target }}
 
+      # Smoke-test the freshly built binary so a platform that won't even run
+      # (or whose deterministic self-test fails) fails the release instead of
+      # shipping. Skip the cross-compiled aarch64 Linux binary — it can't run on
+      # the x86_64 runner.
+      - name: Smoke-test the built binary
+        if: matrix.platform.target != 'aarch64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}"
+          "$BIN" version
+          "$BIN" self-test --format json
+
       - name: Package as archive (Linux/macOS)
         if: contains(matrix.platform.os, 'ubuntu') || contains(matrix.platform.os, 'macos')
         run: |
@@ -174,17 +186,25 @@ jobs:
         with:
           path: ./artifacts
 
-      - name: Generate changelog
+      - name: Extract release notes from CHANGELOG
         id: changelog
         run: |
-          # Get the previous tag
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -z "$PREV_TAG" ]; then
-            echo "First release" > CHANGELOG.md
-          else
-            echo "## Changes since $PREV_TAG" > CHANGELOG.md
-            git log $PREV_TAG..HEAD --pretty=format:"- %s" >> CHANGELOG.md
+          VERSION="${{ github.event.inputs.version || github.ref_name }}"
+          VERSION="${VERSION#v}"  # strip a leading v (v0.17.0 -> 0.17.0)
+          # Pull the curated `## [VERSION]` section (up to the next `## ` header)
+          # out of the committed CHANGELOG. `index(...)==1` is a LITERAL match so
+          # the `[`/`]` in the header aren't treated as regex.
+          notes=$(awk -v ver="## [$VERSION]" '
+            index($0, ver) == 1 { flag = 1; next }
+            /^## / && flag { exit }
+            flag { print }
+          ' CHANGELOG.md)
+          if [ -z "$(echo "$notes" | tr -d '[:space:]')" ]; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section — cut one from [Unreleased] before tagging."
+            exit 1
           fi
+          { echo "## Mermaid $VERSION"; echo; echo "$notes"; } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
 
       - name: Generate SHA256 checksums
         run: |
@@ -205,10 +225,40 @@ jobs:
             SHA256SUMS
           draft: false
           prerelease: false
-          generate_release_notes: true
-          body_path: CHANGELOG.md
+          # Authoritative notes = the curated CHANGELOG section (extracted above).
+          # No `generate_release_notes` — the hand-written entry is the release note.
+          body_path: RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Smoke-test the PUBLISHED install script end-to-end: fetch + install the
+  # just-released version and confirm the binary runs and reports the tag.
+  # Linux + macOS (install.sh); a Windows install.ps1 e2e is a follow-up.
+  install-smoke:
+    name: Install-Script Smoke (${{ matrix.os }})
+    needs: [publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install via install.sh and verify the version
+        shell: bash
+        env:
+          MERMAID_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # Retry: release assets can take a few seconds to become downloadable.
+          for attempt in 1 2 3 4 5; do
+            if sh ./install.sh; then break; fi
+            echo "install.sh attempt $attempt failed; retrying in 15s..."
+            sleep 15
+          done
+          got=$(mermaid version)
+          echo "$got"
+          echo "$got" | grep -F "${MERMAID_VERSION#v}"
 
   # Optional: Publish to crates.io
   publish-crate:
