@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Faster session listing + session provenance.** Each saved session now writes
+  a tiny `<id>.meta` sidecar, so listing sessions (`/list`) reads metadata
+  instead of parsing every transcript (older sessions fall back to a full read).
+  Sessions also record their creation environment — git branch, git SHA, and CLI
+  version — plus `forked_from` / `parent_session` lineage fields (ready for a
+  future fork/rewind).
 - **TUI: attention bell, keyboard scrolling, and a shortcut list.** The terminal
   title now reflects run state (`mermaid · working`, else the conversation
   title), and Mermaid rings the bell when a run finishes or an approval is

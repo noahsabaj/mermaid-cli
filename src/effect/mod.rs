@@ -882,14 +882,14 @@ impl EffectRunner {
                 self.detached.spawn(async move {
                     let summaries = match crate::session::ConversationManager::new(&workdir) {
                         Ok(mgr) => mgr
-                            .list_conversations()
+                            .list_conversation_metas()
                             .unwrap_or_default()
                             .into_iter()
-                            .map(|h| crate::domain::ConversationSummary {
-                                id: h.id.clone(),
-                                title: h.title.clone(),
-                                message_count: h.messages.len(),
-                                updated_at: h.updated_at.to_rfc3339(),
+                            .map(|m| crate::domain::ConversationSummary {
+                                id: m.id,
+                                title: m.title,
+                                message_count: m.message_count,
+                                updated_at: m.updated_at.to_rfc3339(),
                             })
                             .collect(),
                         Err(_) => Vec::new(),

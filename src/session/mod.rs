@@ -2,5 +2,7 @@
 mod conversation;
 mod selector;
 
-pub use conversation::{ConversationHistory, ConversationManager, detect_git_branch};
+pub use conversation::{
+    ConversationHistory, ConversationManager, ConversationMeta, detect_git_branch, detect_git_sha,
+};
 pub use selector::{SessionEntry, select_conversation};

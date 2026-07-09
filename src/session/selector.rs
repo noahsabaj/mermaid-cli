@@ -414,6 +414,11 @@ fn meta_label(entry: &SessionEntry, now: DateTime<Local>) -> String {
     {
         bits.push(branch.clone());
     }
+    // Session lineage: mark a branched-from session (dormant until fork/rewind
+    // lands, but the field is persisted now).
+    if entry.history.forked_from.is_some() {
+        bits.push("forked".to_string());
+    }
     bits.push(humanize_size(entry.size_bytes));
     bits.join(" · ")
 }
@@ -496,6 +501,10 @@ mod tests {
             last_token_usage: None,
             cumulative_token_usage: crate::domain::TokenUsageTotals::default(),
             context_usage: None,
+            forked_from: None,
+            parent_session: None,
+            cli_version: None,
+            git_sha: None,
         }
     }
 
