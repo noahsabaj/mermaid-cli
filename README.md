@@ -264,6 +264,21 @@ searxng_url = "http://localhost:8080"
 
 Create an `AGENTS.md` (the cross-tool open standard) and/or a `MERMAID.md` (mermaid-specific) at your project root with conventions, tool versions, naming patterns, and run commands. Both are loaded from the nearest matching directory — `AGENTS.md` first, then `MERMAID.md`, so MERMAID.md overrides on conflict. They auto-reload when the files change (one `stat` per turn, no filesystem watcher). The walk stops at the `.git` root or `$HOME`.
 
+## Skills
+
+Skills are task-specific playbooks the agent loads on demand (progressive disclosure). Each skill is a directory holding a `SKILL.md` with Claude Code-compatible frontmatter:
+
+```markdown
+---
+name: deploy
+description: Cut a release — version bump, changelog, tag, publish
+---
+
+Step-by-step instructions the model follows when this skill applies...
+```
+
+At startup mermaid discovers skills from three places — project (`<git-root>/.mermaid/skills/<name>/SKILL.md`, shared with your team), user (`~/.config/mermaid/skills/<name>/SKILL.md`, all your projects), and enabled plugins (declared in the plugin manifest's `skills` list) — and injects a compact index (name, description, path) into the system prompt. Same-named skills dedupe with project > user > plugin precedence. When a task matches a description, the model reads the full `SKILL.md` with `read_file`, so activation is visible in the transcript and idle skills cost almost nothing per request. The index caps at 64 skills / 8 KiB; edits to skill files are picked up on the next session start. `mermaid doctor` reports the discovered count.
+
 ```markdown
 # Project: foo-service
 

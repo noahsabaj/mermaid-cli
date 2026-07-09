@@ -498,10 +498,11 @@ impl ToolExecutor for SubagentTool {
         // ask questions — nobody is watching to answer them).
         child_state.session.is_subagent = true;
         child_state.session.agent_preamble = agent_type.preamble.clone();
-        let (instructions, memory) =
+        let (instructions, memory, skills) =
             crate::app::instructions::load_project_context(&cwd, &config.memory);
         child_state.instructions = instructions;
         child_state.memory = memory;
+        child_state.skills = skills;
         // Advertise the parent's live MCP tools to the child (types that
         // exclude `mcp` skip this — their registry has no proxy, so
         // advertising would invite unknown-tool calls). The MCP manager is
