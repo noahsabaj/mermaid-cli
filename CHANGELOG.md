@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Shell commands can no longer grab the terminal.** Model-run commands now
+  start in their own session (`setsid`) with no controlling terminal, so a
+  child that opens `/dev/tty` — a `sudo` password prompt, an ssh passphrase
+  read — fails instantly instead of painting its prompt over the TUI and
+  hanging until the command timeout. Git is additionally told never to prompt
+  (`GIT_TERMINAL_PROMPT=0`) in foreground and background commands alike.
+  Esc-cancel, timeout tree-kill, and Ctrl+B backgrounding semantics are
+  unchanged; no behavior change on Windows.
+
 ### Added
 
 - **Layered config engine.** Configuration now merges as ordered layers —
