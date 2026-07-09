@@ -45,6 +45,12 @@ pub struct RenderCache {
     /// role-prefixed assistant lines, so committed messages aren't re-parsed or
     /// re-wrapped every frame (#134).
     pub wrapped_line_cache: FxHashMap<u64, Vec<ratatui::text::Line<'static>>>,
+    /// Memoized stitched transcript: committed `Continuation` messages folded
+    /// into their predecessor bubble and spent `RecoveryNudge` notes hidden.
+    /// Rebuilt only when the committed log changes (keyed by a content
+    /// fingerprint) — without the memo, every idle frame after the first
+    /// auto-continue would deep-clone the whole transcript forever.
+    stitched: Option<StitchedMemo>,
     pub theme: theme::Theme,
     /// Host + user for the status bar's `user@host:cwd` line, read once at
     /// startup so `StatusWidget::render` doesn't hit the environment on every
@@ -72,10 +78,17 @@ impl Default for RenderCache {
             username: std::env::var("USER")
                 .or_else(|_| std::env::var("USERNAME"))
                 .unwrap_or_else(|_| "user".to_string()),
+            stitched: None,
             last_mouse_scroll_accum: 0,
             last_scroll_to_bottom_seq: 0,
         }
     }
+}
+
+/// See [`RenderCache::stitched`].
+struct StitchedMemo {
+    key: u64,
+    messages: Vec<crate::models::ChatMessage>,
 }
 
 impl RenderCache {
@@ -256,7 +269,28 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         horizontal: 1,
         vertical: 0,
     });
-    let live_messages = build_live_messages(state.session.messages(), &state.turn, state.now);
+    // Stitch pre-pass: fold auto-continued replies into one bubble and hide
+    // spent recovery nudges. Sessions without either kind skip this entirely
+    // (borrowed slice, no fingerprint); with them, the memo makes idle frames
+    // a hash-check instead of a transcript clone.
+    let committed = state.session.messages();
+    let base: &[crate::models::ChatMessage] = if needs_stitch(committed) {
+        let key = stitch_fingerprint(committed);
+        if rstate.stitched.as_ref().map(|m| m.key) != Some(key) {
+            rstate.stitched = Some(StitchedMemo {
+                key,
+                messages: stitch_committed(committed),
+            });
+        }
+        &rstate
+            .stitched
+            .as_ref()
+            .expect("stitched memo populated above")
+            .messages
+    } else {
+        committed
+    };
+    let live_messages = build_live_messages(base, &state.turn, state.now);
     let chat_widget = ChatWidget {
         messages: live_messages.as_ref(),
         theme: &rstate.theme,
@@ -399,9 +433,145 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     }
 }
 
+/// Can a `Continuation` message be folded into this predecessor? Guards the
+/// stitch against non-bubble assistants: a compaction checkpoint's assistant
+/// half (`ContextCheckpoint`, rendered as an event block), the empty
+/// error-carrier message, or an assistant that ended in tool calls.
+/// `pub(crate)` so the chat widget applies the same rule when deciding to
+/// draw a streaming continuation without a fresh bubble prefix.
+pub(crate) fn mergeable_into(prev: &crate::models::ChatMessage) -> bool {
+    prev.role == crate::models::MessageRole::Assistant
+        && matches!(
+            prev.kind,
+            crate::models::ChatMessageKind::Normal | crate::models::ChatMessageKind::Continuation
+        )
+        && prev.tool_calls.is_none()
+}
+
+/// Does the committed log contain anything the stitch pre-pass would change?
+/// The common session never does — and then rendering keeps borrowing the
+/// committed slice with zero copies, exactly as before auto-continue existed.
+fn needs_stitch(committed: &[crate::models::ChatMessage]) -> bool {
+    committed.iter().any(|m| {
+        matches!(
+            m.kind,
+            crate::models::ChatMessageKind::Continuation
+                | crate::models::ChatMessageKind::RecoveryNudge
+        )
+    })
+}
+
+/// Fingerprint of every committed-message field the stitched transcript
+/// depends on. Cheap relative to re-stitching (hashing, no cloning); mirrors
+/// the chat widget's frame fingerprint so in-place mutations that don't
+/// change message count (e.g. an action attached to the last message during a
+/// tool run) still invalidate the memo.
+fn stitch_fingerprint(committed: &[crate::models::ChatMessage]) -> u64 {
+    use std::fmt::Write as _;
+    use std::hash::{Hash, Hasher};
+    struct HashWrite<'a, H: Hasher>(&'a mut H);
+    impl<H: Hasher> std::fmt::Write for HashWrite<'_, H> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0.write(s.as_bytes());
+            Ok(())
+        }
+    }
+    let mut h = rustc_hash::FxHasher::default();
+    committed.len().hash(&mut h);
+    for msg in committed {
+        msg.content.hash(&mut h);
+        msg.thinking.hash(&mut h);
+        msg.timestamp.timestamp().hash(&mut h);
+        msg.images.as_ref().map_or(0, |v| v.len()).hash(&mut h);
+        msg.image_numbers
+            .as_ref()
+            .map_or(0, |v| v.len())
+            .hash(&mut h);
+        let mut hw = HashWrite(&mut h);
+        let _ = write!(
+            hw,
+            "{:?}|{:?}|{:?}|{:?}",
+            msg.role,
+            msg.kind,
+            msg.actions,
+            msg.tool_calls.as_ref().map(|t| t.len())
+        );
+    }
+    h.finish()
+}
+
+/// The display stitch: fold committed `Continuation` messages into their
+/// predecessor bubble and hide spent `RecoveryNudge` notes, so an
+/// auto-continued reply reads as ONE uninterrupted assistant message.
+///
+/// Display-only — canonical history keeps the separate messages exactly as
+/// they crossed the wire (provider-correct, thinking-signature-safe). Merging
+/// the contents into one string here also means one `parse_markdown` call, so
+/// a code fence cut open by the output cap and re-closed in the continuation
+/// renders as a single intact block. A `Continuation` whose predecessor is
+/// not a mergeable bubble (archived by compaction, wedged system note)
+/// renders as its own message — a graceful seam, never a wrong merge.
+fn stitch_committed(committed: &[crate::models::ChatMessage]) -> Vec<crate::models::ChatMessage> {
+    let mut out: Vec<crate::models::ChatMessage> = Vec::with_capacity(committed.len());
+    for msg in committed {
+        if msg.kind == crate::models::ChatMessageKind::RecoveryNudge {
+            continue;
+        }
+        if msg.kind == crate::models::ChatMessageKind::Continuation
+            && let Some(prev) = out.last_mut()
+            && mergeable_into(prev)
+        {
+            merge_continuation(prev, msg);
+            continue;
+        }
+        out.push(msg.clone());
+    }
+    out
+}
+
+/// Fold one continuation segment into the bubble it resumes. The seam gets a
+/// conservative overlap trim (see `continuation_overlap`): a resume-echo of
+/// the previous tail is dropped, anything ambiguous is kept.
+fn merge_continuation(prev: &mut crate::models::ChatMessage, cont: &crate::models::ChatMessage) {
+    let skip = crate::utils::continuation_overlap(&prev.content, &cont.content);
+    prev.content.push_str(&cont.content[skip..]);
+    if let Some(cont_thinking) = &cont.thinking {
+        match &mut prev.thinking {
+            Some(t) => {
+                t.push_str("\n\n");
+                t.push_str(cont_thinking);
+            },
+            None => prev.thinking = Some(cont_thinking.clone()),
+        }
+    }
+    prev.actions.extend(cont.actions.iter().cloned());
+    if let Some(imgs) = &cont.images {
+        prev.images
+            .get_or_insert_with(Vec::new)
+            .extend(imgs.iter().cloned());
+    }
+    if let Some(nums) = &cont.image_numbers {
+        prev.image_numbers
+            .get_or_insert_with(Vec::new)
+            .extend(nums.iter().copied());
+    }
+    // A continuation that resumed the reply and then called tools carries the
+    // calls; the merged bubble inherits them (the guard ensured prev had none).
+    if cont.tool_calls.is_some() {
+        prev.tool_calls = cont.tool_calls.clone();
+    }
+}
+
 /// Merge the committed message log with any in-flight partial
 /// content from `TurnState::Generating`. The chat widget renders
 /// this as a single stream.
+///
+/// `committed` is the (possibly stitched) display transcript. When the live
+/// turn is an auto-continue, the pseudo-message is stamped `Continuation` so
+/// the widget draws it as a prefix-less extension of the previous bubble, and
+/// its leading resume-echo is trimmed against that bubble's tail — the
+/// in-flight reply looks like one message while it streams, not just after
+/// it commits.
 fn build_live_messages<'a>(
     committed: &'a [crate::models::ChatMessage],
     turn: &TurnState,
@@ -413,6 +583,7 @@ fn build_live_messages<'a>(
     if let TurnState::Generating {
         partial_text,
         partial_reasoning,
+        continuation,
         ..
     } = turn
         && (!partial_text.is_empty() || !partial_reasoning.is_empty())
@@ -422,13 +593,25 @@ fn build_live_messages<'a>(
         } else {
             Some(partial_reasoning.clone())
         };
+        let stitching = *continuation && committed.last().is_some_and(mergeable_into);
+        let content = if stitching {
+            let prev = &committed[committed.len() - 1].content;
+            let skip = crate::utils::continuation_overlap(prev, partial_text);
+            partial_text[skip..].to_string()
+        } else {
+            partial_text.clone()
+        };
         let msg = crate::models::ChatMessage {
             role: crate::models::MessageRole::Assistant,
-            content: partial_text.clone(),
+            content,
             // `state.now` (stamped each tick) keeps render a pure function of
             // State — never read the wall clock here.
             timestamp: now,
-            kind: crate::models::ChatMessageKind::Normal,
+            kind: if stitching {
+                crate::models::ChatMessageKind::Continuation
+            } else {
+                crate::models::ChatMessageKind::Normal
+            },
             metadata: None,
             actions: Vec::new(),
             thinking,
@@ -613,11 +796,200 @@ mod tests {
             phase: GenPhase::Sending,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
         let live = build_live_messages(&committed, &turn, now);
         assert!(matches!(live, Cow::Owned(_)));
         assert_eq!(live.len(), 2);
         assert_eq!(live[1].timestamp, now);
+    }
+
+    fn kinded(
+        mut msg: crate::models::ChatMessage,
+        kind: crate::models::ChatMessageKind,
+    ) -> crate::models::ChatMessage {
+        msg.kind = kind;
+        msg
+    }
+
+    #[test]
+    fn stitch_committed_merges_chain_and_hides_nudges() {
+        use crate::models::{ChatMessage, ChatMessageKind};
+        let mut part1 = ChatMessage::assistant("The audit found three issues in the resolver");
+        part1.thinking = Some("first trace".to_string());
+        // The continuation echoes the tail of part1 — the seam trim drops it.
+        let mut part2 = kinded(
+            ChatMessage::assistant("issues in the resolver, and here is the fix."),
+            ChatMessageKind::Continuation,
+        );
+        part2.thinking = Some("second trace".to_string());
+        let committed = vec![
+            ChatMessage::user("audit the widget"),
+            part1,
+            kinded(
+                ChatMessage::system("resume nudge"),
+                ChatMessageKind::RecoveryNudge,
+            ),
+            part2,
+        ];
+
+        assert!(needs_stitch(&committed));
+        let stitched = stitch_committed(&committed);
+        assert_eq!(stitched.len(), 2, "user + one merged bubble");
+        assert_eq!(
+            stitched[1].content,
+            "The audit found three issues in the resolver, and here is the fix.",
+            "contents merge with the resume echo trimmed"
+        );
+        assert_eq!(
+            stitched[1].thinking.as_deref(),
+            Some("first trace\n\nsecond trace"),
+            "both reasoning segments survive in order"
+        );
+        assert!(
+            !stitched.iter().any(|m| m.content.contains("resume nudge")),
+            "nudges never render"
+        );
+    }
+
+    #[test]
+    fn stitch_refuses_non_bubble_predecessor() {
+        use crate::models::{ChatMessage, ChatMessageKind};
+        // A continuation whose bubble was archived by compaction lands after
+        // the checkpoint's assistant half — render it as its own message
+        // (graceful seam) rather than merging into the event block.
+        let committed = vec![
+            kinded(
+                ChatMessage::assistant("checkpoint summary"),
+                ChatMessageKind::ContextCheckpoint,
+            ),
+            kinded(
+                ChatMessage::assistant("orphaned continuation"),
+                ChatMessageKind::Continuation,
+            ),
+        ];
+        let stitched = stitch_committed(&committed);
+        assert_eq!(stitched.len(), 2, "no merge into a checkpoint");
+        assert_eq!(stitched[1].content, "orphaned continuation");
+    }
+
+    #[test]
+    fn needs_stitch_is_false_for_plain_sessions() {
+        use crate::models::ChatMessage;
+        // The fast path: a session that never auto-continued skips the
+        // pre-pass entirely (borrowed slice, no fingerprint, no clone).
+        let committed = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("hello"),
+            ChatMessage::system("note"),
+        ];
+        assert!(!needs_stitch(&committed));
+    }
+
+    #[test]
+    fn build_live_messages_stamps_streaming_continuation_and_trims_echo() {
+        use crate::domain::{GenPhase, TurnId};
+        use crate::models::{ChatMessage, ChatMessageKind};
+
+        let committed = vec![ChatMessage::assistant(
+            "the fix lands in the resolver module",
+        )];
+        let turn = TurnState::Generating {
+            id: TurnId(2),
+            started: std::time::SystemTime::now(),
+            partial_text: "in the resolver module, specifically the clamp".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+            continuation: true,
+        };
+        let live = build_live_messages(&committed, &turn, chrono::Local::now());
+        let streamed = live.last().expect("pseudo-message appended");
+        assert_eq!(
+            streamed.kind,
+            ChatMessageKind::Continuation,
+            "the live half is stamped so the widget draws it prefix-less"
+        );
+        assert_eq!(
+            streamed.content, ", specifically the clamp",
+            "the leading resume echo is trimmed against the committed tail"
+        );
+    }
+
+    #[test]
+    fn auto_continued_reply_renders_as_one_bubble() {
+        use crate::models::{ChatMessage, ChatMessageKind};
+        let mut s = mock_state();
+        s.session.append(ChatMessage::user("audit"), s.now);
+        s.session
+            .append(ChatMessage::assistant("part one of the reply"), s.now);
+        s.session.append(
+            kinded(
+                ChatMessage::system("output limit — continuing"),
+                ChatMessageKind::RecoveryNudge,
+            ),
+            s.now,
+        );
+        s.session.append(
+            kinded(
+                ChatMessage::assistant("and part two lands here"),
+                ChatMessageKind::Continuation,
+            ),
+            s.now,
+        );
+
+        let out = render_to_string(&s);
+        assert!(out.contains("part one of the reply"));
+        assert!(out.contains("and part two lands here"));
+        assert!(
+            !out.contains("continuing"),
+            "the recovery nudge never renders"
+        );
+        assert_eq!(
+            out.matches('●').count(),
+            1,
+            "both halves share one assistant bullet:\n{out}"
+        );
+    }
+
+    #[test]
+    fn streaming_continuation_renders_without_fresh_bullet() {
+        use crate::domain::{GenPhase, TurnId};
+        use crate::models::{ChatMessage, ChatMessageKind};
+        let mut s = mock_state();
+        s.session.append(ChatMessage::user("audit"), s.now);
+        s.session
+            .append(ChatMessage::assistant("part one of the reply"), s.now);
+        s.session.append(
+            kinded(
+                ChatMessage::system("output limit — continuing"),
+                ChatMessageKind::RecoveryNudge,
+            ),
+            s.now,
+        );
+        s.turn = TurnState::Generating {
+            id: TurnId(3),
+            started: std::time::SystemTime::now(),
+            partial_text: "and part two streams in".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+            continuation: true,
+        };
+
+        let out = render_to_string(&s);
+        assert!(out.contains("part one of the reply"));
+        assert!(out.contains("and part two streams in"));
+        assert!(!out.contains("continuing"), "live nudge hidden too");
+        assert_eq!(
+            out.matches('●').count(),
+            1,
+            "the streaming half joins the committed bubble:\n{out}"
+        );
     }
 
     #[test]

@@ -402,10 +402,10 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             );
         },
         Msg::UpstreamError { turn, error } => {
-            handle_upstream_error(&mut state, turn, error);
+            handle_upstream_error(&mut state, &mut cmds, turn, error);
         },
         Msg::TurnCancelled(turn) => {
-            handle_turn_cancelled(&mut state, turn);
+            handle_turn_cancelled(&mut state, &mut cmds, turn);
         },
 
         // ── Tools ───────────────────────────────────────────────────
@@ -657,8 +657,15 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::OpenImageAt {
             message_index,
             image_index,
+            image_number,
         } => {
-            handle_open_image_at(&mut state, &mut cmds, message_index, image_index);
+            handle_open_image_at(
+                &mut state,
+                &mut cmds,
+                message_index,
+                image_index,
+                image_number,
+            );
         },
         Msg::CopySelection(text) => {
             // The selection itself lives in the render layer; the main loop
@@ -1863,10 +1870,14 @@ fn handle_submit_prompt(
     // counters track this run start so they don't reset at every step.
     state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
     state.runtime.run_committed_tokens = 0;
-    // Fresh run — clear the truncation-recovery and empty-turn guards from any
-    // prior run so this intent gets a full retry budget.
+    // Fresh run — clear the truncation-recovery, empty-turn, and output-cap
+    // continuation guards from any prior run so this intent gets a full retry
+    // budget. (A run that *ended* at the continuation cap never hits the
+    // in-stream reset, so without this the next run would start with a zero
+    // continuation budget.)
     state.runtime.truncation_recoveries = 0;
     state.runtime.empty_continuations = 0;
+    state.runtime.continue_recoveries = 0;
     state.turn = start_generating(turn, std::time::SystemTime::from(state.now));
     cmds.push(Cmd::CallModel {
         turn,
@@ -2311,6 +2322,18 @@ fn visible_reasoning_value(arg: Option<&str>, current: bool) -> Result<bool, &'s
 /// scrollable transcript instead of flashing in the spinner's row. The zone
 /// above the input is reserved for the generation spinner alone.
 fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) {
+    push_system_kind(state, cmds, text, crate::models::ChatMessageKind::Normal);
+}
+
+/// `push_system` with an explicit message kind. The recovery tails use it to
+/// stamp their one-shot nudges `RecoveryNudge` so the transcript hides them
+/// and `sweep_spent_nudges` retires them at the next turn-end.
+fn push_system_kind(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    text: impl Into<String>,
+    kind: crate::models::ChatMessageKind,
+) {
     // While tools are mid-flight the trailing message is the committed
     // `assistant(tool_calls)` whose `tool` results haven't landed yet. Appending
     // a system note *after* it wedges a message between the `tool_use` and its
@@ -2332,19 +2355,28 @@ fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) 
     ) && messages
         .last()
         .is_some_and(|m| m.role == MessageRole::Assistant && m.tool_calls.is_some());
+    let mut msg = ChatMessage::system(text.into());
+    msg.kind = kind;
     if would_split {
         let pos = messages.len() - 1;
-        state
-            .session
-            .conversation
-            .messages
-            .insert(pos, ChatMessage::system(text.into()));
+        state.session.conversation.messages.insert(pos, msg);
     } else {
-        state
-            .session
-            .append(ChatMessage::system(text.into()), state.now);
+        state.session.append(msg, state.now);
     }
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+}
+
+/// Retire spent recovery nudges. A `RecoveryNudge` steers exactly one request
+/// (auto-continue resume, stalled-turn retry); by the time any turn-end
+/// arrives that request has already gone out, so the note is dead weight —
+/// worse, if it lingered it would keep instructing the model on the user's
+/// *next, unrelated* turn while the transcript hides it. Returns whether
+/// anything was removed so callers on paths without a save can persist.
+fn sweep_spent_nudges(state: &mut State) -> bool {
+    let messages = &mut state.session.conversation.messages;
+    let before = messages.len();
+    messages.retain(|m| m.kind != crate::models::ChatMessageKind::RecoveryNudge);
+    messages.len() != before
 }
 
 fn ollama_pull_target(model_id: &str) -> Option<String> {
@@ -2385,6 +2417,7 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
         id: turn,
         started: std::time::SystemTime::from(state.now),
         trigger: CompactionTrigger::Manual,
+        resume_continuation: false,
     };
     // The live "Compacting…" status comes from the TurnState::Compacting status
     // line (the blue indicator); no separate gray status message — it was a
@@ -3044,12 +3077,14 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     clear_parked_tool_requests(state);
     // Quitting mid-stream: preserve whatever the model already produced so
     // `--continue` shows what was on screen. Commit the in-flight partial
-    // as an assistant message with an interrupted marker before saving.
+    // as an assistant message with an interrupted marker before saving —
+    // keeping the continuation stamp so a reloaded transcript still stitches.
     let now = state.now;
     if let TurnState::Generating {
         partial_text,
         partial_reasoning,
         thinking_signature,
+        continuation,
         ..
     } = &mut state.turn
         && !partial_text.trim().is_empty()
@@ -3057,12 +3092,14 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
         let text = std::mem::take(partial_text);
         let reasoning = std::mem::take(partial_reasoning);
         let sig = thinking_signature.take();
+        let continuation = *continuation;
         let msg = commit_assistant_message(
             format!("{text}\n\n_[interrupted]_"),
             reasoning,
             Vec::new(),
             sig,
             now,
+            continuation,
         );
         state.session.append(msg, state.now);
     }
@@ -3070,6 +3107,8 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     // placeholders so the saved history a later `--continue` reloads isn't a
     // malformed `assistant(tool_calls)` with no results.
     seal_orphaned_tool_calls(state);
+    // The run is over — any live recovery nudge is spent; don't persist it.
+    sweep_spent_nudges(state);
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
     cmds.push(Cmd::Exit);
 }
@@ -3132,18 +3171,29 @@ fn handle_compaction_finished(
     // continue in the effect.
     enum Outcome {
         Manual,
-        Recovery,
+        /// Resume the run; `resume_continuation` carries the interrupted turn's
+        /// auto-continue flag so a chain survives a mid-chain compaction.
+        Recovery {
+            resume_continuation: bool,
+        },
         AutoMidTurn,
     }
     let outcome = match state.turn {
-        TurnState::Compacting { id, trigger, .. } if id == turn => match trigger {
+        TurnState::Compacting {
+            id,
+            trigger,
+            resume_continuation,
+            ..
+        } if id == turn => match trigger {
             // A context-limit compaction (the provider rejected the request
             // mid-stream for length; emitted from effect/mod.rs via
             // `is_context_limit_error`) must RESUME the interrupted request, just
             // like a truncation recovery — not silently end the turn as the old
             // `_ => Manual` arm did.
             CompactionTrigger::ContextLimitRetry | CompactionTrigger::TruncationRecovery => {
-                Outcome::Recovery
+                Outcome::Recovery {
+                    resume_continuation,
+                }
             },
             _ => Outcome::Manual,
         },
@@ -3193,12 +3243,18 @@ fn handle_compaction_finished(
             // FIFO until some later turn happened to end.
             drain_next_queued_message(state);
         },
-        Outcome::Recovery => {
+        Outcome::Recovery {
+            resume_continuation,
+        } => {
             // Resume the run with the compacted context so the model can finish the
             // work the truncation cut off (mirrors `handle_tool_finished`'s
             // follow-up dispatch).
             let next_turn = state.ids.fresh_turn();
-            state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
+            state.turn = super::transition::start_generating_with(
+                next_turn,
+                std::time::SystemTime::from(state.now),
+                resume_continuation,
+            );
             cmds.push(Cmd::CallModel {
                 turn: next_turn,
                 request: build_chat_request(state),
@@ -3363,12 +3419,14 @@ fn handle_stream_done(
             partial_reasoning,
             thinking_signature: accumulated_sig,
             pending_tool_calls,
+            continuation,
             ..
         } if id == turn => (
             partial_text,
             partial_reasoning,
             accumulated_sig,
             pending_tool_calls,
+            continuation,
         ),
         other => {
             // #F40: a StreamDone can arrive for a turn that is already Cancelling
@@ -3394,11 +3452,17 @@ fn handle_stream_done(
         },
     };
 
-    let (partial_text, partial_reasoning, accumulated_sig, tool_calls) = generating;
+    let (partial_text, partial_reasoning, accumulated_sig, tool_calls, continuation) = generating;
     // Bank this phase's generated tokens into the run total so the spinner's
     // counter carries across the tool step into the next model call (matches the
     // live estimate in StreamText/StreamReasoning).
     state.runtime.run_committed_tokens += (partial_text.len() + partial_reasoning.len()) / 4;
+
+    // The turn that any live recovery nudge was steering has now ended — retire
+    // it before committing, so the partial and its continuation sit adjacent in
+    // history (and the one-shot instruction never leaks into a later request).
+    // Placed after the Generating unpack so a stale/Cancelling Done can't sweep.
+    sweep_spent_nudges(state);
 
     // A turn that produced no assistant *text* and no tool calls is a dead end for
     // the user — even when the model spent the turn "thinking" (reasoning is
@@ -3440,6 +3504,7 @@ fn handle_stream_done(
             tool_calls.clone(),
             final_sig,
             state.now,
+            continuation,
         );
         state.session.append(msg, state.now);
     }
@@ -3625,6 +3690,9 @@ fn handle_stream_done(
             id: comp_turn,
             started: std::time::SystemTime::from(state.now),
             trigger: CompactionTrigger::TruncationRecovery,
+            // Carry the interrupted turn's auto-continue flag through the
+            // compaction so the resumed text keeps its Continuation stamp.
+            resume_continuation: continuation,
         };
         cmds.push(Cmd::CompactConversation {
             turn: comp_turn,
@@ -3646,14 +3714,19 @@ fn handle_stream_done(
     // assistant-prefill dependency). Returning keeps the run alive.
     if continuing {
         state.runtime.continue_recoveries += 1;
-        push_system(
+        push_system_kind(
             state,
             cmds,
             "The response hit the model's per-response output limit — continuing. Resume \
              exactly where the previous message stopped; do not repeat text already sent.",
+            crate::models::ChatMessageKind::RecoveryNudge,
         );
         let next_turn = state.ids.fresh_turn();
-        state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
+        state.turn = super::transition::start_generating_with(
+            next_turn,
+            std::time::SystemTime::from(state.now),
+            true,
+        );
         cmds.push(Cmd::CallModel {
             turn: next_turn,
             request: build_chat_request(state),
@@ -3669,14 +3742,22 @@ fn handle_stream_done(
     // here keeps the run alive instead of dropping to the run-summary tail.
     if auto_retry_empty {
         state.runtime.empty_continuations += 1;
-        push_system(
+        push_system_kind(
             state,
             cmds,
             "The last turn produced no reply or action — continuing. Provide your \
              response or take the next step.",
+            crate::models::ChatMessageKind::RecoveryNudge,
         );
         let next_turn = state.ids.fresh_turn();
-        state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
+        // Propagate the continuation flag: an empty retry *inside* an
+        // auto-continue chain must not strip the marker from the eventual
+        // real continuation text.
+        state.turn = super::transition::start_generating_with(
+            next_turn,
+            std::time::SystemTime::from(state.now),
+            continuation,
+        );
         cmds.push(Cmd::CallModel {
             turn: next_turn,
             request: build_chat_request(state),
@@ -3709,25 +3790,43 @@ fn handle_stream_done(
     drain_next_queued_message(state);
 }
 
-/// Handle `Msg::OpenImageAt { message_index, image_index }`. Resolves
-/// the base64 payload from the committed message history, writes it
-/// to a temp file, and dispatches `Cmd::OpenInSystem` so the user's
-/// default image viewer opens it. F13.
+/// Handle `Msg::OpenImageAt`. Resolves the base64 payload from the committed
+/// message history, writes it to a temp file, and dispatches
+/// `Cmd::OpenInSystem` so the user's default image viewer opens it. F13.
+///
+/// Resolution prefers the stable global image number: the click map indexes
+/// the DISPLAY transcript, which the continuation stitch can shift away from
+/// committed history (hidden nudges, merged bubbles). The positional pair is
+/// the fallback for images without a number (pre-numbering sessions — which
+/// predate stitching, so their indices still align).
 fn handle_open_image_at(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     message_index: usize,
     image_index: usize,
+    image_number: Option<u64>,
 ) {
-    let msg = match state.session.messages().get(message_index) {
-        Some(m) => m,
-        None => return,
-    };
-    let Some(images) = msg.images.as_ref() else {
-        return;
-    };
-    let Some(b64) = images.get(image_index) else {
-        return;
+    let by_number = image_number.and_then(|n| {
+        state.session.messages().iter().find_map(|m| {
+            let pos = m.image_numbers.as_ref()?.iter().position(|&x| x == n)?;
+            m.images.as_ref()?.get(pos)
+        })
+    });
+    let b64 = match by_number {
+        Some(b64) => b64,
+        None => {
+            let msg = match state.session.messages().get(message_index) {
+                Some(m) => m,
+                None => return,
+            };
+            let Some(images) = msg.images.as_ref() else {
+                return;
+            };
+            let Some(b64) = images.get(image_index) else {
+                return;
+            };
+            b64
+        },
     };
     use base64::{Engine, engine::general_purpose};
     let Ok(bytes) = general_purpose::STANDARD.decode(b64) else {
@@ -3752,11 +3851,17 @@ fn handle_open_image_at(
 ///
 /// Stale filter at the top of `update_step` catches mismatched turn ids
 /// before we get here, so this handler is branch-light.
-fn handle_turn_cancelled(state: &mut State, turn: TurnId) {
+fn handle_turn_cancelled(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
     match state.turn {
         TurnState::Cancelling { id, .. } if id == turn => {
             state.turn = TurnState::Idle;
             state.ui.live_tool_status.clear();
+            // The cancelled turn abandoned whatever recovery its nudge was
+            // steering — retire it so the hidden instruction can't leak into
+            // the user's next, unrelated request.
+            if sweep_spent_nudges(state) {
+                cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            }
             drain_next_queued_message(state);
         },
         _ => {
@@ -3783,7 +3888,12 @@ fn drain_next_queued_message(state: &mut State) {
     }
 }
 
-fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::UserFacingError) {
+fn handle_upstream_error(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    turn: TurnId,
+    error: crate::models::UserFacingError,
+) {
     // Defense in depth (F4): even though the stale-filter at the top of
     // `update_step` gates on `turn_id()`, re-check here so a future
     // refactor that weakens the filter can't silently wipe the active
@@ -3810,6 +3920,11 @@ fn handle_upstream_error(state: &mut State, turn: TurnId, error: crate::models::
     // would paint the same error twice.
     let now = state.now;
     state.turn = TurnState::Idle;
+    // The errored turn abandoned whatever recovery its nudge was steering —
+    // retire it so the hidden instruction can't leak into a later request.
+    if sweep_spent_nudges(state) {
+        cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    }
     let msg = ChatMessage {
         role: MessageRole::Assistant,
         content: String::new(),
@@ -5120,6 +5235,7 @@ mod tests {
             Msg::OpenImageAt {
                 message_index: 0,
                 image_index: 0,
+                image_number: None,
             },
         );
 
@@ -5132,6 +5248,52 @@ mod tests {
             _ => None,
         });
         assert_eq!(write_path, open_path);
+    }
+
+    #[test]
+    fn open_image_resolves_by_global_number_over_stale_position() {
+        // The click map indexes the DISPLAY transcript, which the continuation
+        // stitch can shift away from committed history. The stable [Image #N]
+        // number must win over a stale positional pair.
+        use base64::Engine as _;
+        let mut state = fresh_state();
+        let first = base64::engine::general_purpose::STANDARD.encode(b"first image");
+        let second = base64::engine::general_purpose::STANDARD.encode(b"second image");
+        state.session.append(
+            ChatMessage::user("a [Image #7]")
+                .with_images(vec![first])
+                .with_image_numbers(vec![7]),
+            state.now,
+        );
+        state.session.append(
+            ChatMessage::user("b [Image #9]")
+                .with_images(vec![second.clone()])
+                .with_image_numbers(vec![9]),
+            state.now,
+        );
+
+        // Positional pair deliberately points at the FIRST message.
+        let (_, cmds) = update(
+            state,
+            Msg::OpenImageAt {
+                message_index: 0,
+                image_index: 0,
+                image_number: Some(9),
+            },
+        );
+
+        let expected = base64::engine::general_purpose::STANDARD
+            .decode(second)
+            .unwrap();
+        let written = cmds.iter().find_map(|cmd| match cmd {
+            Cmd::WriteImageToTemp { bytes, .. } => Some(bytes.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            written.as_deref(),
+            Some(expected.as_slice()),
+            "resolution follows the global number, not the display position"
+        );
     }
 
     #[test]
@@ -5850,6 +6012,7 @@ mod tests {
             phase: GenPhase::Streaming,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
         let (state, cmds) = update(
             state,
@@ -5905,6 +6068,7 @@ mod tests {
             phase: GenPhase::Streaming,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
         let (state, _) = update(
             state,
@@ -5969,6 +6133,7 @@ mod tests {
             phase: GenPhase::Streaming,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
         let (state, _) = update(
             state,
@@ -5999,6 +6164,7 @@ mod tests {
             phase: GenPhase::Streaming,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
         let (state, cmds) = update(
             state,
@@ -6031,6 +6197,7 @@ mod tests {
             phase: GenPhase::Thinking,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
         let (state, _) = update(
             state,
@@ -6063,6 +6230,7 @@ mod tests {
             phase: GenPhase::Streaming,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         }
     }
 
@@ -6364,6 +6532,275 @@ mod tests {
         assert_eq!(state.runtime.continue_recoveries, 0);
     }
 
+    /// A live continuation turn (mid auto-continue) with accumulated text.
+    fn continuation_turn(id: TurnId, partial: &str) -> TurnState {
+        TurnState::Generating {
+            id,
+            started: std::time::SystemTime::now(),
+            partial_text: partial.to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            thinking_signature: None,
+            pending_tool_calls: Vec::new(),
+            continuation: true,
+        }
+    }
+
+    #[test]
+    fn continuation_full_cycle_stamps_kind_and_sweeps_spent_nudge() {
+        // The whole seamless-stitch contract at the domain layer: the nudge is
+        // stamped RecoveryNudge (hidden + retirable), the continuation turn
+        // carries the flag, its commit is stamped Continuation, and the spent
+        // nudge is swept at the continuation's stream-done — leaving partial
+        // and continuation ADJACENT in history so the transcript can merge
+        // them. An unrelated system note must survive the sweep.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("audit the widget"), state.now);
+        state
+            .session
+            .append(ChatMessage::system("unrelated note"), state.now);
+        state.turn = truncating_turn("part one of the reply");
+        let (mut state, _) = update(state, length_done_with_usage(16_600, 4_000));
+
+        let nudge = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.content.contains("continuing"))
+            .expect("nudge pushed");
+        assert_eq!(
+            nudge.kind,
+            crate::models::ChatMessageKind::RecoveryNudge,
+            "the nudge is stamped for hiding + retirement"
+        );
+        let cont_id = state.turn.id().expect("continuation turn live");
+        assert!(
+            matches!(
+                state.turn,
+                TurnState::Generating {
+                    continuation: true,
+                    ..
+                }
+            ),
+            "the fresh turn carries the continuation flag"
+        );
+
+        // The continuation streams its half and finishes normally.
+        state.turn = continuation_turn(cont_id, "and part two");
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: cont_id,
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+
+        let messages = state.session.messages();
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.kind == crate::models::ChatMessageKind::RecoveryNudge),
+            "the spent nudge is retired from history"
+        );
+        assert!(
+            messages.iter().any(|m| m.content == "unrelated note"),
+            "the sweep only removes recovery nudges"
+        );
+        let part_one = messages
+            .iter()
+            .position(|m| m.content == "part one of the reply")
+            .expect("partial committed");
+        let part_two = &messages[part_one + 1];
+        assert_eq!(
+            part_two.content, "and part two",
+            "partial and continuation sit adjacent once the nudge is gone"
+        );
+        assert_eq!(
+            part_two.kind,
+            crate::models::ChatMessageKind::Continuation,
+            "the continuation commit is stamped for the display stitch"
+        );
+        assert_eq!(state.runtime.continue_recoveries, 0, "progress resets");
+    }
+
+    #[test]
+    fn empty_retry_inside_continuation_chain_keeps_the_flag() {
+        // A continuation turn that comes back empty auto-retries; the retry
+        // turn must still be a continuation or the eventual real text commits
+        // unstamped and the transcript shows a seam mid-chain.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("audit the widget"), state.now);
+        state.turn = continuation_turn(TurnId(5), "");
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                thinking_signature: None,
+                stop_reason: None,
+            },
+        );
+        assert!(
+            matches!(
+                state.turn,
+                TurnState::Generating {
+                    continuation: true,
+                    ..
+                }
+            ),
+            "the empty-retry turn inherits the continuation flag"
+        );
+        let nudge = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.content.contains("no reply or action"))
+            .expect("empty-retry nudge pushed");
+        assert_eq!(
+            nudge.kind,
+            crate::models::ChatMessageKind::RecoveryNudge,
+            "the stalled-turn nudge gets the same retirement treatment"
+        );
+    }
+
+    #[test]
+    fn truncation_recovery_resume_keeps_continuation_flag() {
+        // A continuation turn that hits a genuine context-full stop compacts;
+        // the resume after compaction must re-enter Generating with the flag.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("original prompt"), state.now);
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::TruncationRecovery,
+            resume_continuation: true,
+        };
+        let result = fake_recovery_result(vec![ChatMessage::user("compacted context")]);
+        let (state, _) = update(
+            state,
+            Msg::CompactionFinished {
+                turn: TurnId(7),
+                result,
+            },
+        );
+        assert!(
+            matches!(
+                state.turn,
+                TurnState::Generating {
+                    continuation: true,
+                    ..
+                }
+            ),
+            "the compaction resume carries the chain marker through"
+        );
+    }
+
+    #[test]
+    fn quit_mid_continuation_stamps_interrupted_commit_and_sweeps() {
+        // Ctrl+C mid-continuation: the interrupted partial keeps the
+        // Continuation stamp (a `--continue` reload still stitches) and the
+        // live nudge doesn't get persisted into the saved session.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("audit the widget"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("part one of the reply"), state.now);
+        let mut nudge = ChatMessage::system("resume nudge");
+        nudge.kind = crate::models::ChatMessageKind::RecoveryNudge;
+        state.session.append(nudge, state.now);
+        state.turn = continuation_turn(TurnId(9), "and part tw");
+        let (state, cmds) = update(state, Msg::Quit);
+
+        assert!(state.should_exit);
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        let messages = state.session.messages();
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.kind == crate::models::ChatMessageKind::RecoveryNudge),
+            "the live nudge is not persisted on quit"
+        );
+        let last = messages.last().expect("interrupted partial committed");
+        assert!(last.content.contains("and part tw"));
+        assert_eq!(
+            last.kind,
+            crate::models::ChatMessageKind::Continuation,
+            "the interrupted commit keeps the stitch marker"
+        );
+    }
+
+    #[test]
+    fn cancel_and_upstream_error_sweep_spent_nudges() {
+        // Both non-stream-done turn ends retire a live nudge: leaving it in
+        // history would keep steering later requests while the transcript
+        // hides it.
+        for is_error in [false, true] {
+            let mut state = fresh_state();
+            let mut nudge = ChatMessage::system("resume nudge");
+            nudge.kind = crate::models::ChatMessageKind::RecoveryNudge;
+            state.session.append(nudge, state.now);
+            let msg = if is_error {
+                state.turn = continuation_turn(TurnId(9), "half");
+                Msg::UpstreamError {
+                    turn: TurnId(9),
+                    error: crate::models::UserFacingError {
+                        summary: "boom".to_string(),
+                        message: "provider died".to_string(),
+                        suggestion: String::new(),
+                        category: crate::models::ErrorCategory::Temporary,
+                        recoverable: true,
+                    },
+                }
+            } else {
+                state.turn = TurnState::Cancelling {
+                    id: TurnId(9),
+                    since: std::time::SystemTime::now(),
+                };
+                Msg::TurnCancelled(TurnId(9))
+            };
+            let (state, cmds) = update(state, msg);
+            assert!(
+                !state
+                    .session
+                    .messages()
+                    .iter()
+                    .any(|m| m.kind == crate::models::ChatMessageKind::RecoveryNudge),
+                "nudge swept (is_error={is_error})"
+            );
+            assert!(
+                cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
+                "sweep persisted (is_error={is_error})"
+            );
+        }
+    }
+
+    #[test]
+    fn submit_resets_continue_recoveries() {
+        // A run that ENDED at the continuation cap never hits the in-stream
+        // reset; the next submit must restore the full budget.
+        let mut state = fresh_state();
+        state.runtime.continue_recoveries = crate::constants::MAX_OUTPUT_CONTINUATIONS;
+        let (state, _) = update(
+            state,
+            Msg::SubmitPrompt {
+                text: "next task".to_string(),
+                attachment_ids: Vec::new(),
+            },
+        );
+        assert_eq!(state.runtime.continue_recoveries, 0);
+    }
+
     #[test]
     fn length_with_usage_near_known_window_still_compacts() {
         // With usage AND a known window that prompt+completion+reserve reaches,
@@ -6436,6 +6873,7 @@ mod tests {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
             trigger: CompactionTrigger::TruncationRecovery,
+            resume_continuation: false,
         };
         let result = fake_recovery_result(vec![ChatMessage::user("compacted context")]);
         let (state, cmds) = update(
@@ -6468,6 +6906,7 @@ mod tests {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
             trigger: CompactionTrigger::ContextLimitRetry,
+            resume_continuation: false,
         };
         let result = fake_recovery_result(vec![ChatMessage::user("compacted context")]);
         let (state, cmds) = update(
@@ -6499,6 +6938,7 @@ mod tests {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
             trigger: CompactionTrigger::Manual,
+            resume_continuation: false,
         };
         let result = fake_recovery_result(vec![ChatMessage::user("compacted")]);
         let (state, cmds) = update(
@@ -6521,6 +6961,7 @@ mod tests {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
             trigger: CompactionTrigger::TruncationRecovery,
+            resume_continuation: false,
         };
         let (state, _) = update(
             state,
@@ -6552,6 +6993,7 @@ mod tests {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
             trigger: CompactionTrigger::Manual,
+            resume_continuation: false,
         };
         let (state, _) = update(
             state,
@@ -6586,6 +7028,7 @@ mod tests {
             id: TurnId(7),
             started: std::time::SystemTime::now(),
             trigger: CompactionTrigger::Manual,
+            resume_continuation: false,
         };
         let (state, _) = update(
             state,
@@ -6628,6 +7071,7 @@ mod tests {
             phase: GenPhase::Streaming,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
 
         let (state, _) = update(
@@ -6665,6 +7109,7 @@ mod tests {
             phase: GenPhase::Streaming,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
 
         let (state, cmds) = update(
@@ -6714,6 +7159,7 @@ mod tests {
             phase: GenPhase::Streaming,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
 
         let (state, cmds) = update(
@@ -6756,6 +7202,7 @@ mod tests {
             phase: GenPhase::Streaming,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
 
         let (state, _) = update(
@@ -6783,6 +7230,7 @@ mod tests {
             phase: GenPhase::Thinking,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
         let snapshot = crate::domain::state::ContextUsageSnapshot::from_estimate(
             crate::domain::state::PromptTokenBreakdown {
@@ -6842,7 +7290,8 @@ mod tests {
             category: crate::models::ErrorCategory::Temporary,
             recoverable: true,
         };
-        super::handle_upstream_error(&mut state, TurnId(999), err);
+        let mut cmds = Vec::new();
+        super::handle_upstream_error(&mut state, &mut cmds, TurnId(999), err);
         // Active turn must be untouched and no error message committed.
         assert!(matches!(
             state.turn,
@@ -8072,6 +8521,7 @@ mod tests {
             id: TurnId(9),
             started: std::time::SystemTime::now(),
             trigger: CompactionTrigger::ContextLimitRetry,
+            resume_continuation: false,
         };
 
         let (state, _) = update(
@@ -8264,6 +8714,7 @@ mod tests {
             phase: GenPhase::Streaming,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         }
     }
 

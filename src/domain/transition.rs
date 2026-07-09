@@ -64,6 +64,14 @@ pub fn fill_outcome(
 /// `now` is the reducer step's injected clock (`state.now`), so the
 /// `started` stamp is deterministic on replay rather than read live (Cause 3).
 pub fn start_generating(id: TurnId, now: SystemTime) -> TurnState {
+    start_generating_with(id, now, false)
+}
+
+/// `start_generating` with an explicit continuation flag. Used by the
+/// auto-continue tail (and the paths that must carry its flag forward:
+/// empty-retry, truncation-recovery resume) so the eventual commit stamps
+/// `ChatMessageKind::Continuation`.
+pub fn start_generating_with(id: TurnId, now: SystemTime, continuation: bool) -> TurnState {
     TurnState::Generating {
         id,
         started: now,
@@ -73,6 +81,7 @@ pub fn start_generating(id: TurnId, now: SystemTime) -> TurnState {
         phase: GenPhase::Sending,
         thinking_signature: None,
         pending_tool_calls: Vec::new(),
+        continuation,
     }
 }
 
@@ -105,17 +114,23 @@ pub fn commit_assistant_message(
     tool_calls: Vec<ModelToolCall>,
     thinking_signature: Option<String>,
     now: chrono::DateTime<chrono::Local>,
+    continuation: bool,
 ) -> ChatMessage {
     let thinking = if partial_reasoning.is_empty() {
         None
     } else {
         Some(partial_reasoning)
     };
+    let kind = if continuation {
+        crate::models::ChatMessageKind::Continuation
+    } else {
+        crate::models::ChatMessageKind::Normal
+    };
     let mut msg = ChatMessage {
         role: MessageRole::Assistant,
         content: partial_text,
         timestamp: now,
-        kind: crate::models::ChatMessageKind::Normal,
+        kind,
         metadata: None,
         actions: Vec::new(),
         thinking,
@@ -1061,6 +1076,7 @@ mod tests {
             vec![],
             Some("sig_abc".to_string()),
             chrono::Local::now(),
+            false,
         );
         assert_eq!(m.content, "hello");
         assert_eq!(m.thinking.as_deref(), Some("reasoning"));
@@ -1075,8 +1091,44 @@ mod tests {
             vec![],
             None,
             chrono::Local::now(),
+            false,
         );
         assert!(m.thinking.is_none());
+        assert_eq!(m.kind, crate::models::ChatMessageKind::Normal);
+    }
+
+    #[test]
+    fn commit_assistant_message_stamps_continuation_kind() {
+        let m = commit_assistant_message(
+            "resumed text".to_string(),
+            String::new(),
+            vec![],
+            None,
+            chrono::Local::now(),
+            true,
+        );
+        assert_eq!(m.kind, crate::models::ChatMessageKind::Continuation);
+    }
+
+    #[test]
+    fn start_generating_with_carries_the_continuation_flag() {
+        let t = start_generating_with(TurnId(3), std::time::SystemTime::now(), true);
+        assert!(matches!(
+            t,
+            TurnState::Generating {
+                continuation: true,
+                ..
+            }
+        ));
+        // The plain constructor stays a non-continuation turn.
+        let t = start_generating(TurnId(4), std::time::SystemTime::now());
+        assert!(matches!(
+            t,
+            TurnState::Generating {
+                continuation: false,
+                ..
+            }
+        ));
     }
 
     #[test]

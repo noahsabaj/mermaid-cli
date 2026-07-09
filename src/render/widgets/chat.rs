@@ -21,10 +21,17 @@ use crate::utils::format_relative_timestamp;
 /// Entry in the click map: maps a content line to an image in chat history
 #[derive(Debug, Clone)]
 pub struct ImageClickTarget {
-    /// Index into session_state.messages
+    /// Index into the DISPLAY message slice this frame rendered. The display
+    /// slice can diverge from committed history (the continuation stitch hides
+    /// nudges and merges bubbles), so this is only a fallback locator — prefer
+    /// `image_number`.
     pub message_index: usize,
-    /// Index into that message's images vec
+    /// Index into that display message's images vec
     pub image_index: usize,
+    /// The image's stable global `[Image #N]` number, when it has one.
+    /// Position-independent, so the reducer can resolve the click against
+    /// committed history no matter how the display transcript was stitched.
+    pub image_number: Option<u64>,
 }
 
 /// State for the chat widget
@@ -611,12 +618,40 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     continue;
                 }
 
+                // A recovery nudge is a one-shot model instruction, not user
+                // content — the stitch pre-pass hides committed ones, and this
+                // guard keeps a still-live one (mid-recovery) invisible too.
+                if matches!(msg.kind, ChatMessageKind::RecoveryNudge) {
+                    continue;
+                }
+
+                // Auto-continue stitch, streaming half: a `Continuation`
+                // extending a mergeable assistant bubble draws as that
+                // bubble's tail — no fresh `●`, no blank separator — so the
+                // reply reads as one message *while it streams*, not only
+                // after commit (committed halves are merged upstream in
+                // `stitch_committed`). An unmergeable predecessor (e.g. a
+                // compaction checkpoint) falls through to a normal bubble.
+                let stitch_onto_prev = matches!(msg.kind, ChatMessageKind::Continuation)
+                    && self.messages[..idx]
+                        .iter()
+                        .rev()
+                        .find(|m| !matches!(m.role, MessageRole::Tool))
+                        .is_some_and(crate::render::mergeable_into);
+                if stitch_onto_prev && lines.last().is_some_and(|l| line_plain_text(l).is_empty()) {
+                    lines.pop();
+                }
+
                 let (role_prefix, role_color) = match msg.role {
                     MessageRole::User => (">", ratatui::style::Color::White),
                     MessageRole::Assistant => ("●", ratatui::style::Color::White),
                     MessageRole::System => ("●", self.theme.colors.system_message.to_color()),
                     MessageRole::Tool => unreachable!("Tool messages filtered above"),
                 };
+                // A stitched continuation keeps the 2-cell gutter but no
+                // bullet: a single space prefix renders as the same margin
+                // the bubble's wrapped lines already use.
+                let role_prefix = if stitch_onto_prev { " " } else { role_prefix };
 
                 if matches!(msg.role, MessageRole::Assistant) {
                     // Render thinking block if present
@@ -683,6 +718,9 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     msg.content.hash(&mut hasher);
                     theme_seed.hash(&mut hasher);
                     content_width.hash(&mut hasher);
+                    // A stitched continuation renders prefix-less; keep its
+                    // cached lines distinct from a same-content bubble.
+                    stitch_onto_prev.hash(&mut hasher);
                     let cache_key = hasher.finish();
 
                     let wrapped = if let Some(cached) = self.wrapped_line_cache.get(&cache_key) {
@@ -830,21 +868,21 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                         // scrollback past u16::MAX rows clamps instead of wrapping a
                         // stale line index into the map (F32).
                         let content_line = lines.len();
+                        let image_number =
+                            msg.image_numbers.as_ref().and_then(|v| v.get(i)).copied();
                         state.image_click_map.push((
                             clamp_to_u16(content_line),
                             ImageClickTarget {
                                 message_index: idx,
                                 image_index: i,
+                                image_number,
                             },
                         ));
                         // Prefer the stable global number stored with the
                         // message; fall back to a positional index for sessions
                         // saved before image numbering (and assistant/tool
                         // images, which carry no global number).
-                        let label = msg
-                            .image_numbers
-                            .as_ref()
-                            .and_then(|v| v.get(i))
+                        let label = image_number
                             .map(|n| format!("[Image #{n}]"))
                             .unwrap_or_else(|| format!("[Image #{}]", i + 1));
                         lines.push(Line::from(vec![

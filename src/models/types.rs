@@ -232,6 +232,16 @@ pub enum ChatMessageKind {
     /// A display-only run summary ("Worked for … · used … tokens"). Rendered
     /// dim/italic; excluded from the model context by `build_chat_request`.
     RunSummary,
+    /// An assistant message that resumes a reply cut by the provider's
+    /// per-response output cap (auto-continue). Canonical history keeps it as
+    /// its own message — true to the wire, signature-safe — but the transcript
+    /// stitches it into the previous assistant bubble.
+    Continuation,
+    /// A system nudge injected for exactly one recovery request (auto-continue
+    /// resume, stalled-turn retry). Hidden from the transcript and swept from
+    /// history at the next turn-end — it must never outlive the request it
+    /// steers.
+    RecoveryNudge,
     /// F74: a kind written by a NEWER build that this one doesn't model. Mapped
     /// here by `#[serde(other)]` instead of failing the whole conversation parse;
     /// it's neither a checkpoint nor a run summary, so every `matches!` site
@@ -491,6 +501,29 @@ mod tests {
         let kind: ChatMessageKind = serde_json::from_str("\"some_future_kind\"").expect("tolerant");
         assert_eq!(kind, ChatMessageKind::Unknown);
         assert_ne!(kind, ChatMessageKind::Normal);
+    }
+
+    #[test]
+    fn continuation_kinds_round_trip_through_serde() {
+        // The stitch markers must survive session save/load: a reloaded
+        // transcript stitches exactly like the live one did.
+        for kind in [
+            ChatMessageKind::Continuation,
+            ChatMessageKind::RecoveryNudge,
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: ChatMessageKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
+        // And the snake_case wire form is stable.
+        assert_eq!(
+            serde_json::to_string(&ChatMessageKind::Continuation).unwrap(),
+            "\"continuation\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ChatMessageKind::RecoveryNudge).unwrap(),
+            "\"recovery_nudge\""
+        );
     }
 
     #[test]

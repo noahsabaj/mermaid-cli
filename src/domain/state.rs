@@ -601,6 +601,13 @@ pub enum TurnState {
         /// transitions to `ExecutingTools`. When the vec is empty at
         /// stream end, the turn returns to `Idle`.
         pending_tool_calls: Vec<ModelToolCall>,
+        /// True when this turn resumes a reply cut by the per-response
+        /// output cap (auto-continue). The commit stamps the resulting
+        /// message `ChatMessageKind::Continuation` so the transcript can
+        /// stitch it into the previous bubble. Survives an intervening
+        /// empty-retry or truncation-recovery compaction so a chain never
+        /// loses the marker mid-way.
+        continuation: bool,
     },
     ExecutingTools {
         id: TurnId,
@@ -620,6 +627,12 @@ pub enum TurnState {
         id: TurnId,
         started: SystemTime,
         trigger: CompactionTrigger,
+        /// True when the turn that led into this compaction was itself a
+        /// continuation (see `Generating::continuation`): a `TruncationRecovery`
+        /// resume must re-enter `Generating` with the flag intact or a
+        /// continuation chain interrupted by a genuine context-full compaction
+        /// would commit its remaining text unmarked.
+        resume_continuation: bool,
     },
     /// `CancelTurn` was dispatched. The reducer has already emitted a
     /// `Cmd::CancelScope` — now we wait for the final `Cancelled` /
@@ -1216,6 +1229,7 @@ mod tests {
             phase: GenPhase::Sending,
             thinking_signature: None,
             pending_tool_calls: Vec::new(),
+            continuation: false,
         };
         assert!(s.accepts(TurnId(7)));
         assert!(!s.accepts(TurnId(6)));
