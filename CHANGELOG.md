@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cancelling or resetting a turn no longer leaves a dead question modal on
+  screen.** An `ask_user_question` prompt parked mid-turn survived `/load`,
+  `/clear`, Ctrl+C, and quit — the tool task behind it was torn down, so the
+  modal could never be answered. All four paths now clear it (and the stale
+  running-tool indicator) alongside the pending approval they already dropped.
 - **A context-limit compaction no longer silently drops your turn.** When a
   provider rejected a request mid-stream for length, Mermaid compacted the
   conversation but then ended the turn instead of resuming — abandoning the work

@@ -526,11 +526,15 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // their parked approval requests could never be answered either (#2).
             if let Some(id) = state.turn.id() {
                 cmds.push(Cmd::CancelScope(id));
-                state.pending_approval.clear();
+                // Drop the cancelled turn's parked approval/question modals and
+                // its stale running-tool indicators — the tasks behind them are
+                // being torn down.
+                clear_parked_tool_requests(&mut state);
+                state.ui.live_tool_status.clear();
             }
             // Messages queued against the *previous* conversation must not
             // auto-submit into the one being loaded — drop them (mirrors the
-            // `pending_approval` clear above).
+            // clears above).
             state.ui.queued_messages.clear();
             state.session.conversation = history;
             state.turn = TurnState::Idle;
@@ -2852,6 +2856,17 @@ fn seal_orphaned_tool_calls(state: &mut State) {
     }
 }
 
+/// Release both parked-tool-request queues together. `pending_approval` and
+/// `pending_question` are drained only by the user answering — `ResolveApproval`
+/// / `ResolveQuestion` — but a cancelled `TurnScope` tears down the parked tool
+/// task, so those replies can never come. Left behind, a stale approval or
+/// question modal survives `/load`, `/clear`, Ctrl+C, and quit with nothing to
+/// answer it (D2/D3/D4). Every turn-cancel/reset site clears both through here.
+fn clear_parked_tool_requests(state: &mut State) {
+    state.pending_approval.clear();
+    state.pending_question.clear();
+}
+
 fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
     let Some(id) = state.turn.id() else {
         return;
@@ -2861,9 +2876,9 @@ fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
         return;
     }
     cmds.push(Cmd::CancelScope(id));
-    // The cancelled turn's tool tasks are aborted; their parked approval
-    // requests can never be answered, so drop any queued prompts.
-    state.pending_approval.clear();
+    // The cancelled turn's tool tasks are aborted; their parked approval and
+    // question requests can never be answered, so drop both.
+    clear_parked_tool_requests(state);
     // If tools were mid-flight, close the tool_use/tool_result pairing before
     // leaving `ExecutingTools`, or the next request would be malformed.
     seal_orphaned_tool_calls(state);
@@ -2882,7 +2897,7 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     }
     state.should_exit = true;
     state.ui.pending_msgs.clear();
-    state.pending_approval.clear();
+    clear_parked_tool_requests(state);
     // Quitting mid-stream: preserve whatever the model already produced so
     // `--continue` shows what was on screen. Commit the in-flight partial
     // as an assistant message with an interrupted marker before saving.
@@ -2931,7 +2946,10 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             // never be answered, so drop them too.
             if let Some(id) = state.turn.id() {
                 cmds.push(Cmd::CancelScope(id));
-                state.pending_approval.clear();
+                // Drop the cancelled turn's parked approval/question modals and
+                // stale running-tool indicators before wiping the conversation.
+                clear_parked_tool_requests(state);
+                state.ui.live_tool_status.clear();
             }
             // A message queued mid-turn belonged to the conversation being
             // wiped — don't let it auto-submit into the fresh one.
@@ -4668,6 +4686,73 @@ mod tests {
                 .any(|c| matches!(c, Cmd::CancelScope(TurnId(5))))
         );
         assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
+    }
+
+    #[test]
+    fn cancel_and_reset_paths_clear_pending_question() {
+        // RC-1 (D2/D3/D4): a parked `ask_user_question` modal must not survive a
+        // turn cancel/reset — the tool task behind it is torn down, so the modal
+        // would be permanently unanswerable. Every cancel/reset path clears it.
+        use super::super::ids::ToolCallId;
+
+        let parked = || {
+            let mut state = fresh_state();
+            state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
+            let (state, _) = update(
+                state,
+                Msg::QuestionAsked {
+                    turn: TurnId(5),
+                    call_id: ToolCallId(1),
+                    questions: vec![],
+                },
+            );
+            assert_eq!(
+                state.pending_question.len(),
+                1,
+                "precondition: a question is parked mid-turn"
+            );
+            state
+        };
+
+        // Esc / CancelTurn.
+        let (state, _) = update(parked(), Msg::CancelTurn);
+        assert!(
+            state.pending_question.is_empty(),
+            "CancelTurn must clear the parked question"
+        );
+
+        // Ctrl+C quit (request_exit).
+        let (state, _) = update(
+            parked(),
+            Msg::Key(Key {
+                code: KeyCode::Char('c'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        assert!(
+            state.pending_question.is_empty(),
+            "Ctrl+C quit must clear the parked question"
+        );
+
+        // `/load` a conversation mid-turn.
+        let history = fresh_state().session.conversation.clone();
+        let (state, _) = update(parked(), Msg::ConversationLoaded(history));
+        assert!(
+            state.pending_question.is_empty(),
+            "ConversationLoaded must clear the parked question"
+        );
+
+        // `/clear` (confirmed) mid-turn.
+        let mut state = parked();
+        state.confirm = Some(super::super::state::Confirmation {
+            prompt: "Clear conversation history?".to_string(),
+            accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
+        });
+        let (state, _) = update(state, Msg::ConfirmAccepted);
+        assert!(
+            state.pending_question.is_empty(),
+            "ClearConversation must clear the parked question"
+        );
     }
 
     #[test]
