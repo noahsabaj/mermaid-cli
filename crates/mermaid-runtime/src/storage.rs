@@ -698,14 +698,19 @@ impl RuntimeStore {
     }
 
     /// Best-effort retention GC (#130, F22/RC-F): prune archived
-    /// approvals/checkpoints, the events of long-finished tasks, and the
-    /// high-churn / old terminal rows of the remaining tables, all older than
-    /// `retention_days`. Deletes only archived, finished, or terminal-and-old
-    /// rows — **active data is never touched** (a running task, a still-open tool
-    /// run, a live process, or a recently-updated session all survive). Returns
-    /// the number of rows removed.
-    pub fn gc(&self, retention_days: i64) -> Result<u64> {
-        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
+    /// approvals/checkpoints, the events of long-finished tasks, terminal tasks,
+    /// and the high-churn / old rows of the remaining tables, all older than
+    /// `retention_days`. The append-only `outcomes` reward table — the
+    /// self-improving-loop training corpus — is pruned on its own, longer
+    /// `outcomes_retention_days` window so a large training history survives the
+    /// shorter task/session window. Deletes only archived, finished, or
+    /// terminal-and-old rows — **active data is never touched** (a running task,
+    /// a still-open tool run, a live process, or a recently-updated session all
+    /// survive). Returns the number of rows removed.
+    pub fn gc(&self, retention_days: i64, outcomes_retention_days: i64) -> Result<u64> {
+        let now = chrono::Utc::now();
+        let cutoff = (now - chrono::Duration::days(retention_days)).to_rfc3339();
+        let outcomes_cutoff = (now - chrono::Duration::days(outcomes_retention_days)).to_rfc3339();
         let tx = self.conn.unchecked_transaction()?;
         let mut removed = 0u64;
         removed += tx.execute(
@@ -756,6 +761,27 @@ impl RuntimeStore {
         )? as u64;
         removed += tx.execute(
             "DELETE FROM sessions WHERE updated_at < ?1",
+            params![cutoff],
+        )? as u64;
+        // The append-only `outcomes` reward table is the training corpus for the
+        // self-improving loop, so it is pruned on its own, deliberately longer
+        // window. Prune it BEFORE the terminal-tasks delete below: an outcome's
+        // `task_id` is `ON DELETE SET NULL`, so a task pruned on the shorter
+        // window nulls the link on any still-retained outcome — the denormalized
+        // `detail_json` (captured at task-terminal time) preserves the training
+        // context regardless.
+        removed += tx.execute(
+            "DELETE FROM outcomes WHERE created_at < ?1",
+            params![outcomes_cutoff],
+        )? as u64;
+        // Terminal tasks past the window — the #148 durable queue would otherwise
+        // keep every finished task (with its full `prompt`) forever. `task_events`
+        // is `ON DELETE CASCADE`, so a pruned task's events go with it (the
+        // explicit task_events prune above already cleared most). A queued /
+        // running / waiting task is never terminal, so live work survives.
+        removed += tx.execute(
+            "DELETE FROM tasks
+             WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at < ?1",
             params![cutoff],
         )? as u64;
         tx.commit()?;
@@ -3622,7 +3648,7 @@ mod tests {
             )
             .unwrap();
 
-        let removed = store.gc(30).expect("gc");
+        let removed = store.gc(30, 180).expect("gc");
         assert!(removed >= 1, "the old archived approval should be pruned");
         assert!(
             store.approvals().get(&gone.id).unwrap().is_none(),
@@ -3632,6 +3658,110 @@ mod tests {
             store.approvals().get(&keep.id).unwrap().is_some(),
             "active row kept"
         );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn gc_prunes_outcomes_and_terminal_tasks_on_their_windows() {
+        // R1: `gc` prunes terminal tasks past the task window and `outcomes` past
+        // their own (longer) window, never touching a live task or a recent
+        // outcome. When a task is pruned while its outcome survives, the outcome
+        // stays with a NULL `task_id` (ON DELETE SET NULL) — the denormalized
+        // `detail_json` is what keeps it usable for training after the link dies.
+        let path = temp_db("gc_outcomes");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let old = "2000-01-01T00:00:00+00:00"; // far past both windows
+
+        // A live (queued) task must survive.
+        let live = store
+            .tasks()
+            .create(NewTask::new("live", "/repo", "m"))
+            .expect("live task");
+
+        // An old terminal task must be pruned.
+        let done = store
+            .tasks()
+            .create(NewTask::new("done", "/repo", "m"))
+            .expect("done task");
+        store
+            .tasks()
+            .update_status(&done.id, TaskStatus::Completed, Some("ok"))
+            .expect("finish task");
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
+                params![done.id, old],
+            )
+            .unwrap();
+
+        // An outcome for that pruned task, still inside the (longer) outcomes
+        // window: it must survive, with its link nulled and its context intact.
+        let kept_outcome = store
+            .outcomes()
+            .record(NewOutcome {
+                id: None,
+                task_id: Some(done.id.clone()),
+                tool_run_id: None,
+                kind: "task_terminal".to_string(),
+                label: OUTCOME_LABEL_SUCCESS.to_string(),
+                reward: Some(1.0),
+                source: OUTCOME_SOURCE_SYSTEM.to_string(),
+                detail_json: Some("{\"prompt\":\"do the thing\"}".to_string()),
+            })
+            .expect("record kept outcome");
+
+        // An ancient outcome, past the outcomes window: it must be pruned.
+        let gone_outcome = store
+            .outcomes()
+            .record(NewOutcome {
+                id: None,
+                task_id: None,
+                tool_run_id: None,
+                kind: "task_terminal".to_string(),
+                label: OUTCOME_LABEL_FAILURE.to_string(),
+                reward: Some(-1.0),
+                source: OUTCOME_SOURCE_SYSTEM.to_string(),
+                detail_json: None,
+            })
+            .expect("record gone outcome");
+        store
+            .conn
+            .execute(
+                "UPDATE outcomes SET created_at = ?2 WHERE id = ?1",
+                params![gone_outcome.id, old],
+            )
+            .unwrap();
+
+        store.gc(30, 180).expect("gc");
+
+        assert!(
+            store.tasks().get(&live.id).unwrap().is_some(),
+            "a live (queued) task must survive gc"
+        );
+        assert!(
+            store.tasks().get(&done.id).unwrap().is_none(),
+            "an old terminal task must be pruned"
+        );
+        let kept = store
+            .outcomes()
+            .get(&kept_outcome.id)
+            .unwrap()
+            .expect("the recent outcome must survive gc");
+        assert!(
+            kept.task_id.is_none(),
+            "the pruned task's link is nulled (ON DELETE SET NULL)"
+        );
+        assert_eq!(
+            kept.detail_json.as_deref(),
+            Some("{\"prompt\":\"do the thing\"}"),
+            "the denormalized training context must survive the task prune"
+        );
+        assert!(
+            store.outcomes().get(&gone_outcome.id).unwrap().is_none(),
+            "an outcome past the outcomes window must be pruned"
+        );
+
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -3785,7 +3915,7 @@ mod tests {
             )
             .unwrap();
 
-        let removed = store.gc(30).expect("gc");
+        let removed = store.gc(30, 180).expect("gc");
         assert!(removed >= 5, "stale rows pruned (got {removed})");
         assert!(
             store.sessions().get(&stale_session.id).unwrap().is_none(),

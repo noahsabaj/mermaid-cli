@@ -16,6 +16,10 @@ pub struct McpClient {
     transport: StdioTransport,
     /// Server info from initialization
     pub server_info: Option<ServerInfo>,
+    /// Set once [`Self::shutdown`] runs, so a later `call_tool` returns a clean
+    /// "stopped" error instead of a broken-pipe transport error — the manager
+    /// keeps the entry in its frozen map, so the client outlives its process.
+    shutdown: std::sync::atomic::AtomicBool,
 }
 
 /// Info returned by the server during initialization
@@ -83,6 +87,7 @@ impl McpClient {
         Self {
             transport,
             server_info: None,
+            shutdown: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -311,6 +316,15 @@ impl McpClient {
 
     /// Shut down the transport (kills the server process).
     pub async fn shutdown(&self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
         self.transport.shutdown().await;
+    }
+
+    /// `true` once [`Self::shutdown`] has run. The manager checks this so a
+    /// `call_tool` to a stopped-but-still-registered server returns a clean
+    /// error rather than a broken-pipe transport failure.
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown.load(std::sync::atomic::Ordering::Acquire)
     }
 }

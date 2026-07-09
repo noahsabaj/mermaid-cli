@@ -663,12 +663,20 @@ impl EffectRunner {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
                 self.detached.spawn(async move {
-                    if let Ok(manager) = crate::session::ConversationManager::new(&workdir)
-                        && manager.save_conversation(&history).is_ok()
-                    {
-                        let _ = tx.send(Msg::SessionSaved).await;
-                    } else {
-                        tracing::warn!("SaveConversation: failed to write to disk");
+                    match crate::session::ConversationManager::new(&workdir) {
+                        Ok(manager) => match manager.save_conversation(&history) {
+                            Ok(_) => {
+                                let _ = tx.send(Msg::SessionSaved).await;
+                            },
+                            Err(err) => tracing::warn!(
+                                error = %err,
+                                "SaveConversation: failed to write conversation to disk"
+                            ),
+                        },
+                        Err(err) => tracing::warn!(
+                            error = %err,
+                            "SaveConversation: failed to open the conversation manager"
+                        ),
                     }
                 });
             },
@@ -715,12 +723,13 @@ impl EffectRunner {
                                 )
                                 .await;
                             }
-                            if manager.save_conversation(&conversation).is_ok() {
-                                let _ = tx.send(Msg::SessionSaved).await;
-                            } else {
+                            if let Err(err) = manager.save_conversation(&conversation) {
                                 tracing::warn!(
+                                    error = %err,
                                     "SaveCompactionArchive: archive persisted but conversation save failed"
                                 );
+                            } else {
+                                let _ = tx.send(Msg::SessionSaved).await;
                             }
                         },
                         Err(err) => {
@@ -763,22 +772,32 @@ impl EffectRunner {
             },
             Cmd::PersistLastModel(model) => {
                 self.detached.spawn(async move {
-                    let _ = crate::app::persist_last_model(&model);
+                    if let Err(err) = crate::app::persist_last_model(&model) {
+                        tracing::warn!(error = %err, "failed to persist last-used model");
+                    }
                 });
             },
             Cmd::PersistReasoningFor { model_id, level } => {
                 self.detached.spawn(async move {
-                    let _ = crate::app::persist_reasoning_for_model(&model_id, level);
+                    if let Err(err) = crate::app::persist_reasoning_for_model(&model_id, level) {
+                        tracing::warn!(error = %err, "failed to persist reasoning level for model");
+                    }
                 });
             },
             Cmd::PersistOllamaNumCtxFor { model_id, num_ctx } => {
                 self.detached.spawn(async move {
-                    let _ = crate::app::persist_ollama_num_ctx_for_model(&model_id, num_ctx);
+                    if let Err(err) =
+                        crate::app::persist_ollama_num_ctx_for_model(&model_id, num_ctx)
+                    {
+                        tracing::warn!(error = %err, "failed to persist Ollama num_ctx for model");
+                    }
                 });
             },
             Cmd::PersistOllamaOffload(enabled) => {
                 self.detached.spawn(async move {
-                    let _ = crate::app::persist_ollama_allow_ram_offload(enabled);
+                    if let Err(err) = crate::app::persist_ollama_allow_ram_offload(enabled) {
+                        tracing::warn!(error = %err, "failed to persist Ollama RAM-offload setting");
+                    }
                 });
             },
             Cmd::ListMemory => {

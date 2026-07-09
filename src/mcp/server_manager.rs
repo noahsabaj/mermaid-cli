@@ -123,6 +123,9 @@ impl McpServerManager {
             .servers
             .get(server_name)
             .ok_or_else(|| anyhow!("MCP server '{}' not found or not running", server_name))?;
+        if client.is_shutdown() {
+            return Err(anyhow!("MCP server '{}' has been stopped", server_name));
+        }
 
         client.call_tool(tool_name, arguments).await
     }
@@ -213,10 +216,9 @@ impl McpServerManager {
     /// `true` if a server matched.
     ///
     /// The registry entry lingers (the manager is shared immutably behind an
-    /// `Arc`, so the `HashMap` can't be mutated here), but the child's stdin
-    /// pipe is now closed: a later `call_tool` to a stopped server fails fast
-    /// (broken pipe), not a hang. Fully removing the entry would need
-    /// interior-mutability on the manager.
+    /// `Arc`, so the `HashMap` can't be mutated here), but the client is flagged
+    /// shut down, so a later `call_tool` to a stopped server returns a clean
+    /// "has been stopped" error rather than a broken-pipe transport failure.
     pub async fn stop_server(&self, name: &str) -> bool {
         match self.servers.get(name) {
             Some(client) => {
