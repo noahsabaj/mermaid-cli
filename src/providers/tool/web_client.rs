@@ -377,6 +377,12 @@ impl NativeFetchClient {
             .user_agent(NATIVE_FETCH_UA)
             .timeout(Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::limited(5))
+            // Vet every DNS resolution at connect time — the initial host AND
+            // each redirect hop — and fail closed on an internal address. This
+            // closes the DNS-rebinding TOCTOU: the connection binds to exactly
+            // the addresses vetted here, so a name that passed a pre-flight check
+            // can't rebind to 127.0.0.1 / 169.254.169.254 before the connect.
+            .dns_resolver(std::sync::Arc::new(VettingResolver))
             .build()
             .unwrap_or_else(|_| Client::new());
         Self { client }
@@ -386,11 +392,10 @@ impl NativeFetchClient {
 #[async_trait]
 impl FetchProvider for NativeFetchClient {
     async fn fetch(&self, url: &str) -> Result<WebFetchResult> {
-        // Native fetch makes THIS process the fetcher, so re-check that the
-        // host doesn't resolve to an internal address (defense-in-depth on top
-        // of the lexical guard `web.rs` already applied).
-        guard_resolved_ips(url).await?;
-
+        // SSRF: `web.rs` already vetted the URL's literal host/scheme, and the
+        // connect-time `VettingResolver` on `self.client` vets the *resolved*
+        // addresses of the host and every redirect hop — so no separate
+        // pre-flight resolution is needed here.
         let response = self
             .client
             .get(url)
@@ -442,27 +447,33 @@ impl FetchProvider for NativeFetchClient {
     }
 }
 
-/// Reject a native fetch whose host resolves to a loopback / private /
-/// link-local / metadata address. Best-effort: the eventual connect re-resolves
-/// (a TOCTOU gap a no-network check can't close), but this stops the obvious
-/// "public name pointing at 127.0.0.1 / 169.254.169.254" aim.
-async fn guard_resolved_ips(url: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| anyhow!("invalid URL: {e}"))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow!("URL has no host"))?;
-    let port = parsed.port_or_known_default().unwrap_or(80);
-    let addrs = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| anyhow!("DNS resolution failed for {host}: {e}"))?;
-    for addr in addrs {
-        if classify_host(&addr.ip().to_string()).is_internal() {
-            return Err(anyhow!(
-                "refusing to fetch '{host}' — it resolves to an internal address"
-            ));
-        }
+/// A reqwest DNS resolver that performs the lookup, then rejects the whole
+/// resolution if ANY resolved address is internal (loopback / private /
+/// link-local / metadata). Installed on the native fetch client so it runs at
+/// connect time for the initial host and every redirect hop — closing the
+/// DNS-rebinding TOCTOU a one-shot pre-flight resolve leaves open, since the
+/// connection binds to exactly the addresses vetted here.
+struct VettingResolver;
+
+impl reqwest::dns::Resolve for VettingResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_string();
+            // Port 0 is a placeholder — reqwest overrides it with the URL's port.
+            // We only need the resolved IPs in order to vet them.
+            let addrs: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            for addr in &addrs {
+                if classify_host(&addr.ip().to_string()).is_internal() {
+                    return Err(format!(
+                        "refusing to connect to '{host}' — it resolves to an internal address"
+                    )
+                    .into());
+                }
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
     }
-    Ok(())
 }
 
 /// Extract a page's title + main content (as markdown) from raw HTML. Uses a
@@ -671,6 +682,21 @@ mod tests {
         let (title, md) = extract_readable(html, "https://example.com");
         assert_eq!(title, "Bare");
         assert!(md.contains("just a snippet"));
+    }
+
+    #[tokio::test]
+    async fn vetting_resolver_rejects_a_name_resolving_to_loopback() {
+        use reqwest::dns::Resolve;
+        use std::str::FromStr;
+        // `localhost` resolves (via the hosts file, no network) to 127.0.0.1/::1
+        // — both internal, so the connect-time resolver must fail closed. This is
+        // the half of the DNS-rebinding guard a pre-flight resolve can't cover,
+        // because it runs on the address the connection actually uses.
+        let name = reqwest::dns::Name::from_str("localhost").expect("valid host name");
+        assert!(
+            VettingResolver.resolve(name).await.is_err(),
+            "a name resolving to a loopback address must be rejected"
+        );
     }
 
     #[test]
