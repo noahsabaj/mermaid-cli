@@ -248,7 +248,11 @@ mod tests {
     fn python_bin_sits_under_the_runtime() {
         let py = python_bin(Path::new("/data/searxng/runtime"));
         assert!(py.starts_with("/data/searxng/runtime/python"), "{py:?}");
-        assert!(py.ends_with(if cfg!(windows) { "python.exe" } else { "python3" }));
+        assert!(py.ends_with(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python3"
+        }));
     }
 
     #[test]

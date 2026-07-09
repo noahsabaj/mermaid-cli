@@ -217,7 +217,10 @@ mod tests {
         for t in ["linux-x86_64", "linux-aarch64", "macos-aarch64"] {
             let sha = bundle_manifest::bundle_sha256(t).unwrap_or_else(|| panic!("no sha for {t}"));
             assert_eq!(sha.len(), 64, "{t} sha is not 64 hex chars");
-            assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "{t} sha not hex");
+            assert!(
+                sha.chars().all(|c| c.is_ascii_hexdigit()),
+                "{t} sha not hex"
+            );
         }
     }
 
