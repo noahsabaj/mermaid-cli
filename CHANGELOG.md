@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Truncation is now diagnosed correctly — no more false "Context window
+  full".** A `length` stop is classified from the response usage: hitting the
+  per-response output cap (window still has room — the common case on remote
+  providers) now stops with an accurate message naming the real limit, instead
+  of misreporting a full window and looping through futile conversation
+  compactions that couldn't help. A genuinely full window still compacts and
+  continues exactly as before.
 - **Model-scaled output budget — the hardcoded 4096-token cap is gone.**
   `default_model.max_tokens` now defaults to `0` = **auto**: OpenAI-compatible
   providers and Gemini get no cap at all (the provider applies the model's own

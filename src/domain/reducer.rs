@@ -3273,6 +3273,25 @@ fn truncation_hint(state: &State) -> String {
     msg
 }
 
+/// Hint for an output-cap length stop (the window had room). With AUTO
+/// budgeting mermaid no longer imposes its own cap, so the stop was either the
+/// user's explicit `max_tokens` hard cap or the model/provider's own
+/// per-response ceiling.
+fn output_cap_hint(state: &State) -> String {
+    let cap = state.settings.default_model.max_tokens;
+    if cap > 0 {
+        format!(
+            "Response truncated — hit your configured max_tokens cap ({}). Raise it, or set \
+             `default_model.max_tokens = 0` (auto) to lift it.",
+            format_compact_count(cap)
+        )
+    } else {
+        "Response truncated — the model's per-response output limit was reached. Ask it to \
+         continue from where it stopped."
+            .to_string()
+    }
+}
+
 /// Per-run cap on automatic retries of a turn that produced no visible output.
 /// One nudged re-attempt recovers the common case (a reasoning-heavy model that
 /// stalled without replying) without letting a persistently-empty model loop and
@@ -3401,21 +3420,49 @@ fn handle_stream_done(
     if tool_calls.is_empty() && !auto_retry_empty {
         match stop_reason {
             Some(crate::models::FinishReason::Length) => {
-                // The window filled mid-turn. If there's history to compact and
-                // we're under the per-run cap, recover (compact + continue) rather
-                // than stopping; otherwise fall back to the manual-levers hint.
-                let cap = state.settings.compaction.max_truncation_recoveries;
-                let under_cap = cap == 0 || state.runtime.truncation_recoveries < cap as u32;
-                if under_cap && state.session.messages().len() >= 3 {
-                    recovering = true;
-                    push_system(
-                        state,
-                        cmds,
-                        "Context window full — compacting the conversation to continue.",
-                    );
-                } else {
-                    let hint = truncation_hint(state);
-                    push_system(state, cmds, hint);
+                // Classify before deciding: a length-stop is either the window
+                // filling mid-turn (compaction helps) or the per-response
+                // OUTPUT cap (it can't — compacting the input is futile; GLM-5.2
+                // at deep reasoning hit this with a 1M window at 2% used and
+                // looped through pointless compactions).
+                let window = state
+                    .session
+                    .context_usage
+                    .as_ref()
+                    .and_then(|s| s.max_tokens)
+                    .or(state.runtime.provider_capabilities.max_context_tokens);
+                match crate::domain::compaction::classify_length_stop(
+                    usage.as_ref(),
+                    window,
+                    crate::constants::COMPACTION_MIN_RESPONSE_RESERVE_TOKENS,
+                ) {
+                    crate::domain::compaction::LengthCause::OutputCapped => {
+                        // Never compact for an output-cap stop; say what
+                        // actually happened. (Auto-continue is the follow-up.)
+                        let hint = output_cap_hint(state);
+                        push_system(state, cmds, hint);
+                    },
+                    crate::domain::compaction::LengthCause::ContextFull
+                    | crate::domain::compaction::LengthCause::Unknown => {
+                        // The window filled mid-turn (or usage was absent and we
+                        // assume so). If there's history to compact and we're
+                        // under the per-run cap, recover (compact + continue)
+                        // rather than stopping; else the manual-levers hint.
+                        let cap = state.settings.compaction.max_truncation_recoveries;
+                        let under_cap =
+                            cap == 0 || state.runtime.truncation_recoveries < cap as u32;
+                        if under_cap && state.session.messages().len() >= 3 {
+                            recovering = true;
+                            push_system(
+                                state,
+                                cmds,
+                                "Context window full — compacting the conversation to continue.",
+                            );
+                        } else {
+                            let hint = truncation_hint(state);
+                            push_system(state, cmds, hint);
+                        }
+                    },
                 }
             },
             Some(crate::models::FinishReason::ContentFilter) => push_system(
@@ -5991,6 +6038,94 @@ mod tests {
             },
         );
         assert_eq!(state.runtime.truncation_recoveries, 0);
+    }
+
+    fn length_done_with_usage(prompt: usize, completion: usize) -> Msg {
+        Msg::StreamDone {
+            turn: TurnId(5),
+            usage: Some(crate::models::TokenUsage::provider(
+                prompt,
+                completion,
+                prompt + completion,
+            )),
+            thinking_signature: None,
+            stop_reason: Some(crate::models::FinishReason::Length),
+        }
+    }
+
+    #[test]
+    fn length_output_cap_stops_with_accurate_hint_not_compaction() {
+        // The GLM-5.2 case: a length-stop with usage present and the window
+        // unknown (the normal remote-provider state) is the per-response
+        // OUTPUT cap — compacting the input can't help, so the run must stop
+        // with an accurate message instead of futilely compacting.
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("audit the widget"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("exploring the code"), state.now);
+        state.turn = truncating_turn("here is the audit so f");
+        let (state, cmds) = update(state, length_done_with_usage(16_600, 4_000));
+
+        assert!(matches!(state.turn, TurnState::Idle), "must not compact");
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::CompactConversation { .. })),
+            "output-cap truncation must never dispatch a compaction"
+        );
+        assert_eq!(state.runtime.truncation_recoveries, 0);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("per-response output limit")),
+            "the accurate output-cap hint is shown"
+        );
+        assert!(
+            !state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Context window full")),
+            "the misdiagnosed window-full message is gone"
+        );
+    }
+
+    #[test]
+    fn length_with_usage_near_known_window_still_compacts() {
+        // With usage AND a known window that prompt+completion+reserve reaches,
+        // the window genuinely filled — the legacy compact-and-continue
+        // recovery is still correct.
+        let mut state = fresh_state();
+        state.runtime.provider_capabilities.max_context_tokens = Some(20_000);
+        state
+            .session
+            .append(ChatMessage::user("build a site"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("ok, writing files"), state.now);
+        state.turn = truncating_turn("let me fix the");
+        let (state, cmds) = update(state, length_done_with_usage(18_000, 1_500));
+
+        assert!(
+            matches!(
+                state.turn,
+                TurnState::Compacting {
+                    trigger: CompactionTrigger::TruncationRecovery,
+                    ..
+                }
+            ),
+            "a genuinely full window still recovers via compaction"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::CompactConversation { .. })),
+            "compaction dispatched"
+        );
     }
 
     fn fake_recovery_result(replacement: Vec<ChatMessage>) -> CompactionResult {
