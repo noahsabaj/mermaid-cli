@@ -98,6 +98,31 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+impl Cli {
+    /// Collect this invocation's config-shaped flags into the `Session`
+    /// config layer's inputs: the repeatable `-c` overrides plus the dedicated
+    /// flags (`--no-network`/`--confine-fs`/`--sandbox`, and `run`'s
+    /// `--max-tokens`/`--allow-untrusted-tools`). Prompt flags and
+    /// `--reasoning` stay outside the layer merge — see `apply_prompt_flags`.
+    pub fn session_flags(&self) -> crate::app::SessionFlags {
+        let (max_tokens, allow_untrusted_tools) = match &self.command {
+            Some(Commands::Run {
+                max_tokens,
+                allow_untrusted_tools,
+                ..
+            }) => (*max_tokens, *allow_untrusted_tools),
+            _ => (None, false),
+        };
+        crate::app::SessionFlags {
+            overrides: self.config_overrides.clone(),
+            deny_network: self.no_network || self.sandbox,
+            confine_fs: self.confine_fs || self.sandbox,
+            max_tokens,
+            allow_untrusted_tools,
+        }
+    }
+}
+
 const TOP_LEVEL_HELP_AFTER: &str = "\
 Common first run:
   mermaid doctor                         Check model, tools, safety, and project readiness
@@ -536,6 +561,34 @@ mod tests {
         let cli = Cli::try_parse_from(["mermaid", "run", "x", "-c", "c=true"])
             .expect("global -c parses after the subcommand");
         assert_eq!(cli.config_overrides, vec!["c=true"]);
+    }
+
+    #[test]
+    fn session_flags_collect_sandbox_and_run_flags() {
+        let cli = Cli::try_parse_from([
+            "mermaid",
+            "--sandbox",
+            "-c",
+            "a=1",
+            "run",
+            "x",
+            "--max-tokens",
+            "512",
+            "--allow-untrusted-tools",
+        ])
+        .expect("parses");
+        let flags = cli.session_flags();
+        assert!(flags.deny_network && flags.confine_fs);
+        assert_eq!(flags.max_tokens, Some(512));
+        assert!(flags.allow_untrusted_tools);
+        assert_eq!(flags.overrides, vec!["a=1"]);
+
+        // Without `run`, the run-scoped flags stay unset.
+        let cli = Cli::try_parse_from(["mermaid", "--no-network"]).expect("parses");
+        let flags = cli.session_flags();
+        assert!(flags.deny_network && !flags.confine_fs);
+        assert_eq!(flags.max_tokens, None);
+        assert!(!flags.allow_untrusted_tools);
     }
 
     #[test]

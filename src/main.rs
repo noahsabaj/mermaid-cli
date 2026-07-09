@@ -3,7 +3,7 @@ use clap::Parser;
 
 use mermaid_cli::{
     app::{
-        InteractiveOptions, RunOptions, format_result, load_config_or_warn_with_overrides,
+        InteractiveOptions, RunOptions, format_result, load_layered_config_or_warn,
         persist_last_model, persist_reasoning_for_model, resolve_model_id, run_interactive_with,
         run_non_interactive_with,
     },
@@ -54,7 +54,10 @@ async fn async_main() -> Result<()> {
     // Handle stand-alone subcommands first (init, list, status, add,
     // remove, mcp, version). Returns Ok(true) when the subcommand
     // handled the invocation and we should exit.
-    let mut config = load_config_or_warn_with_overrides(&cli.config_overrides);
+    //
+    // The config is the layered merge: defaults < user file < session flags
+    // (`-c` + the dedicated sandbox/run flags, collected by `session_flags`).
+    let mut config = load_layered_config_or_warn(&cli.session_flags());
     apply_prompt_flags(&cli, &mut config)?;
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
     if let Some(cmd) = &cli.command
@@ -64,24 +67,16 @@ async fn async_main() -> Result<()> {
     }
 
     // Otherwise: Commands::Run → headless driver; else interactive.
+    // `--max-tokens` / `--allow-untrusted-tools` are already folded into the
+    // config via the session-flags layer above.
     if let Some(Commands::Run {
         prompt,
         format,
-        max_tokens,
         no_execute,
-        allow_untrusted_tools,
+        ..
     }) = &cli.command
     {
-        return dispatch_non_interactive(
-            &cli,
-            config,
-            prompt.clone(),
-            *format,
-            *max_tokens,
-            *no_execute,
-            *allow_untrusted_tools,
-        )
-        .await;
+        return dispatch_non_interactive(&cli, config, prompt.clone(), *format, *no_execute).await;
     }
 
     dispatch_interactive(cli, config).await
@@ -111,14 +106,12 @@ fn apply_prompt_flags(cli: &Cli, config: &mut mermaid_cli::app::Config) -> Resul
                 )
             })?);
     }
-    // `--no-network` / `--confine-fs` / `--sandbox` (both): engage the OS
-    // sandbox dimensions for shell commands.
-    if cli.no_network || cli.sandbox {
-        config.safety.network = mermaid_cli::app::NetworkPolicy::Deny;
-    }
-    if cli.confine_fs || cli.sandbox {
-        config.safety.filesystem = mermaid_cli::app::FilesystemPolicy::Project;
-    }
+    // The prompt flags are the one config surface that deliberately stays
+    // OUTSIDE the layered table merge: `config.prompt` is `#[serde(skip)]`
+    // (one-off personas must never round-trip through TOML or persist), so
+    // they overlay the typed Config here. Everything else config-shaped
+    // (`--no-network`, `--confine-fs`, `--sandbox`, `run --max-tokens`,
+    // `run --allow-untrusted-tools`) rides the session-flags layer.
     Ok(())
 }
 
@@ -208,9 +201,7 @@ async fn dispatch_non_interactive(
     mut config: mermaid_cli::app::Config,
     prompt: Option<String>,
     format: OutputFormat,
-    max_tokens: Option<usize>,
     no_execute: bool,
-    allow_untrusted_tools: bool,
 ) -> Result<()> {
     let prompt = resolve_prompt_from_stdin(prompt)?;
     let cli_model_provided = cli.model.is_some();
@@ -231,16 +222,6 @@ async fn dispatch_non_interactive(
             tracing::warn!(error = %err, "failed to persist reasoning level for model");
         }
     }
-    // F6 `run --max-tokens <n>`: overlay the config's per-model cap.
-    if let Some(n) = max_tokens {
-        config.default_model.max_tokens = n;
-    }
-    // `run --allow-untrusted-tools`: headless opt-in for non-replayable tools
-    // on an Ask decision (otherwise blocked when there's no approval UI).
-    if allow_untrusted_tools {
-        config.safety.allow_untrusted_headless_tools = true;
-    }
-
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
     let runtime_task_id = create_run_task(&cwd, &model_id, &prompt, no_execute);
     let run_result = run_non_interactive_with(

@@ -293,6 +293,19 @@ Release builds keep the existing `.tar.gz`/`.zip` archives and add Linux `.deb`/
 
 Config file: `~/.config/mermaid/config.toml` (Linux) or platform equivalent via `directories` crate.
 
+Configuration is assembled from layers, later layers winning key-by-key through one recursive
+TOML deep-merge (tables merge; scalars and arrays replace):
+
+1. built-in defaults
+2. the user config file above
+3. session flags: repeatable `-c key.path=value` plus the dedicated flags (`--no-network`,
+   `--confine-fs`, `--sandbox`, `run --max-tokens`, `run --allow-untrusted-tools`), with a
+   dedicated flag beating a contradictory `-c`
+
+Unknown-key warnings name the layer they came from, and in-app settings changes (`/model`,
+Alt+T, `/context`, `mermaid add`) rewrite only their own keys in the user file — unrecognized
+keys in the file survive, and defaults are never frozen in.
+
 Run `mermaid init` to create a default config. Important fields in the current config schema:
 
 ```toml

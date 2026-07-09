@@ -1083,11 +1083,15 @@ impl RuntimeService {
     }
 
     pub fn set_safety_mode(&self, mode: &str) -> Result<crate::app::SafetyConfig> {
-        let mut config = crate::app::load_config()?;
-        config.safety.mode = super::SafetyMode::parse(mode)
+        let parsed = super::SafetyMode::parse(mode)
             .ok_or_else(|| anyhow::anyhow!("unknown safety mode: {}", mode))?;
-        crate::app::save_config(&config, None)?;
-        Ok(config.safety)
+        // Rewrite only `safety.mode` in the user file (never the whole merged
+        // config), then report back the resulting user-scope safety section.
+        crate::app::update_user_config_key(
+            &["safety", "mode"],
+            toml::Value::String(parsed.as_str().to_string()),
+        )?;
+        Ok(crate::app::load_config()?.safety)
     }
 
     pub fn model_info(&self, model: &str) -> Value {

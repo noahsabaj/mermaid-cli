@@ -669,37 +669,218 @@ impl Default for NonInteractiveConfig {
     }
 }
 
-/// Load configuration from the single config file.
-/// Priority: CLI `-c` overrides > config file > defaults.
-pub fn load_config() -> Result<Config> {
-    Ok(load_config_with_overrides(&[])?.0)
+/// One source of configuration in the layered merge. Declaration order IS
+/// precedence: every later layer's table is deep-merged over the earlier ones,
+/// so `Defaults < User < Project < Session`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConfigLayer {
+    /// Built-in defaults (`Config::default()`); the implicit base — an empty
+    /// table deserializes to it, so no explicit table is ever built for it.
+    Defaults = 0,
+    /// The user's `~/.config/mermaid/config.toml` — the only layer persists
+    /// write to.
+    User = 1,
+    /// A repo's `<git-root>/.mermaid/config.toml` (sanitized + tighten-only;
+    /// populated by the project-config loader).
+    Project = 2,
+    /// This invocation's CLI flags: `-c KEY=VALUE` plus the dedicated flags
+    /// (`--no-network`, `--confine-fs`, `--sandbox`, `run --max-tokens`,
+    /// `run --allow-untrusted-tools`).
+    Session = 3,
 }
 
-/// Load the config, applying repeatable `-c KEY=VALUE` CLI overrides on top of
-/// the file before deserializing. Returns the config plus the dotted paths of
-/// any unknown/ignored keys (typo detection), which the startup path warns
-/// about.
-///
-/// This is the seed the future layered-config engine extends: it already folds
-/// (file → CLI overrides) through one `toml::Table` before a single deserialize,
-/// so adding user/project layers becomes a matter of merging more tables here.
-pub fn load_config_with_overrides(overrides: &[String]) -> Result<(Config, Vec<String>)> {
+impl ConfigLayer {
+    /// Human name used in unknown-key warnings ("in user config (…)").
+    fn name(self) -> &'static str {
+        match self {
+            ConfigLayer::Defaults => "defaults",
+            ConfigLayer::User => "user config",
+            ConfigLayer::Project => "project config",
+            ConfigLayer::Session => "session flags",
+        }
+    }
+}
+
+/// One layer's raw table plus where it came from (for warning attribution).
+#[derive(Debug, Clone)]
+pub(crate) struct LayerSource {
+    /// Which precedence slot this table occupies.
+    pub layer: ConfigLayer,
+    /// Human-readable origin (file path or "command line") for warnings.
+    pub origin: String,
+    /// The layer's raw parsed TOML, merged verbatim (already sanitized for
+    /// the project layer).
+    pub table: toml::Table,
+}
+
+/// The per-invocation config overrides carried by CLI flags — the `Session`
+/// layer's inputs. Built from the parsed CLI by `Cli::session_flags()`.
+#[derive(Debug, Clone, Default)]
+pub struct SessionFlags {
+    /// Repeatable `-c KEY=VALUE` overrides, applied first (dedicated flags
+    /// deep-set on top, so a flag beats a contradictory `-c`).
+    pub overrides: Vec<String>,
+    /// `--no-network` or `--sandbox` → `safety.network = "deny"`.
+    pub deny_network: bool,
+    /// `--confine-fs` or `--sandbox` → `safety.filesystem = "project"`.
+    pub confine_fs: bool,
+    /// `run --max-tokens <n>` → `default_model.max_tokens`.
+    pub max_tokens: Option<usize>,
+    /// `run --allow-untrusted-tools` → `safety.allow_untrusted_headless_tools`.
+    pub allow_untrusted_tools: bool,
+}
+
+impl SessionFlags {
+    /// Render the flags as the `Session` layer's raw table. `-c` overrides go
+    /// in first; the dedicated flags deep-set on top of them, preserving the
+    /// historical ordering where `--no-network` beats `-c safety.network=allow`.
+    pub(crate) fn to_table(&self) -> Result<toml::Table> {
+        let mut table = toml::Table::new();
+        apply_cli_overrides(&mut table, &self.overrides)?;
+        if self.deny_network {
+            deep_set_segments(
+                &mut table,
+                &["safety", "network"],
+                toml::Value::String("deny".into()),
+            )?;
+        }
+        if self.confine_fs {
+            deep_set_segments(
+                &mut table,
+                &["safety", "filesystem"],
+                toml::Value::String("project".into()),
+            )?;
+        }
+        if let Some(n) = self.max_tokens {
+            deep_set_segments(
+                &mut table,
+                &["default_model", "max_tokens"],
+                toml::Value::Integer(n as i64),
+            )?;
+        }
+        if self.allow_untrusted_tools {
+            deep_set_segments(
+                &mut table,
+                &["safety", "allow_untrusted_headless_tools"],
+                toml::Value::Boolean(true),
+            )?;
+        }
+        Ok(table)
+    }
+}
+
+/// Load the user-scope configuration (defaults + the user file, no project or
+/// session layers). This is the view persistence baselines, the daemon, and
+/// runtime re-reads use — anything that must not observe another repo's
+/// project config or a one-off CLI flag.
+pub fn load_config() -> Result<Config> {
     let config_path = get_config_path()?;
-    let mut table = if config_path.exists() {
-        let raw = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read {}", config_path.display()))?;
-        toml::from_str::<toml::Table>(&raw).with_context(|| {
-            format!(
-                "Failed to parse {}. Run 'mermaid init' to regenerate.",
-                config_path.display()
-            )
-        })?
-    } else {
-        toml::Table::new()
-    };
+    let mut table = read_config_table(&config_path)?;
     migrate_legacy_max_tokens(&mut table);
-    apply_cli_overrides(&mut table, overrides)?;
-    finalize_config(table)
+    Ok(finalize_config(table)?.0)
+}
+
+/// Load the full layered configuration: defaults < user file < session flags.
+/// (The project layer slots in between once the project-config loader lands.)
+/// Returns the config plus layer-attributed unknown-key warnings.
+pub fn load_layered_config(flags: &SessionFlags) -> Result<(Config, Vec<String>)> {
+    let config_path = get_config_path()?;
+    let mut user_table = read_config_table(&config_path)?;
+    migrate_legacy_max_tokens(&mut user_table);
+    let layers = vec![
+        LayerSource {
+            layer: ConfigLayer::User,
+            origin: config_path.display().to_string(),
+            table: user_table,
+        },
+        LayerSource {
+            layer: ConfigLayer::Session,
+            origin: "command line".to_string(),
+            table: flags.to_table()?,
+        },
+    ];
+    merge_layers(layers)
+}
+
+/// Like [`load_config`] (user scope, no session flags) but never fails: on a
+/// malformed config, warn on stderr (secret-redacted, #F13) and fall back to
+/// defaults (#111). For standalone subcommands that only read user settings.
+pub fn load_config_or_warn() -> Config {
+    load_config().unwrap_or_else(|e| {
+        eprintln!(
+            "mermaid: {}",
+            crate::utils::redact_secrets(&format!("{e:#}"))
+        );
+        Config::default()
+    })
+}
+
+/// Read and parse one layer's TOML file; a missing file is an empty table.
+fn read_config_table(path: &std::path::Path) -> Result<toml::Table> {
+    if !path.exists() {
+        return Ok(toml::Table::new());
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    toml::from_str::<toml::Table>(&raw).with_context(|| {
+        format!(
+            "Failed to parse {}. Run 'mermaid init' to regenerate.",
+            path.display()
+        )
+    })
+}
+
+/// Deep-merge the layers in order (later wins) and deserialize the result
+/// once. Unknown-key warnings are collected per layer so each names the file
+/// (or flag set) that actually contains the typo.
+pub(crate) fn merge_layers(layers: Vec<LayerSource>) -> Result<(Config, Vec<String>)> {
+    let mut warnings = Vec::new();
+    let mut merged = toml::Table::new();
+    for layer in layers {
+        collect_layer_warnings(&layer, &mut warnings);
+        deep_merge(&mut merged, layer.table);
+    }
+    let (config, _) = finalize_config(merged)?;
+    Ok((config, warnings))
+}
+
+/// Run one layer's table through `serde_ignored` purely for warning
+/// attribution. A layer that fails to deserialize on its own contributes no
+/// warnings — the authoritative merged deserialize in `merge_layers` surfaces
+/// any real error (and a later layer may legitimately fix an earlier one's
+/// value).
+fn collect_layer_warnings(layer: &LayerSource, warnings: &mut Vec<String>) {
+    let mut ignored = Vec::new();
+    let result: Result<Config, _> =
+        serde_ignored::deserialize(toml::Value::Table(layer.table.clone()), |path| {
+            ignored.push(path.to_string())
+        });
+    if result.is_ok() {
+        for path in ignored {
+            warnings.push(format!(
+                "unknown config key '{path}' in {} ({}) — check for a typo",
+                layer.layer.name(),
+                layer.origin
+            ));
+        }
+    }
+}
+
+/// Recursively merge `overlay` into `base`: tables merge key-by-key, while
+/// scalars and arrays replace wholesale (arrays are atomic values here — an
+/// element-wise merge could never express removing an entry). A kind conflict
+/// (table over scalar or vice versa) resolves to the overlay's value.
+fn deep_merge(base: &mut toml::Table, overlay: toml::Table) {
+    for (key, value) in overlay {
+        match (base.get_mut(&key), value) {
+            (Some(toml::Value::Table(base_table)), toml::Value::Table(overlay_table)) => {
+                deep_merge(base_table, overlay_table);
+            },
+            (_, value) => {
+                base.insert(key, value);
+            },
+        }
+    }
 }
 
 /// One-time migration for the AUTO output-budget change. Existing config files
@@ -759,37 +940,63 @@ fn parse_override_value(s: &str) -> toml::Value {
         .unwrap_or_else(|| toml::Value::String(s.to_string()))
 }
 
-/// Set a dotted `key` path in `table` to `value`, creating intermediate tables.
+/// Set a dotted `key` path in `table` to `value`, creating intermediate
+/// tables. Dotted-path parsing means a `-c` override cannot address a map key
+/// that itself contains a dot (e.g. a `reasoning_per_model` model id) — a
+/// documented syntax limitation; internal persists use
+/// [`deep_set_segments`] directly and are immune.
 fn deep_set(table: &mut toml::Table, key: &str, value: toml::Value) -> Result<()> {
     let parts: Vec<&str> = key.split('.').collect();
+    deep_set_segments(table, &parts, value).with_context(|| format!("cannot set '{key}'"))
+}
+
+/// Set a pre-split `path` in `table` to `value`, creating intermediate tables.
+/// Segments are literal keys — a segment containing a dot addresses exactly
+/// that key (which dotted parsing cannot express).
+fn deep_set_segments(table: &mut toml::Table, path: &[&str], value: toml::Value) -> Result<()> {
+    let Some((leaf, parents)) = path.split_last() else {
+        anyhow::bail!("empty config key path");
+    };
     let mut cur = table;
-    for part in &parts[..parts.len() - 1] {
+    for part in parents {
         let next = cur
             .entry((*part).to_string())
             .or_insert_with(|| toml::Value::Table(toml::Table::new()));
         cur = next
             .as_table_mut()
-            .with_context(|| format!("cannot set '{key}': '{part}' is not a table"))?;
+            .with_context(|| format!("'{part}' is not a table"))?;
     }
-    cur.insert(parts[parts.len() - 1].to_string(), value);
+    cur.insert((*leaf).to_string(), value);
     Ok(())
 }
 
-/// Like [`load_config`] but never fails: on a malformed config, warn on stderr
-/// and fall back to defaults (#111); on success, warn about any unknown keys.
-pub fn load_config_or_warn() -> Config {
-    load_config_or_warn_with_overrides(&[])
+/// Remove a pre-split `path` from `table`. Returns whether a value was
+/// actually removed. Never creates intermediate tables; a missing parent
+/// simply means there was nothing to remove.
+fn deep_remove_segments(table: &mut toml::Table, path: &[&str]) -> bool {
+    let Some((leaf, parents)) = path.split_last() else {
+        return false;
+    };
+    let mut cur = table;
+    for part in parents {
+        match cur.get_mut(*part).and_then(|v| v.as_table_mut()) {
+            Some(next) => cur = next,
+            None => return false,
+        }
+    }
+    cur.remove(*leaf).is_some()
 }
 
-/// [`load_config_or_warn`] plus CLI `-c` overrides — the startup entry point.
-/// Unknown top-level or nested keys are reported (typo detection) but tolerated.
-pub fn load_config_or_warn_with_overrides(overrides: &[String]) -> Config {
-    match load_config_with_overrides(overrides) {
-        Ok((config, ignored)) => {
-            for path in &ignored {
-                eprintln!(
-                    "mermaid: warning: unknown config key '{path}' (ignored — check for a typo)"
-                );
+/// Like [`load_layered_config`] but never fails — the startup entry point.
+/// On success, prints layer-attributed unknown-key warnings to stderr. On a
+/// malformed layer, warns (secret-redacted, #F13) and degrades: the session
+/// flags are re-applied over bare defaults so `--no-network`/`-c` survive a
+/// corrupt user file rather than being silently dropped with it.
+pub fn load_layered_config_or_warn(flags: &SessionFlags) -> Config {
+    match load_layered_config(flags) {
+        Ok((config, warnings)) => {
+            for warning in &warnings {
+                eprintln!("mermaid: warning: {warning}");
             }
             config
         },
@@ -801,7 +1008,12 @@ pub fn load_config_or_warn_with_overrides(overrides: &[String]) -> Config {
                 "mermaid: {}",
                 crate::utils::redact_secrets(&format!("{e:#}"))
             );
-            Config::default()
+            flags
+                .to_table()
+                .ok()
+                .and_then(|table| finalize_config(table).ok())
+                .map(|(config, _)| config)
+                .unwrap_or_default()
         },
     }
 }
@@ -828,30 +1040,37 @@ pub fn get_config_dir() -> Result<PathBuf> {
     }
 }
 
-/// Save configuration to file
-pub fn save_config(config: &Config, path: Option<PathBuf>) -> Result<()> {
+/// Save a full configuration to file. Private on purpose: serializing the
+/// whole typed `Config` freezes every default (and would freeze merged
+/// project/session values) into the file, so the only legitimate callers are
+/// `init_config` (writing pristine defaults to an absent file) and tests.
+/// Runtime persistence goes through [`update_user_config_key`] /
+/// [`remove_user_config_key`], which rewrite only their own keys.
+fn save_config(config: &Config, path: Option<PathBuf>) -> Result<()> {
     let path = if let Some(p) = path {
         p
     } else {
         get_config_dir()?.join("config.toml")
     };
+    write_config_bytes(&path, toml::to_string_pretty(config)?.as_bytes())
+}
 
-    let toml_string = toml::to_string_pretty(config)?;
-
-    // The config can carry literal secrets — `mcp_servers[].env`,
-    // `mcp_servers[].args`, and `providers[].extra_headers` all accept inline
-    // credential values — so it must not be left world-readable, and a crash
-    // mid-write must not truncate it. Write atomically (temp → fsync → rename),
-    // creating the temp 0600 on Unix so the renamed file is never even briefly
-    // world-readable (this also tightens a pre-existing config, since the new
-    // file replaces the old one). Windows relies on the per-user profile ACL.
+/// Write raw config bytes atomically and owner-only.
+///
+/// The config can carry literal secrets — `mcp_servers[].env`,
+/// `mcp_servers[].args`, and `providers[].extra_headers` all accept inline
+/// credential values — so it must not be left world-readable, and a crash
+/// mid-write must not truncate it. Write atomically (temp → fsync → rename),
+/// creating the temp 0600 on Unix so the renamed file is never even briefly
+/// world-readable (this also tightens a pre-existing config, since the new
+/// file replaces the old one). Windows relies on the per-user profile ACL.
+fn write_config_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     #[cfg(unix)]
-    crate::runtime::write_atomic_with_mode(&path, toml_string.as_bytes(), 0o600)
+    crate::runtime::write_atomic_with_mode(path, bytes, 0o600)
         .with_context(|| format!("Failed to write config to {}", path.display()))?;
     #[cfg(not(unix))]
-    crate::runtime::write_atomic(&path, toml_string.as_bytes())
+    crate::runtime::write_atomic(path, bytes)
         .with_context(|| format!("Failed to write config to {}", path.display()))?;
-
     Ok(())
 }
 
@@ -877,27 +1096,60 @@ pub fn init_config() -> Result<()> {
 /// only across the synchronous fs work — never across an `.await`.
 static PERSIST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Load the config, apply `mutate`, and save it back — under `PERSIST_LOCK` so
-/// concurrent persists can't clobber each other. On a malformed config the error
-/// propagates (the caller drops it) rather than overwriting the file with
-/// defaults (#111).
-fn update_config(mutate: impl FnOnce(&mut Config)) -> Result<()> {
+/// Read the raw USER config table, apply `mutate`, and write it back — under
+/// `PERSIST_LOCK` so concurrent persists can't clobber each other. Operating
+/// on the raw table (never the merged typed `Config`) means a persist rewrites
+/// only its own keys: unknown keys survive, defaults are not frozen in, and
+/// project-layer or session-flag values can never leak into the user file.
+/// A malformed file propagates the parse error rather than being overwritten
+/// with defaults (#111).
+fn update_user_config_table(mutate: impl FnOnce(&mut toml::Table) -> Result<()>) -> Result<()> {
+    update_user_config_table_at(&get_config_path()?, mutate)
+}
+
+/// [`update_user_config_table`] against an explicit path (test seam).
+fn update_user_config_table_at(
+    path: &std::path::Path,
+    mutate: impl FnOnce(&mut toml::Table) -> Result<()>,
+) -> Result<()> {
     let _guard = PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut config = load_config()?;
-    mutate(&mut config);
-    save_config(&config, None)
+    let mut table = read_config_table(path)?;
+    // Converge the on-disk legacy output cap while we're rewriting anyway.
+    migrate_legacy_max_tokens(&mut table);
+    mutate(&mut table)?;
+    write_config_bytes(path, toml::to_string_pretty(&table)?.as_bytes())
 }
 
-/// Persist the last used model to config file.
+/// Set one key (pre-split path segments, so map keys containing dots — e.g.
+/// `reasoning_per_model."ollama/qwen3:8b"` — address correctly) in the USER
+/// config file, leaving every other key untouched.
+pub fn update_user_config_key(path: &[&str], value: toml::Value) -> Result<()> {
+    update_user_config_table(|table| deep_set_segments(table, path, value))
+}
+
+/// Remove one key (pre-split path segments) from the USER config file.
+/// Returns whether the key existed.
+pub fn remove_user_config_key(path: &[&str]) -> Result<bool> {
+    let mut removed = false;
+    update_user_config_table(|table| {
+        removed = deep_remove_segments(table, path);
+        Ok(())
+    })?;
+    Ok(removed)
+}
+
+/// Persist the last used model to the user config file.
 pub fn persist_last_model(model: &str) -> Result<()> {
-    update_config(|config| config.last_used_model = Some(model.to_string()))
+    update_user_config_key(&["last_used_model"], toml::Value::String(model.to_string()))
 }
 
-/// Persist the user's default reasoning level to config file. Used by the
-/// `/reasoning` slash command and the Alt+T cycle handler so the choice survives
-/// across sessions.
+/// Persist the user's default reasoning level. Used by the `/reasoning` slash
+/// command and the Alt+T cycle handler so the choice survives across sessions.
 pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
-    update_config(|config| config.default_model.reasoning = level)
+    update_user_config_key(
+        &["default_model", "reasoning"],
+        toml::Value::try_from(level)?,
+    )
 }
 
 /// Persist a reasoning level for a specific model ID
@@ -906,31 +1158,30 @@ pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
 /// the choice sticks per-model rather than bleeding into other models on
 /// next session start.
 pub fn persist_reasoning_for_model(model_id: &str, level: ReasoningLevel) -> Result<()> {
-    update_config(|config| {
-        config
-            .reasoning_per_model
-            .insert(model_id.to_string(), level);
-    })
+    update_user_config_key(
+        &["reasoning_per_model", model_id],
+        toml::Value::try_from(level)?,
+    )
 }
 
 /// Persist (or clear) a per-model Ollama `num_ctx` override. `Some(n)` sets it,
 /// `None` removes the entry (returning that model to auto-fit).
 pub fn persist_ollama_num_ctx_for_model(model_id: &str, num_ctx: Option<u32>) -> Result<()> {
-    update_config(|config| match num_ctx {
-        Some(n) => {
-            config
-                .ollama_num_ctx_per_model
-                .insert(model_id.to_string(), n);
-        },
-        None => {
-            config.ollama_num_ctx_per_model.remove(model_id);
-        },
-    })
+    match num_ctx {
+        Some(n) => update_user_config_key(
+            &["ollama_num_ctx_per_model", model_id],
+            toml::Value::Integer(i64::from(n)),
+        ),
+        None => remove_user_config_key(&["ollama_num_ctx_per_model", model_id]).map(|_| ()),
+    }
 }
 
 /// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
 pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
-    update_config(|config| config.ollama.allow_ram_offload = enabled)
+    update_user_config_key(
+        &["ollama", "allow_ram_offload"],
+        toml::Value::Boolean(enabled),
+    )
 }
 
 /// Resolve which model to use: CLI arg > last_used > default_model > any available
@@ -1058,6 +1309,238 @@ mod tests {
         let mut table = toml::Table::new();
         assert!(apply_cli_overrides(&mut table, &["noequalssign".to_string()]).is_err());
         assert!(apply_cli_overrides(&mut table, &["=novalue".to_string()]).is_err());
+    }
+
+    #[test]
+    fn deep_merge_recurses_tables_and_replaces_scalars_and_arrays() {
+        let mut base: toml::Table = toml::from_str(
+            "top = 1\n[ollama]\nhost = \"localhost\"\nport = 11434\n[safety]\noverrides = [\"a\", \"b\"]\n",
+        )
+        .unwrap();
+        let overlay: toml::Table =
+            toml::from_str("[ollama]\nhost = \"gpu-box\"\n[safety]\noverrides = [\"c\"]\n")
+                .unwrap();
+        deep_merge(&mut base, overlay);
+        // Sibling keys inside a merged table survive...
+        assert_eq!(base["ollama"]["port"].as_integer(), Some(11434));
+        // ...the overlaid scalar wins...
+        assert_eq!(base["ollama"]["host"].as_str(), Some("gpu-box"));
+        // ...arrays replace wholesale (no concat)...
+        assert_eq!(base["safety"]["overrides"].as_array().unwrap().len(), 1);
+        // ...and untouched top-level keys survive.
+        assert_eq!(base["top"].as_integer(), Some(1));
+    }
+
+    #[test]
+    fn deep_merge_overlay_wins_on_kind_conflict() {
+        // Scalar over table and table over scalar both resolve to the overlay.
+        let mut base: toml::Table = toml::from_str("[a]\nx = 1\nb = 2\n").unwrap();
+        let overlay: toml::Table = toml::from_str("a = 5\n[b]\ny = 3\n").unwrap();
+        deep_merge(&mut base, overlay);
+        assert_eq!(base["a"].as_integer(), Some(5));
+        assert_eq!(base["b"]["y"].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn merge_layers_precedence_and_layer_attributed_warnings() {
+        let user: toml::Table = toml::from_str(
+            "last_used_model = \"ollama/a\"\nuser_typo = 1\n[default_model]\nmax_tokens = 100\n",
+        )
+        .unwrap();
+        let session: toml::Table =
+            toml::from_str("last_used_model = \"ollama/b\"\nsession_typo = 2\n").unwrap();
+        let (config, warnings) = merge_layers(vec![
+            LayerSource {
+                layer: ConfigLayer::User,
+                origin: "/tmp/user.toml".to_string(),
+                table: user,
+            },
+            LayerSource {
+                layer: ConfigLayer::Session,
+                origin: "command line".to_string(),
+                table: session,
+            },
+        ])
+        .expect("merges");
+        // Later layer wins; earlier layer's untouched keys survive.
+        assert_eq!(config.last_used_model.as_deref(), Some("ollama/b"));
+        assert_eq!(config.default_model.max_tokens, 100);
+        // Each unknown key names its own layer + origin.
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("user_typo") && w.contains("user config (/tmp/user.toml)")),
+            "got {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("session_typo") && w.contains("session flags")),
+            "got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn session_flags_table_maps_each_flag() {
+        let flags = SessionFlags {
+            overrides: vec!["web.searxng_url=\"http://x:1\"".to_string()],
+            deny_network: true,
+            confine_fs: true,
+            max_tokens: Some(512),
+            allow_untrusted_tools: true,
+        };
+        let (config, _) = finalize_config(flags.to_table().unwrap()).unwrap();
+        assert_eq!(config.safety.network, NetworkPolicy::Deny);
+        assert_eq!(config.safety.filesystem, FilesystemPolicy::Project);
+        assert_eq!(config.default_model.max_tokens, 512);
+        assert!(config.safety.allow_untrusted_headless_tools);
+        assert_eq!(config.web.searxng_url, "http://x:1");
+    }
+
+    #[test]
+    fn session_dedicated_flags_beat_dash_c() {
+        // `--no-network` wins over a contradictory `-c safety.network=allow`
+        // (the dedicated flags deep-set after the -c overrides).
+        let flags = SessionFlags {
+            overrides: vec!["safety.network=allow".to_string()],
+            deny_network: true,
+            ..Default::default()
+        };
+        let (config, _) = finalize_config(flags.to_table().unwrap()).unwrap();
+        assert_eq!(config.safety.network, NetworkPolicy::Deny);
+    }
+
+    #[test]
+    fn corrupt_layer_yields_no_warnings_but_merged_error_surfaces() {
+        // A layer that doesn't deserialize on its own contributes no warnings…
+        let bad: toml::Table = toml::from_str("[safety]\nmode = 42\n").unwrap();
+        let mut warnings = Vec::new();
+        collect_layer_warnings(
+            &LayerSource {
+                layer: ConfigLayer::User,
+                origin: "x".to_string(),
+                table: bad.clone(),
+            },
+            &mut warnings,
+        );
+        assert!(warnings.is_empty());
+        // …and the merged deserialize is what errors…
+        assert!(
+            merge_layers(vec![LayerSource {
+                layer: ConfigLayer::User,
+                origin: "x".to_string(),
+                table: bad.clone(),
+            }])
+            .is_err()
+        );
+        // …unless a later layer fixes the value (session repairing a bad file).
+        let fix: toml::Table = toml::from_str("[safety]\nmode = \"ask\"\n").unwrap();
+        let (config, _) = merge_layers(vec![
+            LayerSource {
+                layer: ConfigLayer::User,
+                origin: "x".to_string(),
+                table: bad,
+            },
+            LayerSource {
+                layer: ConfigLayer::Session,
+                origin: "command line".to_string(),
+                table: fix,
+            },
+        ])
+        .expect("later layer repairs the earlier one");
+        assert_eq!(config.safety.mode, SafetyMode::Ask);
+    }
+
+    #[test]
+    fn session_flags_survive_corrupt_user_layer_fallback() {
+        // The or_warn fallback re-applies the session flags over bare defaults;
+        // pin the exact expression it uses.
+        let flags = SessionFlags {
+            deny_network: true,
+            ..Default::default()
+        };
+        let config = flags
+            .to_table()
+            .ok()
+            .and_then(|table| finalize_config(table).ok())
+            .map(|(config, _)| config)
+            .unwrap_or_default();
+        assert_eq!(config.safety.network, NetworkPolicy::Deny);
+    }
+
+    #[test]
+    fn deep_set_segments_addresses_keys_containing_dots() {
+        // A model id with dots must be ONE key, which dotted parsing cannot
+        // express — the latent bug the segment API fixes.
+        let mut table = toml::Table::new();
+        deep_set_segments(
+            &mut table,
+            &["reasoning_per_model", "gemini/gemini-2.5-pro"],
+            toml::Value::String("high".to_string()),
+        )
+        .unwrap();
+        let (config, ignored) = finalize_config(table).unwrap();
+        assert!(ignored.is_empty(), "got {ignored:?}");
+        assert_eq!(
+            config.reasoning_per_model.get("gemini/gemini-2.5-pro"),
+            Some(&ReasoningLevel::High)
+        );
+    }
+
+    #[test]
+    fn deep_remove_segments_removes_leaf_only() {
+        let mut table: toml::Table =
+            toml::from_str("[ollama_num_ctx_per_model]\n\"ollama/a\" = 1\n\"ollama/b\" = 2\n")
+                .unwrap();
+        assert!(deep_remove_segments(
+            &mut table,
+            &["ollama_num_ctx_per_model", "ollama/a"]
+        ));
+        // Sibling survives; parent table survives; missing keys report false.
+        assert_eq!(
+            table["ollama_num_ctx_per_model"]["ollama/b"].as_integer(),
+            Some(2)
+        );
+        assert!(!deep_remove_segments(
+            &mut table,
+            &["ollama_num_ctx_per_model", "ollama/a"]
+        ));
+        assert!(!deep_remove_segments(&mut table, &["nope", "x"]));
+    }
+
+    #[test]
+    fn update_user_config_table_preserves_unknown_keys() {
+        let dir = std::env::temp_dir().join("mermaid_test_config_targeted_persist");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.toml");
+        // A file with an unknown key (maybe from a newer mermaid) and one known
+        // setting the persist must not disturb.
+        std::fs::write(
+            &path,
+            "future_key = \"kept\"\nlast_used_model = \"ollama/old\"\n\n[ollama]\nport = 12345\n",
+        )
+        .expect("seed");
+
+        update_user_config_table_at(&path, |table| {
+            deep_set_segments(
+                table,
+                &["last_used_model"],
+                toml::Value::String("ollama/new".to_string()),
+            )
+        })
+        .expect("persist");
+
+        let blob = std::fs::read_to_string(&path).expect("read back");
+        let table: toml::Table = toml::from_str(&blob).expect("parse back");
+        // The targeted key changed…
+        assert_eq!(table["last_used_model"].as_str(), Some("ollama/new"));
+        // …the unknown key survived (typed round-trips would have dropped it)…
+        assert_eq!(table["future_key"].as_str(), Some("kept"));
+        // …and no defaults were frozen in (only the keys that were there).
+        assert!(!blob.contains("safety"), "defaults must not be frozen in");
+        assert_eq!(table["ollama"]["port"].as_integer(), Some(12345));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
