@@ -118,6 +118,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The streaming relay task can no longer leak on cancel.** Each provider's
+  stream bridge spawned a relay task whose handle was dropped (not aborted) when
+  a turn was cancelled; parked on a full downstream sink, it could outlive the
+  turn. It now rides an abort-on-drop guard (promoted to a shared util), so a
+  cancelled turn aborts it — the same structural task ownership the effect runner
+  already used internally.
 - **`temperature = 0.0` is now honored.** Setting an explicit `0.0`
   (deterministic / greedy decoding) was silently overridden with the `0.7`
   default — a leftover `> 0.0` guard treated a deliberate zero as "unset." It now

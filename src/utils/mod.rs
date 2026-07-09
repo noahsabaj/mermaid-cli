@@ -16,6 +16,7 @@ mod redact;
 mod retry;
 pub mod serde_base64;
 mod sse;
+mod task;
 mod text;
 mod timestamp;
 
@@ -38,5 +39,6 @@ pub use redact::{redact_json, redact_secrets};
 pub(crate) use retry::jitter;
 pub use retry::{RetryConfig, retry_async, retry_async_if};
 pub use sse::drain_sse_events;
+pub(crate) use task::{AbortOnDrop, join_logged, spawn_guarded};
 pub use text::{format_duration, truncate_content, truncate_web_content};
 pub use timestamp::format_relative_timestamp;
