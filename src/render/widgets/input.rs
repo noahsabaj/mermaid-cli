@@ -92,6 +92,10 @@ pub struct InputWidget<'a> {
     /// hint in the box title while the window is open (idle-state surface —
     /// the busy-state hint lives in the status line).
     pub exit_armed: bool,
+    /// A first idle Esc armed the double-Esc rewind; show the second-press
+    /// hint in the box title while the window is open. Exit arming wins
+    /// when both are somehow live (quitting is the more consequential act).
+    pub rewind_armed: bool,
 }
 
 impl<'a> StatefulWidget for InputWidget<'a> {
@@ -130,6 +134,11 @@ impl<'a> StatefulWidget for InputWidget<'a> {
                 .borders(Borders::TOP | Borders::BOTTOM)
                 .border_style(Style::new().fg(border_color))
                 .title(" press ctrl+c again to exit ")
+        } else if self.rewind_armed {
+            Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::new().fg(border_color))
+                .title(" esc again to rewind ")
         } else {
             Block::default()
                 .borders(Borders::TOP | Borders::BOTTOM)

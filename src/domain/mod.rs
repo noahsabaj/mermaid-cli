@@ -53,8 +53,8 @@ pub use state::{
     ApprovalChoice, ApprovalKind, Attachment, Confirmation, ConfirmationTarget,
     ContextUsageSnapshot, ConversationSummary, GenPhase, IdAllocatorBundle, McpServerEntry,
     McpServerStatus, McpState, McpToolSpec, PendingApproval, PendingToolCall, PromptTokenBreakdown,
-    QueuedMessage, Session, State, StatusKind, TokenUsageTotals, ToolOutcome, TurnState, UiMode,
-    UiState, estimate_context_usage_for_request, estimate_tool_schema_tokens,
+    QueuedMessage, RewindCandidate, Session, State, StatusKind, TokenUsageTotals, ToolOutcome,
+    TurnState, UiMode, UiState, estimate_context_usage_for_request, estimate_tool_schema_tokens,
 };
 pub use transition::{
     action_display_for, commit_assistant_message, display_info_for, fill_outcome,
