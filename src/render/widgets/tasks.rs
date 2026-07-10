@@ -8,6 +8,12 @@
 //! naming the upcoming pending task (the ACTIVE task already lives on the
 //! spinner line above).
 //!
+//! The `⎿` gutter is subordinate to the status widget: it only renders when
+//! the status zone above is actually showing (`attached`). Detached (idle,
+//! no agent rows), expanded rows sit flush-left with no elbow, and the
+//! collapsed one-liner disappears entirely — collapse is a minimize-while-
+//! working affordance with nothing to minimize into when idle.
+//!
 //! Glyphs are deliberately outside the no-emoji CI ranges: `√` completed
 //! (U+221A — the dingbat checkmarks U+2713/14 are banned), `■` in-progress,
 //! `□` pending (geometric shapes), `⎿` gutter (house transcript glyph).
@@ -26,19 +32,27 @@ const MAX_ROWS: usize = 8;
 
 /// Whether the checklist band renders at all: there must be something to
 /// show, and a fully-green list retires once the run goes idle (finished
-/// work stays visible only while unfinished work remains).
-pub fn tasks_visible(store: &TaskStore, turn: &TurnState) -> bool {
+/// work stays visible only while unfinished work remains). Collapsed with no
+/// status widget above (`attached` false) renders nothing — the state
+/// persists and the one-liner reappears when the next run starts.
+pub fn tasks_visible(store: &TaskStore, turn: &TurnState, collapsed: bool, attached: bool) -> bool {
     if store.is_empty() {
+        return false;
+    }
+    if collapsed && !attached {
         return false;
     }
     !(matches!(turn, TurnState::Idle) && store.all_done())
 }
 
 /// Build the checklist rows for the reserved zone. `collapsed` is the Ctrl+T
-/// one-line form. `width` is the zone's inner width in cells.
+/// one-line form. `attached` means the status zone renders above, so the
+/// first row carries the `⎿` connector; detached rows sit flush-left.
+/// `width` is the zone's inner width in cells.
 pub fn build_task_lines(
     store: &TaskStore,
     collapsed: bool,
+    attached: bool,
     width: u16,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
@@ -59,7 +73,7 @@ pub fn build_task_lines(
 
     let mut lines = Vec::with_capacity(window.len() + 1);
     for (i, task) in window.iter().enumerate() {
-        lines.push(task_row(task, i == 0, width, theme, meta_style));
+        lines.push(task_row(task, i == 0, attached, width, theme, meta_style));
     }
     if hidden_completed + hidden_pending > 0 {
         let mut bits = Vec::new();
@@ -69,8 +83,10 @@ pub fn build_task_lines(
         if hidden_completed > 0 {
             bits.push(format!("{hidden_completed} completed"));
         }
+        // Ellipsis aligns under the subject column in either mode.
+        let footer_pad = if attached { "    " } else { "  " };
         lines.push(Line::from(Span::styled(
-            truncate_to_cells(&format!("    … {}", bits.join(", ")), width),
+            truncate_to_cells(&format!("{footer_pad}… {}", bits.join(", ")), width),
             meta_style,
         )));
     }
@@ -121,16 +137,22 @@ fn window_rows<'a>(visible: &[&'a TaskItem]) -> (Vec<&'a TaskItem>, usize, usize
     )
 }
 
-/// One checklist row. The first row carries the `⎿` gutter that visually
-/// attaches the list to the spinner line above; the rest indent to align.
+/// One checklist row. Attached, the first row carries the `⎿` gutter that
+/// visually connects the list to the spinner line above and the rest indent
+/// to align; detached there is nothing to hang from, so rows sit flush-left.
 fn task_row(
     task: &TaskItem,
     first: bool,
+    attached: bool,
     width: usize,
     theme: &Theme,
     meta_style: Style,
 ) -> Line<'static> {
-    let gutter = if first { " ⎿ " } else { "   " };
+    let gutter = match (attached, first) {
+        (true, true) => " ⎿ ",
+        (true, false) => "   ",
+        (false, _) => "",
+    };
     let brand = Style::new().fg(theme.colors.brand.to_color());
     let warning = Style::new().fg(theme.colors.warning.to_color());
     let text = Style::new().fg(theme.colors.text_primary.to_color());
@@ -293,25 +315,47 @@ mod tests {
     fn visibility_rules() {
         use TaskStatus::*;
         let store = store_of(&[Completed, InProgress, Pending]);
-        assert!(tasks_visible(&store, &TurnState::Idle));
+        assert!(tasks_visible(&store, &TurnState::Idle, false, false));
         let done = store_of(&[Completed, Completed]);
         assert!(
-            !tasks_visible(&done, &TurnState::Idle),
+            !tasks_visible(&done, &TurnState::Idle, false, true),
             "all-done idle retires"
         );
-        assert!(!tasks_visible(&TaskStore::default(), &TurnState::Idle));
+        assert!(!tasks_visible(
+            &TaskStore::default(),
+            &TurnState::Idle,
+            false,
+            true
+        ));
+        // Collapsed with no status widget above renders nothing at all…
+        assert!(!tasks_visible(&store, &TurnState::Idle, true, false));
+        // …but stays visible while attached (spinner or agent rows above).
+        assert!(tasks_visible(&store, &TurnState::Idle, true, true));
     }
 
     #[test]
     fn expanded_rows_carry_glyphs_and_gutter() {
         use TaskStatus::*;
         let store = store_of(&[Completed, InProgress, Pending]);
-        let lines = build_task_lines(&store, false, 80, &Theme::dark());
+        let lines = build_task_lines(&store, false, true, 80, &Theme::dark());
         let rows = rendered(&lines);
         assert_eq!(rows.len(), 3);
         assert!(rows[0].starts_with(" ⎿ √ "), "{:?}", rows[0]);
         assert!(rows[1].starts_with("   ■ "), "{:?}", rows[1]);
         assert!(rows[2].starts_with("   □ "), "{:?}", rows[2]);
+    }
+
+    #[test]
+    fn detached_rows_drop_elbow_and_sit_flush() {
+        use TaskStatus::*;
+        let store = store_of(&[Completed, InProgress, Pending]);
+        let lines = build_task_lines(&store, false, false, 80, &Theme::dark());
+        let rows = rendered(&lines);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].starts_with("√ "), "{:?}", rows[0]);
+        assert!(rows[1].starts_with("■ "), "{:?}", rows[1]);
+        assert!(rows[2].starts_with("□ "), "{:?}", rows[2]);
+        assert!(!rows.iter().any(|r| r.contains('⎿')), "{rows:?}");
     }
 
     #[test]
@@ -323,7 +367,7 @@ mod tests {
             .chain(std::iter::repeat_n(Pending, 9))
             .collect();
         let store = store_of(&statuses);
-        let lines = build_task_lines(&store, false, 80, &Theme::dark());
+        let lines = build_task_lines(&store, false, true, 80, &Theme::dark());
         let rows = rendered(&lines);
         // 8 windowed rows + footer.
         assert_eq!(rows.len(), 9);
@@ -342,14 +386,20 @@ mod tests {
     fn collapsed_shows_next_pending() {
         use TaskStatus::*;
         let store = store_of(&[Completed, InProgress, Pending]);
-        let lines = build_task_lines(&store, true, 80, &Theme::dark());
+        let lines = build_task_lines(&store, true, true, 80, &Theme::dark());
         let rows = rendered(&lines);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].contains("Next: task number 2"), "{:?}", rows[0]);
         assert_eq!(tasks_height(&store, true), 1);
 
         let no_pending = store_of(&[Completed, InProgress]);
-        let rows = rendered(&build_task_lines(&no_pending, true, 80, &Theme::dark()));
+        let rows = rendered(&build_task_lines(
+            &no_pending,
+            true,
+            true,
+            80,
+            &Theme::dark(),
+        ));
         assert!(rows[0].contains("Tasks 1/2"), "{:?}", rows[0]);
     }
 
@@ -381,7 +431,7 @@ mod tests {
             },
         );
         // A single completed task while a run is still busy stays visible.
-        let lines = build_task_lines(&store, false, 100, &Theme::dark());
+        let lines = build_task_lines(&store, false, true, 100, &Theme::dark());
         let row = &rendered(&lines)[0];
         assert!(row.contains("(2m 10s · 8.4k tok)"), "{row:?}");
         assert!(row.contains("(you)"), "{row:?}");

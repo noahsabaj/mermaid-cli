@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Task checklist no longer dangles a `⎿` connector when idle.** The elbow
+  glyph on the checklist's first row exists to attach the band to the
+  status/spinner line above it; once the run went idle and that widget
+  disappeared, the elbow was left hanging from nothing. Idle now renders the
+  expanded checklist flush-left with no connector, and a collapsed (Ctrl+T)
+  checklist disappears entirely between runs — collapse is a
+  minimize-while-working affordance, so with no status line there is nothing
+  to minimize into. Active-run rendering is unchanged, and the collapsed
+  state persists: the "Next:" one-liner reappears when the next run starts.
+
 - **Safety-mode switch note: fires once, model-only.** The "earlier read-only
   policy blocks no longer apply" note used to appear in the transcript on
   every loosening step (ask, then auto, then full_access — three banners for
