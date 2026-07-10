@@ -378,7 +378,7 @@ A repo can commit shared defaults in `.mermaid/config.toml` — model choice, pr
 per-model reasoning, web/UX knobs. Loading needs no trust ceremony because safety is
 structural:
 
-- Only these top-level sections are honored: `default_model`, `model_profiles`,
+- Only these top-level sections are honored: `default_model`, `model_aliases`,
   `reasoning_per_model`, `ollama`, `ollama_num_ctx_per_model`, `web`, `compaction`,
   `computer_use`, `memory`, `non_interactive`, and a `safety` subset. Anything else —
   `mcp_servers` (spawns commands), `providers` (redirects traffic/credentials), `agents`,
@@ -487,9 +487,9 @@ timeout_secs = 1200
 # "<provider>/<model>" = "high"
 "ollama/qwen3-coder:30b" = "low"
 
-# Optional agent/plugin model profiles. A request for `--model fast` or
-# `--model profile:fast` resolves through this table when present.
-[model_profiles]
+# Optional model-id aliases. A request for `--model fast` or
+# `--model alias:fast` resolves through this table when present.
+[model_aliases]
 fast = "ollama/qwen3-coder:14b"
 # large-context = "openai/<model>"
 # tool-strong = "anthropic/<model>"

@@ -90,11 +90,12 @@ pub struct Config {
     #[serde(default)]
     pub ollama_num_ctx_per_model: HashMap<String, u32>,
 
-    /// Named model profiles that agents/plugins can request without
+    /// Named model-id aliases that agents/plugins can request without
     /// hardcoding a concrete provider model. Values are full model IDs.
-    /// Example:
+    /// (Distinct from `[profiles.<name>]`, which are whole-config overlays
+    /// selected with `--profile`.) Example:
     /// ```toml
-    /// [model_profiles]
+    /// [model_aliases]
     /// fast = "ollama/qwen3-coder:14b"
     /// large-context = "openai/<model>"
     /// tool-strong = "anthropic/<model>"
@@ -102,7 +103,7 @@ pub struct Config {
     /// cheap = "groq/llama-3.3-70b-versatile"
     /// ```
     #[serde(default)]
-    pub model_profiles: HashMap<String, String>,
+    pub model_aliases: HashMap<String, String>,
 
     /// Runtime safety policy. Defaults to `Ask` so mutations / shell /
     /// network actions require approval out of the box; users opt into
@@ -1314,13 +1315,13 @@ pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
 /// Resolve which model to use: CLI arg > last_used > default_model > any available
 pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyhow::Result<String> {
     if let Some(model) = cli_model {
-        if let Some(resolved) = resolve_model_profile_alias(model, config)? {
+        if let Some(resolved) = resolve_model_alias(model, config)? {
             return Ok(resolved);
         }
         return Ok(model.to_string());
     }
     if let Some(last_model) = &config.last_used_model {
-        if let Some(resolved) = resolve_model_profile_alias(last_model, config)? {
+        if let Some(resolved) = resolve_model_alias(last_model, config)? {
             return Ok(resolved);
         }
         return Ok(last_model.clone());
@@ -1341,20 +1342,20 @@ pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyho
     Ok(format!("ollama/{}", first))
 }
 
-fn resolve_model_profile_alias(requested: &str, config: &Config) -> anyhow::Result<Option<String>> {
-    let profile = requested.strip_prefix("profile:").unwrap_or(requested);
-    if let Some(model) = config.model_profiles.get(profile) {
+fn resolve_model_alias(requested: &str, config: &Config) -> anyhow::Result<Option<String>> {
+    let alias = requested.strip_prefix("alias:").unwrap_or(requested);
+    if let Some(model) = config.model_aliases.get(alias) {
         anyhow::ensure!(
             !model.trim().is_empty(),
-            "model profile `{}` is configured with an empty model id",
-            profile
+            "model alias `{}` is configured with an empty model id",
+            alias
         );
         return Ok(Some(model.clone()));
     }
-    if requested.starts_with("profile:") {
+    if requested.starts_with("alias:") {
         anyhow::bail!(
-            "model profile `{}` is not configured; add it under [model_profiles]",
-            profile
+            "model alias `{}` is not configured; add it under [model_aliases]",
+            alias
         );
     }
     Ok(None)
@@ -1800,29 +1801,26 @@ model = "ollama/qwen3:8b"
     }
 
     #[test]
-    fn configured_model_profile_resolves_explicit_alias() {
+    fn configured_model_alias_resolves_explicit_prefix() {
         let mut config = Config::default();
         config
-            .model_profiles
+            .model_aliases
             .insert("fast".to_string(), "ollama/qwen3-coder:14b".to_string());
         assert_eq!(
-            resolve_model_profile_alias("fast", &config).unwrap(),
+            resolve_model_alias("fast", &config).unwrap(),
             Some("ollama/qwen3-coder:14b".to_string())
         );
         assert_eq!(
-            resolve_model_profile_alias("profile:fast", &config).unwrap(),
+            resolve_model_alias("alias:fast", &config).unwrap(),
             Some("ollama/qwen3-coder:14b".to_string())
         );
     }
 
     #[test]
-    fn profile_prefix_requires_configuration() {
+    fn alias_prefix_requires_configuration() {
         let config = Config::default();
-        assert!(resolve_model_profile_alias("profile:vision", &config).is_err());
-        assert_eq!(
-            resolve_model_profile_alias("vision", &config).unwrap(),
-            None
-        );
+        assert!(resolve_model_alias("alias:vision", &config).is_err());
+        assert_eq!(resolve_model_alias("vision", &config).unwrap(), None);
     }
 
     /// `persist_default_reasoning` writes to the real config path, so
