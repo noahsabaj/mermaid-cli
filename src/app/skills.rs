@@ -148,6 +148,13 @@ fn read_skill_entry(path: &Path, source: SkillSource) -> Option<SkillEntry> {
 /// line-based parsing (Claude Code-compatible frontmatter needs no YAML dep);
 /// a missing or unclosed fence means the whole file is body.
 fn parse_skill_frontmatter(raw: &str) -> (Option<String>, Option<String>) {
+    let (name, description, _) = parse_frontmatter_with_body(raw);
+    (name, description)
+}
+
+/// [`parse_skill_frontmatter`] plus the body after the fence — the shared
+/// dialect for skills AND plugin prompt commands (`app::plugin_assets`).
+pub(crate) fn parse_frontmatter_with_body(raw: &str) -> (Option<String>, Option<String>, String) {
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let mut name = None;
     let mut description = None;
@@ -187,7 +194,7 @@ fn parse_skill_frontmatter(raw: &str) -> (Option<String>, Option<String>) {
         .map(|l| l.trim())
         .find(|l| !l.is_empty())
         .map(str::to_string);
-    (name, description.or(first_body_line))
+    (name, description.or(first_body_line), body_lines.join("\n"))
 }
 
 /// Resolve a plugin's declared skill paths to canonical SKILL.md files,

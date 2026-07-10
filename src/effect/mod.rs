@@ -1079,22 +1079,6 @@ impl EffectRunner {
                     let _ = tx.blocking_send(msg);
                 });
             },
-            Cmd::KillBackgroundAgent { agent_id } => {
-                // Synchronous token fire — no task to spawn. Feedback flows
-                // through the dying child's `Msg::BackgroundAgentFinished`
-                // (the reducer already validated the id against its registry).
-                let spawner = self.tools.as_ref().and_then(|t| t.subagent_spawner());
-                if let Some(spawner) = spawner {
-                    match agent_id {
-                        Some(id) => {
-                            spawner.kill_detached(&id);
-                        },
-                        None => {
-                            spawner.kill_all_detached();
-                        },
-                    }
-                }
-            },
             Cmd::RestartRuntimeProcess { id } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {

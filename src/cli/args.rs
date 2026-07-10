@@ -342,17 +342,6 @@ pub enum Commands {
     /// from your shell before starting mermaid — it reads stdin and
     /// doesn't work from inside the TUI.
     CloudSetup,
-    /// Store a provider API key in the OS keyring, or list key status
-    Login {
-        /// Provider name (e.g. groq, anthropic, ollama). Omit to list every
-        /// provider's key status.
-        provider: Option<String>,
-    },
-    /// Remove a provider API key from the OS keyring
-    Logout {
-        /// Provider name whose stored key to remove
-        provider: String,
-    },
     /// Run a single prompt non-interactively
     Run {
         /// Prompt to execute. Omit or pass `-` to read it from piped stdin;
@@ -607,19 +596,6 @@ mod tests {
         let cli = Cli::try_parse_from(["mermaid", "run", "x", "-c", "c=true"])
             .expect("global -c parses after the subcommand");
         assert_eq!(cli.config_overrides, vec!["c=true"]);
-    }
-
-    #[test]
-    fn parses_login_and_logout() {
-        let cli = Cli::parse_from(["mermaid", "login"]);
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Login { provider: None })
-        ));
-        let cli = Cli::parse_from(["mermaid", "login", "groq"]);
-        assert!(matches!(cli.command, Some(Commands::Login { provider: Some(p) }) if p == "groq"));
-        let cli = Cli::parse_from(["mermaid", "logout", "groq"]);
-        assert!(matches!(cli.command, Some(Commands::Logout { provider }) if provider == "groq"));
     }
 
     #[test]

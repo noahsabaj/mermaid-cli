@@ -98,6 +98,12 @@ pub struct State {
     /// Quit flag. When set, the main loop drains pending effects and
     /// exits. The reducer never panics on its own; it sets this instead.
     pub should_exit: bool,
+    /// Prompt-backed slash commands contributed by enabled plugins
+    /// (`manifest.prompts`). Loaded once at startup by the run loop (like
+    /// `skills`); the reducer expands `/name args` into a normal
+    /// `Msg::SubmitPrompt`, so recordings replay without the plugin
+    /// installed. Sorted by name.
+    pub plugin_commands: Vec<PluginCommand>,
     /// `mermaid run --output-schema`: set by the headless driver before the
     /// dedicated formatting turn; `build_chat_request` copies it onto the
     /// request (dropping all tools for that turn). Never set interactively.
@@ -186,6 +192,7 @@ impl State {
             runtime,
             should_exit: false,
             output_schema: None,
+            plugin_commands: Vec::new(),
             // Seed the injected clock from the caller (live: startup wall
             // clock; replay: the recorded header's ts). The driver overwrites
             // this on every iteration (Cause 3); the reducer never reads the
@@ -866,6 +873,39 @@ impl ToolOutcome {
 pub struct LiveToolStatus {
     pub activity: String,
     pub tokens: usize,
+}
+
+/// One plugin-contributed slash command (a markdown prompt from an enabled
+/// plugin's `manifest.prompts`). Plain data — parsing/IO happens in
+/// `app::plugin_assets`; the reducer only expands and submits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginCommand {
+    /// Command name without the leading `/` (validated `[a-z0-9-]+`).
+    pub name: String,
+    /// One-line description for the palette and `/help`.
+    pub description: String,
+    /// The prompt body. `$ARGUMENTS` is replaced with the typed args;
+    /// without the token, non-empty args append as a final paragraph.
+    pub body: String,
+    /// Owning plugin name, shown as `(plugin:<name>)` in the palette.
+    pub plugin: String,
+}
+
+impl PluginCommand {
+    /// Expand the body with typed arguments: replace-all of `$ARGUMENTS`
+    /// when the token is present, else append the args as a new paragraph
+    /// when non-empty. Pure.
+    pub fn expand(&self, args: &str) -> String {
+        let args = args.trim();
+        if self.body.contains("$ARGUMENTS") {
+            return self.body.replace("$ARGUMENTS", args);
+        }
+        if args.is_empty() {
+            self.body.clone()
+        } else {
+            format!("{}\n\n{}", self.body, args)
+        }
+    }
 }
 
 /// All UI-only state. Things in `UiState` never affect what gets sent
