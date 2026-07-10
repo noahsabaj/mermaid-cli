@@ -2871,10 +2871,20 @@ fn classify_error_for_ui(e: &crate::models::ModelError) -> crate::models::UserFa
             category: ErrorCategory::Auth,
             recoverable: false,
         },
-        ModelError::RateLimit { retry_after } => UserFacingError {
-            summary: "Rate limit".to_string(),
-            message: format!("retry after {:?}", retry_after),
-            suggestion: "Wait and try again.".to_string(),
+        ModelError::RateLimit {
+            retry_after,
+            message,
+        } => UserFacingError {
+            summary: "Rate limited".to_string(),
+            // The provider's own reason distinguishes "slow down" from
+            // "daily quota exhausted" — show it when the 429 body had one.
+            message: message.clone().unwrap_or_else(|| {
+                "The provider rejected the request with 429 (too many requests).".to_string()
+            }),
+            suggestion: match retry_after {
+                Some(secs) => format!("The provider asked to retry after {secs}s."),
+                None => "Retry shortly; if it persists, check your plan's quota.".to_string(),
+            },
             category: ErrorCategory::Temporary,
             recoverable: true,
         },

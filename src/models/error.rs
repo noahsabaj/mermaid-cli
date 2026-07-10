@@ -59,8 +59,15 @@ pub enum ModelError {
         duration_secs: u64,
     },
 
-    /// Rate limit exceeded
-    RateLimit { retry_after: Option<u64> },
+    /// Rate limit exceeded. `retry_after` is the server's `Retry-After` in
+    /// seconds when it sent one; `message` is the human-readable reason from
+    /// the 429 response body when one could be extracted (e.g. Cloudflare's
+    /// "used up your daily free allocation of 10,000 neurons") — the
+    /// difference between "wait a moment" and "upgrade your plan".
+    RateLimit {
+        retry_after: Option<u64>,
+        message: Option<String>,
+    },
 
     /// Invalid request (malformed input, bad parameters)
     InvalidRequest(String),
@@ -117,12 +124,18 @@ impl fmt::Display for ModelError {
                     )
                 }
             },
-            ModelError::RateLimit { retry_after } => {
+            ModelError::RateLimit {
+                retry_after,
+                message,
+            } => {
+                write!(f, "Rate limit exceeded")?;
                 if let Some(secs) = retry_after {
-                    write!(f, "Rate limit exceeded. Retry after {} seconds", secs)
-                } else {
-                    write!(f, "Rate limit exceeded")
+                    write!(f, " (retry after {} seconds)", secs)?;
                 }
+                if let Some(reason) = message {
+                    write!(f, ": {}", reason)?;
+                }
+                Ok(())
             },
             ModelError::InvalidRequest(msg) => write!(f, "Invalid request: {}", msg),
             ModelError::ParseError { message, raw } => {
@@ -301,17 +314,25 @@ impl ModelError {
                 category: ErrorCategory::Temporary,
                 recoverable: true,
             },
-            ModelError::RateLimit { retry_after } => {
+            ModelError::RateLimit {
+                retry_after,
+                message,
+            } => {
                 let wait_msg = retry_after
-                    .map(|s| format!("Wait {} seconds", s))
-                    .unwrap_or_else(|| "Wait a moment".to_string());
+                    .map(|s| format!("Wait {} seconds and retry", s))
+                    .unwrap_or_else(|| {
+                        "This can be a burst limit (retry shortly) or an exhausted quota"
+                            .to_string()
+                    });
                 UserFacingError {
                     summary: "Rate limited".to_string(),
-                    message: "Too many requests - rate limit exceeded".to_string(),
-                    suggestion: format!(
-                        "{}. Consider using a local Ollama model to avoid rate limits",
-                        wait_msg
-                    ),
+                    // Prefer the provider's own explanation (it distinguishes
+                    // "slow down" from "your daily quota is spent") over the
+                    // generic phrasing.
+                    message: message.clone().unwrap_or_else(|| {
+                        "The provider rejected the request with 429 (too many requests)".to_string()
+                    }),
+                    suggestion: format!("{}. Local Ollama models have no rate limits", wait_msg),
                     category: ErrorCategory::Temporary,
                     recoverable: true,
                 }
