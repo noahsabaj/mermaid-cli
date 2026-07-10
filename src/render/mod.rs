@@ -264,8 +264,16 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
 
     // Task checklist band, directly under the status line. Same starvation
     // guard as the status zone: chat floor + input + bottom bar always win.
+    // The `⎿` connector only draws when the status zone above actually
+    // renders (attached); collapsed + detached shows nothing at all.
     let tasks_store = &state.session.conversation.tasks;
-    let tasks_zone_height = if widgets::tasks_visible(tasks_store, &state.turn) {
+    let tasks_attached = status_line_height > 0;
+    let tasks_zone_height = if widgets::tasks_visible(
+        tasks_store,
+        &state.turn,
+        state.ui.tasks_collapsed,
+        tasks_attached,
+    ) {
         widgets::tasks_height(tasks_store, state.ui.tasks_collapsed).min(
             frame
                 .area()
@@ -414,6 +422,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let lines = widgets::build_task_lines(
             tasks_store,
             state.ui.tasks_collapsed,
+            tasks_attached,
             tasks_area.width,
             &rstate.theme,
         );
