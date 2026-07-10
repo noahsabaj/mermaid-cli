@@ -26,7 +26,7 @@ use crate::runtime::SafetyMode;
 /// user-file persistence).
 const PROJECT_ALLOWED_TOP_LEVEL: &[&str] = &[
     "default_model",
-    "model_profiles",
+    "model_aliases",
     "reasoning_per_model",
     "ollama",
     "ollama_num_ctx_per_model",
@@ -270,7 +270,7 @@ max_concurrent_tasks = 9
 [default_model]
 provider = "ollama"
 name = "qwen3"
-[model_profiles]
+[model_aliases]
 fast = "ollama/qwen3:8b"
 [web]
 search_backend = "auto"

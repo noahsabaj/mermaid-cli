@@ -201,6 +201,8 @@ fn handle_qa(command: &QaCommand, config: &Config, cwd: &Path) -> Result<()> {
 pub(crate) struct DoctorReport {
     pub(crate) ok: bool,
     pub(crate) cwd: String,
+    /// The `--profile` overlay active for this invocation, if any.
+    pub(crate) active_profile: Option<String>,
     pub(crate) active_model: Option<String>,
     pub(crate) model_error: Option<String>,
     pub(crate) model_capabilities: Option<DoctorModelCapabilities>,
@@ -439,6 +441,7 @@ pub(crate) async fn build_doctor_report(
     DoctorReport {
         ok,
         cwd: cwd.display().to_string(),
+        active_profile: config.active_profile.clone(),
         active_model,
         model_error,
         model_capabilities,
@@ -519,6 +522,9 @@ fn print_doctor_text(report: &DoctorReport) {
         "  [INFO] Safety: mode={}, checkpoint_on_mutation={}",
         report.safety_mode, report.checkpoint_on_mutation
     );
+    if let Some(profile) = &report.active_profile {
+        println!("  [INFO] Config profile: {}", profile);
+    }
     println!(
         "  [INFO] Prompt customization: {}",
         if report.prompt_customized {
