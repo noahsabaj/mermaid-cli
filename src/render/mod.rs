@@ -141,6 +141,20 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         rstate.last_scroll_to_bottom_seq = state.ui.scroll_to_bottom_seq;
     }
 
+    // Interrupt modals, decided up front because they reshape the whole
+    // bottom of the screen. Approval wins over question when both queue up.
+    let approval_item = state.pending_approval.front();
+    let question_item = if approval_item.is_none() {
+        state.pending_question.front()
+    } else {
+        None
+    };
+    // Claude Code parity: while the question modal is up it owns the bottom
+    // of the screen — no status spinner, no task band, no input box. Keys
+    // route exclusively to the modal anyway (see `handle_question_key`), so
+    // the hidden input is inert, not just invisible.
+    let question_modal_open = question_item.is_some();
+
     // Input height: content-aware, respecting CJK/emoji widths.
     let terminal_width = frame.area().width.saturating_sub(4) as usize;
     let input_lines = if state.ui.input_buffer.is_empty() {
@@ -159,13 +173,19 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         }
         lines.min(5)
     };
-    let input_height = (input_lines + 2) as u16;
+    let input_height = if question_modal_open {
+        0
+    } else {
+        (input_lines + 2) as u16
+    };
 
     // Build the status-line rows up front (wrapped to the terminal width) so
-    // the layout reserves exactly the height they need — a long
-    // `Running tools: <cmd>` plus the trailing `(esc to interrupt …)` fold onto
-    // continuation rows instead of bleeding off the right edge.
-    let status_lines = if state.is_busy() {
+    // the layout reserves exactly the height they need — a long task headline
+    // plus the trailing `(esc to interrupt …)` fold onto continuation rows
+    // instead of bleeding off the right edge.
+    let status_lines = if question_modal_open {
+        Vec::new()
+    } else if state.is_busy() {
         // Elapsed is computed from the injected `state.now` (stamped every tick),
         // not the live wall clock, so the rendered frame is a pure function of
         // State (Cause 3). Visually identical — both resolve to whole seconds.
@@ -185,7 +205,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             TurnState::Cancelling { since, .. } => elapsed_since(*since),
             TurnState::Idle => 0,
         };
-        let active_tool = active_tool_label(state);
         let (agent_rows, status_override, bg_available) = agent_panel_data(state);
         // Claude Code parity: while a checklist task is in_progress its
         // active_form IS the spinner headline ("Wiring the broker…"), with
@@ -219,7 +238,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             elapsed_secs,
             tokens_display,
             tokens_estimated,
-            active_tool.as_deref(),
             status_override.as_deref(),
             &agent_rows,
             bg_available,
@@ -239,7 +257,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             0,
             0,
             false,
-            None,
             None,
             &agent_rows,
             false,
@@ -268,7 +285,9 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // renders (attached); collapsed + detached shows nothing at all.
     let tasks_store = &state.session.conversation.tasks;
     let tasks_attached = status_line_height > 0;
-    let tasks_zone_height = if widgets::tasks_visible(
+    let tasks_zone_height = if question_modal_open {
+        0
+    } else if widgets::tasks_visible(
         tasks_store,
         &state.turn,
         state.ui.tasks_collapsed,
@@ -291,13 +310,8 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     //   - Otherwise: 2-line status bar.
     // Precedence: approval modal > confirm modal > ConversationList picker >
     // slash palette > status bar. Approvals/confirms are interrupts that
-    // overlay regardless of input mode.
-    let approval_item = state.pending_approval.front();
-    let question_item = if approval_item.is_none() {
-        state.pending_question.front()
-    } else {
-        None
-    };
+    // overlay regardless of input mode. (`approval_item`/`question_item`
+    // were decided up front, before the status/input zones were sized.)
     let confirm_open =
         approval_item.is_none() && question_item.is_none() && state.confirm.is_some();
     let conv_list_open = approval_item.is_none()
@@ -400,6 +414,10 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         theme: &rstate.theme,
         wrapped_line_cache: &mut rstate.wrapped_line_cache,
         show_reasoning: state.ui.show_reasoning,
+        // 500ms blink phase for in-flight action dots, from the injected
+        // clock (never the wall clock) so a frame stays a pure function of
+        // State. Only frames that paint a running action consume it.
+        blink_on: (state.now.timestamp_millis().div_euclid(500)) % 2 == 0,
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut rstate.chat);
 
@@ -429,29 +447,33 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         frame.render_widget(ratatui::widgets::Paragraph::new(lines), tasks_area);
     }
 
-    // Input box (chunks[3]; the attachment zone is gone, the task band precedes).
-    let input_widget = InputWidget {
-        input: state.ui.input_buffer.as_str(),
-        showing_command_hints: state.ui.input_buffer.starts_with('/'),
-        theme: &rstate.theme,
-        reasoning_active: state.session.reasoning != ReasoningLevel::None,
-        exit_armed: exit_armed(state),
-        rewind_armed: rewind_armed(state),
-    };
-    let mut input_widget_state = InputState {
-        cursor_position: state.ui.input_cursor.min(state.ui.input_buffer.len()),
-    };
-    frame.render_stateful_widget(input_widget, chunks[3], &mut input_widget_state);
+    // Input box (chunks[3]; the attachment zone is gone, the task band
+    // precedes). Collapsed entirely — including the terminal cursor — while
+    // the question modal owns the bottom of the screen.
+    if !question_modal_open {
+        let input_widget = InputWidget {
+            input: state.ui.input_buffer.as_str(),
+            showing_command_hints: state.ui.input_buffer.starts_with('/'),
+            theme: &rstate.theme,
+            reasoning_active: state.session.reasoning != ReasoningLevel::None,
+            exit_armed: exit_armed(state),
+            rewind_armed: rewind_armed(state),
+        };
+        let mut input_widget_state = InputState {
+            cursor_position: state.ui.input_cursor.min(state.ui.input_buffer.len()),
+        };
+        frame.render_stateful_widget(input_widget, chunks[3], &mut input_widget_state);
 
-    // Cursor always tracks the input caret.
-    let input_area = chunks[3];
-    let content_width = input_area.width.saturating_sub(2) as usize;
-    let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
-        &state.ui.input_buffer,
-        state.ui.input_cursor.min(state.ui.input_buffer.len()),
-        content_width,
-    );
-    frame.set_cursor_position((input_area.x + cursor_col + 2, input_area.y + 1 + cursor_row));
+        // Cursor tracks the input caret.
+        let input_area = chunks[3];
+        let content_width = input_area.width.saturating_sub(2) as usize;
+        let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
+            &state.ui.input_buffer,
+            state.ui.input_cursor.min(state.ui.input_buffer.len()),
+            content_width,
+        );
+        frame.set_cursor_position((input_area.x + cursor_col + 2, input_area.y + 1 + cursor_row));
+    }
 
     // Effective reasoning level. Per-model supported_reasoning cap
     // isn't threaded through `State` yet; defaults to no snap
@@ -698,9 +720,18 @@ fn merge_continuation(prev: &mut crate::models::ChatMessage, cont: &crate::model
     }
 }
 
-/// Merge the committed message log with any in-flight partial
-/// content from `TurnState::Generating`. The chat widget renders
-/// this as a single stream.
+/// Merge the committed message log with the live turn's in-flight view:
+/// partial streamed content from `TurnState::Generating`, or the executing
+/// batch's action rows from `TurnState::ExecutingTools`. The chat widget
+/// renders this as a single stream.
+///
+/// While tools run, each call gets its transcript action row immediately —
+/// completed calls with their real outcome, still-running ones as a
+/// `Running` placeholder whose header dot blinks (Claude Code parity: the
+/// transcript, not the status spinner, names the tool). Two kinds of pending
+/// call are skipped: `agent` (the live agent panel under the spinner carries
+/// them) and `ask_user_question` (the modal IS its in-flight representation;
+/// the question → answer block lands once answered).
 ///
 /// `committed` is the (possibly stitched) display transcript. When the live
 /// turn is an auto-continue, the pseudo-message is stamped `Continuation` so
@@ -713,6 +744,42 @@ fn build_live_messages<'a>(
     turn: &TurnState,
     now: chrono::DateTime<chrono::Local>,
 ) -> std::borrow::Cow<'a, [crate::models::ChatMessage]> {
+    if let TurnState::ExecutingTools {
+        calls, outcomes, ..
+    } = turn
+    {
+        let actions: Vec<crate::domain::ActionDisplay> = calls
+            .iter()
+            .zip(outcomes)
+            .filter_map(|(call, outcome)| match outcome {
+                Some(outcome) => Some(crate::domain::transition::action_display_for(call, outcome)),
+                None => {
+                    let name = call.source.function.name.as_str();
+                    if name == "agent" || name == "ask_user_question" {
+                        return None;
+                    }
+                    let (action_type, target) = crate::domain::display_info_for(call);
+                    Some(crate::domain::ActionDisplay {
+                        action_type,
+                        target,
+                        result: crate::domain::ActionResult::Running,
+                        details: crate::domain::ActionDetails::Simple,
+                        duration_seconds: None,
+                        metadata: None,
+                    })
+                },
+            })
+            .collect();
+        if actions.is_empty() {
+            return std::borrow::Cow::Borrowed(committed);
+        }
+        let mut msg = crate::models::ChatMessage::assistant("");
+        msg.timestamp = now;
+        msg.actions = actions;
+        let mut out = committed.to_vec();
+        out.push(msg);
+        return std::borrow::Cow::Owned(out);
+    }
     // Idle / no-partial frames borrow the committed log directly — no per-frame
     // clone of the whole transcript. Only an in-flight partial forces an owned
     // copy (committed + the one live assistant message).
@@ -783,44 +850,6 @@ fn rewind_armed(state: &State) -> bool {
         .ui
         .esc_armed_at
         .is_some_and(|armed| (state.now - armed) <= chrono::Duration::milliseconds(1000))
-}
-
-/// While tools run, name the first in-flight NON-AGENT one so the status line
-/// isn't an opaque "Running tools…" (agent calls get their own panel rows —
-/// see `agent_panel_data` — and are skipped here). When the reducer holds live
-/// per-call activity (from `Msg::ToolProgress`), its stable label is appended
-/// so a long-running tool is never a silent spinner.
-fn active_tool_label(state: &State) -> Option<String> {
-    match &state.turn {
-        TurnState::ExecutingTools {
-            calls, outcomes, ..
-        } => {
-            let mut pending_other = calls
-                .iter()
-                .zip(outcomes)
-                .filter(|(call, o)| o.is_none() && call.source.function.name != "agent");
-            let first = pending_other.next()?;
-            let extra = pending_other.count();
-            let (call, _) = first;
-            let (action, target) = crate::domain::display_info_for(call);
-            let mut label = if target.is_empty() {
-                action
-            } else {
-                format!("{action} {target}")
-            };
-            if let Some(live) = state.ui.live_tool_status.get(&call.call_id)
-                && !live.activity.is_empty()
-            {
-                label = format!("{label} · {}", live.activity);
-            }
-            Some(if extra > 0 {
-                format!("{label} (+{extra} more)")
-            } else {
-                label
-            })
-        },
-        _ => None,
-    }
 }
 
 /// Data for the live agent panel + the status-line adjustments it implies:
@@ -1018,9 +1047,13 @@ mod tests {
             },
         );
 
-        // Agent calls never splice into the status line — they get panel rows
-        // (and the "Running N agents" override) instead.
-        assert_eq!(active_tool_label(&state), None);
+        // Agent calls never get a live transcript action row — they get panel
+        // rows (and the "Running N agents" override) instead.
+        let live = build_live_messages(&[], &state.turn, chrono::Local::now());
+        assert!(
+            live.is_empty(),
+            "a pending agent call must not synthesize a transcript row"
+        );
         let (rows, override_text, bg_available) = agent_panel_data(&state);
         assert_eq!(override_text.as_deref(), Some("Running 1 agent"));
         assert!(bg_available, "agents are detachable via ctrl+b");
@@ -1073,14 +1106,18 @@ mod tests {
             },
         );
 
-        // The shell command is named (no "(+1 more)" for the agent — it has
-        // its own panel row); no override since agents aren't the only work.
-        let label = active_tool_label(&state).expect("non-agent tool is named");
-        assert!(label.starts_with("Bash"), "unexpected label: {label}");
-        assert!(
-            !label.contains("more"),
-            "agents don't count as (+N more): {label}"
-        );
+        // The shell command gets a live Running transcript row; the agent gets
+        // only its panel row. No override since agents aren't the only work.
+        let live = build_live_messages(&[], &state.turn, chrono::Local::now());
+        assert_eq!(live.len(), 1, "one synthetic message carries the rows");
+        let actions = &live[0].actions;
+        assert_eq!(actions.len(), 1, "the agent call gets no transcript row");
+        assert_eq!(actions[0].action_type, "Bash");
+        assert_eq!(actions[0].target, "cargo test");
+        assert!(matches!(
+            actions[0].result,
+            crate::domain::ActionResult::Running
+        ));
         let (rows, override_text, _) = agent_panel_data(&state);
         assert_eq!(override_text, None);
         assert_eq!(rows.len(), 1);
@@ -1363,7 +1400,7 @@ mod tests {
     }
 
     #[test]
-    fn status_line_names_the_in_flight_tool() {
+    fn in_flight_tool_renders_as_transcript_row_with_bare_status_line() {
         use crate::domain::PendingToolCall;
         use crate::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
         let mut s = mock_state();
@@ -1384,10 +1421,54 @@ mod tests {
             outcomes: vec![None],
         };
         let frame = render_to_string(&s);
-        assert!(frame.contains("Running tools"), "got: {frame}");
+        // The spinner headline is the bare phase word — the command must NOT
+        // ride on it (the bug class this regression test pins down)…
+        assert!(frame.contains("Running tools..."), "got: {frame}");
+        assert!(
+            !frame.contains("Running tools:"),
+            "status line must not carry tool detail; got: {frame}"
+        );
+        // …because the transcript's live action row names it instead.
         assert!(
             frame.contains("npm run dev"),
-            "status line must name the in-flight command; got: {frame}"
+            "transcript must show the in-flight call's action row; got: {frame}"
+        );
+    }
+
+    #[test]
+    fn pending_question_and_agent_calls_get_no_transcript_row() {
+        use crate::domain::PendingToolCall;
+        use crate::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
+        let mut s = mock_state();
+        let mk = |id: u64, name: &str, args: serde_json::Value| PendingToolCall {
+            call_id: crate::domain::ToolCallId(id),
+            source: ModelToolCall {
+                id: Some(format!("c{id}")),
+                function: FunctionCall {
+                    name: name.to_string(),
+                    arguments: args,
+                },
+            },
+        };
+        s.turn = TurnState::ExecutingTools {
+            id: crate::domain::TurnId(1),
+            started: std::time::SystemTime::now(),
+            calls: vec![
+                mk(1, "ask_user_question", serde_json::json!({"questions": []})),
+                mk(
+                    2,
+                    "agent",
+                    serde_json::json!({"description": "scan the repo"}),
+                ),
+            ],
+            outcomes: vec![None, None],
+        };
+        let frame = render_to_string(&s);
+        // The question's representation is the modal; the agent's is its
+        // panel row under the spinner. Neither gets a transcript action row.
+        assert!(
+            !frame.contains("ask_user_question"),
+            "pending question must not surface as a transcript row or status text; got: {frame}"
         );
     }
 

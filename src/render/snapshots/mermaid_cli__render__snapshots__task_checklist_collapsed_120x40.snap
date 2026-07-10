@@ -1,9 +1,11 @@
 ---
 source: src/render/snapshots.rs
+assertion_line: 67
 expression: frame
 ---
  > ship the feature                                                                         January 2nd, 2026 at 3:04am 
                                                                                                                         
+ ● Bash(cargo check)                                                                                                    
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -34,8 +36,7 @@ expression: frame
                                                                                                                         
                                                                                                                         
                                                                                                                         
- • Wiring the broker through ExecContext · Bash cargo check...                                                          
-   (esc to interrupt • ctrl+b to background • 3s • ↓ 0 tokens)                                                          
+ • Wiring the broker through ExecContext... (esc to interrupt • ctrl+b to background • 3s • ↓ 0 tokens)                 
   ⎿ Next: Render the checklist band                                                                                     
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 >                                                                                                                       
