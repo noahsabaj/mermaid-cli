@@ -1541,15 +1541,16 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // input buffer opens with `/`. Enter falls through to the normal
     // handler below so the command actually dispatches.
     if state.ui.input_buffer.starts_with('/') {
-        use crate::domain::slash_commands::filter_by_prefix;
+        use crate::domain::slash_commands::filter_entries;
         let typed = state
             .ui
             .input_buffer
             .trim_start_matches('/')
             .split_whitespace()
             .next()
-            .unwrap_or("");
-        let candidates = filter_by_prefix(typed);
+            .unwrap_or("")
+            .to_string();
+        let candidates = filter_entries(&typed, &state.plugin_commands);
         match code {
             KeyCode::Up => {
                 let cur = state.ui.palette_cursor.unwrap_or(0);
@@ -1564,8 +1565,10 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             },
             KeyCode::Tab => {
                 let sel = state.ui.palette_cursor.unwrap_or(0);
-                if let Some(cmd) = candidates.get(sel) {
-                    state.ui.input_buffer = format!("/{} ", cmd.name);
+                if let Some(entry) = candidates.get(sel) {
+                    let completed = format!("/{} ", entry.name());
+                    drop(candidates);
+                    state.ui.input_buffer = completed;
                     state.ui.input_cursor = state.ui.input_buffer.len();
                     state.ui.palette_cursor = Some(0);
                 }
@@ -1583,14 +1586,16 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 // user already typed), then fall through to the Enter
                 // handler below so the command actually dispatches.
                 let sel = state.ui.palette_cursor.unwrap_or(0);
-                if let Some(cmd) = candidates.get(sel) {
+                if let Some(entry) = candidates.get(sel) {
+                    let name = entry.name().to_string();
+                    drop(candidates);
                     let raw = state.ui.input_buffer.clone();
                     let after_slash = raw.trim_start_matches('/');
                     let rest = match after_slash.find(char::is_whitespace) {
                         Some(idx) => &after_slash[idx..],
                         None => "",
                     };
-                    state.ui.input_buffer = format!("/{}{}", cmd.name, rest);
+                    state.ui.input_buffer = format!("/{}{}", name, rest);
                     state.ui.input_cursor = state.ui.input_buffer.len();
                 }
                 // Fall through to the Enter handler below.
@@ -2316,6 +2321,30 @@ fn submit_current_input(state: &mut State) {
         return;
     }
     if let Some(rest) = buf.strip_prefix('/') {
+        // Plugin prompt commands: an enabled plugin's `/name args` expands
+        // into a normal user prompt — the transcript shows the EXPANSION, so
+        // recordings replay without the plugin installed. Built-ins always
+        // win (the loader already refuses shadowing names; this order makes
+        // it structural).
+        let (name, args) = match rest.split_once(char::is_whitespace) {
+            Some((n, a)) => (n.to_lowercase(), a),
+            None => (rest.to_lowercase(), ""),
+        };
+        let builtin = crate::domain::slash_commands::COMMAND_REGISTRY
+            .iter()
+            .any(|c| c.name == name || c.aliases.contains(&name.as_str()));
+        if !builtin && let Some(cmd) = state.plugin_commands.iter().find(|c| c.name == name) {
+            let text = cmd.expand(args);
+            state.ui.input_buffer.clear();
+            state.ui.input_cursor = 0;
+            state.ui.palette_cursor = None;
+            let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
+            state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
+                text,
+                attachment_ids,
+            });
+            return;
+        }
         let slash = crate::app::event_source::parse_slash_command(rest);
         state.ui.input_buffer.clear();
         state.ui.input_cursor = 0;
@@ -3002,9 +3031,10 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             });
         },
         SlashCmd::Help => {
-            state
-                .session
-                .append(ChatMessage::system(help_text()), state.now);
+            state.session.append(
+                ChatMessage::system(help_text(&state.plugin_commands)),
+                state.now,
+            );
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Quit => {
@@ -3221,7 +3251,7 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
     });
 }
 
-fn help_text() -> String {
+fn help_text(plugin_commands: &[crate::domain::PluginCommand]) -> String {
     let mut lines = Vec::with_capacity(COMMAND_REGISTRY.len() + COMMAND_GROUPS.len() + 2);
     lines.push("Mermaid commands".to_string());
     lines.push(
@@ -3249,6 +3279,22 @@ fn help_text() -> String {
             lines.push(format!(
                 "  /{}{}{} - {}",
                 command.name, suffix, aliases, command.description
+            ));
+        }
+    }
+    if !plugin_commands.is_empty() {
+        lines.push(String::new());
+        lines.push("Plugin commands:".to_string());
+        for cmd in plugin_commands {
+            lines.push(format!(
+                "  /{} - {} (plugin:{})",
+                cmd.name,
+                if cmd.description.is_empty() {
+                    "prompt"
+                } else {
+                    &cmd.description
+                },
+                cmd.plugin
             ));
         }
     }
@@ -5724,7 +5770,7 @@ mod tests {
 
     #[test]
     fn help_text_lists_keyboard_shortcuts() {
-        let help = help_text();
+        let help = help_text(&[]);
         assert!(help.contains("Keyboard shortcuts:"));
         assert!(help.contains("PageUp"));
     }
@@ -9745,6 +9791,120 @@ mod tests {
         state.ui.input_buffer = "kept".to_string();
         let (state, _) = update(state, Msg::EditorReturned { text: None });
         assert_eq!(state.ui.input_buffer, "kept");
+    }
+
+    fn plugin_cmd(name: &str, body: &str) -> crate::domain::PluginCommand {
+        crate::domain::PluginCommand {
+            name: name.to_string(),
+            description: "does things".to_string(),
+            body: body.to_string(),
+            plugin: "demo".to_string(),
+        }
+    }
+
+    #[test]
+    fn plugin_command_expands_into_a_prompt_submit() {
+        let mut state = fresh_state();
+        state.plugin_commands = vec![plugin_cmd("deploy", "Deploy to $ARGUMENTS now.")];
+        state.ui.input_buffer = "/deploy prod".to_string();
+        let (mut state, _) = update(state, key(KeyCode::Enter));
+        // The reducer re-enters pending_msgs itself; the expansion lands as a
+        // committed user message (transcript shows the EXPANSION, so
+        // recordings replay without the plugin installed).
+        let last_user = state
+            .session
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::models::MessageRole::User)
+            .map(|m| m.content.clone());
+        assert_eq!(last_user.as_deref(), Some("Deploy to prod now."));
+        assert!(state.ui.input_buffer.is_empty());
+        // No-args + no token: body submits verbatim.
+        state.turn = crate::domain::TurnState::Idle;
+        state.plugin_commands = vec![plugin_cmd("ship", "Ship it.")];
+        state.ui.input_buffer = "/ship".to_string();
+        let (state, _) = update(state, key(KeyCode::Enter));
+        let queued_or_committed = state
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.content == "Ship it.")
+            || state
+                .ui
+                .queued_messages
+                .iter()
+                .any(|q| q.text == "Ship it.");
+        assert!(queued_or_committed, "plugin body submitted or queued");
+    }
+
+    #[test]
+    fn unknown_slash_still_reports_unknown_not_plugin() {
+        let mut state = fresh_state();
+        state.plugin_commands = vec![plugin_cmd("deploy", "body")];
+        state.ui.input_buffer = "/nosuch".to_string();
+        let (state, _) = update(state, key(KeyCode::Enter));
+        let last = state.session.messages().last().unwrap().content.clone();
+        assert!(last.contains("Unknown command: /nosuch"), "{last}");
+    }
+
+    #[test]
+    fn builtin_wins_over_same_named_plugin_command() {
+        // Structural guarantee on top of the loader's shadowing filter.
+        let mut state = fresh_state();
+        state.plugin_commands = vec![plugin_cmd("help", "hijacked")];
+        state.ui.input_buffer = "/help".to_string();
+        let (state, _) = update(state, key(KeyCode::Enter));
+        let last = state.session.messages().last().unwrap().content.clone();
+        assert!(
+            last.contains("Mermaid commands"),
+            "built-in help ran: {last}"
+        );
+        assert!(!last.contains("hijacked"));
+    }
+
+    #[test]
+    fn palette_filter_entries_appends_plugins_and_agrees_on_indices() {
+        use crate::domain::slash_commands::{COMMAND_REGISTRY, filter_entries};
+        let plugin = vec![plugin_cmd("deploy", "body")];
+        let all = filter_entries("", &plugin);
+        assert_eq!(all.len(), COMMAND_REGISTRY.len() + 1);
+        assert_eq!(all.last().unwrap().name(), "deploy");
+        assert!(all.last().unwrap().description().contains("(plugin:demo)"));
+        // Prefix filtering reaches plugin rows too.
+        let d = filter_entries("dep", &plugin);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].name(), "deploy");
+        // Tab-completion path: cursor over the plugin row completes it.
+        let mut state = fresh_state();
+        state.plugin_commands = plugin;
+        state.ui.input_buffer = "/dep".to_string();
+        state.ui.palette_cursor = Some(0);
+        let (state, _) = update(state, key(KeyCode::Tab));
+        assert_eq!(state.ui.input_buffer, "/deploy ");
+    }
+
+    #[test]
+    fn help_lists_plugin_commands() {
+        let mut state = fresh_state();
+        state.plugin_commands = vec![plugin_cmd("deploy", "body")];
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Help));
+        let last = state.session.messages().last().unwrap().content.clone();
+        assert!(last.contains("Plugin commands:"), "{last}");
+        assert!(
+            last.contains("/deploy - does things (plugin:demo)"),
+            "{last}"
+        );
+    }
+
+    #[test]
+    fn plugin_command_expand_cases() {
+        let cmd = plugin_cmd("x", "Do $ARGUMENTS and $ARGUMENTS.");
+        assert_eq!(cmd.expand("this"), "Do this and this.");
+        assert_eq!(cmd.expand("  "), "Do  and .");
+        let cmd = plugin_cmd("x", "Just do it.");
+        assert_eq!(cmd.expand(""), "Just do it.");
+        assert_eq!(cmd.expand("with args"), "Just do it.\n\nwith args");
     }
 
     #[test]

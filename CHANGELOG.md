@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Plugin bundles: MCP servers, prompt commands, and agent types.** An
+  enabled plugin's `plugin.toml` can now declare `mcp` (TOML files of
+  `[servers.<name>]` configs, started with your own servers and flowing
+  through tool deferral), `prompts` (markdown slash commands with
+  `$ARGUMENTS` substitution, shown in the palette as `(plugin:<name>)` and
+  in `/help`), and `agents` (TOML files of `[types.<name>]` agent types).
+  Config-defined entries always shadow plugin ones with a warning;
+  built-in slash commands can never be shadowed; `./`-relative MCP
+  commands resolve inside the plugin directory with containment. Same
+  restart-to-refresh policy as skills.
+
+
 - **Kill background agents: `/agents` command + `agent` tool kill action.**
   `/agents` lists every detached (Ctrl+B backgrounded) subagent with its id,
   description, live activity, elapsed time, and token count; `/agents kill

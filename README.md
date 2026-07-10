@@ -361,6 +361,29 @@ strings concatenate. Failure semantics are asymmetric by design: an explicit den
 while infrastructure failures (unparseable output, a timeout, a crash) log a warning and allow —
 a buggy hook must not lock you out of every tool call.
 
+### Plugin bundles: MCP servers, commands, agent types
+
+Beyond skills and hooks, an enabled plugin can contribute three more asset kinds, each a list of
+plugin-relative paths in `plugin.toml`:
+
+- **`mcp = ["servers.toml"]`** — each file's `[servers.<name>]` tables are MCP server configs
+  (same shape as `[mcp_servers.<name>]` in your config). They start with your own servers at
+  session startup and flow through tool deferral like any other server. A `./`-relative
+  `command` resolves inside the plugin directory (containment enforced); anything else is
+  PATH-looked-up. A same-named server in your config wins with a warning. Enabling a plugin that
+  declares MCP servers grants command execution — the same trust boundary as hooks.
+- **`prompts = ["deploy.md"]`** — markdown prompt commands with the skills frontmatter dialect
+  (`name:`/`description:`; the name falls back to the file stem, validated `[a-z0-9-]+`). They
+  appear in the `/` palette tagged `(plugin:<name>)` and in `/help`; running `/deploy prod`
+  substitutes `prod` for `$ARGUMENTS` (or appends the args when the token is absent) and submits
+  the expansion as a normal prompt — the transcript shows the expanded text, so recordings
+  replay without the plugin. Built-in commands always win over a same-named prompt.
+- **`agents = ["types.toml"]`** — each file's `[types.<name>]` tables are agent types (same
+  shape as `[agents.types.<name>]`): the model can spawn them via the `agent` tool. Your config's
+  same-named type wins with a warning.
+
+Like skills, bundle changes are picked up on the next session start.
+
 ## Configuration
 
 Config file: `~/.config/mermaid/config.toml` (Linux) or platform equivalent via `directories` crate.
