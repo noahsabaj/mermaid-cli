@@ -174,7 +174,7 @@ impl ToolExecutor for ExecuteCommandTool {
                         &ctx.workdir,
                         &[],
                         Some(pending_action.clone()),
-                        ctx.task_id.clone(),
+                        ctx.checkpoint_origin(),
                     );
                 }
             },
@@ -1542,6 +1542,8 @@ mod tests {
                 project.clone(),
                 std::sync::Arc::new(config),
                 String::new(),
+                None,
+                None,
                 None,
                 crate::runtime::SafetyMode::ReadOnly,
                 None,

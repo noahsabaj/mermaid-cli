@@ -15,11 +15,32 @@ pub struct CheckpointFile {
     pub snapshot_relpath: Option<String>,
 }
 
+/// Provenance of a checkpoint: which runtime task and (for interactive
+/// sessions) which conversation position the checkpointed mutation belonged
+/// to. `Default` = fully unanchored (manual `/checkpoint`, headless runs).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckpointOrigin {
+    /// Durable daemon task that owned the tool call, when queued.
+    pub task_id: Option<String>,
+    /// Conversation id of the interactive session, when any.
+    pub session_id: Option<String>,
+    /// Conversation length (`messages().len()`) at tool dispatch. A fork at
+    /// user-message index `k` discards this checkpoint iff `message_index > k`
+    /// (strict — see `CheckpointsRepo::list_for_session`).
+    pub message_index: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointManifest {
     pub id: String,
     #[serde(default)]
     pub task_id: Option<String>,
+    /// Conversation anchor (see [`CheckpointOrigin`]); absent on manifests
+    /// written before anchoring existed.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub message_index: Option<i64>,
     pub project_path: String,
     pub files: Vec<CheckpointFile>,
     pub pending_action: Option<serde_json::Value>,
@@ -35,14 +56,19 @@ pub fn create_checkpoint(
     paths: &[PathBuf],
     pending_action: Option<serde_json::Value>,
 ) -> Result<CheckpointManifest> {
-    create_checkpoint_for_task(project_path, paths, pending_action, None)
+    create_checkpoint_for_task(
+        project_path,
+        paths,
+        pending_action,
+        CheckpointOrigin::default(),
+    )
 }
 
 pub fn create_checkpoint_for_task(
     project_path: &Path,
     paths: &[PathBuf],
     pending_action: Option<serde_json::Value>,
-    task_id: Option<String>,
+    origin: CheckpointOrigin,
 ) -> Result<CheckpointManifest> {
     // Collision-hardened id (salt+seq+nanos) — the old time-only id could repeat
     // within a coarse-clock tick and overwrite a prior checkpoint's files (#117).
@@ -96,7 +122,9 @@ pub fn create_checkpoint_for_task(
     let shadow_git = snapshot_shadow_git(&project_root, &files, &id).ok();
     let manifest = CheckpointManifest {
         id: id.clone(),
-        task_id: task_id.clone(),
+        task_id: origin.task_id.clone(),
+        session_id: origin.session_id.clone(),
+        message_index: origin.message_index,
         project_path: project_path.display().to_string(),
         files,
         pending_action,
@@ -115,7 +143,7 @@ pub fn create_checkpoint_for_task(
         // can't find them. Roll the on-disk checkpoint back and surface it.
         if let Err(error) = store.checkpoints().create(NewCheckpoint {
             id: Some(id.clone()),
-            task_id,
+            task_id: origin.task_id,
             project_path: manifest.project_path.clone(),
             snapshot_path: root.display().to_string(),
             changed_files_json: serde_json::to_string(&manifest.files)?,
@@ -125,6 +153,8 @@ pub fn create_checkpoint_for_task(
                 .map(serde_json::to_string)
                 .transpose()?,
             approval_id: None,
+            session_id: manifest.session_id.clone(),
+            message_index: manifest.message_index,
         }) {
             let _ = std::fs::remove_dir_all(&root);
             return Err(error)

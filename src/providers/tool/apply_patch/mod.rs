@@ -103,7 +103,7 @@ impl ToolExecutor for ApplyPatchTool {
                 &ctx.workdir,
                 &abs_paths,
                 Some(serde_json::json!({ "tool": "apply_patch" })),
-                ctx.task_id.clone(),
+                ctx.checkpoint_origin(),
             )
         {
             return ToolOutcome::error(format!("apply_patch checkpoint failed: {e}"), 0.0);

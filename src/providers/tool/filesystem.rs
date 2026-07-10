@@ -234,7 +234,7 @@ impl ToolExecutor for DeleteFileTool {
                     "tool": "delete_file",
                     "path": raw_path,
                 })),
-                ctx.task_id.clone(),
+                ctx.checkpoint_origin(),
             )
         {
             return err(&format!("delete_file checkpoint failed: {}", e), 0.0);
@@ -338,7 +338,7 @@ impl ToolExecutor for CreateDirectoryTool {
                     "tool": "create_directory",
                     "path": raw_path,
                 })),
-                ctx.task_id.clone(),
+                ctx.checkpoint_origin(),
             )
         {
             return err(&format!("create_directory checkpoint failed: {}", e), 0.0);
@@ -452,7 +452,7 @@ impl ToolExecutor for WriteFileTool {
                     "tool": "write_file",
                     "path": path,
                 })),
-                ctx.task_id.clone(),
+                ctx.checkpoint_origin(),
             )
         {
             return ToolOutcome::error(format!("write_file checkpoint failed: {}", e), 0.0);

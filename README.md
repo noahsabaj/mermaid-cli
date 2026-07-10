@@ -18,11 +18,11 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Durable Memory** — the agent remembers facts across sessions (`memory` tool + `/remember`, `/memory`, `/forget`); a compact index auto-loads into every prompt
 - **MCP Servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers (`mermaid add <name>`)
 - **Session Persistence** — conversations auto-save; `--continue` reopens the last one in the current directory, `--resume` opens a searchable picker of past sessions
-- **Rewind & Fork** — double-Esc when idle picks an earlier message and forks the session there (new session id, lineage recorded, original untouched); edit the pre-filled prompt and resend to branch the timeline
+- **Rewind & Fork** — double-Esc when idle picks an earlier message and forks the session there (new session id, lineage recorded, original untouched); edit the pre-filled prompt and resend to branch the timeline. Files are not rewound, but checkpoints taken after the fork point are surfaced so `/restore <id>` can roll them back
 - **Context Compaction** — automatic checkpoint-and-continue when the window fills (or the model truncates mid-run); manual `/compact [focus]` for handoffs
 - **Record & Replay** — `--record` captures every reducer input; `--replay` reconstructs the session offline, deterministically, with a built-in purity check
 - **@-Mentions** — type `@` in the composer to fuzzy-pick a project file (gitignore-aware); the path lands in your prompt as text the agent reads with its tools
-- **Message Queuing** — type while the model generates, messages send in order
+- **Message Queuing & Mid-Run Steering** — type while the agent works; queued messages are delivered at the next tool boundary within the run (the model course-corrects mid-task), or at run end when no boundary follows
 - **Non-Interactive Mode** — script with `mermaid run "prompt"` for CI/automation
 
 ### Architecture

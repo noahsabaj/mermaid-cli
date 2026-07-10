@@ -1544,6 +1544,8 @@ mod tests {
                 changed_files_json: "[]".to_string(),
                 pending_action_json: Some("{\"tool\":\"write_file\"}".to_string()),
                 approval_id: None,
+                session_id: None,
+                message_index: None,
             })
             .expect("create checkpoint");
         let approval = store

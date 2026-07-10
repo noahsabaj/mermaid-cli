@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mid-run steering.** Messages typed while the agent is working are now
+  delivered at the next tool boundary WITHIN the run — committed as user
+  messages right after the tool results, so the very next model call sees
+  them and course-corrects mid-task. Previously queued input waited for the
+  whole run to end. Messages queued mid-stream with no later tool boundary
+  still deliver at run end; images attached to queued messages ride along.
+
+- **Checkpoints anchored to the conversation.** File checkpoints now record
+  which session and message position produced them. Rewinding with
+  double-Esc reports the checkpoints the discarded timeline left behind and
+  names the one to `/restore` to roll files back to the fork point — rewind
+  itself still never touches files.
+
 - **Deferred MCP tools via `tool_search`.** MCP tools are no longer all
   advertised on every request: the model gets one `tool_search` tool that
   searches the deferred pool (names + descriptions) and promotes matches to

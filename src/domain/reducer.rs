@@ -622,6 +622,25 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             );
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
+        Msg::ForkCheckpointsFound(checkpoints) => {
+            // Reply to the rewind/fork lookup. Files were NOT rewound —
+            // point the user at the oldest checkpoint past the cut (each is
+            // a PRE-mutation snapshot, so the oldest holds file state
+            // closest to the fork point). Empty = nothing to say.
+            if let Some(oldest) = checkpoints.first() {
+                push_system(
+                    &mut state,
+                    &mut cmds,
+                    format!(
+                        "{} file checkpoint(s) were created after this point. Files were \
+                         not rewound. /restore {} restores the files changed by the first \
+                         mutation after the fork; /checkpoints lists the rest.",
+                        checkpoints.len(),
+                        oldest.id
+                    ),
+                );
+            }
+        },
         Msg::RuntimePluginsListed(plugins) => {
             state
                 .session
@@ -1717,6 +1736,15 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     //    can never clobber the fork's save below.
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
 
+    // File checkpoints anchored past the cut belong to the timeline being
+    // discarded; ask the runtime store which exist (async — the reply arm
+    // emits a /restore hint). Uses the ORIGINAL id: the fork's history is a
+    // strict prefix, so anchors always reference the original session.
+    cmds.push(Cmd::ListForkCheckpoints {
+        session_id: state.session.conversation.id.clone(),
+        message_index,
+    });
+
     let original = &state.session.conversation;
     let original_id = original.id.clone();
     // 2. Mint the fork from the injected clock — the new id is a pure
@@ -2125,39 +2153,15 @@ fn handle_clipboard_read(state: &mut State, cmds: &mut Vec<Cmd>, read: Clipboard
     }
 }
 
-fn handle_submit_prompt(
-    state: &mut State,
-    cmds: &mut Vec<Cmd>,
-    text: String,
-    attachment_ids: &[u64],
-) {
+/// Commit one user message to the conversation: resolve its `[Image #N]`
+/// tokens against the attachments it owns, drop those attachments from the
+/// staging area, append the `ChatMessage`, and record input history. Shared
+/// by the idle submit path and the mid-run steering drain (tool-boundary
+/// delivery of queued messages) so both commit with identical semantics.
+fn commit_user_message(state: &mut State, text: String, attachment_ids: &[u64]) {
     if text.trim().is_empty() {
         return;
     }
-    // If a turn is already in flight, queue this message. The
-    // reducer's StreamDone arm pops the oldest queued message and
-    // auto-submits it.
-    if !matches!(state.turn, TurnState::Idle) {
-        // Bound the queue: a user holding Enter during a long turn would
-        // otherwise grow it without limit. Past the cap, drop the oldest queued
-        // prompt (mirrors the `pending_msgs` drain cap).
-        if state.ui.queued_messages.len() >= MAX_QUEUED_MESSAGES {
-            state.ui.queued_messages.pop_front();
-            tracing::warn!(
-                max = MAX_QUEUED_MESSAGES,
-                "reducer: queued_messages cap hit — dropped the oldest queued prompt"
-            );
-        }
-        state
-            .ui
-            .queued_messages
-            .push_back(super::state::QueuedMessage {
-                text,
-                attachment_ids: attachment_ids.to_vec(),
-            });
-        return;
-    }
-
     // Select images by the `[Image #N]` tokens present in the submitted text, in
     // first-appearance order — the inline tokens are the source of truth. Scope
     // by `attachment_ids` (the attachments this message owns) so the busy/queued
@@ -2195,6 +2199,42 @@ fn handle_submit_prompt(
     }
     state.session.append(user_msg, state.now);
     state.session.conversation.add_to_input_history(text);
+}
+
+fn handle_submit_prompt(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    text: String,
+    attachment_ids: &[u64],
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    // If a turn is already in flight, queue this message. The
+    // reducer's StreamDone arm pops the oldest queued message and
+    // auto-submits it.
+    if !matches!(state.turn, TurnState::Idle) {
+        // Bound the queue: a user holding Enter during a long turn would
+        // otherwise grow it without limit. Past the cap, drop the oldest queued
+        // prompt (mirrors the `pending_msgs` drain cap).
+        if state.ui.queued_messages.len() >= MAX_QUEUED_MESSAGES {
+            state.ui.queued_messages.pop_front();
+            tracing::warn!(
+                max = MAX_QUEUED_MESSAGES,
+                "reducer: queued_messages cap hit — dropped the oldest queued prompt"
+            );
+        }
+        state
+            .ui
+            .queued_messages
+            .push_back(super::state::QueuedMessage {
+                text,
+                attachment_ids: attachment_ids.to_vec(),
+            });
+        return;
+    }
+
+    commit_user_message(state, text, attachment_ids);
     state.ui.input_buffer.clear();
 
     // The first user message derives the conversation title; every
@@ -4030,6 +4070,12 @@ fn handle_stream_done(
                 model_id: state.session.model_id.clone(),
                 safety_mode: state.session.safety_mode,
                 intent: intent.clone(),
+                // Checkpoint anchoring: conversation id + length at DISPATCH.
+                // History here is [..., user@k, assistant(tool_use)], so any
+                // checkpoint this run takes has message_index >= k+1 and a
+                // fork at k discards it iff message_index > k (strict).
+                session_id: state.session.conversation.id.clone(),
+                message_index: state.session.messages().len(),
             });
         }
         state.turn = super::transition::start_executing_tools(
@@ -4461,6 +4507,26 @@ fn handle_tool_finished(
         let tool_msgs = tool_result_messages(&calls, completed_outcomes);
         for m in tool_msgs {
             state.session.append(m, state.now);
+        }
+        // Mid-run steering: deliver EVERY queued message at this tool
+        // boundary, FIFO, as committed user messages — the follow-up model
+        // call sees them mid-run instead of after the run ends. Wire order
+        // (assistant tool_use → user tool_results → user steering text) is
+        // legal for every adapter; `normalize_history` runs on the request
+        // clone as always. Draining here empties the queue, so the turn-end
+        // one-at-a-time drain can never double-submit. A message queued
+        // mid-STREAM (no tool boundary before the run ends) still arrives
+        // via that turn-end path. Run counters are untouched: steering
+        // continues the same run.
+        let steered = !state.ui.queued_messages.is_empty();
+        while let Some(queued) = state.ui.queued_messages.pop_front() {
+            commit_user_message(state, queued.text, &queued.attachment_ids);
+        }
+        if steered {
+            // Steered text is user-authored; persist it now rather than
+            // relying on the next StreamDone's save (a crash between this
+            // CallModel and its StreamDone would otherwise lose it).
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         }
         let next_turn = state.ids.fresh_turn();
         state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
@@ -9375,6 +9441,227 @@ mod tests {
             .iter()
             .any(|m| m.content.contains("No deferred MCP tools"));
         assert!(has_no_tools_note, "clean informative outcome committed");
+    }
+
+    fn pending_read_file_call() -> super::super::state::PendingToolCall {
+        super::super::state::PendingToolCall {
+            call_id: crate::domain::ToolCallId(1),
+            source: crate::models::ToolCall {
+                id: Some("call_a".to_string()),
+                function: crate::models::FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn steering_delivers_all_queued_messages_at_the_tool_boundary() {
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::assistant("calling a tool"), state.now);
+        state.turn = super::super::transition::start_executing_tools(
+            TurnId(1),
+            vec![pending_read_file_call()],
+            std::time::SystemTime::now(),
+        );
+        for text in ["steer one", "steer two"] {
+            state
+                .ui
+                .queued_messages
+                .push_back(super::super::state::QueuedMessage {
+                    text: text.to_string(),
+                    attachment_ids: vec![],
+                });
+        }
+        let (state, cmds) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(1),
+                call_id: crate::domain::ToolCallId(1),
+                outcome: ToolOutcome::success("file body", "read it", 0.1),
+            },
+        );
+        assert!(state.ui.queued_messages.is_empty(), "queue fully drained");
+        // Wire order: assistant → tool result → steered user texts, FIFO.
+        let contents: Vec<&str> = state
+            .session
+            .messages()
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        let tool_pos = contents.iter().position(|c| c.contains("file body"));
+        let one_pos = contents.iter().position(|c| *c == "steer one");
+        let two_pos = contents.iter().position(|c| *c == "steer two");
+        assert!(tool_pos < one_pos && one_pos < two_pos, "{contents:?}");
+        // The follow-up request already carries the steered messages.
+        let request = cmds
+            .iter()
+            .find_map(|c| match c {
+                Cmd::CallModel { request, .. } => Some(request),
+                _ => None,
+            })
+            .expect("follow-up CallModel");
+        assert!(request.messages.iter().any(|m| m.content == "steer two"));
+        // User-authored text persists at the boundary, not only at StreamDone.
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    }
+
+    #[test]
+    fn steering_resolves_queued_image_tokens_against_owned_attachments() {
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::assistant("calling a tool"), state.now);
+        state.turn = super::super::transition::start_executing_tools(
+            TurnId(1),
+            vec![pending_read_file_call()],
+            std::time::SystemTime::now(),
+        );
+        state.ui.attachments.push(super::super::state::Attachment {
+            id: 7,
+            number: 1,
+            base64_data: "aGk=".to_string(),
+            temp_path: std::path::PathBuf::from("/tmp/x.png"),
+            size_bytes: 2,
+            format: "png".to_string(),
+        });
+        state
+            .ui
+            .queued_messages
+            .push_back(super::super::state::QueuedMessage {
+                text: "look at [Image #1]".to_string(),
+                attachment_ids: vec![7],
+            });
+        let (state, _) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(1),
+                call_id: crate::domain::ToolCallId(1),
+                outcome: ToolOutcome::success("done", "done", 0.1),
+            },
+        );
+        let steered = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.content.contains("[Image #1]"))
+            .expect("steered message committed");
+        assert_eq!(steered.images.as_ref().map(Vec::len), Some(1));
+        assert!(state.ui.attachments.is_empty(), "attachment consumed");
+    }
+
+    #[test]
+    fn execute_tool_cmd_carries_the_session_anchor() {
+        let mut state = state_with_two_exchanges();
+        let expected_session = state.session.conversation.id.clone();
+        state.turn = TurnState::Generating {
+            id: TurnId(9),
+            started: std::time::SystemTime::now(),
+            partial_text: String::new(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: vec![crate::models::ToolCall {
+                id: Some("call_b".to_string()),
+                function: crate::models::FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+            }],
+            continuation: false,
+        };
+        let (state, cmds) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(9),
+                usage: None,
+                provider_continuation: None,
+                stop_reason: None,
+            },
+        );
+        let (session_id, message_index) = cmds
+            .iter()
+            .find_map(|c| match c {
+                Cmd::ExecuteTool {
+                    session_id,
+                    message_index,
+                    ..
+                } => Some((session_id.clone(), *message_index)),
+                _ => None,
+            })
+            .expect("ExecuteTool dispatched");
+        assert_eq!(session_id, expected_session);
+        assert_eq!(
+            message_index,
+            state.session.messages().len(),
+            "stamped at dispatch, after the assistant tool_use commit"
+        );
+    }
+
+    #[test]
+    fn fork_fires_the_checkpoint_lookup_with_the_original_session_id() {
+        let mut state = state_with_two_exchanges();
+        let original_id = state.session.conversation.id.clone();
+        let mut cmds = Vec::new();
+        fork_conversation_at(&mut state, &mut cmds, 2);
+        let found = cmds
+            .iter()
+            .find_map(|c| match c {
+                Cmd::ListForkCheckpoints {
+                    session_id,
+                    message_index,
+                } => Some((session_id.clone(), *message_index)),
+                _ => None,
+            })
+            .expect("fork queries anchored checkpoints");
+        assert_eq!(found.0, original_id, "anchors reference the ORIGINAL id");
+        assert_eq!(found.1, 2);
+        assert_ne!(state.session.conversation.id, original_id, "forked");
+    }
+
+    fn anchored_checkpoint(id: &str, index: i64) -> crate::runtime::CheckpointRecord {
+        crate::runtime::CheckpointRecord {
+            id: id.to_string(),
+            task_id: None,
+            project_path: "/tmp/p".to_string(),
+            snapshot_path: format!("/snap/{id}"),
+            changed_files_json: "[]".to_string(),
+            pending_action_json: None,
+            approval_id: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            archived_at: None,
+            archive_reason: None,
+            session_id: Some("sess".to_string()),
+            message_index: Some(index),
+        }
+    }
+
+    #[test]
+    fn fork_checkpoints_found_names_the_oldest_or_stays_silent() {
+        let state = fresh_state();
+        let before = state.session.messages().len();
+        let (state, _) = update(
+            state,
+            Msg::ForkCheckpointsFound(vec![
+                anchored_checkpoint("cp-old", 4),
+                anchored_checkpoint("cp-new", 8),
+            ]),
+        );
+        let notice = state.session.messages().last().expect("notice appended");
+        assert!(notice.content.contains("cp-old"), "{}", notice.content);
+        assert!(notice.content.contains("Files were not rewound"));
+        assert!(notice.content.contains("2 file checkpoint(s)"));
+
+        let (state, _) = update(state, Msg::ForkCheckpointsFound(Vec::new()));
+        assert_eq!(
+            state.session.messages().len(),
+            before + 1,
+            "empty reply emits nothing"
+        );
     }
 
     #[test]

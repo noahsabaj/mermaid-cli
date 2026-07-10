@@ -549,6 +549,8 @@ impl EffectRunner {
                 model_id,
                 safety_mode,
                 intent,
+                session_id,
+                message_index,
             } => {
                 let tx = self.msg_tx.clone();
                 let tools = self.tools.clone();
@@ -601,6 +603,8 @@ impl EffectRunner {
                         config,
                         model_id,
                         task_id,
+                        session_id,
+                        message_index,
                         safety_mode,
                         intent,
                         classifier,
@@ -1042,6 +1046,22 @@ impl EffectRunner {
                         .map(|read| read.value)
                         .unwrap_or_default();
                     let _ = tx.blocking_send(Msg::RuntimeCheckpointsListed(checkpoints));
+                });
+            },
+            Cmd::ListForkCheckpoints {
+                session_id,
+                message_index,
+            } => {
+                let tx = self.msg_tx.clone();
+                self.detached.spawn_blocking(move || {
+                    let checkpoints = crate::runtime::RuntimeStore::open_default()
+                        .and_then(|store| {
+                            store
+                                .checkpoints()
+                                .list_for_session(&session_id, message_index as i64)
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.blocking_send(Msg::ForkCheckpointsFound(checkpoints));
                 });
             },
             Cmd::ListRuntimePlugins => {
@@ -2354,6 +2374,8 @@ async fn dispatch_execute_tool(
     config: Arc<crate::app::Config>,
     model_id: String,
     task_id: Option<String>,
+    session_id: String,
+    message_index: usize,
     safety_mode: crate::runtime::SafetyMode,
     intent: Option<String>,
     classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
@@ -2466,6 +2488,8 @@ async fn dispatch_execute_tool(
         config,
         model_id,
         task_id,
+        Some(session_id),
+        Some(message_index as i64),
         safety_mode,
         intent,
         classifier,
@@ -3206,6 +3230,8 @@ mod tests {
             model_id: "ollama/test".to_string(),
             safety_mode: crate::runtime::SafetyMode::Ask,
             intent: None,
+            session_id: "sess-test".to_string(),
+            message_index: 0,
         });
         let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
