@@ -25,7 +25,10 @@ pub use auth::{resolve_api_key, resolve_api_key_with_fallback};
 pub use bounded::{CappedLine, read_capped, read_file_capped, read_line_capped};
 pub use confirm::{confirm_or_refuse, is_affirmative, should_refuse_noninteractive};
 pub use host_memory::{gpu_vram_bytes, system_ram_bytes};
-pub use logger::{init_logger, log_debug, log_error, log_info, log_progress, log_warn};
+pub use logger::{
+    TraceRing, init_logger, log_debug, log_error, log_file_path, log_info, log_progress, log_warn,
+    trace_ring,
+};
 pub use ndjson::drain_complete_lines;
 pub use net::{HostClass, classify_host};
 pub use open::open_file;

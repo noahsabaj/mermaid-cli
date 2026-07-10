@@ -1,15 +1,26 @@
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    EnvFilter, Layer,
+    layer::{Context as LayerContext, SubscriberExt},
+    util::SubscriberInitExt,
+};
 
 /// Rotate the log file when it reaches this size. Bounded: at most two
 /// log files (`mermaid.log` current + `mermaid.log.old` previous), so
 /// worst-case disk use is ~2x this value between restarts.
 const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+
+/// Events retained by the in-memory TRACE ring (`mermaid feedback`).
+const RING_CAPACITY: usize = 2000;
+/// Per-event byte clamp so one giant payload can't hog the ring
+/// (~1 MiB worst-case total with [`RING_CAPACITY`]).
+const RING_MAX_EVENT_BYTES: usize = 512;
 
 /// Get the log file path (~/.mermaid/mermaid.log)
 fn get_log_file_path() -> Option<PathBuf> {
@@ -19,6 +30,149 @@ fn get_log_file_path() -> Option<PathBuf> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()
         .map(|home| PathBuf::from(home).join(".mermaid").join("mermaid.log"))
+}
+
+/// The log file path, if resolvable — `mermaid feedback` tails it.
+pub fn log_file_path() -> Option<PathBuf> {
+    get_log_file_path()
+}
+
+/// Always-on in-memory ring of recent trace events. Captures at TRACE for the
+/// mermaid crates regardless of `RUST_LOG` (deps capped at INFO), so a bug
+/// report carries the last ~2000 events without asking the user to reproduce
+/// under elevated logging. Secrets are redacted AT CAPTURE, not at read time.
+#[derive(Clone)]
+pub struct TraceRing {
+    inner: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl TraceRing {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(VecDeque::with_capacity(RING_CAPACITY))),
+        }
+    }
+
+    /// Append one formatted event, evicting the oldest past capacity.
+    fn push(&self, line: String) {
+        let Ok(mut ring) = self.inner.lock() else {
+            return;
+        };
+        if ring.len() == RING_CAPACITY {
+            ring.pop_front();
+        }
+        ring.push_back(line);
+    }
+
+    /// Copy of the ring contents, oldest first.
+    pub fn snapshot(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|ring| ring.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Process-global ring, installed by [`init_logger`]. `None` before init
+/// (unit tests, library embedding).
+static TRACE_RING: OnceLock<TraceRing> = OnceLock::new();
+
+/// The process-global trace ring, if logging was initialized.
+pub fn trace_ring() -> Option<&'static TraceRing> {
+    TRACE_RING.get()
+}
+
+/// `tracing` layer that mirrors every (filter-passing) event into a
+/// [`TraceRing`] as one compact line: `ts LEVEL target: message k=v`.
+struct RingLayer {
+    ring: TraceRing,
+}
+
+/// Field visitor for [`RingLayer`]: the `message` field becomes the line body,
+/// every other field is appended as ` k=v`.
+struct RingVisitor {
+    message: String,
+    fields: String,
+}
+
+impl tracing::field::Visit for RingVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            self.message.push_str(value);
+        } else {
+            let _ = write!(self.fields, " {}={}", field.name(), value);
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            let _ = write!(self.message, "{value:?}");
+        } else {
+            let _ = write!(self.fields, " {}={:?}", field.name(), value);
+        }
+    }
+}
+
+impl<S> Layer<S> for RingLayer
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    // NOTE: never log from inside on_event — a tracing call here would
+    // re-enter the subscriber.
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: LayerContext<'_, S>) {
+        let mut visitor = RingVisitor {
+            message: String::new(),
+            fields: String::new(),
+        };
+        event.record(&mut visitor);
+        let meta = event.metadata();
+        let mut line = format!(
+            "{} {} {}: {}{}",
+            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f"),
+            meta.level(),
+            meta.target(),
+            visitor.message,
+            visitor.fields
+        );
+        if line.len() > RING_MAX_EVENT_BYTES {
+            line.truncate(line.floor_char_boundary(RING_MAX_EVENT_BYTES));
+            line.push_str("...");
+        }
+        // Redact ON CAPTURE: the ring is read back by `mermaid feedback`, so a
+        // key must never sit in memory waiting to be exported.
+        self.ring.push(crate::utils::redact_secrets(&line));
+    }
+}
+
+/// The ring's fixed filter: our crates at TRACE, dependencies capped at INFO
+/// (hyper/h2 TRACE floods stay disabled via per-callsite interest caching).
+/// Independent of `RUST_LOG`, which scopes only the file layer. `Targets`
+/// (not `EnvFilter`) deliberately: `EnvFilter` is documented as unsuitable
+/// for per-layer use alongside another `EnvFilter` — its callsite-interest
+/// caching made the ring silently drop everything next to the file layer.
+fn ring_filter() -> tracing_subscriber::filter::Targets {
+    use tracing::level_filters::LevelFilter;
+    tracing_subscriber::filter::Targets::new()
+        .with_default(LevelFilter::INFO)
+        .with_target("mermaid_cli", LevelFilter::TRACE)
+        .with_target("mermaid_runtime", LevelFilter::TRACE)
+        .with_target("mermaidd", LevelFilter::TRACE)
+}
+
+/// The filtered ring layer, generic over the subscriber stack it joins —
+/// `Filtered<…, S>` is stack-specific, so each `init_logger` branch builds
+/// its own instance (both share the ONE process-global ring).
+fn build_ring_layer<S>()
+-> tracing_subscriber::filter::Filtered<RingLayer, tracing_subscriber::filter::Targets, S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    RingLayer {
+        ring: TRACE_RING.get_or_init(TraceRing::new).clone(),
+    }
+    .with_filter(ring_filter())
 }
 
 /// If the log file exceeds MAX_LOG_SIZE, rename it to `.log.old`
@@ -34,10 +188,18 @@ fn rotate_if_large(path: &Path) {
     }
 }
 
-/// Initialize the logging system with tracing
+/// Initialize the logging system with tracing.
+///
+/// Two layers, each with its OWN filter:
+/// - the file layer (`~/.mermaid/mermaid.log`), scoped by `RUST_LOG` /
+///   `--verbose` exactly as before;
+/// - the always-on [`TraceRing`] with a fixed mermaid-at-TRACE filter, so
+///   `mermaid feedback` can export recent events without a reproduce-under-
+///   RUST_LOG round trip.
 pub fn init_logger(verbose: bool) {
     // If --verbose flag is set, override to debug level
-    // Otherwise use RUST_LOG environment variable, default to warn level (quieter)
+    // Otherwise use RUST_LOG environment variable, default to warn level
+    // (quieter). This filter scopes ONLY the file layer.
     let filter = if verbose {
         EnvFilter::new("debug,mermaid=debug")
     } else {
@@ -79,18 +241,22 @@ pub fn init_logger(verbose: bool) {
                 .with_thread_ids(false)
                 .with_thread_names(false)
                 .with_ansi(false) // No ANSI colors in file
-                .compact();
+                .compact()
+                .with_filter(filter);
 
             tracing_subscriber::registry()
-                .with(filter)
                 .with(fmt_layer)
+                .with(build_ring_layer())
                 .init();
             return;
         }
     }
 
-    // Fallback: no logging if file creation fails (don't corrupt TUI)
-    tracing_subscriber::registry().with(filter).init();
+    // Fallback: no file logging if creation fails (don't corrupt the TUI) —
+    // but the trace ring still captures, so `mermaid feedback` keeps working.
+    tracing_subscriber::registry()
+        .with(build_ring_layer())
+        .init();
 }
 
 /// A `MakeWriter` that scrubs credential-shaped strings out of every formatted
@@ -243,6 +409,84 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&old);
+    }
+
+    /// Local (non-global) subscriber for ring tests — never touches the
+    /// `TRACE_RING` OnceLock, so tests can't interfere with each other.
+    fn with_ring_subscriber(ring: TraceRing, f: impl FnOnce()) {
+        let subscriber =
+            tracing_subscriber::registry().with(RingLayer { ring }.with_filter(ring_filter()));
+        tracing::subscriber::with_default(subscriber, f);
+    }
+
+    #[test]
+    fn ring_captures_trace_events_from_mermaid_targets() {
+        let ring = TraceRing::new();
+        with_ring_subscriber(ring.clone(), || {
+            tracing::trace!(target: "mermaid_cli::probe", step = 3, "ring probe fired");
+        });
+        let lines = ring.snapshot();
+        assert_eq!(lines.len(), 1, "TRACE from our crates must be captured");
+        assert!(lines[0].contains("TRACE"));
+        assert!(lines[0].contains("mermaid_cli::probe"));
+        assert!(lines[0].contains("ring probe fired"));
+        assert!(lines[0].contains("step=3"));
+    }
+
+    #[test]
+    fn ring_caps_dependencies_at_info() {
+        let ring = TraceRing::new();
+        with_ring_subscriber(ring.clone(), || {
+            tracing::trace!(target: "hyper::client", "dep noise");
+            tracing::info!(target: "hyper::client", "dep signal");
+        });
+        let lines = ring.snapshot();
+        assert_eq!(lines.len(), 1, "dep TRACE dropped, dep INFO kept");
+        assert!(lines[0].contains("dep signal"));
+    }
+
+    #[test]
+    fn ring_evicts_oldest_past_capacity() {
+        let ring = TraceRing::new();
+        for i in 0..(RING_CAPACITY + 10) {
+            ring.push(format!("event {i}"));
+        }
+        let lines = ring.snapshot();
+        assert_eq!(lines.len(), RING_CAPACITY);
+        assert_eq!(lines[0], "event 10", "oldest evicted first");
+        assert_eq!(
+            lines[RING_CAPACITY - 1],
+            format!("event {}", RING_CAPACITY + 9)
+        );
+    }
+
+    #[test]
+    fn ring_redacts_secrets_on_capture() {
+        let ring = TraceRing::new();
+        with_ring_subscriber(ring.clone(), || {
+            tracing::warn!(target: "mermaid_cli::auth", "key OPENAI_API_KEY=sk-abcdefghijklmnop1234 seen");
+        });
+        let lines = ring.snapshot();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("[REDACTED]"), "got: {}", lines[0]);
+        assert!(!lines[0].contains("sk-abcdefghijklmnop1234"));
+    }
+
+    #[test]
+    fn ring_truncates_oversized_events() {
+        let ring = TraceRing::new();
+        let huge = "x".repeat(4 * RING_MAX_EVENT_BYTES);
+        with_ring_subscriber(ring.clone(), || {
+            tracing::info!(target: "mermaid_cli::big", "{huge}");
+        });
+        let lines = ring.snapshot();
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].len() <= RING_MAX_EVENT_BYTES + 8,
+            "event must be clamped, got {} bytes",
+            lines[0].len()
+        );
+        assert!(lines[0].ends_with("..."));
     }
 
     #[test]

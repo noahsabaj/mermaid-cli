@@ -2,6 +2,7 @@
 mod args;
 mod commands;
 mod daemon;
+mod feedback;
 
 pub use args::{
     Cli, Commands, DaemonCommand, GitHost, OutputFormat, PairCommand, PluginCommand, PrCommand,
