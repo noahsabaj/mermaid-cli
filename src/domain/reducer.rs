@@ -3128,8 +3128,11 @@ fn usage_text(state: &State) -> String {
         Some(last) => lines.push(format!("Last API request: {}", usage_totals_line(last))),
         None => lines.push("Last API request: n/a".to_string()),
     }
+    // Cumulative is a cost-accounting sum: every API call re-sends the
+    // growing conversation, so input dwarfs output and the total grows much
+    // faster than the context gauge — label it so that reads as intended.
     lines.push(format!(
-        "Session processed: {}",
+        "Session cumulative (all API calls, subagents included): {}",
         usage_totals_line(state.session.cumulative_token_usage)
     ));
 

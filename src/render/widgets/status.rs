@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::domain::{ContextUsageSnapshot, TokenUsageTotals, format_compact_count};
+use crate::domain::{ContextUsageSnapshot, format_compact_count};
 use crate::models::{ReasoningLevel, TokenUsageSource};
 use crate::render::theme::Theme;
 use crate::runtime::SafetyMode;
@@ -22,8 +22,6 @@ pub struct StatusWidget<'a> {
     pub hostname: &'a str,
     pub username: &'a str,
     pub context_usage: Option<&'a ContextUsageSnapshot>,
-    pub last_usage: Option<TokenUsageTotals>,
-    pub session_usage: TokenUsageTotals,
     pub model_name: &'a str,
     /// Effective reasoning depth — what the API actually saw after
     /// `nearest_effort` snapping against the model's capabilities. Always
@@ -43,8 +41,7 @@ impl<'a> Widget for StatusWidget<'a> {
         // Line 1: username@hostname:/path (left) | token usage (right, fixed position).
         // Host/user are resolved once at startup and passed in (#55).
         let directory_text = format!("{}@{}:{}", self.username, self.hostname, self.working_dir);
-        let token_text =
-            format_token_status(self.context_usage, self.last_usage, self.session_usage);
+        let token_text = format_token_status(self.context_usage);
 
         // Calculate padding to push tokens to right edge. Use display-cell
         // widths so CJK / emoji chars in working_dir or hostname don't
@@ -130,24 +127,14 @@ impl<'a> Widget for StatusWidget<'a> {
     }
 }
 
-pub(crate) fn format_token_status(
-    context_usage: Option<&ContextUsageSnapshot>,
-    last_usage: Option<TokenUsageTotals>,
-    session_usage: TokenUsageTotals,
-) -> String {
-    let session = format_compact_count(session_usage.total_tokens());
-    let context = match context_usage {
+/// The footer shows the context gauge only: cumulative session usage is a
+/// cost-accounting number (input re-sent per API call, subagents included)
+/// that dwarfs and confuses the window meter — it lives in `/usage` with
+/// labels instead.
+pub(crate) fn format_token_status(context_usage: Option<&ContextUsageSnapshot>) -> String {
+    match context_usage {
         Some(snapshot) => format_context_snapshot(snapshot),
         None => "context: n/a".to_string(),
-    };
-    match last_usage {
-        Some(usage) => format!(
-            "{} | last api: {} | session: {}",
-            context,
-            format_compact_count(usage.total_tokens()),
-            session
-        ),
-        None => format!("{} | session: {}", context, session),
     }
 }
 
@@ -197,43 +184,20 @@ mod tests {
     }
 
     #[test]
-    fn token_status_labels_last_and_session_usage() {
+    fn token_status_shows_context_gauge_only() {
         let context = ContextUsageSnapshot::from_usage(
             &crate::models::TokenUsage::provider(12_000, 456),
             Some(128_000),
         );
         assert_eq!(
-            format_token_status(
-                Some(&context),
-                Some(TokenUsageTotals {
-                    prompt_tokens: 12_000,
-                    completion_tokens: 456,
-                    ..TokenUsageTotals::default()
-                }),
-                TokenUsageTotals {
-                    prompt_tokens: 500_000,
-                    completion_tokens: 73_443,
-                    ..TokenUsageTotals::default()
-                },
-            ),
-            "context: 12.4k / 128k (9%) | last api: 12.4k | session: 573.4k"
+            format_token_status(Some(&context)),
+            "context: 12.4k / 128k (9%)"
         );
     }
 
     #[test]
-    fn token_status_handles_missing_last_usage() {
-        assert_eq!(
-            format_token_status(
-                None,
-                None,
-                TokenUsageTotals {
-                    prompt_tokens: 900,
-                    completion_tokens: 50,
-                    ..TokenUsageTotals::default()
-                },
-            ),
-            "context: n/a | session: 950"
-        );
+    fn token_status_handles_missing_context() {
+        assert_eq!(format_token_status(None), "context: n/a");
     }
 
     #[test]
@@ -252,8 +216,8 @@ mod tests {
         );
 
         assert_eq!(
-            format_token_status(Some(&context), None, TokenUsageTotals::default()),
-            "context: ~100 / unknown | session: 0"
+            format_token_status(Some(&context)),
+            "context: ~100 / unknown"
         );
     }
 }

@@ -509,8 +509,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             hostname: &rstate.hostname,
             username: &rstate.username,
             context_usage: state.session.context_usage.as_ref(),
-            last_usage: state.session.last_token_usage,
-            session_usage: state.session.cumulative_token_usage,
             model_name: &state.session.model_id,
             reasoning_level: effective,
             requested_level,
