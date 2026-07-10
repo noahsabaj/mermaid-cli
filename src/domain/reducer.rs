@@ -2363,7 +2363,7 @@ fn handle_submit_prompt(
     // `TurnId`s for each tool follow-up, but the spinner's elapsed + token
     // counters track this run start so they don't reset at every step.
     state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
-    state.runtime.run_committed_tokens = 0;
+    state.runtime.run_tokens = super::runtime::RunTokenCounter::default();
     // Fresh run — clear the truncation-recovery, empty-turn, and output-cap
     // continuation guards from any prior run so this intent gets a full retry
     // budget. (A run that *ended* at the continuation cap never hits the
@@ -3705,17 +3705,20 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
 
 /// How one API request's usage folds into the session/run counters.
 enum UsageFold {
-    /// The session's own model request: also becomes `last_token_usage`,
-    /// which feeds the context gauge.
+    /// The session's own model request: also becomes `last_token_usage`
+    /// (which feeds the context gauge) and banks its output into the run
+    /// counter.
     OwnRequest,
     /// A subagent's child-session delta: cumulative + run counter only —
     /// never `last_token_usage`, which is the parent's most recent request
     /// and feeds the PARENT's context-size estimate (the child's context
     /// is a separate window).
     Subagent,
-    /// A compaction summarizer call: charged like an own request, but the
-    /// caller rebuilds the context gauge from the compaction snapshot.
-    Compaction,
+    /// A compaction summarizer call: charged like an own request, but its
+    /// output counts toward the run only when the compaction happened
+    /// inside one (auto/recovery) — a manual `/compact` is not run spend.
+    /// The caller rebuilds the context gauge from the compaction snapshot.
+    Compaction { mid_run: bool },
 }
 
 /// The single accumulation point for provider-reported usage. Every path
@@ -3730,13 +3733,19 @@ fn fold_token_usage(
 ) {
     let totals = TokenUsageTotals::from_usage(usage);
     session.cumulative_token_usage.add_assign(totals);
-    match fold {
-        UsageFold::OwnRequest | UsageFold::Compaction => {
+    let bank_run_output = match fold {
+        UsageFold::OwnRequest => {
             session.last_token_usage = Some(totals);
+            true
         },
-        UsageFold::Subagent => {
-            runtime.run_committed_tokens += usage.output_total_tokens();
+        UsageFold::Subagent => true,
+        UsageFold::Compaction { mid_run } => {
+            session.last_token_usage = Some(totals);
+            mid_run
         },
+    };
+    if bank_run_output {
+        runtime.run_tokens.add_provider(usage.output_total_tokens());
     }
 }
 
@@ -3810,7 +3819,9 @@ fn handle_compaction_finished(
             &mut state.session,
             &mut state.runtime,
             &usage,
-            UsageFold::Compaction,
+            UsageFold::Compaction {
+                mid_run: !matches!(outcome, Outcome::Manual),
+            },
         );
     }
 
@@ -4031,9 +4042,17 @@ fn handle_stream_done(
     let (partial_text, partial_reasoning, accumulated_continuation, tool_calls, continuation) =
         generating;
     // Bank this phase's generated tokens into the run total so the spinner's
-    // counter carries across the tool step into the next model call (matches the
-    // live estimate in StreamText/StreamReasoning).
-    state.runtime.run_committed_tokens += (partial_text.len() + partial_reasoning.len()) / 4;
+    // counter carries across the tool step into the next model call. When the
+    // provider reported usage, the real output lands via `fold_token_usage`
+    // below; only a usage-less phase (common on tool follow-ups from some
+    // providers, or a stream cut early) falls back to the chars/4 estimate,
+    // which marks the whole run counter `~`.
+    if usage.is_none() {
+        state
+            .runtime
+            .run_tokens
+            .add_estimate((partial_text.len() + partial_reasoning.len()) / 4);
+    }
 
     // The turn that any live recovery nudge was steering has now ended — retire
     // it before committing, so the partial and its continuation sit adjacent in
@@ -4376,10 +4395,16 @@ fn handle_stream_done(
             .duration_since(started)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        let run_tokens = state.runtime.run_tokens;
         let summary = format!(
-            "Worked for {} · used {} tokens",
+            "Worked for {} · used {}{} tokens",
             super::transition::format_run_duration(elapsed),
-            format_compact_count(state.runtime.run_committed_tokens),
+            if run_tokens.contains_estimate {
+                "~"
+            } else {
+                ""
+            },
+            format_compact_count(run_tokens.output_tokens),
         );
         state
             .session
@@ -7093,7 +7118,7 @@ mod tests {
     fn submit_anchors_run_and_resets_token_counter() {
         let mut state = fresh_state();
         // Stale values from a previous run must not leak into the new one.
-        state.runtime.run_committed_tokens = 999;
+        state.runtime.run_tokens.add_estimate(999);
         state.runtime.run_started = None;
         let (state, _) = update(
             state,
@@ -7107,7 +7132,8 @@ mod tests {
             "run anchor set on submit"
         );
         assert_eq!(
-            state.runtime.run_committed_tokens, 0,
+            state.runtime.run_tokens,
+            crate::domain::runtime::RunTokenCounter::default(),
             "token counter reset on submit"
         );
     }
@@ -7118,7 +7144,7 @@ mod tests {
         // Run started 72s ago with some generated tokens.
         state.runtime.run_started =
             Some(std::time::SystemTime::from(state.now) - std::time::Duration::from_secs(72));
-        state.runtime.run_committed_tokens = 1500;
+        state.runtime.run_tokens.add_provider(1500);
         state.turn = TurnState::Generating {
             id: TurnId(5),
             started: std::time::SystemTime::now(),
@@ -7155,6 +7181,53 @@ mod tests {
             state.runtime.run_started.is_none(),
             "run_started is cleared so the summary fires exactly once per run"
         );
+        assert!(
+            summary.content.contains("used ~"),
+            "a usage-less final phase falls back to a chars/4 estimate and \
+             must mark the total `~`, got {:?}",
+            summary.content
+        );
+    }
+
+    #[test]
+    fn run_summary_uses_real_provider_output_unmarked() {
+        let mut state = fresh_state();
+        state.runtime.run_started =
+            Some(std::time::SystemTime::from(state.now) - std::time::Duration::from_secs(10));
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: "final answer".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: Vec::new(),
+            continuation: false,
+        };
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: Some(
+                    crate::models::TokenUsage::provider(1_000, 30).with_reasoning_output(20),
+                ),
+                provider_continuation: None,
+                stop_reason: None,
+            },
+        );
+        let summary = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .expect("a run summary should be appended at run end");
+        assert!(
+            summary.content.contains("used 50 tokens"),
+            "provider-reported output (completion 30 + reasoning 20) with no \
+             `~`, got {:?}",
+            summary.content
+        );
     }
 
     #[test]
@@ -7183,7 +7256,7 @@ mod tests {
         // The counter must accumulate, not reset, as each model call completes —
         // so a multi-step agentic run shows one growing total.
         let mut state = fresh_state();
-        state.runtime.run_committed_tokens = 100; // earlier phases this run
+        state.runtime.run_tokens.add_provider(100); // earlier phases this run
         state.turn = TurnState::Generating {
             id: TurnId(5),
             started: std::time::SystemTime::now(),
@@ -7204,8 +7277,10 @@ mod tests {
                 stop_reason: None,
             },
         );
-        // 100 prior + (400 + 400)/4 = 200 this phase.
-        assert_eq!(state.runtime.run_committed_tokens, 300);
+        // 100 prior + (400 + 400)/4 = 200 this phase — an estimate, because
+        // this Done carried no provider usage, so the counter is tainted `~`.
+        assert_eq!(state.runtime.run_tokens.output_tokens, 300);
+        assert!(state.runtime.run_tokens.contains_estimate);
     }
 
     #[test]
@@ -8129,7 +8204,8 @@ mod tests {
         );
         assert_eq!(state.session.last_token_usage.unwrap().total_tokens(), 125);
         assert_eq!(state.session.cumulative_token_usage.total_tokens(), 125);
-        assert_eq!(state.runtime.run_committed_tokens, 0);
+        assert_eq!(state.runtime.run_tokens.output_tokens, 25);
+        assert!(!state.runtime.run_tokens.contains_estimate);
 
         // Subagent: cumulative + run counter (output only), never last —
         // the child's context is a separate window.
@@ -8142,17 +8218,28 @@ mod tests {
         );
         assert!(state.session.last_token_usage.is_none());
         assert_eq!(state.session.cumulative_token_usage.total_tokens(), 250);
-        assert_eq!(state.runtime.run_committed_tokens, 25);
+        assert_eq!(state.runtime.run_tokens.output_tokens, 50);
 
-        // Compaction: charged like an own request.
+        // Manual compaction: charged like an own request, but not run spend.
         fold_token_usage(
             &mut state.session,
             &mut state.runtime,
             &usage,
-            UsageFold::Compaction,
+            UsageFold::Compaction { mid_run: false },
         );
         assert_eq!(state.session.last_token_usage.unwrap().total_tokens(), 125);
         assert_eq!(state.session.cumulative_token_usage.total_tokens(), 375);
+        assert_eq!(state.runtime.run_tokens.output_tokens, 50);
+
+        // Mid-run (auto/recovery) compaction output IS run spend.
+        fold_token_usage(
+            &mut state.session,
+            &mut state.runtime,
+            &usage,
+            UsageFold::Compaction { mid_run: true },
+        );
+        assert_eq!(state.session.cumulative_token_usage.total_tokens(), 500);
+        assert_eq!(state.runtime.run_tokens.output_tokens, 75);
     }
 
     #[test]
@@ -10862,7 +10949,7 @@ mod tests {
     fn subagent_usage_rolls_into_session_totals_and_run_counter() {
         let (state, call_id) = state_executing_agent_call();
         let before_cum = state.session.cumulative_token_usage.total_tokens();
-        assert_eq!(state.runtime.run_committed_tokens, 0);
+        assert_eq!(state.runtime.run_tokens.output_tokens, 0);
 
         let usage = crate::models::TokenUsage::provider(1_000, 250).with_reasoning_output(50);
         let metadata = crate::domain::ToolRunMetadata {
@@ -10890,8 +10977,10 @@ mod tests {
             before_cum + 1_300
         );
         assert_eq!(state.session.cumulative_token_usage.completion_tokens, 250);
-        // …the run counter banks its generated tokens (completion + reasoning)…
-        assert_eq!(state.runtime.run_committed_tokens, 300);
+        // …the run counter banks its generated tokens (completion + reasoning),
+        // as a real provider count (no `~` taint)…
+        assert_eq!(state.runtime.run_tokens.output_tokens, 300);
+        assert!(!state.runtime.run_tokens.contains_estimate);
         // …but the child never poses as the parent's own last request (that
         // field feeds the context-size estimate for the PARENT's window).
         assert!(state.session.last_token_usage.is_none());
