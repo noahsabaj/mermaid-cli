@@ -383,6 +383,13 @@ fn action_details_for(
                 line_count: None,
             }
         },
+        // Fallback for non-answered resolutions (dismissed, chat-about-this,
+        // headless) and recordings from before answers rode the metadata —
+        // an answered call renders from `ToolMetadata::Questions` instead.
+        "ask_user_question" => ActionDetails::Preview {
+            text: success_summary(outcome.summary.clone(), duration),
+            line_count: None,
+        },
         _ => ActionDetails::Simple,
     }
 }
@@ -676,6 +683,27 @@ mod tests {
                     arguments,
                 },
             },
+        }
+    }
+
+    #[test]
+    fn ask_user_question_fallback_previews_the_summary() {
+        // Non-answered resolutions (dismissed / chat-about-this / headless)
+        // carry no `Questions` metadata; the transcript shows the summary
+        // instead of a bare duration.
+        let call = sample_call(1, "ask_user_question");
+        let outcome = ToolOutcome::success(
+            "The user dismissed the question(s) without answering.",
+            "dismissed without answering",
+            4.0,
+        );
+        let action = action_display_for(&call, &outcome);
+        match &action.details {
+            ActionDetails::Preview { text, .. } => {
+                assert!(text.contains("dismissed without answering"), "got {text}");
+                assert!(text.contains("took 4.0s"), "got {text}");
+            },
+            other => panic!("expected Preview details, got {other:?}"),
         }
     }
 

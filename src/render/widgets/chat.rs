@@ -10,7 +10,9 @@ use ratatui::{
 use rustc_hash::FxHashMap;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::domain::{ActionDetails, ActionDisplay, ActionResult, format_compact_count};
+use crate::domain::{
+    ActionDetails, ActionDisplay, ActionResult, QuestionAnswer, ToolMetadata, format_compact_count,
+};
 use crate::models::ChatMessageKind;
 use crate::models::{ChatMessage, MessageRole};
 use crate::render::diff::{DiffLineKind, parse_diff_line};
@@ -1124,6 +1126,20 @@ fn render_actions(
         if action_idx > 0 {
             lines.push(Line::from(""));
         }
+        // An answered `ask_user_question` renders as its own block — the
+        // user's answers ARE the outcome, so the transcript shows each
+        // question → answer pair instead of the generic `name(target)`
+        // header over a bare duration.
+        if let Some(meta) = &action.metadata
+            && let ToolMetadata::Questions {
+                answers,
+                remembered,
+            } = &meta.detail
+            && matches!(action.result, ActionResult::Success { .. })
+        {
+            render_question_answers(answers, *remembered, lines, theme, viewport_width);
+            continue;
+        }
         let action_color = match action.action_type.as_str() {
             "Write" | "Update" => theme.colors.success.to_color(),
             "Delete" => theme.colors.warning.to_color(),
@@ -1295,6 +1311,65 @@ fn render_actions(
                     Span::styled(error, Style::new().fg(theme.colors.error.to_color())),
                 ]));
             },
+        }
+    }
+}
+
+/// Claude-Code-style record of an answered `ask_user_question` call: a plain
+/// header bullet plus one `· question → answer` line per question, so the
+/// transcript preserves what the user chose (not just how long it took).
+fn render_question_answers(
+    answers: &[QuestionAnswer],
+    remembered: bool,
+    lines: &mut Vec<Line>,
+    theme: &Theme,
+    viewport_width: usize,
+) {
+    let header = if remembered {
+        "User answered the model's questions (remembered):"
+    } else {
+        "User answered the model's questions:"
+    };
+    lines.push(Line::from(Span::styled(
+        format!("● {header}"),
+        Style::new().fg(theme.colors.text_primary.to_color()),
+    )));
+
+    let gutter_style = Style::new().fg(theme.colors.text_secondary.to_color());
+    let text_style = Style::new().fg(theme.colors.text_secondary.to_color());
+    let note_style = Style::new()
+        .fg(theme.colors.text_disabled.to_color())
+        .italic();
+    // The 4-cell gutter ("  ⎿ " on the first row, "    " after) comes off the
+    // wrap budget; continuations hang 2 cells so wrapped text aligns under
+    // the question, not the `·`.
+    let wrap_width = viewport_width.saturating_sub(4);
+    let mut first_row = true;
+    for answer in answers {
+        let value = if answer.selected.is_empty() {
+            "(no selection)".to_string()
+        } else {
+            answer.selected.join(", ")
+        };
+        let entry = format!("· {} → {}", answer.question, value);
+        let mut rows: Vec<(String, Style)> = wrap_text_with_indent(&entry, wrap_width, 0, 2)
+            .into_iter()
+            .map(|row| (row, text_style))
+            .collect();
+        if let Some(note) = &answer.note {
+            rows.extend(
+                wrap_text_with_indent(&format!("(note: {note})"), wrap_width, 2, 4)
+                    .into_iter()
+                    .map(|row| (row, note_style)),
+            );
+        }
+        for (row, style) in rows {
+            let gutter = if first_row { "  ⎿ " } else { "    " };
+            first_row = false;
+            lines.push(Line::from(vec![
+                Span::styled(gutter, gutter_style),
+                Span::styled(row, style),
+            ]));
         }
     }
 }
@@ -1656,6 +1731,70 @@ fn wrap_styled_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn question_answers_render_as_question_arrow_answer_block() {
+        use crate::domain::{QuestionAnswer, ToolMetadata, ToolRunMetadata};
+
+        let theme = Theme::dark();
+        let answers = vec![
+            QuestionAnswer {
+                header: "Snack".to_string(),
+                question: "Which snack fuels your next coding session?".to_string(),
+                selected: vec!["Coffee (Recommended)".to_string()],
+                note: None,
+            },
+            QuestionAnswer {
+                header: "Powers".to_string(),
+                question: "Which superpowers would you take?".to_string(),
+                selected: vec![
+                    "Read any codebase instantly".to_string(),
+                    "Bugs reproduce on demand".to_string(),
+                ],
+                note: Some("only on weekdays".to_string()),
+            },
+        ];
+        let action = ActionDisplay {
+            action_type: "ask_user_question".to_string(),
+            target: String::new(),
+            result: ActionResult::Success {
+                output: String::new(),
+                images: None,
+            },
+            details: ActionDetails::Simple,
+            duration_seconds: Some(93.0),
+            metadata: Some(ToolRunMetadata {
+                detail: ToolMetadata::Questions {
+                    answers,
+                    remembered: false,
+                },
+                ..Default::default()
+            }),
+        };
+
+        let mut lines: Vec<Line> = Vec::new();
+        render_actions(&[action], &mut lines, &theme, 120);
+        let rows: Vec<String> = lines.iter().map(line_plain_text).collect();
+        let all = rows.join("\n");
+
+        assert_eq!(rows[0], "● User answered the model's questions:");
+        assert!(
+            rows[1].starts_with("  ⎿ · Which snack fuels your next coding session? → Coffee"),
+            "got {:?}",
+            rows[1]
+        );
+        assert!(
+            all.contains(
+                "· Which superpowers would you take? → Read any codebase instantly, \
+                 Bugs reproduce on demand"
+            ),
+            "got {all}"
+        );
+        assert!(all.contains("(note: only on weekdays)"), "got {all}");
+        // The generic `name()` header and duration line are replaced entirely.
+        assert!(!all.contains("ask_user_question("), "got {all}");
+        assert!(!all.contains("took"), "got {all}");
+    }
 
     #[test]
     fn diff_background_fills_full_width_with_tabs() {
