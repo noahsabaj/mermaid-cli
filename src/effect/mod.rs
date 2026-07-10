@@ -435,7 +435,11 @@ impl EffectRunner {
                 // built-ins come from the runner (which holds the
                 // registry). This keeps `ChatRequest.tools` the
                 // single source of truth for what the model sees.
-                if let Some(tools) = &self.tools {
+                // Formatting turns (`output_schema`) advertise NO tools —
+                // the reducer already sent none; don't re-add built-ins.
+                if let Some(tools) = &self.tools
+                    && request.output_schema.is_none()
+                {
                     let mut enriched = tools.describe_all();
                     // Report the built-in tool-schema token cost so the
                     // reducer's /context preview can fold it into its MCP-only
@@ -1946,6 +1950,7 @@ async fn consolidate_memory(
         ollama_allow_ram_offload: None,
         resolved_context_window: None,
         resolved_max_output: None,
+        output_schema: None,
     };
 
     let provider = match factory.resolve(&model_id).await {
@@ -3175,6 +3180,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -3201,6 +3207,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -3282,6 +3289,7 @@ mod tests {
                 ollama_allow_ram_offload: None,
                 resolved_context_window: None,
                 resolved_max_output: None,
+                output_schema: None,
             },
         });
         assert_eq!(r.scope_count(), 1);
@@ -3311,6 +3319,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         let turn = TurnId(123);
 

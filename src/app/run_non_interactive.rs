@@ -30,6 +30,9 @@ pub struct RunResult {
     /// Conversation/session id that owns this run — resumable with
     /// `mermaid run --resume <id>`.
     pub session_id: String,
+    /// `--output-schema` runs: the response parsed as JSON, present only when
+    /// it parsed AND validated against the schema.
+    pub structured_output: Option<serde_json::Value>,
 }
 
 /// Per-invocation options for `run_non_interactive`.
@@ -63,6 +66,11 @@ pub struct RunOptions {
     /// `--continue`). The run appends to the SAME session id, so repeated
     /// `--resume <id>` invocations chain naturally.
     pub seed: Option<crate::session::ConversationHistory>,
+    /// `--output-schema`: JSON Schema the final answer must conform to. The
+    /// agentic loop runs normally; one extra FORMATTING turn (no tools,
+    /// native constrained output where supported) reshapes the final answer,
+    /// validated client-side. See `run_formatting_turn`.
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
@@ -155,88 +163,61 @@ pub async fn run_non_interactive_with(
     }
 
     let deadline = opts.deadline.unwrap_or(Duration::from_secs(20 * 60));
-
-    /// How long a cancelled run may keep unwinding before the drive loop
-    /// hard-stops. Generous next to the turn scope's own ~2s teardown bound.
-    const CANCEL_GRACE: Duration = Duration::from_secs(15);
     let cancel = opts.cancel.clone();
-    // Set when the cancel token fires; from then on the loop exits as soon as
-    // the turn is idle (queued messages must not seed another turn) or the
-    // grace deadline passes.
-    let mut cancel_deadline: Option<tokio::time::Instant> = None;
 
-    let drive = async {
-        loop {
-            let idle = matches!(state.turn, TurnState::Idle);
-            if drive_should_stop(
-                idle,
-                state.ui.queued_messages.is_empty(),
-                cancel_deadline.is_some(),
-            ) {
-                break;
-            }
-            let msg = tokio::select! {
-                m = msg_rx.recv() => match m {
-                    Some(m) => m,
-                    None => break,
-                },
-                s = lifecycle.next_msg() => match s {
-                    Some(s) => s,
-                    None => continue,
-                },
-                _ = async {
-                    match &cancel {
-                        Some(token) => token.cancelled().await,
-                        None => std::future::pending().await,
-                    }
-                }, if cancel.is_some() && cancel_deadline.is_none() => {
-                    cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_GRACE);
-                    Msg::CancelTurn
-                },
-                // NOTE: select! evaluates every branch expression even when its
-                // `if` guard is false, so the sleep target must not unwrap.
-                _ = tokio::time::sleep_until(
-                    cancel_deadline
-                        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400)),
-                ), if cancel_deadline.is_some() => {
-                    tracing::warn!("cancelled run did not unwind within grace; hard-stopping");
-                    break;
-                },
-            };
-            // Plumbing notices ("Starting the local Ollama server…") have no
-            // renderer here — mirror them to stderr live so the user isn't
-            // staring at silence during an up-to-15s server start. stderr,
-            // not stdout: the response payload must stay clean for scripts.
-            if let Msg::TransientStatus { text } = &msg {
-                eprintln!("{text}");
-            }
-            // Project the lifecycle message onto the public NDJSON stream before
-            // `update` consumes it. Most messages have no projection.
-            if stream_ndjson && let Some(event) = RunEvent::from_msg(&msg) {
-                emit_run_event(&event);
-            }
-            state.now = chrono::Local::now();
-            let (new_state, cmds) = update(state, msg);
-            state = new_state;
-            for cmd in cmds {
-                runner.dispatch(cmd);
-            }
-            if state.should_exit {
-                break;
-            }
-        }
-        state
-    };
-
-    let final_state = timeout(deadline, drive).await.map_err(|_| {
+    let final_state = timeout(
+        deadline,
+        drive_to_idle(
+            state,
+            &mut runner,
+            &mut msg_rx,
+            &mut lifecycle,
+            cancel.as_ref(),
+            stream_ndjson,
+        ),
+    )
+    .await
+    .map_err(|_| {
         anyhow::anyhow!(
             "non-interactive run exceeded {} seconds",
             deadline.as_secs()
         )
     })?;
 
+    let mut result = build_result(&final_state);
+
+    // `--output-schema`: one extra formatting turn on the completed run.
+    if let Some(schema) = opts.output_schema.clone() {
+        let cancelled = cancel.as_ref().is_some_and(|t| t.is_cancelled());
+        if cancelled || final_state.should_exit || result.response.is_empty() {
+            result
+                .errors
+                .push("output_schema: skipped (run ended without a final answer)".to_string());
+        } else {
+            let final_state = timeout(
+                deadline,
+                run_formatting_turn(
+                    final_state,
+                    schema.clone(),
+                    &mut runner,
+                    &mut msg_rx,
+                    &mut lifecycle,
+                    cancel.as_ref(),
+                    stream_ndjson,
+                ),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "output-schema formatting turn exceeded {} seconds",
+                    deadline.as_secs()
+                )
+            })?;
+            apply_schema_outcome(&mut result, &final_state, &schema);
+        }
+    }
+
     runner.shutdown().await;
-    let result = build_result(&final_state);
     // Terminal line of the NDJSON stream: the aggregated result.
     if stream_ndjson {
         emit_run_event(&RunEvent::Result {
@@ -245,9 +226,182 @@ pub async fn run_non_interactive_with(
             total_tokens: result.total_tokens as u64,
             errors: result.errors.clone(),
             session_id: result.session_id.clone(),
+            structured_output: result.structured_output.clone(),
         });
     }
     Ok(result)
+}
+
+/// Drive the reducer until the turn is idle and the queue is drained (or the
+/// run is cancelled / the channel closes). Shared by the main run and the
+/// `--output-schema` formatting turn.
+async fn drive_to_idle(
+    mut state: State,
+    runner: &mut EffectRunner,
+    msg_rx: &mut tokio::sync::mpsc::Receiver<Msg>,
+    lifecycle: &mut RuntimeLifecycle,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    stream_ndjson: bool,
+) -> State {
+    /// How long a cancelled run may keep unwinding before the drive loop
+    /// hard-stops. Generous next to the turn scope's own ~2s teardown bound.
+    const CANCEL_GRACE: Duration = Duration::from_secs(15);
+    // Set when the cancel token fires; from then on the loop exits as soon as
+    // the turn is idle (queued messages must not seed another turn) or the
+    // grace deadline passes.
+    let mut cancel_deadline: Option<tokio::time::Instant> = None;
+    loop {
+        let idle = matches!(state.turn, TurnState::Idle);
+        if drive_should_stop(
+            idle,
+            state.ui.queued_messages.is_empty(),
+            cancel_deadline.is_some(),
+        ) {
+            break;
+        }
+        let msg = tokio::select! {
+            m = msg_rx.recv() => match m {
+                Some(m) => m,
+                None => break,
+            },
+            s = lifecycle.next_msg() => match s {
+                Some(s) => s,
+                None => continue,
+            },
+            _ = async {
+                match &cancel {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            }, if cancel.is_some() && cancel_deadline.is_none() => {
+                cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_GRACE);
+                Msg::CancelTurn
+            },
+            // NOTE: select! evaluates every branch expression even when its
+            // `if` guard is false, so the sleep target must not unwrap.
+            _ = tokio::time::sleep_until(
+                cancel_deadline
+                    .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400)),
+            ), if cancel_deadline.is_some() => {
+                tracing::warn!("cancelled run did not unwind within grace; hard-stopping");
+                break;
+            },
+        };
+        // Plumbing notices ("Starting the local Ollama server…") have no
+        // renderer here — mirror them to stderr live so the user isn't
+        // staring at silence during an up-to-15s server start. stderr,
+        // not stdout: the response payload must stay clean for scripts.
+        if let Msg::TransientStatus { text } = &msg {
+            eprintln!("{text}");
+        }
+        // Project the lifecycle message onto the public NDJSON stream before
+        // `update` consumes it. Most messages have no projection.
+        if stream_ndjson && let Some(event) = RunEvent::from_msg(&msg) {
+            emit_run_event(&event);
+        }
+        state.now = chrono::Local::now();
+        let (new_state, cmds) = update(state, msg);
+        state = new_state;
+        for cmd in cmds {
+            runner.dispatch(cmd);
+        }
+        if state.should_exit {
+            break;
+        }
+    }
+    state
+}
+
+/// The synthetic prompt that drives the `--output-schema` formatting turn.
+const FORMAT_PROMPT: &str = "Convert your final answer into a single JSON object that \
+conforms to the provided schema. Respond with only the JSON object - no prose, no code fences.";
+
+/// Run the dedicated `--output-schema` formatting turn: set the schema rider
+/// on state (build_chat_request drops all tools + adapters engage native
+/// constrained output), seed the format prompt, and drive to idle.
+async fn run_formatting_turn(
+    mut state: State,
+    schema: serde_json::Value,
+    runner: &mut EffectRunner,
+    msg_rx: &mut tokio::sync::mpsc::Receiver<Msg>,
+    lifecycle: &mut RuntimeLifecycle,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    stream_ndjson: bool,
+) -> State {
+    state.output_schema = Some(schema);
+    state.now = chrono::Local::now();
+    let (new_state, cmds) = update(
+        state,
+        Msg::SubmitPrompt {
+            text: FORMAT_PROMPT.to_string(),
+            attachment_ids: vec![],
+        },
+    );
+    state = new_state;
+    for cmd in cmds {
+        runner.dispatch(cmd);
+    }
+    drive_to_idle(state, runner, msg_rx, lifecycle, cancel, stream_ndjson).await
+}
+
+/// Fold the formatting turn's outcome into the run result: the reshaped text
+/// replaces the response (code fences stripped), and `structured_output` is
+/// set only when the text parses AND validates. Every failure keeps the best
+/// available text and records an `output_schema:` error — a run that produced
+/// an answer never returns empty output.
+fn apply_schema_outcome(result: &mut RunResult, state: &State, schema: &serde_json::Value) {
+    // The formatting reply is the last assistant message; total tokens grew.
+    let formatted = build_result(state);
+    result.total_tokens = formatted.total_tokens;
+    if formatted.response.is_empty() || formatted.response == result.response {
+        result
+            .errors
+            .push("output_schema: formatting turn produced no output".to_string());
+        return;
+    }
+    let text = strip_code_fences(&formatted.response);
+    result.response = text.to_string();
+    let parsed: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => {
+            result
+                .errors
+                .push(format!("output_schema: response is not valid JSON: {e}"));
+            return;
+        },
+    };
+    let validator = match jsonschema::validator_for(schema) {
+        Ok(v) => v,
+        Err(e) => {
+            result
+                .errors
+                .push(format!("output_schema: schema did not compile: {e}"));
+            return;
+        },
+    };
+    if let Some(err) = validator.iter_errors(&parsed).next() {
+        result
+            .errors
+            .push(format!("output_schema: response does not conform: {err}"));
+        return;
+    }
+    result.structured_output = Some(parsed);
+}
+
+/// Trim a single wrapping markdown code fence (with optional info string) —
+/// models wrap JSON in ```json fences despite instructions.
+fn strip_code_fences(text: &str) -> &str {
+    let t = text.trim();
+    let Some(rest) = t.strip_prefix("```") else {
+        return t;
+    };
+    let Some(rest) = rest.split_once('\n').map(|(_, r)| r) else {
+        return t;
+    };
+    match rest.strip_suffix("```") {
+        Some(inner) => inner.trim(),
+        None => t,
+    }
 }
 
 /// Write one `RunEvent` as a JSON line to stdout (the NDJSON SDK stream).
@@ -355,6 +509,7 @@ pub fn format_result(result: &RunResult, format: OutputFormat) -> String {
                 total_tokens: result.total_tokens as u64,
                 errors: result.errors.clone(),
                 session_id: result.session_id.clone(),
+                structured_output: result.structured_output.clone(),
             };
             serde_json::to_string_pretty(&event).unwrap_or_default()
         },
@@ -427,6 +582,129 @@ mod tests {
             .append(ChatMessage::assistant("final reply"), state.now);
         let result = build_result(&state);
         assert_eq!(result.response, "final reply");
+    }
+
+    #[test]
+    fn strip_code_fences_unwraps_single_fence_only() {
+        use super::strip_code_fences;
+        assert_eq!(strip_code_fences("{\"a\":1}"), "{\"a\":1}");
+        assert_eq!(strip_code_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(strip_code_fences("```\n{\"a\":1}\n```"), "{\"a\":1}");
+        // Unterminated fence -> left alone (don't mangle).
+        assert_eq!(
+            strip_code_fences("```json\n{\"a\":1}"),
+            "```json\n{\"a\":1}"
+        );
+        assert_eq!(strip_code_fences("  {\"a\":1}  "), "{\"a\":1}");
+    }
+
+    fn schema_state(reply: &str) -> crate::domain::State {
+        use crate::models::ChatMessage;
+        let mut state = crate::domain::State::new(
+            crate::app::Config::default(),
+            std::path::PathBuf::from("/tmp/p"),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
+        state.session.append(ChatMessage::user("q"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("the plain answer"), state.now);
+        state
+            .session
+            .append(ChatMessage::user("format it"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant(reply), state.now);
+        state
+    }
+
+    fn base_result() -> super::RunResult {
+        super::RunResult {
+            response: "the plain answer".to_string(),
+            ..super::RunResult::default()
+        }
+    }
+
+    #[test]
+    fn schema_outcome_valid_json_sets_structured_output() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "integer"}},
+            "required": ["answer"],
+        });
+        let state = schema_state("```json\n{\"answer\": 42}\n```");
+        let mut result = base_result();
+        super::apply_schema_outcome(&mut result, &state, &schema);
+        assert_eq!(result.response, "{\"answer\": 42}");
+        assert_eq!(
+            result.structured_output,
+            Some(serde_json::json!({"answer": 42}))
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+    }
+
+    #[test]
+    fn schema_outcome_invalid_json_keeps_text_and_records() {
+        let schema = serde_json::json!({"type": "object"});
+        let state = schema_state("not json at all");
+        let mut result = base_result();
+        super::apply_schema_outcome(&mut result, &state, &schema);
+        assert_eq!(result.response, "not json at all");
+        assert!(result.structured_output.is_none());
+        assert!(
+            result.errors.iter().any(|e| e.contains("not valid JSON")),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn schema_outcome_nonconforming_json_records_reason() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "integer"}},
+            "required": ["answer"],
+        });
+        let state = schema_state("{\"wrong\": true}");
+        let mut result = base_result();
+        super::apply_schema_outcome(&mut result, &state, &schema);
+        assert!(result.structured_output.is_none());
+        assert!(
+            result.errors.iter().any(|e| e.contains("does not conform")),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn schema_outcome_no_new_reply_keeps_original() {
+        // The formatting turn produced nothing new (same last assistant
+        // message) -> keep the agent's answer, record the failure.
+        let schema = serde_json::json!({"type": "object"});
+        use crate::models::ChatMessage;
+        let mut state = crate::domain::State::new(
+            crate::app::Config::default(),
+            std::path::PathBuf::from("/tmp/p"),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
+        state.session.append(ChatMessage::user("q"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("the plain answer"), state.now);
+        let mut result = base_result();
+        super::apply_schema_outcome(&mut result, &state, &schema);
+        assert_eq!(result.response, "the plain answer");
+        assert!(result.structured_output.is_none());
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("produced no output")),
+            "{:?}",
+            result.errors
+        );
     }
 
     #[test]

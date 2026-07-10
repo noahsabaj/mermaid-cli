@@ -4884,7 +4884,14 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         reasoning: state.session.reasoning,
         temperature,
         max_tokens,
-        tools: mcp_tools,
+        // A formatting turn (`--output-schema`) advertises NO tools: several
+        // providers reject or degrade schema-constrained output when tools
+        // are present, and the turn's only job is reshaping the final answer.
+        tools: if state.output_schema.is_some() {
+            Vec::new()
+        } else {
+            mcp_tools
+        },
         // Per-model `/context` override (set via /context <n>/max) wins; else the
         // auto-converged value the `/api/ps` check found fits; else None = auto-fit.
         ollama_num_ctx: state
@@ -4906,6 +4913,7 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         // before dispatch — the reducer never awaits a probe.
         resolved_context_window: None,
         resolved_max_output: None,
+        output_schema: state.output_schema.clone(),
     }
 }
 

@@ -365,6 +365,14 @@ pub enum Commands {
         /// otherwise refuses them when there's no approval UI.
         #[arg(long)]
         allow_untrusted_tools: bool,
+
+        /// JSON Schema file the final answer must conform to. The agentic
+        /// loop runs normally; one extra formatting turn (no tools, native
+        /// constrained output where the provider supports it) reshapes the
+        /// final answer, validated client-side. Failures are reported in the
+        /// run's errors; the text answer is still returned.
+        #[arg(long, value_name = "FILE")]
+        output_schema: Option<PathBuf>,
     },
 }
 

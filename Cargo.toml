@@ -94,6 +94,7 @@ htmd = "0.5.4"
 # only, no I/O, so the domain purity guard stays satisfied).
 ignore = "0.4"
 nucleo-matcher = "0.3"
+jsonschema = "0.47.0"
 
 [dev-dependencies]
 # Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`

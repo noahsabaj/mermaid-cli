@@ -671,6 +671,11 @@ impl OllamaAdapter {
             "tools": &tools,
         });
 
+        // `--output-schema` formatting turn: Ollama's structured output.
+        if let Some(schema) = &config.output_schema {
+            request_body["format"] = schema.clone();
+        }
+
         // `think` parameter: most Ollama models accept `think: bool`, gpt-oss
         // requires a string enum, and a model that doesn't advertise `thinking`
         // must not receive the field at all (it 400s). `think_for_ollama`
@@ -1521,6 +1526,25 @@ mod tests {
         OllamaAdapter::new("gpt-oss:20b", Arc::new(BackendConfig::default()))
             .await
             .expect("adapter")
+    }
+
+    #[tokio::test]
+    async fn ollama_request_body_maps_output_schema_to_format() {
+        let adapter = make_adapter().await;
+        let config = ModelConfig {
+            output_schema: Some(serde_json::json!({"type": "object"})),
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false, true);
+        assert_eq!(body["format"]["type"], "object");
+        // Absent -> no format key.
+        let body = adapter.build_request_body(
+            &[ChatMessage::user("hi")],
+            &ModelConfig::default(),
+            false,
+            true,
+        );
+        assert!(body.get("format").is_none());
     }
 
     #[tokio::test]

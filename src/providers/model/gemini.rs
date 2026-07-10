@@ -105,6 +105,7 @@ fn build_model_config(request: &ChatRequest) -> ModelConfig {
         system_prompt: Some(request.system_prompt.clone()),
         dynamic_system_suffix: request.instructions.clone(),
         tools: request.tools.iter().map(|t| t.to_openai_json()).collect(),
+        output_schema: request.output_schema.clone(),
         ..Default::default()
     }
 }
@@ -154,6 +155,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         let cfg = build_model_config(&req);
         assert_eq!(cfg.reasoning, crate::models::ReasoningLevel::High);

@@ -1165,6 +1165,7 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         let sizing = live.resolve_context_window(&probe_request).await;
         if let Some(window) = sizing.model_max.or(sizing.effective) {

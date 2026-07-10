@@ -117,6 +117,11 @@ pub enum RunEvent {
         /// reads the terminal line still gets it). Additive (defaulted).
         #[serde(default)]
         session_id: String,
+        /// `--output-schema` runs: the response parsed as JSON, present only
+        /// when it parsed AND validated against the schema. Additive
+        /// (defaulted) — protocol_version stays 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<serde_json::Value>,
     },
 }
 
@@ -268,6 +273,7 @@ mod tests {
                 total_tokens: 1234,
                 errors: vec![],
                 session_id: "20260709_120000_000".to_string(),
+                structured_output: None,
             },
         ]
     }
@@ -325,6 +331,36 @@ mod tests {
         // variant. Bump the count when a variant lands (and add its golden
         // line above, which won't compile otherwise).
         assert_eq!(samples().len(), 9);
+    }
+
+    #[test]
+    fn result_structured_output_is_additive() {
+        // Present -> serialized; absent -> omitted entirely (golden above
+        // stays frozen); old wire lines without the field still parse.
+        let ev = RunEvent::Result {
+            response: "{\"answer\":42}".to_string(),
+            reasoning: None,
+            total_tokens: 10,
+            errors: vec![],
+            session_id: "s".to_string(),
+            structured_output: Some(serde_json::json!({"answer": 42})),
+        };
+        let wire = serde_json::to_string(&ev).unwrap();
+        assert!(
+            wire.contains("\"structured_output\":{\"answer\":42}"),
+            "{wire}"
+        );
+        let back: RunEvent = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back, ev);
+        let old = r#"{"type":"result","response":"x","reasoning":null,"total_tokens":1,"errors":[],"session_id":"s"}"#;
+        let parsed: RunEvent = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            parsed,
+            RunEvent::Result {
+                structured_output: None,
+                ..
+            }
+        ));
     }
 
     #[test]

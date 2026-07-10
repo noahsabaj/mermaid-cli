@@ -368,6 +368,7 @@ pub fn build_summary_request(
         ollama_allow_ram_offload: base.ollama_allow_ram_offload,
         resolved_context_window: base.resolved_context_window,
         resolved_max_output: base.resolved_max_output,
+        output_schema: None,
     }
 }
 
@@ -396,6 +397,7 @@ pub fn build_verification_request(
         ollama_allow_ram_offload: base.ollama_allow_ram_offload,
         resolved_context_window: base.resolved_context_window,
         resolved_max_output: base.resolved_max_output,
+        output_schema: None,
     }
 }
 
@@ -799,6 +801,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         }
     }
 

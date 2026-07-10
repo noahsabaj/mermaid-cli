@@ -452,6 +452,13 @@ impl GeminiAdapter {
             // non-gemini id) — omit thinkingConfig entirely; sending it 400s.
             _ => {},
         }
+        // `--output-schema` formatting turn: native constrained output.
+        // The reducer guarantees no tools ride this request (Gemini errors
+        // when function calling is combined with a response schema).
+        if let Some(schema) = &config.output_schema {
+            gen_config["responseMimeType"] = json!("application/json");
+            gen_config["responseJsonSchema"] = schema.clone();
+        }
         body["generationConfig"] = gen_config;
 
         // Tools come from `config.tools` (OpenAI-compat shape,
@@ -1442,6 +1449,29 @@ mod tests {
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[0]["parts"][0]["text"], "hi");
         assert!(body["generationConfig"].is_object());
+    }
+
+    #[test]
+    fn build_request_body_maps_output_schema_to_response_json_schema() {
+        let adapter = test_adapter();
+        let messages = vec![ChatMessage::user("format it")];
+        let config = ModelConfig {
+            output_schema: Some(serde_json::json!({"type": "object"})),
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&messages, &config);
+        assert_eq!(
+            body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(
+            body["generationConfig"]["responseJsonSchema"]["type"],
+            "object"
+        );
+        // Absent -> neither field.
+        let body = adapter.build_request_body(&messages, &ModelConfig::default());
+        assert!(body["generationConfig"].get("responseMimeType").is_none());
+        assert!(body["generationConfig"].get("responseJsonSchema").is_none());
     }
 
     #[test]

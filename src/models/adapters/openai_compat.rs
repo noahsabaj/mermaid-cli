@@ -388,6 +388,22 @@ impl OpenAICompatAdapter {
             }
         }
 
+        // `--output-schema` formatting turn: native structured output.
+        // `strict: false` — strict mode rejects many hand-written schemas
+        // (every object needs additionalProperties: false etc.); client-side
+        // validation is the real gate. Some compat providers 400 on
+        // response_format entirely; that surfaces as a run error, documented.
+        if let Some(schema) = &config.output_schema {
+            body["response_format"] = json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "output",
+                    "strict": false,
+                    "schema": schema,
+                }
+            });
+        }
+
         body
     }
 
@@ -1950,6 +1966,30 @@ mod tests {
         assert!(body["messages"].is_array());
         // Default reasoning is Medium → Effort strategy emits the field.
         assert_eq!(body["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn build_request_body_maps_output_schema_to_response_format() {
+        let adapter = test_adapter();
+        let messages = vec![ChatMessage::user("format it")];
+        let config = ModelConfig {
+            output_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"answer": {"type": "integer"}}
+            })),
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&messages, &config, false);
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["response_format"]["json_schema"]["name"], "output");
+        assert_eq!(body["response_format"]["json_schema"]["strict"], false);
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"]["type"],
+            "object"
+        );
+        // Absent -> no response_format at all.
+        let body = adapter.build_request_body(&messages, &ModelConfig::default(), false);
+        assert!(body.get("response_format").is_none());
     }
 
     #[test]
