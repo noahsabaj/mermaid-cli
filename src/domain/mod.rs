@@ -17,6 +17,7 @@ pub mod file_mention;
 pub mod ids;
 pub mod image_token;
 pub mod msg;
+pub mod plan;
 pub mod question;
 pub mod reducer;
 pub mod run_event;

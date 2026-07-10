@@ -5089,6 +5089,12 @@ fn handle_tool_finished(
         _ => None,
     };
 
+    // Plan-tool transitions happen at this boundary — after the outcome slots
+    // are filled, before the follow-up model call is built — so the next
+    // request's system prompt, tool list, and dispatch flooring all see the
+    // new plan state, and an approval's queued kickoff rides the drain below.
+    plan_tool_transition(state, cmds, call_id, &outcome);
+
     if let Some(completed_outcomes) = completed
         && let TurnState::ExecutingTools { id, calls, .. } =
             std::mem::replace(&mut state.turn, TurnState::Idle)
@@ -5236,7 +5242,17 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // see `domain::tool_search`. The effect runner prepends built-in tools
     // before dispatching, so this vector is the MCP-only portion. Ordering
     // is byte-stable across runs for prompt-cache warmth (#F68).
-    let mcp_tools = super::tool_search::mcp_tool_definitions(state);
+    let mut mcp_tools = super::tool_search::mcp_tool_definitions(state);
+    // Plan-mode tools are registered `is_internal` (never in the effect
+    // layer's `describe_all`), so which one the model sees is decided HERE,
+    // where the plan state lives: `exit_plan_mode` only while planning,
+    // `enter_plan_mode` only while not (and never for subagents — children
+    // explore, they don't plan).
+    if state.session.plan.is_some() {
+        mcp_tools.push(super::plan::exit_plan_mode_definition());
+    } else if !state.session.is_subagent {
+        mcp_tools.push(super::plan::enter_plan_mode_definition());
+    }
 
     // Run-summary lines ("Worked for …") are display-only UI — never send them
     // to the model. Then repair tool_use/tool_result pairing as the FINAL pass
@@ -5602,15 +5618,40 @@ fn plan_path_display(state: &State, path: &std::path::Path) -> String {
         .to_string()
 }
 
-/// Enter plan mode: allocate the plan file path and flip `session.plan`.
+/// The pure state flip of entering plan mode: allocate the plan file path,
+/// set `session.plan`, retract stale nudges, persist. Shared by the
+/// interactive entry (Alt+P / `/plan`) and the `enter_plan_mode` tool — the
+/// tool path runs mid-batch, where appending a system message would
+/// interleave between an assistant `tool_use` and its tool results, so THIS
+/// helper never touches the message log. Returns the allocated path; `None`
+/// when already planning or a subagent.
+///
 /// `session.safety_mode` is deliberately untouched — it is the restore target
 /// (shown as "restores: <mode>"); tool dispatch floors the effective mode
 /// while `session.plan` is `Some`.
-fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
+fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::path::PathBuf> {
     // Children explore, they don't plan (and have no user to approve).
-    if state.session.is_subagent {
-        return;
+    if state.session.is_subagent || state.session.plan.is_some() {
+        return None;
     }
+    let plan_path = plan_path_for(state);
+    state.session.plan = Some(super::state::PlanState {
+        plan_path: plan_path.clone(),
+    });
+    // Retract any pending mode-change nudge: "re-attempt gated actions" would
+    // steer the model wrong now that the read-only floor applies.
+    state.session.conversation.messages.retain(|m| {
+        m.kind != crate::models::ChatMessageKind::RecoveryNudge
+            || (!m.content.starts_with(SAFETY_NUDGE_PREFIX)
+                && !m.content.starts_with(PLAN_NUDGE_PREFIX))
+    });
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    Some(plan_path)
+}
+
+/// Interactive plan-mode entry (Alt+P / `/plan`): the state flip plus the
+/// transcript announcement.
+fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     if let Some(plan) = &state.session.plan {
         let path = plan_path_display(state, &plan.plan_path.clone());
         push_system(
@@ -5620,22 +5661,14 @@ fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
         );
         return;
     }
-    let plan_path = plan_path_for(state);
-    let display = plan_path_display(state, &plan_path);
-    state.session.plan = Some(super::state::PlanState { plan_path });
-    // Retract any pending mode-change nudge: "re-attempt gated actions" would
-    // steer the model wrong now that the read-only floor applies.
-    state.session.conversation.messages.retain(|m| {
-        m.kind != crate::models::ChatMessageKind::RecoveryNudge
-            || (!m.content.starts_with(SAFETY_NUDGE_PREFIX)
-                && !m.content.starts_with(PLAN_NUDGE_PREFIX))
-    });
-    push_system(
-        state,
-        cmds,
-        format!("Planning: {display} — plan mode on (Alt+P to toggle)"),
-    );
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    if let Some(plan_path) = enter_plan_mode_state(state, cmds) {
+        let display = plan_path_display(state, &plan_path);
+        push_system(
+            state,
+            cmds,
+            format!("Planning: {display} — plan mode on (Alt+P to toggle)"),
+        );
+    }
 }
 
 /// Leave plan mode without an approval flow (Alt+P toggle / `/plan off`).
@@ -5725,6 +5758,114 @@ fn note_plan_mode_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
             ),
             ChatMessageKind::RecoveryNudge,
         );
+    }
+}
+
+/// Plan-tool post-processing at the tool boundary (`handle_tool_finished`):
+/// flip the plan state so everything the follow-up model call derives —
+/// system prompt, tool advertisement, dispatch flooring — sees the new mode.
+/// Message-log appends are deliberately avoided here (a system message now
+/// would interleave between the assistant `tool_use` and its tool results);
+/// the transcript record is the rendered `ToolMetadata::Plan` block, and the
+/// per-request denial neutralizer handles history hygiene.
+fn plan_tool_transition(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    call_id: super::ids::ToolCallId,
+    outcome: &ToolOutcome,
+) {
+    use super::plan::{ENTER_PLAN_MODE_TOOL, EXIT_PLAN_MODE_TOOL};
+    let tool_name = match &state.turn {
+        TurnState::ExecutingTools { calls, .. } => calls
+            .iter()
+            .find(|c| c.call_id == call_id)
+            .map(|c| c.source.function.name.clone()),
+        _ => None,
+    };
+    match tool_name.as_deref() {
+        Some(name)
+            if name == ENTER_PLAN_MODE_TOOL
+                && outcome.status == crate::domain::ToolStatus::Success =>
+        {
+            enter_plan_mode_state(state, cmds);
+        },
+        Some(name) if name == EXIT_PLAN_MODE_TOOL => {
+            if let crate::domain::ToolMetadata::Plan { body, start, .. } = &outcome.metadata.detail
+            {
+                let (body, start) = (body.clone(), *start);
+                finish_plan_mode(state, cmds, &body, start);
+            }
+        },
+        _ => {},
+    }
+}
+
+/// The user approved the plan (`exit_plan_mode` returned `ToolMetadata::
+/// Plan`): leave plan mode, seed the checklist from the plan's Tasks section,
+/// and optionally queue the implementation kickoff.
+fn finish_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>, body: &str, start: bool) {
+    if state.session.plan.take().is_none() {
+        // Stale or duplicate approval — nothing to transition.
+        return;
+    }
+    // Retract any pending plan nudge; the per-request neutralizer rewrites
+    // the denials themselves, and the tool result already tells the model
+    // plan mode is off — no extra message here (see `plan_tool_transition`).
+    state.session.conversation.messages.retain(|m| {
+        m.kind != crate::models::ChatMessageKind::RecoveryNudge
+            || !m.content.starts_with(PLAN_NUDGE_PREFIX)
+    });
+    // Seed the checklist. Re-plan reconcile: completed items survive (their
+    // subjects aren't re-seeded), everything still open is replaced by the
+    // new plan's steps. `Stamp::default()` keeps it replay-deterministic;
+    // the wholesale `SyncTaskStore` mirrors the fork/clear reset path (the
+    // broker's `seed` doesn't publish — the reducer already holds the truth).
+    let specs = super::plan::parse_plan_tasks(body);
+    if !specs.is_empty() {
+        use super::tasks::{Stamp, TaskEdit, TaskOrigin, TaskStatus};
+        let mut store = state.session.conversation.tasks.clone();
+        let completed: std::collections::HashSet<String> = store
+            .visible()
+            .filter(|t| t.status == TaskStatus::Completed)
+            .map(|t| t.subject.trim().to_ascii_lowercase())
+            .collect();
+        let stale: Vec<TaskEdit> = store
+            .visible()
+            .filter(|t| t.status != TaskStatus::Completed)
+            .map(|t| TaskEdit {
+                id: t.id,
+                status: Some(TaskStatus::Deleted),
+                subject: None,
+                active_form: None,
+                description: None,
+            })
+            .collect();
+        if !stale.is_empty() {
+            store.apply(&stale, Stamp::default());
+        }
+        let fresh: Vec<_> = specs
+            .into_iter()
+            .filter(|s| !completed.contains(&s.subject.trim().to_ascii_lowercase()))
+            .collect();
+        if !fresh.is_empty() {
+            store.create(fresh, TaskOrigin::Model, Stamp::default());
+        }
+        state.session.conversation.tasks = store.clone();
+        cmds.push(Cmd::SyncTaskStore(store));
+    }
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    if start {
+        // Auto-submit implementation through the queued-message path (the
+        // background-report precedent): the tool-boundary drain in
+        // `handle_tool_finished` commits it before the follow-up model call,
+        // so approval flows straight into implementation in one turn.
+        state
+            .ui
+            .queued_messages
+            .push_back(super::state::QueuedMessage {
+                text: "Implement the plan.".to_string(),
+                attachment_ids: vec![],
+            });
     }
 }
 
@@ -10794,7 +10935,14 @@ mod tests {
             );
         }
         let request = build_chat_request(&state);
-        let names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
+        // Scope to the MCP portion: the reducer also appends the mode-scoped
+        // plan tool (enter/exit_plan_mode) after the MCP block.
+        let names: Vec<&str> = request
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .filter(|n| n.starts_with("mcp__"))
+            .collect();
         assert_eq!(
             names,
             vec![
@@ -10865,7 +11013,14 @@ mod tests {
                 _ => None,
             })
             .expect("interception completes the batch and fires the follow-up");
-        let names: Vec<&str> = follow_up.tools.iter().map(|t| t.name.as_str()).collect();
+        // Scope to the MCP portion: the reducer also appends the mode-scoped
+        // plan tool after the MCP block.
+        let names: Vec<&str> = follow_up
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .filter(|n| n.starts_with("mcp__") || *n == "tool_search")
+            .collect();
         assert_eq!(
             names,
             vec!["mcp__srv__alpha"],
@@ -11316,6 +11471,206 @@ mod tests {
             prompt.contains("Safety mode: plan"),
             "the session block must not invite gated actions while planning"
         );
+    }
+
+    #[test]
+    fn build_chat_request_advertises_the_right_plan_tool() {
+        let mut state = fresh_state();
+        let names = |state: &State| -> Vec<String> {
+            build_chat_request(state)
+                .tools
+                .iter()
+                .map(|t| t.name.clone())
+                .collect()
+        };
+        // Not planning: enter_plan_mode only.
+        let n = names(&state);
+        assert!(n.contains(&"enter_plan_mode".to_string()));
+        assert!(!n.contains(&"exit_plan_mode".to_string()));
+        // Planning: exit_plan_mode only.
+        state.session.plan = Some(crate::domain::PlanState {
+            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+        });
+        let n = names(&state);
+        assert!(n.contains(&"exit_plan_mode".to_string()));
+        assert!(!n.contains(&"enter_plan_mode".to_string()));
+        // Subagents get neither.
+        state.session.plan = None;
+        state.session.is_subagent = true;
+        let n = names(&state);
+        assert!(!n.contains(&"enter_plan_mode".to_string()));
+        assert!(!n.contains(&"exit_plan_mode".to_string()));
+    }
+
+    /// Drive a single named tool call through StreamDone so the turn lands in
+    /// `ExecutingTools`, returning the allocated call id.
+    fn drive_single_tool_call(state: &mut State, tool: &str) -> crate::domain::ToolCallId {
+        state.turn = TurnState::Generating {
+            id: TurnId(9),
+            started: std::time::SystemTime::now(),
+            partial_text: String::new(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: vec![crate::models::ToolCall {
+                id: Some("call_p".to_string()),
+                function: crate::models::FunctionCall {
+                    name: tool.to_string(),
+                    arguments: serde_json::json!({}),
+                },
+            }],
+            continuation: false,
+        };
+        let (next, cmds) = update(
+            std::mem::replace(state, fresh_state()),
+            Msg::StreamDone {
+                turn: TurnId(9),
+                usage: None,
+                provider_continuation: None,
+                stop_reason: None,
+            },
+        );
+        *state = next;
+        cmds.iter()
+            .find_map(|c| match c {
+                Cmd::ExecuteTool { call_id, .. } => Some(*call_id),
+                _ => None,
+            })
+            .expect("tool dispatched")
+    }
+
+    #[test]
+    fn exit_plan_mode_approval_transitions_out_and_seeds_the_checklist() {
+        let mut state = state_with_two_exchanges();
+        state.session.plan = Some(crate::domain::PlanState {
+            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+        });
+        let call_id = drive_single_tool_call(&mut state, "exit_plan_mode");
+
+        let body = "## Summary\nS\n\n## Tasks\n1. Add the flag\n2. Wire the broker\n";
+        let outcome = ToolOutcome::success("The user approved the plan.", "plan approved", 0.1)
+            .with_metadata(crate::domain::ToolRunMetadata {
+                detail: crate::domain::ToolMetadata::Plan {
+                    path: ".mermaid/plans/x.md".to_string(),
+                    body: body.to_string(),
+                    start: true,
+                },
+                ..Default::default()
+            });
+        let (state, cmds) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(9),
+                call_id,
+                outcome,
+            },
+        );
+
+        assert!(state.session.plan.is_none(), "approval leaves plan mode");
+        let subjects: Vec<String> = state
+            .session
+            .conversation
+            .tasks
+            .visible()
+            .map(|t| t.subject.clone())
+            .collect();
+        assert_eq!(subjects, ["Add the flag", "Wire the broker"]);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SyncTaskStore(store) if store.visible().count() == 2)),
+            "the effect-side broker must be synced with the seeded store"
+        );
+        // start=true: the kickoff was committed as a user message at the tool
+        // boundary and the follow-up model call fired.
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.role == MessageRole::User && m.content == "Implement the plan."),
+            "auto-submit rides the queued-message drain"
+        );
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
+    }
+
+    #[test]
+    fn replan_reconcile_preserves_completed_tasks() {
+        use crate::domain::tasks::{Stamp, TaskEdit, TaskOrigin, TaskSpec, TaskStatus};
+        let mut state = fresh_state();
+        state.session.plan = Some(crate::domain::PlanState {
+            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+        });
+        // Prior round: one completed, one still open.
+        let mut store = crate::domain::tasks::TaskStore::default();
+        let ids = store.create(
+            vec![
+                TaskSpec {
+                    subject: "Add the flag".into(),
+                    active_form: "Add the flag".into(),
+                    description: None,
+                    in_progress: false,
+                },
+                TaskSpec {
+                    subject: "Old open step".into(),
+                    active_form: "Old open step".into(),
+                    description: None,
+                    in_progress: false,
+                },
+            ],
+            TaskOrigin::Model,
+            Stamp::default(),
+        );
+        store.apply(
+            &[TaskEdit {
+                id: ids[0],
+                status: Some(TaskStatus::Completed),
+                subject: None,
+                active_form: None,
+                description: None,
+            }],
+            Stamp::default(),
+        );
+        state.session.conversation.tasks = store;
+
+        let mut cmds = Vec::new();
+        let body = "## Tasks\n1. Add the flag\n2. New step\n";
+        finish_plan_mode(&mut state, &mut cmds, body, false);
+
+        let visible: Vec<(String, crate::domain::tasks::TaskStatus)> = state
+            .session
+            .conversation
+            .tasks
+            .visible()
+            .map(|t| (t.subject.clone(), t.status))
+            .collect();
+        // Completed survives, is not duplicated; the open step is replaced.
+        assert_eq!(
+            visible,
+            [
+                ("Add the flag".to_string(), TaskStatus::Completed),
+                ("New step".to_string(), TaskStatus::Pending),
+            ]
+        );
+        // start=false: nothing queued.
+        assert!(state.ui.queued_messages.is_empty());
+    }
+
+    #[test]
+    fn enter_plan_mode_tool_success_flips_the_session_into_planning() {
+        let mut state = state_with_two_exchanges();
+        let call_id = drive_single_tool_call(&mut state, "enter_plan_mode");
+        assert!(state.session.plan.is_none(), "not planning during the call");
+        let (state, _) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(9),
+                call_id,
+                outcome: ToolOutcome::success("Plan mode is on", "plan mode on", 0.0),
+            },
+        );
+        let plan = state.session.plan.expect("tool success enters plan mode");
+        assert!(plan.plan_path.starts_with("/tmp/project/.mermaid/plans"));
     }
 
     #[test]

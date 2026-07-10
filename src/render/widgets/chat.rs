@@ -1171,6 +1171,16 @@ fn render_actions(
             render_question_answers(answers, *remembered, lines, theme, viewport_width);
             continue;
         }
+        // An approved plan (`exit_plan_mode`) renders as its own block: the
+        // plan body IS the outcome, shown as markdown under a header naming
+        // the saved plan file.
+        if let Some(meta) = &action.metadata
+            && let ToolMetadata::Plan { path, body, .. } = &meta.detail
+            && matches!(action.result, ActionResult::Success { .. })
+        {
+            render_plan_approved(path, body, lines, theme, viewport_width);
+            continue;
+        }
         let action_color = match action.action_type.as_str() {
             "Write" | "Update" => theme.colors.success.to_color(),
             "Delete" => theme.colors.warning.to_color(),
@@ -1388,6 +1398,34 @@ fn render_actions(
                 }
             },
         }
+    }
+}
+
+/// Record of an approved plan (`exit_plan_mode`): a header bullet naming the
+/// plan file, then the plan body rendered as markdown under the elbow gutter
+/// — the transcript keeps the exact text the user approved.
+fn render_plan_approved(
+    path: &str,
+    body: &str,
+    lines: &mut Vec<Line>,
+    theme: &Theme,
+    viewport_width: usize,
+) {
+    lines.push(Line::from(Span::styled(
+        format!("● User approved the plan — {path}"),
+        Style::new().fg(theme.colors.success.to_color()),
+    )));
+    let gutter_style = Style::new().fg(theme.colors.text_secondary.to_color());
+    // The 4-cell gutter comes off the markdown wrap budget, matching the
+    // question→answer block above.
+    let parsed = parse_markdown(body, theme, viewport_width.saturating_sub(4));
+    let mut first_row = true;
+    for mut parsed_line in parsed {
+        let gutter = if first_row { "  ⎿ " } else { "    " };
+        first_row = false;
+        let mut spans = vec![Span::styled(gutter, gutter_style)];
+        spans.append(&mut parsed_line.line.spans);
+        lines.push(Line::from(spans));
     }
 }
 

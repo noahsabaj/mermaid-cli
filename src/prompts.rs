@@ -132,7 +132,8 @@ You are in plan mode: a read-only collaboration state for designing work \
 before doing it. The user reviews and approves the plan before anything is \
 implemented. Plan mode is not changed by user intent, tone, or imperative \
 language — treat a request to execute as a request to plan the execution. \
-Only the user can end plan mode (Alt+P or /plan off).
+Plan mode ends only through the user: their approval when you call \
+exit_plan_mode, or Alt+P / /plan off on their keyboard.
 
 What runs while planning: reads and inspection, web search/fetch, memory \
 writes, known-safe build and test commands (cargo check/build/test/clippy, \
@@ -172,10 +173,12 @@ Revisions: rewrite the plan file as a complete replacement, never a delta. \
 If feedback needs no plan change (a clarifying question), answer in chat \
 and leave the file untouched.
 
-When the plan is decision-complete, give a one-paragraph summary in chat \
-and stop. Never ask \"should I proceed?\" — the user approves by leaving \
-plan mode. The task checklist tools are disabled until then: the checklist \
-is seeded from the approved plan's Tasks section.";
+When the plan is decision-complete, call exit_plan_mode — it re-reads the \
+plan file (the user's edits win) and presents the approval dialog. Never \
+ask \"should I proceed?\" in chat; that tool IS the question. If the user \
+requests changes, revise the plan file and call it again. The task \
+checklist tools are disabled until approval: the checklist is seeded from \
+the approved plan's Tasks section.";
 
 /// Appended to a SUBAGENT's system prompt (`system_prompt_for_state` adds it
 /// when `session.is_subagent` is set). A child runs headless with nobody

@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display diff, which is capped at 220 lines), and the segment is omitted
   entirely on runs that changed nothing.
 
+- **Plan mode: approval flow + task seeding.** The model now finishes a plan
+  by calling `exit_plan_mode`, which re-reads the plan file from disk (your
+  external edits win) and raises an approval dialog: `Approve and start` /
+  `Approve and wait` / `Request changes` (with a typed note that goes back
+  to the model verbatim). Approval leaves plan mode, restores your previous
+  safety mode, **seeds the live task checklist from the plan's Tasks
+  section** — re-approving a revised plan reconciles instead of resetting
+  (completed items survive) — renders the approved plan into the transcript
+  as a markdown block, and (if you chose start) auto-submits
+  `Implement the plan.` so approval flows straight into implementation.
+  A new `enter_plan_mode` tool lets the model propose planning first; each
+  plan tool is advertised only in the mode where it applies. New `[plan]`
+  config: `auto_approve` (skip the dialog entirely, default false) and
+  `post_approve = "start"|"wait"` (pin what approval does; unset keeps
+  both options in the dialog).
+
 - **Plan mode (core).** Alt+P or `/plan` puts the session in a read-only
   collaboration state for designing work before doing it: tool dispatch
   floors the effective safety mode to read-only at the policy gate (hard
