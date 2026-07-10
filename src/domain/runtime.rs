@@ -158,6 +158,15 @@ pub struct ToolRunMetadata {
     pub display_diff: Option<String>,
     #[serde(default)]
     pub diff_truncated: bool,
+    /// Exact line-change counts for file mutations. Carried separately from
+    /// `display_diff` because that string is capped at
+    /// `MAX_DISPLAY_DIFF_LINES` — recounting it would undercount large
+    /// writes. `handle_tool_finished` folds these into the per-run totals
+    /// behind the end-of-run `+N/-M` summary.
+    #[serde(default)]
+    pub lines_added: usize,
+    #[serde(default)]
+    pub lines_removed: usize,
     #[serde(default)]
     pub artifacts: Vec<ToolArtifact>,
     /// Provider token usage the tool itself consumed (today: a subagent's
@@ -405,6 +414,12 @@ pub struct RuntimeState {
     /// time.
     #[serde(skip)]
     pub run_tokens: RunTokenCounter,
+    /// Lines added/removed by file-mutating tools (write_file, apply_patch)
+    /// across the whole run, summed from each outcome's exact metadata counts
+    /// so the end-of-run summary can show `+N/-M` without the user totting up
+    /// per-call diffs. Reset on submit alongside `run_tokens`. Session-only.
+    #[serde(skip)]
+    pub run_line_changes: RunLineChanges,
     /// Consecutive auto-compact-and-continue recoveries in the current run after a
     /// context-window truncation. Bounded by `settings.compaction.max_truncation_recoveries`
     /// (0 = uncapped) and reset whenever the run makes progress, so it caps only
@@ -448,6 +463,24 @@ impl RunTokenCounter {
     }
 }
 
+/// Lines added/removed by file mutations in the current run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunLineChanges {
+    pub added: usize,
+    pub removed: usize,
+}
+
+impl RunLineChanges {
+    pub fn add(&mut self, added: usize, removed: usize) {
+        self.added = self.added.saturating_add(added);
+        self.removed = self.removed.saturating_add(removed);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.added == 0 && self.removed == 0
+    }
+}
+
 impl RuntimeState {
     pub fn new(model_id: &str) -> Self {
         Self {
@@ -465,6 +498,7 @@ impl RuntimeState {
             ollama_converged_num_ctx: std::collections::HashMap::new(),
             run_started: None,
             run_tokens: RunTokenCounter::default(),
+            run_line_changes: RunLineChanges::default(),
             truncation_recoveries: 0,
             empty_continuations: 0,
             continue_recoveries: 0,

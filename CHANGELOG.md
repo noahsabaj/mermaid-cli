@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Run summary shows total line changes.** The end-of-run
+  `Worked for … · used … tokens` line now appends ` · +N/-M` — the exact
+  lines added and removed across every file mutation in the run
+  (`write_file`, `apply_patch`), so you don't have to sum each tool call's
+  diff by hand. Counts come from the tools' exact diff metadata (not the
+  display diff, which is capped at 220 lines), and the segment is omitted
+  entirely on runs that changed nothing.
+
 - **Native structured output on Anthropic.** `mermaid run --output-schema`
   now sends the schema as `output_config.format` (JSON Schema) on the
   Anthropic formatting turn, matching the native enforcement already used

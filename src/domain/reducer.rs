@@ -2562,6 +2562,7 @@ fn handle_submit_prompt(
     // counters track this run start so they don't reset at every step.
     state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
     state.runtime.run_tokens = super::runtime::RunTokenCounter::default();
+    state.runtime.run_line_changes = super::runtime::RunLineChanges::default();
     // Fresh run — clear the truncation-recovery, empty-turn, and output-cap
     // continuation guards from any prior run so this intent gets a full retry
     // budget. (A run that *ended* at the continuation cap never hits the
@@ -4707,7 +4708,7 @@ fn handle_stream_done(
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let run_tokens = state.runtime.run_tokens;
-        let summary = format!(
+        let mut summary = format!(
             "Worked for {} · used {}{} tokens",
             super::transition::format_run_duration(elapsed),
             if run_tokens.contains_estimate {
@@ -4717,6 +4718,13 @@ fn handle_stream_done(
             },
             format_compact_count(run_tokens.output_tokens),
         );
+        // Total line changes across the run's file mutations, so the user
+        // doesn't have to sum each tool call's diff by hand. Omitted when the
+        // run changed nothing — a read-only run stays a two-part summary.
+        let changes = state.runtime.run_line_changes;
+        if !changes.is_empty() {
+            summary.push_str(&format!(" · +{}/-{}", changes.added, changes.removed));
+        }
         state
             .session
             .append(ChatMessage::run_summary(summary), state.now);
@@ -5003,6 +5011,12 @@ fn handle_tool_finished(
                     UsageFold::Subagent,
                 );
             }
+            // Fold this mutation's exact line counts into the run totals for
+            // the end-of-run `+N/-M` summary (zero for non-mutating tools).
+            state
+                .runtime
+                .run_line_changes
+                .add(outcome.metadata.lines_added, outcome.metadata.lines_removed);
             // Attach action display to the last assistant message so
             // the renderer can show it.
             if let Some(call) = calls.iter().find(|c| c.call_id == call_id) {
@@ -7637,6 +7651,118 @@ mod tests {
             "a usage-less final phase falls back to a chars/4 estimate and \
              must mark the total `~`, got {:?}",
             summary.content
+        );
+    }
+
+    #[test]
+    fn run_summary_shows_line_change_totals() {
+        let mut state = fresh_state();
+        state.runtime.run_started =
+            Some(std::time::SystemTime::from(state.now) - std::time::Duration::from_secs(10));
+        state.runtime.run_line_changes.add(4, 4);
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: "final answer".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: Vec::new(),
+            continuation: false,
+        };
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                provider_continuation: None,
+                stop_reason: None,
+            },
+        );
+        let summary = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .expect("a run summary should be appended at run end");
+        assert!(
+            summary.content.contains("· +4/-4"),
+            "a run that mutated files totals its line changes, got {:?}",
+            summary.content
+        );
+    }
+
+    #[test]
+    fn run_summary_omits_line_changes_when_nothing_changed() {
+        let mut state = fresh_state();
+        state.runtime.run_started =
+            Some(std::time::SystemTime::from(state.now) - std::time::Duration::from_secs(10));
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: "final answer".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: Vec::new(),
+            continuation: false,
+        };
+        let (state, _) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                provider_continuation: None,
+                stop_reason: None,
+            },
+        );
+        let summary = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .expect("a run summary should be appended at run end");
+        assert!(
+            !summary.content.contains('+'),
+            "a read-only run keeps the two-part summary, got {:?}",
+            summary.content
+        );
+    }
+
+    #[test]
+    fn tool_finished_folds_line_changes_into_run_totals() {
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::assistant("editing a file"), state.now);
+        state.turn = super::super::transition::start_executing_tools(
+            TurnId(1),
+            vec![pending_read_file_call()],
+            std::time::SystemTime::now(),
+        );
+        let outcome = ToolOutcome::success("Wrote foo.rs (3 lines)", "3 lines written", 0.1)
+            .with_metadata(crate::domain::runtime::ToolRunMetadata {
+                lines_added: 3,
+                lines_removed: 1,
+                ..Default::default()
+            });
+        let (state, _) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(1),
+                call_id: crate::domain::ToolCallId(1),
+                outcome,
+            },
+        );
+        assert_eq!(
+            state.runtime.run_line_changes,
+            crate::domain::runtime::RunLineChanges {
+                added: 3,
+                removed: 1
+            },
+            "exact metadata counts accumulate across the run"
         );
     }
 
