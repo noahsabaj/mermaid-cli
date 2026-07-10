@@ -70,10 +70,8 @@ impl StreamAccumulator {
     /// rather than a zero `TokenUsage` keeps the reducer's context gauge from
     /// being reset to zero (F54, mirrors gemini's `saw_usage` guard / #125).
     fn usage(&self) -> Option<TokenUsage> {
-        self.saw_usage.then(|| {
-            let total = self.prompt_tokens.saturating_add(self.completion_tokens);
-            TokenUsage::provider(self.prompt_tokens, self.completion_tokens, total)
-        })
+        self.saw_usage
+            .then(|| TokenUsage::provider(self.prompt_tokens, self.completion_tokens))
     }
 
     /// F56: whether the stream closed abnormally — it ended before Ollama's
@@ -837,11 +835,7 @@ impl OllamaAdapter {
 
         Ok(ModelResponse {
             content: json.message.content,
-            usage: Some(TokenUsage::provider(
-                prompt_tokens,
-                completion_tokens,
-                prompt_tokens.saturating_add(completion_tokens),
-            )),
+            usage: Some(TokenUsage::provider(prompt_tokens, completion_tokens)),
             model_name: self.model_name.clone(),
             stop_reason: json.done_reason.as_deref().map(map_ollama_done_reason),
             thinking,
@@ -1697,7 +1691,7 @@ mod tests {
             .expect("usage present after a done chunk with counts");
         assert_eq!(usage.prompt_tokens, 120);
         assert_eq!(usage.completion_tokens, 8);
-        assert_eq!(usage.total_tokens, 128);
+        assert_eq!(usage.total_tokens(), 128);
     }
 
     #[test]

@@ -637,19 +637,9 @@ impl GeminiAdapter {
         let prompt_tokens = raw_prompt_tokens.saturating_sub(cached_tokens);
         let completion_tokens = json.usage_metadata.candidates_token_count.unwrap_or(0);
         let reasoning_tokens = json.usage_metadata.thoughts_token_count.unwrap_or(0);
-        let usage = TokenUsage::provider(
-            prompt_tokens,
-            completion_tokens,
-            json.usage_metadata.total_token_count.unwrap_or_else(|| {
-                // The total uses the FULL prompt (incl. cached), not the de-duped
-                // breakdown component.
-                raw_prompt_tokens
-                    .saturating_add(completion_tokens)
-                    .saturating_add(reasoning_tokens)
-            }),
-        )
-        .with_cached_input(cached_tokens)
-        .with_reasoning_output(reasoning_tokens);
+        let usage = TokenUsage::provider(prompt_tokens, completion_tokens)
+            .with_cached_input(cached_tokens)
+            .with_reasoning_output(reasoning_tokens);
 
         Ok(ModelResponse {
             content: text_acc,
@@ -726,18 +716,10 @@ impl GeminiAdapter {
             ));
         }
 
-        let total_tokens = if state.total_tokens > 0 {
-            state.total_tokens
-        } else {
-            state
-                .prompt_tokens
-                .saturating_add(state.completion_tokens)
-                .saturating_add(state.reasoning_output_tokens)
-        };
         // F3: wrapper emits the authoritative `Done`. See
         // adapters/anthropic.rs for rationale.
 
-        let usage = state.usage(total_tokens);
+        let usage = state.usage();
 
         Ok(ModelResponse {
             content: state.text_acc,
@@ -772,7 +754,6 @@ struct StreamState {
     completion_tokens: usize,
     cached_input_tokens: usize,
     reasoning_output_tokens: usize,
-    total_tokens: usize,
     /// Set once a `usageMetadata` block is seen, so a stream that never reports
     /// usage returns `None` instead of a misleading zero (#125).
     saw_usage: bool,
@@ -784,10 +765,10 @@ impl StreamState {
     /// so the reducer keeps its estimate rather than resetting to zero. The
     /// fresh-prompt component subtracts cached, which Gemini folds into
     /// `promptTokenCount`, so the input breakdown isn't double-counted (#137).
-    fn usage(&self, total_tokens: usize) -> Option<TokenUsage> {
+    fn usage(&self) -> Option<TokenUsage> {
         self.saw_usage.then(|| {
             let fresh_prompt = self.prompt_tokens.saturating_sub(self.cached_input_tokens);
-            TokenUsage::provider(fresh_prompt, self.completion_tokens, total_tokens)
+            TokenUsage::provider(fresh_prompt, self.completion_tokens)
                 .with_cached_input(self.cached_input_tokens)
                 .with_reasoning_output(self.reasoning_output_tokens)
         })
@@ -851,9 +832,6 @@ fn process_chunk_payload(
         }
         if let Some(c) = usage.get("candidatesTokenCount").and_then(|v| v.as_u64()) {
             state.completion_tokens = c as usize;
-        }
-        if let Some(t) = usage.get("totalTokenCount").and_then(|v| v.as_u64()) {
-            state.total_tokens = t as usize;
         }
         if let Some(cached) = usage
             .get("cachedContentTokenCount")
@@ -1095,8 +1073,6 @@ struct UsageMetadata {
     cached_content_token_count: Option<usize>,
     #[serde(default, rename = "thoughtsTokenCount")]
     thoughts_token_count: Option<usize>,
-    #[serde(default, rename = "totalTokenCount")]
-    total_token_count: Option<usize>,
 }
 
 /// Translate a non-success HTTP response into a structured `ModelError`.
@@ -1841,7 +1817,7 @@ mod tests {
         assert_eq!(state.text_acc, "Hello, world!");
         assert_eq!(state.prompt_tokens, 5);
         assert_eq!(state.completion_tokens, 3);
-        assert_eq!(state.total_tokens, 8);
+        assert_eq!(state.usage().expect("usage present").total_tokens(), 8);
 
         let evts = events.lock().unwrap();
         assert_eq!(count_text(&evts), 2);
@@ -1859,7 +1835,7 @@ mod tests {
             json!({ "candidates": [{ "content": {"parts": [{"text": "hi"}]} }] }).to_string();
         process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
         assert!(!state.saw_usage);
-        assert!(state.usage(0).is_none());
+        assert!(state.usage().is_none());
     }
 
     #[test]
@@ -1880,7 +1856,7 @@ mod tests {
         .to_string();
         process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
         assert!(state.saw_usage);
-        let usage = state.usage(1050).expect("usage present");
+        let usage = state.usage().expect("usage present");
         assert_eq!(
             usage.input_total_tokens(),
             1000,

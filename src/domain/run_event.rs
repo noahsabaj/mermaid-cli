@@ -166,7 +166,7 @@ impl RunEvent {
             Msg::StreamDone {
                 usage, stop_reason, ..
             } => RunEvent::TurnDone {
-                total_tokens: usage.as_ref().map(|u| u.total_tokens as u64),
+                total_tokens: usage.as_ref().map(|u| u.total_tokens() as u64),
                 stop_reason: stop_reason.as_ref().map(finish_reason_str),
             },
             _ => return None,
@@ -369,7 +369,7 @@ mod tests {
 
         let done = Msg::StreamDone {
             turn: TurnId(1),
-            usage: Some(TokenUsage::provider(10, 20, 30)),
+            usage: Some(TokenUsage::provider(10, 20)),
             provider_continuation: None,
             stop_reason: Some(FinishReason::Stop),
         };

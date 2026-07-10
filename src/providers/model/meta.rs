@@ -479,11 +479,6 @@ fn meta_item_is_replayable(item: &Value) -> bool {
 fn meta_usage(value: &Value) -> TokenUsage {
     let input = usize_field(value, "input_tokens");
     let output = usize_field(value, "output_tokens");
-    let total = value
-        .get("total_tokens")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or_else(|| input.saturating_add(output));
     let cached = value
         .get("input_tokens_details")
         .map(|details| usize_field(details, "cached_tokens"))
@@ -492,9 +487,15 @@ fn meta_usage(value: &Value) -> TokenUsage {
         .get("output_tokens_details")
         .map(|details| usize_field(details, "reasoning_tokens"))
         .unwrap_or_default();
-    TokenUsage::provider(input, output, total)
-        .with_cached_input(cached)
-        .with_reasoning_output(reasoning)
+    // Responses-API wire counts nest cached inside input_tokens and
+    // reasoning inside output_tokens; carve both out so the shared
+    // TokenUsage components stay disjoint (matches openai_compat).
+    TokenUsage::provider(
+        input.saturating_sub(cached),
+        output.saturating_sub(reasoning),
+    )
+    .with_cached_input(cached)
+    .with_reasoning_output(reasoning)
 }
 
 fn usize_field(value: &Value, key: &str) -> usize {
@@ -703,7 +704,12 @@ mod tests {
             "input_tokens_details": {"cached_tokens": 20},
             "output_tokens_details": {"reasoning_tokens": 15}
         }));
-        assert_eq!(usage.total_tokens, 140);
+        assert_eq!(usage.prompt_tokens, 80, "cached carved out of input");
+        assert_eq!(
+            usage.completion_tokens, 25,
+            "reasoning carved out of output"
+        );
+        assert_eq!(usage.total_tokens(), 140);
         assert_eq!(usage.cached_input_tokens, 20);
         assert_eq!(usage.reasoning_output_tokens, 15);
         assert_eq!(

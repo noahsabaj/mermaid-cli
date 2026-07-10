@@ -3520,7 +3520,7 @@ fn plugins_text(plugins: &[crate::runtime::PluginInstallRecord]) -> String {
 
 fn usage_totals_line(usage: TokenUsageTotals) -> String {
     let mut parts = vec![
-        format!("total {}", format_compact_count(usage.total_tokens)),
+        format!("total {}", format_compact_count(usage.total_tokens())),
         format!("input {}", format_compact_count(usage.input_total_tokens())),
         format!(
             "output {}",
@@ -3776,7 +3776,7 @@ fn handle_compaction_finished(
         state.session.cumulative_tokens = state
             .session
             .cumulative_tokens
-            .saturating_add(usage.total_tokens);
+            .saturating_add(usage.total_tokens());
     }
 
     match outcome {
@@ -3987,7 +3987,7 @@ fn handle_stream_done(
                 state.session.cumulative_tokens = state
                     .session
                     .cumulative_tokens
-                    .saturating_add(u.total_tokens);
+                    .saturating_add(u.total_tokens());
             }
             state.turn = other;
             return;
@@ -4164,7 +4164,7 @@ fn handle_stream_done(
         state.session.cumulative_tokens = state
             .session
             .cumulative_tokens
-            .saturating_add(u.total_tokens);
+            .saturating_add(u.total_tokens());
         let max_context = state
             .session
             .context_usage
@@ -4635,7 +4635,7 @@ fn handle_tool_finished(
                 state.session.cumulative_tokens = state
                     .session
                     .cumulative_tokens
-                    .saturating_add(usage.total_tokens);
+                    .saturating_add(usage.total_tokens());
                 state.runtime.run_committed_tokens += usage
                     .completion_tokens
                     .saturating_add(usage.reasoning_output_tokens);
@@ -7423,11 +7423,7 @@ mod tests {
     fn length_done_with_usage(prompt: usize, completion: usize) -> Msg {
         Msg::StreamDone {
             turn: TurnId(5),
-            usage: Some(crate::models::TokenUsage::provider(
-                prompt,
-                completion,
-                prompt + completion,
-            )),
+            usage: Some(crate::models::TokenUsage::provider(prompt, completion)),
             provider_continuation: None,
             stop_reason: Some(crate::models::FinishReason::Length),
         }
@@ -7495,8 +7491,7 @@ mod tests {
             .session
             .append(ChatMessage::assistant("exploring the code"), state.now);
         state.turn = truncating_turn("here is");
-        let usage =
-            crate::models::TokenUsage::provider(16_600, 4_000, 20_600).with_reasoning_output(3_900);
+        let usage = crate::models::TokenUsage::provider(16_600, 4_000).with_reasoning_output(3_900);
         let (state, cmds) = update(
             state,
             Msg::StreamDone {
@@ -8111,14 +8106,14 @@ mod tests {
             state,
             Msg::StreamDone {
                 turn: TurnId(5),
-                usage: Some(crate::models::TokenUsage::provider(120, 30, 150)),
+                usage: Some(crate::models::TokenUsage::provider(120, 30)),
                 provider_continuation: None,
                 stop_reason: None,
             },
         );
 
         assert_eq!(state.session.last_token_usage.unwrap().prompt_tokens, 120);
-        assert_eq!(state.session.cumulative_token_usage.total_tokens, 150);
+        assert_eq!(state.session.cumulative_token_usage.total_tokens(), 150);
         assert_eq!(state.session.cumulative_tokens, 150);
         assert_eq!(
             state.session.context_usage.as_ref().unwrap().used_tokens,
@@ -8149,7 +8144,7 @@ mod tests {
             state,
             Msg::StreamDone {
                 turn: TurnId(5),
-                usage: Some(crate::models::TokenUsage::provider(100, 0, 100)),
+                usage: Some(crate::models::TokenUsage::provider(100, 0)),
                 provider_continuation: None,
                 stop_reason: None,
             },
@@ -10267,7 +10262,7 @@ mod tests {
             state,
             Msg::StreamDone {
                 turn: TurnId(1),
-                usage: Some(crate::models::TokenUsage::provider(120, 30, 150)),
+                usage: Some(crate::models::TokenUsage::provider(120, 30)),
                 provider_continuation: None,
                 stop_reason: None,
             },
@@ -10802,15 +10797,7 @@ mod tests {
         let before_cum = state.session.cumulative_tokens;
         assert_eq!(state.runtime.run_committed_tokens, 0);
 
-        let usage = crate::models::TokenUsage {
-            prompt_tokens: 1_000,
-            completion_tokens: 250,
-            total_tokens: 1_250,
-            cached_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            reasoning_output_tokens: 50,
-            source: Default::default(),
-        };
+        let usage = crate::models::TokenUsage::provider(1_000, 250).with_reasoning_output(50);
         let metadata = crate::domain::ToolRunMetadata {
             detail: crate::domain::ToolMetadata::Subagent {
                 model_id: "ollama/test".to_string(),
@@ -10829,9 +10816,10 @@ mod tests {
             },
         );
 
-        // Session totals count the child's whole session…
-        assert_eq!(state.session.cumulative_tokens, before_cum + 1_250);
-        assert_eq!(state.session.cumulative_token_usage.total_tokens, 1_250);
+        // Session totals count the child's whole session (reasoning is
+        // disjoint from completion, so 1000 + 250 + 50)…
+        assert_eq!(state.session.cumulative_tokens, before_cum + 1_300);
+        assert_eq!(state.session.cumulative_token_usage.total_tokens(), 1_300);
         assert_eq!(state.session.cumulative_token_usage.completion_tokens, 250);
         // …the run counter banks its generated tokens (completion + reasoning)…
         assert_eq!(state.runtime.run_committed_tokens, 300);

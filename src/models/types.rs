@@ -400,14 +400,21 @@ pub enum TokenUsageSource {
 
 /// Token usage statistics normalized across providers.
 ///
-/// `prompt_tokens`, `completion_tokens`, and `total_tokens` preserve
-/// the old public surface. Extra fields keep cache/reasoning detail so
-/// UI can stop flattening unlike provider concepts into one number.
+/// Component fields are disjoint; totals are derived, never stored:
+/// - `prompt_tokens`: fresh (non-cached) input only. Adapters subtract
+///   cache reads for providers whose wire prompt count includes them.
+/// - `cached_input_tokens` / `cache_creation_input_tokens`: cache read
+///   and write.
+/// - `completion_tokens`: non-reasoning output only. Adapters subtract
+///   reasoning for providers whose wire completion count includes it.
+///   Anthropic reports no separate thinking count, so its thinking
+///   tokens ride inside `completion_tokens` and
+///   `reasoning_output_tokens` stays 0.
+/// - `reasoning_output_tokens`: disjoint from `completion_tokens`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
-    pub total_tokens: usize,
     #[serde(default)]
     pub cached_input_tokens: usize,
     #[serde(default)]
@@ -419,11 +426,10 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
-    pub fn provider(prompt_tokens: usize, completion_tokens: usize, total_tokens: usize) -> Self {
+    pub fn provider(prompt_tokens: usize, completion_tokens: usize) -> Self {
         Self {
             prompt_tokens,
             completion_tokens,
-            total_tokens,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning_output_tokens: 0,
@@ -435,7 +441,6 @@ impl TokenUsage {
         Self {
             prompt_tokens,
             completion_tokens: 0,
-            total_tokens: prompt_tokens,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning_output_tokens: 0,
@@ -467,6 +472,14 @@ impl TokenUsage {
     pub fn output_total_tokens(&self) -> usize {
         self.completion_tokens
             .saturating_add(self.reasoning_output_tokens)
+    }
+
+    /// Full request total, derived. Equals every provider's wire total
+    /// (verified for Anthropic, OpenAI, Gemini, Ollama) — a stored total
+    /// would only reintroduce per-provider drift.
+    pub fn total_tokens(&self) -> usize {
+        self.input_total_tokens()
+            .saturating_add(self.output_total_tokens())
     }
 }
 
@@ -511,15 +524,19 @@ mod tests {
 
     #[test]
     fn test_token_usage_structure() {
-        let usage = TokenUsage::provider(100, 50, 150)
+        let usage = TokenUsage::provider(100, 50)
             .with_cached_input(25)
+            .with_cache_creation(5)
             .with_reasoning_output(10);
 
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.completion_tokens, 50);
-        assert_eq!(usage.total_tokens, 150);
         assert_eq!(usage.cached_input_tokens, 25);
+        assert_eq!(usage.cache_creation_input_tokens, 5);
         assert_eq!(usage.reasoning_output_tokens, 10);
+        assert_eq!(usage.input_total_tokens(), 130);
+        assert_eq!(usage.output_total_tokens(), 60);
+        assert_eq!(usage.total_tokens(), 190);
         assert_eq!(usage.source, TokenUsageSource::Provider);
     }
 
@@ -667,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_model_response_creation() {
-        let usage = TokenUsage::provider(100, 50, 150);
+        let usage = TokenUsage::provider(100, 50);
 
         let response = ModelResponse {
             content: "Hello, world!".to_string(),
@@ -682,7 +699,7 @@ mod tests {
         assert_eq!(response.content, "Hello, world!");
         assert!(response.usage.is_some());
         assert_eq!(response.model_name, "ollama/tinyllama");
-        assert_eq!(response.usage.unwrap().total_tokens, 150);
+        assert_eq!(response.usage.unwrap().total_tokens(), 150);
         assert!(response.tool_calls.is_none());
     }
 }

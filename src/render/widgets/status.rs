@@ -135,7 +135,7 @@ pub(crate) fn format_token_status(
     last_usage: Option<TokenUsageTotals>,
     session_usage: TokenUsageTotals,
 ) -> String {
-    let session = format_compact_count(session_usage.total_tokens);
+    let session = format_compact_count(session_usage.total_tokens());
     let context = match context_usage {
         Some(snapshot) => format_context_snapshot(snapshot),
         None => "context: n/a".to_string(),
@@ -144,7 +144,7 @@ pub(crate) fn format_token_status(
         Some(usage) => format!(
             "{} | last api: {} | session: {}",
             context,
-            format_compact_count(usage.total_tokens),
+            format_compact_count(usage.total_tokens()),
             session
         ),
         None => format!("{} | session: {}", context, session),
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn token_status_labels_last_and_session_usage() {
         let context = ContextUsageSnapshot::from_usage(
-            &crate::models::TokenUsage::provider(12_000, 456, 12_456),
+            &crate::models::TokenUsage::provider(12_000, 456),
             Some(128_000),
         );
         assert_eq!(
@@ -208,13 +208,11 @@ mod tests {
                 Some(TokenUsageTotals {
                     prompt_tokens: 12_000,
                     completion_tokens: 456,
-                    total_tokens: 12_456,
                     ..TokenUsageTotals::default()
                 }),
                 TokenUsageTotals {
                     prompt_tokens: 500_000,
                     completion_tokens: 73_443,
-                    total_tokens: 573_443,
                     ..TokenUsageTotals::default()
                 },
             ),
@@ -231,7 +229,6 @@ mod tests {
                 TokenUsageTotals {
                     prompt_tokens: 900,
                     completion_tokens: 50,
-                    total_tokens: 950,
                     ..TokenUsageTotals::default()
                 },
             ),

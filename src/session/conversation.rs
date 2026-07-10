@@ -752,7 +752,7 @@ mod tests {
         conv.safety_mode = Some(crate::runtime::SafetyMode::FullAccess);
         conv.cumulative_tokens = 777;
         conv.cumulative_token_usage = crate::domain::TokenUsageTotals {
-            total_tokens: 777,
+            prompt_tokens: 777,
             ..Default::default()
         };
         let round: ConversationHistory =
@@ -762,7 +762,7 @@ mod tests {
             Some(crate::runtime::SafetyMode::FullAccess)
         );
         assert_eq!(round.cumulative_tokens, 777);
-        assert_eq!(round.cumulative_token_usage.total_tokens, 777);
+        assert_eq!(round.cumulative_token_usage.total_tokens(), 777);
     }
 
     #[test]

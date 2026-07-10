@@ -428,12 +428,13 @@ fn stream_callback_for(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) ->
             }),
             ModelStreamEvent::ToolCall(tc) => StreamEvent::ToolCall(tc),
             ModelStreamEvent::Status(s) => StreamEvent::Status(s),
-            ModelStreamEvent::Done { tokens } => StreamEvent::Done {
-                usage: if tokens > 0 {
-                    Some(crate::models::TokenUsage::provider(0, tokens, tokens))
-                } else {
-                    None
-                },
+            // No adapter emits `Done` through this callback — the wrapper
+            // sends the authoritative terminal `Done` built from the
+            // returned `ModelResponse` (F3). Map defensively without
+            // inventing usage (the old placeholder misfiled everything
+            // as completion tokens).
+            ModelStreamEvent::Done { .. } => StreamEvent::Done {
+                usage: None,
                 provider_continuation: None,
                 stop_reason: None,
             },
@@ -605,28 +606,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_callback_forwards_done_with_tokens() {
+    async fn stream_callback_done_never_invents_usage() {
+        // The wrapper's terminal Done (built from ModelResponse) is the only
+        // authoritative usage carrier; a callback Done must map to None
+        // rather than misfiling its bare count as completion tokens.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cb = stream_callback_for(tx);
         cb(ModelStreamEvent::Done { tokens: 42 });
-        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
-            .await
-            .expect("recv")
-            .expect("sender");
-        match recv {
-            StreamEvent::Done { usage, .. } => {
-                let u = usage.expect("tokens > 0 → Some");
-                assert_eq!(u.total_tokens, 42);
-            },
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_callback_done_zero_tokens_is_none_usage() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let cb = stream_callback_for(tx);
-        cb(ModelStreamEvent::Done { tokens: 0 });
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
             .await
             .expect("recv")
