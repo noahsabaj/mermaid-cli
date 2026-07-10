@@ -876,7 +876,102 @@ impl OpenAICompatAdapter {
     /// resolve the live context window / output ceiling.
     pub async fn list_models_detailed(&self) -> Result<Vec<ModelListing>> {
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
-        let mut req = self.client.get(&url);
+        let response = self.get_models_response(&url).await?;
+        let body: ListModelsResponse =
+            response.json().await.map_err(|e| ModelError::ParseError {
+                message: format!("Failed to parse {} models list: {}", self.profile.name, e),
+                raw: None,
+            })?;
+        Ok(body.data.into_iter().map(ModelListing::from).collect())
+    }
+
+    /// Limits-oriented listing. For most providers this is
+    /// `list_models_detailed`; for Cloudflare the OpenAI-compat `/models`
+    /// returns bare `{id}` entries, so the real limits come from the
+    /// account's `models/search` endpoint — first in `format=openrouter`
+    /// (context window + output cap, but only the curated marketplace
+    /// subset), then the default format (context window only, full catalog)
+    /// when the model isn't in that subset.
+    pub async fn list_models_for_limits(&self) -> Result<Vec<ModelListing>> {
+        let Some(search_base) = self.cloudflare_models_search_base() else {
+            return self.list_models_detailed().await;
+        };
+        // Cloudflare's `name` field IS the full model id (`@cf/vendor/model`),
+        // so searching by the last segment narrows the response to (usually)
+        // the one model the session runs.
+        let hint = self
+            .model_name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.model_name);
+        if let Ok(listings) = self
+            .fetch_cloudflare_openrouter_format(&search_base, hint)
+            .await
+            && listings.iter().any(|m| m.id == self.model_name)
+        {
+            return Ok(listings);
+        }
+        // A default-format failure surfaces as Err so the wrapper skips
+        // caching (a transient outage must not pin `None` limits for the
+        // whole probe TTL).
+        self.fetch_cloudflare_default_format(&search_base, hint)
+            .await
+    }
+
+    /// Cloudflare's OpenAI-compat surface carries no limit metadata; the
+    /// account-level management endpoint `…/accounts/{id}/ai/models/search`
+    /// does (same bearer token). Derive it from the chat base_url when that
+    /// is the canonical account-scoped shape (`…/ai/v1`). AI Gateway
+    /// overrides (`…/workers-ai/v1`) don't end in `/ai/v1` and get `None` —
+    /// generic discovery, same as before.
+    fn cloudflare_models_search_base(&self) -> Option<String> {
+        if self.profile.name != "cloudflare" {
+            return None;
+        }
+        let root = self.base_url.trim_end_matches('/').strip_suffix("/v1")?;
+        root.ends_with("/ai")
+            .then(|| format!("{root}/models/search"))
+    }
+
+    async fn fetch_cloudflare_openrouter_format(
+        &self,
+        search_base: &str,
+        hint: &str,
+    ) -> Result<Vec<ModelListing>> {
+        let url = format!(
+            "{search_base}?format=openrouter&per_page=100&search={}",
+            encode_query_value(hint)
+        );
+        let response = self.get_models_response(&url).await?;
+        let body: ListModelsResponse =
+            response.json().await.map_err(|e| ModelError::ParseError {
+                message: format!("Failed to parse {} models search: {}", self.profile.name, e),
+                raw: None,
+            })?;
+        Ok(body.data.into_iter().map(ModelListing::from).collect())
+    }
+
+    async fn fetch_cloudflare_default_format(
+        &self,
+        search_base: &str,
+        hint: &str,
+    ) -> Result<Vec<ModelListing>> {
+        let url = format!(
+            "{search_base}?per_page=100&search={}",
+            encode_query_value(hint)
+        );
+        let response = self.get_models_response(&url).await?;
+        let body: CfModelsSearchResponse =
+            response.json().await.map_err(|e| ModelError::ParseError {
+                message: format!("Failed to parse {} models search: {}", self.profile.name, e),
+                raw: None,
+            })?;
+        Ok(body.result.into_iter().map(ModelListing::from).collect())
+    }
+
+    /// Shared GET + status/error mapping for the model-listing endpoints.
+    async fn get_models_response(&self, url: &str) -> Result<reqwest::Response> {
+        let mut req = self.client.get(url);
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
@@ -886,7 +981,7 @@ impl OpenAICompatAdapter {
         let response = req.send().await.map_err(|e| {
             ModelError::Backend(BackendError::ConnectionFailed {
                 backend: self.profile.name.to_string(),
-                url: url.clone(),
+                url: url.to_string(),
                 reason: e.to_string(),
             })
         })?;
@@ -901,12 +996,7 @@ impl OpenAICompatAdapter {
                 message: format!("{} list_models failed", self.profile.name),
             }));
         }
-        let body: ListModelsResponse =
-            response.json().await.map_err(|e| ModelError::ParseError {
-                message: format!("Failed to parse {} models list: {}", self.profile.name, e),
-                raw: None,
-            })?;
-        Ok(body.data.into_iter().map(ModelListing::from).collect())
+        Ok(response)
     }
 }
 
@@ -1216,8 +1306,9 @@ struct ListModelsResponse {
 /// One `/models` entry. Providers decorate the OpenAI-standard `{id}` with
 /// their own limit metadata — OpenRouter sends `context_length` +
 /// `top_provider.max_completion_tokens`, others use `context_window` /
-/// `max_completion_tokens` flat. All optional; absent fields deserialize to
-/// `None` instead of failing the whole list.
+/// `max_completion_tokens` flat, Cloudflare's `models/search?format=openrouter`
+/// sends `context_length` + `max_output_length`. All optional; absent fields
+/// deserialize to `None` instead of failing the whole list.
 #[derive(Debug, Deserialize)]
 struct ModelInfo {
     id: String,
@@ -1229,6 +1320,8 @@ struct ModelInfo {
     max_completion_tokens: Option<usize>,
     #[serde(default)]
     max_output_tokens: Option<usize>,
+    #[serde(default)]
+    max_output_length: Option<usize>,
     #[serde(default)]
     top_provider: Option<TopProviderInfo>,
 }
@@ -1262,8 +1355,68 @@ impl From<ModelInfo> for ModelListing {
             max_output_tokens: m
                 .max_completion_tokens
                 .or(m.max_output_tokens)
+                .or(m.max_output_length)
                 .or_else(|| top.and_then(|t| t.max_completion_tokens)),
             id: m.id,
+        }
+    }
+}
+
+/// Percent-encode a URL query value: RFC 3986 unreserved characters pass
+/// through, everything else (including `/` and `@` in Cloudflare model ids)
+/// is `%XX`-escaped. Only used for the `models/search` `search` param —
+/// reqwest's `.query()` lives behind a cargo feature this crate doesn't pull.
+fn encode_query_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            },
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// Cloudflare `models/search` (default format): each model's limits ride a
+/// `properties` array of `{property_id, value}` pairs, where `value` is a
+/// JSON *string* for scalars (`context_window: "262144"`) and an array for
+/// `price` — hence `serde_json::Value`. This format covers the full catalog
+/// (269+ models), unlike `format=openrouter`'s curated subset, but carries
+/// no output-cap property.
+#[derive(Debug, Deserialize)]
+struct CfModelsSearchResponse {
+    result: Vec<CfModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CfModelEntry {
+    /// The full model id (`@cf/vendor/model`).
+    name: String,
+    #[serde(default)]
+    properties: Vec<CfModelProperty>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CfModelProperty {
+    property_id: String,
+    #[serde(default)]
+    value: serde_json::Value,
+}
+
+impl From<CfModelEntry> for ModelListing {
+    fn from(m: CfModelEntry) -> Self {
+        let max_context_tokens = m
+            .properties
+            .iter()
+            .find(|p| p.property_id == "context_window")
+            .and_then(|p| p.value.as_str())
+            .and_then(|s| s.parse().ok());
+        ModelListing {
+            id: m.name,
+            max_context_tokens,
+            max_output_tokens: None,
         }
     }
 }
@@ -1418,6 +1571,106 @@ mod tests {
         let m = ModelListing::from(bare.data.into_iter().next().unwrap());
         assert_eq!(m.max_context_tokens, None);
         assert_eq!(m.max_output_tokens, None);
+    }
+
+    #[test]
+    fn model_listing_parses_cloudflare_openrouter_shape() {
+        // Cloudflare `models/search?format=openrouter` (captured live
+        // 2026-07-09): `context_length` + `max_output_length` — the output
+        // cap rides a field name no other provider uses.
+        let cf: ListModelsResponse = serde_json::from_str(
+            r#"{"data":[{"id":"@cf/zai-org/glm-5.2","hugging_face_id":"zai-org/glm-5.2",
+                 "context_length":262144,"max_output_length":262144,
+                 "pricing":{"prompt":"0.0000014000","completion":"0.0000044000"}}]}"#,
+        )
+        .unwrap();
+        let m = ModelListing::from(cf.data.into_iter().next().unwrap());
+        assert_eq!(m.id, "@cf/zai-org/glm-5.2");
+        assert_eq!(m.max_context_tokens, Some(262_144));
+        assert_eq!(m.max_output_tokens, Some(262_144));
+    }
+
+    #[test]
+    fn cloudflare_models_search_default_format_parses_properties() {
+        // Default-format `models/search` (captured live 2026-07-09): limits
+        // ride a `properties` array; `context_window` is a JSON *string*,
+        // `price` is an array — neither shape may fail the parse, and models
+        // without the property (or without properties at all) stay `None`.
+        let body: CfModelsSearchResponse = serde_json::from_str(
+            r#"{"success":true,"result":[
+                 {"name":"@cf/zai-org/glm-5.2","description":"agentic coding model",
+                  "properties":[
+                    {"property_id":"context_window","value":"262144"},
+                    {"property_id":"price",
+                     "value":[{"unit":"per M input tokens","price":1.4,"currency":"USD"}]},
+                    {"property_id":"function_calling","value":"true"}]},
+                 {"name":"@cf/meta/no-window","properties":[
+                    {"property_id":"function_calling","value":"true"}]},
+                 {"name":"@cf/meta/bare"}]}"#,
+        )
+        .unwrap();
+        let listings: Vec<ModelListing> = body.result.into_iter().map(ModelListing::from).collect();
+        assert_eq!(listings[0].id, "@cf/zai-org/glm-5.2");
+        assert_eq!(listings[0].max_context_tokens, Some(262_144));
+        // The default format carries no output-cap property.
+        assert_eq!(listings[0].max_output_tokens, None);
+        assert_eq!(listings[1].max_context_tokens, None);
+        assert_eq!(listings[2].max_context_tokens, None);
+    }
+
+    #[test]
+    fn query_value_encoding_escapes_reserved_bytes() {
+        // Unreserved characters pass through untouched.
+        assert_eq!(encode_query_value("glm-5.2"), "glm-5.2");
+        // Reserved/special bytes are %XX-escaped (full model ids included).
+        assert_eq!(
+            encode_query_value("@cf/zai-org/glm-5.2"),
+            "%40cf%2Fzai-org%2Fglm-5.2"
+        );
+        assert_eq!(encode_query_value("a b&c=d"), "a%20b%26c%3Dd");
+    }
+
+    #[test]
+    fn cloudflare_models_search_base_derives_only_from_account_scoped_url() {
+        let cloudflare = lookup_provider("cloudflare").unwrap();
+        let adapter = |base: &str, profile: &'static ProviderProfile| {
+            OpenAICompatAdapter::new(
+                profile,
+                base.to_string(),
+                Some("test-token".to_string()),
+                "@cf/zai-org/glm-5.2".to_string(),
+                HashMap::new(),
+            )
+            .expect("adapter constructs")
+        };
+        // Canonical account-scoped URL → the management search endpoint.
+        let a = adapter(
+            "https://api.cloudflare.com/client/v4/accounts/abc123/ai/v1",
+            cloudflare,
+        );
+        assert_eq!(
+            a.cloudflare_models_search_base().as_deref(),
+            Some("https://api.cloudflare.com/client/v4/accounts/abc123/ai/models/search"),
+        );
+        // Trailing slash tolerated.
+        let a = adapter(
+            "https://api.cloudflare.com/client/v4/accounts/abc123/ai/v1/",
+            cloudflare,
+        );
+        assert!(a.cloudflare_models_search_base().is_some());
+        // AI Gateway override ends in `workers-ai/v1`, which is NOT the
+        // account-scoped `/ai/v1` — no derivation, generic fallback.
+        let a = adapter(
+            "https://gateway.ai.cloudflare.com/v1/abc/gw/workers-ai/v1",
+            cloudflare,
+        );
+        assert_eq!(a.cloudflare_models_search_base(), None);
+        // Non-cloudflare profile never derives, even from a lookalike URL.
+        let a = adapter(
+            "https://api.cloudflare.com/client/v4/accounts/abc123/ai/v1",
+            test_profile(),
+        );
+        assert_eq!(a.cloudflare_models_search_base(), None);
     }
 
     #[test]

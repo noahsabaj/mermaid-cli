@@ -59,16 +59,17 @@ impl ModelProvider for OpenAICompatProvider {
 
     /// Live limit discovery: most OpenAI-compatible providers attach the
     /// model's context window / output ceiling to their `/models` metadata
-    /// (OpenRouter, Cloudflare, …) — data mermaid previously discarded.
-    /// Cache-first via `provider_probes` (TTL-bounded), one live fetch on a
-    /// miss, static fallback (all `None`) when the provider exposes nothing or
-    /// the fetch fails.
+    /// (OpenRouter et al); Cloudflare exposes it on its account-level
+    /// `models/search` endpoint instead (`list_models_for_limits` routes
+    /// there). Cache-first via `provider_probes` (TTL-bounded), one live
+    /// fetch on a miss, static fallback (all `None`) when the provider
+    /// exposes nothing or the fetch fails.
     async fn resolve_context_window(&self, request: &ChatRequest) -> ContextSizing {
         let _ = request;
         let provider = self.adapter.provider_name().to_string();
         let model = Model::name(&self.adapter).to_string();
         let limits = resolve_limits_cached(&provider, &model, || async {
-            let listings = self.adapter.list_models_detailed().await?;
+            let listings = self.adapter.list_models_for_limits().await?;
             let found = listings.into_iter().find(|m| m.id == model);
             Ok(ModelLimits {
                 max_context_tokens: found.as_ref().and_then(|m| m.max_context_tokens),
