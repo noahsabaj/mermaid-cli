@@ -260,10 +260,25 @@ impl ToolExecutor for WebFetchTool {
     fn schema(&self) -> ToolDefinition {
         ToolDefinition {
             name: "web_fetch".to_string(),
-            description: "Retrieve a single URL's main content as markdown.".to_string(),
+            description: "Retrieve a single URL's main content as markdown. Optional 'pattern' \
+                          finds matches in the page instead of returning the whole body: plain \
+                          case-insensitive substring matching, applied per line (a pattern \
+                          containing a newline never matches), returning each match with \
+                          surrounding context lines."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": { "url": { "type": "string" } },
+                "properties": {
+                    "url": { "type": "string" },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Case-insensitive substring to find in the page (not a regex)"
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "Context lines around each match (default 2, max 10)"
+                    }
+                },
                 "required": ["url"]
             }),
         }
@@ -273,6 +288,16 @@ impl ToolExecutor for WebFetchTool {
         let Some(url) = args.get("url").and_then(|v| v.as_str()) else {
             return ToolOutcome::error("web_fetch requires 'url' (string)", 0.0);
         };
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|p| !p.is_empty());
+        let context_lines = args
+            .get("context_lines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2)
+            .min(10) as usize;
         if let Err(reason) = validate_fetch_url(url) {
             return ToolOutcome::error(format!("web_fetch: {reason}"), 0.0);
         }
@@ -295,7 +320,7 @@ impl ToolExecutor for WebFetchTool {
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             result = fetch => match result {
                 Ok(page) => {
-                    let output = format_fetch(url, &page);
+                    let output = format_fetch(url, &page, pattern, context_lines);
                     let duration_secs = start.elapsed().as_secs_f64();
                     let line_count = output.lines().count();
                     let byte_count = output.len();
@@ -348,14 +373,103 @@ fn cap_fetch_content(content: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(format!("{}\n\n...[content truncated]", &content[..cut]))
 }
 
-fn format_fetch(url: &str, page: &WebFetchResult) -> String {
+/// Cap on find-in-page match BLOCKS per call (merged context windows).
+/// Matched lines beyond the included blocks are summarized as a
+/// `(+N more matches)` tail so the model knows the page has more.
+const MAX_PATTERN_MATCHES: usize = 20;
+
+fn format_fetch(
+    url: &str,
+    page: &WebFetchResult,
+    pattern: Option<&str>,
+    ctx_lines: usize,
+) -> String {
     let title = if page.title.is_empty() {
         "(no title)"
     } else {
         page.title.as_str()
     };
+    // Find-in-page runs on the FULL readable markdown, then the report goes
+    // through the cap — capping first would hide matches in the tail.
+    if let Some(pattern) = pattern {
+        let body = match extract_matches(&page.content, pattern, ctx_lines, MAX_PATTERN_MATCHES) {
+            Some(report) => report,
+            // No match: say so, then the capped head as usual so the model
+            // keeps its orientation on the page.
+            None => format!(
+                "No matches for \"{}\".\n\n{}",
+                pattern,
+                cap_fetch_content(&page.content)
+            ),
+        };
+        let report = format!("# {}\n\nURL: {}\n\n{}", title, url, body);
+        return cap_fetch_content(&report).into_owned();
+    }
     let content = cap_fetch_content(&page.content);
     format!("# {}\n\nURL: {}\n\n{}", title, url, content)
+}
+
+/// Find-in-page core: plain case-insensitive SUBSTRING match per line (not a
+/// regex — model-supplied metacharacters must mean themselves), each match
+/// reported as a `L<n>:`-prefixed context block. Overlapping or adjacent
+/// windows merge into one block; blocks are separated by `---` lines and
+/// capped at `max_blocks`, with a `(+N more matches)` tail counting the
+/// matched lines that didn't fit. Returns `None` when nothing matches.
+fn extract_matches(
+    content: &str,
+    pattern: &str,
+    context_lines: usize,
+    max_blocks: usize,
+) -> Option<String> {
+    let needle = pattern.to_lowercase();
+    let lines: Vec<&str> = content.lines().collect();
+    let matched: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.to_lowercase().contains(&needle))
+        .map(|(i, _)| i)
+        .collect();
+    if matched.is_empty() {
+        return None;
+    }
+
+    // Merge each match's [i-ctx, i+ctx] window with overlapping/adjacent
+    // neighbors; count how many matched lines the included blocks cover.
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    for &i in &matched {
+        let start = i.saturating_sub(context_lines);
+        let end = (i + context_lines).min(lines.len() - 1);
+        match blocks.last_mut() {
+            Some((_, last_end)) if start <= *last_end + 1 => *last_end = (*last_end).max(end),
+            _ => blocks.push((start, end)),
+        }
+    }
+    let included = &blocks[..blocks.len().min(max_blocks)];
+    let cutoff = included.last().map(|&(_, end)| end).unwrap_or(0);
+    let dropped = matched.iter().filter(|&&i| i > cutoff).count();
+
+    let mut out = format!(
+        "{} match{} for \"{}\":\n",
+        matched.len(),
+        if matched.len() == 1 { "" } else { "es" },
+        pattern
+    );
+    for (bi, &(start, end)) in included.iter().enumerate() {
+        if bi > 0 {
+            out.push_str("---\n");
+        }
+        for (offset, line) in lines[start..=end].iter().enumerate() {
+            // 1-based line numbers, matching how editors and grep report.
+            out.push_str(&format!("L{}: {}\n", start + offset + 1, line));
+        }
+    }
+    if dropped > 0 {
+        out.push_str(&format!(
+            "(+{dropped} more match{})\n",
+            if dropped == 1 { "" } else { "es" }
+        ));
+    }
+    Some(out)
 }
 
 fn parse_queries(args: &serde_json::Value) -> Result<Vec<(String, usize)>, String> {
@@ -585,7 +699,7 @@ mod tests {
             title: "T".to_string(),
             content: big,
         };
-        let out = format_fetch("https://example.com", &page);
+        let out = format_fetch("https://example.com", &page, None, 2);
         assert!(
             out.len() < WEB_FETCH_MAX_CHARS + 256,
             "content must be capped, got {} bytes",
@@ -598,9 +712,88 @@ mod tests {
             title: "T".to_string(),
             content: "hello world".to_string(),
         };
-        let out = format_fetch("https://example.com", &small);
+        let out = format_fetch("https://example.com", &small, None, 2);
         assert!(out.contains("hello world"));
         assert!(!out.contains("truncated"));
+    }
+
+    #[test]
+    fn extract_matches_finds_case_insensitive_with_context() {
+        let content = "line one\nline two\nTARGET here\nline four\nline five";
+        let out = extract_matches(content, "target", 1, 20).unwrap();
+        assert!(out.starts_with("1 match for \"target\":"));
+        assert!(out.contains("L2: line two"));
+        assert!(out.contains("L3: TARGET here"));
+        assert!(out.contains("L4: line four"));
+        assert!(!out.contains("L1:"), "context clipped to 1 line: {out}");
+        assert!(!out.contains("L5:"));
+    }
+
+    #[test]
+    fn extract_matches_merges_overlapping_windows() {
+        // Matches on adjacent lines must merge into ONE block (no separator).
+        let content = "a\nhit one\nhit two\nb\nc\nd\ne\nf\ng\nhit three\nz";
+        let out = extract_matches(content, "hit", 1, 20).unwrap();
+        assert!(out.starts_with("3 matches"));
+        assert_eq!(out.matches("---").count(), 1, "two blocks: {out}");
+        // No duplicated lines from the merged windows.
+        assert_eq!(out.matches("hit one").count(), 1);
+    }
+
+    #[test]
+    fn extract_matches_caps_blocks_and_reports_tail() {
+        // 25 matches spaced far apart -> 25 blocks, capped at 20 + tail note.
+        let content = (0..25)
+            .map(|i| format!("match {i}\nx\nx\nx\nx\nx"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = extract_matches(&content, "match", 0, 20).unwrap();
+        assert!(out.starts_with("25 matches"));
+        assert_eq!(out.matches("---").count(), 19, "20 blocks: {out}");
+        assert!(out.contains("(+5 more matches)"), "tail note: {out}");
+    }
+
+    #[test]
+    fn extract_matches_none_and_multibyte() {
+        assert!(extract_matches("nothing here", "absent", 2, 20).is_none());
+        // Multibyte content must not panic and must match case-insensitively.
+        let content = "voil\u{e0} un r\u{e9}sultat\nplain line";
+        let out = extract_matches(content, "R\u{c9}SULTAT", 0, 20).unwrap();
+        assert!(out.contains("L1: voil\u{e0} un r\u{e9}sultat"));
+        // Context 0 keeps only the matching line.
+        assert!(!out.contains("plain line"));
+    }
+
+    #[test]
+    fn format_fetch_pattern_paths() {
+        let page = WebFetchResult {
+            title: "T".to_string(),
+            content: "alpha\nbeta\ngamma".to_string(),
+        };
+        // Match -> report replaces the body.
+        let out = format_fetch("https://example.com", &page, Some("beta"), 1);
+        assert!(out.contains("1 match for \"beta\""));
+        assert!(out.contains("L2: beta"));
+        // No match -> explicit notice + the page head so the model keeps
+        // orientation.
+        let out = format_fetch("https://example.com", &page, Some("nope"), 1);
+        assert!(out.contains("No matches for \"nope\"."));
+        assert!(out.contains("alpha"));
+    }
+
+    #[test]
+    fn find_in_page_runs_before_the_cap() {
+        // A match in the tail of a page longer than the cap must still be
+        // found (matching runs pre-cap; only the report is capped).
+        let mut content = "x\n".repeat(WEB_FETCH_MAX_CHARS / 2);
+        content.push_str("needle in the tail\n");
+        let page = WebFetchResult {
+            title: "T".to_string(),
+            content,
+        };
+        let out = format_fetch("https://example.com", &page, Some("needle"), 1);
+        assert!(out.contains("1 match for \"needle\""), "tail match found");
+        assert!(out.contains("needle in the tail"));
     }
 
     #[test]

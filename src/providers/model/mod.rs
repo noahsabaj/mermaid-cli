@@ -326,6 +326,7 @@ pub(crate) fn output_cap_from_error(err: &ModelError) -> Option<usize> {
         ModelError::Backend(crate::models::BackendError::HttpError {
             status: 400,
             message,
+            ..
         }) => parse_output_cap_message(message),
         _ => None,
     }
@@ -433,12 +434,14 @@ mod tests {
         let err_400 = ModelError::Backend(crate::models::BackendError::HttpError {
             status: 400,
             message: MINIMAX_JSON.to_string(),
+            debug: Default::default(),
         });
         assert_eq!(output_cap_from_error(&err_400), Some(131_072));
         // Same body on a 500 is a transient fault, not a learned limit.
         let err_500 = ModelError::Backend(crate::models::BackendError::HttpError {
             status: 500,
             message: MINIMAX_JSON.to_string(),
+            debug: Default::default(),
         });
         assert_eq!(output_cap_from_error(&err_500), None);
         assert_eq!(output_cap_from_error(&ModelError::Cancelled), None);

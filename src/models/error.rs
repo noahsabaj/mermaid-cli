@@ -187,7 +187,11 @@ impl ModelError {
                     recoverable: true,
                 }
             },
-            ModelError::Backend(BackendError::HttpError { status, message }) => {
+            ModelError::Backend(BackendError::HttpError {
+                status,
+                message,
+                debug,
+            }) => {
                 let (summary, suggestion) = match status {
                     401 | 403 => (
                         "Authentication failed",
@@ -220,7 +224,7 @@ impl ModelError {
                 };
                 UserFacingError {
                     summary: summary.to_string(),
-                    message: rendered,
+                    message: debug.suffix(rendered),
                     suggestion: suggestion.to_string(),
                     // 5xx errors ARE recoverable (the caller can retry) and
                     // the suggestion tells the user to try again — that's
@@ -251,11 +255,15 @@ impl ModelError {
                 provider,
                 code,
                 message,
+                debug,
             }) => {
                 let code_str = code.as_deref().unwrap_or("unknown");
                 UserFacingError {
                     summary: format!("{} error", provider),
-                    message: format!("{} returned error {}: {}", provider, code_str, message),
+                    message: debug.suffix(format!(
+                        "{} returned error {}: {}",
+                        provider, code_str, message
+                    )),
                     suggestion: format!(
                         "Check {} documentation for error code {}",
                         provider, code_str
@@ -390,6 +398,80 @@ impl ModelError {
     }
 }
 
+/// Correlation ids captured from a provider's HTTP response headers.
+/// Appended (one plain-text line) to the user-facing error message so bug
+/// reports to the provider can quote them; deliberately NOT part of
+/// `Display`, which feeds logs and `try_extract_error_message`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ResponseDebugContext {
+    /// Provider request id: first present of `x-request-id`, `request-id`,
+    /// `anthropic-request-id`.
+    pub request_id: Option<String>,
+    /// Cloudflare ray id (`cf-ray`) — identifies the edge PoP + request for
+    /// providers fronted by Cloudflare.
+    pub cf_ray: Option<String>,
+}
+
+impl ResponseDebugContext {
+    /// Capture correlation ids from response headers. Cheap; call before
+    /// consuming the body (`.text()` takes the response by value).
+    pub fn from_headers(headers: &reqwest::header::HeaderMap) -> Self {
+        let get = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let captured = Self {
+            request_id: ["x-request-id", "request-id", "anthropic-request-id"]
+                .iter()
+                .find_map(|n| get(n)),
+            cf_ray: get("cf-ray"),
+        };
+        if !captured.is_empty() {
+            // Feeds the TRACE ring so `--trace` runs correlate provider-side.
+            tracing::trace!(
+                request_id = ?captured.request_id,
+                cf_ray = ?captured.cf_ray,
+                "captured provider response ids"
+            );
+        }
+        captured
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.request_id.is_none() && self.cf_ray.is_none()
+    }
+
+    /// The `(request-id: ..., cf-ray: ...)` suffix line, or `None` when
+    /// nothing was captured.
+    fn render(&self) -> Option<String> {
+        let parts: Vec<String> = [
+            self.request_id
+                .as_ref()
+                .map(|id| format!("request-id: {id}")),
+            self.cf_ray.as_ref().map(|ray| format!("cf-ray: {ray}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(format!("({})", parts.join(", ")))
+        }
+    }
+
+    /// Append the rendered id line to a user-facing message when present.
+    fn suffix(&self, message: String) -> String {
+        match self.render() {
+            Some(line) => format!("{message}\n{line}"),
+            None => message,
+        }
+    }
+}
+
 /// Backend-specific errors
 #[derive(Debug)]
 pub enum BackendError {
@@ -404,7 +486,13 @@ pub enum BackendError {
     NotAvailable { backend: String, reason: String },
 
     /// HTTP error from backend
-    HttpError { status: u16, message: String },
+    HttpError {
+        status: u16,
+        message: String,
+        /// Response-header correlation ids (empty when the error was not
+        /// built from an HTTP response).
+        debug: ResponseDebugContext,
+    },
 
     /// Backend returned unexpected response format
     UnexpectedResponse { backend: String, message: String },
@@ -414,6 +502,9 @@ pub enum BackendError {
         provider: String,
         code: Option<String>,
         message: String,
+        /// Response-header correlation ids (empty when the error was not
+        /// built from an HTTP response).
+        debug: ResponseDebugContext,
     },
 }
 
@@ -430,7 +521,12 @@ impl fmt::Display for BackendError {
             BackendError::NotAvailable { backend, reason } => {
                 write!(f, "Backend '{}' not available: {}", backend, reason)
             },
-            BackendError::HttpError { status, message } => {
+            // `debug` ids are deliberately NOT printed here: Display feeds
+            // logs and try_extract_error_message; the ids surface once, in
+            // to_user_facing.
+            BackendError::HttpError {
+                status, message, ..
+            } => {
                 write!(f, "HTTP error {}: {}", status, message)
             },
             BackendError::UnexpectedResponse { backend, message } => {
@@ -440,6 +536,7 @@ impl fmt::Display for BackendError {
                 provider,
                 code,
                 message,
+                ..
             } => {
                 if let Some(c) = code {
                     write!(f, "{} error {}: {}", provider, c, message)
@@ -530,6 +627,7 @@ impl From<reqwest::Error> for ModelError {
             ModelError::Backend(BackendError::HttpError {
                 status,
                 message: err.to_string(),
+                debug: ResponseDebugContext::default(),
             })
         } else {
             ModelError::Backend(BackendError::UnexpectedResponse {
@@ -596,6 +694,86 @@ fn try_extract_error_message(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
+        let mut map = reqwest::header::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn debug_context_captures_each_request_id_alias() {
+        for alias in ["x-request-id", "request-id", "anthropic-request-id"] {
+            let debug = ResponseDebugContext::from_headers(&headers(&[(alias, "req_123")]));
+            assert_eq!(debug.request_id.as_deref(), Some("req_123"), "{alias}");
+        }
+        // Precedence: x-request-id beats the later aliases.
+        let debug = ResponseDebugContext::from_headers(&headers(&[
+            ("anthropic-request-id", "anth"),
+            ("x-request-id", "xreq"),
+        ]));
+        assert_eq!(debug.request_id.as_deref(), Some("xreq"));
+        // cf-ray captured independently; absent headers -> empty.
+        let debug = ResponseDebugContext::from_headers(&headers(&[("cf-ray", "8f3a-EWR")]));
+        assert_eq!(debug.cf_ray.as_deref(), Some("8f3a-EWR"));
+        assert!(debug.request_id.is_none());
+        assert!(ResponseDebugContext::from_headers(&headers(&[])).is_empty());
+    }
+
+    #[test]
+    fn user_facing_appends_ids_display_does_not() {
+        let debug = ResponseDebugContext {
+            request_id: Some("req_abc".to_string()),
+            cf_ray: Some("ray_1".to_string()),
+        };
+        let err = ModelError::Backend(BackendError::HttpError {
+            status: 500,
+            message: "boom".to_string(),
+            debug: debug.clone(),
+        });
+        let ufe = err.to_user_facing();
+        assert!(
+            ufe.message
+                .ends_with("(request-id: req_abc, cf-ray: ray_1)"),
+            "got: {}",
+            ufe.message
+        );
+        // Display feeds logs + try_extract_error_message: no ids there.
+        assert!(!err.to_string().contains("req_abc"));
+
+        let err = ModelError::Backend(BackendError::ProviderError {
+            provider: "anthropic".to_string(),
+            code: Some("api_error".to_string()),
+            message: "boom".to_string(),
+            debug,
+        });
+        let ufe = err.to_user_facing();
+        assert!(ufe.message.contains("(request-id: req_abc, cf-ray: ray_1)"));
+        assert!(!err.to_string().contains("req_abc"));
+
+        // Empty debug adds nothing (no trailing blank line).
+        let err = ModelError::Backend(BackendError::HttpError {
+            status: 500,
+            message: "boom".to_string(),
+            debug: ResponseDebugContext::default(),
+        });
+        let msg = err.to_user_facing().message;
+        assert!(!msg.contains("request-id"));
+        assert!(!msg.ends_with('\n'));
+    }
+
+    #[test]
+    fn redaction_leaves_the_id_line_intact() {
+        // The `(request-id: ...)` line must survive the secret scrubber —
+        // pinned so a future redaction pattern can't silently eat it.
+        let line = "HTTP 500: boom\n(request-id: req_0aF3kZ9xQ, cf-ray: 8f3ab2cd4e-EWR)";
+        assert_eq!(crate::utils::redact_secrets(line), line);
+    }
 
     #[test]
     fn timeout_display_omits_zero_duration() {
@@ -683,6 +861,7 @@ mod tests {
         let err = ModelError::Backend(BackendError::HttpError {
             status: 500,
             message: r#"{"error":"Internal Server Error (ref: abc-123)"}"#.to_string(),
+            debug: Default::default(),
         });
         let ufe = err.to_user_facing();
         assert_eq!(ufe.summary, "Server error");
@@ -701,6 +880,7 @@ mod tests {
         let err = ModelError::Backend(BackendError::HttpError {
             status: 502,
             message: "<html>Bad Gateway</html>".to_string(),
+            debug: Default::default(),
         });
         let ufe = err.to_user_facing();
         assert_eq!(ufe.message, "HTTP 502: <html>Bad Gateway</html>");

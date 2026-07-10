@@ -807,6 +807,7 @@ impl AnthropicAdapter {
                 provider: "anthropic".to_string(),
                 code: Some("refusal".to_string()),
                 message: "Anthropic returned no content (refusal / content filter)".to_string(),
+                debug: crate::models::error::ResponseDebugContext::default(),
             }));
         }
 
@@ -1072,6 +1073,7 @@ impl AnthropicAdapter {
                             provider: "anthropic".to_string(),
                             code: Some(err_type.to_string()),
                             message: err_msg.to_string(),
+                            debug: crate::models::error::ResponseDebugContext::default(),
                         }));
                     },
                     "ping" | "" => {
@@ -1145,6 +1147,7 @@ impl AnthropicAdapter {
                 provider: "anthropic".to_string(),
                 code: Some("refusal".to_string()),
                 message: "Anthropic returned no content (refusal / content filter)".to_string(),
+                debug: crate::models::error::ResponseDebugContext::default(),
             }));
         }
 
@@ -1310,6 +1313,7 @@ enum BlockAccumulator {
 /// Translate a non-success HTTP response into a structured `ModelError`.
 async fn http_error_from_response(response: reqwest::Response) -> ModelError {
     let status = response.status().as_u16();
+    let debug = crate::models::error::ResponseDebugContext::from_headers(response.headers());
     let body = response
         .text()
         .await
@@ -1334,17 +1338,20 @@ async fn http_error_from_response(response: reqwest::Response) -> ModelError {
                          please open an issue with the conversation that triggered it)",
                     err_msg
                 ),
+                debug: debug.clone(),
             });
         }
         return ModelError::Backend(BackendError::ProviderError {
             provider: "anthropic".to_string(),
             code: Some(err_type.to_string()),
             message: err_msg.to_string(),
+            debug: debug.clone(),
         });
     }
     ModelError::Backend(BackendError::HttpError {
         status,
         message: body,
+        debug,
     })
 }
 

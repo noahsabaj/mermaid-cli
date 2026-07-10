@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recordings capture the returned text, so `--replay` never launches an
   editor.
 
+- **`web_fetch` find-in-page.** New optional `pattern` argument: instead of
+  returning the whole page, the tool returns each match (plain
+  case-insensitive substring, per line) with `context_lines` of surrounding
+  context (default 2), line-numbered and merged into blocks, capped at 20
+  blocks with a `(+N more matches)` tail. Matching runs on the full page
+  before the output cap, so tail matches on long pages are found.
+
+- **Provider request ids in error messages.** Errors built from a provider's
+  HTTP response now capture `x-request-id`/`request-id`/
+  `anthropic-request-id` and `cf-ray` and append them as a
+  `(request-id: ..., cf-ray: ...)` line to the user-facing message — quote
+  it when reporting provider failures. Log output is unchanged.
+
 - **Mid-run steering.** Messages typed while the agent is working are now
   delivered at the next tool boundary WITHIN the run — committed as user
   messages right after the tool results, so the very next model call sees
