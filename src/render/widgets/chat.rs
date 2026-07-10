@@ -415,6 +415,11 @@ pub struct ChatWidget<'a> {
     /// re-wrapped every frame — it's cloned from here instead (#134).
     pub wrapped_line_cache: &'a mut FxHashMap<u64, Vec<Line<'static>>>,
     pub show_reasoning: bool,
+    /// Blink phase for in-flight (`ActionResult::Running`) action headers,
+    /// derived from `state.now` by the compose function. Ignored — including
+    /// by the frame memo — when no message carries a running action, so idle
+    /// frames don't reassemble twice a second.
+    pub blink_on: bool,
 }
 
 /// Render assistant message content (markdown) into wrapped, role-prefixed
@@ -510,6 +515,7 @@ fn frame_fingerprint(
     theme_seed: u64,
     content_width: u16,
     show_reasoning: bool,
+    blink_on: bool,
 ) -> u64 {
     use std::fmt::Write as _;
     let mut h = rustc_hash::FxHasher::default();
@@ -519,6 +525,16 @@ fn frame_fingerprint(
     // The day-relative label ("Today"/"Yesterday"/date) on user timestamps
     // changes only at midnight; fold today's date in so the memo refreshes then.
     chrono::Local::now().date_naive().hash(&mut h);
+    // The blink phase only affects frames that actually paint a running
+    // action's header dot; folding it in unconditionally would invalidate the
+    // memo twice a second on every idle frame.
+    if messages.iter().any(|m| {
+        m.actions
+            .iter()
+            .any(|a| matches!(a.result, ActionResult::Running))
+    }) {
+        blink_on.hash(&mut h);
+    }
     messages.len().hash(&mut h);
     for msg in messages {
         msg.content.hash(&mut h);
@@ -571,6 +587,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             theme_seed,
             content_width,
             self.show_reasoning,
+            self.blink_on,
         );
         // Type is inferred from the map below (the frame_memo struct names the
         // fields); an explicit annotation would just be a clippy::type_complexity.
@@ -773,6 +790,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                             &mut lines,
                             self.theme,
                             content_width as usize,
+                            self.blink_on,
                         );
                     }
                 } else {
@@ -1133,6 +1151,7 @@ fn render_actions(
     lines: &mut Vec<Line>,
     theme: &Theme,
     viewport_width: usize,
+    blink_on: bool,
 ) {
     for (action_idx, action) in actions.iter().enumerate() {
         if action_idx > 0 {
@@ -1163,9 +1182,28 @@ fn render_actions(
         // as rows and overlong rows word-wrap with a hanging indent; a huge
         // target (e.g. a heredoc script) is capped so one Bash call can't
         // flood the transcript — the cap row ends in "…)" like a truncation.
-        push_action_header(lines, action, action_color, theme, viewport_width);
+        // An in-flight call's dot blinks (accent ↔ faded) as the live "this
+        // one is still running" indicator; the rest of the header stays put.
+        let dot_style = if matches!(action.result, ActionResult::Running) && !blink_on {
+            Style::new()
+                .fg(theme.colors.text_disabled.to_color())
+                .bold()
+        } else {
+            Style::new().fg(action_color).bold()
+        };
+        push_action_header(
+            lines,
+            action,
+            action_color,
+            dot_style,
+            theme,
+            viewport_width,
+        );
 
         match &action.result {
+            // In flight: the header row (with its blinking dot) is the whole
+            // display — the result elbow arrives with the outcome.
+            ActionResult::Running => {},
             ActionResult::Success { .. } => {
                 // Result summary from details enum
                 let result_msg = match &action.details {
@@ -1428,6 +1466,7 @@ fn push_action_header(
     lines: &mut Vec<Line>,
     action: &ActionDisplay,
     action_color: Color,
+    dot_style: Style,
     theme: &Theme,
     viewport_width: usize,
 ) {
@@ -1435,7 +1474,7 @@ fn push_action_header(
     let secondary = Style::new().fg(theme.colors.text_secondary.to_color());
     if action.target.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("● ", bold),
+            Span::styled("● ", dot_style),
             Span::styled(format!("{}()", action.action_type), bold),
         ]));
         return;
@@ -1455,7 +1494,7 @@ fn push_action_header(
     for (i, row) in rows.into_iter().enumerate() {
         let mut spans = if i == 0 {
             vec![
-                Span::styled("● ", bold),
+                Span::styled("● ", dot_style),
                 Span::styled(open.clone(), bold),
                 Span::styled(row.trim_start().to_string(), secondary),
             ]
@@ -1884,7 +1923,7 @@ mod tests {
         };
 
         let mut lines: Vec<Line> = Vec::new();
-        render_actions(&[action], &mut lines, &theme, 120);
+        render_actions(&[action], &mut lines, &theme, 120, true);
         let rows: Vec<String> = lines.iter().map(line_plain_text).collect();
         let all = rows.join("\n");
 
@@ -1943,7 +1982,7 @@ mod tests {
 
         let width: u16 = 60;
         let mut lines: Vec<Line> = Vec::new();
-        render_actions(&[action], &mut lines, &theme, width as usize);
+        render_actions(&[action], &mut lines, &theme, width as usize, true);
         let h = lines.len() as u16;
         let backend = TestBackend::new(width, h);
         let mut term = Terminal::new(backend).unwrap();
@@ -2003,7 +2042,7 @@ mod tests {
 
         let width = 60usize;
         let mut lines: Vec<Line> = Vec::new();
-        render_actions(&[action], &mut lines, &theme, width);
+        render_actions(&[action], &mut lines, &theme, width, true);
 
         assert_rows_fit(&lines, width);
         let rendered = lines
@@ -2039,7 +2078,7 @@ mod tests {
 
         let width = 60usize;
         let mut lines: Vec<Line> = Vec::new();
-        render_actions(&[action], &mut lines, &theme, width);
+        render_actions(&[action], &mut lines, &theme, width, true);
 
         assert_rows_fit(&lines, width);
         let rows: Vec<String> = lines.iter().map(line_plain_text).collect();
@@ -2074,7 +2113,7 @@ mod tests {
 
         let width = 60usize;
         let mut lines: Vec<Line> = Vec::new();
-        render_actions(&[action], &mut lines, &theme, width);
+        render_actions(&[action], &mut lines, &theme, width, true);
 
         assert_rows_fit(&lines, width);
         let header_rows: Vec<String> = lines
@@ -2113,7 +2152,7 @@ mod tests {
         };
 
         let mut lines: Vec<Line> = Vec::new();
-        render_actions(&[action], &mut lines, &theme, 80);
+        render_actions(&[action], &mut lines, &theme, 80, true);
 
         let rows: Vec<String> = lines.iter().map(line_plain_text).collect();
         assert!(rows[0].contains("python3 - << 'PY'"));
@@ -2144,7 +2183,7 @@ mod tests {
 
         let width = 60usize;
         let mut lines: Vec<Line> = Vec::new();
-        render_actions(&[action], &mut lines, &theme, width);
+        render_actions(&[action], &mut lines, &theme, width, true);
 
         assert_rows_fit(&lines, width);
         let rendered = lines
@@ -2190,6 +2229,7 @@ mod tests {
                     theme: &theme,
                     wrapped_line_cache: cache,
                     show_reasoning: true,
+                    blink_on: true,
                 };
                 f.render_stateful_widget(widget, Rect::new(0, 0, width, height), &mut state);
             })
@@ -2692,6 +2732,7 @@ mod tests {
                     theme: &theme,
                     wrapped_line_cache: cache,
                     show_reasoning: true,
+                    blink_on: true,
                 };
                 f.render_stateful_widget(widget, Rect::new(0, 0, width, height), state);
             })

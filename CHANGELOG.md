@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The status spinner never names tools; the transcript does.** The spinner
+  headline used to splice in the executing tool and its arguments
+  (`Running tools: Bash pwd; ls -la…`, `Running tools: ask_user_question...`)
+  — detail that belongs in the chat window, not the status widget (Claude
+  Code parity). The headline is now only the task's active form, the
+  "Running N agents" override, or the bare phase word, followed by the usual
+  `(esc to interrupt • time • tokens)` metadata. Instead, each executing
+  tool call gets its `● Bash(cmd)` action row in the transcript the moment
+  it starts — with a blinking header dot while it runs — and its result
+  elbow folds in underneath as soon as that call completes, not only when
+  the whole batch commits. Pending `agent` calls keep their live panel rows
+  (no duplicate transcript row), and a pending `ask_user_question` is
+  represented by its modal alone, with the question → answer block landing
+  once answered.
+
+- **The question modal owns the screen.** While an `ask_user_question` modal
+  is up, the status spinner, task checklist band, and the input box (keys
+  already routed exclusively to the modal) are hidden — matching Claude
+  Code, where the modal is the only thing below the transcript instead of
+  sitting under a ticking `Running tools: ask_user_question...` spinner and
+  an inert prompt.
+
 - **Task checklist no longer dangles a `⎿` connector when idle.** The elbow
   glyph on the checklist's first row exists to attach the band to the
   status/spinner line above it; once the run went idle and that widget

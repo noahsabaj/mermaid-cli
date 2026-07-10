@@ -1,9 +1,11 @@
 ---
 source: src/render/snapshots.rs
+assertion_line: 67
 expression: frame
 ---
  > run tests and audit in parallel                  January 2nd, 2026 at 3:04am 
                                                                                 
+ ● Bash(cargo test)                                                             
                                                                                 
                                                                                 
                                                                                 
@@ -18,8 +20,7 @@ expression: frame
                                                                                 
                                                                                 
                                                                                 
- • Running tools: Bash cargo test...                                            
-   (esc to interrupt • ctrl+b to background • 9s • ↓ 0 tokens)                  
+ • Running tools... (esc to interrupt • ctrl+b to background • 9s • ↓ 0 tokens) 
    ◦ Audit deps  starting… · 9s                                                 
 ────────────────────────────────────────────────────────────────────────────────
 >                                                                               

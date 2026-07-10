@@ -27,6 +27,10 @@ pub enum ActionResult {
     Error {
         error: String,
     },
+    /// Call is still in flight. Only ever synthesized by the render layer
+    /// for the live transcript view (the chat widget blinks the header dot);
+    /// never committed to the message log, so it never reaches disk.
+    Running,
 }
 
 /// Attached to a committed assistant `ChatMessage` — one per tool

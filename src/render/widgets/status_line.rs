@@ -33,19 +33,17 @@ pub struct AgentPanelRow {
 /// per queued message.
 ///
 /// When the spinner fits in `width` it stays on one row. When it doesn't (a
-/// long `Running tools: <cmd>`), it splits into exactly two rows — the status
-/// text on row 1, the `(esc to interrupt …)` metadata on row 2 (indented under
-/// the status text) — and each row is *truncated* to `width` so nothing ever
-/// bleeds off the right edge, including unbreakable file paths. The fixed
-/// 1-or-2-row shape keeps the reserved height stable as the timer/token counter
-/// tick (no per-frame reflow).
+/// long task headline), it splits into exactly two rows — the status text on
+/// row 1, the `(esc to interrupt …)` metadata on row 2 (indented under the
+/// status text) — and each row is *truncated* to `width` so nothing ever
+/// bleeds off the right edge. The fixed 1-or-2-row shape keeps the reserved
+/// height stable as the timer/token counter tick (no per-frame reflow).
 #[allow(clippy::too_many_arguments)]
 pub fn build_status_lines(
     status: GenerationStatus,
     elapsed_secs: u64,
     tokens_received: usize,
     tokens_estimated: bool,
-    active_tool: Option<&str>,
     status_override: Option<&str>,
     agents: &[AgentPanelRow],
     bg_available: bool,
@@ -64,22 +62,15 @@ pub fn build_status_lines(
 
     // The headline, by precedence:
     //   1. An in_progress checklist task's `active_form` (Claude Code parity —
-    //      the spinner row reads as the checklist header), with the executing
-    //      tool folded in after a separator.
+    //      the spinner row reads as the checklist header).
     //   2. An override replacing the whole text ("Running 3 agents") when the
     //      agent panel carries the detail.
-    //   3. The generation phase, with the in-flight tool appended while tools
-    //      run (a long `npm run dev` etc. no longer looks opaque).
-    let status_text = match (task_headline, status_override, status, active_tool) {
-        (Some(head), _, GenerationStatus::RunningTools, Some(tool)) => {
-            format!("{head} · {tool}")
-        },
-        (Some(head), _, _, _) => head.to_string(),
-        (None, Some(text), _, _) => text.to_string(),
-        (None, None, GenerationStatus::RunningTools, Some(tool)) => {
-            format!("{}: {}", status.display_text(), tool)
-        },
-        (None, None, _, _) => status.display_text().to_string(),
+    //   3. The bare generation phase. Never the tool name or its arguments —
+    //      per-tool detail belongs to the transcript's action rows, not here.
+    let status_text = match (task_headline, status_override) {
+        (Some(head), _) => head.to_string(),
+        (None, Some(text)) => text.to_string(),
+        (None, None) => status.display_text().to_string(),
     };
 
     let info_style = Style::new().fg(theme.colors.info.to_color());
@@ -225,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn long_running_tool_status_splits_and_fits_width() {
+    fn long_task_headline_splits_and_fits_width() {
         let theme = Theme::dark();
         let queued = VecDeque::new();
         let lines = build_status_lines(
@@ -233,13 +224,10 @@ mod tests {
             3,
             0,
             false,
-            Some(
-                "Bash cd /d D:/Code/TestEnv/wordle && npm run dev -- --host 127.0.0.1 --port 5173",
-            ),
             None,
             &[],
             true,
-            None,
+            Some("Rewiring the provider factory so runtime toggles ride on ChatRequest end to end"),
             &queued,
             false,
             &theme,
@@ -257,6 +245,42 @@ mod tests {
     }
 
     #[test]
+    fn running_tools_headline_is_the_bare_phase_word() {
+        // Regression: the in-flight tool (name + command/path) used to be
+        // folded into the spinner headline ("Running tools: Bash pwd; …").
+        // Per-tool detail belongs to the transcript; the status line must
+        // never carry it.
+        let theme = Theme::dark();
+        let queued = VecDeque::new();
+        let lines = build_status_lines(
+            GenerationStatus::RunningTools,
+            11,
+            169,
+            false,
+            None,
+            &[],
+            true,
+            None,
+            &queued,
+            false,
+            &theme,
+            120,
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            text.contains("Running tools..."),
+            "bare phase word expected: {text}"
+        );
+        assert!(
+            !text.contains(':'),
+            "no tool detail may follow the phase word: {text}"
+        );
+    }
+
+    #[test]
     fn thinking_shows_downstream_arrow_and_live_token_count() {
         // Regression: the live counter sat at 0 through the (often long) thinking
         // phase. It must climb and read as received (downstream) tokens.
@@ -267,7 +291,6 @@ mod tests {
             7,
             1_234,
             true,
-            None,
             None,
             &[],
             true,
@@ -290,9 +313,9 @@ mod tests {
     }
 
     #[test]
-    fn unbreakable_long_path_is_truncated_not_overflowed() {
-        // Regression (review finding): a long whitespace-free path used to be
-        // pushed whole onto a row and still bleed off the right edge.
+    fn unbreakable_long_headline_is_truncated_not_overflowed() {
+        // Regression (review finding): a long whitespace-free headline used to
+        // be pushed whole onto a row and still bleed off the right edge.
         let theme = Theme::dark();
         let queued = VecDeque::new();
         let lines = build_status_lines(
@@ -300,11 +323,10 @@ mod tests {
             1,
             0,
             false,
-            Some("Edit D:/Code/AI/some/very/deeply/nested/directory/structure/longfilename.rs"),
             None,
             &[],
             true,
-            None,
+            Some("Editing D:/Code/AI/some/very/deeply/nested/directory/structure/longfilename.rs"),
             &queued,
             false,
             &theme,
@@ -329,7 +351,6 @@ mod tests {
             0,
             false,
             None,
-            None,
             &[],
             true,
             None,
@@ -347,17 +368,16 @@ mod tests {
         // the chat transcript doesn't reflow every second.
         let theme = Theme::dark();
         let queued = VecDeque::new();
-        let tool = Some("Bash npm run dev -- --host 127.0.0.1 --port 5173 --strictPort");
+        let headline = Some("Running the full local gate across every workspace crate and target");
         let n0 = build_status_lines(
             GenerationStatus::RunningTools,
             9,
             99,
             false,
-            tool,
             None,
             &[],
             true,
-            None,
+            headline,
             &queued,
             false,
             &theme,
@@ -370,11 +390,10 @@ mod tests {
                 elapsed,
                 tokens,
                 false,
-                tool,
                 None,
                 &[],
                 true,
-                None,
+                headline,
                 &queued,
                 false,
                 &theme,
@@ -394,7 +413,6 @@ mod tests {
             2,
             10,
             true,
-            None,
             None,
             &[],
             true,
@@ -423,7 +441,6 @@ mod tests {
             0,
             0,
             false,
-            None,
             None,
             &[],
             true,
