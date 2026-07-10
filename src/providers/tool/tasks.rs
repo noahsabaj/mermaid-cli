@@ -72,6 +72,23 @@ fn no_broker(secs: f64) -> ToolOutcome {
     )
 }
 
+/// Plan mode firewalls the checklist WRITERS: implementation steps belong in
+/// the plan file's Tasks section, which seeds the checklist when the plan is
+/// approved. Without a hard error models conflate the two planning surfaces
+/// (Codex shipped the same runtime error for the same reason). `task_list`
+/// stays available — reading is harmless.
+fn plan_mode_block(ctx: &crate::providers::ExecContext, secs: f64) -> Option<ToolOutcome> {
+    ctx.plan_file.as_ref().map(|_| {
+        ToolOutcome::error(
+            "task tools are disabled in plan mode: the checklist is seeded from the \
+             approved plan. Put implementation steps in the plan file's Tasks section \
+             instead."
+                .to_string(),
+            secs,
+        )
+    })
+}
+
 fn metadata(action: &str, store: &TaskStore) -> ToolRunMetadata {
     let (completed, total) = store.counts();
     ToolRunMetadata {
@@ -233,6 +250,9 @@ impl ToolExecutor for TaskCreateTool {
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
         let secs = || started.elapsed().as_secs_f64();
+        if let Some(blocked) = plan_mode_block(&ctx, secs()) {
+            return blocked;
+        }
         let Some(broker) = ctx.tasks.clone() else {
             return no_broker(secs());
         };
@@ -317,6 +337,9 @@ impl ToolExecutor for TaskUpdateTool {
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
         let secs = || started.elapsed().as_secs_f64();
+        if let Some(blocked) = plan_mode_block(&ctx, secs()) {
+            return blocked;
+        }
         let Some(broker) = ctx.tasks.clone() else {
             return no_broker(secs());
         };

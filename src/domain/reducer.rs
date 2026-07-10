@@ -1513,6 +1513,19 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Alt+P toggles plan mode. A dedicated chord rather than a fifth
+    // Shift+Tab cycle entry: plan mode restores the safety mode the user was
+    // in, which a flat cycle can't express, and a cycle entry would put plan
+    // on the path to full_access.
+    if mods.alt && code == KeyCode::Char('p') {
+        if state.session.plan.is_some() {
+            exit_plan_mode(state, cmds);
+        } else {
+            enter_plan_mode(state, cmds);
+        }
+        return;
+    }
+
     // Shift+Tab cycles the safety mode (read-only → ask → auto → full-access).
     // Session-scoped: the `[safety]` config value stays the persistent default,
     // so a session never silently inherits a more-permissive mode from a
@@ -2637,6 +2650,18 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             // Shift+Tab handler).
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
             // The bottom status bar shows the new mode — no banner.
+        },
+        SlashCmd::Plan(arg) => match arg.as_deref().map(str::trim) {
+            None | Some("") | Some("on") => enter_plan_mode(state, cmds),
+            Some("off") => exit_plan_mode(state, cmds),
+            Some("show") => match &state.session.plan {
+                Some(plan) => {
+                    let path = plan_path_display(state, &plan.plan_path.clone());
+                    push_system(state, cmds, format!("Plan file (drafting): {path}"));
+                },
+                None => push_system(state, cmds, "Not in plan mode (Alt+P or /plan enters it)"),
+            },
+            Some(_) => push_system(state, cmds, "Usage: /plan [off|show]"),
         },
         SlashCmd::VisibleReasoning(arg) => {
             match visible_reasoning_value(arg.as_deref(), state.ui.show_reasoning) {
@@ -4585,6 +4610,21 @@ fn handle_stream_done(
         // Captured once for the whole batch: the live safety mode + the
         // turn's intent (for the Auto-mode classifier).
         let intent = latest_user_intent(&state.session);
+        // Plan mode floors the effective safety mode to read-only at the one
+        // dispatch chokepoint — the policy gate, shell classifier, and
+        // subagent inheritance then all apply unchanged. The plan carve-outs
+        // (plan file, memory, known-safe builds) key on `plan_file` inside
+        // the gate.
+        let effective_safety = if state.session.plan.is_some() {
+            crate::runtime::SafetyMode::ReadOnly
+        } else {
+            state.session.safety_mode
+        };
+        let plan_file = state
+            .session
+            .plan
+            .as_ref()
+            .map(|plan| plan.plan_path.clone());
         for call in &pending {
             if call.source.function.name == super::tool_search::TOOL_SEARCH_NAME {
                 continue;
@@ -4596,7 +4636,8 @@ fn handle_stream_done(
                 // F7: pass the session's current model id so subagent
                 // tools can spawn children against the same provider.
                 model_id: state.session.model_id.clone(),
-                safety_mode: state.session.safety_mode,
+                safety_mode: effective_safety,
+                plan_file: plan_file.clone(),
                 intent: intent.clone(),
                 // Checkpoint anchoring: conversation id + length at DISPATCH.
                 // History here is [..., user@k, assistant(tool_use)], so any
@@ -5215,7 +5256,18 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // earlier read-only denials in history, contradicting the now-current mode;
     // rewrite them so the wire history matches the live mode (else the model
     // keeps refusing edits / claims "still read-only" after a switch up).
-    neutralize_superseded_policy_denials(&mut messages, state.session.safety_mode);
+    // While a plan is being drafted the EFFECTIVE mode is the read-only floor,
+    // so pre-plan read-only denials still describe reality — pass the floor,
+    // not the (possibly looser) restore target, so they stay untouched.
+    let effective_safety = if state.session.plan.is_some() {
+        crate::runtime::SafetyMode::ReadOnly
+    } else {
+        state.session.safety_mode
+    };
+    neutralize_superseded_policy_denials(&mut messages, effective_safety);
+    // Same contract for plan-mode denials: they stop applying the moment plan
+    // mode ends (approve or cancel).
+    neutralize_superseded_plan_denials(&mut messages, state.session.plan.is_some());
     super::compaction::normalize_history(&mut messages);
 
     ChatRequest {
@@ -5264,11 +5316,26 @@ fn system_prompt_for_state(state: &State) -> String {
         .settings
         .prompt
         .render_system_prompt(&get_system_prompt());
+    // While a plan is being drafted the live-mode line would mislead ("attempt
+    // gated actions") — the effective policy is the plan-mode read-only floor.
+    let safety_line = match &state.session.plan {
+        Some(_) => format!(
+            "Safety mode: plan (a plan is being drafted; the plan-mode read-only floor is in \
+             effect; leaving plan mode restores {}).",
+            state.session.safety_mode.as_str()
+        ),
+        None => format!(
+            "Safety mode: {} (live — the user can switch it anytime with Shift+Tab or /safety; \
+             trust this over any earlier tool error, and attempt gated actions rather than \
+             assuming they will fail).",
+            state.session.safety_mode.as_str()
+        ),
+    };
     let mut prompt = format!(
-        "{}\n\n## Current Session\nCurrent working directory: {}\nSafety mode: {} (live — the user can switch it anytime with Shift+Tab or /safety; trust this over any earlier tool error, and attempt gated actions rather than assuming they will fail).\nTreat this as the project root unless the user specifies a different path.",
+        "{}\n\n## Current Session\nCurrent working directory: {}\n{}\nTreat this as the project root unless the user specifies a different path.",
         base,
         state.cwd.display(),
-        state.session.safety_mode.as_str()
+        safety_line
     );
     if state.session.is_subagent {
         prompt.push_str("\n\n");
@@ -5277,6 +5344,13 @@ fn system_prompt_for_state(state: &State) -> String {
     if let Some(preamble) = &state.session.agent_preamble {
         prompt.push_str("\n\n");
         prompt.push_str(preamble);
+    }
+    if let Some(plan) = &state.session.plan {
+        prompt.push_str("\n\n");
+        prompt.push_str(
+            &crate::prompts::PLAN_MODE_PROMPT
+                .replace("{plan_path}", &plan.plan_path.display().to_string()),
+        );
     }
     prompt
 }
@@ -5453,6 +5527,205 @@ fn note_safety_mode_change(
     }
     // No save here for the retract-only path: both callers persist the mode
     // switch right after this returns.
+}
+
+// ---------- Plan mode ----------
+
+/// Word pools for the plan-file slug suffix. Indexed by a deterministic hash
+/// of (conversation id, message count) — never the wall clock or an RNG — so
+/// `--replay` allocates the identical path.
+const PLAN_SLUG_ADJECTIVES: &[&str] = &[
+    "amber", "bright", "calm", "deft", "eager", "fresh", "keen", "lucid", "mellow", "neat",
+    "quiet", "sharp", "steady", "swift", "tidy", "vivid",
+];
+const PLAN_SLUG_NOUNS: &[&str] = &[
+    "anchor", "beacon", "compass", "current", "delta", "harbor", "inlet", "lagoon", "pearl",
+    "reef", "ripple", "shoal", "spring", "strand", "tide", "wake",
+];
+
+/// FNV-1a — tiny, dependency-free, deterministic across runs (unlike
+/// `DefaultHasher`, whose seed is unspecified).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Allocate the plan-file path for a new plan: `.mermaid/plans/<topic>-<adj>-
+/// <noun>.md` under the project root. The topic comes from the latest user
+/// message (what the plan is about); the word-pair suffix keeps concurrent
+/// sessions in one repo from colliding.
+fn plan_path_for(state: &State) -> std::path::PathBuf {
+    let topic_src = latest_user_intent(&state.session).unwrap_or_default();
+    let words: Vec<String> = topic_src
+        .split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .map(|c| c.to_ascii_lowercase())
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .take(4)
+        .collect();
+    let mut topic = if words.is_empty() {
+        "plan".to_string()
+    } else {
+        words.join("-")
+    };
+    topic.truncate(topic.floor_char_boundary(40));
+    let topic = topic.trim_end_matches('-');
+    let seed = format!(
+        "{}:{}",
+        state.session.conversation.id,
+        state.session.messages().len()
+    );
+    let h = fnv1a(seed.as_bytes());
+    let adj = PLAN_SLUG_ADJECTIVES[(h % PLAN_SLUG_ADJECTIVES.len() as u64) as usize];
+    let noun = PLAN_SLUG_NOUNS[((h >> 8) % PLAN_SLUG_NOUNS.len() as u64) as usize];
+    state
+        .cwd
+        .join(".mermaid")
+        .join("plans")
+        .join(format!("{topic}-{adj}-{noun}.md"))
+}
+
+/// The plan-file path shown to the user: relative to the project root when it
+/// is inside it (it always is today), absolute otherwise.
+fn plan_path_display(state: &State, path: &std::path::Path) -> String {
+    path.strip_prefix(&state.cwd)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+/// Enter plan mode: allocate the plan file path and flip `session.plan`.
+/// `session.safety_mode` is deliberately untouched — it is the restore target
+/// (shown as "restores: <mode>"); tool dispatch floors the effective mode
+/// while `session.plan` is `Some`.
+fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
+    // Children explore, they don't plan (and have no user to approve).
+    if state.session.is_subagent {
+        return;
+    }
+    if let Some(plan) = &state.session.plan {
+        let path = plan_path_display(state, &plan.plan_path.clone());
+        push_system(
+            state,
+            cmds,
+            format!("Already in plan mode — plan file: {path} (Alt+P or /plan off leaves)"),
+        );
+        return;
+    }
+    let plan_path = plan_path_for(state);
+    let display = plan_path_display(state, &plan_path);
+    state.session.plan = Some(super::state::PlanState { plan_path });
+    // Retract any pending mode-change nudge: "re-attempt gated actions" would
+    // steer the model wrong now that the read-only floor applies.
+    state.session.conversation.messages.retain(|m| {
+        m.kind != crate::models::ChatMessageKind::RecoveryNudge
+            || (!m.content.starts_with(SAFETY_NUDGE_PREFIX)
+                && !m.content.starts_with(PLAN_NUDGE_PREFIX))
+    });
+    push_system(
+        state,
+        cmds,
+        format!("Planning: {display} — plan mode on (Alt+P to toggle)"),
+    );
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+}
+
+/// Leave plan mode without an approval flow (Alt+P toggle / `/plan off`).
+/// The effective safety mode reverts to `session.safety_mode` simply because
+/// the floor stops applying.
+fn exit_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
+    if state.session.plan.take().is_none() {
+        push_system(state, cmds, "Not in plan mode (Alt+P or /plan enters it)");
+        return;
+    }
+    note_plan_mode_exit(state, cmds);
+    push_system(
+        state,
+        cmds,
+        format!(
+            "Plan mode off — safety mode: {}",
+            state.session.safety_mode.as_str()
+        ),
+    );
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+}
+
+/// The `content` infix that marks a persisted **plan-mode** policy denial.
+/// Sibling of [`readonly_denial_signature`], keyed on
+/// [`crate::runtime::PLAN_DENIAL_MARKER`].
+fn plan_denial_signature() -> String {
+    format!("blocked by policy: {}", crate::runtime::PLAN_DENIAL_MARKER)
+}
+
+/// True if the conversation still carries a plan-mode policy denial.
+fn history_has_plan_denial(messages: &[ChatMessage]) -> bool {
+    let signature = plan_denial_signature();
+    messages
+        .iter()
+        .any(|m| m.role == MessageRole::Tool && m.content.contains(&signature))
+}
+
+/// Plan-mode sibling of [`neutralize_superseded_policy_denials`]: once plan
+/// mode ends, its denials stop describing the live policy — rewrite them to a
+/// past-tense note so the wire history stops contradicting the current mode.
+/// No-op while planning (the denials still apply).
+fn neutralize_superseded_plan_denials(messages: &mut [ChatMessage], plan_active: bool) {
+    if plan_active {
+        return;
+    }
+    let signature = plan_denial_signature();
+    for msg in messages.iter_mut() {
+        if msg.role != MessageRole::Tool || !msg.content.contains(&signature) {
+            continue;
+        }
+        let summary = msg
+            .content
+            .split_once(" blocked by policy: ")
+            .map(|(head, _)| head.trim_end())
+            .filter(|head| !head.is_empty())
+            .unwrap_or("The action");
+        msg.content = format!(
+            "{summary} was blocked earlier while a plan was being drafted. Plan \
+             mode is now off — that restriction no longer applies; re-run it if \
+             the plan calls for it."
+        );
+    }
+}
+
+/// Content prefix of the plan-mode-exit nudge — how [`enter_plan_mode`] and
+/// [`note_plan_mode_exit`] recognize a pending one to retract it.
+const PLAN_NUDGE_PREFIX: &str = "Plan mode is now off";
+
+/// One-shot nudge injected when plan mode ends while plan-mode denials are in
+/// history, so the model re-attempts gated actions instead of trusting the
+/// old blocks. Pairs with [`neutralize_superseded_plan_denials`], which
+/// rewrites the denials themselves on every request.
+fn note_plan_mode_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
+    use crate::models::ChatMessageKind;
+    state.session.conversation.messages.retain(|m| {
+        m.kind != ChatMessageKind::RecoveryNudge || !m.content.starts_with(PLAN_NUDGE_PREFIX)
+    });
+    if history_has_plan_denial(state.session.messages()) {
+        push_system_kind(
+            state,
+            cmds,
+            format!(
+                "{PLAN_NUDGE_PREFIX}; earlier plan-mode policy blocks no longer \
+                 apply. Safety mode is {} — re-attempt gated actions instead of \
+                 assuming they'll fail.",
+                state.session.safety_mode.as_str()
+            ),
+            ChatMessageKind::RecoveryNudge,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -10805,6 +11078,243 @@ mod tests {
             message_index,
             state.session.messages().len(),
             "stamped at dispatch, after the assistant tool_use commit"
+        );
+    }
+
+    #[test]
+    fn alt_p_toggles_plan_mode_and_allocates_a_plan_path() {
+        let key = || {
+            Msg::Key(Key {
+                code: KeyCode::Char('p'),
+                modifiers: KeyMods {
+                    alt: true,
+                    ..Default::default()
+                },
+            })
+        };
+        let (state, _) = update(fresh_state(), key());
+        let plan = state.session.plan.clone().expect("Alt+P enters plan mode");
+        assert!(
+            plan.plan_path.starts_with("/tmp/project/.mermaid/plans"),
+            "plan file is project-local: {:?}",
+            plan.plan_path
+        );
+        assert!(plan.plan_path.extension().is_some_and(|e| e == "md"));
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.starts_with("Planning: ")),
+            "entry announces the plan file"
+        );
+        // The restore target is untouched — plan mode is not a safety mode.
+        assert_eq!(state.session.safety_mode, Config::default().safety.mode);
+        let (state, _) = update(state, key());
+        assert!(state.session.plan.is_none(), "Alt+P toggles back off");
+    }
+
+    #[test]
+    fn slash_plan_enters_shows_and_leaves() {
+        let (state, _) = update(fresh_state(), Msg::Slash(SlashCmd::Plan(None)));
+        assert!(state.session.plan.is_some());
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Plan(Some("show".to_string()))));
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Plan file (drafting):")),
+            "/plan show prints the path"
+        );
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Plan(Some("off".to_string()))));
+        assert!(state.session.plan.is_none());
+    }
+
+    #[test]
+    fn plan_path_allocation_is_deterministic() {
+        // `--replay` must allocate the identical path: no wall clock, no RNG.
+        let state = fresh_state();
+        assert_eq!(plan_path_for(&state), plan_path_for(&state));
+    }
+
+    #[test]
+    fn plan_mode_floors_dispatch_to_read_only_and_stamps_the_plan_file() {
+        use crate::runtime::SafetyMode;
+        let mut state = state_with_two_exchanges();
+        state.session.safety_mode = SafetyMode::FullAccess;
+        let plan_path = PathBuf::from("/tmp/project/.mermaid/plans/x.md");
+        state.session.plan = Some(crate::domain::PlanState {
+            plan_path: plan_path.clone(),
+        });
+        state.turn = TurnState::Generating {
+            id: TurnId(9),
+            started: std::time::SystemTime::now(),
+            partial_text: String::new(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: vec![crate::models::ToolCall {
+                id: Some("call_b".to_string()),
+                function: crate::models::FunctionCall {
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+            }],
+            continuation: false,
+        };
+        let (_state, cmds) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(9),
+                usage: None,
+                provider_continuation: None,
+                stop_reason: None,
+            },
+        );
+        let (mode, plan_file) = cmds
+            .iter()
+            .find_map(|c| match c {
+                Cmd::ExecuteTool {
+                    safety_mode,
+                    plan_file,
+                    ..
+                } => Some((*safety_mode, plan_file.clone())),
+                _ => None,
+            })
+            .expect("ExecuteTool dispatched");
+        assert_eq!(
+            mode,
+            SafetyMode::ReadOnly,
+            "plan mode floors the effective mode even from full_access"
+        );
+        assert_eq!(plan_file, Some(plan_path));
+    }
+
+    #[test]
+    fn build_chat_request_neutralizes_a_superseded_plan_denial() {
+        // Once plan mode ends its denials stop describing the live policy —
+        // the wire history must stop asserting them.
+        let mut state = fresh_state();
+        let call = crate::models::tool_call::ToolCall {
+            id: Some("call-1".to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({ "path": "main.qml" }),
+            },
+        };
+        state.session.append(
+            ChatMessage::assistant("editing").with_tool_calls(vec![call]),
+            state.now,
+        );
+        state.session.append(
+            ChatMessage::tool(
+                "call-1",
+                "write_file",
+                format!(
+                    "write_file(main.qml) blocked by policy: {} is active — planning only",
+                    crate::runtime::PLAN_DENIAL_MARKER
+                ),
+            ),
+            state.now,
+        );
+
+        // While planning: the denial stands verbatim.
+        state.session.plan = Some(crate::domain::PlanState {
+            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+        });
+        let req = build_chat_request(&state);
+        let tool_msg = req
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Tool)
+            .expect("tool_result in request");
+        assert!(
+            tool_msg.content.contains("blocked by policy"),
+            "denial must stand while planning: {:?}",
+            tool_msg.content
+        );
+
+        // Plan mode off: rewritten to a past-tense note.
+        state.session.plan = None;
+        let req = build_chat_request(&state);
+        let tool_msg = req
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Tool)
+            .expect("tool_result in request");
+        assert!(
+            !tool_msg.content.contains("blocked by policy"),
+            "stale plan denial must be neutralized: {:?}",
+            tool_msg.content
+        );
+        assert!(tool_msg.content.contains("no longer applies"));
+    }
+
+    #[test]
+    fn plan_mode_keeps_read_only_denials_standing() {
+        use crate::runtime::SafetyMode;
+        // full_access + planning: the EFFECTIVE mode is the read-only floor,
+        // so a pre-plan read-only denial still describes reality — the
+        // loosened-mode rewrite must not fire.
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::FullAccess;
+        state.session.plan = Some(crate::domain::PlanState {
+            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+        });
+        let call = crate::models::tool_call::ToolCall {
+            id: Some("call-1".to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({ "path": "main.qml" }),
+            },
+        };
+        state.session.append(
+            ChatMessage::assistant("editing").with_tool_calls(vec![call]),
+            state.now,
+        );
+        state.session.append(
+            ChatMessage::tool(
+                "call-1",
+                "write_file",
+                format!(
+                    "write_file(main.qml) blocked by policy: {} blocks mutations and control actions",
+                    crate::runtime::READ_ONLY_DENIAL_MARKER
+                ),
+            ),
+            state.now,
+        );
+        let req = build_chat_request(&state);
+        let tool_msg = req
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Tool)
+            .expect("tool_result in request");
+        assert!(
+            tool_msg.content.contains("blocked by policy"),
+            "read-only denial stands while the plan floor applies: {:?}",
+            tool_msg.content
+        );
+    }
+
+    #[test]
+    fn system_prompt_carries_the_plan_block_only_while_planning() {
+        let mut state = fresh_state();
+        let prompt = system_prompt_for_state(&state);
+        assert!(!prompt.contains("## Plan Mode"));
+        state.session.plan = Some(crate::domain::PlanState {
+            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+        });
+        let prompt = system_prompt_for_state(&state);
+        assert!(prompt.contains("## Plan Mode"));
+        assert!(
+            prompt.contains("/tmp/project/.mermaid/plans/x.md"),
+            "the plan block names the concrete plan file"
+        );
+        assert!(
+            prompt.contains("Safety mode: plan"),
+            "the session block must not invite gated actions while planning"
         );
     }
 

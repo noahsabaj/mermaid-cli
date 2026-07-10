@@ -112,6 +112,11 @@ pub struct ConversationHistory {
     /// a `None` safety mode falls back to the config default on resume.
     #[serde(default)]
     pub safety_mode: Option<crate::runtime::SafetyMode>,
+    /// Plan-mode-in-progress (see `domain::PlanState`): `Some` only when the
+    /// session was saved mid-planning, so `--resume` re-enters plan mode with
+    /// the same plan file and restore target.
+    #[serde(default)]
+    pub plan: Option<crate::domain::PlanState>,
     #[serde(default)]
     pub last_token_usage: Option<crate::domain::TokenUsageTotals>,
     #[serde(default)]
@@ -227,6 +232,7 @@ impl ConversationHistory {
             git_branch: None,
             // Snapshotted from `Session` on save (see `snapshot_conversation`).
             safety_mode: None,
+            plan: None,
             last_token_usage: None,
             cumulative_token_usage: crate::domain::TokenUsageTotals::default(),
             context_usage: None,

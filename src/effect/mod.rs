@@ -561,6 +561,7 @@ impl EffectRunner {
                 source,
                 model_id,
                 safety_mode,
+                plan_file,
                 intent,
                 session_id,
                 message_index,
@@ -620,6 +621,7 @@ impl EffectRunner {
                         session_id,
                         message_index,
                         safety_mode,
+                        plan_file,
                         intent,
                         classifier,
                         approval,
@@ -2538,6 +2540,7 @@ async fn dispatch_execute_tool(
     session_id: String,
     message_index: usize,
     safety_mode: crate::runtime::SafetyMode,
+    plan_file: Option<PathBuf>,
     intent: Option<String>,
     classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
     approval: Option<crate::providers::ApprovalBroker>,
@@ -2660,6 +2663,7 @@ async fn dispatch_execute_tool(
         Some(tasks.clone()),
     );
     ctx.background = background;
+    ctx.plan_file = plan_file;
     // Detached work (backgrounded subagents) reports back through the main
     // msg channel after this turn's progress relay is gone.
     ctx.notify = Some(msg_tx.clone());
@@ -3414,6 +3418,7 @@ mod tests {
             source,
             model_id: "ollama/test".to_string(),
             safety_mode: crate::runtime::SafetyMode::Ask,
+            plan_file: None,
             intent: None,
             session_id: "sess-test".to_string(),
             message_index: 0,

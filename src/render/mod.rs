@@ -586,6 +586,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             reasoning_level: effective,
             requested_level,
             safety_mode: state.session.safety_mode,
+            plan_active: state.session.plan.is_some(),
         };
         frame.render_widget(status_widget, chunks[4]);
     }
