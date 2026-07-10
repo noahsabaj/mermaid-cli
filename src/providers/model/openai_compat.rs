@@ -173,6 +173,7 @@ fn build_model_config(request: &ChatRequest) -> ModelConfig {
         system_prompt: Some(request.system_prompt.clone()),
         dynamic_system_suffix: request.instructions.clone(),
         tools: request.tools.iter().map(|t| t.to_openai_json()).collect(),
+        output_schema: request.output_schema.clone(),
         ..Default::default()
     }
 }

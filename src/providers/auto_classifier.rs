@@ -133,6 +133,7 @@ impl ModelAutoClassifier {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         }
     }
 }

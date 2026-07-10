@@ -58,6 +58,14 @@ pub struct ModelConfig {
     #[serde(default)]
     pub backend_options: HashMap<String, HashMap<String, String>>,
 
+    /// `mermaid run --output-schema` formatting turn: the JSON Schema the
+    /// response must conform to. Adapters map it to their native constrained
+    /// output (OpenAI-compat `response_format`, Gemini `responseJsonSchema`,
+    /// Ollama `format`); Anthropic has no native shape and relies on the
+    /// prompt + client-side validation. Runtime-only, never persisted.
+    #[serde(skip)]
+    pub output_schema: Option<serde_json::Value>,
+
     /// Tool definitions the model sees, already translated into
     /// OpenAI-compatible `{type: "function", function: {name,
     /// description, parameters}}` shape. Runtime-only. Populated by

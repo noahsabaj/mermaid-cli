@@ -671,6 +671,11 @@ impl OllamaAdapter {
             "tools": &tools,
         });
 
+        // `--output-schema` formatting turn: Ollama's structured output.
+        if let Some(schema) = &config.output_schema {
+            request_body["format"] = schema.clone();
+        }
+
         // `think` parameter: most Ollama models accept `think: bool`, gpt-oss
         // requires a string enum, and a model that doesn't advertise `thinking`
         // must not receive the field at all (it 400s). `think_for_ollama`

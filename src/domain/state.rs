@@ -93,6 +93,10 @@ pub struct State {
     /// Quit flag. When set, the main loop drains pending effects and
     /// exits. The reducer never panics on its own; it sets this instead.
     pub should_exit: bool,
+    /// `mermaid run --output-schema`: set by the headless driver before the
+    /// dedicated formatting turn; `build_chat_request` copies it onto the
+    /// request (dropping all tools for that turn). Never set interactively.
+    pub output_schema: Option<serde_json::Value>,
     /// Wall-clock for the current reducer step, injected as data (Cause 3).
     /// The driver stamps this once per tick — `Local::now()` live, or the
     /// recorded entry's `ts` on replay — *before* calling `update`. The
@@ -175,6 +179,7 @@ impl State {
             pending_question: VecDeque::new(),
             runtime,
             should_exit: false,
+            output_schema: None,
             // Seed the injected clock from the caller (live: startup wall
             // clock; replay: the recorded header's ts). The driver overwrites
             // this on every iteration (Cause 3); the reducer never reads the

@@ -116,6 +116,10 @@ fn build_model_config(request: &ChatRequest) -> ModelConfig {
         tools: request.tools.iter().map(|t| t.to_openai_json()).collect(),
         resolved_context_window: request.resolved_context_window,
         resolved_max_output: request.resolved_max_output,
+        // Copied for symmetry; the Anthropic adapter has no native
+        // constrained-output shape and ignores it (prompt + client-side
+        // validation carry the formatting turn there).
+        output_schema: request.output_schema.clone(),
         ..Default::default()
     }
 }

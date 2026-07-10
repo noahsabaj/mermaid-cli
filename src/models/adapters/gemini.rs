@@ -452,6 +452,13 @@ impl GeminiAdapter {
             // non-gemini id) — omit thinkingConfig entirely; sending it 400s.
             _ => {},
         }
+        // `--output-schema` formatting turn: native constrained output.
+        // The reducer guarantees no tools ride this request (Gemini errors
+        // when function calling is combined with a response schema).
+        if let Some(schema) = &config.output_schema {
+            gen_config["responseMimeType"] = json!("application/json");
+            gen_config["responseJsonSchema"] = schema.clone();
+        }
         body["generationConfig"] = gen_config;
 
         // Tools come from `config.tools` (OpenAI-compat shape,

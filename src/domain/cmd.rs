@@ -319,6 +319,12 @@ pub struct ChatRequest {
     /// `resolved_context_window`. `None` means unknown — adapters that
     /// require a concrete `max_tokens` (Anthropic) fall back to a floor.
     pub resolved_max_output: Option<usize>,
+    /// `mermaid run --output-schema`: the JSON Schema the FORMATTING turn
+    /// must conform to. Set only on that dedicated turn (never during the
+    /// agentic loop — Gemini rejects tools+schema, Ollama's `format` would
+    /// degrade tool calling). When `Some`, the request carries no tools:
+    /// the reducer sends none and the effect runner skips the built-ins.
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// Provider-agnostic tool definition sent in the request. Concrete
