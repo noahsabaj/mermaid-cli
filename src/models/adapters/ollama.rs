@@ -1529,6 +1529,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ollama_request_body_maps_output_schema_to_format() {
+        let adapter = make_adapter().await;
+        let config = ModelConfig {
+            output_schema: Some(serde_json::json!({"type": "object"})),
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false, true);
+        assert_eq!(body["format"]["type"], "object");
+        // Absent -> no format key.
+        let body = adapter.build_request_body(
+            &[ChatMessage::user("hi")],
+            &ModelConfig::default(),
+            false,
+            true,
+        );
+        assert!(body.get("format").is_none());
+    }
+
+    #[tokio::test]
     async fn ollama_request_body_sets_think_low_for_gpt_oss_none() {
         let adapter = make_gpt_oss_adapter().await;
         let config = ModelConfig {

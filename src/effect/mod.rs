@@ -3180,6 +3180,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -3206,6 +3207,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -3287,6 +3289,7 @@ mod tests {
                 ollama_allow_ram_offload: None,
                 resolved_context_window: None,
                 resolved_max_output: None,
+                output_schema: None,
             },
         });
         assert_eq!(r.scope_count(), 1);
@@ -3316,6 +3319,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         let turn = TurnId(123);
 

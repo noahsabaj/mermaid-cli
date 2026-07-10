@@ -1452,6 +1452,29 @@ mod tests {
     }
 
     #[test]
+    fn build_request_body_maps_output_schema_to_response_json_schema() {
+        let adapter = test_adapter();
+        let messages = vec![ChatMessage::user("format it")];
+        let config = ModelConfig {
+            output_schema: Some(serde_json::json!({"type": "object"})),
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&messages, &config);
+        assert_eq!(
+            body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(
+            body["generationConfig"]["responseJsonSchema"]["type"],
+            "object"
+        );
+        // Absent -> neither field.
+        let body = adapter.build_request_body(&messages, &ModelConfig::default());
+        assert!(body["generationConfig"].get("responseMimeType").is_none());
+        assert!(body["generationConfig"].get("responseJsonSchema").is_none());
+    }
+
+    #[test]
     fn auto_max_tokens_omits_max_output_tokens() {
         // `max_tokens == 0` is AUTO: omit `maxOutputTokens` so Gemini applies
         // the model's own per-response maximum.

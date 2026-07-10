@@ -466,6 +466,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         let app_cfg = crate::app::Config::default();
         let cfg = build_model_config(&req, &app_cfg, None, None);
@@ -501,6 +502,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         let mut app_cfg = crate::app::Config::default();
         app_cfg.ollama.num_gpu = Some(10);
@@ -535,6 +537,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         let cfg = build_model_config(&req, &crate::app::Config::default(), Some(131_072), None);
         // Exactly the 4096 cap; plenty of room in a 131072 window.
@@ -560,6 +563,7 @@ mod tests {
             ollama_allow_ram_offload: None,
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         };
         let app_cfg = crate::app::Config::default();
         // Without a learned cap, AUTO hands over the full window room —

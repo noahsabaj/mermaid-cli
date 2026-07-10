@@ -103,6 +103,7 @@ impl Default for ModelConfig {
             tools: Vec::new(),
             resolved_context_window: None,
             resolved_max_output: None,
+            output_schema: None,
         }
     }
 }

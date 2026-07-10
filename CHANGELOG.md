@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `-c` overrides. Unknown profile names error listing what is defined;
   `doctor` shows the active profile; persists never touch `[profiles.*]`.
 
+- **`mermaid run --output-schema <FILE>`.** Structured output for headless
+  runs: the agentic loop runs completely normally, then one extra formatting
+  turn (no tools) reshapes the final answer to the given JSON Schema —
+  natively enforced on OpenAI-compatible providers (`response_format`),
+  Gemini (`responseJsonSchema`), and Ollama (`format`); prompt-driven on
+  Anthropic. The response is validated client-side either way: valid output
+  lands in the result's `structured_output` field, and any failure keeps the
+  text answer and records an `output_schema:` error instead of returning
+  nothing.
+
 - **Light theme, `/theme`, and a `[ui]` config table.** The TUI now ships a
   light palette alongside the default dark one. `/theme dark|light` switches
   live and persists as `ui.theme`; every previously hardcoded widget color

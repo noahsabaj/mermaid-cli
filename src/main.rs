@@ -76,10 +76,25 @@ async fn async_main() -> Result<()> {
         prompt,
         format,
         no_execute,
+        output_schema,
         ..
     }) = &cli.command
     {
-        return dispatch_non_interactive(&cli, config, prompt.clone(), *format, *no_execute).await;
+        // Read + validate the schema BEFORE any model work: a bad file must
+        // fail fast, not after a full agentic run.
+        let output_schema = output_schema
+            .as_deref()
+            .map(load_output_schema)
+            .transpose()?;
+        return dispatch_non_interactive(
+            &cli,
+            config,
+            prompt.clone(),
+            *format,
+            *no_execute,
+            output_schema,
+        )
+        .await;
     }
 
     dispatch_interactive(cli, config).await
@@ -223,12 +238,38 @@ fn load_seed_conversation(
     }
 }
 
+/// Load and structurally check an `--output-schema` file: bounded size,
+/// valid JSON, top-level object. Deeper validity surfaces at validation time.
+fn load_output_schema(path: &std::path::Path) -> Result<serde_json::Value> {
+    const MAX_SCHEMA_BYTES: u64 = 64 * 1024;
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("--output-schema: cannot read {}", path.display()))?;
+    anyhow::ensure!(
+        meta.len() <= MAX_SCHEMA_BYTES,
+        "--output-schema: {} is {} bytes; cap is {} (64 KiB)",
+        path.display(),
+        meta.len(),
+        MAX_SCHEMA_BYTES
+    );
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("--output-schema: cannot read {}", path.display()))?;
+    let schema: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("--output-schema: {} is not valid JSON", path.display()))?;
+    anyhow::ensure!(
+        schema.is_object(),
+        "--output-schema: {} must contain a JSON object (a JSON Schema)",
+        path.display()
+    );
+    Ok(schema)
+}
+
 async fn dispatch_non_interactive(
     cli: &Cli,
     mut config: mermaid_cli::app::Config,
     prompt: Option<String>,
     format: OutputFormat,
     no_execute: bool,
+    output_schema: Option<serde_json::Value>,
 ) -> Result<()> {
     let prompt = resolve_prompt_from_stdin(prompt)?;
     let cli_model_provided = cli.model.is_some();
@@ -268,6 +309,7 @@ async fn dispatch_non_interactive(
             task_id: runtime_task_id.clone(),
             stream_ndjson: matches!(format, OutputFormat::Ndjson),
             seed,
+            output_schema,
             ..RunOptions::default()
         },
     )

@@ -143,6 +143,14 @@ mermaid cloud-setup                             # Configure Ollama Cloud API key
 mermaid run "fix the tests"                     # Non-interactive mode
 mermaid run "explain main.rs" -f json           # JSON output (single typed object)
 mermaid run "explain main.rs" -f ndjson         # Streaming NDJSON events (SDK/scripting)
+mermaid run "summarize this repo" --output-schema schema.json -f json
+                                                # Structured output: the agentic loop runs
+                                                # normally, then one formatting turn reshapes
+                                                # the answer to your JSON Schema (validated
+                                                # client-side; result carries structured_output).
+                                                # Native constrained output on OpenAI-compatible
+                                                # providers, Gemini, and Ollama; prompt-driven +
+                                                # validation on Anthropic.
 mermaid --resume <id> run "and now the tests"   # Continue a saved session headless (id from
                                                 #   ndjson session_started/result, json result,
                                                 #   or the `session:` line on stderr)
