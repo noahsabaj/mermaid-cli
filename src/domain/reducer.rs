@@ -578,6 +578,13 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // If the user already navigated away (Esc before the
             // list landed), the event silently drops.
         },
+        Msg::ProjectFilesListed(files) => {
+            state.ui.project_files_loading = false;
+            state.ui.project_files = Some(files);
+            // Stale-while-revalidate: the user has been filtering the old
+            // cache; swap the fresh list in and re-rank the open picker.
+            recompute_file_matches(&mut state);
+        },
         Msg::RuntimeTasksListed(tasks) => {
             state
                 .session
@@ -1416,6 +1423,48 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             _ => {
                 // Fall through to normal key handling (char/Backspace
                 // update the filter; palette_cursor gets reset below).
+            },
+        }
+    }
+
+    // @-mention file picker — intercepts ↑/↓/Tab/Enter/Esc while an
+    // @-token is under the cursor (never on a slash command; the palette
+    // above owns that surface). Enter COMPLETES here instead of submitting:
+    // picking a file and firing the prompt with one keypress would send a
+    // half-written message.
+    if state.ui.file_picker_open() {
+        match code {
+            KeyCode::Up => {
+                let cur = state.ui.file_picker_cursor.unwrap_or(0);
+                state.ui.file_picker_cursor = Some(cur.saturating_sub(1));
+                return;
+            },
+            KeyCode::Down => {
+                let max = state.ui.file_picker_matches.len().saturating_sub(1);
+                let cur = state.ui.file_picker_cursor.unwrap_or(0);
+                state.ui.file_picker_cursor = Some((cur + 1).min(max));
+                return;
+            },
+            KeyCode::Tab => {
+                complete_file_mention(state);
+                return;
+            },
+            KeyCode::Enter if !mods.shift && !state.ui.file_picker_matches.is_empty() => {
+                complete_file_mention(state);
+                return;
+            },
+            KeyCode::Escape => {
+                // Dismiss for THIS token only; the input stays untouched
+                // (deliberate divergence from the slash palette's clear-all —
+                // the @-text is prose the user typed, not a command filter).
+                state.ui.file_picker_dismissed = true;
+                state.ui.file_picker_matches.clear();
+                state.ui.file_picker_cursor = None;
+                return;
+            },
+            _ => {
+                // Fall through: chars/Backspace edit the query below and the
+                // trailing refresh re-ranks the matches.
             },
         }
     }

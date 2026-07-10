@@ -281,6 +281,10 @@ pub enum Msg {
     /// Response to `Cmd::ListConversations`. Populates the `/load`
     /// picker's candidate list.
     ConversationsListed(Vec<ConversationSummary>),
+    /// Response to `Cmd::ListProjectFiles`: relative project paths for the
+    /// @-mention picker (gitignore-aware walk, capped, sorted; directories
+    /// carry a trailing `/`).
+    ProjectFilesListed(Vec<String>),
     /// Response to `/tasks`.
     RuntimeTasksListed(Vec<TaskRecord>),
     /// Response to `/task <id>`.
@@ -598,6 +602,7 @@ impl Msg {
             Msg::SessionSaved => MsgKind::SessionSaved,
             Msg::ConversationLoaded(_) => MsgKind::ConversationLoaded,
             Msg::ConversationsListed(_) => MsgKind::ConversationsListed,
+            Msg::ProjectFilesListed(_) => MsgKind::ProjectFilesListed,
             Msg::RuntimeTasksListed(_)
             | Msg::RuntimeTaskLoaded { .. }
             | Msg::RuntimeProcessesListed(_)
@@ -655,6 +660,7 @@ pub enum MsgKind {
     SessionSaved,
     ConversationLoaded,
     ConversationsListed,
+    ProjectFilesListed,
     RuntimeStore,
     ModelPullFinished,
     ModelPullProgress,

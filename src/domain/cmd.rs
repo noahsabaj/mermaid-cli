@@ -158,6 +158,10 @@ pub enum Cmd {
     /// saved session (newest first). The reducer transitions to
     /// `UiMode::ConversationList` and the render shows the picker.
     ListConversations,
+    /// Walk the project for the @-mention file picker (gitignore-aware,
+    /// capped, sorted). Emits `Msg::ProjectFilesListed` with relative paths
+    /// (directories carry a trailing `/`).
+    ListProjectFiles,
     /// List durable daemon/runtime tasks.
     ListRuntimeTasks { limit: usize },
     /// Load one durable daemon/runtime task and its timeline.

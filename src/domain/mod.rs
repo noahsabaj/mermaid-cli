@@ -13,6 +13,7 @@
 pub mod action;
 pub mod cmd;
 pub mod compaction;
+pub mod file_mention;
 pub mod ids;
 pub mod image_token;
 pub mod msg;
