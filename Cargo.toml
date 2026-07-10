@@ -89,6 +89,12 @@ sysinfo = { version = "0.38.4", default-features = false, features = ["system"] 
 dom_smoothie = "0.18.0"
 htmd = "0.5.4"
 
+# @-mention file picker: ripgrep's gitignore-aware directory walker (effect
+# side) + Helix's fuzzy matcher (pure ranking in src/domain — computation
+# only, no I/O, so the domain purity guard stays satisfied).
+ignore = "0.4"
+nucleo-matcher = "0.3"
+
 [dev-dependencies]
 # Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`
 # patterns in model + auth tests. Safer under `--test-threads > 1`.

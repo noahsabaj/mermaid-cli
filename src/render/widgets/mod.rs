@@ -7,6 +7,7 @@
 mod approval;
 mod chat;
 mod conversation_list;
+mod file_picker;
 mod input;
 mod question;
 mod slash_palette;
@@ -16,6 +17,7 @@ mod status_line;
 pub use approval::ApprovalModalWidget;
 pub use chat::{ChatState, ChatWidget, ImageClickTarget};
 pub use conversation_list::ConversationListWidget;
+pub use file_picker::FilePickerWidget;
 pub use input::{InputState, InputWidget};
 pub use question::{QuestionModalWidget, question_modal_height};
 pub use slash_palette::SlashPaletteWidget;

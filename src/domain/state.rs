@@ -878,6 +878,22 @@ pub struct UiState {
     /// When `Some(i)`, the palette has a highlighted row. `None` =
     /// closed / not showing.
     pub palette_cursor: Option<usize>,
+    /// Cached project file list for the @-mention picker (relative paths,
+    /// dirs with a trailing `/`). `None` until the first walk completes;
+    /// stale-while-revalidate — every picker OPEN refreshes it.
+    pub project_files: Option<Vec<String>>,
+    /// A `Cmd::ListProjectFiles` walk is in flight (dedupe: opening the
+    /// picker again while loading must not spawn a second walk).
+    pub project_files_loading: bool,
+    /// Current fuzzy matches for the active @-token, best first (top 50).
+    /// Recomputed in the reducer on every text mutation — not per-frame in
+    /// render — because fuzzy-ranking 20k paths at 60 Hz would be wasteful.
+    pub file_picker_matches: Vec<String>,
+    /// Highlighted row in `file_picker_matches`. `None` = picker closed.
+    pub file_picker_cursor: Option<usize>,
+    /// The user Esc'd the picker for the CURRENT token; cleared on the next
+    /// text mutation so typing reopens it.
+    pub file_picker_dismissed: bool,
     /// Messages the user typed while a turn was in flight. The
     /// reducer pops the oldest and auto-submits on a successful
     /// `StreamDone`. FIFO order. Each entry carries the attachment
@@ -949,6 +965,23 @@ pub struct UiState {
     /// the chat transcript. Hidden by default to keep the TUI focused
     /// on user-facing work while retaining provider-required history.
     pub show_reasoning: bool,
+}
+
+impl UiState {
+    /// The @-mention token under the cursor, when the picker may show:
+    /// not user-dismissed, and not while the buffer is a slash command
+    /// (the slash palette owns that surface).
+    pub fn active_file_token(&self) -> Option<crate::domain::file_mention::AtToken> {
+        if self.file_picker_dismissed || self.input_buffer.starts_with('/') {
+            return None;
+        }
+        crate::domain::file_mention::active_at_token(&self.input_buffer, self.input_cursor)
+    }
+
+    /// Whether the @-mention file picker is currently open.
+    pub fn file_picker_open(&self) -> bool {
+        self.active_file_token().is_some()
+    }
 }
 
 /// Top-level UI mode. Like `TurnState` this is a sum type instead of a

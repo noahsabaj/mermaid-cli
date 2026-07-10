@@ -578,6 +578,13 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // If the user already navigated away (Esc before the
             // list landed), the event silently drops.
         },
+        Msg::ProjectFilesListed(files) => {
+            state.ui.project_files_loading = false;
+            state.ui.project_files = Some(files);
+            // Stale-while-revalidate: the user has been filtering the old
+            // cache; swap the fresh list in and re-rank the open picker.
+            recompute_file_matches(&mut state);
+        },
         Msg::RuntimeTasksListed(tasks) => {
             state
                 .session
@@ -1420,6 +1427,48 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         }
     }
 
+    // @-mention file picker — intercepts ↑/↓/Tab/Enter/Esc while an
+    // @-token is under the cursor (never on a slash command; the palette
+    // above owns that surface). Enter COMPLETES here instead of submitting:
+    // picking a file and firing the prompt with one keypress would send a
+    // half-written message.
+    if state.ui.file_picker_open() {
+        match code {
+            KeyCode::Up => {
+                let cur = state.ui.file_picker_cursor.unwrap_or(0);
+                state.ui.file_picker_cursor = Some(cur.saturating_sub(1));
+                return;
+            },
+            KeyCode::Down => {
+                let max = state.ui.file_picker_matches.len().saturating_sub(1);
+                let cur = state.ui.file_picker_cursor.unwrap_or(0);
+                state.ui.file_picker_cursor = Some((cur + 1).min(max));
+                return;
+            },
+            KeyCode::Tab => {
+                complete_file_mention(state);
+                return;
+            },
+            KeyCode::Enter if !mods.shift && !state.ui.file_picker_matches.is_empty() => {
+                complete_file_mention(state);
+                return;
+            },
+            KeyCode::Escape => {
+                // Dismiss for THIS token only; the input stays untouched
+                // (deliberate divergence from the slash palette's clear-all —
+                // the @-text is prose the user typed, not a command filter).
+                state.ui.file_picker_dismissed = true;
+                state.ui.file_picker_matches.clear();
+                state.ui.file_picker_cursor = None;
+                return;
+            },
+            _ => {
+                // Fall through: chars/Backspace edit the query below and the
+                // trailing refresh re-ranks the matches.
+            },
+        }
+    }
+
     // Enter submits the current input (or triggers the slash palette
     // pick). Shift+Enter is a newline for multi-line input. This arm
     // enqueues a synthetic `Msg` on `pending_msgs` rather than
@@ -1447,9 +1496,11 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             KeyCode::Char(c) => {
                 // Any text mutation resets history nav — the user's
                 // typing wins over whatever historical entry was
-                // on-screen.
+                // on-screen. It also un-dismisses the @-mention picker:
+                // Esc dismisses per-token, typing reopens.
                 state.ui.input_history_cursor = None;
                 state.ui.history_draft.clear();
+                state.ui.file_picker_dismissed = false;
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
                 state.ui.input_buffer.insert(pos, c);
                 state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + c.len_utf8());
@@ -1464,6 +1515,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             KeyCode::Backspace => {
                 state.ui.input_history_cursor = None;
                 state.ui.history_draft.clear();
+                state.ui.file_picker_dismissed = false;
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
                 // If a whole `[Image #N]` pill ends at the cursor, delete it and
                 // drop its attachment together; otherwise one codepoint.
@@ -1487,6 +1539,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             KeyCode::Delete => {
                 state.ui.input_history_cursor = None;
                 state.ui.history_draft.clear();
+                state.ui.file_picker_dismissed = false;
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
                 // Symmetric to Backspace: a pill starting at the cursor deletes
                 // whole, taking its attachment with it.
@@ -1534,6 +1587,9 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             },
             _ => {},
         }
+        // The buffer or cursor may have moved: re-evaluate the @-mention
+        // token, re-rank matches, and fire the project walk on open.
+        refresh_file_picker(state, cmds);
     }
 }
 
@@ -1571,6 +1627,63 @@ fn handle_conversation_list_key(state: &mut State, cmds: &mut Vec<Cmd>, code: Ke
         },
         _ => {},
     }
+}
+
+/// Cap on ranked matches held in state (and shown by the widget's window).
+const FILE_PICKER_MAX_MATCHES: usize = 50;
+
+/// Re-rank `file_picker_matches` for the active @-token against the cached
+/// project file list. Pure recompute — never fires a walk.
+fn recompute_file_matches(state: &mut State) {
+    let Some(token) = state.ui.active_file_token() else {
+        state.ui.file_picker_matches.clear();
+        state.ui.file_picker_cursor = None;
+        return;
+    };
+    let query = state.ui.input_buffer[token.query_start..token.query_end].to_string();
+    let files: &[String] = state.ui.project_files.as_deref().unwrap_or(&[]);
+    state.ui.file_picker_matches =
+        crate::domain::file_mention::fuzzy_rank(files, &query, FILE_PICKER_MAX_MATCHES);
+    // Clamp (don't reset) the cursor so ↑/↓ position survives narrowing.
+    let max = state.ui.file_picker_matches.len().saturating_sub(1);
+    let cur = state.ui.file_picker_cursor.unwrap_or(0);
+    state.ui.file_picker_cursor = Some(cur.min(max));
+}
+
+/// Token re-evaluation after a text mutation or cursor move: rank matches,
+/// and on the CLOSED → OPEN transition fire a fresh project walk
+/// (stale-while-revalidate — the user filters the cached list instantly and
+/// the fresh list swaps in via `Msg::ProjectFilesListed`). The in-flight
+/// flag dedupes: reopening while a walk runs never spawns a second one.
+fn refresh_file_picker(state: &mut State, cmds: &mut Vec<Cmd>) {
+    let was_open = state.ui.file_picker_cursor.is_some();
+    recompute_file_matches(state);
+    let is_open = state.ui.file_picker_cursor.is_some();
+    if is_open && !was_open && !state.ui.project_files_loading {
+        state.ui.project_files_loading = true;
+        cmds.push(Cmd::ListProjectFiles);
+    }
+}
+
+/// Complete the active @-token with the highlighted match: splice
+/// `@<path> ` over `@<query>` and land the cursor after the space. The
+/// trailing space closes the token, so the picker drops on its own.
+fn complete_file_mention(state: &mut State) {
+    let Some(token) = state.ui.active_file_token() else {
+        return;
+    };
+    let sel = state.ui.file_picker_cursor.unwrap_or(0);
+    let Some(path) = state.ui.file_picker_matches.get(sel) else {
+        return;
+    };
+    let mention = format!("@{path} ");
+    state
+        .ui
+        .input_buffer
+        .replace_range(token.start..token.query_end, &mention);
+    state.ui.input_cursor = token.start + mention.len();
+    state.ui.file_picker_matches.clear();
+    state.ui.file_picker_cursor = None;
 }
 
 /// Clamp a raw byte offset onto the nearest preceding char boundary
@@ -4459,6 +4572,132 @@ mod tests {
         let before = state.ui.scroll_to_bottom_seq;
         let (state, _) = update(state, key(KeyCode::End, KeyMods::default()));
         assert_eq!(state.ui.scroll_to_bottom_seq, before + 1);
+    }
+
+    /// Type each char of `text` through the real reducer.
+    fn type_text(mut state: State, text: &str) -> (State, Vec<Cmd>) {
+        let mut all_cmds = Vec::new();
+        for c in text.chars() {
+            let (next, cmds) = update(
+                state,
+                Msg::Key(Key {
+                    code: KeyCode::Char(c),
+                    modifiers: KeyMods::default(),
+                }),
+            );
+            state = next;
+            all_cmds.extend(cmds);
+        }
+        (state, all_cmds)
+    }
+
+    fn plain_key(code: KeyCode) -> Msg {
+        Msg::Key(Key {
+            code,
+            modifiers: KeyMods::default(),
+        })
+    }
+
+    #[test]
+    fn file_picker_opens_on_at_and_walks_once() {
+        let (state, cmds) = type_text(fresh_state(), "look at @");
+        assert!(state.ui.file_picker_open(), "@ opens the picker");
+        assert!(state.ui.project_files_loading);
+        let walks = cmds
+            .iter()
+            .filter(|c| matches!(c, Cmd::ListProjectFiles))
+            .count();
+        assert_eq!(walks, 1, "open fires exactly one walk");
+        // Further filtering while the walk is in flight never re-fires.
+        let (state, cmds) = type_text(state, "src");
+        assert!(state.ui.file_picker_open());
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Cmd::ListProjectFiles)),
+            "in-flight walk dedupes"
+        );
+        let _ = state;
+    }
+
+    #[test]
+    fn file_picker_ranks_listed_files_and_completes_with_tab() {
+        let (state, _) = type_text(fresh_state(), "@ma");
+        let (state, _) = update(
+            state,
+            Msg::ProjectFilesListed(vec!["docs/notes.md".to_string(), "src/main.rs".to_string()]),
+        );
+        assert_eq!(state.ui.file_picker_matches, vec!["src/main.rs"]);
+        let (state, _) = update(state, plain_key(KeyCode::Tab));
+        assert_eq!(state.ui.input_buffer, "@src/main.rs ");
+        assert_eq!(state.ui.input_cursor, state.ui.input_buffer.len());
+        assert!(
+            !state.ui.file_picker_open(),
+            "the trailing space closes the token"
+        );
+    }
+
+    #[test]
+    fn file_picker_enter_completes_instead_of_submitting() {
+        let (state, _) = type_text(fresh_state(), "@ma");
+        let (state, _) = update(
+            state,
+            Msg::ProjectFilesListed(vec!["src/main.rs".to_string()]),
+        );
+        let (state, _) = update(state, plain_key(KeyCode::Enter));
+        assert_eq!(
+            state.ui.input_buffer, "@src/main.rs ",
+            "Enter completes the mention"
+        );
+        assert!(
+            state.session.messages().is_empty(),
+            "Enter with the picker open must NOT submit the prompt"
+        );
+    }
+
+    #[test]
+    fn file_picker_esc_dismisses_and_typing_reopens() {
+        let (state, _) = type_text(fresh_state(), "@ma");
+        let (state, _) = update(
+            state,
+            Msg::ProjectFilesListed(vec!["src/main.rs".to_string()]),
+        );
+        let buffer_before = state.ui.input_buffer.clone();
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        assert!(!state.ui.file_picker_open(), "Esc dismisses");
+        assert_eq!(
+            state.ui.input_buffer, buffer_before,
+            "Esc leaves the typed text untouched"
+        );
+        let (state, _) = type_text(state, "i");
+        assert!(state.ui.file_picker_open(), "typing reopens the picker");
+    }
+
+    #[test]
+    fn file_picker_never_opens_on_slash_commands_or_emails() {
+        let (state, cmds) = type_text(fresh_state(), "/load @x");
+        assert!(!state.ui.file_picker_open(), "slash palette owns `/` input");
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::ListProjectFiles)));
+        let (state, cmds) = type_text(fresh_state(), "mail user@host");
+        assert!(!state.ui.file_picker_open(), "user@host is not a mention");
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::ListProjectFiles)));
+        let _ = state;
+    }
+
+    #[test]
+    fn file_picker_arrow_keys_move_the_cursor_without_editing() {
+        let (state, _) = type_text(fresh_state(), "@s");
+        let (state, _) = update(
+            state,
+            Msg::ProjectFilesListed(vec![
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+                "src/c.rs".to_string(),
+            ]),
+        );
+        let (state, _) = update(state, plain_key(KeyCode::Down));
+        assert_eq!(state.ui.file_picker_cursor, Some(1));
+        assert_eq!(state.ui.input_buffer, "@s", "Down never edits the buffer");
+        let (state, _) = update(state, plain_key(KeyCode::Up));
+        assert_eq!(state.ui.file_picker_cursor, Some(0));
     }
 
     #[test]
