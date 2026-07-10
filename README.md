@@ -149,8 +149,8 @@ mermaid run "summarize this repo" --output-schema schema.json -f json
                                                 # the answer to your JSON Schema (validated
                                                 # client-side; result carries structured_output).
                                                 # Native constrained output on OpenAI-compatible
-                                                # providers, Gemini, and Ollama; prompt-driven +
-                                                # validation on Anthropic.
+                                                # providers, Gemini, Ollama, and Anthropic
+                                                # (output_config.format on current models).
 mermaid --resume <id> run "and now the tests"   # Continue a saved session headless (id from
                                                 #   ndjson session_started/result, json result,
                                                 #   or the `session:` line on stderr)

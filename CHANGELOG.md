@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Native structured output on Anthropic.** `mermaid run --output-schema`
+  now sends the schema as `output_config.format` (JSON Schema) on the
+  Anthropic formatting turn, matching the native enforcement already used
+  for OpenAI-compatible providers, Gemini, and Ollama. Anthropic accepts a
+  JSON-Schema subset and older models reject `format` entirely; in either
+  case the run keeps the agent's original answer, records an
+  `output_schema:` error, and the client-side validator remains the final
+  gate.
+
 ### Fixed
 
 - **The status spinner never names tools; the transcript does.** The spinner
