@@ -62,6 +62,10 @@ pub async fn handle_command(
             show_doctor(config, cwd, cli_model, *format).await?;
             Ok(true)
         },
+        Commands::Feedback { stdout, format } => {
+            super::feedback::run_feedback(config, cwd, cli_model, *stdout, *format).await?;
+            Ok(true)
+        },
         Commands::SelfTest {
             format,
             keep_workspace,
@@ -194,43 +198,43 @@ fn handle_qa(command: &QaCommand, config: &Config, cwd: &Path) -> Result<()> {
 }
 
 #[derive(Debug, serde::Serialize)]
-struct DoctorReport {
-    ok: bool,
-    cwd: String,
-    active_model: Option<String>,
-    model_error: Option<String>,
-    model_capabilities: Option<DoctorModelCapabilities>,
-    safety_mode: String,
-    checkpoint_on_mutation: bool,
-    prompt_customized: bool,
-    ollama: DoctorCheck,
-    remote_providers: Vec<String>,
-    project_instructions: DoctorCheck,
-    tools: Vec<String>,
-    runtime: DoctorRuntime,
-    next_steps: Vec<String>,
+pub(crate) struct DoctorReport {
+    pub(crate) ok: bool,
+    pub(crate) cwd: String,
+    pub(crate) active_model: Option<String>,
+    pub(crate) model_error: Option<String>,
+    pub(crate) model_capabilities: Option<DoctorModelCapabilities>,
+    pub(crate) safety_mode: String,
+    pub(crate) checkpoint_on_mutation: bool,
+    pub(crate) prompt_customized: bool,
+    pub(crate) ollama: DoctorCheck,
+    pub(crate) remote_providers: Vec<String>,
+    pub(crate) project_instructions: DoctorCheck,
+    pub(crate) tools: Vec<String>,
+    pub(crate) runtime: DoctorRuntime,
+    pub(crate) next_steps: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
-struct DoctorModelCapabilities {
-    provider: String,
-    name: String,
-    supports_tools: bool,
-    supports_vision: bool,
-    reasoning: String,
-    max_context_tokens: Option<usize>,
+pub(crate) struct DoctorModelCapabilities {
+    pub(crate) provider: String,
+    pub(crate) name: String,
+    pub(crate) supports_tools: bool,
+    pub(crate) supports_vision: bool,
+    pub(crate) reasoning: String,
+    pub(crate) max_context_tokens: Option<usize>,
 }
 
 #[derive(Debug, serde::Serialize)]
-struct DoctorCheck {
-    status: &'static str,
-    message: String,
+pub(crate) struct DoctorCheck {
+    pub(crate) status: &'static str,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, serde::Serialize)]
-struct DoctorRuntime {
-    daemon: DoctorCheck,
-    local_store: DoctorCheck,
+pub(crate) struct DoctorRuntime {
+    pub(crate) daemon: DoctorCheck,
+    pub(crate) local_store: DoctorCheck,
 }
 
 async fn show_doctor(
@@ -239,6 +243,17 @@ async fn show_doctor(
     cli_model: Option<&str>,
     format: OutputFormat,
 ) -> Result<()> {
+    let report = build_doctor_report(config, cwd, cli_model).await;
+    print_doctor_report(&report, format)
+}
+
+/// Assemble the full readiness report without printing — shared by
+/// `mermaid doctor` and the `mermaid feedback` diagnostic bundle.
+pub(crate) async fn build_doctor_report(
+    config: &Config,
+    cwd: &Path,
+    cli_model: Option<&str>,
+) -> DoctorReport {
     let active_model_result = crate::app::resolve_model_id(cli_model, config).await;
     let (active_model, model_error, model_capabilities) = match active_model_result {
         Ok(model) => {
@@ -421,7 +436,7 @@ async fn show_doctor(
     let ok = active_model.is_some()
         && local_store.status != "warning"
         && (ollama.status == "ok" || !remote_providers.is_empty());
-    let report = DoctorReport {
+    DoctorReport {
         ok,
         cwd: cwd.display().to_string(),
         active_model,
@@ -439,8 +454,7 @@ async fn show_doctor(
             local_store,
         },
         next_steps,
-    };
-    print_doctor_report(&report, format)
+    }
 }
 
 fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()> {

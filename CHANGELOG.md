@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`mermaid feedback` + an always-on TRACE ring.** A new in-memory ring
+  captures the last ~2000 trace events from mermaid's crates at TRACE level
+  (dependencies capped at INFO) regardless of `RUST_LOG`, with secrets
+  redacted at capture — so a bug that already happened is diagnosable without
+  a reproduce-under-logging round trip. `mermaid feedback` bundles the doctor
+  report, a names-and-booleans config summary (provider keys reported as
+  present/absent, never values), recent session ids, the trace ring, and the
+  log tail into a local `mermaid-feedback-<ts>.md` (mode 0600; `--stdout` /
+  `--format json` available). Nothing is uploaded; the rendered bundle passes
+  a final whole-document redaction sweep. `RUST_LOG` now scopes only the file
+  log layer.
+
 - **Render snapshot suite.** Nine curated TUI scenes (idle, transcript,
   streaming, tool execution with a queued message, approval modal, question
   modal, conversation picker, slash palette, system notice + compaction

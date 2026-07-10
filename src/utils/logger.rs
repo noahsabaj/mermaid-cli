@@ -115,7 +115,10 @@ impl tracing::field::Visit for RingVisitor {
     }
 }
 
-impl<S: tracing::Subscriber> Layer<S> for RingLayer {
+impl<S> Layer<S> for RingLayer
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
     // NOTE: never log from inside on_event — a tracing call here would
     // re-enter the subscriber.
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: LayerContext<'_, S>) {
@@ -145,9 +148,31 @@ impl<S: tracing::Subscriber> Layer<S> for RingLayer {
 
 /// The ring's fixed filter: our crates at TRACE, dependencies capped at INFO
 /// (hyper/h2 TRACE floods stay disabled via per-callsite interest caching).
-/// Independent of `RUST_LOG`, which scopes only the file layer.
-fn ring_filter() -> EnvFilter {
-    EnvFilter::new("info,mermaid_cli=trace,mermaid_runtime=trace,mermaidd=trace")
+/// Independent of `RUST_LOG`, which scopes only the file layer. `Targets`
+/// (not `EnvFilter`) deliberately: `EnvFilter` is documented as unsuitable
+/// for per-layer use alongside another `EnvFilter` — its callsite-interest
+/// caching made the ring silently drop everything next to the file layer.
+fn ring_filter() -> tracing_subscriber::filter::Targets {
+    use tracing::level_filters::LevelFilter;
+    tracing_subscriber::filter::Targets::new()
+        .with_default(LevelFilter::INFO)
+        .with_target("mermaid_cli", LevelFilter::TRACE)
+        .with_target("mermaid_runtime", LevelFilter::TRACE)
+        .with_target("mermaidd", LevelFilter::TRACE)
+}
+
+/// The filtered ring layer, generic over the subscriber stack it joins —
+/// `Filtered<…, S>` is stack-specific, so each `init_logger` branch builds
+/// its own instance (both share the ONE process-global ring).
+fn build_ring_layer<S>()
+-> tracing_subscriber::filter::Filtered<RingLayer, tracing_subscriber::filter::Targets, S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    RingLayer {
+        ring: TRACE_RING.get_or_init(TraceRing::new).clone(),
+    }
+    .with_filter(ring_filter())
 }
 
 /// If the log file exceeds MAX_LOG_SIZE, rename it to `.log.old`
@@ -180,10 +205,6 @@ pub fn init_logger(verbose: bool) {
     } else {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,mermaid=info"))
     };
-    let ring_layer = RingLayer {
-        ring: TRACE_RING.get_or_init(TraceRing::new).clone(),
-    }
-    .with_filter(ring_filter());
 
     // Try to write logs to a file to avoid corrupting the TUI
     // Falls back to no logging if file creation fails (TUI takes priority)
@@ -225,7 +246,7 @@ pub fn init_logger(verbose: bool) {
 
             tracing_subscriber::registry()
                 .with(fmt_layer)
-                .with(ring_layer)
+                .with(build_ring_layer())
                 .init();
             return;
         }
@@ -233,7 +254,9 @@ pub fn init_logger(verbose: bool) {
 
     // Fallback: no file logging if creation fails (don't corrupt the TUI) —
     // but the trace ring still captures, so `mermaid feedback` keeps working.
-    tracing_subscriber::registry().with(ring_layer).init();
+    tracing_subscriber::registry()
+        .with(build_ring_layer())
+        .init();
 }
 
 /// A `MakeWriter` that scrubs credential-shaped strings out of every formatted
@@ -391,8 +414,8 @@ mod tests {
     /// Local (non-global) subscriber for ring tests — never touches the
     /// `TRACE_RING` OnceLock, so tests can't interfere with each other.
     fn with_ring_subscriber(ring: TraceRing, f: impl FnOnce()) {
-        let subscriber = tracing_subscriber::registry()
-            .with(RingLayer { ring }.with_filter(ring_filter()));
+        let subscriber =
+            tracing_subscriber::registry().with(RingLayer { ring }.with_filter(ring_filter()));
         tracing::subscriber::with_default(subscriber, f);
     }
 
@@ -431,7 +454,10 @@ mod tests {
         let lines = ring.snapshot();
         assert_eq!(lines.len(), RING_CAPACITY);
         assert_eq!(lines[0], "event 10", "oldest evicted first");
-        assert_eq!(lines[RING_CAPACITY - 1], format!("event {}", RING_CAPACITY + 9));
+        assert_eq!(
+            lines[RING_CAPACITY - 1],
+            format!("event {}", RING_CAPACITY + 9)
+        );
     }
 
     #[test]

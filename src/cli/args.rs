@@ -179,6 +179,18 @@ pub enum Commands {
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
+    /// Write a local diagnostic bundle: doctor report, config summary
+    /// (names and booleans only), recent trace events, and the log tail.
+    /// Nothing is uploaded — the file stays on this machine.
+    Feedback {
+        /// Print to stdout instead of writing mermaid-feedback-<ts> in the
+        /// current directory
+        #[arg(long)]
+        stdout: bool,
+        /// Output format (markdown or json)
+        #[arg(short, long, value_enum, default_value_t = OutputFormat::Markdown)]
+        format: OutputFormat,
+    },
     /// Run fast deterministic Mermaid self-tests
     SelfTest {
         /// Output format (text, json, markdown)

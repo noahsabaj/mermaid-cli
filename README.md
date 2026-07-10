@@ -305,6 +305,12 @@ Daemon `run` requests are queued and executed by a scheduler bounded by `[daemon
 
 On Linux, install a per-user systemd unit with `mermaid daemon install --start`. The installer writes `~/.config/systemd/user/mermaidd.service`, points `ExecStart` at the discovered `mermaidd` binary, reloads systemd's user manager, and optionally enables/starts the service. Use `mermaid daemon status`, `mermaid daemon logs [-f]`, `mermaid daemon restart`, `mermaid daemon stop`, `mermaid daemon uninstall`, or `mermaid daemon print-unit` for day-to-day service management. Set `MERMAID_DAEMON_BIN=/absolute/path/to/mermaidd` before installing if the background-service binary is not next to `mermaid` or on `PATH`.
 
+### Logging and diagnostics
+
+Mermaid logs to `~/.mermaid/mermaid.log` (owner-only, secret-redacted, 10 MiB rotation), scoped by `RUST_LOG` / `--verbose`. Independently, an always-on in-memory ring captures the last ~2000 trace events from mermaid's own crates at TRACE level (dependencies capped at INFO) regardless of `RUST_LOG` — so a bug that already happened is diagnosable without reproducing it under elevated logging.
+
+`mermaid feedback` writes a local diagnostic bundle to the current directory (mode 0600): the doctor report, a names-and-booleans config summary (provider keys are reported as present/absent — never values), recent session ids, the trace ring, and the log tail. `--stdout` prints instead; `--format json` emits machine-readable output. **Nothing is uploaded** — the ring redacts secrets at capture, the log at write, and the whole rendered bundle passes a final redaction sweep; review the file before sharing it in a bug report.
+
 On Windows, `mermaidd.exe` serves the same JSONL control surface over a named pipe at `\\.\pipe\mermaidd-<your-user-SID>` instead of a Unix socket. The pipe carries an explicit owner-only security descriptor (LocalSystem + your user, nothing else) and rejects remote pipe clients, mirroring the `0600` socket + peer-uid check on Unix; the same pairing-token rules apply on top. There is no service installer yet — start `mermaidd.exe` directly or wire it into Task Scheduler; `mermaid daemon install` remains Linux/systemd-only.
 
 Release builds keep the existing `.tar.gz`/`.zip` archives and add Linux `.deb`/`.rpm` artifacts for x86_64 and aarch64. The distro packages install `mermaid`, `mermaidd`, docs, and a reference systemd user unit at `/usr/lib/systemd/user/mermaidd.service`; they do not auto-enable or start the daemon.
