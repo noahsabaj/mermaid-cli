@@ -380,11 +380,6 @@ pub enum Msg {
         description: String,
         report: String,
         success: bool,
-        /// The drive ended because its cancel token fired (`/agents kill`,
-        /// the `agent` tool's kill action). A cancelled child gets a system
-        /// note but NO queued report — the killer already knows.
-        #[serde(default)]
-        cancelled: bool,
         /// Provider-reported usage for the child's whole drive (None when the
         /// provider reported nothing — the display falls back to `tokens`).
         usage: Option<TokenUsage>,
@@ -584,9 +579,6 @@ pub enum SlashCmd {
     Handoff(Option<String>),
     Report(Option<String>),
     Processes,
-    /// No arg → list background agents; `Some("kill <id>"|"kill all")` →
-    /// cancel them. Tail parsed in the reducer arm.
-    Agents(Option<String>),
     Logs(Option<String>),
     Stop(Option<String>),
     Restart(Option<String>),

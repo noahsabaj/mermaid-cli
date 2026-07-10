@@ -258,7 +258,6 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("cancel") => SlashCmd::Cancel(arg),
         Some("handoff") => SlashCmd::Handoff(arg),
         Some("report") => SlashCmd::Report(arg),
-        Some("agents") => SlashCmd::Agents(arg),
         Some("processes") => SlashCmd::Processes,
         Some("logs") => SlashCmd::Logs(arg),
         Some("stop") => SlashCmd::Stop(arg),
@@ -295,19 +294,6 @@ mod tests {
             SlashCmd::Theme(Some("light".to_string()))
         );
         assert_eq!(parse_slash_command("editor"), SlashCmd::Editor);
-    }
-
-    #[test]
-    fn parses_agents_command_with_kill_tail() {
-        assert_eq!(parse_slash_command("agents"), SlashCmd::Agents(None));
-        assert_eq!(
-            parse_slash_command("agents kill a1"),
-            SlashCmd::Agents(Some("kill a1".to_string()))
-        );
-        assert_eq!(
-            parse_slash_command("agents kill all"),
-            SlashCmd::Agents(Some("kill all".to_string()))
-        );
     }
 
     #[test]

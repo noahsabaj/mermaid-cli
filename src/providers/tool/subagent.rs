@@ -215,22 +215,6 @@ pub struct SubagentSpawner {
     /// its agent runs a continuation (re-stored afterward), so concurrent
     /// continuations of one id error instead of racing a single `State`.
     cache: Mutex<AgentCache>,
-    /// Kill handles for detached (Ctrl+B backgrounded) children. Registered
-    /// by `detach_child` before its task spawns, removed by that task when
-    /// the drive ends — so an entry here always maps to a live child.
-    detached_cancels: Mutex<HashMap<String, CancellationToken>>,
-}
-
-/// What `kill_detached` found for an agent id.
-#[derive(Debug, PartialEq, Eq)]
-pub enum KillResult {
-    /// A running detached child — its cancel token was fired; expect a
-    /// `Msg::BackgroundAgentFinished { cancelled: true, .. }` shortly.
-    Killed,
-    /// No running child, but a finished one sat in the continuation cache —
-    /// it was evicted (the id can no longer be continued).
-    Evicted,
-    NotFound,
 }
 
 impl SubagentSpawner {
@@ -240,7 +224,6 @@ impl SubagentSpawner {
             inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)),
             next_agent_id: AtomicU64::new(0),
             cache: Mutex::new(AgentCache::default()),
-            detached_cancels: Mutex::new(HashMap::new()),
         }
     }
 
@@ -270,56 +253,6 @@ impl SubagentSpawner {
             };
             cache.entries.remove(&oldest);
         }
-    }
-
-    fn register_detached(&self, agent_id: String, cancel: CancellationToken) {
-        self.detached_cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(agent_id, cancel);
-    }
-
-    fn unregister_detached(&self, agent_id: &str) {
-        self.detached_cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(agent_id);
-    }
-
-    /// Kill a detached child (fires its cancel token; the child unwinds
-    /// orderly and reports through `Msg::BackgroundAgentFinished`), or —
-    /// if the id only names a FINISHED child — evict it from the
-    /// continuation cache.
-    pub fn kill_detached(&self, agent_id: &str) -> KillResult {
-        let cancel = self
-            .detached_cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(agent_id);
-        if let Some(cancel) = cancel {
-            cancel.cancel();
-            return KillResult::Killed;
-        }
-        if self.cache_take(agent_id).is_some() {
-            return KillResult::Evicted;
-        }
-        KillResult::NotFound
-    }
-
-    /// Kill every detached child. Returns how many tokens were fired.
-    pub fn kill_all_detached(&self) -> usize {
-        let cancels: Vec<CancellationToken> = {
-            let mut map = self
-                .detached_cancels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            map.drain().map(|(_, c)| c).collect()
-        };
-        let n = cancels.len();
-        for cancel in cancels {
-            cancel.cancel();
-        }
-        n
     }
 }
 
@@ -355,23 +288,16 @@ impl ToolExecutor for SubagentTool {
                  send a follow-up prompt to the same child with its context intact (the \
                  {max_cached} most recent children are kept). Breadth-capped at \
                  {max_breadth} concurrent; subagents can't themselves spawn subagents \
-                 and never get GUI (screenshot/click/…) access. A child moved to the \
-                 background (the user detaches one with Ctrl+B) can be cancelled with \
-                 action: \"kill\" plus its agent_id.",
+                 and never get GUI (screenshot/click/…) access.",
                 max_cached = MAX_CACHED_AGENTS,
                 max_breadth = MAX_INFLIGHT,
             ),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["spawn", "kill"],
-                        "description": "Default 'spawn' (also covers continuing via agent_id). 'kill' cancels a backgrounded child by agent_id — no prompt needed."
-                    },
                     "prompt": {
                         "type": "string",
-                        "description": "The task for the subagent (required unless action is 'kill'). Self-contained; the subagent has no access to the parent's conversation. When continuing via agent_id, this is the next user message to that child."
+                        "description": "The task for the subagent. Self-contained; the subagent has no access to the parent's conversation. When continuing via agent_id, this is the next user message to that child."
                     },
                     "description": {
                         "type": "string",
@@ -387,59 +313,16 @@ impl ToolExecutor for SubagentTool {
                     },
                     "agent_id": {
                         "type": "string",
-                        "description": "Continue a previous child (its conversation context is restored and `prompt` becomes its next user message) or, with action 'kill', the backgrounded child to cancel. Use the id from a prior result's [agent_id: …] trailer or the background notice."
+                        "description": "Continue a previous child: its conversation context is restored and `prompt` becomes its next user message. Use the id from a prior result's [agent_id: …] trailer."
                     }
                 },
-                "required": []
+                "required": ["prompt"]
             }),
         }
     }
 
     async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
-
-        // Kill action: cancel a backgrounded child (or evict a finished one
-        // from the continuation cache). Short-circuits before the policy
-        // gate and the breadth permit — there is no model-authored prompt to
-        // vet and no new capacity consumed; it only reaches children this
-        // session already spawned. The dying child reports through
-        // `Msg::BackgroundAgentFinished { cancelled: true, .. }`.
-        if args.get("action").and_then(|v| v.as_str()) == Some("kill") {
-            let Some(id) = args
-                .get("agent_id")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            else {
-                return ToolOutcome::error("action 'kill' requires `agent_id`", 0.0);
-            };
-            return match self.spawner.kill_detached(id) {
-                KillResult::Killed => ToolOutcome::success(
-                    format!(
-                        "Background agent '{id}' cancelled — it unwinds at its next \
-                         await point; a cancellation notice will appear in the \
-                         conversation."
-                    ),
-                    "subagent killed",
-                    started.elapsed().as_secs_f64(),
-                ),
-                KillResult::Evicted => ToolOutcome::success(
-                    format!(
-                        "Agent '{id}' had already finished; removed it from the \
-                         continuation cache instead."
-                    ),
-                    "subagent evicted",
-                    started.elapsed().as_secs_f64(),
-                ),
-                KillResult::NotFound => ToolOutcome::error(
-                    format!(
-                        "no background or cached agent '{id}' — it may have already \
-                         finished and been evicted, or the id was never issued"
-                    ),
-                    started.elapsed().as_secs_f64(),
-                ),
-            };
-        }
 
         // Parse args.
         let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
@@ -688,7 +571,6 @@ impl ToolExecutor for SubagentTool {
                         drive,
                         progress_rx: child_progress_rx,
                         permit,
-                        cancel: child_cancel.clone(),
                         notify: ctx.notify.clone(),
                         agent_id,
                         description,
@@ -729,9 +611,6 @@ struct DetachArgs<F> {
     drive: std::pin::Pin<Box<F>>,
     progress_rx: mpsc::Receiver<ProgressEvent>,
     permit: tokio::sync::OwnedSemaphorePermit,
-    /// The child's own cancel token — registered on the spawner so
-    /// `/agents kill` and the `agent` tool's kill action can reach it.
-    cancel: CancellationToken,
     notify: Option<mpsc::Sender<Msg>>,
     agent_id: String,
     description: String,
@@ -756,7 +635,6 @@ impl SubagentTool {
             mut drive,
             mut progress_rx,
             permit,
-            cancel,
             notify,
             agent_id,
             description,
@@ -773,9 +651,6 @@ impl SubagentTool {
             });
         }
         let spawner = self.spawner.clone();
-        // Register the kill handle before the task spawns so a kill can
-        // never race a not-yet-registered child.
-        spawner.register_detached(agent_id.clone(), cancel);
         let outcome_text = format!(
             "Agent '{description}' ({agent_id}) moved to background — it keeps running and \
              its report will be posted to the conversation when it finishes."
@@ -817,8 +692,6 @@ impl SubagentTool {
                     r = &mut drive => break r,
                 }
             };
-            spawner.unregister_detached(&bg_agent_id);
-            let cancelled = matches!(result, Err(DriveError::Cancelled));
             let outcome = finish_drive(
                 &spawner,
                 type_name,
@@ -840,7 +713,6 @@ impl SubagentTool {
                         description: bg_description,
                         report: outcome.model_content.clone(),
                         success: outcome.is_success(),
-                        cancelled,
                         usage,
                         tokens: tokens_total,
                         duration_secs: started.elapsed().as_secs(),
@@ -1781,78 +1653,6 @@ mod tests {
         // Core tools present.
         assert!(r.get("read_file").is_some());
         assert!(r.get("execute_command").is_some());
-    }
-
-    #[test]
-    fn kill_detached_fires_registered_tokens_and_evicts_cached_children() {
-        let spawner = SubagentSpawner::new(Arc::new(ProviderFactory::new(
-            crate::app::Config::default(),
-        )));
-
-        // Running detached child: token registered → killed exactly once.
-        let cancel = CancellationToken::new();
-        spawner.register_detached("a1".to_string(), cancel.clone());
-        assert_eq!(spawner.kill_detached("a1"), KillResult::Killed);
-        assert!(cancel.is_cancelled());
-        // The handle is consumed — a second kill finds nothing.
-        assert_eq!(spawner.kill_detached("a1"), KillResult::NotFound);
-
-        // Finished child (continuation cache only): evicted, not killable.
-        spawner.cache_store(
-            "a2".to_string(),
-            CachedAgent {
-                state: test_state(),
-                type_name: "general".to_string(),
-            },
-        );
-        assert_eq!(spawner.kill_detached("a2"), KillResult::Evicted);
-        assert!(spawner.cache_take("a2").is_none(), "eviction is permanent");
-
-        // Never-issued id.
-        assert_eq!(spawner.kill_detached("a99"), KillResult::NotFound);
-
-        // kill_all fires every registered token and drains the map.
-        let (c1, c2) = (CancellationToken::new(), CancellationToken::new());
-        spawner.register_detached("a3".to_string(), c1.clone());
-        spawner.register_detached("a4".to_string(), c2.clone());
-        assert_eq!(spawner.kill_all_detached(), 2);
-        assert!(c1.is_cancelled() && c2.is_cancelled());
-        assert_eq!(spawner.kill_all_detached(), 0);
-    }
-
-    #[tokio::test]
-    async fn kill_action_validates_agent_id_and_skips_prompt_requirement() {
-        let spawner = Arc::new(SubagentSpawner::new(Arc::new(ProviderFactory::new(
-            crate::app::Config::default(),
-        ))));
-        let tool = SubagentTool::new(spawner.clone());
-
-        // No agent_id → arg error (and NOT the missing-prompt error: the
-        // kill path must not require a prompt).
-        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
-        let outcome = tool
-            .execute(serde_json::json!({"action": "kill"}), ctx)
-            .await;
-        assert!(!outcome.is_success());
-        assert!(outcome.model_content.contains("requires `agent_id`"));
-
-        // Unknown id → error naming the id.
-        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(2), PathBuf::from("/tmp"));
-        let outcome = tool
-            .execute(serde_json::json!({"action": "kill", "agent_id": "a7"}), ctx)
-            .await;
-        assert!(!outcome.is_success());
-        assert!(outcome.model_content.contains("a7"));
-
-        // Registered detached child → success, token fired.
-        let cancel = CancellationToken::new();
-        spawner.register_detached("a7".to_string(), cancel.clone());
-        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(3), PathBuf::from("/tmp"));
-        let outcome = tool
-            .execute(serde_json::json!({"action": "kill", "agent_id": "a7"}), ctx)
-            .await;
-        assert!(outcome.is_success(), "{}", outcome.model_content);
-        assert!(cancel.is_cancelled());
     }
 
     #[test]

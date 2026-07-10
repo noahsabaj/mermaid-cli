@@ -746,7 +746,6 @@ mod tests {
                 description: "audit docs".to_string(),
                 report: "all good".to_string(),
                 success: true,
-                cancelled: false,
                 usage: Some(crate::models::TokenUsage::provider(60_000, 30_000)),
                 tokens: 90_000,
                 duration_secs: 132,

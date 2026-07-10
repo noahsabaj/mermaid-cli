@@ -27,8 +27,7 @@ pub fn web_fetch_tool(web: &WebConfig) -> Option<WebFetchTool> {
     match web.fetch_backend {
         FetchBackend::Native => Some(WebFetchTool::native()),
         FetchBackend::Ollama => {
-            crate::utils::resolve_provider_key("ollama", "OLLAMA_API_KEY", None)
-                .map(WebFetchTool::ollama)
+            crate::utils::resolve_api_key("OLLAMA_API_KEY", None).map(WebFetchTool::ollama)
         },
     }
 }
@@ -41,13 +40,12 @@ pub fn web_search_tool(web: &WebConfig) -> Option<WebSearchTool> {
         // Zero-config default: Ollama Cloud when a key is present, otherwise an
         // auto-managed local SearXNG (started lazily on the first search).
         SearchBackend::Auto => Some(
-            crate::utils::resolve_provider_key("ollama", "OLLAMA_API_KEY", None)
+            crate::utils::resolve_api_key("OLLAMA_API_KEY", None)
                 .map(WebSearchTool::ollama)
                 .unwrap_or_else(WebSearchTool::managed_searxng),
         ),
         SearchBackend::Ollama => {
-            crate::utils::resolve_provider_key("ollama", "OLLAMA_API_KEY", None)
-                .map(WebSearchTool::ollama)
+            crate::utils::resolve_api_key("OLLAMA_API_KEY", None).map(WebSearchTool::ollama)
         },
         SearchBackend::Searxng => Some(WebSearchTool::searxng(web.searxng_url.clone())),
     }
