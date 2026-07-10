@@ -241,7 +241,7 @@ The model uses these autonomously via native tool calling:
 | `execute_command` | Run shell commands; background mode registers PID/log/URL metadata for GUI apps and dev servers |
 | `memory` | Manage durable cross-session memory (remember / update / forget facts; project, shared, or global scope) |
 | `web_search` | Search the web (zero-config: managed local SearXNG, or Ollama Cloud) |
-| `web_fetch` | Fetch a URL as markdown (native in-process by default, no key) |
+| `web_fetch` | Fetch a URL as markdown (native in-process by default, no key); optional `pattern` finds case-insensitive substring matches with surrounding context instead of returning the whole page |
 | `agent` | Spawn autonomous sub-agent for parallel tasks |
 | `screenshot` | Capture the screen (fullscreen, focused window, monitor, region, or window by title) |
 | `list_windows` | List visible window titles (X11-only discovery for window-mode screenshots) |
@@ -564,6 +564,8 @@ mermaid --model meta/muse-spark-1.1 --reasoning high
 ```
 
 Cloudflare Workers AI needs both `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` (the account id is spliced into the account-scoped endpoint URL); alternatively set `[providers.cloudflare].base_url` to a full account-scoped URL or an AI Gateway endpoint. Example model: `cloudflare/@cf/zai-org/glm-5.2`.
+
+When a cloud provider call fails, the error shown in the TUI ends with a `(request-id: ..., cf-ray: ...)` line when the provider's response carried those headers — quote it when reporting the failure to the provider (or in a Mermaid issue), it lets them find the exact request.
 
 Ollama Cloud models authenticate via `OLLAMA_API_KEY`. The web tools don't require it: `web_fetch` is native, and `web_search` defaults to `auto` — Ollama Cloud when the key is set, otherwise a mermaid-managed local SearXNG (see [Web tool backends](#web-tool-backends)). Use `mermaid cloud-setup` from your shell to set the key for cloud models; `/cloud-setup` in the TUI points back to that shell command.
 

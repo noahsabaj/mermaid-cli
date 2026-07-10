@@ -402,6 +402,8 @@ impl OllamaAdapter {
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let debug =
+                crate::models::error::ResponseDebugContext::from_headers(response.headers());
             let error_text = response
                 .text()
                 .await
@@ -409,6 +411,7 @@ impl OllamaAdapter {
             return Err(ModelError::Backend(BackendError::HttpError {
                 status,
                 message: error_text,
+                debug,
             }));
         }
 
@@ -807,6 +810,8 @@ impl OllamaAdapter {
     async fn decode_non_streaming(&self, response: reqwest::Response) -> Result<ModelResponse> {
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let debug =
+                crate::models::error::ResponseDebugContext::from_headers(response.headers());
             let error_text = response
                 .text()
                 .await
@@ -814,6 +819,7 @@ impl OllamaAdapter {
             return Err(ModelError::Backend(BackendError::HttpError {
                 status,
                 message: error_text,
+                debug,
             }));
         }
 
@@ -879,6 +885,7 @@ impl Model for OllamaAdapter {
             return Err(ModelError::Backend(BackendError::HttpError {
                 status: response.status().as_u16(),
                 message: "Failed to list models".to_string(),
+                debug: crate::models::error::ResponseDebugContext::from_headers(response.headers()),
             }));
         }
 
@@ -1039,6 +1046,7 @@ fn parse_ollama_stream_frame(line: &str) -> Result<OllamaStreamChunk> {
             provider: "ollama".to_string(),
             code: None,
             message: message.to_string(),
+            debug: crate::models::error::ResponseDebugContext::default(),
         }));
     }
     serde_json::from_str(line).map_err(|e| ModelError::ParseError {

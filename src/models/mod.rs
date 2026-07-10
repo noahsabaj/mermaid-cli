@@ -17,7 +17,10 @@ mod types; // Core types (ChatMessage, etc)
 // Public re-exports — the ONLY way to access model functionality
 pub use capabilities::ModelCapabilities;
 pub use config::{BackendConfig, ModelConfig, OllamaOptions};
-pub use error::{BackendError, ConfigError, ErrorCategory, ModelError, Result, UserFacingError};
+pub use error::{
+    BackendError, ConfigError, ErrorCategory, ModelError, ResponseDebugContext, Result,
+    UserFacingError,
+};
 pub use providers::{
     CompatStyle, MaxTokensParam, ProviderProfile, REGISTRY as PROVIDER_REGISTRY,
     ReasoningExtraction, ReasoningStrategy, lookup_provider,

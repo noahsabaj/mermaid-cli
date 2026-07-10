@@ -550,6 +550,7 @@ fn meta_failure(event: &Value) -> ModelError {
             .and_then(Value::as_str)
             .map(str::to_string),
         message: crate::utils::redact_secrets(message),
+        debug: crate::models::ResponseDebugContext::default(),
     })
 }
 
@@ -558,6 +559,7 @@ async fn http_error(
     token: &tokio_util::sync::CancellationToken,
 ) -> ModelError {
     let status = response.status().as_u16();
+    let debug = crate::models::ResponseDebugContext::from_headers(response.headers());
     let body = tokio::select! {
         biased;
         _ = token.cancelled() => return ModelError::Cancelled,
@@ -566,6 +568,7 @@ async fn http_error(
     ModelError::Backend(BackendError::HttpError {
         status,
         message: crate::utils::redact_secrets(&body),
+        debug,
     })
 }
 

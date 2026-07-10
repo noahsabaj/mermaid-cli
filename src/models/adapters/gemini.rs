@@ -577,6 +577,7 @@ impl GeminiAdapter {
                 provider: "gemini".to_string(),
                 code: Some(reason.to_string()),
                 message: format!("Gemini blocked the prompt (blockReason={reason})"),
+                debug: crate::models::error::ResponseDebugContext::default(),
             }));
         }
 
@@ -621,6 +622,7 @@ impl GeminiAdapter {
                             provider: "gemini".to_string(),
                             code: Some(reason.to_string()),
                             message: format!("Gemini returned no content (finishReason={reason})"),
+                            debug: crate::models::error::ResponseDebugContext::default(),
                         }));
                     }
                 },
@@ -820,6 +822,7 @@ fn process_chunk_payload(
             provider: "gemini".to_string(),
             code: Some(code.to_string()),
             message: msg.to_string(),
+            debug: crate::models::error::ResponseDebugContext::default(),
         }));
     }
 
@@ -836,6 +839,7 @@ fn process_chunk_payload(
             provider: "gemini".to_string(),
             code: Some(reason.to_string()),
             message: format!("Gemini blocked the prompt (blockReason={reason})"),
+            debug: crate::models::error::ResponseDebugContext::default(),
         }));
     }
 
@@ -891,6 +895,7 @@ fn process_chunk_payload(
                 provider: "gemini".to_string(),
                 code: Some(fr.to_string()),
                 message: format!("Gemini returned no content (finishReason={fr})"),
+                debug: crate::models::error::ResponseDebugContext::default(),
             }));
         }
         return Ok(());
@@ -1097,6 +1102,7 @@ struct UsageMetadata {
 /// Translate a non-success HTTP response into a structured `ModelError`.
 async fn http_error_from_response(response: reqwest::Response) -> ModelError {
     let status = response.status().as_u16();
+    let debug = crate::models::error::ResponseDebugContext::from_headers(response.headers());
     let body = response
         .text()
         .await
@@ -1125,11 +1131,13 @@ async fn http_error_from_response(response: reqwest::Response) -> ModelError {
             provider: "gemini".to_string(),
             code,
             message: format!("{}{}", msg, suffix),
+            debug: debug.clone(),
         });
     }
     ModelError::Backend(BackendError::HttpError {
         status,
         message: body,
+        debug,
     })
 }
 
@@ -1223,6 +1231,7 @@ mod tests {
                 provider,
                 code,
                 message,
+                ..
             }) => {
                 assert_eq!(provider, "gemini");
                 assert_eq!(code.as_deref(), Some("PROHIBITED_CONTENT"));

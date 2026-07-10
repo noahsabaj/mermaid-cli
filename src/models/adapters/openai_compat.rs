@@ -432,6 +432,8 @@ impl OpenAICompatAdapter {
     async fn decode_non_streaming(&self, response: reqwest::Response) -> Result<ModelResponse> {
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let debug =
+                crate::models::error::ResponseDebugContext::from_headers(response.headers());
             let body = response
                 .text()
                 .await
@@ -439,6 +441,7 @@ impl OpenAICompatAdapter {
             return Err(ModelError::Backend(BackendError::HttpError {
                 status,
                 message: body,
+                debug,
             }));
         }
         let json: ChatCompletion = response.json().await.map_err(|e| ModelError::ParseError {
@@ -506,6 +509,7 @@ impl OpenAICompatAdapter {
                 provider: self.profile.name.to_string(),
                 code: Some("content_filter".to_string()),
                 message: "Provider returned no content (content filter)".to_string(),
+                debug: crate::models::error::ResponseDebugContext::default(),
             }));
         }
 
@@ -530,6 +534,8 @@ impl OpenAICompatAdapter {
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let debug =
+                crate::models::error::ResponseDebugContext::from_headers(response.headers());
             let body = response
                 .text()
                 .await
@@ -537,6 +543,7 @@ impl OpenAICompatAdapter {
             return Err(ModelError::Backend(BackendError::HttpError {
                 status,
                 message: body,
+                debug,
             }));
         }
 
@@ -610,6 +617,7 @@ impl OpenAICompatAdapter {
                         provider: self.profile.name.to_string(),
                         code,
                         message,
+                        debug: crate::models::error::ResponseDebugContext::default(),
                     }));
                 }
                 let parsed: ChatCompletionChunk = match serde_json::from_value(value) {
@@ -792,6 +800,7 @@ impl OpenAICompatAdapter {
                 provider: self.profile.name.to_string(),
                 code: Some("content_filter".to_string()),
                 message: "Provider returned no content (content filter)".to_string(),
+                debug: crate::models::error::ResponseDebugContext::default(),
             }));
         }
 
@@ -994,6 +1003,7 @@ impl OpenAICompatAdapter {
             return Err(ModelError::Backend(BackendError::HttpError {
                 status: response.status().as_u16(),
                 message: format!("{} list_models failed", self.profile.name),
+                debug: crate::models::error::ResponseDebugContext::from_headers(response.headers()),
             }));
         }
         Ok(response)
