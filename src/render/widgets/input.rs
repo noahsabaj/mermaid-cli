@@ -230,7 +230,7 @@ struct RowSpan {
 }
 
 /// Lay `input` out into rendered rows at `line_width` (display cells).
-/// Explicit `\n` forces a new row (so pasted/Shift+Enter newlines render as
+/// Explicit `\n` forces a new row (so pasted/Ctrl+J newlines render as
 /// real lines); each resulting segment is then soft-wrapped on width via
 /// `find_line_break`. A trailing newline yields a final empty row.
 fn layout_rows(input: &str, line_width: usize) -> Vec<RowSpan> {
@@ -339,7 +339,7 @@ mod tests {
             "你好世界",
             "你好 world 世界",
             "abc你好def世界ghi",
-            // Embedded newlines (pasted / Shift+Enter): hard line breaks.
+            // Embedded newlines (pasted / Ctrl+J): hard line breaks.
             "first line\nsecond line",
             "para one\n\npara two",
             "trailing newline\n",

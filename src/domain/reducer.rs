@@ -1470,6 +1470,20 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Ctrl+J: insert a newline at the cursor (multi-line input). Works on
+    // legacy terminals too — raw-mode crossterm parses the LF byte Ctrl+J
+    // sends as `Char('j') + CONTROL` while Enter arrives as CR — so the
+    // chord needs no kitty disambiguation. Gated like Ctrl+V so pickers
+    // and modals never receive a stray newline.
+    if mods.ctrl
+        && code == KeyCode::Char('j')
+        && matches!(state.ui.mode, UiMode::EditingInput)
+        && state.confirm.is_none()
+    {
+        insert_text_at_cursor(state, "\n");
+        return;
+    }
+
     // Alt+T cycles reasoning depth. Persists per-model so cycling on
     // Sonnet doesn't bleed into the next session with Ollama.
     if mods.alt && code == KeyCode::Char('t') {
@@ -1634,12 +1648,12 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     }
 
     // Enter submits the current input (or triggers the slash palette
-    // pick). Shift+Enter is a newline for multi-line input. This arm
-    // enqueues a synthetic `Msg` on `pending_msgs` rather than
-    // invoking the dispatch directly — the outer `update()` drain
-    // will run the follow-up with stale-filter + pending-msgs
-    // guarantees intact.
-    if code == KeyCode::Enter && !mods.shift {
+    // pick) regardless of shift — Ctrl+J is the newline chord for
+    // multi-line input. This arm enqueues a synthetic `Msg` on
+    // `pending_msgs` rather than invoking the dispatch directly — the
+    // outer `update()` drain will run the follow-up with stale-filter +
+    // pending-msgs guarantees intact.
+    if code == KeyCode::Enter {
         // Paste-race guard: if a Ctrl+V clipboard read is still in flight, hold
         // the submit until it lands. `handle_clipboard_read` re-runs
         // `submit_current_input` once the last pending read drains, re-deriving
@@ -5391,6 +5405,65 @@ mod tests {
             !state.ui.file_picker_open(),
             "the trailing space closes the token"
         );
+    }
+
+    #[test]
+    fn ctrl_j_inserts_newline_at_cursor_without_submitting() {
+        let (mut state, _) = type_text(fresh_state(), "line one");
+        // Move the cursor mid-buffer to prove insertion happens at the
+        // cursor, not the end.
+        state.ui.input_cursor = 4;
+        let (state, cmds) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('j'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        assert_eq!(state.ui.input_buffer, "line\n one");
+        assert_eq!(state.ui.input_cursor, 5, "cursor lands after the newline");
+        assert!(
+            state.session.messages().is_empty(),
+            "Ctrl+J must never submit"
+        );
+        assert!(cmds.is_empty(), "newline insert is reducer-only");
+    }
+
+    #[test]
+    fn ctrl_j_outside_editing_input_is_ignored() {
+        let (mut state, _) = type_text(fresh_state(), "draft");
+        state.ui.mode = UiMode::ModelList;
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Char('j'),
+                modifiers: KeyMods::ctrl(),
+            }),
+        );
+        assert_eq!(
+            state.ui.input_buffer, "draft",
+            "pickers must not receive a stray newline"
+        );
+    }
+
+    #[test]
+    fn shift_enter_submits_like_plain_enter() {
+        let (state, _) = type_text(fresh_state(), "hello there");
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::Enter,
+                modifiers: KeyMods {
+                    shift: true,
+                    ..KeyMods::NONE
+                },
+            }),
+        );
+        assert!(
+            state.ui.input_buffer.is_empty(),
+            "Shift+Enter submits — Ctrl+J is the only newline chord"
+        );
+        assert_eq!(state.session.messages().len(), 1);
     }
 
     #[test]

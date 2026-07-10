@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Ctrl+J inserts a newline in the input box.** Multi-line prompts can now
+  be composed directly: Ctrl+J breaks the line at the cursor (matching
+  Claude Code and Codex), Enter still submits. Works on legacy terminals
+  too — the chord needs no kitty keyboard enhancement. Listed under
+  `/help` keybindings.
+
 - **Plugin bundles: MCP servers, prompt commands, and agent types.** An
   enabled plugin's `plugin.toml` can now declare `mcp` (TOML files of
   `[servers.<name>]` configs, started with your own servers and flowing
