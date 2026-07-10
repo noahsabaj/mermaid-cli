@@ -34,6 +34,17 @@ pub struct Config {
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
+    /// When unset or true, MCP tools are DEFERRED: instead of advertising
+    /// every server's tools on every request, the model gets one
+    /// `tool_search` tool that returns matching schemas and promotes them
+    /// to direct advertisement. Bounds the always-on tool surface.
+    /// `Option` so the derived `Config::default()` and the serde default
+    /// agree (both `None` = on) and saved configs don't freeze the value.
+    /// Per-server override: `defer = false` on the server entry. Read via
+    /// [`Config::mcp_deferral_enabled`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_defer_tools: Option<bool>,
+
     /// User overrides + custom OpenAI-compatible providers. Keys are
     /// provider names; matching a built-in registry entry overrides its
     /// defaults, anything else defines a fully custom provider.
@@ -121,6 +132,13 @@ pub struct Config {
     /// not pollute the user's persistent Mermaid settings.
     #[serde(skip)]
     pub prompt: PromptConfig,
+}
+
+impl Config {
+    /// Effective value of [`Config::mcp_defer_tools`]: unset means ON.
+    pub fn mcp_deferral_enabled(&self) -> bool {
+        self.mcp_defer_tools.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -435,6 +453,12 @@ pub struct McpServerConfig {
     /// Tool names hidden from the model. Takes precedence over `enabled_tools`.
     #[serde(default)]
     pub disabled_tools: Vec<String>,
+    /// Per-server deferral override: `Some(false)` always advertises this
+    /// server's tools directly (skips `tool_search`); `Some(true)` defers
+    /// even when the global `mcp_defer_tools` is off; `None` follows the
+    /// global setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer: Option<bool>,
 }
 
 impl McpServerConfig {

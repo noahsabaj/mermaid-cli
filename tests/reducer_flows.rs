@@ -869,7 +869,8 @@ fn configured_mcp_servers_seed_state_and_ready_updates() {
         Msg::McpServerReady {
             name: "context7".to_string(),
             tools: vec![McpToolSpec {
-                name: "resolve-library-id".to_string(),
+                name: "mcp__context7__resolve-library-id".to_string(),
+                raw_name: "resolve-library-id".to_string(),
                 description: "Resolve a library name".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
             }],
@@ -878,7 +879,7 @@ fn configured_mcp_servers_seed_state_and_ready_updates() {
     let entry = &state.mcp.servers["context7"];
     assert_eq!(entry.status, McpServerStatus::Ready);
     assert_eq!(entry.tools.len(), 1);
-    assert_eq!(entry.tools[0].name, "resolve-library-id");
+    assert_eq!(entry.tools[0].name, "mcp__context7__resolve-library-id");
 }
 
 #[test]

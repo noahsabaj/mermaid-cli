@@ -1069,6 +1069,12 @@ pub struct QueuedMessage {
 #[derive(Debug, Clone, Default)]
 pub struct McpState {
     pub servers: HashMap<String, McpServerEntry>,
+    /// Deferred MCP tools promoted to direct advertisement by a
+    /// `tool_search` call this session (sanitized full names). A
+    /// `BTreeSet` keeps the advertised tool order byte-stable across
+    /// requests for prompt-cache warmth (#F68). Transient: cleared by
+    /// conversation switch/`/clear` along with the rest of the session.
+    pub promoted: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1092,13 +1098,17 @@ pub enum McpServerStatus {
     Stopped,
 }
 
-/// Subset of the MCP `ToolDefinition` carried in reducer state. The
-/// reducer doesn't need the full schema; the effect layer uses the
-/// server name + tool name to route, and the reducer uses the
-/// description for palette display.
+/// Subset of the MCP `ToolDefinition` carried in reducer state. `name` is
+/// the FULL sanitized advertised name (`mcp__<server>__<tool>`, provider-safe
+/// charset and length — see `crate::mcp::sanitize`); `raw_name` is the bare
+/// tool name exactly as the server advertised it, used for user-facing
+/// display and for `enabled_tools`/`disabled_tools` filtering.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct McpToolSpec {
     pub name: String,
+    /// Bare tool name as the server advertised it (pre-sanitization).
+    #[serde(default)]
+    pub raw_name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
 }

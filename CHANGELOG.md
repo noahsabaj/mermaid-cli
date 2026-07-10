@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deferred MCP tools via `tool_search`.** MCP tools are no longer all
+  advertised on every request: the model gets one `tool_search` tool that
+  searches the deferred pool (names + descriptions) and promotes matches to
+  direct advertisement for the rest of the session. Bounds the always-on
+  tool surface (and the prompt tokens it costs) no matter how many servers
+  are configured. Opt out with `mcp_defer_tools = false` globally or
+  `defer = false` per server.
+
+- **Concurrent, timeout-bounded MCP startup.** Servers now start in
+  parallel, each with a 60s wall-clock bound, and report Ready/Errored
+  individually as they resolve — one hung server no longer delays (or
+  blocks) the rest. A timed-out server reports `startup timed out after
+  60s` instead of hanging startup.
+
+- **Provider-safe MCP tool names and schemas.** Tool names are sanitized at
+  ingestion (charset `[A-Za-z0-9_-]`, 64-char cap with a stable hash suffix
+  on overflow/collision — server names containing `__` no longer break
+  routing) and input schemas are normalized for strict provider validators
+  (local `$ref` inlined, `$defs`/`$schema` dropped, `const` to `enum`,
+  nullable `anyOf` flattened, draft-4 boolean exclusive bounds dropped).
+  `enabled_tools`/`disabled_tools` filters keep matching the raw names the
+  server advertises.
+
 - **Meta Muse Spark 1.1 now uses the Responses API with reasoning continuity.**
   `meta/muse-spark-1.1` authenticates with `MODEL_API_KEY`, streams text,
   automatic reasoning summaries, tool calls, usage, and multimodal inputs from

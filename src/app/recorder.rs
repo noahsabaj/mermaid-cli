@@ -849,7 +849,8 @@ mod tests {
             Msg::McpServerReady {
                 name: "srv".to_string(),
                 tools: vec![crate::domain::McpToolSpec {
-                    name: "t".to_string(),
+                    name: "mcp__srv__t".to_string(),
+                    raw_name: "t".to_string(),
                     description: "d".to_string(),
                     input_schema: serde_json::json!({"type": "object"}),
                 }],

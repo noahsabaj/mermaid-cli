@@ -850,18 +850,19 @@ fn seed_child_mcp(state: &mut State) {
     let Some(manager) = crate::mcp::manager_ref::get() else {
         return;
     };
-    apply_live_mcp(&mut state.mcp.servers, manager.get_all_tools(), |name| {
+    apply_live_mcp(&mut state.mcp.servers, &manager.all_specs(), |name| {
         manager.has_server(name)
     });
 }
 
 /// Pure core of [`seed_child_mcp`], injectable for tests: flip every entry
-/// the live manager actually runs to `Ready` and attach its advertised tools.
-/// Entries for servers the manager doesn't have (failed to start) keep their
-/// `Starting` status and stay un-advertised — same as in the parent.
+/// the live manager actually runs to `Ready` and attach its advertised
+/// (already-sanitized) specs. Entries for servers the manager doesn't have
+/// (failed to start) keep their `Starting` status and stay un-advertised —
+/// same as in the parent.
 fn apply_live_mcp(
     servers: &mut std::collections::HashMap<String, crate::domain::McpServerEntry>,
-    live_tools: &[(String, crate::mcp::McpToolDef)],
+    live_specs: &[(String, crate::domain::McpToolSpec)],
     has_server: impl Fn(&str) -> bool,
 ) {
     for (name, entry) in servers.iter_mut() {
@@ -870,16 +871,13 @@ fn apply_live_mcp(
         }
         entry.status = crate::domain::McpServerStatus::Ready;
         let cfg = &entry.config;
-        let tools: Vec<crate::domain::McpToolSpec> = live_tools
+        let tools: Vec<crate::domain::McpToolSpec> = live_specs
             .iter()
             .filter(|(server, _)| server == name)
-            // Honor the per-server enabled_tools/disabled_tools filter.
-            .filter(|(_, def)| cfg.tool_allowed(&def.name))
-            .map(|(_, def)| crate::domain::McpToolSpec {
-                name: def.name.clone(),
-                description: def.description.clone(),
-                input_schema: def.input_schema.clone(),
-            })
+            // Honor the per-server enabled_tools/disabled_tools filter,
+            // matched against the server's own (raw) tool names.
+            .filter(|(_, spec)| cfg.tool_allowed(&spec.raw_name))
+            .map(|(_, spec)| spec.clone())
             .collect();
         entry.tools = tools;
     }
@@ -1040,8 +1038,9 @@ mod tests {
         let live = vec![
             (
                 "slack".to_string(),
-                crate::mcp::McpToolDef {
-                    name: "send".to_string(),
+                crate::domain::McpToolSpec {
+                    name: "mcp__slack__send".to_string(),
+                    raw_name: "send".to_string(),
                     description: "send a message".to_string(),
                     input_schema: serde_json::json!({"type": "object"}),
                 },
@@ -1050,8 +1049,9 @@ mod tests {
             // not create an entry out of thin air.
             (
                 "other".to_string(),
-                crate::mcp::McpToolDef {
-                    name: "x".to_string(),
+                crate::domain::McpToolSpec {
+                    name: "mcp__other__x".to_string(),
+                    raw_name: "x".to_string(),
                     description: String::new(),
                     input_schema: serde_json::json!({}),
                 },
@@ -1062,7 +1062,8 @@ mod tests {
         let slack = &servers["slack"];
         assert_eq!(slack.status, McpServerStatus::Ready);
         assert_eq!(slack.tools.len(), 1);
-        assert_eq!(slack.tools[0].name, "send");
+        assert_eq!(slack.tools[0].name, "mcp__slack__send");
+        assert_eq!(slack.tools[0].raw_name, "send");
         // A configured server the manager doesn't run stays un-advertised.
         assert_eq!(servers["broken"].status, McpServerStatus::Starting);
         assert!(servers["broken"].tools.is_empty());

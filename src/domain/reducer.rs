@@ -3995,10 +3995,32 @@ fn handle_stream_done(
                 source,
             })
             .collect();
+        // `tool_search` is DOMAIN-INTERCEPTED: it is a pure function of
+        // state (deferred MCP specs + the promoted set), so it never gets a
+        // `Cmd::ExecuteTool`. Its outcome is computed inline AFTER the
+        // ExecutingTools transition (so the outcome slots exist) and fed
+        // through the normal `handle_tool_finished` slot-fill machinery —
+        // deterministic under --replay with zero new Msg/Cmd variants.
+        let intercepted: Vec<(super::ids::ToolCallId, ToolOutcome)> = pending
+            .iter()
+            .filter(|call| call.source.function.name == super::tool_search::TOOL_SEARCH_NAME)
+            .map(|call| {
+                let result =
+                    super::tool_search::run_tool_search(state, &call.source.function.arguments);
+                super::tool_search::apply_promotions(&mut state.mcp.promoted, result.promote);
+                (
+                    call.call_id,
+                    ToolOutcome::success(result.text, result.summary, 0.0),
+                )
+            })
+            .collect();
         // Captured once for the whole batch: the live safety mode + the
         // turn's intent (for the Auto-mode classifier).
         let intent = latest_user_intent(&state.session);
         for call in &pending {
+            if call.source.function.name == super::tool_search::TOOL_SEARCH_NAME {
+                continue;
+            }
             cmds.push(Cmd::ExecuteTool {
                 turn,
                 call_id: call.call_id,
@@ -4015,6 +4037,9 @@ fn handle_stream_done(
             pending,
             std::time::SystemTime::from(state.now),
         );
+        for (call_id, outcome) in intercepted {
+            handle_tool_finished(state, cmds, turn, call_id, outcome);
+        }
         return;
     }
 
@@ -4520,39 +4545,13 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // the user's explicit hard cap.
     let max_tokens = settings.max_tokens;
 
-    // MCP tools the model should see — each advertised by a Ready
-    // server, fully-qualified as `mcp__<server>__<tool>`. The effect
-    // runner prepends built-in tools before dispatching, so this
-    // vector is the MCP-only portion.
-    //
-    // `state.mcp.servers` is a `HashMap`, whose iteration order is
-    // randomized per process (`RandomState`). Sort the Ready servers by
-    // name before emitting tools so `ChatRequest.tools` is byte-stable
-    // across runs — byte-reproducible requests keep the provider prompt
-    // cache warm instead of missing on a reshuffled tool list (#F68).
-    // Within a server, `tools` is an ordered `Vec`, so it is already stable.
-    let mut ready_servers: Vec<_> = state
-        .mcp
-        .servers
-        .iter()
-        .filter(|(_, entry)| matches!(entry.status, crate::domain::McpServerStatus::Ready))
-        .collect();
-    ready_servers.sort_by(|a, b| a.0.cmp(b.0));
-    let mcp_tools: Vec<crate::domain::ToolDefinition> = ready_servers
-        .into_iter()
-        .flat_map(|(server_name, entry)| {
-            entry
-                .tools
-                .iter()
-                // Honor the per-server enabled_tools/disabled_tools filter.
-                .filter(move |tool| entry.config.tool_allowed(&tool.name))
-                .map(move |tool| crate::domain::ToolDefinition {
-                    name: format!("mcp__{}__{}", server_name, tool.name),
-                    description: tool.description.clone(),
-                    input_schema: tool.input_schema.clone(),
-                })
-        })
-        .collect();
+    // MCP tools the model should see — advertised names arrive pre-sanitized
+    // (`mcp__<server>__<tool>`) from ingestion. With deferral on (the
+    // default), most MCP tools are replaced by one `tool_search` definition;
+    // see `domain::tool_search`. The effect runner prepends built-in tools
+    // before dispatching, so this vector is the MCP-only portion. Ordering
+    // is byte-stable across runs for prompt-cache warmth (#F68).
+    let mcp_tools = super::tool_search::mcp_tool_definitions(state);
 
     // Run-summary lines ("Worked for …") are display-only UI — never send them
     // to the model. Then repair tool_use/tool_result pairing as the FINAL pass
@@ -9225,6 +9224,9 @@ mod tests {
         // emitted `ChatRequest.tools` ordering is deterministic across runs
         // (byte-reproducible requests / prompt-cache stability).
         let mut state = fresh_state();
+        // Deferral would collapse the list to `tool_search`; this test pins
+        // the DIRECT advertisement ordering, so turn deferral off.
+        state.settings.mcp_defer_tools = Some(false);
         state.mcp = McpState::default();
         for name in ["zeta", "alpha", "mike", "bravo", "delta"] {
             state.mcp.servers.insert(
@@ -9238,7 +9240,8 @@ mod tests {
                     },
                     status: McpServerStatus::Ready,
                     tools: vec![crate::domain::state::McpToolSpec {
-                        name: "do".to_string(),
+                        name: format!("mcp__{name}__do"),
+                        raw_name: "do".to_string(),
                         description: "d".to_string(),
                         input_schema: serde_json::json!({}),
                     }],
@@ -9258,6 +9261,120 @@ mod tests {
             ],
             "MCP tools must be ordered by server name regardless of HashMap layout"
         );
+    }
+
+    #[test]
+    fn tool_search_call_is_intercepted_and_promotes_for_the_follow_up() {
+        // A `tool_search` call never reaches the effect layer: the reducer
+        // resolves it purely, promotes the matches, and the follow-up
+        // CallModel already advertises the promoted tool directly.
+        let mut state = fresh_state();
+        state.mcp.servers.insert(
+            "srv".to_string(),
+            McpServerEntry {
+                config: crate::app::McpServerConfig::default(),
+                status: McpServerStatus::Ready,
+                tools: vec![crate::domain::state::McpToolSpec {
+                    name: "mcp__srv__alpha".to_string(),
+                    raw_name: "alpha".to_string(),
+                    description: "does alpha things".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+        );
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: String::new(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: vec![crate::models::ToolCall {
+                id: Some("call_ts".to_string()),
+                function: crate::models::FunctionCall {
+                    name: super::super::tool_search::TOOL_SEARCH_NAME.to_string(),
+                    arguments: serde_json::json!({"query": "alpha"}),
+                },
+            }],
+            continuation: false,
+        };
+        let (state, cmds) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                provider_continuation: None,
+                stop_reason: None,
+            },
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Cmd::ExecuteTool { .. })),
+            "tool_search must not dispatch to the effect layer"
+        );
+        assert!(state.mcp.promoted.contains("mcp__srv__alpha"));
+        let follow_up = cmds
+            .iter()
+            .find_map(|c| match c {
+                Cmd::CallModel { request, .. } => Some(request),
+                _ => None,
+            })
+            .expect("interception completes the batch and fires the follow-up");
+        let names: Vec<&str> = follow_up.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["mcp__srv__alpha"],
+            "promoted tool advertised directly; tool_search drops out once nothing is deferred"
+        );
+        // The tool result round-trips through the normal pairing machinery.
+        let has_tool_result = state
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.role == crate::models::MessageRole::Tool && m.content.contains("alpha"));
+        assert!(has_tool_result, "tool_search outcome committed to history");
+    }
+
+    #[test]
+    fn tool_search_with_deferral_off_returns_clean_no_op_outcome() {
+        // A hallucinated tool_search while nothing is deferred must not
+        // reach the effect layer's unknown-tool arm.
+        let mut state = fresh_state();
+        state.settings.mcp_defer_tools = Some(false);
+        state.turn = TurnState::Generating {
+            id: TurnId(6),
+            started: std::time::SystemTime::now(),
+            partial_text: String::new(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: vec![crate::models::ToolCall {
+                id: Some("call_ts2".to_string()),
+                function: crate::models::FunctionCall {
+                    name: super::super::tool_search::TOOL_SEARCH_NAME.to_string(),
+                    arguments: serde_json::json!({"query": "anything"}),
+                },
+            }],
+            continuation: false,
+        };
+        let (state, cmds) = update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(6),
+                usage: None,
+                provider_continuation: None,
+                stop_reason: None,
+            },
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::ExecuteTool { .. })));
+        assert!(state.mcp.promoted.is_empty());
+        let has_no_tools_note = state
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.content.contains("No deferred MCP tools"));
+        assert!(has_no_tools_note, "clean informative outcome committed");
     }
 
     #[test]

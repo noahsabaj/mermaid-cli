@@ -1132,33 +1132,8 @@ impl EffectRunner {
             },
             Cmd::InitMcpServers(configs) => {
                 let tx = self.msg_tx.clone();
-                self.detached.spawn(async move {
-                    if configs.is_empty() {
-                        return;
-                    }
-                    crate::mcp::manager_ref::mark_init_started();
-                    let manager =
-                        std::sync::Arc::new(crate::mcp::McpServerManager::start(&configs).await);
-                    // Emit a Ready or Errored per server based on
-                    // what came up. Zero-tool servers are still ready
-                    // if the manager has an active client for them.
-                    for name in configs.keys() {
-                        let server_tools: Vec<crate::domain::McpToolSpec> = manager
-                            .get_all_tools()
-                            .iter()
-                            .filter(|(server, _)| server == name)
-                            .map(|(_, def)| crate::domain::McpToolSpec {
-                                name: def.name.clone(),
-                                description: def.description.clone(),
-                                input_schema: def.input_schema.clone(),
-                            })
-                            .collect();
-                        let msg = mcp_startup_msg(name, manager.has_server(name), server_tools);
-                        let _ = tx.send(msg).await;
-                    }
-                    crate::mcp::manager_ref::set_manager(manager);
-                    crate::mcp::manager_ref::mark_init_complete();
-                });
+                self.detached
+                    .spawn(async move { dispatch_init_mcp_servers(configs, tx).await });
             },
             Cmd::StopMcpServer { name } => {
                 let tx = self.msg_tx.clone();
@@ -2738,18 +2713,41 @@ async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
     }
 }
 
-fn mcp_startup_msg(name: &str, started: bool, tools: Vec<crate::domain::McpToolSpec>) -> Msg {
-    if started {
-        Msg::McpServerReady {
-            name: name.to_string(),
-            tools,
-        }
-    } else {
-        Msg::McpServerErrored {
-            name: name.to_string(),
-            reason: "server failed to start or initialize".to_string(),
-        }
+/// Start every configured MCP server CONCURRENTLY, each bounded by
+/// `MCP_STARTUP_TIMEOUT`, emitting one `Msg::McpServerReady`/`McpServerErrored`
+/// per server AS IT RESOLVES — a slow server never delays the rest. The
+/// (initially empty) manager is installed BEFORE the tasks spawn so shutdown
+/// always finds it; init is "complete" once every server has resolved
+/// (`McpToolProxy::wait_ready` semantics unchanged — a first-message
+/// `mcp__` call waits, bounded, for the full fleet). A zero-tool server that
+/// started successfully is still Ready with an empty tool list.
+async fn dispatch_init_mcp_servers(
+    configs: std::collections::HashMap<String, crate::app::McpServerConfig>,
+    tx: tokio::sync::mpsc::Sender<Msg>,
+) {
+    if configs.is_empty() {
+        return;
     }
+    crate::mcp::manager_ref::mark_init_started();
+    let manager = std::sync::Arc::new(crate::mcp::McpServerManager::new(&configs));
+    crate::mcp::manager_ref::set_manager(manager.clone());
+    let mut join = tokio::task::JoinSet::new();
+    for (name, config) in configs {
+        let manager = manager.clone();
+        let tx = tx.clone();
+        join.spawn(async move {
+            let msg = match manager.start_server(&name, &config).await {
+                Ok(tools) => Msg::McpServerReady { name, tools },
+                Err(e) => Msg::McpServerErrored {
+                    name,
+                    reason: e.to_string(),
+                },
+            };
+            let _ = tx.send(msg).await;
+        });
+    }
+    while join.join_next().await.is_some() {}
+    crate::mcp::manager_ref::mark_init_complete();
 }
 
 /// Read the system clipboard on a blocking thread and emit a `Msg`
@@ -3032,23 +3030,34 @@ mod tests {
         assert!(matches!(msg, Msg::SessionSaved));
     }
 
-    #[test]
-    fn mcp_startup_msg_treats_zero_tool_started_server_as_ready() {
-        let msg = mcp_startup_msg("empty", true, Vec::new());
-        assert!(matches!(
-            msg,
-            Msg::McpServerReady { name, tools } if name == "empty" && tools.is_empty()
-        ));
-    }
-
-    #[test]
-    fn mcp_startup_msg_reports_unstarted_server_as_error() {
-        let msg = mcp_startup_msg("bad", false, Vec::new());
-        assert!(matches!(
-            msg,
-            Msg::McpServerErrored { name, reason }
-                if name == "bad" && reason.contains("failed to start")
-        ));
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn init_mcp_servers_emits_incremental_errored_msgs() {
+        // Two servers that both fail fast (nonexistent binaries): each
+        // resolves independently and emits its own Errored msg; init
+        // completes after both. Also exercises the empty-manager install.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut configs = std::collections::HashMap::new();
+        for name in ["one", "two"] {
+            configs.insert(
+                name.to_string(),
+                crate::app::McpServerConfig {
+                    command: "/nonexistent/mermaid-test-mcp-binary".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        dispatch_init_mcp_servers(configs, tx).await;
+        let mut errored = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                Msg::McpServerErrored { name, .. } => errored.push(name),
+                other => panic!("unexpected msg: {other:?}"),
+            }
+        }
+        errored.sort();
+        assert_eq!(errored, vec!["one".to_string(), "two".to_string()]);
+        assert!(crate::mcp::manager_ref::is_ready());
     }
 
     #[tokio::test]
