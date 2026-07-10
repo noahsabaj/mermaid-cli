@@ -487,6 +487,15 @@ timeout_secs = 1200
 # "<provider>/<model>" = "high"
 "ollama/qwen3-coder:30b" = "low"
 
+# Optional named config overlays selected per invocation with
+# `--profile <name>`. A profile's values beat this file's top-level values
+# but lose to a repo's project config and to `-c` overrides.
+#   mermaid --profile work doctor
+# [profiles.work.default_model]
+# temperature = 0.2
+# [profiles.work]
+# last_used_model = "anthropic/<model>"
+
 # Optional model-id aliases. A request for `--model fast` or
 # `--model alias:fast` resolves through this table when present.
 [model_aliases]

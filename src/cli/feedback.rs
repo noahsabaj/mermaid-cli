@@ -336,6 +336,7 @@ mod tests {
         DoctorReport {
             ok: true,
             cwd: "/project/demo".to_string(),
+            active_profile: None,
             active_model: Some("ollama/test".to_string()),
             model_error: None,
             model_capabilities: None,

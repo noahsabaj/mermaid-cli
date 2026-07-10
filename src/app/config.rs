@@ -137,6 +137,12 @@ pub struct Config {
     /// not pollute the user's persistent Mermaid settings.
     #[serde(skip)]
     pub prompt: PromptConfig,
+
+    /// The `--profile <name>` overlay active this session, for `doctor` and
+    /// startup notices. Runtime-only (`skip`): never persisted, and
+    /// `[profiles.*]` itself is excised before deserialization ever sees it.
+    #[serde(skip)]
+    pub active_profile: Option<String>,
 }
 
 impl Config {
@@ -728,7 +734,7 @@ impl Default for NonInteractiveConfig {
 
 /// One source of configuration in the layered merge. Declaration order IS
 /// precedence: every later layer's table is deep-merged over the earlier ones,
-/// so `Defaults < User < Project < Session`.
+/// so `Defaults < User < Profile < Project < Session`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfigLayer {
     /// Built-in defaults (`Config::default()`); the implicit base — an empty
@@ -737,13 +743,17 @@ pub enum ConfigLayer {
     /// The user's `~/.config/mermaid/config.toml` — the only layer persists
     /// write to.
     User = 1,
+    /// A named overlay from the user file's `[profiles.<name>]`, selected
+    /// with `--profile <name>`. Sits BELOW Project so a repo's tighten-only
+    /// safety clamp still wins over a profile's choices.
+    Profile = 2,
     /// A repo's `<git-root>/.mermaid/config.toml` (sanitized + tighten-only;
     /// populated by the project-config loader).
-    Project = 2,
+    Project = 3,
     /// This invocation's CLI flags: `-c KEY=VALUE` plus the dedicated flags
     /// (`--no-network`, `--confine-fs`, `--sandbox`, `run --max-tokens`,
     /// `run --allow-untrusted-tools`).
-    Session = 3,
+    Session = 4,
 }
 
 impl ConfigLayer {
@@ -752,6 +762,7 @@ impl ConfigLayer {
         match self {
             ConfigLayer::Defaults => "defaults",
             ConfigLayer::User => "user config",
+            ConfigLayer::Profile => "config profile",
             ConfigLayer::Project => "project config",
             ConfigLayer::Session => "session flags",
         }
@@ -785,6 +796,10 @@ pub struct SessionFlags {
     pub max_tokens: Option<usize>,
     /// `run --allow-untrusted-tools` → `safety.allow_untrusted_headless_tools`.
     pub allow_untrusted_tools: bool,
+    /// `--profile <name>`: select a `[profiles.<name>]` overlay from the user
+    /// config file. NOT rendered into `to_table` — profiles are their own
+    /// layer, resolved by `load_layered_config`.
+    pub profile: Option<String>,
 }
 
 impl SessionFlags {
@@ -826,6 +841,60 @@ impl SessionFlags {
     }
 }
 
+/// Remove the `profiles` table from a raw user-config table and return it
+/// (empty when absent). `[profiles.<name>]` overlays must NEVER reach
+/// `Config` deserialization — they are a container of layer tables, not
+/// config keys — so every user-file read excises them before
+/// `finalize_config` (which would otherwise warn about unknown keys) and
+/// before any safety baseline is computed.
+fn take_profiles(table: &mut toml::Table) -> toml::Table {
+    match table.remove("profiles") {
+        Some(toml::Value::Table(profiles)) => profiles,
+        // A non-table `profiles` key is malformed; drop it (the profile
+        // lookup errors clearly when one was requested).
+        _ => toml::Table::new(),
+    }
+}
+
+/// Resolve `--profile <name>` against the user file's excised `[profiles.*]`
+/// table: the named overlay as a `Profile` layer, or a hard error naming the
+/// available profiles (sorted).
+fn resolve_profile_layer(
+    profiles: &toml::Table,
+    name: &str,
+    config_path: &std::path::Path,
+) -> Result<LayerSource> {
+    match profiles.get(name) {
+        Some(toml::Value::Table(overlay)) => Ok(LayerSource {
+            layer: ConfigLayer::Profile,
+            origin: format!("profile:{} ({})", name, config_path.display()),
+            table: overlay.clone(),
+        }),
+        Some(_) => anyhow::bail!(
+            "config profile '{}' is not a table; define it as [profiles.{}] in {}",
+            name,
+            name,
+            config_path.display()
+        ),
+        None => {
+            let mut available: Vec<&str> = profiles.keys().map(String::as_str).collect();
+            available.sort_unstable();
+            if available.is_empty() {
+                anyhow::bail!(
+                    "no config profiles defined; add [profiles.{}] to {}",
+                    name,
+                    config_path.display()
+                );
+            }
+            anyhow::bail!(
+                "unknown config profile '{}'; available: {}",
+                name,
+                available.join(", ")
+            )
+        },
+    }
+}
+
 /// Load the user-scope configuration (defaults + the user file, no project or
 /// session layers). This is the view persistence baselines, the daemon, and
 /// runtime re-reads use — anything that must not observe another repo's
@@ -834,6 +903,7 @@ pub fn load_config() -> Result<Config> {
     let config_path = get_config_path()?;
     let mut table = read_config_table(&config_path)?;
     migrate_legacy_max_tokens(&mut table);
+    let _ = take_profiles(&mut table);
     Ok(finalize_config(table)?.0)
 }
 
@@ -859,6 +929,9 @@ pub fn load_layered_config(
     let config_path = get_config_path()?;
     let mut user_table = read_config_table(&config_path)?;
     migrate_legacy_max_tokens(&mut user_table);
+    // Excise [profiles.*] BEFORE anything deserializes the user table (the
+    // safety baseline below and finalize_config's unknown-key scan).
+    let profiles = take_profiles(&mut user_table);
     let mut layers = vec![LayerSource {
         layer: ConfigLayer::User,
         origin: config_path.display().to_string(),
@@ -866,6 +939,15 @@ pub fn load_layered_config(
     }];
     let mut sanitizer_warnings = Vec::new();
     let mut notices = Vec::new();
+    if let Some(name) = flags.profile.as_deref() {
+        let layer = resolve_profile_layer(&profiles, name, &config_path)?;
+        notices.push(format!(
+            "using config profile '{}' (from {})",
+            name,
+            config_path.display()
+        ));
+        layers.push(layer);
+    }
     if let Some(cwd) = cwd {
         // The tighten-only safety clamp compares against the user-scope
         // (defaults + user file) values.
@@ -883,7 +965,8 @@ pub fn load_layered_config(
         origin: "command line".to_string(),
         table: flags.to_table()?,
     });
-    let (config, unknown_key_warnings) = merge_layers(layers)?;
+    let (mut config, unknown_key_warnings) = merge_layers(layers)?;
+    config.active_profile = flags.profile.clone();
     // Sanitizer warnings first: they explain keys that will also be absent
     // from the merged result.
     sanitizer_warnings.extend(unknown_key_warnings);
@@ -903,6 +986,7 @@ pub fn load_project_scoped_config(cwd: &std::path::Path) -> Config {
         let config_path = get_config_path()?;
         let mut user_table = read_config_table(&config_path)?;
         migrate_legacy_max_tokens(&mut user_table);
+        let _ = take_profiles(&mut user_table);
         let base_safety = finalize_config(user_table.clone())?.0.safety;
         let mut layers = vec![LayerSource {
             layer: ConfigLayer::User,
@@ -1521,6 +1605,127 @@ mod tests {
     }
 
     #[test]
+    fn take_profiles_excises_and_tolerates_absence() {
+        let mut table: toml::Table =
+            toml::from_str("[profiles.fast.default_model]\ntemperature = 0.1\n").unwrap();
+        let profiles = take_profiles(&mut table);
+        assert!(table.is_empty(), "profiles must be excised: {table:?}");
+        assert!(profiles.contains_key("fast"));
+        // Absent -> empty, table untouched.
+        let mut table: toml::Table = toml::from_str("last_used_model = \"x\"\n").unwrap();
+        assert!(take_profiles(&mut table).is_empty());
+        assert_eq!(table.len(), 1);
+        // Malformed (non-table) -> dropped, empty result.
+        let mut table: toml::Table = toml::from_str("profiles = 3\n").unwrap();
+        assert!(take_profiles(&mut table).is_empty());
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn resolve_profile_layer_errors_name_available_profiles() {
+        let profiles: toml::Table = toml::from_str("[work]\n[fast]\n").unwrap();
+        let path = std::path::Path::new("/tmp/config.toml");
+        let err = resolve_profile_layer(&profiles, "nope", path).unwrap_err();
+        assert!(err.to_string().contains("available: fast, work"), "{err}");
+        // No profiles at all -> a distinct, actionable error.
+        let err = resolve_profile_layer(&toml::Table::new(), "work", path).unwrap_err();
+        assert!(
+            err.to_string().contains("no config profiles defined"),
+            "{err}"
+        );
+        // Non-table profile value -> hard error.
+        let profiles: toml::Table = toml::from_str("work = 1\n").unwrap();
+        let err = resolve_profile_layer(&profiles, "work", path).unwrap_err();
+        assert!(err.to_string().contains("not a table"), "{err}");
+        // Hit -> Profile layer with attributing origin.
+        let profiles: toml::Table =
+            toml::from_str("[work.default_model]\ntemperature = 0.2\n").unwrap();
+        let layer = resolve_profile_layer(&profiles, "work", path).unwrap();
+        assert_eq!(layer.layer, ConfigLayer::Profile);
+        assert!(layer.origin.contains("profile:work"));
+    }
+
+    #[test]
+    fn profile_layer_beats_user_loses_to_project_and_session() {
+        let user: toml::Table = toml::from_str(
+            "last_used_model = \"ollama/user\"\n[default_model]\ntemperature = 0.9\nmax_tokens = 100\n",
+        )
+        .unwrap();
+        let profile: toml::Table = toml::from_str(
+            "last_used_model = \"ollama/profile\"\n[default_model]\ntemperature = 0.1\nprofile_typo = 1\n",
+        )
+        .unwrap();
+        let project: toml::Table = toml::from_str("[default_model]\ntemperature = 0.5\n").unwrap();
+        let session: toml::Table =
+            toml::from_str("last_used_model = \"ollama/session\"\n").unwrap();
+        let (config, warnings) = merge_layers(vec![
+            LayerSource {
+                layer: ConfigLayer::User,
+                origin: "/tmp/user.toml".to_string(),
+                table: user,
+            },
+            LayerSource {
+                layer: ConfigLayer::Profile,
+                origin: "profile:work (/tmp/user.toml)".to_string(),
+                table: profile,
+            },
+            LayerSource {
+                layer: ConfigLayer::Project,
+                origin: "/repo/.mermaid/config.toml".to_string(),
+                table: project,
+            },
+            LayerSource {
+                layer: ConfigLayer::Session,
+                origin: "command line".to_string(),
+                table: session,
+            },
+        ])
+        .expect("merges");
+        // Project beats profile; session beats everything; profile beats user
+        // where later layers are silent.
+        assert_eq!(config.default_model.temperature, 0.5);
+        assert_eq!(config.last_used_model.as_deref(), Some("ollama/session"));
+        assert_eq!(config.default_model.max_tokens, 100);
+        // Unknown keys inside the profile attribute to it.
+        assert!(
+            warnings.iter().any(|w| w.contains("profile_typo")
+                && w.contains("config profile (profile:work (/tmp/user.toml))")),
+            "got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn persists_never_touch_profile_tables() {
+        let dir = std::env::temp_dir().join("mermaid_test_profiles_persist");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[profiles.fast.default_model]\ntemperature = 0.1\n\n[safety]\nmode = \"ask\"\n",
+        )
+        .expect("seed");
+
+        update_user_config_table_at(&path, |table| {
+            deep_set_segments(
+                table,
+                &["safety", "mode"],
+                toml::Value::String("auto".to_string()),
+            )
+        })
+        .expect("persist");
+
+        let table: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&path).expect("read back")).expect("parse");
+        assert_eq!(table["safety"]["mode"].as_str(), Some("auto"));
+        // The overlay table survives persists byte-for-byte semantically.
+        assert_eq!(
+            table["profiles"]["fast"]["default_model"]["temperature"].as_float(),
+            Some(0.1)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn session_flags_table_maps_each_flag() {
         let flags = SessionFlags {
             overrides: vec!["web.searxng_url=\"http://x:1\"".to_string()],
@@ -1528,6 +1733,7 @@ mod tests {
             confine_fs: true,
             max_tokens: Some(512),
             allow_untrusted_tools: true,
+            profile: None,
         };
         let (config, _) = finalize_config(flags.to_table().unwrap()).unwrap();
         assert_eq!(config.safety.network, NetworkPolicy::Deny);

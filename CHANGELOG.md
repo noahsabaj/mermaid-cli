@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queued-message path when it finishes, with its token spend still folded
   into the session totals. The `ctrl+b to background` hint only renders when
   something running can actually background (shell commands or agents).
+
+- **Named config profiles.** Define `[profiles.<name>]` overlays in your
+  user config and select one per invocation with the global
+  `--profile <name>` flag. Profile values beat the user file but lose to a
+  repo's project config (its tighten-only safety clamp still wins) and to
+  `-c` overrides. Unknown profile names error listing what is defined;
+  `doctor` shows the active profile; persists never touch `[profiles.*]`.
+
 - **Light theme, `/theme`, and a `[ui]` config table.** The TUI now ships a
   light palette alongside the default dark one. `/theme dark|light` switches
   live and persists as `ui.theme`; every previously hardcoded widget color
@@ -198,6 +206,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session (the emitted id never dangles), and a script that names a missing
   session or asks for `--continue` with none saved gets a hard error instead
   of a silent fresh session.
+
+### Changed
+
+- **`model_profiles` renamed to `[model_aliases]`** (and the `profile:`
+  model-id prefix to `alias:`) to free the "profile" name for the config
+  overlays above. Bare alias names still resolve unchanged.
 
 ### Fixed
 

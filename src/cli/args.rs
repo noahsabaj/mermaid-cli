@@ -102,6 +102,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub sandbox: bool,
 
+    /// Apply a named config overlay from `[profiles.<name>]` in your user
+    /// config file for this invocation. Profile values beat the user file but
+    /// lose to a repo's project config and to `-c` overrides.
+    #[arg(long, value_name = "NAME", global = true)]
+    pub profile: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -127,6 +133,7 @@ impl Cli {
             confine_fs: self.confine_fs || self.sandbox,
             max_tokens,
             allow_untrusted_tools,
+            profile: self.profile.clone(),
         }
     }
 }
