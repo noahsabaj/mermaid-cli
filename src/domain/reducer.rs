@@ -1133,6 +1133,10 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     }
     // Any other key disarms a pending exit confirmation — the user moved on.
     state.ui.exit_armed_until = None;
+    // Same for the double-Esc rewind arming: only Esc keeps it alive.
+    if code != KeyCode::Escape {
+        state.ui.esc_armed_at = None;
+    }
 
     // Ctrl+B: send a running foreground command to the background (it keeps
     // running as a `/processes` entry) instead of waiting on it. Only
@@ -1362,6 +1366,13 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Rewind picker (double-Esc): ↑/↓ navigate the user messages, Enter
+    // forks the session at the highlighted one, Esc dismisses untouched.
+    if matches!(state.ui.mode, UiMode::RewindPicker { .. }) {
+        handle_rewind_picker_key(state, cmds, code);
+        return;
+    }
+
     // Slash-palette navigation — intercepts ↑/↓/Tab/Esc while the
     // input buffer opens with `/`. Enter falls through to the normal
     // handler below so the command actually dispatches.
@@ -1581,9 +1592,13 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 history_nav_forward(state);
             },
             KeyCode::Escape => {
-                // Clear any in-progress history nav.
+                // Clear any in-progress history nav, then run the double-Esc
+                // rewind arming: first idle Esc arms, a second within the
+                // window opens the rewind picker. Busy Esc never reaches here
+                // (it cancelled and returned above).
                 state.ui.input_history_cursor = None;
                 state.ui.history_draft.clear();
+                handle_rewind_esc(state);
             },
             _ => {},
         }
@@ -1591,6 +1606,217 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         // token, re-rank matches, and fire the project walk on open.
         refresh_file_picker(state, cmds);
     }
+}
+
+/// Double-Esc window: a second idle Esc within this many ms of the first
+/// opens the rewind picker.
+const ESC_REWIND_WINDOW_MS: i64 = 1000;
+
+/// Idle-Esc arming: first press arms, a second within the window fires the
+/// rewind picker; past the window the press re-arms. Compared against the
+/// injected `state.now` (pure; replay-exact).
+fn handle_rewind_esc(state: &mut State) {
+    let fired = state.ui.esc_armed_at.is_some_and(|armed| {
+        (state.now - armed) <= chrono::Duration::milliseconds(ESC_REWIND_WINDOW_MS)
+    });
+    if !fired {
+        state.ui.esc_armed_at = Some(state.now);
+        return;
+    }
+    state.ui.esc_armed_at = None;
+    let candidates = rewind_candidates(state.session.messages());
+    if candidates.is_empty() {
+        // Nothing to rewind to — silently no-op.
+        return;
+    }
+    state.ui.mode = UiMode::RewindPicker {
+        candidates,
+        cursor: 0,
+    };
+}
+
+/// The rewind targets: user-role `Normal` messages, NEWEST FIRST (the most
+/// recent exchange is the most likely rewind point). Excerpts are the first
+/// non-empty line, clipped.
+fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::domain::RewindCandidate> {
+    const EXCERPT_MAX_CHARS: usize = 80;
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, m)| {
+            m.role == crate::models::MessageRole::User
+                && m.kind == crate::models::ChatMessageKind::Normal
+        })
+        .map(|(message_index, m)| {
+            let line = m
+                .content
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("(empty message)");
+            let excerpt = if line.chars().count() > EXCERPT_MAX_CHARS {
+                let mut clipped: String = line.chars().take(EXCERPT_MAX_CHARS).collect();
+                clipped.push('…');
+                clipped
+            } else {
+                line.to_string()
+            };
+            crate::domain::RewindCandidate {
+                message_index,
+                excerpt,
+            }
+        })
+        .collect()
+}
+
+/// Handle keyboard input while the rewind picker is open. Up/Down walk the
+/// candidate list; Enter forks the session at the highlighted user message;
+/// Esc dismisses without touching the conversation.
+fn handle_rewind_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+    let UiMode::RewindPicker {
+        ref candidates,
+        ref mut cursor,
+    } = state.ui.mode
+    else {
+        return;
+    };
+    match code {
+        KeyCode::Up => {
+            *cursor = cursor.saturating_sub(1);
+        },
+        KeyCode::Down => {
+            let max = candidates.len().saturating_sub(1);
+            if *cursor < max {
+                *cursor += 1;
+            }
+        },
+        KeyCode::Enter => {
+            if let Some(candidate) = candidates.get(*cursor) {
+                let message_index = candidate.message_index;
+                fork_conversation_at(state, cmds, message_index);
+            }
+        },
+        KeyCode::Escape => {
+            state.ui.mode = UiMode::EditingInput;
+        },
+        _ => {},
+    }
+}
+
+/// Fork the session at `message_index` (a user message): the ORIGINAL
+/// session is saved and preserved; a NEW session (new id, lineage stamped)
+/// takes over with `messages[..message_index]` and the composer pre-filled
+/// with the selected message — edit and resend to branch the timeline.
+///
+/// Idle-only by construction (the picker opens from an idle double-Esc), so
+/// there is no in-flight TurnId or scope to reconcile when the id swaps.
+fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: usize) {
+    // 1. Persist the original FIRST — different id, different file, so this
+    //    can never clobber the fork's save below.
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+
+    let original = &state.session.conversation;
+    let original_id = original.id.clone();
+    // 2. Mint the fork from the injected clock — the new id is a pure
+    //    function of `state.now` (replay-exact; the `/clear` handler is the
+    //    precedent).
+    let mut fork = crate::session::ConversationHistory::new(
+        original.project_path.clone(),
+        original.model_name.clone(),
+        state.now,
+    );
+    // Ids are millisecond-derived; a fork minted in the SAME millisecond as
+    // the original would share its id — and its save file. Deterministic
+    // 1ms bump keeps the fork pure while guaranteeing a distinct file.
+    if fork.id == original.id {
+        fork = crate::session::ConversationHistory::new(
+            original.project_path.clone(),
+            original.model_name.clone(),
+            state.now + chrono::Duration::milliseconds(1),
+        );
+    }
+    fork.title = original.title.clone();
+    // The cut lands on a user message, which always starts a run, so the
+    // prefix can't split a tool_use/tool_result pair — normalize anyway as
+    // defense in depth.
+    let mut messages: Vec<ChatMessage> = original.messages[..message_index].to_vec();
+    super::compaction::normalize_history(&mut messages);
+    fork.messages = messages;
+    fork.input_history = original.input_history.clone();
+    fork.git_branch = original.git_branch.clone();
+    fork.git_sha = original.git_sha.clone();
+    fork.cli_version = original.cli_version.clone();
+    // Carried for provenance: the records' archive paths point at the
+    // ORIGINAL session's archives (read-only history, never rewritten).
+    fork.compactions = original.compactions.clone();
+    // The payoff: the resume picker's "forked" chip and the `.meta` sidecar
+    // light up from these two fields with zero render changes.
+    fork.forked_from = Some(original_id.clone());
+    fork.parent_session = Some(original_id);
+    let selected = original.messages.get(message_index).cloned();
+
+    // 3. Swap. Cumulative token meters continue (same spend, same session of
+    //    work); context/last-usage described the dropped suffix — reset.
+    state.session.conversation = fork;
+    state.session.context_usage = None;
+    state.session.last_token_usage = None;
+
+    // 4. `state.ids.image` is NOT re-based: the allocator stays monotonic, so
+    //    image numbers remain unique across the fork (seed_conversation's
+    //    re-base is for fresh processes only).
+
+    // 5. Pre-fill the composer with the selected message. The pre-rewind
+    //    draft and its staged attachments are deliberately dropped; the
+    //    selected message's own images are RE-STAGED so its `[Image #N]`
+    //    tokens resolve at submit.
+    state.ui.attachments.clear();
+    if let Some(msg) = selected {
+        state.ui.input_buffer = msg.content.clone();
+        state.ui.input_cursor = state.ui.input_buffer.len();
+        if let (Some(images), Some(numbers)) = (&msg.images, &msg.image_numbers) {
+            for (b64, number) in images.iter().zip(numbers) {
+                restage_image(state, cmds, b64, *number);
+            }
+        }
+    }
+
+    // 6. Close the picker and save the fork. Edge: rewinding to the FIRST
+    //    user message yields an empty prefix — `save_conversation` skips
+    //    empty conversations, so the fork file materializes on first resend.
+    state.ui.mode = UiMode::EditingInput;
+    state.ui.esc_armed_at = None;
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    emit_title_if_changed(state, cmds);
+}
+
+/// Re-stage one of the selected message's images as a live attachment so its
+/// inline `[Image #N]` token resolves at submit. Keeps the ORIGINAL number
+/// (the token in the pre-filled text references it). A base64 decode failure
+/// skips the attachment — the token degrades to literal text, matching how
+/// orphan tokens behave today. The stored format isn't recorded per-image;
+/// "png" is the decode-side fallback (viewers sniff the real magic bytes).
+fn restage_image(state: &mut State, cmds: &mut Vec<Cmd>, base64_data: &str, number: u64) {
+    let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_data)
+    else {
+        return;
+    };
+    let id = state.ids.tool_call.next();
+    let format = "png".to_string();
+    let temp_path = state.temp_dir.join(format!("mermaid-img-{id}.{format}"));
+    state.ui.attachments.push(super::state::Attachment {
+        id,
+        number,
+        base64_data: base64_data.to_string(),
+        temp_path: temp_path.clone(),
+        size_bytes: bytes.len(),
+        format: format.clone(),
+    });
+    cmds.push(Cmd::WriteImageToTemp {
+        path: temp_path,
+        bytes,
+        format,
+    });
 }
 
 /// Handle keyboard input while the conversation-list picker is open.
@@ -4698,6 +4924,203 @@ mod tests {
         assert_eq!(state.ui.input_buffer, "@s", "Down never edits the buffer");
         let (state, _) = update(state, plain_key(KeyCode::Up));
         assert_eq!(state.ui.file_picker_cursor, Some(0));
+    }
+
+    /// A conversation with two full user/assistant exchanges.
+    fn state_with_two_exchanges() -> State {
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("first prompt"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("first reply"), state.now);
+        state
+            .session
+            .append(ChatMessage::user("second prompt"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("second reply"), state.now);
+        state
+    }
+
+    #[test]
+    fn double_esc_opens_rewind_picker_single_esc_only_arms() {
+        let mut state = state_with_two_exchanges();
+        let (state2, _) = update(state.clone(), plain_key(KeyCode::Escape));
+        assert!(state2.ui.esc_armed_at.is_some(), "first Esc arms");
+        assert!(matches!(state2.ui.mode, UiMode::EditingInput));
+        let (state3, _) = update(state2, plain_key(KeyCode::Escape));
+        let UiMode::RewindPicker { candidates, cursor } = &state3.ui.mode else {
+            panic!("second Esc within the window opens the picker");
+        };
+        assert_eq!(cursor, &0);
+        assert_eq!(candidates.len(), 2, "only user messages are candidates");
+        assert_eq!(candidates[0].excerpt, "second prompt", "newest first");
+        assert_eq!(candidates[0].message_index, 2);
+        assert_eq!(candidates[1].message_index, 0);
+        // Past the window: the press RE-ARMS instead of firing.
+        state.ui.esc_armed_at = Some(state.now - chrono::Duration::milliseconds(1500));
+        let (state4, _) = update(state, plain_key(KeyCode::Escape));
+        assert!(matches!(state4.ui.mode, UiMode::EditingInput));
+        assert_eq!(state4.ui.esc_armed_at, Some(state4.now), "re-armed");
+    }
+
+    #[test]
+    fn busy_esc_cancels_and_never_arms() {
+        let mut state = state_with_two_exchanges();
+        state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
+        let (state, cmds) = update(state, plain_key(KeyCode::Escape));
+        assert!(
+            matches!(state.turn, TurnState::Cancelling { .. }),
+            "busy Esc stays the cancel gesture"
+        );
+        assert!(state.ui.esc_armed_at.is_none(), "busy Esc never arms");
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::CancelScope(_))));
+    }
+
+    #[test]
+    fn any_other_key_disarms_rewind() {
+        let state = state_with_two_exchanges();
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        assert!(state.ui.esc_armed_at.is_some());
+        let (state, _) = update(state, plain_key(KeyCode::Char('x')));
+        assert!(state.ui.esc_armed_at.is_none(), "typing disarms");
+    }
+
+    #[test]
+    fn double_esc_with_no_user_messages_is_a_noop() {
+        let state = fresh_state();
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        assert!(
+            matches!(state.ui.mode, UiMode::EditingInput),
+            "nothing to rewind to"
+        );
+    }
+
+    #[test]
+    fn rewind_picker_esc_dismisses_without_mutation() {
+        let state = state_with_two_exchanges();
+        let original_id = state.session.conversation.id.clone();
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        assert!(matches!(state.ui.mode, UiMode::RewindPicker { .. }));
+        let (state, cmds) = update(state, plain_key(KeyCode::Escape));
+        assert!(matches!(state.ui.mode, UiMode::EditingInput));
+        assert_eq!(state.session.conversation.id, original_id);
+        assert_eq!(state.session.messages().len(), 4, "history untouched");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
+            "dismiss saves nothing"
+        );
+    }
+
+    #[test]
+    fn rewind_enter_forks_with_lineage_and_prefilled_composer() {
+        let state = state_with_two_exchanges();
+        let original_id = state.session.conversation.id.clone();
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        // Cursor 0 = "second prompt" (message_index 2).
+        let (state, cmds) = update(state, plain_key(KeyCode::Enter));
+        let fork = &state.session.conversation;
+        assert_ne!(fork.id, original_id, "the fork gets a NEW session id");
+        assert_eq!(fork.forked_from.as_deref(), Some(original_id.as_str()));
+        assert_eq!(fork.parent_session.as_deref(), Some(original_id.as_str()));
+        assert_eq!(
+            fork.messages.len(),
+            2,
+            "fork keeps only the prefix before the selected message"
+        );
+        assert_eq!(fork.messages[0].content, "first prompt");
+        assert_eq!(fork.messages[1].content, "first reply");
+        assert_eq!(
+            state.ui.input_buffer, "second prompt",
+            "composer pre-filled with the selected message"
+        );
+        assert_eq!(state.ui.input_cursor, state.ui.input_buffer.len());
+        assert!(matches!(state.ui.mode, UiMode::EditingInput));
+        let saves = cmds
+            .iter()
+            .filter(|c| matches!(c, Cmd::SaveConversation(_)))
+            .count();
+        assert_eq!(saves, 2, "original saved first, then the fork");
+        // The FIRST save carries the ORIGINAL (full history, its own id).
+        let Some(Cmd::SaveConversation(first_saved)) =
+            cmds.iter().find(|c| matches!(c, Cmd::SaveConversation(_)))
+        else {
+            unreachable!()
+        };
+        assert_eq!(first_saved.id, original_id);
+        assert_eq!(first_saved.messages.len(), 4);
+    }
+
+    #[test]
+    fn rewind_to_first_message_yields_empty_fork_prefix() {
+        let state = state_with_two_exchanges();
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        // Move to the OLDEST candidate ("first prompt", message_index 0).
+        let (state, _) = update(state, plain_key(KeyCode::Down));
+        let (state, _) = update(state, plain_key(KeyCode::Enter));
+        assert!(state.session.messages().is_empty());
+        assert_eq!(state.ui.input_buffer, "first prompt");
+    }
+
+    #[test]
+    fn fork_id_is_a_pure_function_of_the_injected_clock() {
+        let build = || {
+            let mut s = state_with_two_exchanges();
+            s.now = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05+00:00")
+                .unwrap()
+                .with_timezone(&chrono::Local);
+            let (s, _) = update(s, plain_key(KeyCode::Escape));
+            let (s, _) = update(s, plain_key(KeyCode::Escape));
+            let (s, _) = update(s, plain_key(KeyCode::Enter));
+            s.session.conversation.id.clone()
+        };
+        assert_eq!(build(), build(), "replay-exact fork ids");
+    }
+
+    #[test]
+    fn rewind_restages_the_selected_messages_images() {
+        let mut state = state_with_two_exchanges();
+        let mut msg = ChatMessage::user("look at [Image #1]");
+        // 1x1 PNG-ish payload; content only needs to round-trip base64.
+        msg.images = Some(vec![base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"fake-image-bytes",
+        )]);
+        msg.image_numbers = Some(vec![1]);
+        state.session.append(msg, state.now);
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        // Cursor 0 = the newest user message (the image one).
+        let (state, cmds) = update(state, plain_key(KeyCode::Enter));
+        assert_eq!(state.ui.input_buffer, "look at [Image #1]");
+        assert_eq!(state.ui.attachments.len(), 1, "image re-staged");
+        assert_eq!(state.ui.attachments[0].number, 1, "original number kept");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::WriteImageToTemp { .. })),
+            "temp preview rewritten for the re-staged image"
+        );
+    }
+
+    #[test]
+    fn rewind_candidates_skip_non_user_and_non_normal_messages() {
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("real"), state.now);
+        state
+            .session
+            .append(ChatMessage::system("system note"), state.now);
+        let mut summary = ChatMessage::user("summary-ish");
+        summary.kind = crate::models::ChatMessageKind::RunSummary;
+        state.session.append(summary, state.now);
+        let candidates = rewind_candidates(state.session.messages());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].excerpt, "real");
     }
 
     #[test]

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Rewind and fork with double-Esc.** Pressing Esc twice within a second
+  while idle opens a picker of the session's earlier user messages (newest
+  first). Selecting one FORKS the session at that point: the original is
+  saved and preserved (it keeps appearing in the `--resume` picker, now with
+  its lineage recorded via `forked_from`/`parent_session`), a new session id
+  takes over with the history before that message, and the composer is
+  pre-filled with the message itself — its pasted images re-staged — so you
+  edit and resend to branch the timeline. Busy Esc is unchanged (still
+  cancels); a first idle Esc shows an `esc again to rewind` hint on the
+  input box. The whole flow is key-driven and pure, so record/replay work
+  unchanged.
+
 - **@-mention fuzzy file picker.** Typing `@` at the start of a word in the
   composer opens a fuzzy picker over the project's files (ripgrep's
   gitignore-aware walker — hidden files, `.git`, and ignored paths excluded;

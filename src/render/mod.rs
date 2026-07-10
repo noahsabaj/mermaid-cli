@@ -219,10 +219,15 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             state.ui.mode,
             crate::domain::UiMode::ConversationList { .. }
         );
+    let rewind_open = approval_item.is_none()
+        && question_item.is_none()
+        && !confirm_open
+        && matches!(state.ui.mode, crate::domain::UiMode::RewindPicker { .. });
     let file_picker_open = approval_item.is_none()
         && question_item.is_none()
         && !confirm_open
         && !conv_list_open
+        && !rewind_open
         && state.ui.file_picker_open();
     let palette_open = approval_item.is_none()
         && question_item.is_none()
@@ -238,7 +243,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         widgets::question_modal_height(qset, &rstate.theme)
     } else if confirm_open {
         6
-    } else if conv_list_open {
+    } else if conv_list_open || rewind_open {
         12
     } else if file_picker_open {
         let rows = state.ui.file_picker_matches.len().clamp(1, 8);
@@ -325,6 +330,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         theme: &rstate.theme,
         reasoning_active: state.session.reasoning != ReasoningLevel::None,
         exit_armed: exit_armed(state),
+        rewind_armed: rewind_armed(state),
     };
     let mut input_widget_state = InputState {
         cursor_position: state.ui.input_cursor.min(state.ui.input_buffer.len()),
@@ -403,6 +409,14 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     } else if let crate::domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
         use widgets::ConversationListWidget;
         let widget = ConversationListWidget {
+            theme: &rstate.theme,
+            candidates,
+            cursor: *cursor,
+        };
+        frame.render_widget(widget, chunks[3]);
+    } else if let crate::domain::UiMode::RewindPicker { candidates, cursor } = &state.ui.mode {
+        use widgets::RewindPickerWidget;
+        let widget = RewindPickerWidget {
             theme: &rstate.theme,
             candidates,
             cursor: *cursor,
@@ -656,6 +670,15 @@ fn exit_armed(state: &State) -> bool {
         .ui
         .exit_armed_until
         .is_some_and(|deadline| state.now <= deadline)
+}
+
+/// True while a first idle Esc's rewind window is open (same lazy-expiry
+/// pattern as `exit_armed`; the reducer owns the 1s window constant).
+fn rewind_armed(state: &State) -> bool {
+    state
+        .ui
+        .esc_armed_at
+        .is_some_and(|armed| (state.now - armed) <= chrono::Duration::milliseconds(1000))
 }
 
 /// While tools run, name the first in-flight one so the status line isn't an

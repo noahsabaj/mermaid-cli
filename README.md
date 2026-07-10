@@ -18,6 +18,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Durable Memory** — the agent remembers facts across sessions (`memory` tool + `/remember`, `/memory`, `/forget`); a compact index auto-loads into every prompt
 - **MCP Servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers (`mermaid add <name>`)
 - **Session Persistence** — conversations auto-save; `--continue` reopens the last one in the current directory, `--resume` opens a searchable picker of past sessions
+- **Rewind & Fork** — double-Esc when idle picks an earlier message and forks the session there (new session id, lineage recorded, original untouched); edit the pre-filled prompt and resend to branch the timeline
 - **Context Compaction** — automatic checkpoint-and-continue when the window fills (or the model truncates mid-run); manual `/compact [focus]` for handoffs
 - **Record & Replay** — `--record` captures every reducer input; `--replay` reconstructs the session offline, deterministically, with a built-in purity check
 - **@-Mentions** — type `@` in the composer to fuzzy-pick a project file (gitignore-aware); the path lands in your prompt as text the agent reads with its tools
@@ -162,6 +163,7 @@ mermaid pr create                               # Open a PR/MR from the current 
 |-----|--------|
 | Enter | Send message (or queue while the model is generating) |
 | Esc | Stop generation / dismiss command palette or attachment focus |
+| Esc Esc | (idle) Rewind: fork the session at an earlier message — original preserved, composer pre-filled |
 | Ctrl+C | Quit (auto-saves the session) |
 | Ctrl+D | Quit when the input box is empty (auto-saves the session) |
 | Ctrl+B | While tools are running, send the foreground command to the background (it keeps running as a `/processes` entry) |

@@ -956,6 +956,12 @@ pub struct UiState {
     /// the next tick with no state change. Ctrl+D on empty input and `/quit`
     /// still exit immediately.
     pub exit_armed_until: Option<DateTime<Local>>,
+    /// Double-Esc rewind arming. `Some(t)` after an idle Esc; a second Esc
+    /// within `ESC_REWIND_WINDOW_MS` of `t` opens the rewind picker. Any
+    /// other key disarms; expiry is lazy against `state.now` like
+    /// `exit_armed_until` (the hint vanishes on the next tick). Busy Esc
+    /// never arms — it stays the cancel gesture.
+    pub esc_armed_at: Option<DateTime<Local>>,
     /// Whether the terminal window has LOST focus (from terminal focus
     /// reporting via `Msg::FocusChanged`). Defaults `false` (assume attended, so
     /// terminals without focus reporting never ding); the attention bell fires
@@ -999,6 +1005,26 @@ pub enum UiMode {
     },
     /// `/model` — list of available models visible.
     ModelList,
+    /// Double-Esc rewind: pick an earlier user message to fork the session
+    /// at. Candidates are user-role Normal messages, newest first. Selecting
+    /// one forks into a NEW session (original preserved, lineage stamped)
+    /// with the composer pre-filled.
+    RewindPicker {
+        candidates: Vec<RewindCandidate>,
+        cursor: usize,
+    },
+}
+
+/// One rewind target: a user message's position in the conversation plus a
+/// one-line excerpt for the picker row. Never rides in a `Msg` (the whole
+/// flow is Key-driven), so no serde — record/replay work unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindCandidate {
+    /// Index into `conversation.messages` of the user message; the fork
+    /// keeps `messages[..index]` and pre-fills the composer with this one.
+    pub message_index: usize,
+    /// First line of the message, clipped for the picker row.
+    pub excerpt: String,
 }
 
 /// Summary row for the conversation picker. Produced by
