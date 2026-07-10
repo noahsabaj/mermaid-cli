@@ -1550,6 +1550,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             );
             (ctx, rx)
         };

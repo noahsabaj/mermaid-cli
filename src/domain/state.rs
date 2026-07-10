@@ -62,6 +62,11 @@ pub struct State {
     /// request consumes them (see `push_call_model`). Byte-capped; transient
     /// (never persisted with the session).
     pub pending_hook_context: Vec<String>,
+    /// One-line notices about the task checklist for the model's next
+    /// request: user `/todos` edits, vetoed completions, staleness nudges.
+    /// Same lifecycle as `pending_hook_context` (consumed by the next real
+    /// dispatch, transient, never persisted).
+    pub pending_task_notices: Vec<String>,
     /// Current working directory. Captured once at startup; tools
     /// receive it via `ExecContext::workdir` and spawned subprocesses
     /// inherit it. Centralized here so tests can inject a fake cwd.
@@ -171,6 +176,7 @@ impl State {
             memory: None,
             skills: None,
             pending_hook_context: Vec::new(),
+            pending_task_notices: Vec::new(),
             cwd,
             temp_dir: std::env::temp_dir(),
             ids: IdAllocatorBundle::default(),
@@ -994,6 +1000,10 @@ pub struct UiState {
     /// the chat transcript. Hidden by default to keep the TUI focused
     /// on user-facing work while retaining provider-required history.
     pub show_reasoning: bool,
+    /// Whether the task checklist under the status line is collapsed to its
+    /// one-line form (Ctrl+T toggles). Named for the non-default state so
+    /// `derive(Default)` yields expanded, session-scoped, never persisted.
+    pub tasks_collapsed: bool,
 }
 
 impl UiState {

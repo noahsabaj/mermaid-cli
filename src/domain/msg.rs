@@ -244,6 +244,22 @@ pub enum Msg {
         call_id: ToolCallId,
         questions: Vec<Question>,
     },
+    /// The `TaskBroker` published a full checklist snapshot after a task tool
+    /// (or `/tasks` edit) mutated the store. Fire-and-forget — the broker
+    /// already holds the new truth; the reducer replaces `conversation.tasks`
+    /// and diffs old vs new for `task_completed` hook dispatch. Snapshot (not
+    /// a diff) so this arm is a plain replace and can never desync. Not
+    /// turn-scoped: `/tasks` edits arrive outside any turn, and gating would
+    /// only let the render copy drift from the broker's truth.
+    TasksUpdated {
+        store: crate::domain::tasks::TaskStore,
+    },
+    /// A one-line checklist notice for the model's next request (user
+    /// `/todos` edit, vetoed completion). Buffered on
+    /// `state.pending_task_notices`; the reducer never turn-gates it.
+    TaskNotice {
+        text: String,
+    },
 
     // ── MCP (from effect::mcp) ──────────────────────────────────────
     /// `initialize` succeeded; server is ready to dispatch tools.
@@ -541,6 +557,9 @@ pub enum SlashCmd {
     Load(Option<String>),
     List,
     Usage,
+    /// The task checklist: no arg → show; `add <subject>` / `rm <id>` /
+    /// `done <id>` / `clear` edit it (routed through the TaskBroker).
+    Todos(Option<String>),
     Context(ContextCmd),
     Compact(Option<String>),
     /// List saved durable memories.
@@ -642,6 +661,8 @@ impl Msg {
             Msg::ToolFinished { .. } => MsgKind::ToolFinished,
             Msg::ApprovalRequested { .. } => MsgKind::ApprovalRequested,
             Msg::QuestionAsked { .. } => MsgKind::QuestionAsked,
+            Msg::TasksUpdated { .. } => MsgKind::TasksUpdated,
+            Msg::TaskNotice { .. } => MsgKind::TaskNotice,
             Msg::TurnCancelled(_) => MsgKind::TurnCancelled,
             Msg::McpServerReady { .. }
             | Msg::McpServerErrored { .. }
@@ -707,6 +728,8 @@ pub enum MsgKind {
     ToolFinished,
     ApprovalRequested,
     QuestionAsked,
+    TasksUpdated,
+    TaskNotice,
     TurnCancelled,
     Mcp,
     InstructionsChanged,

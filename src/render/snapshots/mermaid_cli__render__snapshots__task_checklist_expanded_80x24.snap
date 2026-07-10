@@ -1,0 +1,29 @@
+---
+source: src/render/snapshots.rs
+assertion_line: 67
+expression: frame
+---
+ > ship the feature                                 January 2nd, 2026 at 3:04am 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ • Wiring the broker through ExecContext · Bash cargo check...                  
+   (esc to interrupt • ctrl+b to background • 3s • ↓ 0 tokens)                  
+  ⎿ √ Audit the call sites (2m 10s · 8.4k tok)                                  
+    √ Add TaskStore to the domain (1m 10s · 3.5k tok)                           
+    ■ Wire the broker through ExecContext                                       
+    □ Render the checklist band                                                 
+    □ Update the changelog                                                      
+    □ Double-check the docs (you)                                               
+────────────────────────────────────────────────────────────────────────────────
+>                                                                               
+────────────────────────────────────────────────────────────────────────────────
+snapuser@snaphost:/project/demo                                     context: n/a
+mermaid v0.16.0 · safety: ask · reasoning: medium                    ollama/test

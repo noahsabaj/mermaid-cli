@@ -14,6 +14,7 @@ mod rewind_picker;
 mod slash_palette;
 mod status;
 mod status_line;
+mod tasks;
 
 pub use approval::ApprovalModalWidget;
 pub use chat::{ChatState, ChatWidget, ImageClickTarget};
@@ -25,6 +26,7 @@ pub use rewind_picker::RewindPickerWidget;
 pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
 pub use status_line::{AgentPanelRow, build_status_lines};
+pub use tasks::{build_task_lines, tasks_height, tasks_visible};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 

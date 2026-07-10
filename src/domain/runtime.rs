@@ -253,6 +253,14 @@ pub enum ToolMetadata {
         #[serde(default)]
         agent_id: String,
     },
+    /// The task checklist tools (`task_create` / `task_update` / `task_list`).
+    /// `action` is the wire tool suffix ("create" / "update" / "list");
+    /// counts are over visible (non-deleted) tasks after the call.
+    Tasks {
+        action: String,
+        completed: u32,
+        total: u32,
+    },
     Custom {
         name: String,
         data: Value,
@@ -357,6 +365,11 @@ pub struct RuntimeState {
     /// so the once-per-session warning behaves like the auto-fit hint.
     #[serde(skip)]
     pub offload_warned: HashSet<String>,
+    /// Model-call cycles since the task checklist last changed, while a task
+    /// sits in_progress. Drives the staleness nudge (see `push_call_model`);
+    /// session-only, reset by every `Msg::TasksUpdated`.
+    #[serde(skip)]
+    pub calls_since_task_update: u32,
     /// Models we've already shown the no-vision-model notice for this session.
     /// Session-only (not persisted), so the one-shot warning behaves like the
     /// auto-fit hint and offload warning.
@@ -437,6 +450,7 @@ impl RuntimeState {
             ollama_placement: None,
             hinted_models: HashSet::new(),
             offload_warned: HashSet::new(),
+            calls_since_task_update: 0,
             vision_warned: HashSet::new(),
             ollama_converged_num_ctx: std::collections::HashMap::new(),
             run_started: None,

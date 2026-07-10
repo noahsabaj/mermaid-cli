@@ -134,6 +134,11 @@ pub struct ExecContext {
     /// only). `Some` lets the tool park until the user answers; `None`
     /// (headless) makes the tool proceed with best judgment instead of blocking.
     pub questions: Option<QuestionBroker>,
+    /// The checklist broker for the task tools (single writer for all task
+    /// state). Present on every live path — interactive, headless, and
+    /// subagent runners each own one; `None` only in bare test contexts,
+    /// where the tools degrade to a graceful no-op.
+    pub tasks: Option<crate::providers::tasks::TaskBroker>,
 }
 
 impl std::fmt::Debug for ExecContext {
@@ -161,6 +166,7 @@ impl std::fmt::Debug for ExecContext {
                 "questions",
                 &self.questions.as_ref().map(|_| "<QuestionBroker>"),
             )
+            .field("tasks", &self.tasks.as_ref().map(|_| "<TaskBroker>"))
             .finish_non_exhaustive()
     }
 }
@@ -183,6 +189,7 @@ impl ExecContext {
         classifier: Option<Arc<dyn AutoClassifier>>,
         approval: Option<ApprovalBroker>,
         questions: Option<QuestionBroker>,
+        tasks: Option<crate::providers::tasks::TaskBroker>,
     ) -> Self {
         Self {
             token,
@@ -205,6 +212,7 @@ impl ExecContext {
             classifier,
             approval,
             questions,
+            tasks,
         }
     }
 
@@ -317,6 +325,7 @@ pub fn test_exec_context(
             None,
             None,
             crate::runtime::SafetyMode::FullAccess,
+            None,
             None,
             None,
             None,

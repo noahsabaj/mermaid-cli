@@ -115,6 +115,27 @@ pub enum Cmd {
         resolution: QuestionResolution,
     },
 
+    /// Overwrite the effect-side `TaskBroker` store. Emitted where the
+    /// reducer changes checklist truth outside the broker's own publish
+    /// cycle: rewind/fork and `/clear` (both clear it) and `--replay`
+    /// re-seeding. Fire-and-forget to the broker, not turn-scoped.
+    SyncTaskStore(crate::domain::tasks::TaskStore),
+
+    /// A user `/tasks` edit. Routed through the effect runner to the
+    /// `TaskBroker` (the single writer) instead of mutating reducer state
+    /// directly, so a concurrent tool call can't clobber it; the broker's
+    /// `Msg::TasksUpdated` publish brings the result back.
+    UserTaskEdit(crate::domain::tasks::UserTaskEdit),
+
+    /// A task transitioned to completed: run the gated `task_completed`
+    /// plugin hook. A denying hook flips the task back to in_progress via
+    /// the broker and queues a notice for the model's next turn.
+    NotifyTaskCompleted {
+        task: crate::domain::tasks::TaskItem,
+        completed: u32,
+        total: u32,
+    },
+
     // ── Persistence ─────────────────────────────────────────────────
     /// Save the current conversation to disk. No-op if unchanged since
     /// last save (effect-side idempotence).
@@ -366,6 +387,9 @@ impl Cmd {
             Cmd::BackgroundScope(_) => "background_scope",
             Cmd::ResolveApproval { .. } => "resolve_approval",
             Cmd::ResolveQuestion { .. } => "resolve_question",
+            Cmd::SyncTaskStore(_) => "sync_task_store",
+            Cmd::UserTaskEdit(_) => "user_task_edit",
+            Cmd::NotifyTaskCompleted { .. } => "notify_task_completed",
             Cmd::SaveConversation(_) => "save_conversation",
             Cmd::SaveCompactionArchive { .. } => "save_compaction_archive",
             Cmd::SaveProcess(_) => "save_process",
@@ -489,6 +513,18 @@ impl Cmd {
                 };
                 format!("resolve_question(call={}, {})", call_id, kind)
             },
+            Cmd::SyncTaskStore(store) => {
+                format!("sync_task_store(tasks={})", store.tasks.len())
+            },
+            Cmd::UserTaskEdit(edit) => format!("user_task_edit({:?})", edit),
+            Cmd::NotifyTaskCompleted {
+                task,
+                completed,
+                total,
+            } => format!(
+                "notify_task_completed(id={}, {}/{})",
+                task.id, completed, total
+            ),
             Cmd::SaveConversation(c) => format!("save_conversation(id={})", c.id),
             Cmd::SaveCompactionArchive {
                 archive, record, ..

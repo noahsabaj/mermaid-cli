@@ -288,6 +288,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         // Backend is irrelevant — the flag short-circuits before any capture.
         let driver = ComputerUseDriver::new(Backend::Unsupported);

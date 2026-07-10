@@ -17,6 +17,7 @@ pub mod ctx;
 pub mod factory;
 pub mod model;
 pub mod questions;
+pub mod tasks;
 pub mod tool;
 
 pub use approval::{ApprovalBroker, ApprovalDecision, allowlist_key};
@@ -32,6 +33,7 @@ pub use model::{
     OpenAICompatProvider,
 };
 pub use questions::QuestionBroker;
+pub use tasks::TaskBroker;
 pub use tool::{ToolExecutor, ToolRegistry, TuiMode};
 
 #[cfg(test)]

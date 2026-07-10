@@ -163,6 +163,140 @@ fn busy_tools_with_queue() {
     });
 }
 
+/// A mid-run checklist: 2 completed (one with cost stamps), the active task,
+/// pendings, and one user-added task. Exercises glyphs, strikethrough, the
+/// cost suffix, the `(you)` marker, and the spinner-headline takeover.
+fn task_run_state() -> State {
+    use crate::domain::tasks::{Stamp, TaskEdit, TaskSpec, TaskStatus};
+    let mut s = scene_state();
+    s.session
+        .append(ChatMessage::user("ship the feature"), s.now);
+    let steps = [
+        ("Audit the call sites", "Auditing the call sites"),
+        (
+            "Add TaskStore to the domain",
+            "Adding TaskStore to the domain",
+        ),
+        (
+            "Wire the broker through ExecContext",
+            "Wiring the broker through ExecContext",
+        ),
+        ("Render the checklist band", "Rendering the checklist band"),
+        ("Update the changelog", "Updating the changelog"),
+    ];
+    s.session.conversation.tasks.create(
+        steps
+            .iter()
+            .map(|(subject, active)| TaskSpec {
+                subject: (*subject).to_string(),
+                active_form: (*active).to_string(),
+                description: None,
+                in_progress: false,
+            })
+            .collect(),
+        crate::domain::TaskOrigin::Model,
+        Stamp::default(),
+    );
+    s.session.conversation.tasks.create(
+        vec![TaskSpec {
+            subject: "Double-check the docs".to_string(),
+            active_form: "Double-checking the docs".to_string(),
+            description: None,
+            in_progress: false,
+        }],
+        crate::domain::TaskOrigin::User,
+        Stamp::default(),
+    );
+    let edit = |id, status| TaskEdit {
+        id,
+        status: Some(status),
+        ..TaskEdit::default()
+    };
+    s.session.conversation.tasks.apply(
+        &[edit(1, TaskStatus::InProgress)],
+        Stamp {
+            now_epoch: 100,
+            run_tokens: 500,
+        },
+    );
+    s.session.conversation.tasks.apply(
+        &[
+            edit(1, TaskStatus::Completed),
+            edit(2, TaskStatus::InProgress),
+        ],
+        Stamp {
+            now_epoch: 230,
+            run_tokens: 8_900,
+        },
+    );
+    s.session.conversation.tasks.apply(
+        &[
+            edit(2, TaskStatus::Completed),
+            edit(3, TaskStatus::InProgress),
+        ],
+        Stamp {
+            now_epoch: 300,
+            run_tokens: 12_400,
+        },
+    );
+    s.turn = TurnState::ExecutingTools {
+        id: TurnId(1),
+        started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(3)),
+        calls: vec![PendingToolCall {
+            call_id: ToolCallId(1),
+            source: crate::models::tool_call::ToolCall {
+                id: Some("c1".to_string()),
+                function: crate::models::tool_call::FunctionCall {
+                    name: "execute_command".to_string(),
+                    arguments: serde_json::json!({"command": "cargo check"}),
+                },
+            },
+        }],
+        outcomes: vec![None],
+    };
+    s
+}
+
+#[test]
+fn task_checklist_expanded() {
+    assert_scene("task_checklist_expanded", task_run_state);
+}
+
+#[test]
+fn task_checklist_collapsed() {
+    assert_scene("task_checklist_collapsed", || {
+        let mut s = task_run_state();
+        s.ui.tasks_collapsed = true;
+        s
+    });
+}
+
+#[test]
+fn task_checklist_retires_when_done_and_idle() {
+    assert_scene("task_checklist_retired", || {
+        use crate::domain::tasks::{Stamp, TaskEdit, TaskStatus};
+        let mut s = task_run_state();
+        let ids: Vec<u32> = s
+            .session
+            .conversation
+            .tasks
+            .visible()
+            .map(|t| t.id)
+            .collect();
+        let edits: Vec<TaskEdit> = ids
+            .into_iter()
+            .map(|id| TaskEdit {
+                id,
+                status: Some(TaskStatus::Completed),
+                ..TaskEdit::default()
+            })
+            .collect();
+        s.session.conversation.tasks.apply(&edits, Stamp::default());
+        s.turn = TurnState::Idle;
+        s
+    });
+}
+
 #[test]
 fn busy_agents_panel() {
     assert_scene("busy_agents_panel", || {

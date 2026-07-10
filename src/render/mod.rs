@@ -187,6 +187,15 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         };
         let active_tool = active_tool_label(state);
         let (agent_rows, status_override, bg_available) = agent_panel_data(state);
+        // Claude Code parity: while a checklist task is in_progress its
+        // active_form IS the spinner headline ("Wiring the broker…"), with
+        // the executing tool folded in after a separator.
+        let task_headline = state
+            .session
+            .conversation
+            .tasks
+            .active()
+            .map(|t| t.active_form.clone());
         // Tokens generated so far this run: completed phases carry real
         // provider output counts via `run_tokens` (chars/4 only when a phase
         // reported no usage); the live phase's char-based count rides on top
@@ -214,6 +223,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             status_override.as_deref(),
             &agent_rows,
             bg_available,
+            task_headline.as_deref(),
             &state.ui.queued_messages,
             exit_armed(state),
             &rstate.theme,
@@ -233,6 +243,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             None,
             &agent_rows,
             false,
+            None,
             &state.ui.queued_messages,
             exit_armed(state),
             &rstate.theme,
@@ -250,6 +261,20 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     let status_line_height = (status_lines.len() as u16)
         .min(14)
         .min(frame.area().height.saturating_sub(status_reserve));
+
+    // Task checklist band, directly under the status line. Same starvation
+    // guard as the status zone: chat floor + input + bottom bar always win.
+    let tasks_store = &state.session.conversation.tasks;
+    let tasks_zone_height = if widgets::tasks_visible(tasks_store, &state.turn) {
+        widgets::tasks_height(tasks_store, state.ui.tasks_collapsed).min(
+            frame
+                .area()
+                .height
+                .saturating_sub(status_reserve + status_line_height),
+        )
+    } else {
+        0
+    };
 
     // Bottom region: one of three widgets based on UI mode.
     //   - ConversationList picker: 12-line pane.
@@ -328,6 +353,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         .constraints([
             Constraint::Min(10),
             Constraint::Length(status_line_height),
+            Constraint::Length(tasks_zone_height),
             Constraint::Length(input_height),
             Constraint::Length(bottom_height),
         ])
@@ -378,7 +404,22 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         frame.render_widget(ratatui::widgets::Paragraph::new(status_lines), status_area);
     }
 
-    // Input box (chunks[2] now that the attachment zone is gone).
+    // Task checklist band (chunks[2]), hanging under the spinner line.
+    if tasks_zone_height > 0 {
+        let tasks_area = chunks[2].inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        });
+        let lines = widgets::build_task_lines(
+            tasks_store,
+            state.ui.tasks_collapsed,
+            tasks_area.width,
+            &rstate.theme,
+        );
+        frame.render_widget(ratatui::widgets::Paragraph::new(lines), tasks_area);
+    }
+
+    // Input box (chunks[3]; the attachment zone is gone, the task band precedes).
     let input_widget = InputWidget {
         input: state.ui.input_buffer.as_str(),
         showing_command_hints: state.ui.input_buffer.starts_with('/'),
@@ -390,10 +431,10 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     let mut input_widget_state = InputState {
         cursor_position: state.ui.input_cursor.min(state.ui.input_buffer.len()),
     };
-    frame.render_stateful_widget(input_widget, chunks[2], &mut input_widget_state);
+    frame.render_stateful_widget(input_widget, chunks[3], &mut input_widget_state);
 
     // Cursor always tracks the input caret.
-    let input_area = chunks[2];
+    let input_area = chunks[3];
     let content_width = input_area.width.saturating_sub(2) as usize;
     let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
         &state.ui.input_buffer,
@@ -442,14 +483,14 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             selected_index: Some(item.selected_option),
             accent: rstate.theme.colors.warning.to_color(),
         };
-        frame.render_widget(widget, chunks[3]);
+        frame.render_widget(widget, chunks[4]);
     } else if let Some(qset) = state.pending_question.front() {
         use widgets::QuestionModalWidget;
         let widget = QuestionModalWidget {
             theme: &rstate.theme,
             set: qset,
         };
-        frame.render_widget(widget, chunks[3]);
+        frame.render_widget(widget, chunks[4]);
     } else if let Some(confirm) = &state.confirm {
         use widgets::ApprovalModalWidget;
         let widget = ApprovalModalWidget {
@@ -460,7 +501,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             selected_index: None,
             accent: rstate.theme.colors.warning.to_color(),
         };
-        frame.render_widget(widget, chunks[3]);
+        frame.render_widget(widget, chunks[4]);
     } else if let crate::domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
         use widgets::ConversationListWidget;
         let widget = ConversationListWidget {
@@ -468,7 +509,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             candidates,
             cursor: *cursor,
         };
-        frame.render_widget(widget, chunks[3]);
+        frame.render_widget(widget, chunks[4]);
     } else if let crate::domain::UiMode::RewindPicker { candidates, cursor } = &state.ui.mode {
         use widgets::RewindPickerWidget;
         let widget = RewindPickerWidget {
@@ -476,7 +517,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             candidates,
             cursor: *cursor,
         };
-        frame.render_widget(widget, chunks[3]);
+        frame.render_widget(widget, chunks[4]);
     } else if file_picker_open {
         use widgets::FilePickerWidget;
         let widget = FilePickerWidget {
@@ -485,7 +526,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             selected_index: state.ui.file_picker_cursor.unwrap_or(0),
             loading: state.ui.project_files_loading && state.ui.project_files.is_none(),
         };
-        frame.render_widget(widget, chunks[3]);
+        frame.render_widget(widget, chunks[4]);
     } else if palette_open {
         let typed = state
             .ui
@@ -500,7 +541,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             commands,
             selected_index: state.ui.palette_cursor.unwrap_or(0),
         };
-        frame.render_widget(palette_widget, chunks[3]);
+        frame.render_widget(palette_widget, chunks[4]);
     } else {
         let cwd = state.cwd.display().to_string();
         let status_widget = StatusWidget {
@@ -514,7 +555,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             requested_level,
             safety_mode: state.session.safety_mode,
         };
-        frame.render_widget(status_widget, chunks[3]);
+        frame.render_widget(status_widget, chunks[4]);
     }
 }
 

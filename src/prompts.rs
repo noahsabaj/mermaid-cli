@@ -28,6 +28,14 @@ Maintain memory proactively: the moment you notice a saved fact is wrong or obso
 
 Keep each fact atomic (one idea per memory) and `update`/`forget` whole facts; never merge or re-summarize the corpus — rewriting stored facts drifts them from the truth. Scope defaults to project-private (machine-local, not committed); pass `shared: true` for team facts committed to the repo, or `global: true` for facts that hold across every project.
 
+## Task Planning
+
+For multi-step work (3 or more distinct steps), plan with the task checklist: `task_create` the FULL initial plan in one call, in execution order, then keep it live with `task_update` as you work. The user sees the checklist in the terminal at all times, so never repeat its contents in prose — summarize what changed and move on. Skip the checklist entirely for trivial or single-step requests; a one-item plan is noise.
+
+Write meaningful, verifiable steps (short imperative `subject`, present-tense `active_form`). Keep exactly one task in_progress at all times: mark a task in_progress BEFORE starting its work and completed IMMEDIATELY after it is done and verified — never batch-complete at the end, and never jump a task from pending straight to completed. Only mark completed when the work truly succeeded (tests pass, errors resolved); if blocked, leave it in_progress and add a new task for the blocker.
+
+Do not let the plan go stale. When scope pivots — steps split, merge, reorder, or drop — update or delete tasks in the same breath and give a one-line `explanation`. After a context compaction, call `task_list` to re-anchor on ids and statuses. The user can edit the checklist too (`/todos`); when a notice reports their edit, acknowledge it and fold it into your plan.
+
 ## Web
 
 When a web tool is available, browse instead of guessing for anything time-sensitive or externally verifiable — current events, releases, versions, prices, standards, or library and API docs — any fact with a real chance of having changed since your training. Prefer primary sources. Don't browse for stable general knowledge or for anything already in the repo or your context.
@@ -186,6 +194,55 @@ mod tests {
         assert!(
             prompt.contains("next turn"),
             "MERMAID.md note must mention auto-reload semantics (next turn)"
+        );
+    }
+
+    // ── Task Planning section regression guards ─────────────────────
+
+    /// The Task Planning section must exist and teach the core mechanics:
+    /// full initial plan in one call, skip trivial work, one in_progress.
+    #[test]
+    fn prompt_has_task_planning_section() {
+        let prompt = get_system_prompt();
+        assert!(prompt.contains("## Task Planning"));
+        assert!(
+            prompt.contains("FULL initial plan in one call"),
+            "must teach batch creation"
+        );
+        assert!(
+            prompt.contains("Skip the checklist entirely for trivial or single-step requests"),
+            "must teach when NOT to plan"
+        );
+        assert!(
+            prompt.contains("exactly one task in_progress"),
+            "must teach the single-in_progress discipline"
+        );
+    }
+
+    /// The discipline rules that decay mid-run must be stated explicitly:
+    /// timely transitions, no batch-completes, no status jumps, no stale
+    /// plans, honest completion, compaction re-anchor, user edits.
+    #[test]
+    fn prompt_task_planning_teaches_discipline() {
+        let prompt = get_system_prompt();
+        assert!(prompt.contains("never batch-complete at the end"));
+        assert!(prompt.contains("never jump a task from pending straight to completed"));
+        assert!(prompt.contains("Do not let the plan go stale"));
+        assert!(
+            prompt.contains("if blocked, leave it in_progress and add a new task"),
+            "must teach honest completion"
+        );
+        assert!(
+            prompt.contains("call `task_list` to re-anchor"),
+            "must teach the compaction recovery step"
+        );
+        assert!(
+            prompt.contains("/todos"),
+            "must warn that the user can edit the checklist"
+        );
+        assert!(
+            prompt.contains("never repeat its contents in prose"),
+            "must suppress checklist echo (the harness renders it)"
         );
     }
 

@@ -659,6 +659,8 @@ mod tests {
                 | MsgKind::ToolFinished
                 | MsgKind::ApprovalRequested
                 | MsgKind::QuestionAsked
+                | MsgKind::TasksUpdated
+                | MsgKind::TaskNotice
                 | MsgKind::TurnCancelled
                 | MsgKind::Mcp
                 | MsgKind::HookContext
@@ -684,6 +686,28 @@ mod tests {
         }
 
         let samples: Vec<Msg> = vec![
+            Msg::TasksUpdated {
+                store: {
+                    let mut store = crate::domain::TaskStore::default();
+                    store.create(
+                        vec![crate::domain::TaskSpec {
+                            subject: "sample".to_string(),
+                            active_form: "sampling".to_string(),
+                            description: None,
+                            in_progress: true,
+                        }],
+                        crate::domain::TaskOrigin::Model,
+                        crate::domain::Stamp {
+                            now_epoch: 10,
+                            run_tokens: 20,
+                        },
+                    );
+                    store
+                },
+            },
+            Msg::TaskNotice {
+                text: "The user edited the task checklist: Added task #1 'x'.".to_string(),
+            },
             Msg::Key(Key {
                 code: KeyCode::Char('x'),
                 modifiers: KeyMods::ctrl(),

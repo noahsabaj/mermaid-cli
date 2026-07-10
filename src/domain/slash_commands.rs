@@ -66,6 +66,7 @@ pub const KEYBINDINGS: &[(&str, &str)] = &[
     ("Ctrl+V", "Paste (including images)"),
     ("Ctrl+O", "Compose the prompt in $VISUAL/$EDITOR"),
     ("Ctrl+B", "Background a running command"),
+    ("Ctrl+T", "Expand or collapse the task checklist"),
     ("Alt+T", "Cycle reasoning depth"),
     ("Shift+Tab", "Cycle the safety mode"),
     ("Ctrl+C", "Cancel, then exit"),
@@ -122,6 +123,13 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "List saved conversations",
         arg_hint: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
+        name: "todos",
+        aliases: &["todo"],
+        description: "Show or edit the task checklist",
+        arg_hint: Some("[add <subject>|rm <id>|done <id>|clear]"),
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {

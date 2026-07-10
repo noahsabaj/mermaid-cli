@@ -130,6 +130,11 @@ pub struct ConversationHistory {
     pub cli_version: Option<String>,
     #[serde(default)]
     pub git_sha: Option<String>,
+    /// The task checklist (task_create/task_update tools + /tasks command).
+    /// Snapshotted on every save so --resume/--continue restore an in-flight
+    /// plan; sessions saved before this field existed load an empty store.
+    #[serde(default)]
+    pub tasks: crate::domain::TaskStore,
 }
 
 /// Best-effort current git branch of `dir`, for labelling `--resume` rows.
@@ -230,6 +235,7 @@ impl ConversationHistory {
             parent_session: None,
             cli_version: None,
             git_sha: None,
+            tasks: crate::domain::TaskStore::default(),
         }
     }
 
@@ -738,6 +744,30 @@ mod tests {
         );
         assert!(conv.last_token_usage.is_none());
         assert!(conv.context_usage.is_none());
+        assert!(conv.tasks.tasks.is_empty());
+        assert_eq!(conv.tasks.next_id, 0);
+    }
+
+    #[test]
+    fn tasks_round_trip_through_conversation_json() {
+        let mut fresh = touched("/tmp/proj");
+        fresh.tasks.create(
+            vec![crate::domain::TaskSpec {
+                subject: "wire broker".into(),
+                active_form: "wiring broker".into(),
+                description: Some("through ExecContext".into()),
+                in_progress: true,
+            }],
+            crate::domain::TaskOrigin::Model,
+            crate::domain::Stamp {
+                now_epoch: 42,
+                run_tokens: 7,
+            },
+        );
+        let round: ConversationHistory =
+            serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        assert_eq!(round.tasks, fresh.tasks);
+        assert_eq!(round.tasks.tasks[0].started_at, Some(42));
     }
 
     #[test]

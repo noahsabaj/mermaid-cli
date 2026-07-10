@@ -503,6 +503,7 @@ mod tests {
             parent_session: None,
             cli_version: None,
             git_sha: None,
+            tasks: crate::domain::TaskStore::default(),
         }
     }
 

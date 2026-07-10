@@ -220,6 +220,7 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("load") => SlashCmd::Load(arg),
         Some("list") => SlashCmd::List,
         Some("usage") => SlashCmd::Usage,
+        Some("todos") => SlashCmd::Todos(arg),
         Some("context") => {
             use crate::domain::ContextCmd;
             let a = arg.as_deref().map(str::trim);
