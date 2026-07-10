@@ -12,18 +12,20 @@ use tokio::sync::Mutex;
 use crate::app::Config;
 use crate::models::config::BackendConfig;
 use crate::models::{ModelError, Result, lookup_provider};
-use crate::utils::{resolve_api_key, resolve_api_key_with_fallback};
+use crate::utils::{resolve_api_key, resolve_provider_key, resolve_provider_key_with_fallback};
 
 const GEMINI_API_KEY_ENV: &str = "GOOGLE_API_KEY";
 const GEMINI_LEGACY_API_KEY_ENV: &str = "GEMINI_API_KEY";
 
-/// Resolve an API key or return a clear `ModelError` when the env
-/// var isn't set. Takes `default_env` (the registry-default name)
-/// and allows no override — the factory passes the already-resolved
-/// env name.
-fn require_key(provider: &str, env_var: &str) -> Result<String> {
-    resolve_api_key(env_var, None).ok_or_else(|| {
-        ModelError::Authentication(format!("{} requires env var {}", provider, env_var))
+/// Resolve an API key (env first, then the OS keyring via
+/// `mermaid login <provider>`) or return a clear `ModelError`. A
+/// per-provider `override_env` is authoritative — no keyring fallback.
+fn require_key(provider: &str, default_env: &str, override_env: Option<&str>) -> Result<String> {
+    resolve_provider_key(provider, default_env, override_env).ok_or_else(|| {
+        let env = override_env.unwrap_or(default_env);
+        ModelError::Authentication(format!(
+            "{provider} requires env var {env} (or `mermaid login {provider}`)"
+        ))
     })
 }
 
@@ -32,10 +34,10 @@ fn require_key_with_fallback(
     env_var: &str,
     fallback_env_var: &str,
 ) -> Result<String> {
-    resolve_api_key_with_fallback(env_var, fallback_env_var, None).ok_or_else(|| {
+    resolve_provider_key_with_fallback(provider, env_var, fallback_env_var, None).ok_or_else(|| {
         ModelError::Authentication(format!(
-            "{} requires env var {} (or legacy {})",
-            provider, env_var, fallback_env_var
+            "{provider} requires env var {env_var} (or legacy {fallback_env_var}, or \
+                 `mermaid login {provider}`)"
         ))
     })
 }
@@ -46,17 +48,19 @@ fn require_key_with_fallback(
 /// is a hard error carrying the provider's `hint` so the message is actionable.
 fn resolve_optional_key(
     provider: &str,
-    env_var: &str,
+    default_env: &str,
+    override_env: Option<&str>,
     base_url: &str,
     hint: Option<&str>,
 ) -> Result<Option<String>> {
-    if let Some(key) = resolve_api_key(env_var, None) {
+    if let Some(key) = resolve_provider_key(provider, default_env, override_env) {
         return Ok(Some(key));
     }
     if base_url_is_local(base_url) {
         return Ok(None);
     }
-    let mut msg = format!("{provider} requires env var {env_var}");
+    let env = override_env.unwrap_or(default_env);
+    let mut msg = format!("{provider} requires env var {env} (or `mermaid login {provider}`)");
     if let Some(h) = hint {
         msg.push_str(" — ");
         msg.push_str(h);
@@ -194,10 +198,11 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
             user_cfg.and_then(|c| c.base_url.clone()),
             "https://api.anthropic.com/v1",
         )?;
-        let api_key_env = user_cfg
-            .and_then(|c| c.api_key_env.as_deref())
-            .unwrap_or("ANTHROPIC_API_KEY");
-        let api_key = require_key("anthropic", api_key_env)?;
+        let api_key = require_key(
+            "anthropic",
+            "ANTHROPIC_API_KEY",
+            user_cfg.and_then(|c| c.api_key_env.as_deref()),
+        )?;
         let p = AnthropicProvider::new(api_key, model_name.to_string(), base_url)?;
         return Ok(Box::new(p));
     }
@@ -211,7 +216,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
             "https://generativelanguage.googleapis.com/v1beta",
         )?;
         let api_key = match user_cfg.and_then(|c| c.api_key_env.as_deref()) {
-            Some(api_key_env) => require_key("gemini", api_key_env)?,
+            Some(api_key_env) => require_key("gemini", GEMINI_API_KEY_ENV, Some(api_key_env))?,
             None => {
                 require_key_with_fallback("gemini", GEMINI_API_KEY_ENV, GEMINI_LEGACY_API_KEY_ENV)?
             },
@@ -229,10 +234,11 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
             user_cfg.and_then(|cfg| cfg.base_url.clone()),
             super::model::meta::DEFAULT_BASE_URL,
         )?;
-        let api_key_env = user_cfg
-            .and_then(|cfg| cfg.api_key_env.as_deref())
-            .unwrap_or(super::model::meta::DEFAULT_API_KEY_ENV);
-        let api_key = require_key("meta", api_key_env)?;
+        let api_key = require_key(
+            "meta",
+            super::model::meta::DEFAULT_API_KEY_ENV,
+            user_cfg.and_then(|cfg| cfg.api_key_env.as_deref()),
+        )?;
         let mut extra_headers = std::collections::HashMap::new();
         if let Some(cfg) = user_cfg {
             extra_headers.extend(cfg.extra_headers.clone());
@@ -254,9 +260,8 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
     if provider_lc == "cloudflare" {
         let user_cfg = config.providers.get("cloudflare");
         let profile = lookup_provider("cloudflare").expect("cloudflare is in the registry");
-        let api_key_env = user_cfg
-            .and_then(|c| c.api_key_env.as_deref())
-            .unwrap_or(profile.api_key_env);
+        let override_env = user_cfg.and_then(|c| c.api_key_env.as_deref());
+        let api_key_env = override_env.unwrap_or(profile.api_key_env);
         let base_url = match user_cfg.and_then(|c| c.base_url.clone()) {
             // Override present (AI Gateway / proxy): validate + warn like any built-in
             // override. The account id isn't needed in this case.
@@ -270,7 +275,10 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
             // two fix-and-retry round-trips.
             None => match require_cloudflare_account_id() {
                 Ok(id) => cloudflare_base_url(&id),
-                Err(_) if resolve_api_key(api_key_env, None).is_none() => {
+                Err(_)
+                    if resolve_provider_key("cloudflare", profile.api_key_env, override_env)
+                        .is_none() =>
+                {
                     return Err(ModelError::Authentication(format!(
                         "cloudflare requires env vars {api_key_env} and CLOUDFLARE_ACCOUNT_ID — \
                          create a token at https://dash.cloudflare.com/profile/api-tokens; the \
@@ -281,7 +289,13 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
                 Err(e) => return Err(e),
             },
         };
-        let api_key = resolve_optional_key(&provider_lc, api_key_env, &base_url, profile.key_hint)?;
+        let api_key = resolve_optional_key(
+            &provider_lc,
+            profile.api_key_env,
+            override_env,
+            &base_url,
+            profile.key_hint,
+        )?;
         let extra_headers = merged_headers(profile, user_cfg);
         let p = OpenAICompatProvider::new(
             profile,
@@ -301,13 +315,16 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
             user_cfg.and_then(|c| c.base_url.clone()),
             profile.base_url,
         )?;
-        let api_key_env = user_cfg
-            .and_then(|c| c.api_key_env.as_deref())
-            .unwrap_or(profile.api_key_env);
         // Keyless when the key is unset and the endpoint is local (a registry
         // provider pointed at a loopback/LAN base_url); otherwise a clear,
         // hint-carrying auth error.
-        let api_key = resolve_optional_key(&provider_lc, api_key_env, &base_url, profile.key_hint)?;
+        let api_key = resolve_optional_key(
+            &provider_lc,
+            profile.api_key_env,
+            user_cfg.and_then(|c| c.api_key_env.as_deref()),
+            &base_url,
+            profile.key_hint,
+        )?;
         let extra_headers = merged_headers(profile, user_cfg);
         let p = OpenAICompatProvider::new(
             profile,
@@ -333,8 +350,15 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
         // api_key_env is optional: a local (loopback/LAN) endpoint may run
         // keyless. When a key IS used, harden the URL so it can't be sent in
         // cleartext; a keyless endpoint must be local (no secret to leak).
+        // For a CUSTOM provider its api_key_env is the default (not an
+        // override of a registry default), so the keyring may fill the gap;
+        // a stored key alone also works with no api_key_env at all.
         let api_key_env = user_cfg.api_key_env.as_deref();
-        let api_key = match api_key_env.and_then(|env| resolve_api_key(env, None)) {
+        let resolved = match api_key_env {
+            Some(env) => resolve_provider_key(&provider_lc, env, None),
+            None => crate::utils::default_store().get(&provider_lc),
+        };
+        let api_key = match resolved {
             Some(key) => {
                 validate_provider_base_url(&base_url)?;
                 Some(key)
@@ -342,7 +366,10 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
             None if base_url_is_local(&base_url) => None,
             None => {
                 let reason = match api_key_env {
-                    Some(env) => format!("requires env var {env} (or a loopback/LAN base_url)"),
+                    Some(env) => format!(
+                        "requires env var {env} (or `mermaid login {provider_lc}`, or a \
+                         loopback/LAN base_url)"
+                    ),
                     None => "requires api_key_env, or a loopback/LAN base_url".to_string(),
                 };
                 return Err(ModelError::Authentication(format!(
