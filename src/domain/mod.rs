@@ -23,6 +23,7 @@ pub mod run_event;
 pub mod runtime;
 pub mod slash_commands;
 pub mod state;
+pub mod tool_search;
 pub mod transition;
 
 pub use action::{ActionDetails, ActionDisplay, ActionResult};

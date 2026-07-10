@@ -248,7 +248,9 @@ The model uses these autonomously via native tool calling:
 | `scroll` | Scroll up or down |
 | `mouse_move` | Move mouse cursor without clicking |
 
-MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. `web_fetch` (native) and `web_search` (see [Web tool backends](#web-tool-backends)) are both registered by default with no configuration. Computer-use tools are advertised only in interactive TUI sessions when a usable GUI backend is detected.
+MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. Names and schemas are sanitized to provider-safe form at startup (charset `[A-Za-z0-9_-]`, 64-char cap, `$ref` inlining and other schema normalization); `enabled_tools`/`disabled_tools` filters keep matching the RAW tool names the server itself advertises. `web_fetch` (native) and `web_search` (see [Web tool backends](#web-tool-backends)) are both registered by default with no configuration. Computer-use tools are advertised only in interactive TUI sessions when a usable GUI backend is detected.
+
+By default MCP tools are **deferred**: instead of advertising every server's tools on every request, the model gets one `tool_search` tool that searches deferred tool names/descriptions and promotes matches to direct advertisement for the rest of the session — deferred schemas don't count against `/context` until promoted. Servers start concurrently at launch, each bounded by a 60-second timeout, and report ready/errored individually. Opt out globally with `mcp_defer_tools = false` at the top level of config, or per server with `defer = false` on its `[mcp_servers.<name>]` entry.
 
 ### Web tool backends
 
