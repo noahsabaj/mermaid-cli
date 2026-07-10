@@ -38,6 +38,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text answer and records an `output_schema:` error instead of returning
   nothing.
 
+- **Task checklist (todo tracking).** New `task_create` / `task_update` /
+  `task_list` tools let the model plan multi-step work as an id-addressed
+  checklist: batch creation and differential batch updates in single calls,
+  an optional `explanation` surfaced to the user on scope pivots, and
+  soft-corrective notes (never rejections) when discipline slips (two tasks
+  in_progress, pending-to-completed jumps). The checklist renders live under
+  the status line — the spinner headline becomes the active task's present
+  tense form, completed rows collapse to strikethrough with a per-task cost
+  suffix (elapsed time + tokens), long lists window with an overflow footer —
+  and Ctrl+T toggles a one-line `Next:` collapsed view. The list persists
+  with the session (resume restores it), clears on rewind/fork and `/clear`,
+  and subagents get isolated checklists for free. Beyond the tools: a
+  bounded evidence trail records what actually ran while each task was in
+  progress (visible in `task_list` and `/todos`); a staleness nudge tells
+  the model when an in_progress task has gone untouched for five model
+  calls; the gated `task_completed` plugin hook can veto a completion
+  (flipping the task back to in_progress with the reason); `/todos`
+  (`add`/`rm`/`done`/`clear`) lets the user edit the checklist directly,
+  with the model notified on its next request; and headless runs emit an
+  additive `tasks_updated` NDJSON event carrying the full snapshot with
+  cost attribution.
+
 - **Light theme, `/theme`, and a `[ui]` config table.** The TUI now ships a
   light palette alongside the default dark one. `/theme dark|light` switches
   live and persists as `ui.theme`; every previously hardcoded widget color

@@ -134,6 +134,11 @@ pub struct EffectRunner {
     /// interactive TUI runs (set via `with_interactive_questions`); headless +
     /// child runners leave it `None`, so the tool proceeds without asking.
     questions: Option<crate::providers::QuestionBroker>,
+    /// Checklist broker for the task tools. Built unconditionally — unlike
+    /// `questions`, task tracking works headless, and a subagent's child
+    /// runner minting its own broker (bound to the CHILD's msg channel) is
+    /// exactly what isolates its checklist from the parent's.
+    tasks: crate::providers::TaskBroker,
     /// Abort handle for the background config watcher (#45). It's a perpetual
     /// loop living in `detached`, so `shutdown` aborts it explicitly before
     /// draining — otherwise the drain would block on it until the timeout.
@@ -144,6 +149,7 @@ impl EffectRunner {
     /// Create an unused runner. Pair with `msg_rx` from `channel()`.
     pub fn new(msg_tx: MsgSender, workdir: PathBuf) -> Self {
         Self {
+            tasks: crate::providers::TaskBroker::new(msg_tx.clone()),
             msg_tx,
             scopes: HashMap::new(),
             cancelled_turns: VecDeque::new(),
@@ -471,13 +477,16 @@ impl EffectRunner {
                         "tool_count": request.tools.len(),
                     }),
                 ));
+                // Task cost attribution: model dispatch reports each request's
+                // completion tokens into the broker's cumulative counter.
+                let task_usage = self.tasks.clone();
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 scope.spawn(async move {
                     use futures::FutureExt;
                     let fallback_tx = tx.clone();
                     if std::panic::AssertUnwindSafe(dispatch_call_model(
-                        tx, providers, turn, request, token,
+                        tx, providers, turn, request, token, task_usage,
                     ))
                     .catch_unwind()
                     .await
@@ -589,6 +598,7 @@ impl EffectRunner {
                 let task_id = self.task_id.clone();
                 let approval = self.approval.clone();
                 let questions = self.questions.clone();
+                let task_broker = self.tasks.clone();
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 let background = scope.background_token();
@@ -614,6 +624,7 @@ impl EffectRunner {
                         classifier,
                         approval,
                         questions,
+                        task_broker,
                     ))
                     .catch_unwind()
                     .await
@@ -657,6 +668,91 @@ impl EffectRunner {
                 if let Some(broker) = &self.questions {
                     broker.resolve(call_id, resolution);
                 }
+            },
+            Cmd::SyncTaskStore(store) => {
+                // Reducer-initiated truth overwrite (rewind/fork, /clear,
+                // startup resume). Synchronous; the broker does not publish
+                // back — the reducer already holds this store.
+                self.tasks.seed(store);
+            },
+            Cmd::UserTaskEdit(edit) => {
+                // Route the user's /tasks edit through the broker (single
+                // writer) so it serializes with any in-flight tool call. The
+                // broker publishes the resulting snapshot; the outcome line
+                // lands in the transcript as transient status.
+                let broker = self.tasks.clone();
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let (line, _snapshot) = broker.user_edit(edit).await;
+                    // The user sees the ack in the transcript; the model
+                    // learns about it on its next request via the notice
+                    // buffer (a checklist the model believes in but the user
+                    // has edited is the worst of both).
+                    let _ = tx
+                        .send(Msg::TaskNotice {
+                            text: format!(
+                                "The user edited the task checklist: {line}. Acknowledge and \
+                                 incorporate this into your plan."
+                            ),
+                        })
+                        .await;
+                    let _ = tx.send(Msg::TransientStatus { text: line }).await;
+                });
+            },
+            Cmd::NotifyTaskCompleted {
+                task,
+                completed,
+                total,
+            } => {
+                // Gated `task_completed` plugin hook: a denying hook VETOES
+                // the completion — the task flips back to in_progress via the
+                // broker (single writer; the publish refreshes the band) and
+                // the reason reaches both the user (transcript) and the model
+                // (notice buffer). Fail-open like every plugin hook: no
+                // enabled hooks / timeout => allow, zero latency added
+                // elsewhere because this runs detached.
+                let payload = serde_json::json!({
+                    "task_id": task.id,
+                    "subject": task.subject,
+                    "description": task.description,
+                    "evidence": task.evidence,
+                    "completed": completed,
+                    "total": total,
+                });
+                let broker = self.tasks.clone();
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let gate = run_plugin_hooks_gated("task_completed", payload).await;
+                    let Some((plugin, reason)) = gate.deny else {
+                        return;
+                    };
+                    let reason = crate::utils::redact_secrets(&reason);
+                    let _ = broker
+                        .update(vec![crate::domain::TaskEdit {
+                            id: task.id,
+                            status: Some(crate::domain::TaskStatus::InProgress),
+                            ..crate::domain::TaskEdit::default()
+                        }])
+                        .await;
+                    let _ = tx
+                        .send(Msg::TaskNotice {
+                            text: format!(
+                                "Completion of task #{} '{}' was vetoed by the {plugin} hook: \
+                                 {reason}. The task is back in_progress; address the reason \
+                                 before completing it again.",
+                                task.id, task.subject
+                            ),
+                        })
+                        .await;
+                    let _ = tx
+                        .send(Msg::TransientStatus {
+                            text: format!(
+                                "task #{} completion vetoed by {plugin}: {reason}",
+                                task.id
+                            ),
+                        })
+                        .await;
+                });
             },
             Cmd::CancelScope(turn) => {
                 self.drop_scope(turn);
@@ -1348,12 +1444,25 @@ impl EffectRunner {
 /// cached) and streams its events onto the Msg channel. Without a
 /// bound `ProviderFactory` (unit tests), emits a single
 /// `UpstreamError` so the reducer ends the turn cleanly.
+/// Report a completed request's completion tokens into the task broker's
+/// cumulative counter, so task cost deltas (`tokens_spent`) can be computed
+/// between in_progress and completed stamps.
+fn note_stream_usage(
+    tasks: &crate::providers::TaskBroker,
+    usage: &Option<crate::models::TokenUsage>,
+) {
+    if let Some(usage) = usage {
+        tasks.add_tokens(usage.completion_tokens as u64);
+    }
+}
+
 async fn dispatch_call_model(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
     turn: TurnId,
     mut request: crate::domain::ChatRequest,
     token: tokio_util::sync::CancellationToken,
+    tasks: crate::providers::TaskBroker,
 ) {
     use crate::models::UserFacingError;
 
@@ -1530,6 +1639,7 @@ async fn dispatch_call_model(
     // run concurrently with `provider.chat` for streaming backpressure.)
     let relay_tx = msg_tx.clone();
     let relay_token = token.clone();
+    let relay_tasks = tasks.clone();
     let relay = spawn_guarded(async move {
         loop {
             let event = tokio::select! {
@@ -1548,6 +1658,7 @@ async fn dispatch_call_model(
                             stop_reason,
                         } = buffered
                         {
+                            note_stream_usage(&relay_tasks, &usage);
                             let _ = relay_tx
                                 .send(Msg::StreamDone {
                                     turn,
@@ -1576,11 +1687,14 @@ async fn dispatch_call_model(
                     usage,
                     provider_continuation,
                     stop_reason,
-                } => Msg::StreamDone {
-                    turn,
-                    usage,
-                    provider_continuation,
-                    stop_reason,
+                } => {
+                    note_stream_usage(&relay_tasks, &usage);
+                    Msg::StreamDone {
+                        turn,
+                        usage,
+                        provider_continuation,
+                        stop_reason,
+                    }
                 },
             };
             if relay_tx.send(msg).await.is_err() {
@@ -1634,8 +1748,15 @@ async fn dispatch_call_model(
                             retry_request.messages = result.replacement_messages.clone();
                             let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
                             join_logged(relay.take(), "stream_relay").await;
-                            dispatch_provider_stream(msg_tx, provider, turn, retry_request, token)
-                                .await;
+                            dispatch_provider_stream(
+                                msg_tx,
+                                provider,
+                                turn,
+                                retry_request,
+                                token,
+                                tasks,
+                            )
+                            .await;
                             return;
                         },
                         Err(compact_err) => {
@@ -1711,6 +1832,7 @@ async fn dispatch_provider_stream(
     turn: TurnId,
     request: crate::domain::ChatRequest,
     token: tokio_util::sync::CancellationToken,
+    tasks: crate::providers::TaskBroker,
 ) {
     let _turn_timer = TurnTimer {
         turn,
@@ -1721,6 +1843,7 @@ async fn dispatch_provider_stream(
     let ctx = StreamContext::new(token.clone(), stream_tx, turn);
     let relay_tx = msg_tx.clone();
     let relay_token = token.clone();
+    let relay_tasks = tasks.clone();
     let relay = spawn_guarded(async move {
         loop {
             let event = tokio::select! {
@@ -1739,6 +1862,7 @@ async fn dispatch_provider_stream(
                             stop_reason,
                         } = buffered
                         {
+                            note_stream_usage(&relay_tasks, &usage);
                             let _ = relay_tx
                                 .send(Msg::StreamDone {
                                     turn,
@@ -1766,11 +1890,14 @@ async fn dispatch_provider_stream(
                     usage,
                     provider_continuation,
                     stop_reason,
-                } => Msg::StreamDone {
-                    turn,
-                    usage,
-                    provider_continuation,
-                    stop_reason,
+                } => {
+                    note_stream_usage(&relay_tasks, &usage);
+                    Msg::StreamDone {
+                        turn,
+                        usage,
+                        provider_continuation,
+                        stop_reason,
+                    }
                 },
             };
             if relay_tx.send(msg).await.is_err() {
@@ -2399,6 +2526,7 @@ async fn dispatch_execute_tool(
     classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
     approval: Option<crate::providers::ApprovalBroker>,
     questions: Option<crate::providers::QuestionBroker>,
+    tasks: crate::providers::TaskBroker,
 ) {
     let _ = msg_tx.send(Msg::ToolStarted { turn, call_id }).await;
 
@@ -2513,6 +2641,7 @@ async fn dispatch_execute_tool(
         classifier,
         approval,
         questions,
+        Some(tasks.clone()),
     );
     ctx.background = background;
     // Detached work (backgrounded subagents) reports back through the main
@@ -2565,6 +2694,23 @@ async fn dispatch_execute_tool(
     // rewritten call exactly like an original one.
     let args = gate.updated_input.unwrap_or(args);
     let outcome = tool.execute(args, ctx).await;
+    // Evidence trail: attribute this call to the in-progress checklist task
+    // (no-op when none). The task tools themselves are skipped — a checklist
+    // edit is not evidence of work on the task. `display_info_for` gives the
+    // same human target the transcript row shows (path, command head, query).
+    if !source.function.name.starts_with("task_") {
+        let (action, target) = crate::domain::display_info_for(&crate::domain::PendingToolCall {
+            call_id,
+            source: source.clone(),
+        });
+        tasks
+            .record_evidence(crate::domain::EvidenceEntry {
+                tool: action,
+                target,
+                status: tool_status_label(outcome.status).to_string(),
+            })
+            .await;
+    }
     let after_payload = serde_json::json!({
         "turn_id": turn.0,
         "call_id": call_id.0,

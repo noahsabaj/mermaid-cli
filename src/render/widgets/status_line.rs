@@ -49,6 +49,7 @@ pub fn build_status_lines(
     status_override: Option<&str>,
     agents: &[AgentPanelRow],
     bg_available: bool,
+    task_headline: Option<&str>,
     queued_messages: &VecDeque<QueuedMessage>,
     exit_armed: bool,
     theme: &Theme,
@@ -61,16 +62,24 @@ pub fn build_status_lines(
     }
     let width = width as usize;
 
-    // While running tools, append the in-flight tool so the user sees what's
-    // executing (a long `npm run dev` etc. no longer looks opaque). An
-    // override replaces the whole text ("Running 3 agents") when the agent
-    // panel carries the detail.
-    let status_text = match (status_override, status, active_tool) {
-        (Some(text), _, _) => text.to_string(),
-        (None, GenerationStatus::RunningTools, Some(tool)) => {
+    // The headline, by precedence:
+    //   1. An in_progress checklist task's `active_form` (Claude Code parity —
+    //      the spinner row reads as the checklist header), with the executing
+    //      tool folded in after a separator.
+    //   2. An override replacing the whole text ("Running 3 agents") when the
+    //      agent panel carries the detail.
+    //   3. The generation phase, with the in-flight tool appended while tools
+    //      run (a long `npm run dev` etc. no longer looks opaque).
+    let status_text = match (task_headline, status_override, status, active_tool) {
+        (Some(head), _, GenerationStatus::RunningTools, Some(tool)) => {
+            format!("{head} · {tool}")
+        },
+        (Some(head), _, _, _) => head.to_string(),
+        (None, Some(text), _, _) => text.to_string(),
+        (None, None, GenerationStatus::RunningTools, Some(tool)) => {
             format!("{}: {}", status.display_text(), tool)
         },
-        _ => status.display_text().to_string(),
+        (None, None, _, _) => status.display_text().to_string(),
     };
 
     let info_style = Style::new().fg(theme.colors.info.to_color());
@@ -230,6 +239,7 @@ mod tests {
             None,
             &[],
             true,
+            None,
             &queued,
             false,
             &theme,
@@ -261,6 +271,7 @@ mod tests {
             None,
             &[],
             true,
+            None,
             &queued,
             false,
             &theme,
@@ -293,6 +304,7 @@ mod tests {
             None,
             &[],
             true,
+            None,
             &queued,
             false,
             &theme,
@@ -320,6 +332,7 @@ mod tests {
             None,
             &[],
             true,
+            None,
             &queued,
             false,
             &theme,
@@ -344,6 +357,7 @@ mod tests {
             None,
             &[],
             true,
+            None,
             &queued,
             false,
             &theme,
@@ -360,6 +374,7 @@ mod tests {
                 None,
                 &[],
                 true,
+                None,
                 &queued,
                 false,
                 &theme,
@@ -383,6 +398,7 @@ mod tests {
             None,
             &[],
             true,
+            None,
             &queued,
             true,
             &theme,
@@ -411,6 +427,7 @@ mod tests {
             None,
             &[],
             true,
+            None,
             &queued,
             false,
             &theme,

@@ -23,6 +23,7 @@ pub mod run_event;
 pub mod runtime;
 pub mod slash_commands;
 pub mod state;
+pub mod tasks;
 pub mod tool_search;
 pub mod transition;
 
@@ -57,6 +58,10 @@ pub use state::{
     PromptTokenBreakdown, QueuedMessage, RewindCandidate, Session, State, StatusKind,
     TokenUsageTotals, ToolOutcome, TurnState, UiMode, UiState, estimate_context_usage_for_request,
     estimate_tool_schema_tokens,
+};
+pub use tasks::{
+    ApplyReport, EvidenceEntry, Stamp, TaskEdit, TaskItem, TaskOrigin, TaskSpec, TaskStatus,
+    TaskStore, UserTaskEdit, advisory_notes,
 };
 pub use transition::{
     action_display_for, commit_assistant_message, display_info_for, fill_outcome,

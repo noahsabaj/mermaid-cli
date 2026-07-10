@@ -138,6 +138,14 @@ pub async fn run_non_interactive_with(
         ));
     }
 
+    // A resumed session may carry an in-flight checklist; hand it to the
+    // TaskBroker so headless task tool calls continue the restored list.
+    if !state.session.conversation.tasks.tasks.is_empty() {
+        runner.dispatch(crate::domain::Cmd::SyncTaskStore(
+            state.session.conversation.tasks.clone(),
+        ));
+    }
+
     // First line of the NDJSON stream: protocol + run identity.
     if stream_ndjson {
         emit_run_event(&RunEvent::SessionStarted {

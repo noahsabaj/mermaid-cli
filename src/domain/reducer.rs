@@ -484,6 +484,15 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     turn, call_id, questions,
                 ));
         },
+        Msg::TasksUpdated { store } => {
+            // Deliberately NOT turn-gated: the broker (single writer) has
+            // already committed this snapshot, and `/todos` edits arrive
+            // outside any turn. Gating would only let the render copy drift.
+            handle_tasks_updated(&mut state, &mut cmds, store);
+        },
+        Msg::TaskNotice { text } => {
+            push_task_notice(&mut state, text);
+        },
 
         // ── MCP ─────────────────────────────────────────────────────
         // F5: upsert semantics. State::new seeds entries for configured
@@ -1271,6 +1280,14 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Ctrl+T: toggle the task checklist between its expanded rows and the
+    // one-line collapsed form. Meta-level like Ctrl+L — works everywhere,
+    // no-op in effect when no checklist is showing.
+    if mods.ctrl && code == KeyCode::Char('t') {
+        state.ui.tasks_collapsed = !state.ui.tasks_collapsed;
+        return;
+    }
+
     // Ctrl+O: compose the input draft in $VISUAL/$EDITOR. Allowed while a
     // turn is busy (it only edits the draft), but only from the plain input
     // surface — never over a picker or a pending approval/question modal,
@@ -1842,6 +1859,129 @@ fn handle_rewind_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCod
 ///
 /// Idle-only by construction (the picker opens from an idle double-Esc), so
 /// there is no in-flight TurnId or scope to reconcile when the id swaps.
+/// Replace the render/persist copy of the checklist with the broker's
+/// snapshot, firing `Cmd::NotifyTaskCompleted` for each task that flipped to
+/// completed relative to the previous copy (a re-sent identical snapshot
+/// fires nothing — the diff is the dedupe).
+fn handle_tasks_updated(state: &mut State, cmds: &mut Vec<Cmd>, store: crate::domain::TaskStore) {
+    let (completed, total) = store.counts();
+    let fresh: Vec<crate::domain::TaskItem> = store
+        .newly_completed(&state.session.conversation.tasks)
+        .into_iter()
+        .cloned()
+        .collect();
+    for task in fresh {
+        cmds.push(Cmd::NotifyTaskCompleted {
+            task,
+            completed: completed as u32,
+            total: total as u32,
+        });
+    }
+    state.session.conversation.tasks = store;
+    state.runtime.calls_since_task_update = 0;
+}
+
+/// `/todos` — the user's side of the checklist. Bare `/todos` prints the
+/// list; edits route through `Cmd::UserTaskEdit` to the TaskBroker (single
+/// writer), whose publish updates the band and whose notice tells the model.
+fn handle_todos_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>) {
+    use crate::domain::UserTaskEdit;
+    let arg = arg.unwrap_or("").trim();
+    if arg.is_empty() {
+        state
+            .session
+            .append(ChatMessage::system(todos_text(state)), state.now);
+        return;
+    }
+    let (verb, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+    let rest = rest.trim();
+    let parse_id =
+        |rest: &str| -> Option<u32> { rest.strip_prefix('#').unwrap_or(rest).parse().ok() };
+    let edit = match verb {
+        "add" if !rest.is_empty() => Some(UserTaskEdit::Add {
+            subject: rest.to_string(),
+        }),
+        "rm" | "remove" => parse_id(rest).map(|id| UserTaskEdit::Remove { id }),
+        "done" => parse_id(rest).map(|id| UserTaskEdit::Done { id }),
+        "clear" => Some(UserTaskEdit::Clear),
+        _ => None,
+    };
+    match edit {
+        Some(edit) => cmds.push(Cmd::UserTaskEdit(edit)),
+        None => state.session.append(
+            ChatMessage::system(
+                "usage: /todos [add <subject> | rm <id> | done <id> | clear]".to_string(),
+            ),
+            state.now,
+        ),
+    }
+}
+
+/// The `/todos` listing: the full checklist with descriptions, cost stamps,
+/// and recent evidence — the detail view the compact band doesn't show.
+fn todos_text(state: &State) -> String {
+    let store = &state.session.conversation.tasks;
+    if store.is_empty() {
+        return "No tasks. The model creates them for multi-step work, or add your own: \
+                /todos add <subject>"
+            .to_string();
+    }
+    let mut out = String::from("Task checklist\n");
+    for task in store.visible() {
+        out.push_str(&format!(
+            "  #{} [{}] {}{}\n",
+            task.id,
+            task.status.as_str(),
+            task.subject,
+            if task.origin == crate::domain::TaskOrigin::User {
+                " (you)"
+            } else {
+                ""
+            }
+        ));
+        if let Some(desc) = &task.description {
+            out.push_str(&format!("      {desc}\n"));
+        }
+        let mut cost = Vec::new();
+        if let Some(secs) = task.elapsed_secs() {
+            cost.push(format!("{secs}s"));
+        }
+        if let Some(tok) = task.tokens_spent {
+            cost.push(format!("{tok} tokens"));
+        }
+        if !cost.is_empty() {
+            out.push_str(&format!("      cost: {}\n", cost.join(" · ")));
+        }
+        for entry in task.evidence.iter().rev().take(3).rev() {
+            out.push_str(&format!(
+                "      evidence: {} {} ({})\n",
+                entry.tool, entry.target, entry.status
+            ));
+        }
+    }
+    out.push_str(&format!("  {}", store.progress_string()));
+    out
+}
+
+/// Cap on buffered checklist notices — same spirit as the hook-context cap;
+/// notices are one-liners, so a small count bound suffices.
+const MAX_TASK_NOTICES: usize = 8;
+
+/// Buffer a checklist notice for the model's next request. NOT turn-gated:
+/// `/todos` edits and vetoed completions arrive between turns and must
+/// survive until the next real dispatch.
+fn push_task_notice(state: &mut State, text: String) {
+    if state.pending_task_notices.len() >= MAX_TASK_NOTICES {
+        tracing::warn!("dropping task notice over the {MAX_TASK_NOTICES}-entry cap");
+        return;
+    }
+    state.pending_task_notices.push(text);
+}
+
+/// How many model-call cycles an in_progress task may sit untouched before
+/// the reducer injects a staleness nudge (then re-arms for another window).
+const TASK_STALENESS_CALLS: u32 = 5;
+
 fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: usize) {
     // 1. Persist the original FIRST — different id, different file, so this
     //    can never clobber the fork's save below.
@@ -1898,9 +2038,13 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
 
     // 3. Swap. Cumulative token meters continue (same spend, same session of
     //    work); context/last-usage described the dropped suffix — reset.
+    // The fork starts with an empty checklist (a rewound plan describes
+    // dropped work); the broker must forget it too or the next task tool
+    // call would republish the stale list.
     state.session.conversation = fork;
     state.session.context_usage = None;
     state.session.last_token_usage = None;
+    cmds.push(Cmd::SyncTaskStore(crate::domain::TaskStore::default()));
 
     // 4. `state.ids.image` is NOT re-based: the allocator stays monotonic, so
     //    image numbers remain unique across the fork (seed_conversation's
@@ -2490,6 +2634,9 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 .session
                 .append(ChatMessage::system(usage_text(state)), state.now);
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+        },
+        SlashCmd::Todos(arg) => {
+            handle_todos_command(state, cmds, arg.as_deref());
         },
         SlashCmd::Context(cmd) => {
             use crate::domain::ContextCmd;
@@ -3701,6 +3848,9 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.cumulative_token_usage = TokenUsageTotals::default();
             state.session.context_usage = None;
             state.turn = TurnState::Idle;
+            // The fresh conversation starts with an empty checklist; the
+            // broker must forget the old one too (single-writer sync).
+            cmds.push(Cmd::SyncTaskStore(crate::domain::TaskStore::default()));
             emit_title_if_changed(state, cmds);
         },
     }
@@ -4800,8 +4950,27 @@ fn handle_hook_context(state: &mut State, turn: TurnId, texts: Vec<String>) {
 /// by the next real dispatch. Display-only builders (`/context` estimates) and
 /// the compaction request call `build_chat_request` directly and do not clear.
 fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
+    // Structural plan-rot guard: count model-call cycles while a task sits
+    // in_progress with no checklist update (`handle_tasks_updated` resets the
+    // counter). At the threshold, inject a targeted nudge into THIS request
+    // and re-arm — prompt discipline alone demonstrably decays mid-run.
+    match state.session.conversation.tasks.active() {
+        Some(active) => {
+            state.runtime.calls_since_task_update += 1;
+            if state.runtime.calls_since_task_update >= TASK_STALENESS_CALLS {
+                state.runtime.calls_since_task_update = 0;
+                let notice = format!(
+                    "Task #{} '{}' has been in_progress for {} model calls without a                      checklist update. Update, split, or complete it (task_update) so                      the checklist reflects reality.",
+                    active.id, active.subject, TASK_STALENESS_CALLS
+                );
+                push_task_notice(state, notice);
+            }
+        },
+        None => state.runtime.calls_since_task_update = 0,
+    }
     let request = build_chat_request(state);
     state.pending_hook_context.clear();
+    state.pending_task_notices.clear();
     cmds.push(Cmd::CallModel { turn, request });
 }
 
@@ -4825,6 +4994,12 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         instruction_parts.push(format!(
             "# Hook Context\n\n{}",
             state.pending_hook_context.join("\n\n")
+        ));
+    }
+    if !state.pending_task_notices.is_empty() {
+        instruction_parts.push(format!(
+            "# Task Checklist Notices\n\n{}",
+            state.pending_task_notices.join("\n")
         ));
     }
     let instructions = if instruction_parts.is_empty() {
@@ -10322,6 +10497,255 @@ mod tests {
         assert_eq!(state.ui.full_redraw_seq, before.wrapping_add(1));
         assert!(!state.should_exit, "Ctrl+L must not exit");
         assert!(cmds.is_empty(), "Ctrl+L is reducer-only: {cmds:?}");
+    }
+
+    #[test]
+    fn ctrl_t_toggles_the_task_checklist() {
+        let ctrl_t = || {
+            Msg::Key(Key {
+                code: KeyCode::Char('t'),
+                modifiers: KeyMods {
+                    ctrl: true,
+                    ..KeyMods::NONE
+                },
+            })
+        };
+        let state = fresh_state();
+        assert!(!state.ui.tasks_collapsed, "expanded by default");
+        let (state, cmds) = update(state, ctrl_t());
+        assert!(state.ui.tasks_collapsed);
+        assert!(cmds.is_empty(), "Ctrl+T is reducer-only: {cmds:?}");
+        let (state, _) = update(state, ctrl_t());
+        assert!(!state.ui.tasks_collapsed, "second press expands again");
+    }
+
+    fn sample_task_store(statuses: &[crate::domain::TaskStatus]) -> crate::domain::TaskStore {
+        use crate::domain::tasks::{Stamp, TaskEdit, TaskSpec};
+        let mut store = crate::domain::TaskStore::default();
+        store.create(
+            statuses
+                .iter()
+                .enumerate()
+                .map(|(i, _)| TaskSpec {
+                    subject: format!("task {i}"),
+                    active_form: format!("doing {i}"),
+                    description: None,
+                    in_progress: false,
+                })
+                .collect(),
+            crate::domain::TaskOrigin::Model,
+            Stamp::default(),
+        );
+        let edits: Vec<TaskEdit> = statuses
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| **s != crate::domain::TaskStatus::Pending)
+            .map(|(i, s)| TaskEdit {
+                id: (i + 1) as u32,
+                status: Some(*s),
+                ..TaskEdit::default()
+            })
+            .collect();
+        store.apply(&edits, Stamp::default());
+        store
+    }
+
+    #[test]
+    fn tasks_updated_replaces_snapshot_and_diffs_completions() {
+        use crate::domain::TaskStatus::{Completed, InProgress, Pending};
+        let state = fresh_state();
+        // First snapshot: nothing completed — no notifications.
+        let (state, cmds) = update(
+            state,
+            Msg::TasksUpdated {
+                store: sample_task_store(&[InProgress, Pending]),
+            },
+        );
+        assert!(cmds.is_empty(), "{cmds:?}");
+        assert_eq!(state.session.conversation.tasks.visible().count(), 2);
+
+        // Task 1 completes: exactly one notification, with counts.
+        let (state, cmds) = update(
+            state,
+            Msg::TasksUpdated {
+                store: sample_task_store(&[Completed, InProgress]),
+            },
+        );
+        let notes: Vec<_> = cmds
+            .iter()
+            .filter(|c| matches!(c, Cmd::NotifyTaskCompleted { .. }))
+            .collect();
+        assert_eq!(notes.len(), 1);
+        if let Cmd::NotifyTaskCompleted {
+            task,
+            completed,
+            total,
+        } = notes[0]
+        {
+            assert_eq!(task.id, 1);
+            assert_eq!((*completed, *total), (1, 2));
+        }
+
+        // The same snapshot re-sent: the diff is the dedupe — no re-fire.
+        let (_state, cmds) = update(
+            state,
+            Msg::TasksUpdated {
+                store: sample_task_store(&[Completed, InProgress]),
+            },
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::NotifyTaskCompleted { .. })),
+            "identical snapshot must not re-notify: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn fork_clears_tasks_and_syncs_the_broker() {
+        use crate::domain::TaskStatus::InProgress;
+        let state = fresh_state();
+        let (mut state, _) = update(
+            state,
+            Msg::TasksUpdated {
+                store: sample_task_store(&[InProgress]),
+            },
+        );
+        // Two committed user messages so index 1 is a valid fork cut.
+        state
+            .session
+            .append(crate::models::ChatMessage::user("one"), state.now);
+        state
+            .session
+            .append(crate::models::ChatMessage::user("two"), state.now);
+        let mut cmds = Vec::new();
+        super::fork_conversation_at(&mut state, &mut cmds, 1);
+        assert!(state.session.conversation.tasks.is_empty());
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Cmd::SyncTaskStore(store) if store.tasks.is_empty()
+            )),
+            "fork must clear the broker too: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn todos_command_routes_edits_and_prints_list() {
+        // Bare /todos on an empty list: helpful system line, no Cmd.
+        let state = fresh_state();
+        let (state, cmds) = update(state, Msg::Slash(SlashCmd::Todos(None)));
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::UserTaskEdit(_))));
+        assert!(
+            state
+                .session
+                .messages()
+                .last()
+                .is_some_and(|m| m.content.contains("No tasks")),
+        );
+
+        // add routes through the broker command, never mutating state directly.
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Todos(Some("add review the docs".to_string()))),
+        );
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            Cmd::UserTaskEdit(crate::domain::UserTaskEdit::Add { subject }) if subject == "review the docs"
+        )));
+        assert!(state.session.conversation.tasks.is_empty());
+
+        // done accepts a #-prefixed id; garbage prints usage.
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Todos(Some("done #3".to_string()))),
+        );
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            Cmd::UserTaskEdit(crate::domain::UserTaskEdit::Done { id: 3 })
+        )));
+        let (state, _) = update(
+            state,
+            Msg::Slash(SlashCmd::Todos(Some("frobnicate".to_string()))),
+        );
+        assert!(
+            state
+                .session
+                .messages()
+                .last()
+                .is_some_and(|m| m.content.contains("usage: /todos")),
+        );
+    }
+
+    #[test]
+    fn task_notices_ride_the_next_request_then_clear() {
+        let state = fresh_state();
+        let (mut state, _) = update(
+            state,
+            Msg::TaskNotice {
+                text: "The user edited the task checklist: Added task #1 'x'.".to_string(),
+            },
+        );
+        let mut cmds = Vec::new();
+        super::push_call_model(&mut state, &mut cmds, TurnId(1));
+        let Some(Cmd::CallModel { request, .. }) = cmds.first() else {
+            panic!("expected CallModel: {cmds:?}");
+        };
+        let instructions = request.instructions.clone().unwrap_or_default();
+        assert!(instructions.contains("# Task Checklist Notices"));
+        assert!(instructions.contains("Added task #1 'x'"));
+        assert!(
+            state.pending_task_notices.is_empty(),
+            "notices are consumed by the dispatch"
+        );
+    }
+
+    #[test]
+    fn stale_in_progress_task_triggers_a_nudge_every_n_calls() {
+        use crate::domain::TaskStatus::InProgress;
+        let state = fresh_state();
+        let (mut state, _) = update(
+            state,
+            Msg::TasksUpdated {
+                store: sample_task_store(&[InProgress]),
+            },
+        );
+        // Calls 1..4: no nudge. Call 5: nudge rides the request and re-arms.
+        for i in 1..=4 {
+            let mut cmds = Vec::new();
+            super::push_call_model(&mut state, &mut cmds, TurnId(i));
+            let Some(Cmd::CallModel { request, .. }) = cmds.first() else {
+                panic!("expected CallModel");
+            };
+            assert!(
+                !request
+                    .instructions
+                    .clone()
+                    .unwrap_or_default()
+                    .contains("in_progress for"),
+                "no nudge before the threshold (call {i})"
+            );
+        }
+        let mut cmds = Vec::new();
+        super::push_call_model(&mut state, &mut cmds, TurnId(5));
+        let Some(Cmd::CallModel { request, .. }) = cmds.first() else {
+            panic!("expected CallModel");
+        };
+        let instructions = request.instructions.clone().unwrap_or_default();
+        assert!(
+            instructions.contains("Task #1 'task 0' has been in_progress"),
+            "nudge fires at the threshold: {instructions}"
+        );
+        assert_eq!(state.runtime.calls_since_task_update, 0, "re-armed");
+
+        // A checklist update resets the counter.
+        let (state, _) = update(
+            state,
+            Msg::TasksUpdated {
+                store: sample_task_store(&[InProgress]),
+            },
+        );
+        assert_eq!(state.runtime.calls_since_task_update, 0);
     }
 
     /// Ctrl+L is meta-level (like Ctrl+C/Ctrl+B): it must work — and only

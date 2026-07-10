@@ -361,6 +361,28 @@ fn action_details_for(
                 line_count: None,
             }
         },
+        "task_create" | "task_update" => {
+            // Progress after the call, plus the model's pivot rationale when
+            // it gave one — the user should see WHY the plan changed shape.
+            let mut text = if let ToolMetadata::Tasks {
+                completed, total, ..
+            } = &outcome.metadata.detail
+            {
+                format!("Tasks {completed}/{total}")
+            } else {
+                outcome.summary.clone()
+            };
+            if let Some(explanation) = args.get("explanation").and_then(|v| v.as_str())
+                && !explanation.trim().is_empty()
+            {
+                text.push_str(" · ");
+                text.push_str(explanation.trim());
+            }
+            ActionDetails::Preview {
+                text: success_summary(text, duration),
+                line_count: None,
+            }
+        },
         _ => ActionDetails::Simple,
     }
 }
@@ -604,6 +626,27 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
             "Agent".to_string(),
             string_arg("description").unwrap_or_default(),
         ),
+        "task_create" => {
+            let count = args
+                .get("tasks")
+                .and_then(|v| v.as_array())
+                .map_or(0, Vec::len);
+            (
+                "Tasks".to_string(),
+                format!("plan {count} {}", pluralize("step", count)),
+            )
+        },
+        "task_update" => {
+            let count = args
+                .get("updates")
+                .and_then(|v| v.as_array())
+                .map_or(0, Vec::len);
+            (
+                "Tasks".to_string(),
+                format!("update {count} {}", pluralize("step", count)),
+            )
+        },
+        "task_list" => ("Tasks".to_string(), "list".to_string()),
         n if n.starts_with("mcp__") => {
             let rest = &n[5..];
             let target = rest.replacen("__", ":", 1);

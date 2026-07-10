@@ -128,6 +128,14 @@ pub async fn run_interactive_with(
     for cmd in bootstrap_cmds(&config) {
         runner.dispatch(cmd);
     }
+    // A resumed session may carry an in-flight checklist; hand it to the
+    // TaskBroker (tool-side truth) so the first task tool call of the new
+    // process starts from the restored list instead of an empty one.
+    if !state.session.conversation.tasks.tasks.is_empty() {
+        runner.dispatch(crate::domain::Cmd::SyncTaskStore(
+            state.session.conversation.tasks.clone(),
+        ));
+    }
 
     // Which `select!` arm fired. Terminal events are handled *after* the
     // select! returns so the paste-coalescing drain can borrow `events`

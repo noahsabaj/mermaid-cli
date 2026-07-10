@@ -26,6 +26,7 @@ pub mod path_lock;
 pub mod path_safety;
 pub mod policy_gate;
 pub mod subagent;
+pub mod tasks;
 pub mod web;
 pub mod web_client;
 
@@ -127,6 +128,9 @@ impl Default for ToolRegistry {
         r.register(Arc::new(exec::ExecuteCommandTool));
         r.register(Arc::new(memory::MemoryTool));
         r.register(Arc::new(ask_user_question::AskUserQuestionTool));
+        r.register(Arc::new(tasks::TaskCreateTool));
+        r.register(Arc::new(tasks::TaskUpdateTool));
+        r.register(Arc::new(tasks::TaskListTool));
         // MCP proxy is the dispatcher for every mcp__server__tool
         // call; it's internal (not advertised) but MUST be registered
         // so runtime lookups succeed.
@@ -199,6 +203,9 @@ impl ToolRegistry {
         r.register(Arc::new(exec::ExecuteCommandTool));
         r.register(Arc::new(memory::MemoryTool));
         r.register(Arc::new(ask_user_question::AskUserQuestionTool));
+        r.register(Arc::new(tasks::TaskCreateTool));
+        r.register(Arc::new(tasks::TaskUpdateTool));
+        r.register(Arc::new(tasks::TaskListTool));
         r.register(Arc::new(mcp::McpToolProxy));
 
         if let Some(tool) = web::web_fetch_tool(&config.web) {

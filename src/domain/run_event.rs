@@ -87,6 +87,17 @@ pub enum RunEvent {
         /// Human-readable approval prompt.
         prompt: String,
     },
+    /// The session task checklist changed (`task_create` / `task_update` /
+    /// a user `/tasks` edit). Full snapshot of the visible list, so consumers
+    /// never need to correlate diffs. Additive — protocol stays v1.
+    TasksUpdated {
+        /// Every non-deleted task, in creation order.
+        tasks: Vec<TaskLine>,
+        /// Count of completed tasks (numerator of "Tasks m/n").
+        completed: u32,
+        /// Count of visible tasks (denominator of "Tasks m/n").
+        total: u32,
+    },
     /// The turn hit a recoverable or terminal upstream error.
     Error {
         /// Human-readable error message.
@@ -165,6 +176,14 @@ impl RunEvent {
                 risk: risk.clone(),
                 prompt: prompt.clone(),
             },
+            Msg::TasksUpdated { store } => {
+                let (completed, total) = store.counts();
+                RunEvent::TasksUpdated {
+                    tasks: store.visible().map(TaskLine::from).collect(),
+                    completed: completed as u32,
+                    total: total as u32,
+                }
+            },
             Msg::UpstreamError { error, .. } => RunEvent::Error {
                 message: error.message.clone(),
             },
@@ -176,6 +195,46 @@ impl RunEvent {
             },
             _ => return None,
         })
+    }
+}
+
+/// One checklist row on the `tasks_updated` line. Flat and stringly-statused
+/// (wire contract — the internal enum can grow without breaking consumers).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskLine {
+    pub id: u32,
+    pub subject: String,
+    /// `pending` / `in_progress` / `completed`.
+    pub status: String,
+    pub active_form: String,
+    /// Seconds spent in_progress→completed, when both stamps exist.
+    #[serde(default)]
+    pub elapsed_secs: Option<u64>,
+    /// Completion tokens attributed while in progress, when known.
+    #[serde(default)]
+    pub tokens_spent: Option<u64>,
+    /// `model` or `user` (a `/tasks add` entry).
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+impl From<&crate::domain::TaskItem> for TaskLine {
+    fn from(task: &crate::domain::TaskItem) -> Self {
+        Self {
+            id: task.id,
+            subject: task.subject.clone(),
+            status: task.status.as_str().to_string(),
+            active_form: task.active_form.clone(),
+            elapsed_secs: task.elapsed_secs(),
+            tokens_spent: task.tokens_spent,
+            origin: Some(
+                match task.origin {
+                    crate::domain::TaskOrigin::Model => "model",
+                    crate::domain::TaskOrigin::User => "user",
+                }
+                .to_string(),
+            ),
+        }
     }
 }
 
@@ -196,6 +255,7 @@ fn tool_name(detail: &ToolMetadata) -> String {
         ToolMetadata::ComputerUse { .. } => "computer_use".to_string(),
         ToolMetadata::Mcp { server, tool } => format!("{server}/{tool}"),
         ToolMetadata::Subagent { .. } => "agent".to_string(),
+        ToolMetadata::Tasks { action, .. } => format!("task_{action}"),
         ToolMetadata::Custom { name, .. } => name.clone(),
     }
 }
@@ -260,6 +320,19 @@ mod tests {
                 risk: "network".to_string(),
                 prompt: "Run curl?".to_string(),
             },
+            RunEvent::TasksUpdated {
+                tasks: vec![TaskLine {
+                    id: 1,
+                    subject: "wire the broker".to_string(),
+                    status: "completed".to_string(),
+                    active_form: "wiring the broker".to_string(),
+                    elapsed_secs: Some(130),
+                    tokens_spent: Some(8400),
+                    origin: Some("model".to_string()),
+                }],
+                completed: 1,
+                total: 1,
+            },
             RunEvent::Error {
                 message: "connection failed".to_string(),
             },
@@ -294,6 +367,9 @@ mod tests {
             },
             RunEvent::ApprovalRequired { .. } => {
                 r#"{"type":"approval_required","call_id":"tool#4","tool":"execute_command","risk":"network","prompt":"Run curl?"}"#
+            },
+            RunEvent::TasksUpdated { .. } => {
+                r#"{"type":"tasks_updated","tasks":[{"id":1,"subject":"wire the broker","status":"completed","active_form":"wiring the broker","elapsed_secs":130,"tokens_spent":8400,"origin":"model"}],"completed":1,"total":1}"#
             },
             RunEvent::Error { .. } => r#"{"type":"error","message":"connection failed"}"#,
             RunEvent::TurnDone { .. } => {
@@ -330,7 +406,7 @@ mod tests {
         // Backstop for `golden`'s compile-time guard: keep one sample per
         // variant. Bump the count when a variant lands (and add its golden
         // line above, which won't compile otherwise).
-        assert_eq!(samples().len(), 9);
+        assert_eq!(samples().len(), 10);
     }
 
     #[test]
