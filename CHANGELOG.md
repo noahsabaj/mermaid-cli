@@ -100,6 +100,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cloudflare Workers AI models now report their real context window.**
+  Cloudflare's OpenAI-compatible `/models` lists bare ids with no limit
+  metadata, so the footer gauge read "context: … / unknown" and compaction
+  sizing flew blind. Live limits discovery now queries the account's
+  `models/search` endpoint instead (openrouter format first — context window
+  plus output cap for marketplace models — falling back to the full-catalog
+  default format for everything else). AI Gateway base-url overrides keep
+  the previous generic behavior.
 - **The full repaint no longer kills the TUI.** The post-shell-command
   repaint (and Ctrl+L) queried the terminal for the cursor position, and the
   reply raced the input reader thread — the first shell command the model
