@@ -381,14 +381,13 @@ pub struct AgentTypeConfig {
     pub model: Option<String>,
 }
 
-/// User-supplied OpenAI-compatible provider configuration. All fields are
-/// optional — when matching a built-in registry entry, only the supplied
-/// fields override; the rest fall back to the registry defaults. For
-/// fully custom providers, `base_url` and `api_key_env` are required.
+/// User-supplied remote provider configuration. All fields are optional for a
+/// built-in provider; fully custom OpenAI-compatible providers require a base
+/// URL and API-key environment variable.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct UserProviderConfig {
-    /// Override base URL for `/chat/completions` (None = use built-in
-    /// registry default; required for fully custom providers).
+    /// Override the provider API base URL (None = built-in default; required
+    /// for fully custom providers).
     #[serde(default)]
     pub base_url: Option<String>,
     /// Env var name to read the API key from (None = use the built-in

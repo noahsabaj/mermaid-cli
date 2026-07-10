@@ -61,7 +61,7 @@ fn script() -> Vec<(i64, Msg)> {
             Msg::StreamDone {
                 turn: TurnId(1),
                 usage: Some(TokenUsage::provider(100, 20, 120)),
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: Some(FinishReason::ToolUse),
             },
         ),
@@ -94,7 +94,7 @@ fn script() -> Vec<(i64, Msg)> {
             Msg::StreamDone {
                 turn: TurnId(2),
                 usage: Some(TokenUsage::provider(150, 40, 190)),
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: Some(FinishReason::Stop),
             },
         ),

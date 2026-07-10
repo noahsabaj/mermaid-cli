@@ -815,7 +815,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(1),
                 usage: Some(crate::models::TokenUsage::provider(10, 5, 15)),
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: Some(crate::models::FinishReason::Stop),
             },
             Msg::TurnCancelled(TurnId(3)),

@@ -277,15 +277,15 @@ impl ModelProvider for OllamaProvider {
 
         // F3: the wrapper's `Done` is now the sole terminal event —
         // the adapter no longer emits one from the callback. Carrying
-        // `thinking_signature` out of `ModelResponse` here is what
+        // `provider_continuation` out of `ModelResponse` here is what
         // lets multi-turn extended thinking round-trip.
         let usage = response.usage.clone();
-        let thinking_signature = response.thinking_signature.clone();
+        let provider_continuation = response.provider_continuation.clone();
         let stop_reason = response.stop_reason.clone();
         // Terminal Done through the ordered relay, then drain (see stream_bridge).
         let _ = relay_tx.send(StreamEvent::Done {
             usage: usage.clone(),
-            thinking_signature: thinking_signature.clone(),
+            provider_continuation: provider_continuation.clone(),
             stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
@@ -293,7 +293,7 @@ impl ModelProvider for OllamaProvider {
 
         Ok(FinalResponse {
             usage,
-            thinking_signature,
+            provider_continuation,
             tool_calls: response.tool_calls.unwrap_or_default(),
             stop_reason,
         })
@@ -434,7 +434,7 @@ fn stream_callback_for(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) ->
                 } else {
                     None
                 },
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         };

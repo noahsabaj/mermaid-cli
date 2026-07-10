@@ -126,7 +126,7 @@ fn busy_streaming() {
             partial_reasoning: String::new(),
             tokens: 12,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };

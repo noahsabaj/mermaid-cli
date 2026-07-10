@@ -104,7 +104,8 @@ fn merged_headers(
 }
 
 use super::model::{
-    AnthropicProvider, GeminiProvider, ModelProvider, OllamaProvider, OpenAICompatProvider,
+    AnthropicProvider, GeminiProvider, MetaProvider, ModelProvider, OllamaProvider,
+    OpenAICompatProvider,
 };
 
 /// A lazily-built, shared provider. `OnceCell` gives single-flight construction
@@ -164,9 +165,10 @@ impl ProviderFactory {
 ///   1. `ollama/<model>` → OllamaProvider.
 ///   2. `anthropic/<model>` → AnthropicProvider.
 ///   3. `gemini/<model>` → GeminiProvider.
-///   4. Other builtin providers (openai, openrouter, groq, …) → OpenAICompatProvider.
-///   5. User-defined `[providers.<name>]` → custom OpenAICompatProvider.
-///   6. Bare model name → OllamaProvider.
+///   4. `meta/<model>` → MetaProvider using the Responses API.
+///   5. Other builtin providers (openai, openrouter, groq, …) → OpenAICompatProvider.
+///   6. User-defined `[providers.<name>]` → custom OpenAICompatProvider.
+///   7. Bare model name → OllamaProvider.
 async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn ModelProvider>> {
     let (provider, model_name) = parse_model_id(model_id);
     let provider_lc = provider.to_lowercase();
@@ -218,7 +220,33 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
         return Ok(Box::new(p));
     }
 
-    // 3.5. Cloudflare Workers AI — OpenAI-compatible, but the endpoint URL embeds a
+    // 4. Meta — Responses is required for encrypted reasoning continuity across
+    // Mermaid's tool loop even though Meta also exposes Chat Completions.
+    if provider_lc == "meta" {
+        let user_cfg = config.providers.get("meta");
+        let base_url = resolve_overridable_base_url(
+            "meta",
+            user_cfg.and_then(|cfg| cfg.base_url.clone()),
+            super::model::meta::DEFAULT_BASE_URL,
+        )?;
+        let api_key_env = user_cfg
+            .and_then(|cfg| cfg.api_key_env.as_deref())
+            .unwrap_or(super::model::meta::DEFAULT_API_KEY_ENV);
+        let api_key = require_key("meta", api_key_env)?;
+        let mut extra_headers = std::collections::HashMap::new();
+        if let Some(cfg) = user_cfg {
+            extra_headers.extend(cfg.extra_headers.clone());
+            for (header, env_var) in &cfg.env_headers {
+                if let Ok(value) = std::env::var(env_var) {
+                    extra_headers.insert(header.clone(), value);
+                }
+            }
+        }
+        let p = MetaProvider::new(api_key, model_name.to_string(), base_url, extra_headers)?;
+        return Ok(Box::new(p));
+    }
+
+    // 4.5. Cloudflare Workers AI — OpenAI-compatible, but the endpoint URL embeds a
     // per-account id, so the base_url is synthesized at runtime from
     // CLOUDFLARE_ACCOUNT_ID (or a full [providers.cloudflare].base_url override, e.g.
     // AI Gateway). Must precede the generic registry branch below, which would
@@ -265,7 +293,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
         return Ok(Box::new(p));
     }
 
-    // 4 + 5. OpenAI-compatible registry or user-custom.
+    // 5 + 6. OpenAI-compatible registry or user-custom.
     if let Some(profile) = lookup_provider(&provider_lc) {
         let user_cfg = config.providers.get(&provider_lc);
         let base_url = resolve_overridable_base_url(
@@ -759,6 +787,56 @@ mod tests {
         let (p, m) = parse_model_id("anthropic/claude-opus-4-7");
         assert_eq!(p, "anthropic");
         assert_eq!(m, "claude-opus-4-7");
+    }
+
+    #[tokio::test]
+    async fn meta_requires_its_documented_api_key_env() {
+        temp_env::async_with_vars(
+            [(
+                crate::providers::model::meta::DEFAULT_API_KEY_ENV,
+                None::<&str>,
+            )],
+            async {
+                let factory = ProviderFactory::new(Config::default());
+                let error = match factory.resolve("meta/muse-spark-1.1").await {
+                    Ok(_) => panic!("Meta must require an API key"),
+                    Err(error) => error,
+                };
+                assert!(
+                    error
+                        .to_string()
+                        .contains(crate::providers::model::meta::DEFAULT_API_KEY_ENV)
+                );
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn meta_routes_to_responses_provider_with_muse_capabilities() {
+        temp_env::async_with_vars(
+            [(
+                crate::providers::model::meta::DEFAULT_API_KEY_ENV,
+                Some("test-key"),
+            )],
+            async {
+                let factory = ProviderFactory::new(Config::default());
+                let provider = factory.resolve("meta/muse-spark-1.1").await.unwrap();
+                let capabilities = provider.capabilities();
+                assert!(capabilities.supports_tools);
+                assert!(capabilities.supports_vision);
+                assert!(capabilities.emits_provider_continuation);
+                assert_eq!(
+                    capabilities.max_context_tokens,
+                    Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW)
+                );
+                assert_eq!(
+                    capabilities.max_output_tokens,
+                    Some(crate::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS)
+                );
+            },
+        )
+        .await;
     }
 
     #[test]

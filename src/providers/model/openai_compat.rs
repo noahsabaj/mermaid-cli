@@ -149,7 +149,7 @@ impl ModelProvider for OpenAICompatProvider {
         // then await the relay drain before returning.
         let _ = relay_tx.send(StreamEvent::Done {
             usage: usage.clone(),
-            thinking_signature: None,
+            provider_continuation: None,
             stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
@@ -157,7 +157,7 @@ impl ModelProvider for OpenAICompatProvider {
 
         Ok(FinalResponse {
             usage,
-            thinking_signature: None,
+            provider_continuation: None,
             tool_calls: response.tool_calls.unwrap_or_default(),
             stop_reason,
         })
@@ -193,7 +193,7 @@ fn forward_callback(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) -> St
                 } else {
                     None
                 },
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         };

@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use crate::app::McpServerConfig;
 use crate::app::instructions::LoadedInstructions;
 use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{FinishReason, ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError};
+use crate::models::{
+    FinishReason, ProviderContinuation, ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError,
+};
 use crate::runtime::{
     ApprovalRecord, CheckpointRecord, PluginInstallRecord, ProcessRecord, SafetyMode, TaskRecord,
     TaskTimelineEvent,
@@ -167,13 +169,12 @@ pub enum Msg {
         message: String,
         kind: StatusKind,
     },
-    /// Stream complete. Carries final token count (0 if unknown) and,
-    /// for Anthropic, the thinking signature that must round-trip on
-    /// the next request.
+    /// Stream complete. Carries final token count and opaque provider state
+    /// that must round-trip on the next request.
     StreamDone {
         turn: TurnId,
         usage: Option<TokenUsage>,
-        thinking_signature: Option<String>,
+        provider_continuation: Option<ProviderContinuation>,
         /// Why the model stopped (truncation / content block / normal), when
         /// the provider reported it. Drives the truncation status note.
         stop_reason: Option<FinishReason>,

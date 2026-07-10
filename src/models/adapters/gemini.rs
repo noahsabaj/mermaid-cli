@@ -665,7 +665,7 @@ impl GeminiAdapter {
                 Some(tool_calls)
             },
             // Gemini has no signature round-trip — leave None.
-            thinking_signature: None,
+            provider_continuation: None,
         })
     }
 
@@ -752,7 +752,7 @@ impl GeminiAdapter {
             } else {
                 Some(state.tool_calls_done)
             },
-            thinking_signature: None,
+            provider_continuation: None,
         })
     }
 }

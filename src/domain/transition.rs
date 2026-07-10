@@ -11,7 +11,7 @@
 use std::time::SystemTime;
 
 use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{ChatMessage, MessageRole};
+use crate::models::{ChatMessage, MessageRole, ProviderContinuation};
 
 use super::action::{ActionDetails, ActionDisplay, ActionResult};
 use super::ids::{ToolCallId, TurnId};
@@ -79,7 +79,7 @@ pub fn start_generating_with(id: TurnId, now: SystemTime, continuation: bool) ->
         partial_reasoning: String::new(),
         tokens: 0,
         phase: GenPhase::Sending,
-        thinking_signature: None,
+        provider_continuation: None,
         pending_tool_calls: Vec::new(),
         continuation,
     }
@@ -106,13 +106,12 @@ pub fn start_executing_tools(
 /// Build the committed assistant message from a `Generating` state's
 /// accumulated content. Safe to call with empty text (the model might
 /// have responded with only tool calls). Returns the message plus the
-/// thinking signature so the reducer can record it separately for
-/// Anthropic round-trip.
+/// provider continuation state needed for the next model call.
 pub fn commit_assistant_message(
     partial_text: String,
     partial_reasoning: String,
     tool_calls: Vec<ModelToolCall>,
-    thinking_signature: Option<String>,
+    provider_continuation: Option<ProviderContinuation>,
     now: chrono::DateTime<chrono::Local>,
     continuation: bool,
 ) -> ChatMessage {
@@ -126,7 +125,7 @@ pub fn commit_assistant_message(
     } else {
         crate::models::ChatMessageKind::Normal
     };
-    let mut msg = ChatMessage {
+    ChatMessage {
         role: MessageRole::Assistant,
         content: partial_text,
         timestamp: now,
@@ -143,12 +142,8 @@ pub fn commit_assistant_message(
         },
         tool_call_id: None,
         tool_name: None,
-        thinking_signature: None,
-    };
-    if let Some(sig) = thinking_signature {
-        msg = msg.with_thinking_signature(sig);
+        provider_continuation,
     }
-    msg
 }
 
 /// Build the follow-up `tool` role messages from completed outcomes.
@@ -1069,18 +1064,25 @@ mod tests {
     }
 
     #[test]
-    fn commit_assistant_message_preserves_thinking_signature() {
+    fn commit_assistant_message_preserves_provider_continuation() {
         let m = commit_assistant_message(
             "hello".to_string(),
             "reasoning".to_string(),
             vec![],
-            Some("sig_abc".to_string()),
+            Some(ProviderContinuation::Anthropic {
+                signature: "sig_abc".to_string(),
+            }),
             chrono::Local::now(),
             false,
         );
         assert_eq!(m.content, "hello");
         assert_eq!(m.thinking.as_deref(), Some("reasoning"));
-        assert_eq!(m.thinking_signature.as_deref(), Some("sig_abc"));
+        assert_eq!(
+            m.provider_continuation
+                .as_ref()
+                .and_then(ProviderContinuation::anthropic_signature),
+            Some("sig_abc")
+        );
     }
 
     #[test]

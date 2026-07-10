@@ -516,7 +516,7 @@ impl OpenAICompatAdapter {
             stop_reason,
             thinking,
             tool_calls,
-            thinking_signature: None,
+            provider_continuation: None,
         })
     }
 
@@ -804,7 +804,7 @@ impl OpenAICompatAdapter {
             stop_reason,
             thinking,
             tool_calls,
-            thinking_signature: None,
+            provider_continuation: None,
         })
     }
 }

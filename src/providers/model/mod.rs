@@ -1,6 +1,6 @@
 //! Model adapters wrapped as `ModelProvider` implementations.
 //!
-//! Four providers today: Ollama, Anthropic, Gemini, and OpenAI-
+//! Five providers today: Ollama, Anthropic, Gemini, Meta, and OpenAI-
 //! compat (covering OpenAI, OpenRouter, Groq, Cerebras, DeepInfra,
 //! Together, and user-defined endpoints). Each wraps the
 //! corresponding adapter in `crate::models::adapters`; the adapter
@@ -8,6 +8,7 @@
 
 pub mod anthropic;
 pub mod gemini;
+pub(crate) mod meta;
 pub mod ollama;
 pub mod openai_compat;
 pub(crate) mod stream_bridge;
@@ -142,10 +143,7 @@ pub(crate) async fn collect_text(
                 } => usage = done_usage,
                 // Status is a user-facing plumbing notice, not content —
                 // a text collector has nowhere to surface it.
-                StreamEvent::Reasoning(_)
-                | StreamEvent::ToolCall(_)
-                | StreamEvent::Status(_)
-                | StreamEvent::ThinkingSignature(_) => {},
+                StreamEvent::Reasoning(_) | StreamEvent::ToolCall(_) | StreamEvent::Status(_) => {},
             }
         }
         (text, usage)
@@ -163,6 +161,7 @@ pub(crate) async fn collect_text(
 
 pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;
+pub use meta::MetaProvider;
 pub use ollama::OllamaProvider;
 pub use openai_compat::OpenAICompatProvider;
 

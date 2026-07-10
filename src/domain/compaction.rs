@@ -624,6 +624,15 @@ pub(crate) fn drop_orphan_tool_calls(messages: &mut Vec<ChatMessage>, preserve_p
         if calls.is_empty() {
             m.tool_calls = None;
         }
+        let kept: std::collections::HashSet<&str> = m
+            .tool_calls
+            .iter()
+            .flatten()
+            .filter_map(|call| call.id.as_deref())
+            .collect();
+        if let Some(continuation) = &mut m.provider_continuation {
+            continuation.retain_meta_function_calls(|call_id| kept.contains(call_id));
+        }
     }
 
     // Reverse (#F64): drop a `tool_result` whose `tool_use` id is no longer
@@ -982,6 +991,33 @@ mod tests {
         assert!(
             messages.iter().any(|m| m.content == "calling a tool"),
             "the assistant text is preserved — only the unpaired call is removed"
+        );
+    }
+
+    #[test]
+    fn normalize_history_drops_matching_meta_replay_function_call() {
+        let mut orphan = ChatMessage::assistant("calling a tool");
+        orphan.tool_calls = Some(vec![tool_call("call_1", "do_thing")]);
+        orphan.provider_continuation = Some(crate::models::ProviderContinuation::MetaResponses {
+            output: vec![crate::models::MetaResponseItem::from_wire(
+                serde_json::json!({
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "do_thing",
+                    "arguments": "{}"
+                }),
+            )],
+        });
+        let mut messages = vec![ChatMessage::user("hi"), orphan];
+        normalize_history(&mut messages);
+        let output = messages[1]
+            .provider_continuation
+            .as_ref()
+            .and_then(crate::models::ProviderContinuation::meta_output)
+            .unwrap();
+        assert!(
+            output.is_empty(),
+            "orphan Meta function_call must also drop"
         );
     }
 

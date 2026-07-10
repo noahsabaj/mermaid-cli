@@ -504,9 +504,9 @@ impl OllamaAdapter {
         // F3: the adapter no longer emits a terminal `Done` through the
         // callback. The v0.7 provider wrapper (`providers::model::*`)
         // emits the authoritative `StreamEvent::Done { usage,
-        // thinking_signature }` from the returned `ModelResponse`.
+        // provider_continuation }` from the returned `ModelResponse`.
         // Emitting here would race the wrapper's Done (ordering aside)
-        // and drop the thinking_signature for Anthropic.
+        // and drop the provider_continuation for Anthropic.
 
         Ok(ModelResponse {
             content: acc.content,
@@ -515,7 +515,7 @@ impl OllamaAdapter {
             stop_reason,
             thinking,
             tool_calls,
-            thinking_signature: None,
+            provider_continuation: None,
         })
     }
 
@@ -840,7 +840,7 @@ impl OllamaAdapter {
             stop_reason: json.done_reason.as_deref().map(map_ollama_done_reason),
             thinking,
             tool_calls,
-            thinking_signature: None,
+            provider_continuation: None,
         })
     }
 }

@@ -4,11 +4,11 @@
 //! (cache_control blocks, extended-thinking signature round-trip);
 //! this wrapper plumbs `ChatRequest` / `StreamContext` into it.
 //!
-//! Anthropic is the one provider that emits a `thinking_signature`
+//! Anthropic is the one provider that emits a `provider_continuation`
 //! that MUST round-trip on the next request. The adapter's
-//! `ModelResponse.thinking_signature` already carries it; we forward
+//! `ModelResponse.provider_continuation` already carries it; we forward
 //! that onto the `FinalResponse` so the reducer can commit it via
-//! `ChatMessage::with_thinking_signature`.
+//! `ChatMessage::with_provider_continuation`.
 
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ impl AnthropicProvider {
     pub fn new(api_key: String, model_name: String, base_url: String) -> Result<Self> {
         let adapter = AnthropicAdapter::new(api_key, model_name, base_url)?;
         let capabilities =
-            Capabilities::from_legacy(adapter.capabilities()).with_thinking_signature();
+            Capabilities::from_legacy(adapter.capabilities()).with_provider_continuation();
         Ok(Self {
             adapter,
             capabilities,
@@ -85,12 +85,12 @@ impl ModelProvider for AnthropicProvider {
         };
 
         let usage = response.usage.clone();
-        let thinking_signature = response.thinking_signature.clone();
+        let provider_continuation = response.provider_continuation.clone();
         let stop_reason = response.stop_reason.clone();
         // Terminal Done through the ordered relay, then drain (see stream_bridge).
         let _ = relay_tx.send(StreamEvent::Done {
             usage: usage.clone(),
-            thinking_signature: thinking_signature.clone(),
+            provider_continuation: provider_continuation.clone(),
             stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
@@ -98,7 +98,7 @@ impl ModelProvider for AnthropicProvider {
 
         Ok(FinalResponse {
             usage,
-            thinking_signature,
+            provider_continuation,
             tool_calls: response.tool_calls.unwrap_or_default(),
             stop_reason,
         })
@@ -136,7 +136,7 @@ fn forward_callback(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) -> St
                 } else {
                     None
                 },
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         };

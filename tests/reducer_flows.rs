@@ -58,7 +58,7 @@ fn happy_path_turn_ends_idle_with_assistant_message() {
         Msg::StreamDone {
             turn: id,
             usage: None,
-            thinking_signature: None,
+            provider_continuation: None,
             stop_reason: None,
         },
     );
@@ -98,7 +98,7 @@ fn stale_stream_chunks_cannot_corrupt_current_turn() {
         Msg::StreamDone {
             turn: turn_a,
             usage: None,
-            thinking_signature: None,
+            provider_continuation: None,
             stop_reason: None,
         },
     );
@@ -550,7 +550,7 @@ fn truncation_note_skipped_when_tool_calls_pending() {
         Msg::StreamDone {
             turn: id,
             usage: None,
-            thinking_signature: None,
+            provider_continuation: None,
             stop_reason: Some(mermaid_cli::models::FinishReason::Length),
         },
     );
@@ -580,7 +580,7 @@ fn truncation_note_shown_when_no_tool_calls() {
         Msg::StreamDone {
             turn: id,
             usage: None,
-            thinking_signature: None,
+            provider_continuation: None,
             stop_reason: Some(mermaid_cli::models::FinishReason::Length),
         },
     );
@@ -737,7 +737,7 @@ fn stream_tool_call_buffers_then_stream_done_transitions_to_executing_tools() {
         Msg::StreamDone {
             turn: id,
             usage: None,
-            thinking_signature: None,
+            provider_continuation: None,
             stop_reason: None,
         },
     );
@@ -785,7 +785,7 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
-            thinking_signature: None,
+            provider_continuation: None,
         },
         state.now,
     );

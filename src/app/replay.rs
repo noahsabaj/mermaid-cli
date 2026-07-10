@@ -345,7 +345,7 @@ mod tests {
                 Msg::StreamDone {
                     turn: TurnId(1),
                     usage: Some(TokenUsage::provider(10, 5, 15)),
-                    thinking_signature: None,
+                    provider_continuation: None,
                     stop_reason: Some(FinishReason::Stop),
                 },
             ),

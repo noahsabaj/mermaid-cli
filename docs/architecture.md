@@ -38,7 +38,7 @@ src/
 │   └── middleware.rs   retry_transient_http
 │
 ├── providers/  — the adapter surface.
-│   ├── model/          ModelProvider + {Ollama, Anthropic, Gemini, OpenAI-compat}
+│   ├── model/          ModelProvider + {Ollama, Anthropic, Gemini, Meta, OpenAI-compat}
 │   ├── tool/           ToolExecutor + {filesystem, exec, web, mcp}
 │   ├── ctx.rs          StreamContext, ExecContext
 │   ├── capabilities.rs Capabilities

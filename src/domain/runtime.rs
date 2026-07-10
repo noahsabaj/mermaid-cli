@@ -76,14 +76,21 @@ impl ProviderCapabilitySnapshot {
         let (supports_tools, supports_vision, reasoning) = match provider.as_str() {
             "anthropic" => (true, true, "adaptive".to_string()),
             "gemini" => (true, true, "thinking_level".to_string()),
+            "meta" => (true, true, "responses_effort".to_string()),
             "ollama" => (true, false, "binary".to_string()),
             _ => (true, false, "effort".to_string()),
         };
 
-        let max_context_tokens = infer_static_context_window(&model);
+        let is_muse_spark = provider == "meta" && model.eq_ignore_ascii_case("muse-spark-1.1");
+        let max_context_tokens = if is_muse_spark {
+            Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW)
+        } else {
+            infer_static_context_window(&model)
+        };
         // Output ceilings start unknown everywhere and are refreshed live
         // from provider models endpoints via `ProviderContextResolved`.
-        let max_output_tokens = None;
+        let max_output_tokens =
+            is_muse_spark.then_some(crate::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS);
 
         Self {
             provider,
