@@ -9289,7 +9289,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: vec![crate::models::ToolCall {
                 id: Some("call_ts".to_string()),
                 function: crate::models::FunctionCall {
@@ -9304,7 +9304,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -9348,7 +9348,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: vec![crate::models::ToolCall {
                 id: Some("call_ts2".to_string()),
                 function: crate::models::FunctionCall {
@@ -9363,7 +9363,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(6),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
