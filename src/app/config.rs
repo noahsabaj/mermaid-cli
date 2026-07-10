@@ -903,6 +903,7 @@ pub fn load_config() -> Result<Config> {
     let config_path = get_config_path()?;
     let mut table = read_config_table(&config_path)?;
     migrate_legacy_max_tokens(&mut table);
+    migrate_legacy_model_profiles(&mut table);
     let _ = take_profiles(&mut table);
     Ok(finalize_config(table)?.0)
 }
@@ -929,6 +930,7 @@ pub fn load_layered_config(
     let config_path = get_config_path()?;
     let mut user_table = read_config_table(&config_path)?;
     migrate_legacy_max_tokens(&mut user_table);
+    migrate_legacy_model_profiles(&mut user_table);
     // Excise [profiles.*] BEFORE anything deserializes the user table (the
     // safety baseline below and finalize_config's unknown-key scan).
     let profiles = take_profiles(&mut user_table);
@@ -986,6 +988,7 @@ pub fn load_project_scoped_config(cwd: &std::path::Path) -> Config {
         let config_path = get_config_path()?;
         let mut user_table = read_config_table(&config_path)?;
         migrate_legacy_max_tokens(&mut user_table);
+        migrate_legacy_model_profiles(&mut user_table);
         let _ = take_profiles(&mut user_table);
         let base_safety = finalize_config(user_table.clone())?.0.safety;
         let mut layers = vec![LayerSource {
@@ -1100,6 +1103,21 @@ fn migrate_legacy_max_tokens(table: &mut toml::Table) {
             == Some(LEGACY_DEFAULT_MAX_TOKENS as i64)
     {
         dm.insert("max_tokens".to_string(), toml::Value::Integer(0));
+    }
+}
+
+/// Migrate the pre-profiles `[model_profiles]` table to its new name,
+/// `[model_aliases]` (the `profile` name now belongs to `--profile` config
+/// overlays). Runs wherever `migrate_legacy_max_tokens` runs: config loads
+/// stop warning immediately, and the next persist converges the file on
+/// disk. A file that somehow has BOTH tables keeps `model_aliases`.
+fn migrate_legacy_model_profiles(table: &mut toml::Table) {
+    if table.contains_key("model_aliases") {
+        table.remove("model_profiles");
+        return;
+    }
+    if let Some(profiles) = table.remove("model_profiles") {
+        table.insert("model_aliases".to_string(), profiles);
     }
 }
 
@@ -1320,6 +1338,7 @@ fn update_user_config_table_at(
     let mut table = read_config_table(path)?;
     // Converge the on-disk legacy output cap while we're rewriting anyway.
     migrate_legacy_max_tokens(&mut table);
+    migrate_legacy_model_profiles(&mut table);
     mutate(&mut table)?;
     write_config_bytes(path, toml::to_string_pretty(&table)?.as_bytes())
 }
@@ -1455,6 +1474,7 @@ mod tests {
         let mut table: toml::Table =
             toml::from_str("[default_model]\nmax_tokens = 4096\n").unwrap();
         migrate_legacy_max_tokens(&mut table);
+        migrate_legacy_model_profiles(&mut table);
         let (config, _) = finalize_config(table).unwrap();
         assert_eq!(config.default_model.max_tokens, 0);
 
@@ -1462,14 +1482,45 @@ mod tests {
         let mut table: toml::Table =
             toml::from_str("[default_model]\nmax_tokens = 8192\n").unwrap();
         migrate_legacy_max_tokens(&mut table);
+        migrate_legacy_model_profiles(&mut table);
         let (config, _) = finalize_config(table).unwrap();
         assert_eq!(config.default_model.max_tokens, 8192);
 
         // A config without the key is untouched (stays the 0 default).
         let mut table = toml::Table::new();
         migrate_legacy_max_tokens(&mut table);
+        migrate_legacy_model_profiles(&mut table);
         let (config, _) = finalize_config(table).unwrap();
         assert_eq!(config.default_model.max_tokens, 0);
+    }
+
+    #[test]
+    fn legacy_model_profiles_table_migrates_to_model_aliases() {
+        // Loads stop warning immediately...
+        let mut table: toml::Table =
+            toml::from_str("[model_profiles]\nfast = \"ollama/qwen3:8b\"\n").unwrap();
+        migrate_legacy_model_profiles(&mut table);
+        let (config, ignored) = finalize_config(table).unwrap();
+        assert_eq!(config.model_aliases["fast"], "ollama/qwen3:8b");
+        assert!(ignored.is_empty(), "no unknown-key warning: {ignored:?}");
+        // ...and a file with BOTH keeps the new table.
+        let mut table: toml::Table =
+            toml::from_str("[model_profiles]\nfast = \"old\"\n[model_aliases]\nfast = \"new\"\n")
+                .unwrap();
+        migrate_legacy_model_profiles(&mut table);
+        let (config, ignored) = finalize_config(table).unwrap();
+        assert_eq!(config.model_aliases["fast"], "new");
+        assert!(ignored.is_empty());
+        // ...and the persist path rewrites the key on disk.
+        let dir = std::env::temp_dir().join("mermaid_test_model_profiles_migrate");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[model_profiles]\nfast = \"ollama/x\"\n").unwrap();
+        update_user_config_table_at(&path, |_| Ok(())).unwrap();
+        let blob = std::fs::read_to_string(&path).unwrap();
+        assert!(blob.contains("[model_aliases]"), "{blob}");
+        assert!(!blob.contains("model_profiles"), "{blob}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

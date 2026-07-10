@@ -268,6 +268,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Existing `[model_profiles]` config tables migrate automatically.** The
+  rename to `[model_aliases]` left older config files warning about an
+  unknown key; loads now migrate the table in memory (warning gone
+  immediately) and the next settings persist renames it on disk.
+
+
 - **The status line no longer flickers raw subagent text.** Every child
   stream chunk used to overwrite the status line (garbage fragments flying
   past at stream speed); children now report only stable activity — their
