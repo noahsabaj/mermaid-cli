@@ -217,6 +217,11 @@ pub enum Commands {
     Task {
         /// Task id
         id: String,
+        /// Attach to the task's live event stream (daemon required): prints
+        /// NDJSON `RunEvent` lines to stdout and exits after the terminal
+        /// `result`. Works on queued tasks too (waits for the run to start).
+        #[arg(long)]
+        follow: bool,
     },
     /// List Mermaid-managed background processes
     Processes {
@@ -620,6 +625,14 @@ mod tests {
         assert!(matches!(cli.command, Some(Commands::Login { provider: Some(p) }) if p == "groq"));
         let cli = Cli::parse_from(["mermaid", "logout", "groq"]);
         assert!(matches!(cli.command, Some(Commands::Logout { provider }) if provider == "groq"));
+    }
+
+    #[test]
+    fn parses_task_follow() {
+        let cli = Cli::parse_from(["mermaid", "task", "t1", "--follow"]);
+        assert!(matches!(cli.command, Some(Commands::Task { id, follow: true }) if id == "t1"));
+        let cli = Cli::parse_from(["mermaid", "task", "t1"]);
+        assert!(matches!(cli.command, Some(Commands::Task { id, follow: false }) if id == "t1"));
     }
 
     #[test]

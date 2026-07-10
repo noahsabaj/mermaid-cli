@@ -271,36 +271,42 @@ impl RuntimeClient {
     }
 
     pub fn health(&self) -> Result<RuntimeRead<RuntimeHealth>> {
-        self.read(json!({"command": "health"}), |service| service.health())
+        self.read(crate::runtime::DaemonRequest::Health.to_wire(), |service| {
+            service.health()
+        })
     }
 
     pub fn snapshot(&self) -> Result<RuntimeRead<RuntimeSnapshot>> {
-        self.read(json!({"command": "runtime_snapshot"}), |service| {
-            service.snapshot()
-        })
+        self.read(
+            crate::runtime::DaemonRequest::Snapshot.to_wire(),
+            |service| service.snapshot(),
+        )
     }
 
     pub fn dashboard(&self) -> Result<RuntimeRead<RuntimeDashboard>> {
-        self.read(json!({"command": "runtime_dashboard"}), |service| {
-            service.dashboard()
-        })
+        self.read(
+            crate::runtime::DaemonRequest::RuntimeDashboard.to_wire(),
+            |service| service.dashboard(),
+        )
     }
 
     pub fn diagnostics(&self) -> Result<RuntimeRead<RuntimeDiagnostics>> {
-        self.read(json!({"command": "runtime_diagnostics"}), |service| {
-            service.diagnostics()
-        })
+        self.read(
+            crate::runtime::DaemonRequest::RuntimeDiagnostics.to_wire(),
+            |service| service.diagnostics(),
+        )
     }
 
     pub fn hygiene_preview(&self) -> Result<RuntimeRead<RuntimeHygienePreview>> {
-        self.read(json!({"command": "runtime_hygiene_preview"}), |service| {
-            service.hygiene_preview()
-        })
+        self.read(
+            crate::runtime::DaemonRequest::RuntimeHygienePreview.to_wire(),
+            |service| service.hygiene_preview(),
+        )
     }
 
     pub fn hygiene_archive(&self) -> Result<RuntimeRead<RuntimeHygieneArchive>> {
         self.read_inner(
-            json!({"command": "runtime_hygiene_archive"}),
+            crate::runtime::DaemonRequest::RuntimeHygieneArchive.to_wire(),
             true,
             |service| service.hygiene_archive(),
         )
@@ -308,90 +314,107 @@ impl RuntimeClient {
 
     pub fn task_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeTaskDetail>> {
         self.read(
-            json!({"command": "runtime_task_detail", "id": id}),
+            crate::runtime::DaemonRequest::RuntimeTaskDetail { id: id.to_string() }.to_wire(),
             |service| service.task_detail(id),
         )
     }
 
     pub fn approval_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeApprovalDetail>> {
         self.read(
-            json!({"command": "runtime_approval_detail", "id": id}),
+            crate::runtime::DaemonRequest::RuntimeApprovalDetail { id: id.to_string() }.to_wire(),
             |service| service.approval_detail(id),
         )
     }
 
     pub fn checkpoint_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeCheckpointDetail>> {
         self.read(
-            json!({"command": "runtime_checkpoint_detail", "id": id}),
+            crate::runtime::DaemonRequest::RuntimeCheckpointDetail { id: id.to_string() }.to_wire(),
             |service| service.checkpoint_detail(id),
         )
     }
 
     pub fn list_tasks(&self, limit: usize) -> Result<RuntimeRead<Vec<TaskRecord>>> {
         self.list(
-            json!({"command": "runtime_tasks", "limit": limit}),
+            crate::runtime::DaemonRequest::RuntimeTasks {
+                limit: Some(limit as u64),
+            }
+            .to_wire(),
             |service| service.list_tasks(limit),
         )
     }
 
     pub fn list_processes(&self, limit: usize) -> Result<RuntimeRead<Vec<ProcessRecord>>> {
         self.list(
-            json!({"command": "runtime_processes", "limit": limit}),
+            crate::runtime::DaemonRequest::RuntimeProcesses {
+                limit: Some(limit as u64),
+            }
+            .to_wire(),
             |service| service.list_processes(limit),
         )
     }
 
     pub fn list_approvals(&self) -> Result<RuntimeRead<Vec<ApprovalRecord>>> {
-        self.list(json!({"command": "runtime_approvals"}), |service| {
-            service.list_approvals()
-        })
+        self.list(
+            crate::runtime::DaemonRequest::RuntimeApprovals.to_wire(),
+            |service| service.list_approvals(),
+        )
     }
 
     pub fn list_tool_runs(&self, limit: usize) -> Result<RuntimeRead<Vec<ToolRunRecord>>> {
         self.list(
-            json!({"command": "runtime_tool_runs", "limit": limit}),
+            crate::runtime::DaemonRequest::RuntimeToolRuns {
+                limit: Some(limit as u64),
+            }
+            .to_wire(),
             |service| service.list_tool_runs(limit),
         )
     }
 
     pub fn list_checkpoints(&self, limit: usize) -> Result<RuntimeRead<Vec<CheckpointRecord>>> {
         self.list(
-            json!({"command": "runtime_checkpoints", "limit": limit}),
+            crate::runtime::DaemonRequest::RuntimeCheckpoints {
+                limit: Some(limit as u64),
+            }
+            .to_wire(),
             |service| service.list_checkpoints(limit),
         )
     }
 
     pub fn list_plugins(&self) -> Result<RuntimeRead<Vec<PluginInstallRecord>>> {
-        self.list(json!({"command": "runtime_plugins"}), |service| {
-            service.list_plugins()
-        })
+        self.list(
+            crate::runtime::DaemonRequest::RuntimePlugins.to_wire(),
+            |service| service.list_plugins(),
+        )
     }
 
     pub fn process_log(&self, id: &str, tail_bytes: Option<u64>) -> Result<RuntimeProcessLog> {
         self.action(
-            json!({
-                "command": "logs",
-                "id": id,
-                "tail_bytes": tail_bytes,
-            }),
+            crate::runtime::DaemonRequest::Logs {
+                id: id.to_string(),
+                tail_bytes,
+            }
+            .to_wire(),
             |service| service.process_log(id, tail_bytes),
         )
     }
 
     pub fn stop_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
         // Non-idempotent: `terminate_tree` must not fire twice (RC-G/F25).
-        self.action_authed_non_idempotent(json!({"command": "stop_process", "id": id}), |service| {
-            service
-                .stop_process(id)
-                .map(|item| RuntimeOne { ok: true, item })
-        })
+        self.action_authed_non_idempotent(
+            crate::runtime::DaemonRequest::StopProcess { id: id.to_string() }.to_wire(),
+            |service| {
+                service
+                    .stop_process(id)
+                    .map(|item| RuntimeOne { ok: true, item })
+            },
+        )
     }
 
     pub fn restart_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
         // Non-idempotent: kills then respawns — a duplicate run double-signals
         // (possibly a since-reused PID) and can spawn two servers (RC-G/F25).
         self.action_authed_non_idempotent(
-            json!({"command": "restart_process", "id": id}),
+            crate::runtime::DaemonRequest::RestartProcess { id: id.to_string() }.to_wire(),
             |service| {
                 service
                     .restart_process(id)
@@ -401,34 +424,39 @@ impl RuntimeClient {
     }
 
     pub fn open_process(&self, id: &str) -> Result<RuntimeProcessOpen> {
-        self.action_authed(json!({"command": "open_process", "id": id}), |service| {
-            service.open_process(id)
-        })
+        self.action_authed(
+            crate::runtime::DaemonRequest::OpenProcess { id: id.to_string() }.to_wire(),
+            |service| service.open_process(id),
+        )
     }
 
     pub fn ports(&self) -> Result<RuntimePorts> {
-        self.action(json!({"command": "ports"}), |service| service.ports())
+        self.action(crate::runtime::DaemonRequest::Ports.to_wire(), |service| {
+            service.ports()
+        })
     }
 
     pub fn approve(&self, id: &str) -> Result<RuntimeApprovalDecision> {
         // Non-idempotent: replays the approved action, so a duplicate run could
         // execute that side effect twice (RC-G/F25).
-        self.action_authed_non_idempotent(json!({"command": "approve", "id": id}), |_service| {
-            RuntimeService::approval_decision(approve_and_replay(id)?)
-        })
+        self.action_authed_non_idempotent(
+            crate::runtime::DaemonRequest::Approve { id: id.to_string() }.to_wire(),
+            |_service| RuntimeService::approval_decision(approve_and_replay(id)?),
+        )
     }
 
     pub fn deny(&self, id: &str) -> Result<RuntimeApprovalDecision> {
-        self.action_authed(json!({"command": "deny", "id": id}), |_service| {
-            RuntimeService::approval_decision(deny_approval(id)?)
-        })
+        self.action_authed(
+            crate::runtime::DaemonRequest::Deny { id: id.to_string() }.to_wire(),
+            |_service| RuntimeService::approval_decision(deny_approval(id)?),
+        )
     }
 
     pub fn restore_checkpoint(&self, id: &str) -> Result<RuntimeCheckpointRestore> {
         // Non-idempotent: rewrites working-tree files from the snapshot — a
         // duplicate run could clobber edits made between the two runs (RC-G/F25).
         self.action_authed_non_idempotent(
-            json!({"command": "restore_checkpoint", "id": id}),
+            crate::runtime::DaemonRequest::RestoreCheckpoint { id: id.to_string() }.to_wire(),
             |_service| {
                 Ok(RuntimeCheckpointRestore {
                     ok: true,
@@ -440,7 +468,11 @@ impl RuntimeClient {
 
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         self.action_authed::<Value, _>(
-            json!({"command": "set_plugin_enabled", "id": id, "enabled": enabled}),
+            crate::runtime::DaemonRequest::SetPluginEnabled {
+                id: id.to_string(),
+                enabled,
+            }
+            .to_wire(),
             |service| {
                 service.set_plugin_enabled(id, enabled)?;
                 Ok(json!({"ok": true}))
@@ -451,14 +483,20 @@ impl RuntimeClient {
 
     pub fn model_info(&self, model: &str) -> Result<Value> {
         self.action(
-            json!({"command": "model_info", "model": model}),
+            crate::runtime::DaemonRequest::ModelInfo {
+                model: model.to_string(),
+            }
+            .to_wire(),
             |service| Ok(json!({"ok": true, "model": service.model_info(model)})),
         )
     }
 
     pub fn set_safety_mode(&self, mode: &str) -> Result<Value> {
         self.action_authed(
-            json!({"command": "set_safety_mode", "mode": mode}),
+            crate::runtime::DaemonRequest::SetSafetyMode {
+                mode: mode.to_string(),
+            }
+            .to_wire(),
             |service| {
                 let safety = service.set_safety_mode(mode)?;
                 Ok(json!({"ok": true, "safety": safety}))

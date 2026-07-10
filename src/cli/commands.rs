@@ -76,8 +76,12 @@ pub async fn handle_command(
             show_tasks(*limit)?;
             Ok(true)
         },
-        Commands::Task { id } => {
-            show_task(id)?;
+        Commands::Task { id, follow } => {
+            if *follow {
+                follow_task(id)?;
+            } else {
+                show_task(id)?;
+            }
             Ok(true)
         },
         Commands::Processes { limit } => {
@@ -1639,15 +1643,64 @@ fn deny(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// `mermaid task <id> --follow`: attach to the daemon's live `RunEvent`
+/// stream for a task and print it as NDJSON until the terminal `result`.
+/// Daemon-only — there is no local fallback (the events only exist while the
+/// daemon executes the run).
+fn follow_task(id: &str) -> Result<()> {
+    let lines = crate::runtime::subscribe_daemon_lines(
+        crate::runtime::DaemonRequest::SubscribeTask {
+            task_id: id.to_string(),
+        }
+        .to_wire(),
+    )
+    .context("mermaid task --follow needs a running daemon (`mermaid daemon start`)")?;
+    let mut saw_any = false;
+    for line in lines {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        // The ack line carries ok:false on unknown task / auth failure.
+        if !saw_any {
+            saw_any = true;
+            let ack: serde_json::Value =
+                serde_json::from_str(line.trim()).context("daemon returned invalid JSON")?;
+            if ack.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+                anyhow::bail!(
+                    "{}",
+                    ack.get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("subscribe failed")
+                );
+            }
+            println!("{}", line.trim());
+            continue;
+        }
+        println!("{}", line.trim());
+        if serde_json::from_str::<serde_json::Value>(line.trim())
+            .ok()
+            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+            .as_deref()
+            == Some("result")
+        {
+            return Ok(());
+        }
+    }
+    if saw_any {
+        anyhow::bail!("stream ended without a result (daemon restarted mid-run?)");
+    }
+    anyhow::bail!("daemon closed the connection without responding");
+}
+
 /// Cancel a daemon task. Cancelling a *running* task must reach the daemon —
 /// it holds the in-flight cancellation tokens. A *queued* task can be
 /// cancelled straight in the local store when no daemon is reachable, since
 /// queued tasks only ever execute via the daemon's claim query.
 fn cancel_task(id: &str) -> Result<()> {
-    match crate::runtime::request_daemon_json(serde_json::json!({
-        "command": "cancel_task",
-        "id": id,
-    })) {
+    match crate::runtime::request_daemon_json(
+        crate::runtime::DaemonRequest::CancelTask { id: id.to_string() }.to_wire(),
+    ) {
         Ok(response) => {
             if response.get("cancelling").and_then(|v| v.as_bool()) == Some(true) {
                 println!("Cancelling {} (running; the agent unwinds gracefully)", id);
