@@ -695,6 +695,89 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 state.ui.history_draft.clear();
             }
         },
+        Msg::BackgroundAgentStarted {
+            agent_id,
+            description,
+        } => {
+            state
+                .runtime
+                .background_agents
+                .push(crate::domain::runtime::BackgroundAgent {
+                    agent_id,
+                    description,
+                    started: std::time::SystemTime::from(state.now),
+                    activity: "running…".to_string(),
+                    tokens: 0,
+                });
+        },
+        Msg::BackgroundAgentProgress {
+            agent_id,
+            activity,
+            tokens,
+        } => {
+            if let Some(agent) = state
+                .runtime
+                .background_agents
+                .iter_mut()
+                .find(|a| a.agent_id == agent_id)
+            {
+                if !activity.is_empty() {
+                    agent.activity = activity;
+                }
+                agent.tokens = tokens;
+            }
+        },
+        Msg::BackgroundAgentFinished {
+            agent_id,
+            description,
+            report,
+            success,
+            usage,
+            tokens,
+            duration_secs,
+        } => {
+            state
+                .runtime
+                .background_agents
+                .retain(|a| a.agent_id != agent_id);
+            // Fold the detached child's spend into the session totals, same
+            // as `handle_tool_finished` does for foreground agent calls.
+            if let Some(usage) = usage.as_ref() {
+                let totals = TokenUsageTotals::from_usage(usage);
+                state.session.cumulative_token_usage.add_assign(totals);
+                state.session.cumulative_tokens = state
+                    .session
+                    .cumulative_tokens
+                    .saturating_add(usage.total_tokens);
+            }
+            let verdict = if success { "finished" } else { "failed" };
+            push_system(
+                &mut state,
+                &mut cmds,
+                format!(
+                    "Background agent '{description}' ({agent_id}) {verdict} — {} tokens, took {duration_secs}s. Report queued.",
+                    super::compaction::format_compact_count(tokens),
+                ),
+            );
+            // Deliver the report through the queued-message path: it submits
+            // immediately if the parent is idle, or after the current turn
+            // ends — exactly like a user-queued prompt.
+            if state.ui.queued_messages.len() >= MAX_QUEUED_MESSAGES {
+                state.ui.queued_messages.pop_front();
+            }
+            state
+                .ui
+                .queued_messages
+                .push_back(super::state::QueuedMessage {
+                    text: format!(
+                        "[background agent '{description}' ({agent_id}) {verdict}]\n{report}"
+                    ),
+                    attachment_ids: Vec::new(),
+                });
+            if matches!(state.turn, TurnState::Idle) {
+                drain_next_queued_message(&mut state);
+            }
+        },
         Msg::OpenImageAt {
             message_index,
             image_index,
@@ -4481,9 +4564,10 @@ fn handle_tool_progress(
                 last.images.get_or_insert_with(Vec::new).push(encoded);
             }
         },
-        // Live subagent activity → the per-call status the status line shows
-        // next to the tool label. Only while the owning turn is executing;
-        // a stale turn's progress must not repopulate a cleared map.
+        // Live subagent activity → the per-call status the agent panel and
+        // status line show next to the tool label. Only while the owning turn
+        // is executing; a stale turn's progress must not repopulate a cleared
+        // map.
         ProgressEvent::SubagentToolCall {
             tool_name, phase, ..
         } if matches!(&state.turn, TurnState::ExecutingTools { id, .. } if *id == turn) => {
@@ -4492,17 +4576,28 @@ fn handle_tool_progress(
                 SubagentPhase::Finished => format!("{tool_name} done"),
                 SubagentPhase::Errored => format!("{tool_name} failed"),
             };
-            state.ui.live_tool_status.insert(call_id, detail);
+            state
+                .ui
+                .live_tool_status
+                .entry(call_id)
+                .or_default()
+                .activity = detail;
         },
-        ProgressEvent::SubagentText(snippet) if matches!(&state.turn, TurnState::ExecutingTools { id, .. } if *id == turn) =>
+        ProgressEvent::SubagentActivity(label) if matches!(&state.turn, TurnState::ExecutingTools { id, .. } if *id == turn) =>
         {
-            let trimmed = snippet.trim();
+            let trimmed = label.trim();
             if !trimmed.is_empty() {
                 state
                     .ui
                     .live_tool_status
-                    .insert(call_id, trimmed.to_string());
+                    .entry(call_id)
+                    .or_default()
+                    .activity = trimmed.to_string();
             }
+        },
+        ProgressEvent::SubagentTokens(tokens) if matches!(&state.turn, TurnState::ExecutingTools { id, .. } if *id == turn) =>
+        {
+            state.ui.live_tool_status.entry(call_id).or_default().tokens = tokens;
         },
         _ => {},
     }
@@ -10499,6 +10594,89 @@ mod tests {
         assert!(cmds.is_empty());
     }
 
+    #[test]
+    fn background_agent_lifecycle_registry_note_queue_and_usage() {
+        // Started: adds a live-panel registry row.
+        let state = fresh_state();
+        let (state, _) = update(
+            state,
+            Msg::BackgroundAgentStarted {
+                agent_id: "a3".to_string(),
+                description: "audit docs".to_string(),
+            },
+        );
+        assert_eq!(state.runtime.background_agents.len(), 1);
+        assert_eq!(state.runtime.background_agents[0].description, "audit docs");
+
+        // Progress: updates activity/tokens on the row.
+        let (state, _) = update(
+            state,
+            Msg::BackgroundAgentProgress {
+                agent_id: "a3".to_string(),
+                activity: "read_file…".to_string(),
+                tokens: 4_200,
+            },
+        );
+        assert_eq!(state.runtime.background_agents[0].activity, "read_file…");
+        assert_eq!(state.runtime.background_agents[0].tokens, 4_200);
+
+        // Finished while IDLE: row removed, usage folded into session totals,
+        // and the report auto-submits through the queued-message path (the
+        // outer update() drains pending_msgs, so the turn starts immediately).
+        let tokens_before = state.session.cumulative_tokens;
+        let (state, _) = update(
+            state,
+            Msg::BackgroundAgentFinished {
+                agent_id: "a3".to_string(),
+                description: "audit docs".to_string(),
+                report: "docs are fine".to_string(),
+                success: true,
+                usage: Some(crate::models::TokenUsage::provider(70_000, 20_000, 90_000)),
+                tokens: 90_000,
+                duration_secs: 61,
+            },
+        );
+        assert!(state.runtime.background_agents.is_empty());
+        assert_eq!(state.session.cumulative_tokens, tokens_before + 90_000);
+        assert!(
+            !matches!(state.turn, TurnState::Idle),
+            "idle delivery must auto-submit the report"
+        );
+        let last_user = state
+            .session
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::models::MessageRole::User)
+            .expect("report submitted as a user message");
+        assert!(last_user.content.contains("docs are fine"));
+        assert!(last_user.content.contains("background agent 'audit docs'"));
+    }
+
+    #[test]
+    fn background_agent_report_waits_in_queue_while_a_turn_runs() {
+        let (state, _call_id) = state_executing_agent_call();
+        let (state, _) = update(
+            state,
+            Msg::BackgroundAgentFinished {
+                agent_id: "a9".to_string(),
+                description: "security sweep".to_string(),
+                report: "no findings".to_string(),
+                success: true,
+                usage: None,
+                tokens: 1_000,
+                duration_secs: 5,
+            },
+        );
+        // Busy turn: the report queues instead of interrupting.
+        assert_eq!(state.ui.queued_messages.len(), 1);
+        assert!(
+            state.ui.queued_messages[0].text.contains("no findings"),
+            "queued report carries the child's output"
+        );
+        assert!(matches!(state.turn, TurnState::ExecutingTools { .. }));
+    }
+
     /// Build a one-call ExecutingTools state around an `agent` tool call,
     /// shared by the subagent progress/rollup tests below.
     fn state_executing_agent_call() -> (State, super::super::ids::ToolCallId) {
@@ -10543,22 +10721,38 @@ mod tests {
             },
         );
         assert_eq!(
-            state.ui.live_tool_status.get(&call_id).map(String::as_str),
+            state
+                .ui
+                .live_tool_status
+                .get(&call_id)
+                .map(|s| s.activity.as_str()),
             Some("read_file…"),
         );
 
-        // Child assistant text overwrites it with the latest snippet.
+        // Coarse phase changes overwrite the activity; token counts land on
+        // the same entry without touching it.
         let (state, _) = update(
             state,
             Msg::ToolProgress {
                 turn: TurnId(3),
                 call_id,
-                event: ProgressEvent::SubagentText("scanning crates".to_string()),
+                event: ProgressEvent::SubagentActivity("thinking".to_string()),
+            },
+        );
+        let (state, _) = update(
+            state,
+            Msg::ToolProgress {
+                turn: TurnId(3),
+                call_id,
+                event: ProgressEvent::SubagentTokens(1234),
             },
         );
         assert_eq!(
-            state.ui.live_tool_status.get(&call_id).map(String::as_str),
-            Some("scanning crates"),
+            state.ui.live_tool_status.get(&call_id),
+            Some(&crate::domain::LiveToolStatus {
+                activity: "thinking".to_string(),
+                tokens: 1234,
+            }),
         );
 
         // Progress for a stale turn must not touch the live map.
@@ -10567,12 +10761,24 @@ mod tests {
             Msg::ToolProgress {
                 turn: TurnId(999),
                 call_id,
-                event: ProgressEvent::SubagentText("late straggler".to_string()),
+                event: ProgressEvent::SubagentActivity("late straggler".to_string()),
+            },
+        );
+        let (state, _) = update(
+            state,
+            Msg::ToolProgress {
+                turn: TurnId(999),
+                call_id,
+                event: ProgressEvent::SubagentTokens(9_999_999),
             },
         );
         assert_eq!(
-            state.ui.live_tool_status.get(&call_id).map(String::as_str),
-            Some("scanning crates"),
+            state
+                .ui
+                .live_tool_status
+                .get(&call_id)
+                .map(|s| (s.activity.as_str(), s.tokens)),
+            Some(("thinking", 1234)),
         );
 
         // The call finishing removes its entry (and here ends the turn).

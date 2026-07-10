@@ -342,6 +342,36 @@ pub enum Msg {
         text: Option<String>,
     },
 
+    // ── Background subagents (Ctrl+B detach) ───────────────────────
+    /// A subagent was detached from its turn via Ctrl+B and keeps running
+    /// in its own task. Adds a row to the live agent panel registry.
+    BackgroundAgentStarted {
+        agent_id: String,
+        description: String,
+    },
+    /// Throttled live activity from a detached subagent (same discipline as
+    /// `ProgressEvent::Subagent*` — never per stream chunk).
+    BackgroundAgentProgress {
+        agent_id: String,
+        activity: String,
+        tokens: usize,
+    },
+    /// A detached subagent finished. Removes its panel row, folds the child's
+    /// spend into the session totals, and delivers the report to the model
+    /// via the queued-message path.
+    BackgroundAgentFinished {
+        agent_id: String,
+        description: String,
+        report: String,
+        success: bool,
+        /// Provider-reported usage for the child's whole drive (None when the
+        /// provider reported nothing — the display falls back to `tokens`).
+        usage: Option<TokenUsage>,
+        /// Display token count (usage total, or the live estimate).
+        tokens: usize,
+        duration_secs: u64,
+    },
+
     // ── Mouse (F13) ─────────────────────────────────────────────────
     /// Mouse-wheel scroll in the chat pane. Positive delta = scroll
     /// toward older messages (up), negative = toward newer (down). The
@@ -640,6 +670,9 @@ impl Msg {
             Msg::OpenImageAt { .. } => MsgKind::OpenImageAt,
             Msg::TransientStatus { .. } => MsgKind::TransientStatus,
             Msg::EditorReturned { .. } => MsgKind::EditorReturned,
+            Msg::BackgroundAgentStarted { .. }
+            | Msg::BackgroundAgentProgress { .. }
+            | Msg::BackgroundAgentFinished { .. } => MsgKind::BackgroundAgent,
             Msg::CopySelection(_) => MsgKind::CopySelection,
         }
     }
@@ -690,6 +723,7 @@ pub enum MsgKind {
     Resize,
     MouseScroll,
     FocusChanged,
+    BackgroundAgent,
     OpenImageAt,
     TransientStatus,
     EditorReturned,

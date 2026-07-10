@@ -186,14 +186,18 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             TurnState::Idle => 0,
         };
         let active_tool = active_tool_label(state);
+        let (agent_rows, status_override, bg_available) = agent_panel_data(state);
         // Live, char-based estimate of tokens generated so far this run (answer +
         // thinking), accumulated across tool steps via `run_committed_tokens` so it
-        // doesn't reset each model call. Marked estimated (`~`); the authoritative
-        // count lands in the footer once the turn's `Done` usage arrives.
+        // doesn't reset each model call — while tools run, running subagents'
+        // throttled live counts ride on top so the counter keeps climbing
+        // instead of freezing for the whole child run. Marked estimated (`~`);
+        // the authoritative count lands in the footer once usage arrives.
         let committed = state.runtime.run_committed_tokens;
+        let live_child_tokens: usize = state.ui.live_tool_status.values().map(|l| l.tokens).sum();
         let (tokens_display, tokens_estimated) = match &state.turn {
             TurnState::Generating { tokens, .. } => (committed + *tokens, true),
-            TurnState::ExecutingTools { .. } => (committed, true),
+            TurnState::ExecutingTools { .. } => (committed + live_child_tokens, true),
             _ => (0, false),
         };
         build_status_lines(
@@ -202,10 +206,31 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             tokens_display,
             tokens_estimated,
             active_tool.as_deref(),
+            status_override.as_deref(),
+            &agent_rows,
+            bg_available,
             &state.ui.queued_messages,
             exit_armed(state),
             &rstate.theme,
             // Match the 1-cell horizontal pad the status zone is rendered with.
+            frame.area().width.saturating_sub(2),
+        )
+    } else if !state.runtime.background_agents.is_empty() {
+        // Idle, but detached background agents are still running: keep their
+        // rows visible between turns (no spinner head).
+        let (agent_rows, _, _) = agent_panel_data(state);
+        build_status_lines(
+            GenerationStatus::Idle,
+            0,
+            0,
+            false,
+            None,
+            None,
+            &agent_rows,
+            false,
+            &state.ui.queued_messages,
+            exit_armed(state),
+            &rstate.theme,
             frame.area().width.saturating_sub(2),
         )
     } else {
@@ -218,7 +243,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // trailing Length zones would otherwise starve before the Min(10) chat zone.)
     let status_reserve = 10 + input_height + 2;
     let status_line_height = (status_lines.len() as u16)
-        .min(6)
+        .min(14)
         .min(frame.area().height.saturating_sub(status_reserve));
 
     // Bottom region: one of three widgets based on UI mode.
@@ -706,40 +731,103 @@ fn rewind_armed(state: &State) -> bool {
         .is_some_and(|armed| (state.now - armed) <= chrono::Duration::milliseconds(1000))
 }
 
-/// While tools run, name the first in-flight one so the status line isn't an
-/// opaque "Running tools…". In-flight = the call slots without an outcome.
-/// When the reducer holds live per-call activity (a subagent's current tool /
-/// latest text, from `Msg::ToolProgress`), it is appended after the label so
-/// a long-running child is never a silent spinner.
+/// While tools run, name the first in-flight NON-AGENT one so the status line
+/// isn't an opaque "Running tools…" (agent calls get their own panel rows —
+/// see `agent_panel_data` — and are skipped here). When the reducer holds live
+/// per-call activity (from `Msg::ToolProgress`), its stable label is appended
+/// so a long-running tool is never a silent spinner.
 fn active_tool_label(state: &State) -> Option<String> {
     match &state.turn {
         TurnState::ExecutingTools {
             calls, outcomes, ..
         } => {
-            let pending = outcomes.iter().filter(|o| o.is_none()).count();
-            calls
+            let mut pending_other = calls
                 .iter()
                 .zip(outcomes)
-                .find(|(_, o)| o.is_none())
-                .map(|(call, _)| {
-                    let (action, target) = crate::domain::display_info_for(call);
-                    let mut label = if target.is_empty() {
-                        action
-                    } else {
-                        format!("{action} {target}")
-                    };
-                    if let Some(live) = state.ui.live_tool_status.get(&call.call_id) {
-                        label = format!("{label} · {live}");
-                    }
-                    if pending > 1 {
-                        format!("{label} (+{} more)", pending - 1)
-                    } else {
-                        label
-                    }
-                })
+                .filter(|(call, o)| o.is_none() && call.source.function.name != "agent");
+            let first = pending_other.next()?;
+            let extra = pending_other.count();
+            let (call, _) = first;
+            let (action, target) = crate::domain::display_info_for(call);
+            let mut label = if target.is_empty() {
+                action
+            } else {
+                format!("{action} {target}")
+            };
+            if let Some(live) = state.ui.live_tool_status.get(&call.call_id)
+                && !live.activity.is_empty()
+            {
+                label = format!("{label} · {}", live.activity);
+            }
+            Some(if extra > 0 {
+                format!("{label} (+{extra} more)")
+            } else {
+                label
+            })
         },
         _ => None,
     }
+}
+
+/// Data for the live agent panel + the status-line adjustments it implies:
+/// one `AgentPanelRow` per in-flight `agent` call (plus every detached
+/// background agent), a status override ("Running N agents") when agents are
+/// the only pending work, and whether anything running can honor Ctrl+B.
+fn agent_panel_data(state: &State) -> (Vec<widgets::AgentPanelRow>, Option<String>, bool) {
+    let now_sys = std::time::SystemTime::from(state.now);
+    let elapsed_since =
+        |t: std::time::SystemTime| now_sys.duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
+
+    let mut rows = Vec::new();
+    let mut running_agents = 0usize;
+    let mut pending_total = 0usize;
+    let mut bg_available = false;
+    if let TurnState::ExecutingTools {
+        calls,
+        outcomes,
+        started,
+        ..
+    } = &state.turn
+    {
+        let elapsed = elapsed_since(*started);
+        for (call, _) in calls.iter().zip(outcomes).filter(|(_, o)| o.is_none()) {
+            pending_total += 1;
+            let name = call.source.function.name.as_str();
+            if name == "execute_command" || name == "agent" {
+                bg_available = true;
+            }
+            if name != "agent" {
+                continue;
+            }
+            running_agents += 1;
+            let (_, description) = crate::domain::display_info_for(call);
+            let live = state.ui.live_tool_status.get(&call.call_id);
+            rows.push(widgets::AgentPanelRow {
+                description,
+                activity: live.map(|l| l.activity.clone()).unwrap_or_default(),
+                tokens: live.map_or(0, |l| l.tokens),
+                elapsed_secs: elapsed,
+                backgrounded: false,
+            });
+        }
+    }
+    for agent in &state.runtime.background_agents {
+        rows.push(widgets::AgentPanelRow {
+            description: agent.description.clone(),
+            activity: agent.activity.clone(),
+            tokens: agent.tokens,
+            elapsed_secs: elapsed_since(agent.started),
+            backgrounded: true,
+        });
+    }
+    let status_override = (running_agents > 0 && running_agents == pending_total).then(|| {
+        if running_agents == 1 {
+            "Running 1 agent".to_string()
+        } else {
+            format!("Running {running_agents} agents")
+        }
+    });
+    (rows, status_override, bg_available)
 }
 
 /// Future hook: consult `ProviderFactory` for per-model capabilities.
@@ -848,8 +936,8 @@ mod tests {
     }
 
     #[test]
-    fn active_tool_label_appends_live_subagent_status() {
-        use crate::domain::{PendingToolCall, ToolCallId, TurnId};
+    fn agent_calls_get_panel_rows_and_a_calm_status_override() {
+        use crate::domain::{LiveToolStatus, PendingToolCall, ToolCallId, TurnId};
 
         let mut state = mock_state();
         let call_id = ToolCallId(7);
@@ -868,23 +956,80 @@ mod tests {
             }],
             outcomes: vec![None],
         };
-
-        // Without live status: just the tool label.
-        assert_eq!(
-            active_tool_label(&state).as_deref(),
-            Some("Agent explore crates"),
+        state.ui.live_tool_status.insert(
+            call_id,
+            LiveToolStatus {
+                activity: "read_file…".to_string(),
+                tokens: 12_300,
+            },
         );
 
-        // With live status: the child's current activity rides along, so a
-        // long-running subagent is never an opaque spinner.
-        state
-            .ui
-            .live_tool_status
-            .insert(call_id, "read_file…".to_string());
-        assert_eq!(
-            active_tool_label(&state).as_deref(),
-            Some("Agent explore crates · read_file…"),
+        // Agent calls never splice into the status line — they get panel rows
+        // (and the "Running N agents" override) instead.
+        assert_eq!(active_tool_label(&state), None);
+        let (rows, override_text, bg_available) = agent_panel_data(&state);
+        assert_eq!(override_text.as_deref(), Some("Running 1 agent"));
+        assert!(bg_available, "agents are detachable via ctrl+b");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].description, "explore crates");
+        assert_eq!(rows[0].activity, "read_file…");
+        assert_eq!(rows[0].tokens, 12_300);
+        assert!(!rows[0].backgrounded);
+    }
+
+    #[test]
+    fn mixed_turn_names_first_non_agent_tool_with_stable_activity() {
+        use crate::domain::{LiveToolStatus, PendingToolCall, ToolCallId, TurnId};
+
+        let mut state = mock_state();
+        let exec_id = ToolCallId(8);
+        let agent_id = ToolCallId(9);
+        let call = |id, name: &str, args| PendingToolCall {
+            call_id: id,
+            source: crate::models::tool_call::ToolCall {
+                id: None,
+                function: crate::models::tool_call::FunctionCall {
+                    name: name.to_string(),
+                    arguments: args,
+                },
+            },
+        };
+        state.turn = TurnState::ExecutingTools {
+            id: TurnId(1),
+            started: std::time::SystemTime::now(),
+            calls: vec![
+                call(
+                    exec_id,
+                    "execute_command",
+                    serde_json::json!({"command": "cargo test"}),
+                ),
+                call(
+                    agent_id,
+                    "agent",
+                    serde_json::json!({"description": "audit docs"}),
+                ),
+            ],
+            outcomes: vec![None, None],
+        };
+        state.ui.live_tool_status.insert(
+            exec_id,
+            LiveToolStatus {
+                activity: String::new(),
+                tokens: 0,
+            },
         );
+
+        // The shell command is named (no "(+1 more)" for the agent — it has
+        // its own panel row); no override since agents aren't the only work.
+        let label = active_tool_label(&state).expect("non-agent tool is named");
+        assert!(label.starts_with("Bash"), "unexpected label: {label}");
+        assert!(
+            !label.contains("more"),
+            "agents don't count as (+N more): {label}"
+        );
+        let (rows, override_text, _) = agent_panel_data(&state);
+        assert_eq!(override_text, None);
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]

@@ -522,10 +522,11 @@ impl ToolExecutor for SubagentTool {
             &config.web,
         );
 
-        // Child runner rooted at parent's scope child token. When
-        // parent cancels, `child_token.cancelled()` fires and the
-        // child's subprocess + model streams abort.
-        let child_token = ctx.token.child_token();
+        // Child cancel token OWNED here rather than derived from the turn's
+        // token: a Ctrl+B detach must sever the child from the turn scope
+        // (a derived token would die with the turn). Parent cancellation is
+        // forwarded explicitly in the select below.
+        let child_cancel = CancellationToken::new();
         let (child_tx, child_rx) = mpsc::channel(MSG_CHANNEL_CAPACITY);
         let child_runner =
             EffectRunner::new_child(child_tx, cwd, self.spawner.providers.clone(), child_tools);
@@ -537,65 +538,257 @@ impl ToolExecutor for SubagentTool {
             0 => DEFAULT_TIMEOUT_SECS,
             secs => secs,
         };
-        let (result, mut final_state) = drive_child(
+        // Child progress flows through a local channel so a Ctrl+B detach can
+        // re-route it (turn progress channel → turn-independent notify Msgs).
+        let (child_progress_tx, mut child_progress_rx) = mpsc::channel::<ProgressEvent>(16);
+        let mut drive = Box::pin(drive_child(
             child_state,
             child_runner,
             child_rx,
-            ctx.progress.clone(),
+            child_progress_tx,
             prompt,
-            description.clone(),
-            child_token,
+            child_cancel.clone(),
             Duration::from_secs(timeout_secs),
-        )
-        .await;
+        ));
+
+        let mut progress_open = true;
+        let (result, final_state) = loop {
+            tokio::select! {
+                biased;
+                _ = ctx.token.cancelled() => {
+                    // Parent turn cancelled (Esc): stop the child, then await
+                    // its orderly shutdown — the returned state still carries
+                    // the usage this drive burned.
+                    child_cancel.cancel();
+                    break drive.await;
+                },
+                _ = ctx.background.cancelled() => {
+                    // Ctrl+B: detach. The child keeps running in its own task
+                    // (holding its breadth permit), the turn gets an immediate
+                    // outcome, and the report arrives later through
+                    // `Msg::BackgroundAgentFinished`.
+                    return self.detach_child(DetachArgs {
+                        drive,
+                        progress_rx: child_progress_rx,
+                        permit,
+                        notify: ctx.notify.clone(),
+                        agent_id,
+                        description,
+                        type_name: agent_type.name.clone(),
+                        child_model_id,
+                        usage_before,
+                        timeout_secs,
+                        started,
+                    });
+                },
+                ev = child_progress_rx.recv(), if progress_open => match ev {
+                    Some(ev) => { let _ = ctx.progress.send(ev).await; },
+                    None => progress_open = false,
+                },
+                r = &mut drive => break r,
+            }
+        };
         drop(permit);
 
-        let child_usage = usage_delta(final_state.session.cumulative_token_usage, usage_before);
+        finish_drive(
+            &self.spawner,
+            agent_type.name.clone(),
+            agent_id,
+            &description,
+            child_model_id,
+            usage_before,
+            timeout_secs,
+            started,
+            result,
+            final_state,
+        )
+    }
+}
 
-        // Keep the child for follow-ups unless the parent cancelled (that
-        // turn is being torn down). Timeout/error children are kept too —
-        // "continue a3: what did you find so far?" is exactly the follow-up
-        // a timeout invites. Normalize the turn first: the child's runner is
-        // gone, so a mid-turn state could never complete — a continuation
-        // must be able to seed a fresh prompt into an Idle child.
-        if !matches!(result, Err(DriveError::Cancelled)) {
-            final_state.turn = TurnState::Idle;
-            final_state.ui.queued_messages.clear();
-            final_state.ui.live_tool_status.clear();
-            final_state.pending_approval.clear();
-            self.spawner.cache_store(
-                agent_id.clone(),
-                CachedAgent {
-                    state: final_state,
-                    type_name: agent_type.name.clone(),
-                },
+/// Everything a Ctrl+B detach hands off to the background task. Bundled so
+/// the handoff reads as one unit instead of a 11-argument call.
+struct DetachArgs<F> {
+    drive: std::pin::Pin<Box<F>>,
+    progress_rx: mpsc::Receiver<ProgressEvent>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    notify: Option<mpsc::Sender<Msg>>,
+    agent_id: String,
+    description: String,
+    type_name: String,
+    child_model_id: String,
+    usage_before: TokenUsageTotals,
+    timeout_secs: u64,
+    started: Instant,
+}
+
+impl SubagentTool {
+    /// Detach a running child from its turn: keep driving it in a spawned
+    /// task, translate its progress into `Msg::BackgroundAgent*` (the turn's
+    /// progress relay dies with the turn), and deliver the finished report
+    /// through the queued-message path. Returns the immediate outcome the
+    /// releasing turn reports to the model.
+    fn detach_child<F>(&self, args: DetachArgs<F>) -> ToolOutcome
+    where
+        F: std::future::Future<Output = (Result<String, DriveError>, State)> + Send + 'static,
+    {
+        let DetachArgs {
+            mut drive,
+            mut progress_rx,
+            permit,
+            notify,
+            agent_id,
+            description,
+            type_name,
+            child_model_id,
+            usage_before,
+            timeout_secs,
+            started,
+        } = args;
+        if let Some(notify) = &notify {
+            let _ = notify.try_send(Msg::BackgroundAgentStarted {
+                agent_id: agent_id.clone(),
+                description: description.clone(),
+            });
+        }
+        let spawner = self.spawner.clone();
+        let outcome_text = format!(
+            "Agent '{description}' ({agent_id}) moved to background — it keeps running and \
+             its report will be posted to the conversation when it finishes."
+        );
+        let (bg_agent_id, bg_description) = (agent_id, description);
+        tokio::spawn(async move {
+            // Hold the breadth permit for the child's whole life — detached
+            // agents still consume real provider capacity.
+            let _permit = permit;
+            let mut activity = String::new();
+            let mut tokens = 0usize;
+            let mut progress_open = true;
+            let (result, final_state) = loop {
+                tokio::select! {
+                    ev = progress_rx.recv(), if progress_open => match ev {
+                        Some(ev) => {
+                            match &ev {
+                                ProgressEvent::SubagentToolCall { tool_name, phase, .. } => {
+                                    activity = match phase {
+                                        SubagentPhase::Started => format!("{tool_name}…"),
+                                        SubagentPhase::Finished => format!("{tool_name} done"),
+                                        SubagentPhase::Errored => format!("{tool_name} failed"),
+                                    };
+                                },
+                                ProgressEvent::SubagentActivity(label) => activity = label.clone(),
+                                ProgressEvent::SubagentTokens(count) => tokens = *count,
+                                _ => continue,
+                            }
+                            if let Some(notify) = &notify {
+                                let _ = notify.try_send(Msg::BackgroundAgentProgress {
+                                    agent_id: bg_agent_id.clone(),
+                                    activity: activity.clone(),
+                                    tokens,
+                                });
+                            }
+                        },
+                        None => progress_open = false,
+                    },
+                    r = &mut drive => break r,
+                }
+            };
+            let outcome = finish_drive(
+                &spawner,
+                type_name,
+                bg_agent_id.clone(),
+                &bg_description,
+                child_model_id,
+                usage_before,
+                timeout_secs,
+                started,
+                result,
+                final_state,
             );
-        }
+            if let Some(notify) = notify {
+                let usage = outcome.metadata.token_usage.clone();
+                let tokens_total = usage.as_ref().map_or(tokens, |u| u.total_tokens);
+                let _ = notify
+                    .send(Msg::BackgroundAgentFinished {
+                        agent_id: bg_agent_id,
+                        description: bg_description,
+                        report: outcome.model_content.clone(),
+                        success: outcome.is_success(),
+                        usage,
+                        tokens: tokens_total,
+                        duration_secs: started.elapsed().as_secs(),
+                    })
+                    .await;
+            }
+        });
+        ToolOutcome::success(
+            outcome_text,
+            "subagent backgrounded",
+            started.elapsed().as_secs_f64(),
+        )
+    }
+}
 
-        let elapsed = started.elapsed().as_secs_f64();
-        let trailer = format!("[agent_id: {agent_id} — pass agent_id to continue this child]");
-        let metadata = subagent_metadata(child_model_id, child_usage, agent_id);
-        match result {
-            Ok(summary) => ToolOutcome::success(
-                format!("{summary}\n\n{trailer}"),
-                "subagent completed",
-                elapsed,
-            )
-            .with_metadata(metadata),
-            Err(DriveError::Cancelled) => ToolOutcome::cancelled(),
-            Err(DriveError::TimedOut) => ToolOutcome::error(
-                format!(
-                    "subagent ({description}) exceeded {timeout_secs}s timeout; its context \
-                     is preserved — {trailer}"
-                ),
-                elapsed,
-            )
-            .with_metadata(metadata),
-            Err(DriveError::Errored(e)) => {
-                ToolOutcome::error(format!("subagent ({description}): {e} {trailer}"), elapsed)
-                    .with_metadata(metadata)
+/// Shared post-drive processing for foreground and detached children: cache
+/// the child for continuations (unless cancelled), roll up this drive's
+/// usage, and shape the model-facing outcome.
+#[allow(clippy::too_many_arguments)]
+fn finish_drive(
+    spawner: &SubagentSpawner,
+    type_name: String,
+    agent_id: String,
+    description: &str,
+    child_model_id: String,
+    usage_before: TokenUsageTotals,
+    timeout_secs: u64,
+    started: Instant,
+    result: Result<String, DriveError>,
+    mut final_state: State,
+) -> ToolOutcome {
+    let child_usage = usage_delta(final_state.session.cumulative_token_usage, usage_before);
+
+    // Keep the child for follow-ups unless the parent cancelled (that
+    // turn is being torn down). Timeout/error children are kept too —
+    // "continue a3: what did you find so far?" is exactly the follow-up
+    // a timeout invites. Normalize the turn first: the child's runner is
+    // gone, so a mid-turn state could never complete — a continuation
+    // must be able to seed a fresh prompt into an Idle child.
+    if !matches!(result, Err(DriveError::Cancelled)) {
+        final_state.turn = TurnState::Idle;
+        final_state.ui.queued_messages.clear();
+        final_state.ui.live_tool_status.clear();
+        final_state.pending_approval.clear();
+        spawner.cache_store(
+            agent_id.clone(),
+            CachedAgent {
+                state: final_state,
+                type_name,
             },
-        }
+        );
+    }
+
+    let elapsed = started.elapsed().as_secs_f64();
+    let trailer = format!("[agent_id: {agent_id} — pass agent_id to continue this child]");
+    let metadata = subagent_metadata(child_model_id, child_usage, agent_id);
+    match result {
+        Ok(summary) => ToolOutcome::success(
+            format!("{summary}\n\n{trailer}"),
+            "subagent completed",
+            elapsed,
+        )
+        .with_metadata(metadata),
+        Err(DriveError::Cancelled) => ToolOutcome::cancelled(),
+        Err(DriveError::TimedOut) => ToolOutcome::error(
+            format!(
+                "subagent ({description}) exceeded {timeout_secs}s timeout; its context \
+                 is preserved — {trailer}"
+            ),
+            elapsed,
+        )
+        .with_metadata(metadata),
+        Err(DriveError::Errored(e)) => {
+            ToolOutcome::error(format!("subagent ({description}): {e} {trailer}"), elapsed)
+                .with_metadata(metadata)
+        },
     }
 }
 
@@ -657,29 +850,25 @@ enum DriveError {
 }
 
 /// Drive the child's reducer loop to `Idle`, bounded by `timeout`. Forwards
-/// child `ToolStarted` / `ToolFinished` / `StreamText` events to the
-/// parent's progress channel as `ProgressEvent::Subagent*`. Returns the
-/// child's final report alongside its full `State` — returned on EVERY exit
-/// path so the caller can roll up the usage (real spend regardless of how
-/// the child ended) and cache the context for continuations.
-#[allow(clippy::too_many_arguments)]
+/// stable child activity (tool calls, coarse phase changes, throttled token
+/// counts — never raw stream text) to the parent's progress channel as
+/// `ProgressEvent::Subagent*`. Returns the child's final report alongside its
+/// full `State` — returned on EVERY exit path so the caller can roll up the
+/// usage (real spend regardless of how the child ended) and cache the context
+/// for continuations.
 async fn drive_child(
     mut state: State,
     mut runner: EffectRunner,
     mut msg_rx: mpsc::Receiver<Msg>,
     parent_progress: mpsc::Sender<ProgressEvent>,
     prompt: String,
-    description: String,
     token: CancellationToken,
     timeout: Duration,
 ) -> (Result<String, DriveError>, State) {
-    // Signal start to parent.
+    // Signal start to parent. One stable label — the prompt itself never
+    // belongs on the parent's status line.
     let _ = parent_progress
-        .send(ProgressEvent::SubagentText(format!(
-            "{} — {}",
-            description,
-            prompt.chars().take(80).collect::<String>()
-        )))
+        .send(ProgressEvent::SubagentActivity("starting…".to_string()))
         .await;
 
     // Project instructions + memory are loaded synchronously into `state` before
@@ -707,6 +896,7 @@ async fn drive_child(
     tokio::pin!(deadline);
 
     let mut outcome: Result<(), DriveError> = Ok(());
+    let mut child_progress = ChildProgress::new(tokio::time::Instant::now());
     loop {
         if token.is_cancelled() {
             outcome = Err(DriveError::Cancelled);
@@ -735,7 +925,9 @@ async fn drive_child(
         // Forward child activity to parent progress BEFORE the
         // reducer mutates state (we want `call_id` + `tool_name`
         // semantic info, which reducer events strip).
-        forward_child_event(&msg, &parent_progress, &state).await;
+        for event in child_progress.observe(&msg, &state, tokio::time::Instant::now()) {
+            let _ = parent_progress.send(event).await;
+        }
 
         let (new_state, cmds) = update(state, msg);
         state = new_state;
@@ -777,52 +969,125 @@ async fn drive_child(
     (Ok(summary), state)
 }
 
-/// Translate child-scope `Msg` events into parent-scope
-/// `ProgressEvent::Subagent*`. Flat mapping, never recursive — the
-/// parent reducer just sees "a tool started / finished / said
-/// something" with the child's call identity.
-async fn forward_child_event(msg: &Msg, progress: &mpsc::Sender<ProgressEvent>, state: &State) {
-    match msg {
-        Msg::ToolStarted {
-            turn: _, call_id, ..
-        } => {
-            let tool_name = lookup_tool_name(state, *call_id).unwrap_or_else(|| "tool".to_string());
-            let _ = progress
-                .send(ProgressEvent::SubagentToolCall {
+/// Minimum spacing between `SubagentTokens` progress events. Anything faster
+/// is invisible churn: the parent redraws at most a few times a second and
+/// per-chunk updates were the source of the status-line flicker.
+const TOKEN_PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Translates child-scope `Msg` events into the parent-facing
+/// `ProgressEvent::Subagent*` vocabulary — a pure state machine so the
+/// calm-down rules are unit-testable:
+///
+/// - tool starts/finishes forward as `SubagentToolCall` (stable labels);
+/// - stream chunks NEVER forward text — they only flip a coarse phase
+///   ("thinking"/"replying"), emitted once per phase CHANGE;
+/// - output tokens accumulate as a chars/4 estimate, snapped to the
+///   provider-reported count on `StreamDone`, and emit as `SubagentTokens`
+///   at most every `TOKEN_PROGRESS_INTERVAL` (piggybacking on other events
+///   so a busy child still reads fresh).
+struct ChildProgress {
+    phase: &'static str,
+    /// Provider-confirmed output tokens from the child's completed model calls.
+    confirmed_tokens: usize,
+    /// Character count of the in-flight stream (reset when `StreamDone` snaps
+    /// to the provider-reported figure).
+    streamed_chars: usize,
+    last_tokens_sent: usize,
+    last_tokens_at: tokio::time::Instant,
+}
+
+impl ChildProgress {
+    fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            phase: "",
+            confirmed_tokens: 0,
+            streamed_chars: 0,
+            last_tokens_sent: 0,
+            last_tokens_at: now,
+        }
+    }
+
+    fn total_tokens(&self) -> usize {
+        self.confirmed_tokens + self.streamed_chars / 4
+    }
+
+    /// Observe one child `Msg`; returns the progress events the parent
+    /// should see (usually none).
+    fn observe(
+        &mut self,
+        msg: &Msg,
+        state: &State,
+        now: tokio::time::Instant,
+    ) -> Vec<ProgressEvent> {
+        let mut out = Vec::new();
+        match msg {
+            Msg::ToolStarted {
+                turn: _, call_id, ..
+            } => {
+                let tool_name =
+                    lookup_tool_name(state, *call_id).unwrap_or_else(|| "tool".to_string());
+                out.push(ProgressEvent::SubagentToolCall {
                     child_call_id: *call_id,
                     tool_name,
                     phase: SubagentPhase::Started,
-                })
-                .await;
-        },
-        Msg::ToolFinished {
-            turn: _,
-            call_id,
-            outcome,
-        } => {
-            let tool_name = lookup_tool_name(state, *call_id).unwrap_or_else(|| "tool".to_string());
-            let phase = if outcome.is_success() {
-                SubagentPhase::Finished
-            } else {
-                SubagentPhase::Errored
-            };
-            let _ = progress
-                .send(ProgressEvent::SubagentToolCall {
+                });
+                // Next stream chunk re-announces its phase after the tool.
+                self.phase = "";
+            },
+            Msg::ToolFinished {
+                turn: _,
+                call_id,
+                outcome,
+            } => {
+                let tool_name =
+                    lookup_tool_name(state, *call_id).unwrap_or_else(|| "tool".to_string());
+                let phase = if outcome.is_success() {
+                    SubagentPhase::Finished
+                } else {
+                    SubagentPhase::Errored
+                };
+                out.push(ProgressEvent::SubagentToolCall {
                     child_call_id: *call_id,
                     tool_name,
                     phase,
-                })
-                .await;
-        },
-        Msg::StreamText { chunk, .. } => {
-            // Only forward a compact preview; long assistant text is
-            // overwhelming in the parent's status line.
-            if !chunk.trim().is_empty() {
-                let snippet: String = chunk.chars().take(120).collect();
-                let _ = progress.send(ProgressEvent::SubagentText(snippet)).await;
-            }
-        },
-        _ => {},
+                });
+                self.phase = "";
+            },
+            Msg::StreamReasoning { chunk, .. } => {
+                self.streamed_chars += chunk.text.len();
+                self.set_phase("thinking", &mut out);
+            },
+            Msg::StreamText { chunk, .. } => {
+                self.streamed_chars += chunk.len();
+                self.set_phase("replying", &mut out);
+            },
+            Msg::StreamDone { usage, .. } => {
+                if let Some(usage) = usage {
+                    self.confirmed_tokens += usage
+                        .completion_tokens
+                        .saturating_add(usage.reasoning_output_tokens);
+                    self.streamed_chars = 0;
+                }
+            },
+            _ => {},
+        }
+        // Token count rides along whenever something else is being said, and
+        // otherwise at most every TOKEN_PROGRESS_INTERVAL.
+        let total = self.total_tokens();
+        let due = now.duration_since(self.last_tokens_at) >= TOKEN_PROGRESS_INTERVAL;
+        if total != self.last_tokens_sent && (due || !out.is_empty()) {
+            out.push(ProgressEvent::SubagentTokens(total));
+            self.last_tokens_sent = total;
+            self.last_tokens_at = now;
+        }
+        out
+    }
+
+    fn set_phase(&mut self, phase: &'static str, out: &mut Vec<ProgressEvent>) {
+        if self.phase != phase {
+            self.phase = phase;
+            out.push(ProgressEvent::SubagentActivity(phase.to_string()));
+        }
     }
 }
 
@@ -970,6 +1235,98 @@ mod tests {
     use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use std::path::PathBuf;
+
+    fn test_state() -> State {
+        State::new(
+            crate::app::Config::default(),
+            PathBuf::from("/tmp"),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        )
+    }
+
+    fn stream_text(chunk: &str) -> Msg {
+        Msg::StreamText {
+            turn: TurnId(1),
+            chunk: chunk.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn child_stream_chunks_never_forward_text_only_one_phase_change() {
+        // The status-line flicker regression: every child StreamText chunk
+        // used to become a parent progress event. Now the FIRST chunk flips
+        // the phase ("replying") and subsequent chunks are silent until the
+        // token throttle elapses.
+        let state = test_state();
+        let now = tokio::time::Instant::now();
+        let mut progress = ChildProgress::new(now);
+
+        let first = progress.observe(&stream_text("chunk one — some text"), &state, now);
+        assert!(
+            first.iter().any(
+                |e| matches!(e, ProgressEvent::SubagentActivity(label) if label == "replying")
+            ),
+            "first chunk announces the phase: {first:?}"
+        );
+        assert!(
+            !first
+                .iter()
+                .any(|e| matches!(e, ProgressEvent::SubagentToolCall { .. })),
+            "no raw text ever forwards: {first:?}"
+        );
+
+        // A burst of further chunks inside the throttle window emits NOTHING.
+        for i in 0..50 {
+            let events = progress.observe(&stream_text(&format!("chunk {i}")), &state, now);
+            assert!(
+                events.is_empty(),
+                "chunk {i} must be silent inside the throttle window: {events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn token_estimates_respect_the_throttle_and_snap_to_provider_usage() {
+        let state = test_state();
+        let start = tokio::time::Instant::now();
+        let mut progress = ChildProgress::new(start);
+
+        // First tiny chunk: phase flip only (0 tokens → nothing to report).
+        let _ = progress.observe(&stream_text("xy"), &state, start);
+        // 400 chars ≈ 100 tokens accumulate silently inside the window…
+        let silent = progress.observe(&stream_text(&"x".repeat(400)), &state, start);
+        assert!(
+            silent.is_empty(),
+            "inside the window stays silent: {silent:?}"
+        );
+        // …and flush once the interval has elapsed.
+        let later = start + TOKEN_PROGRESS_INTERVAL;
+        let events = progress.observe(&stream_text("y"), &state, later);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProgressEvent::SubagentTokens(t) if *t >= 100)),
+            "tokens flush after the interval: {events:?}"
+        );
+
+        // StreamDone snaps the estimate to the provider-reported count and
+        // piggybacks... only once the throttle allows again.
+        let done = Msg::StreamDone {
+            turn: TurnId(1),
+            usage: Some(crate::models::TokenUsage::provider(10, 5_000, 5_010)),
+            provider_continuation: None,
+            stop_reason: None,
+        };
+        let much_later = later + TOKEN_PROGRESS_INTERVAL;
+        let events = progress.observe(&done, &state, much_later);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProgressEvent::SubagentTokens(t) if *t >= 5_000)),
+            "provider usage snaps the counter: {events:?}"
+        );
+    }
 
     #[tokio::test]
     async fn empty_prompt_is_rejected() {
