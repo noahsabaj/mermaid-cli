@@ -82,7 +82,7 @@ pub fn event_to_msg(event: CtEvent) -> Option<Msg> {
 /// processed separately.
 ///
 /// A lone keystroke (no burst) returns a normal `Msg::Key`, so Enter still
-/// submits and Shift+Enter still inserts a literal newline.
+/// submits and Ctrl+J still inserts a literal newline.
 pub fn coalesce_key_burst(
     first: CtEvent,
     mut drain: impl FnMut() -> Option<CtEvent>,

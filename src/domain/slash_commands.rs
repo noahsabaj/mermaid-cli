@@ -58,6 +58,7 @@ pub const COMMAND_GROUPS: &[SlashCommandGroup] = &[
 /// sync by hand with the bindings in `reducer::handle_key`. Plain text only.
 pub const KEYBINDINGS: &[(&str, &str)] = &[
     ("Enter", "Submit the prompt"),
+    ("Ctrl+J", "Insert a newline (multi-line input)"),
     ("Esc", "Interrupt the current turn"),
     ("Up / Down", "Browse input history"),
     ("PageUp / PageDown", "Scroll the transcript"),
