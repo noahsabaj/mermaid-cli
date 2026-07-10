@@ -40,6 +40,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commands resolve inside the plugin directory with containment. Same
   restart-to-refresh policy as skills.
 
+- **Live task streaming: `mermaid task <id> --follow`.** Attach to a daemon
+  task's `RunEvent` stream — an ack line, then NDJSON events until the
+  terminal `result`. Subscribing to a still-queued task works (the
+  subscriber holds a receiver on the same channel the executor later uses);
+  an already-finished task gets one synthesized result from the persisted
+  record; slow clients are dropped by a per-write timeout so they can't
+  block the daemon; lagged subscribers get an in-band error event.
+
+### Changed
+
+- **Typed daemon control protocol.** Every `mermaidd` socket command now
+  parses into one exhaustive `DaemonRequest` enum (wire shape unchanged —
+  this is a contract made exhaustive, not a compat shim): a malformed
+  request answers with a serde error naming the field, the auth matrix is
+  compiler-checked per variant, and the CLI client constructs requests from
+  the same enum so a misspelled command is a compile error.
+
+
+- **Kill background agents: `/agents` command + `agent` tool kill action.**
+  `/agents` lists every detached (Ctrl+B backgrounded) subagent with its id,
+  description, live activity, elapsed time, and token count; `/agents kill
+  <id>` cancels one and `/agents kill all` cancels every one. The model can
+  manage its own children too: the `agent` tool now takes `action: "kill"`
+  plus an `agent_id` (killing an already-finished child evicts it from the
+  continuation cache instead). A killed child unwinds orderly, posts a
+  "cancelled" note with its billed token spend folded into the session
+  totals, and — unlike a normally-finished background agent — does not queue
+  its partial report for the model. Closes the follow-up from the agent
+  backgrounding work below.
+
 
 - **Kill background agents: `/agents` command + `agent` tool kill action.**
   `/agents` lists every detached (Ctrl+B backgrounded) subagent with its id,

@@ -130,6 +130,56 @@ pub fn request_daemon_text(line: &str) -> Result<serde_json::Value> {
     }
 }
 
+/// Open a STREAMING daemon connection: send one JSON line, return a
+/// line-iterator over the responses. Used by `subscribe_task`, whose
+/// connection stays open (ack line, then NDJSON events until the terminal
+/// `result`) — `request_daemon_json` reads exactly one line and closes.
+/// `auth.token` is injected from `MERMAID_DAEMON_TOKEN` like the one-shot
+/// path.
+pub fn subscribe_daemon_lines(
+    mut body: serde_json::Value,
+) -> Result<impl Iterator<Item = Result<String>>> {
+    if body.get("auth").is_none()
+        && let Ok(token) = std::env::var(DAEMON_TOKEN_ENV)
+        && !token.trim().is_empty()
+    {
+        body["auth"] = serde_json::json!({ "token": token });
+    }
+    let line = body.to_string();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixStream;
+        let socket = daemon_socket_path()?;
+        let mut stream = UnixStream::connect(&socket)
+            .with_context(|| format!("failed to connect to {}", socket.display()))?;
+        stream.write_all(line.as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+        let reader = BufReader::new(stream);
+        Ok(reader.lines().map(|l| l.map_err(anyhow::Error::from)))
+    }
+
+    #[cfg(windows)]
+    {
+        let pipe_name = daemon_pipe_name()?;
+        let mut stream = open_daemon_pipe(&pipe_name)?;
+        stream.write_all(line.as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+        let reader = BufReader::new(stream);
+        Ok(reader.lines().map(|l| l.map_err(anyhow::Error::from)))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = line;
+        anyhow::bail!("daemon IPC supports Unix sockets and Windows named pipes only");
+        #[allow(unreachable_code)]
+        Ok(std::iter::empty().map(|(): ()| unreachable!()))
+    }
+}
+
 /// Name of the per-user daemon control pipe for `sid`. Namespaced by the
 /// user's SID so two users on one machine get distinct pipes (the analog of
 /// the unix socket living in a per-user data dir) — the ACL from

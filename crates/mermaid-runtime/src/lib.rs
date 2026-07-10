@@ -40,7 +40,7 @@ pub use checkpoint::{
 pub use daemon::{
     DEFAULT_PAIRING_TTL_DAYS, clamp_pairing_ttl_days, daemon_socket_path, generate_pairing_token,
     hash_pairing_token, pairing_expiry_from_now, request_daemon_json, request_daemon_text,
-    snapshot_field_from_daemon,
+    snapshot_field_from_daemon, subscribe_daemon_lines,
 };
 pub use pathguard::{
     OpenIntent, create_dir_all_beneath, open_beneath, remove_file_beneath, write_atomic_beneath,

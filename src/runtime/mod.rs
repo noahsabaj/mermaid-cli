@@ -6,6 +6,8 @@
 //! flag-day import rewrite.
 
 pub mod client;
+pub mod protocol;
 
 pub use client::*;
 pub use mermaid_runtime::*;
+pub use protocol::DaemonRequest;

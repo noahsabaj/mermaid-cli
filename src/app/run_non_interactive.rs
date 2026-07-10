@@ -71,6 +71,10 @@ pub struct RunOptions {
     /// native constrained output where supported) reshapes the final answer,
     /// validated client-side. See `run_formatting_turn`.
     pub output_schema: Option<serde_json::Value>,
+    /// Live `RunEvent` tee for daemon task subscriptions (`subscribe_task`).
+    /// Every event that would print on an NDJSON stream is also broadcast
+    /// here (send is sync + non-blocking; no-receiver errors are ignored).
+    pub event_tx: Option<tokio::sync::broadcast::Sender<crate::domain::RunEvent>>,
 }
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
@@ -154,15 +158,20 @@ pub async fn run_non_interactive_with(
         ));
     }
 
-    // First line of the NDJSON stream: protocol + run identity.
+    // First line of the NDJSON stream: protocol + run identity. Broadcast
+    // to any daemon subscriber regardless of stdout streaming.
+    let started = RunEvent::SessionStarted {
+        protocol_version: RUN_EVENT_PROTOCOL_VERSION,
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        model: event_model,
+        task_id: opts.task_id.clone(),
+        session_id: session_id.clone(),
+    };
     if stream_ndjson {
-        emit_run_event(&RunEvent::SessionStarted {
-            protocol_version: RUN_EVENT_PROTOCOL_VERSION,
-            cli_version: env!("CARGO_PKG_VERSION").to_string(),
-            model: event_model,
-            task_id: opts.task_id.clone(),
-            session_id: session_id.clone(),
-        });
+        emit_run_event(&started);
+    }
+    if let Some(tx) = &opts.event_tx {
+        let _ = tx.send(started);
     }
 
     // Seed the turn.
@@ -190,6 +199,7 @@ pub async fn run_non_interactive_with(
             &mut lifecycle,
             cancel.as_ref(),
             stream_ndjson,
+            opts.event_tx.as_ref(),
         ),
     )
     .await
@@ -220,6 +230,7 @@ pub async fn run_non_interactive_with(
                     &mut lifecycle,
                     cancel.as_ref(),
                     stream_ndjson,
+                    opts.event_tx.as_ref(),
                 ),
             )
             .await
@@ -234,16 +245,22 @@ pub async fn run_non_interactive_with(
     }
 
     runner.shutdown().await;
-    // Terminal line of the NDJSON stream: the aggregated result.
+    // Terminal line of the stream: the aggregated result — sent to daemon
+    // subscribers even when stdout NDJSON is off (that's how a
+    // `subscribe_task` stream knows to close).
+    let terminal = RunEvent::Result {
+        response: result.response.clone(),
+        reasoning: result.reasoning.clone(),
+        total_tokens: result.total_tokens as u64,
+        errors: result.errors.clone(),
+        session_id: result.session_id.clone(),
+        structured_output: result.structured_output.clone(),
+    };
     if stream_ndjson {
-        emit_run_event(&RunEvent::Result {
-            response: result.response.clone(),
-            reasoning: result.reasoning.clone(),
-            total_tokens: result.total_tokens as u64,
-            errors: result.errors.clone(),
-            session_id: result.session_id.clone(),
-            structured_output: result.structured_output.clone(),
-        });
+        emit_run_event(&terminal);
+    }
+    if let Some(tx) = &opts.event_tx {
+        let _ = tx.send(terminal);
     }
     Ok(result)
 }
@@ -258,6 +275,7 @@ async fn drive_to_idle(
     lifecycle: &mut RuntimeLifecycle,
     cancel: Option<&tokio_util::sync::CancellationToken>,
     stream_ndjson: bool,
+    event_tx: Option<&tokio::sync::broadcast::Sender<RunEvent>>,
 ) -> State {
     /// How long a cancelled run may keep unwinding before the drive loop
     /// hard-stops. Generous next to the turn scope's own ~2s teardown bound.
@@ -310,10 +328,18 @@ async fn drive_to_idle(
         if let Msg::TransientStatus { text } = &msg {
             eprintln!("{text}");
         }
-        // Project the lifecycle message onto the public NDJSON stream before
-        // `update` consumes it. Most messages have no projection.
-        if stream_ndjson && let Some(event) = RunEvent::from_msg(&msg) {
-            emit_run_event(&event);
+        // Project the lifecycle message onto the public stream(s) before
+        // `update` consumes it — projected ONCE, printed and/or broadcast.
+        // Most messages have no projection.
+        if (stream_ndjson || event_tx.is_some())
+            && let Some(event) = RunEvent::from_msg(&msg)
+        {
+            if stream_ndjson {
+                emit_run_event(&event);
+            }
+            if let Some(tx) = event_tx {
+                let _ = tx.send(event);
+            }
         }
         state.now = chrono::Local::now();
         let (new_state, cmds) = update(state, msg);
@@ -335,6 +361,7 @@ conforms to the provided schema. Respond with only the JSON object - no prose, n
 /// Run the dedicated `--output-schema` formatting turn: set the schema rider
 /// on state (build_chat_request drops all tools + adapters engage native
 /// constrained output), seed the format prompt, and drive to idle.
+#[allow(clippy::too_many_arguments)]
 async fn run_formatting_turn(
     mut state: State,
     schema: serde_json::Value,
@@ -343,6 +370,7 @@ async fn run_formatting_turn(
     lifecycle: &mut RuntimeLifecycle,
     cancel: Option<&tokio_util::sync::CancellationToken>,
     stream_ndjson: bool,
+    event_tx: Option<&tokio::sync::broadcast::Sender<RunEvent>>,
 ) -> State {
     state.output_schema = Some(schema);
     state.now = chrono::Local::now();
@@ -357,7 +385,16 @@ async fn run_formatting_turn(
     for cmd in cmds {
         runner.dispatch(cmd);
     }
-    drive_to_idle(state, runner, msg_rx, lifecycle, cancel, stream_ndjson).await
+    drive_to_idle(
+        state,
+        runner,
+        msg_rx,
+        lifecycle,
+        cancel,
+        stream_ndjson,
+        event_tx,
+    )
+    .await
 }
 
 /// Fold the formatting turn's outcome into the run result: the reshaped text
@@ -721,6 +758,26 @@ mod tests {
             "{:?}",
             result.errors
         );
+    }
+
+    #[test]
+    fn result_event_carries_structured_output_to_subscribers() {
+        // The broadcast tee is exercised end-to-end by the daemon integration
+        // test; here pin the terminal event SHAPE subscribers rely on (a
+        // `result` type ends the stream).
+        let event = crate::domain::RunEvent::Result {
+            response: "done".to_string(),
+            reasoning: None,
+            total_tokens: 3,
+            errors: vec![],
+            session_id: "s".to_string(),
+            structured_output: None,
+        };
+        let wire = serde_json::to_string(&event).unwrap();
+        assert!(wire.contains("\"type\":\"result\""), "{wire}");
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::domain::RunEvent>(4);
+        tx.send(event.clone()).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), event);
     }
 
     #[test]
