@@ -81,16 +81,14 @@ impl ProviderCapabilitySnapshot {
             _ => (true, false, "effort".to_string()),
         };
 
-        let is_muse_spark = provider == "meta" && model.eq_ignore_ascii_case("muse-spark-1.1");
-        let max_context_tokens = if is_muse_spark {
-            Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW)
-        } else {
-            infer_static_context_window(&model)
-        };
-        // Output ceilings start unknown everywhere and are refreshed live
-        // from provider models endpoints via `ProviderContextResolved`.
-        let max_output_tokens =
-            is_muse_spark.then_some(crate::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS);
+        // Meta's muse-spark rides the catalog like the gpt rows (its /v1/models
+        // exposes no limits) — no provider special-case here.
+        let max_context_tokens = infer_static_context_window(&model);
+        // Output ceilings start unknown everywhere and are refreshed live via
+        // `ProviderContextResolved` (for meta, from the provider's documented
+        // capabilities after the first resolve — same one-turn delay as
+        // anthropic/gemini).
+        let max_output_tokens = None;
 
         Self {
             provider,
@@ -466,13 +464,21 @@ mod tests {
 
     #[test]
     fn static_context_windows_pin_the_known_matrix() {
-        // ONLY the OpenAI gpt rows keep static windows (their /v1/models
-        // exposes no limits). Everything else is None — unknown until live
-        // discovery via `resolve_context_window` fills it.
+        // ONLY the OpenAI gpt rows and Meta's muse-spark keep static windows
+        // (their /v1/models expose no limits). Everything else is None —
+        // unknown until live discovery via `resolve_context_window` fills it.
         for (id, want) in [
             ("openai/gpt-4.1", Some(400_000)),
             ("openai/gpt-5-mini", Some(400_000)),
             ("openai/gpt-5.6", Some(1_500_000)),
+            (
+                "meta/muse-spark-1.1",
+                Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
+            ),
+            (
+                "meta/muse-spark-1.2",
+                Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
+            ),
             ("anthropic/claude-sonnet-4-6", None),
             ("gemini/gemini-2.5-pro", None),
             ("openrouter/anthropic/claude-sonnet-4.5", None),

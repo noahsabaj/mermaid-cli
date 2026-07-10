@@ -22,7 +22,12 @@ pub const DEFAULT_TEMPERATURE: f32 = 0.7;
 /// config loading can recognize the frozen legacy value on disk and migrate it
 /// to AUTO — never used to cap a request.
 pub const LEGACY_DEFAULT_MAX_TOKENS: usize = 4096;
-/// Meta's documented Muse Spark 1.1 context and per-response output ceilings.
+/// Meta's documented Muse Spark context and per-response output ceilings.
+/// Static-but-documented like the OpenAI gpt catalog rows: Meta's `/v1/models`
+/// exposes no limit metadata (Model schema is id/object/created/owned_by/
+/// metadata — verified against the API reference 2026-07-09), so live limits
+/// discovery has nothing to read. Consumed by the muse-spark catalog row
+/// (context) and `MetaProvider` capabilities (both).
 pub const META_MUSE_SPARK_CONTEXT_WINDOW: usize = 1_048_576;
 pub const META_MUSE_SPARK_MAX_OUTPUT_TOKENS: usize = 131_072;
 

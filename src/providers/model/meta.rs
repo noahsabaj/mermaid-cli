@@ -27,7 +27,6 @@ use super::ModelProvider;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.meta.ai/v1";
 pub const DEFAULT_API_KEY_ENV: &str = "MODEL_API_KEY";
-pub const DEFAULT_MODEL: &str = "muse-spark-1.1";
 
 pub struct MetaProvider {
     client: Client,
@@ -58,7 +57,9 @@ impl MetaProvider {
                     reason: error.to_string(),
                 })
             })?;
-        let muse_spark = model_name.eq_ignore_ascii_case(DEFAULT_MODEL);
+        // Prefix, not exact-id: a future muse-spark-1.2 should inherit the
+        // documented family limits instead of regressing to "unknown".
+        let muse_spark = model_name.to_ascii_lowercase().starts_with("muse-spark");
         let capabilities = Capabilities {
             supports_tools: true,
             supports_vision: true,
@@ -137,6 +138,15 @@ impl ModelProvider for MetaProvider {
                     "Meta Responses stream closed before a terminal event".to_string(),
                 ));
             };
+            // Bound SSE reassembly like every other streaming adapter: a
+            // server that streams bytes but never emits the `\n\n` event
+            // separator would otherwise grow `buffer` without bound (#50).
+            if buffer.len() > crate::constants::MAX_SSE_BUFFER_BYTES {
+                return Err(ModelError::StreamError(format!(
+                    "SSE stream exceeded {} byte reassembly cap without a complete event",
+                    crate::constants::MAX_SSE_BUFFER_BYTES
+                )));
+            }
             buffer.extend_from_slice(&chunk.map_err(|error| {
                 ModelError::StreamError(format!("Meta Responses stream failed: {error}"))
             })?);
@@ -595,7 +605,7 @@ mod tests {
 
     #[test]
     fn request_uses_stateless_encrypted_replay_shape() {
-        let body = build_request_body(&request(), DEFAULT_MODEL);
+        let body = build_request_body(&request(), "muse-spark-1.1");
         assert_eq!(body["store"], false);
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["reasoning"]["effort"], "xhigh");
@@ -617,7 +627,7 @@ mod tests {
         let mut req = request();
         req.reasoning = ReasoningLevel::None;
         req.max_tokens = 0;
-        let body = build_request_body(&req, DEFAULT_MODEL);
+        let body = build_request_body(&req, "muse-spark-1.1");
         assert_eq!(body["reasoning"]["effort"], "minimal");
         assert!(body.get("max_output_tokens").is_none());
     }

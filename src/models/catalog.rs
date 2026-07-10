@@ -257,6 +257,17 @@ pub const CATALOG: &[ModelCapEntry] = &[
         rule: Prefix("o4"),
         ..OPENAI_REASONING
     },
+    // Meta Model API's /v1/models exposes no limit metadata (Model schema is
+    // id/object/created/owned_by/metadata — verified against the API
+    // reference 2026-07-09), so like the gpt rows below the documented window
+    // is static. Prefix so future muse-spark revisions inherit the family
+    // window instead of regressing to unknown.
+    ModelCapEntry {
+        rule: Prefix("muse-spark"),
+        vision: true,
+        context_window: Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
+        ..UNKNOWN_MODEL
+    },
     // gpt-5.6 rows must stay ABOVE the gpt-5 rows — they share the prefix
     // and first match wins. OpenAI's /v1/models exposes no limits, so these
     // windows are static-but-documented (1.5M).
