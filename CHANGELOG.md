@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Safety-mode switch note: fires once, model-only.** The "earlier read-only
+  policy blocks no longer apply" note used to appear in the transcript on
+  every loosening step (ask, then auto, then full_access — three banners for
+  one Shift+Tab cycle), because the trigger was "any loosening while a
+  read-only denial exists in history" and the denial text is never removed
+  from stored history. The note now injects only when actually leaving
+  read_only past a stale denial, is hidden from the transcript (the status
+  bar already shows the mode; only the model sees it), and steers exactly
+  one request before being swept. Cycling onward renames the one pending
+  note instead of stacking new ones, and tightening back to read_only
+  retracts it.
+
 ### Added
 
 - **Plugin bundles: MCP servers, prompt commands, and agent types.** An

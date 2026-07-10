@@ -1491,15 +1491,10 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         let previous = state.session.safety_mode;
         let next = cycle_safety(previous);
         state.session.safety_mode = next;
-        // A loosening switch (e.g. read_only → …) leaves earlier read-only
-        // denials in history contradicting the new mode. When there's actually
-        // such a denial to supersede, surface a one-line note; `build_chat_request`
-        // additionally rewrites the stale denials for the model.
-        if next.permissiveness() > previous.permissiveness()
-            && history_has_readonly_denial(state.session.messages())
-        {
-            push_system(state, cmds, safety_loosened_note(next));
-        }
+        // Leaving read_only past a stale denial nudges the model to re-attempt
+        // (hidden from the transcript); `build_chat_request` additionally
+        // rewrites the stale denials themselves.
+        note_safety_mode_change(state, cmds, previous, next);
         // Persist now so `--resume`/`--continue` restore this mode even if the
         // user changes it and quits without sending another message.
         cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
@@ -2604,13 +2599,9 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             // Session-scoped (mirrors Shift+Tab) — not written to the config.
             let previous = state.session.safety_mode;
             state.session.safety_mode = mode;
-            // Loosening past a stale read-only denial: announce it (and let
-            // `build_chat_request` rewrite the denials). See the Shift+Tab handler.
-            if mode.permissiveness() > previous.permissiveness()
-                && history_has_readonly_denial(state.session.messages())
-            {
-                push_system(state, cmds, safety_loosened_note(mode));
-            }
+            // Leaving read_only past a stale denial nudges the model to
+            // re-attempt (hidden). See the Shift+Tab handler.
+            note_safety_mode_change(state, cmds, previous, mode);
             // Persist so `--resume`/`--continue` restore this mode (see the
             // Shift+Tab handler).
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
@@ -5274,16 +5265,64 @@ fn history_has_readonly_denial(messages: &[ChatMessage]) -> bool {
         .any(|m| m.role == MessageRole::Tool && m.content.contains(&signature))
 }
 
-/// One-line note pushed when the user loosens the safety mode while stale
-/// read-only denials are in history, so both the user and the model see those
-/// blocks are lifted. Pairs with `neutralize_superseded_policy_denials`, which
-/// rewrites the denials themselves.
+/// Content prefix of a [`safety_loosened_note`] — how
+/// [`note_safety_mode_change`] recognizes its own pending nudge to retract it.
+const SAFETY_NUDGE_PREFIX: &str = "Safety mode is now ";
+
+/// One-line note injected for the model when the user leaves read_only while
+/// stale read-only denials are in history, so it re-attempts gated actions
+/// instead of trusting the old blocks. Stamped `RecoveryNudge`: hidden from the
+/// transcript (the status bar already shows the mode) and swept once the
+/// request it steers has gone out. Pairs with
+/// `neutralize_superseded_policy_denials`, which rewrites the denials
+/// themselves on every request.
 fn safety_loosened_note(mode: crate::runtime::SafetyMode) -> String {
     format!(
-        "Safety mode is now {}; earlier read-only policy blocks no longer apply. \
+        "{SAFETY_NUDGE_PREFIX}{}; earlier read-only policy blocks no longer apply. \
          Re-attempt gated actions instead of assuming they'll fail.",
         mode.as_str()
     )
+}
+
+/// Model-facing side of a safety-mode switch. Keeps AT MOST ONE pending
+/// loosened-mode nudge, always naming the current mode:
+///
+/// - retracts any still-pending nudge first — it names a stale mode and, on a
+///   tighten back to read_only, would contradict the standing denials;
+/// - (re-)injects one only while a leave-read_only event is pending: either
+///   this switch leaves read_only, or a pending nudge proves an unsent earlier
+///   leave (the user is still cycling, e.g. read_only → ask → auto).
+///
+/// A loosening long after read_only (no pending nudge) stays silent — the
+/// per-request denial rewrite already covers it, and re-announcing on every
+/// loosening step was the old bug.
+fn note_safety_mode_change(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    previous: crate::runtime::SafetyMode,
+    next: crate::runtime::SafetyMode,
+) {
+    use crate::models::ChatMessageKind;
+    use crate::runtime::SafetyMode;
+    let messages = &mut state.session.conversation.messages;
+    let before = messages.len();
+    messages.retain(|m| {
+        m.kind != ChatMessageKind::RecoveryNudge || !m.content.starts_with(SAFETY_NUDGE_PREFIX)
+    });
+    let leave_pending = messages.len() < before;
+    if (previous == SafetyMode::ReadOnly || leave_pending)
+        && next != SafetyMode::ReadOnly
+        && history_has_readonly_denial(state.session.messages())
+    {
+        push_system_kind(
+            state,
+            cmds,
+            safety_loosened_note(next),
+            ChatMessageKind::RecoveryNudge,
+        );
+    }
+    // No save here for the retract-only path: both callers persist the mode
+    // switch right after this returns.
 }
 
 #[cfg(test)]
@@ -9417,7 +9456,7 @@ mod tests {
     }
 
     #[test]
-    fn loosening_past_a_stale_denial_announces_the_switch() {
+    fn leaving_read_only_past_a_stale_denial_injects_a_hidden_nudge() {
         use crate::runtime::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
@@ -9426,14 +9465,90 @@ mod tests {
             .append(readonly_denial_message("write_file(x)"), state.now);
         let (state, _) = update(state, key(KeyCode::BackTab));
         assert_eq!(state.session.safety_mode, SafetyMode::Ask);
+        let nudge = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.content.contains("Safety mode is now ask"))
+            .expect("leaving read_only past a stale denial should inject the nudge");
+        assert_eq!(nudge.role, MessageRole::System);
+        assert_eq!(
+            nudge.kind,
+            crate::models::ChatMessageKind::RecoveryNudge,
+            "the nudge is for the model only — RecoveryNudge hides it from the transcript",
+        );
+    }
+
+    #[test]
+    fn further_loosening_replaces_the_pending_nudge_instead_of_stacking() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::ReadOnly;
+        state
+            .session
+            .append(readonly_denial_message("write_file(x)"), state.now);
+        // The screenshot bug: cycling read_only → ask → auto → full_access
+        // announced three times. Now the pending nudge is carried forward,
+        // renamed to the current mode.
+        let (state, _) = update(state, key(KeyCode::BackTab));
+        let (state, _) = update(state, key(KeyCode::BackTab));
+        let (state, _) = update(state, key(KeyCode::BackTab));
+        assert_eq!(state.session.safety_mode, SafetyMode::FullAccess);
+        let nudges: Vec<_> = state
+            .session
+            .messages()
+            .iter()
+            .filter(|m| m.content.starts_with(SAFETY_NUDGE_PREFIX))
+            .collect();
+        assert_eq!(nudges.len(), 1, "exactly one pending nudge, never a stack");
         assert!(
-            state
+            nudges[0].content.contains("full_access"),
+            "the surviving nudge names the current mode: {:?}",
+            nudges[0].content
+        );
+    }
+
+    #[test]
+    fn loosening_after_the_nudge_was_spent_stays_silent() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::ReadOnly;
+        state
+            .session
+            .append(readonly_denial_message("write_file(x)"), state.now);
+        let (mut state, _) = update(state, key(KeyCode::BackTab)); // → ask, nudge pending
+        sweep_spent_nudges(&mut state); // the request it steered went out
+        let (state, _) = update(state, key(KeyCode::BackTab)); // ask → auto
+        assert!(
+            !state
                 .session
                 .messages()
                 .iter()
-                .any(|m| m.role == MessageRole::System
-                    && m.content.contains("Safety mode is now ask")),
-            "loosening past a stale denial should announce it",
+                .any(|m| m.content.starts_with(SAFETY_NUDGE_PREFIX)),
+            "a later loosening must not re-announce a spent nudge",
+        );
+    }
+
+    #[test]
+    fn tightening_back_to_read_only_retracts_the_pending_nudge() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        state.session.safety_mode = SafetyMode::ReadOnly;
+        state
+            .session
+            .append(readonly_denial_message("write_file(x)"), state.now);
+        let (state, _) = update(state, key(KeyCode::BackTab)); // → ask, nudge pending
+        let (state, _) = update(
+            state,
+            Msg::Slash(SlashCmd::Safety(Some(SafetyMode::ReadOnly))),
+        );
+        assert!(
+            !state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.starts_with(SAFETY_NUDGE_PREFIX)),
+            "back in read_only the denials stand again — the lifted-note must not ride the next request",
         );
     }
 
