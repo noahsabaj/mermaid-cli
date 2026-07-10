@@ -3,8 +3,8 @@
 //! Retry-on-5xx, tracing, rate-limiting — all concerns that would
 //! otherwise be re-implemented per-adapter. Living here means any
 //! new effect handler picks them up uniformly; 500ms→3s exponential
-//! backoff, 3-attempt cap, same classification function for every
-//! provider.
+//! backoff (429s use a slower 2s→5s schedule), 3-attempt cap, same
+//! classification function for every provider.
 
 use std::time::Duration;
 
@@ -20,6 +20,13 @@ const MAX_DELAY_MS: u64 = 3_000;
 /// Upper bound on how long we'll wait, even if a server's `Retry-After` asks
 /// for more — a hostile or misconfigured value mustn't hang the turn.
 const MAX_RETRY_AFTER_MS: u64 = 60_000;
+/// Backoff schedule for 429s that carry no `Retry-After` header. Rate limits
+/// are usually per-second/minute buckets, so the 5xx schedule (500ms→1s,
+/// ~1.5s total) retries inside the same bucket and always loses; spacing the
+/// two retries at ~2s and ~5s gives burst limits time to refill while
+/// keeping the worst silent wait around 7s. (The sleep is Esc-cancellable —
+/// see the #42 note below.)
+const RATE_LIMIT_DELAYS_MS: [u64; 2] = [2_000, 5_000];
 
 /// Retry a closure whose output is `Result<reqwest::Response>`
 /// whenever the response was a transient upstream failure (5xx / 429
@@ -81,10 +88,23 @@ where
                     "middleware: transient upstream failure — retries exhausted"
                 );
                 // A persistent 429 becomes a typed `RateLimit` so the UI can show
-                // a rate-limit affordance instead of a generic HTTP error.
+                // a rate-limit affordance instead of a generic HTTP error. The
+                // body often names the actual limit ("daily free allocation of
+                // 10,000 neurons used up") — the difference between "wait a
+                // moment" and "upgrade your plan" — so carry it along.
                 if transience.reason() == "http_429" && result.is_ok() {
+                    let message = match result {
+                        Ok(response) => response
+                            .text()
+                            .await
+                            .ok()
+                            .as_deref()
+                            .and_then(extract_provider_error_message),
+                        Err(_) => None,
+                    };
                     return Err(ModelError::RateLimit {
                         retry_after: retry_after_ms.map(|ms| ms / 1000),
+                        message,
                     });
                 }
             }
@@ -93,8 +113,14 @@ where
 
         // Honor `Retry-After` when present (capped so a hostile/huge value can't
         // hang the turn); otherwise a jittered exponential backoff that avoids
-        // synchronized retries across concurrent clients.
-        let sleep_ms = crate::utils::jitter(delay_ms)
+        // synchronized retries across concurrent clients. 429s get their own,
+        // slower schedule — see `RATE_LIMIT_DELAYS_MS`.
+        let base_ms = if transience.reason() == "http_429" {
+            RATE_LIMIT_DELAYS_MS[(attempt - 1).min(RATE_LIMIT_DELAYS_MS.len() - 1)]
+        } else {
+            delay_ms
+        };
+        let sleep_ms = crate::utils::jitter(base_ms)
             .max(retry_after_ms.unwrap_or(0))
             .min(MAX_RETRY_AFTER_MS);
         tracing::warn!(
@@ -115,6 +141,45 @@ where
         attempt += 1;
         delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
     }
+}
+
+/// Pull the human-readable reason out of a provider's JSON error body.
+/// Handles the common shapes — OpenAI/Anthropic `{"error":{"message":…}}`,
+/// Cloudflare `{"errors":[{"message":…}]}`, bare `{"message":…}` — and gives
+/// up (`None`) on anything else rather than surfacing raw JSON at the user.
+/// Long messages are truncated: this feeds one status line, not a pager.
+fn extract_provider_error_message(body: &str) -> Option<String> {
+    const MAX_LEN: usize = 300;
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let mut message = value
+        .pointer("/error/message")
+        .or_else(|| value.pointer("/errors/0/message"))
+        .or_else(|| value.pointer("/message"))
+        .and_then(|m| m.as_str())?
+        .trim();
+    // Shed stacked exception-class prefixes ("AiError: AiError: you have…" —
+    // Cloudflare sends them doubled): they carry no information the message
+    // text doesn't.
+    while let Some((head, rest)) = message.split_once(": ") {
+        if head.ends_with("Error") && head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            message = rest.trim_start();
+        } else {
+            break;
+        }
+    }
+    if message.is_empty() {
+        return None;
+    }
+    let mut message = message.to_string();
+    if message.len() > MAX_LEN {
+        let cut = (0..=MAX_LEN)
+            .rev()
+            .find(|&i| message.is_char_boundary(i))
+            .unwrap_or(0);
+        message.truncate(cut);
+        message.push('…');
+    }
+    Some(message)
 }
 
 /// Parse a `Retry-After` header into milliseconds. Handles the integer
@@ -224,6 +289,79 @@ mod tests {
         reqwest::get(url).await.expect("send")
     }
 
+    /// Like `fake_response`, but with a JSON body (and optional `Retry-After`)
+    /// so the exhausted-429 path can extract the provider's reason from it.
+    async fn fake_response_with_body(
+        status: u16,
+        body: &'static str,
+        retry_after_secs: Option<u64>,
+    ) -> reqwest::Response {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let retry_after = retry_after_secs
+                    .map(|s| format!("Retry-After: {s}\r\n"))
+                    .unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\n{retry_after}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let url = format!("http://{}/x", addr);
+        reqwest::get(url).await.expect("send")
+    }
+
+    #[test]
+    fn extract_provider_error_message_handles_known_shapes() {
+        // Cloudflare: {"errors":[{"message":…}]} (captured live 2026-07-09).
+        assert_eq!(
+            extract_provider_error_message(
+                r#"{"errors":[{"message":"you have used up your daily free allocation","code":4006}],"success":false}"#
+            ),
+            Some("you have used up your daily free allocation".to_string())
+        );
+        // OpenAI/Anthropic: {"error":{"message":…}}.
+        assert_eq!(
+            extract_provider_error_message(
+                r#"{"error":{"message":"Rate limit reached for gpt-x","type":"tokens"}}"#
+            ),
+            Some("Rate limit reached for gpt-x".to_string())
+        );
+        // Bare {"message":…}.
+        assert_eq!(
+            extract_provider_error_message(r#"{"message":"slow down"}"#),
+            Some("slow down".to_string())
+        );
+        // Stacked exception-class prefixes are shed (Cloudflare doubles its
+        // "AiError: " prefix); ordinary colons in prose survive.
+        assert_eq!(
+            extract_provider_error_message(
+                r#"{"errors":[{"message":"AiError: AiError: you have used up your daily free allocation"}]}"#
+            ),
+            Some("you have used up your daily free allocation".to_string())
+        );
+        assert_eq!(
+            extract_provider_error_message(r#"{"message":"note: limits reset at midnight"}"#),
+            Some("note: limits reset at midnight".to_string())
+        );
+        // Non-JSON, unknown shape, or empty message → None (never raw JSON).
+        assert_eq!(extract_provider_error_message("<html>429</html>"), None);
+        assert_eq!(extract_provider_error_message(r#"{"detail":"nope"}"#), None);
+        assert_eq!(extract_provider_error_message(r#"{"message":"  "}"#), None);
+        // Oversized messages truncate on a char boundary with an ellipsis.
+        let long = format!(r#"{{"message":"{}"}}"#, "x".repeat(400));
+        let extracted = extract_provider_error_message(&long).unwrap();
+        assert!(extracted.chars().count() <= 301);
+        assert!(extracted.ends_with('…'));
+    }
+
     #[test]
     fn parse_retry_after_handles_integer_seconds_and_ignores_dates() {
         use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
@@ -323,6 +461,65 @@ mod tests {
         // A persistent 429 retries, then surfaces as a typed RateLimit (#2).
         assert!(matches!(result, Err(ModelError::RateLimit { .. })));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn exhausted_429_carries_body_message_and_retry_after() {
+        // The provider's 429 body names the real limit (quota vs burst) — the
+        // typed RateLimit must carry it, plus the Retry-After when present.
+        let result = retry_transient_http_with(RetryPolicy { max_attempts: 1 }, &mut || async {
+            Ok(fake_response_with_body(
+                429,
+                r#"{"errors":[{"message":"you have used up your daily free allocation of 10,000 neurons","code":4006}]}"#,
+                Some(30),
+            )
+            .await)
+        })
+        .await;
+        match result {
+            Err(ModelError::RateLimit {
+                retry_after,
+                message,
+            }) => {
+                assert_eq!(retry_after, Some(30));
+                assert_eq!(
+                    message.as_deref(),
+                    Some("you have used up your daily free allocation of 10,000 neurons")
+                );
+            },
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_backoff_is_slower_than_5xx_schedule() {
+        // A 429 without Retry-After must wait on the RATE_LIMIT_DELAYS_MS
+        // schedule (first delay jitter(2000) ≥ 1600ms), not the 5xx 500ms
+        // one — retrying inside the same rate bucket always loses.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cc = Arc::clone(&calls);
+        let start = std::time::Instant::now();
+        let result = retry_transient_http_with(RetryPolicy { max_attempts: 2 }, &mut move || {
+            let c = Arc::clone(&cc);
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Ok(fake_response(429).await)
+                } else {
+                    Ok(fake_response(200).await)
+                }
+            }
+        })
+        .await;
+        let elapsed = start.elapsed();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status().as_u16(), 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            elapsed >= Duration::from_millis(1_500),
+            "expected the 429 schedule (~2s first delay) to drive the wait, waited only {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]

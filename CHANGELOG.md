@@ -112,6 +112,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Rate-limit errors now say what actually happened.** A provider 429 used
+  to surface as the inscrutable "retry after None"; it now shows the
+  provider's own reason from the response body (e.g. Cloudflare's "you have
+  used up your daily free allocation of 10,000 neurons") — the difference
+  between "wait a moment" and "upgrade your plan" — plus the server's
+  retry-after when sent. 429 retries also got their own backoff schedule
+  (~2s then ~5s instead of the 5xx 500ms→1s): retrying inside the same rate
+  bucket always lost. `Retry-After` headers were already honored and still
+  win when present.
 - **Cloudflare Workers AI models now report their real context window.**
   Cloudflare's OpenAI-compatible `/models` lists bare ids with no limit
   metadata, so the footer gauge read "context: … / unknown" and compaction
