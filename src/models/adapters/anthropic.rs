@@ -638,6 +638,19 @@ impl AnthropicAdapter {
             body["output_config"] = json!({"effort": effort});
         }
 
+        // Native structured output: `output_config.format` (GA, no beta
+        // header). Anthropic accepts a JSON-Schema subset (no recursion,
+        // no numeric/string constraints, `additionalProperties: false`
+        // required on objects) — arbitrary user schemas can 400, and older
+        // models reject `format` entirely; the run falls back to the
+        // prompt-driven turn and client-side validation remains the gate.
+        if let Some(schema) = &config.output_schema {
+            body["output_config"]["format"] = json!({
+                "type": "json_schema",
+                "schema": schema,
+            });
+        }
+
         // Thinking format: per-model dispatch.
         match thinking_format_for(&self.model_name) {
             ThinkingFormat::Adaptive => {
@@ -1906,6 +1919,30 @@ mod tests {
         let sys = body["system"].as_array().expect("system is array");
         assert_eq!(sys.len(), 1);
         assert_eq!(sys[0]["text"], "You are Mermaid.");
+    }
+
+    /// Native structured output rides in `output_config.format` and must
+    /// merge with (not clobber) `output_config.effort` when both are set.
+    #[test]
+    fn build_request_body_maps_output_schema_to_output_config_format() {
+        let adapter = test_adapter();
+        let messages = vec![ChatMessage::user("format it")];
+        let config = ModelConfig {
+            reasoning: ReasoningLevel::High,
+            output_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"answer": {"type": "integer"}}
+            })),
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&messages, &config);
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
+        // Effort coexists in the same object.
+        assert_eq!(body["output_config"]["effort"], "high");
+        // Absent -> no format key at all.
+        let body = adapter.build_request_body(&messages, &ModelConfig::default());
+        assert!(body["output_config"].get("format").is_none());
     }
 
     /// Step 5c bug fix: `effort` lives at `output_config.effort`, NOT
