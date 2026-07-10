@@ -92,7 +92,6 @@ pub struct ConversationHistory {
     pub project_path: String,
     pub created_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,
-    pub total_tokens: Option<usize>,
     /// Metadata for context compactions performed in this conversation.
     #[serde(default)]
     pub compactions: Vec<crate::domain::CompactionRecord>,
@@ -113,8 +112,6 @@ pub struct ConversationHistory {
     /// a `None` safety mode falls back to the config default on resume.
     #[serde(default)]
     pub safety_mode: Option<crate::runtime::SafetyMode>,
-    #[serde(default)]
-    pub cumulative_tokens: usize,
     #[serde(default)]
     pub last_token_usage: Option<crate::domain::TokenUsageTotals>,
     #[serde(default)]
@@ -218,7 +215,6 @@ impl ConversationHistory {
             project_path,
             created_at: now,
             updated_at: now,
-            total_tokens: None,
             compactions: Vec::new(),
             input_history: VecDeque::new(),
             // Populated by the impure startup path (`detect_git_branch`), not
@@ -226,7 +222,6 @@ impl ConversationHistory {
             git_branch: None,
             // Snapshotted from `Session` on save (see `snapshot_conversation`).
             safety_mode: None,
-            cumulative_tokens: 0,
             last_token_usage: None,
             cumulative_token_usage: crate::domain::TokenUsageTotals::default(),
             context_usage: None,
@@ -737,7 +732,6 @@ mod tests {
         }"#;
         let conv: ConversationHistory = serde_json::from_str(json).expect("legacy json loads");
         assert_eq!(conv.safety_mode, None);
-        assert_eq!(conv.cumulative_tokens, 0);
         assert_eq!(
             conv.cumulative_token_usage,
             crate::domain::TokenUsageTotals::default()
@@ -750,7 +744,6 @@ mod tests {
     fn session_state_round_trips_through_json() {
         let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into(), Local::now());
         conv.safety_mode = Some(crate::runtime::SafetyMode::FullAccess);
-        conv.cumulative_tokens = 777;
         conv.cumulative_token_usage = crate::domain::TokenUsageTotals {
             prompt_tokens: 777,
             ..Default::default()
@@ -761,7 +754,6 @@ mod tests {
             round.safety_mode,
             Some(crate::runtime::SafetyMode::FullAccess)
         );
-        assert_eq!(round.cumulative_tokens, 777);
         assert_eq!(round.cumulative_token_usage.total_tokens(), 777);
     }
 

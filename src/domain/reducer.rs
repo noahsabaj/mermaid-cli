@@ -27,7 +27,7 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
-use crate::models::{ChatMessage, MessageRole, ProviderContinuation};
+use crate::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
 use crate::prompts::get_system_prompt;
 use crate::runtime::TaskStatus;
 
@@ -3694,12 +3694,48 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.conversation =
                 crate::session::ConversationHistory::new(project_path, model_name, state.now);
             state.session.conversation.git_branch = git_branch;
-            state.session.cumulative_tokens = 0;
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
             state.session.context_usage = None;
             state.turn = TurnState::Idle;
             emit_title_if_changed(state, cmds);
+        },
+    }
+}
+
+/// How one API request's usage folds into the session/run counters.
+enum UsageFold {
+    /// The session's own model request: also becomes `last_token_usage`,
+    /// which feeds the context gauge.
+    OwnRequest,
+    /// A subagent's child-session delta: cumulative + run counter only —
+    /// never `last_token_usage`, which is the parent's most recent request
+    /// and feeds the PARENT's context-size estimate (the child's context
+    /// is a separate window).
+    Subagent,
+    /// A compaction summarizer call: charged like an own request, but the
+    /// caller rebuilds the context gauge from the compaction snapshot.
+    Compaction,
+}
+
+/// The single accumulation point for provider-reported usage. Every path
+/// that bills tokens goes through here so the meters cannot drift apart.
+/// Takes the two sub-states it touches (not `&mut State`) so callers
+/// holding a `&mut state.turn` borrow can still fold.
+fn fold_token_usage(
+    session: &mut super::state::Session,
+    runtime: &mut super::runtime::RuntimeState,
+    usage: &TokenUsage,
+    fold: UsageFold,
+) {
+    let totals = TokenUsageTotals::from_usage(usage);
+    session.cumulative_token_usage.add_assign(totals);
+    match fold {
+        UsageFold::OwnRequest | UsageFold::Compaction => {
+            session.last_token_usage = Some(totals);
+        },
+        UsageFold::Subagent => {
+            runtime.run_committed_tokens += usage.output_total_tokens();
         },
     }
 }
@@ -3770,13 +3806,12 @@ fn handle_compaction_finished(
     state.session.context_usage = Some(result.after_snapshot);
 
     if let Some(usage) = result.usage {
-        let totals = TokenUsageTotals::from_usage(&usage);
-        state.session.last_token_usage = Some(totals);
-        state.session.cumulative_token_usage.add_assign(totals);
-        state.session.cumulative_tokens = state
-            .session
-            .cumulative_tokens
-            .saturating_add(usage.total_tokens());
+        fold_token_usage(
+            &mut state.session,
+            &mut state.runtime,
+            &usage,
+            UsageFold::Compaction,
+        );
     }
 
     match outcome {
@@ -3981,13 +4016,12 @@ fn handle_stream_done(
                 && *id == turn
                 && let Some(u) = usage
             {
-                let totals = TokenUsageTotals::from_usage(&u);
-                state.session.last_token_usage = Some(totals);
-                state.session.cumulative_token_usage.add_assign(totals);
-                state.session.cumulative_tokens = state
-                    .session
-                    .cumulative_tokens
-                    .saturating_add(u.total_tokens());
+                fold_token_usage(
+                    &mut state.session,
+                    &mut state.runtime,
+                    &u,
+                    UsageFold::OwnRequest,
+                );
             }
             state.turn = other;
             return;
@@ -4158,13 +4192,12 @@ fn handle_stream_done(
     // reported request and the session total so the footer can label
     // the number honestly instead of presenting a giant raw counter.
     if let Some(u) = usage {
-        let totals = TokenUsageTotals::from_usage(&u);
-        state.session.last_token_usage = Some(totals);
-        state.session.cumulative_token_usage.add_assign(totals);
-        state.session.cumulative_tokens = state
-            .session
-            .cumulative_tokens
-            .saturating_add(u.total_tokens());
+        fold_token_usage(
+            &mut state.session,
+            &mut state.runtime,
+            &u,
+            UsageFold::OwnRequest,
+        );
         let max_context = state
             .session
             .context_usage
@@ -4625,20 +4658,14 @@ fn handle_tool_finished(
             state.ui.live_tool_status.remove(&call_id);
             // Fold tool-consumed provider usage (a subagent's child-session
             // total) into the session counters, so the footer and the
-            // end-of-run "used N tokens" summary count the whole tree. Not
-            // `last_token_usage` — that field is the parent's most recent
-            // request, feeding the context-size estimate, and the child's
-            // context is a separate window.
+            // end-of-run "used N tokens" summary count the whole tree.
             if let Some(usage) = outcome.metadata.token_usage.as_ref() {
-                let totals = TokenUsageTotals::from_usage(usage);
-                state.session.cumulative_token_usage.add_assign(totals);
-                state.session.cumulative_tokens = state
-                    .session
-                    .cumulative_tokens
-                    .saturating_add(usage.total_tokens());
-                state.runtime.run_committed_tokens += usage
-                    .completion_tokens
-                    .saturating_add(usage.reasoning_output_tokens);
+                fold_token_usage(
+                    &mut state.session,
+                    &mut state.runtime,
+                    usage,
+                    UsageFold::Subagent,
+                );
             }
             // Attach action display to the last assistant message so
             // the renderer can show it.
@@ -8088,6 +8115,47 @@ mod tests {
     }
 
     #[test]
+    fn fold_token_usage_variants_route_to_the_right_meters() {
+        let mut state = fresh_state();
+        let usage = crate::models::TokenUsage::provider(100, 20).with_reasoning_output(5);
+
+        // OwnRequest: last + cumulative, no run banking (the stream-done
+        // path banks its own output separately).
+        fold_token_usage(
+            &mut state.session,
+            &mut state.runtime,
+            &usage,
+            UsageFold::OwnRequest,
+        );
+        assert_eq!(state.session.last_token_usage.unwrap().total_tokens(), 125);
+        assert_eq!(state.session.cumulative_token_usage.total_tokens(), 125);
+        assert_eq!(state.runtime.run_committed_tokens, 0);
+
+        // Subagent: cumulative + run counter (output only), never last —
+        // the child's context is a separate window.
+        state.session.last_token_usage = None;
+        fold_token_usage(
+            &mut state.session,
+            &mut state.runtime,
+            &usage,
+            UsageFold::Subagent,
+        );
+        assert!(state.session.last_token_usage.is_none());
+        assert_eq!(state.session.cumulative_token_usage.total_tokens(), 250);
+        assert_eq!(state.runtime.run_committed_tokens, 25);
+
+        // Compaction: charged like an own request.
+        fold_token_usage(
+            &mut state.session,
+            &mut state.runtime,
+            &usage,
+            UsageFold::Compaction,
+        );
+        assert_eq!(state.session.last_token_usage.unwrap().total_tokens(), 125);
+        assert_eq!(state.session.cumulative_token_usage.total_tokens(), 375);
+    }
+
+    #[test]
     fn stream_done_tracks_last_and_cumulative_token_usage() {
         let mut state = fresh_state();
         state.turn = TurnState::Generating {
@@ -8114,7 +8182,6 @@ mod tests {
 
         assert_eq!(state.session.last_token_usage.unwrap().prompt_tokens, 120);
         assert_eq!(state.session.cumulative_token_usage.total_tokens(), 150);
-        assert_eq!(state.session.cumulative_tokens, 150);
         assert_eq!(
             state.session.context_usage.as_ref().unwrap().used_tokens,
             150
@@ -8168,7 +8235,7 @@ mod tests {
             "must not commit an empty assistant message"
         );
         // The tokens the stalled turn spent are still accounted for.
-        assert_eq!(state.session.cumulative_tokens, 100);
+        assert_eq!(state.session.cumulative_token_usage.total_tokens(), 100);
     }
 
     #[test]
@@ -10794,7 +10861,7 @@ mod tests {
     #[test]
     fn subagent_usage_rolls_into_session_totals_and_run_counter() {
         let (state, call_id) = state_executing_agent_call();
-        let before_cum = state.session.cumulative_tokens;
+        let before_cum = state.session.cumulative_token_usage.total_tokens();
         assert_eq!(state.runtime.run_committed_tokens, 0);
 
         let usage = crate::models::TokenUsage::provider(1_000, 250).with_reasoning_output(50);
@@ -10818,8 +10885,10 @@ mod tests {
 
         // Session totals count the child's whole session (reasoning is
         // disjoint from completion, so 1000 + 250 + 50)…
-        assert_eq!(state.session.cumulative_tokens, before_cum + 1_300);
-        assert_eq!(state.session.cumulative_token_usage.total_tokens(), 1_300);
+        assert_eq!(
+            state.session.cumulative_token_usage.total_tokens(),
+            before_cum + 1_300
+        );
         assert_eq!(state.session.cumulative_token_usage.completion_tokens, 250);
         // …the run counter banks its generated tokens (completion + reasoning)…
         assert_eq!(state.runtime.run_committed_tokens, 300);
