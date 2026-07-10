@@ -238,6 +238,13 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
+        name: "agents",
+        aliases: &[],
+        description: "List or kill background agents",
+        arg_hint: Some("[kill <id>|all]"),
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
         name: "processes",
         aliases: &["procs"],
         description: "List durable runtime processes",

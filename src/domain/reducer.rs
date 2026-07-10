@@ -741,6 +741,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             description,
             report,
             success,
+            cancelled,
             usage,
             tokens,
             duration_secs,
@@ -751,6 +752,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 .retain(|a| a.agent_id != agent_id);
             // Fold the detached child's spend into the session totals, same
             // as `handle_tool_finished` does for foreground agent calls.
+            // Cancelled children fold too — that work was still billed.
             if let Some(usage) = usage.as_ref() {
                 fold_token_usage(
                     &mut state.session,
@@ -758,6 +760,20 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     usage,
                     UsageFold::Detached,
                 );
+            }
+            if cancelled {
+                // Killed on purpose (`/agents kill`, the agent tool's kill
+                // action): note it and stop — a deliberately killed child's
+                // partial report shouldn't spend a model turn.
+                push_system(
+                    &mut state,
+                    &mut cmds,
+                    format!(
+                        "Background agent '{description}' ({agent_id}) cancelled — {} tokens, took {duration_secs}s.",
+                        super::compaction::format_compact_count(tokens),
+                    ),
+                );
+                return (state, cmds);
             }
             let verdict = if success { "finished" } else { "failed" };
             push_system(
@@ -2842,6 +2858,9 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::Processes => {
             cmds.push(Cmd::ListRuntimeProcesses { limit: 10 });
         },
+        SlashCmd::Agents(arg) => {
+            handle_slash_agents(state, cmds, arg.as_deref());
+        },
         SlashCmd::Logs(Some(id)) => {
             cmds.push(Cmd::ShowRuntimeProcessLogs { id });
         },
@@ -2993,6 +3012,89 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::Unknown(name) => {
             push_system(state, cmds, format!("Unknown command: /{}", name));
+        },
+    }
+}
+
+/// `/agents` — list detached background agents, or kill them
+/// (`kill <id>` / `kill all`). Kills validate against the registry here
+/// (immediate feedback for a bad id), mark the row "cancelling…", and hand
+/// the actual token fire to the effect layer via `Cmd::KillBackgroundAgent`;
+/// the dying child's `Msg::BackgroundAgentFinished { cancelled: true, .. }`
+/// posts the closing note and clears the row.
+fn handle_slash_agents(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>) {
+    let arg = arg.map(str::trim).filter(|s| !s.is_empty());
+    match arg {
+        None => {
+            if state.runtime.background_agents.is_empty() {
+                push_system(
+                    state,
+                    cmds,
+                    "No background agents. (ctrl+b detaches a running agent)",
+                );
+                return;
+            }
+            let now_sys = std::time::SystemTime::from(state.now);
+            let mut lines = vec![format!(
+                "Background agents ({}) — /agents kill <id> cancels one, /agents kill all cancels every one",
+                state.runtime.background_agents.len()
+            )];
+            for agent in &state.runtime.background_agents {
+                let elapsed = now_sys
+                    .duration_since(agent.started)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                lines.push(format!(
+                    "  {}  {} — {} · {}s · ~{} tokens",
+                    agent.agent_id,
+                    agent.description,
+                    agent.activity,
+                    elapsed,
+                    super::compaction::format_compact_count(agent.tokens),
+                ));
+            }
+            push_system(state, cmds, lines.join("\n"));
+        },
+        Some("kill all") => {
+            if state.runtime.background_agents.is_empty() {
+                push_system(state, cmds, "No background agents to kill.");
+                return;
+            }
+            for agent in &mut state.runtime.background_agents {
+                agent.activity = "cancelling…".to_string();
+            }
+            cmds.push(Cmd::KillBackgroundAgent { agent_id: None });
+        },
+        Some(rest) if rest.starts_with("kill ") || rest == "kill" => {
+            let id = rest.strip_prefix("kill").unwrap_or_default().trim();
+            if id.is_empty() {
+                push_system(
+                    state,
+                    cmds,
+                    "Usage: /agents kill <id> (or: /agents kill all)",
+                );
+                return;
+            }
+            let Some(agent) = state
+                .runtime
+                .background_agents
+                .iter_mut()
+                .find(|a| a.agent_id == id)
+            else {
+                push_system(state, cmds, format!("No background agent '{id}'."));
+                return;
+            };
+            agent.activity = "cancelling…".to_string();
+            cmds.push(Cmd::KillBackgroundAgent {
+                agent_id: Some(id.to_string()),
+            });
+        },
+        Some(_) => {
+            push_system(
+                state,
+                cmds,
+                "Usage: /agents (list), /agents kill <id>, /agents kill all",
+            );
         },
     }
 }
@@ -11220,6 +11322,7 @@ mod tests {
                 description: "audit docs".to_string(),
                 report: "docs are fine".to_string(),
                 success: true,
+                cancelled: false,
                 usage: Some(crate::models::TokenUsage::provider(70_000, 20_000)),
                 tokens: 90_000,
                 duration_secs: 61,
@@ -11255,6 +11358,7 @@ mod tests {
                 description: "security sweep".to_string(),
                 report: "no findings".to_string(),
                 success: true,
+                cancelled: false,
                 usage: None,
                 tokens: 1_000,
                 duration_secs: 5,
@@ -11267,6 +11371,113 @@ mod tests {
             "queued report carries the child's output"
         );
         assert!(matches!(state.turn, TurnState::ExecutingTools { .. }));
+    }
+
+    /// Seed a state with one detached background agent in the registry.
+    fn state_with_background_agent(agent_id: &str, description: &str) -> State {
+        let (state, _) = update(
+            fresh_state(),
+            Msg::BackgroundAgentStarted {
+                agent_id: agent_id.to_string(),
+                description: description.to_string(),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn slash_agents_lists_registry_or_reports_none() {
+        // Empty registry: a "none" note, no Cmd beyond the transcript save.
+        let (state, _) = update(fresh_state(), Msg::Slash(SlashCmd::Agents(None)));
+        let last = state.session.messages().last().expect("system note");
+        assert!(last.content.contains("No background agents"));
+
+        // Populated registry: one line per agent with id + description.
+        let state = state_with_background_agent("a3", "audit docs");
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Agents(None)));
+        let last = state.session.messages().last().expect("listing");
+        assert!(last.content.contains("Background agents (1)"));
+        assert!(last.content.contains("a3"));
+        assert!(last.content.contains("audit docs"));
+        // Listing must not kill anything.
+        assert_eq!(state.runtime.background_agents.len(), 1);
+    }
+
+    #[test]
+    fn slash_agents_kill_validates_id_and_fires_cmd() {
+        // Unknown id: feedback, no kill Cmd.
+        let state = state_with_background_agent("a3", "audit docs");
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Agents(Some("kill a99".to_string()))),
+        );
+        let last = state.session.messages().last().expect("note");
+        assert!(last.content.contains("No background agent 'a99'"));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::KillBackgroundAgent { .. })),
+            "unknown id must not fire a kill"
+        );
+
+        // Known id: row marked cancelling, targeted kill Cmd emitted.
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Agents(Some("kill a3".to_string()))),
+        );
+        assert_eq!(state.runtime.background_agents[0].activity, "cancelling…");
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            Cmd::KillBackgroundAgent { agent_id: Some(id) } if id == "a3"
+        )));
+
+        // Kill all: every row marked, broadcast Cmd emitted.
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Agents(Some("kill all".to_string()))),
+        );
+        assert!(
+            state
+                .runtime
+                .background_agents
+                .iter()
+                .all(|a| a.activity == "cancelling…")
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::KillBackgroundAgent { agent_id: None }))
+        );
+    }
+
+    #[test]
+    fn cancelled_background_agent_notes_but_never_queues_a_report() {
+        let state = state_with_background_agent("a3", "audit docs");
+        let tokens_before = state.session.cumulative_token_usage.total_tokens();
+        let (state, _) = update(
+            state,
+            Msg::BackgroundAgentFinished {
+                agent_id: "a3".to_string(),
+                description: "audit docs".to_string(),
+                report: "partial findings".to_string(),
+                success: false,
+                cancelled: true,
+                usage: Some(crate::models::TokenUsage::provider(10_000, 5_000)),
+                tokens: 15_000,
+                duration_secs: 42,
+            },
+        );
+        // Row cleared, spend still folded (the work was billed).
+        assert!(state.runtime.background_agents.is_empty());
+        assert_eq!(
+            state.session.cumulative_token_usage.total_tokens(),
+            tokens_before + 15_000
+        );
+        // Cancelled note in the transcript, but NO queued report and no
+        // auto-submitted turn — a deliberate kill must not spend a model call.
+        let last = state.session.messages().last().expect("note");
+        assert!(last.content.contains("cancelled"));
+        assert!(state.ui.queued_messages.is_empty());
+        assert!(matches!(state.turn, TurnState::Idle));
     }
 
     /// Build a one-call ExecutingTools state around an `agent` tool call,
