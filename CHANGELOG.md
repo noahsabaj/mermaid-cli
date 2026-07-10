@@ -307,6 +307,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The transcript now records what you answered in `ask_user_question`.**
+  An answered question set renders as a `User answered the model's
+  questions:` block with one `· question → answer` line per question
+  (notes included), Claude-Code style, instead of a bare
+  `ask_user_question()` header with only a duration. Dismissed or
+  chat-about-this resolutions show their outcome text too.
+
 - **`model_profiles` renamed to `[model_aliases]`** (and the `profile:`
   model-id prefix to `alias:`) to free the "profile" name for the config
   overlays above. Bare alias names still resolve unchanged.

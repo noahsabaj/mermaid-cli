@@ -261,6 +261,16 @@ pub enum ToolMetadata {
         completed: u32,
         total: u32,
     },
+    /// `ask_user_question` resolved with answers. Kept structured so the
+    /// transcript can replay each question → answer pair rather than a bare
+    /// duration.
+    Questions {
+        answers: Vec<super::question::QuestionAnswer>,
+        /// The answers came from remembered cross-session preferences
+        /// (`memoryKey`) rather than a live prompt.
+        #[serde(default)]
+        remembered: bool,
+    },
     Custom {
         name: String,
         data: Value,

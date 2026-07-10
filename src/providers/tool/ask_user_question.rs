@@ -17,7 +17,7 @@ use async_trait::async_trait;
 
 use crate::domain::{
     OptionPreview, Question, QuestionAnswer, QuestionKind, QuestionOption, QuestionResolution,
-    TextValidate, ToolDefinition, ToolOutcome,
+    TextValidate, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata,
 };
 
 use super::super::ctx::ExecContext;
@@ -41,6 +41,19 @@ fn format_answers(answers: &[QuestionAnswer]) -> String {
         }
     }
     out
+}
+
+/// Ride the structured answers on the outcome metadata so the transcript can
+/// render each question → answer pair (`ToolMetadata::Questions`) instead of
+/// a bare duration line.
+fn answers_metadata(answers: Vec<QuestionAnswer>, remembered: bool) -> ToolRunMetadata {
+    ToolRunMetadata {
+        detail: ToolMetadata::Questions {
+            answers,
+            remembered,
+        },
+        ..ToolRunMetadata::default()
+    }
 }
 
 /// One-line UI summary of the answers.
@@ -349,7 +362,8 @@ impl ToolExecutor for AskUserQuestionTool {
                 format_answers(&answers),
                 format!("{} (remembered)", summarize_answers(&answers)),
                 secs(),
-            );
+            )
+            .with_metadata(answers_metadata(answers, true));
         }
 
         let Some(broker) = ctx.questions.as_ref() else {
@@ -358,7 +372,7 @@ impl ToolExecutor for AskUserQuestionTool {
             return ToolOutcome::success(
                 "No interactive terminal is available, so the user could not be asked. \
                  Proceed using your best judgment and state the assumption you made.",
-                "ask_user_question (no interactive terminal)",
+                "no interactive terminal; proceeding without answers",
                 secs(),
             );
         };
@@ -390,18 +404,19 @@ impl ToolExecutor for AskUserQuestionTool {
                     summarize_answers(&answers),
                     secs(),
                 )
+                .with_metadata(answers_metadata(answers, false))
             },
             QuestionResolution::Dismissed => ToolOutcome::success(
                 "The user dismissed the question(s) without answering. Do not re-ask unless you \
                  still need the information; otherwise proceed with your best judgment.",
-                "ask_user_question (dismissed)",
+                "dismissed without answering",
                 secs(),
             ),
             QuestionResolution::Reformulate => ToolOutcome::success(
                 "The user chose to discuss these questions rather than answer them as posed. \
                  Do not re-issue the same questions; engage with what they say next and \
                  reformulate your approach based on their input.",
-                "ask_user_question (chat about this)",
+                "user chose to chat about this instead",
                 secs(),
             ),
         }

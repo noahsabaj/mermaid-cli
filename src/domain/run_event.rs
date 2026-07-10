@@ -256,6 +256,7 @@ fn tool_name(detail: &ToolMetadata) -> String {
         ToolMetadata::Mcp { server, tool } => format!("{server}/{tool}"),
         ToolMetadata::Subagent { .. } => "agent".to_string(),
         ToolMetadata::Tasks { action, .. } => format!("task_{action}"),
+        ToolMetadata::Questions { .. } => "ask_user_question".to_string(),
         ToolMetadata::Custom { name, .. } => name.clone(),
     }
 }
