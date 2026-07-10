@@ -87,6 +87,10 @@ pub async fn run_interactive_with(
         state.seed_conversation(history);
     }
     crate::app::stamp_session_provenance(&mut state, &cwd);
+    // NO_COLOR (https://no-color.org): present and non-empty disables all
+    // color. Read once here — the reducer never touches the environment; the
+    // render layer resolves `Theme::plain()` off this flag.
+    state.ui.no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
     // Skills load once at startup (authored artifacts, no watcher); the config
     // watcher below keeps only instructions/memory fresh.
     state.skills = crate::app::skills::load(&cwd);
@@ -110,7 +114,11 @@ pub async fn run_interactive_with(
     runner.spawn_config_watcher(cwd.clone(), config.memory.clone());
     let mut terminal = Some(TerminalGuard::setup()?);
     let mut rstate = RenderCache::new();
-    let mut events = EventStream::new();
+    // `Option` because the $EDITOR compose round-trip must DROP the stream
+    // (its reader thread holds crossterm's internal reader mutex) before
+    // suspending, and build a fresh one after — same lifecycle dance as
+    // `terminal` above.
+    let mut events = Some(EventStream::new());
     let mut lifecycle = RuntimeLifecycle::new();
     let mut tick = interval(Duration::from_millis(16));
     let mut recorder = opts.recorder;
@@ -195,7 +203,7 @@ pub async fn run_interactive_with(
                 m = msg_rx.recv() => Sel::Msg(m),
                 // Crossterm events. Handled below, outside the select!, so
                 // coalescing can re-borrow `events`.
-                e = events.next() => Sel::Term(e),
+                e = events.as_mut().expect("event stream is alive while the loop runs").next() => Sel::Term(e),
                 // OS lifecycle signals. A typed Ctrl+C in raw mode is handled
                 // by the crossterm branch above; this covers SIGINT/SIGTERM/
                 // SIGHUP delivered externally.
@@ -284,7 +292,13 @@ pub async fn run_interactive_with(
                             // The drain pulls every immediately-available event
                             // so the whole block lands as one atomic Msg::Paste.
                             let (primary, trailing) = coalesce_key_burst(evt, || {
-                                events.next().now_or_never().flatten().and_then(|r| r.ok())
+                                events
+                                    .as_mut()
+                                    .expect("event stream is alive while the loop runs")
+                                    .next()
+                                    .now_or_never()
+                                    .flatten()
+                                    .and_then(|r| r.ok())
                             });
                             for queued in trailing {
                                 pending_msgs.push_back(queued);
@@ -321,8 +335,28 @@ pub async fn run_interactive_with(
         state.now = now;
         let (new_state, cmds) = update(state, msg);
         state = new_state;
+        // `ComposeInEditor` is run-loop-owned (it suspends the terminal +
+        // event stream, which only this loop holds); everything else goes to
+        // the effect runner. At most one compose per reducer step by
+        // construction (single Ctrl+O / /editor arm).
+        let mut compose_draft: Option<String> = None;
         for cmd in cmds {
-            runner.dispatch(cmd);
+            if let Cmd::ComposeInEditor { text } = cmd {
+                compose_draft = Some(text);
+            } else {
+                runner.dispatch(cmd);
+            }
+        }
+        if let Some(draft) = compose_draft {
+            match crate::app::editor::compose_in_editor(&mut terminal, &mut events, draft).await {
+                // Through pending_msgs, so the result flows through the
+                // recorder like any input — --replay never launches an editor.
+                Ok(msg) => pending_msgs.push_back(msg),
+                Err(err) => {
+                    exit_result = Err(err);
+                    break;
+                },
+            }
         }
 
         if state.should_exit {

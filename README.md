@@ -170,6 +170,7 @@ mermaid pr create                               # Open a PR/MR from the current 
 | Alt+T | Cycle reasoning level: `None → Minimal → Low → Medium → High → XHigh → Max → None` |
 | Shift+Tab | Cycle safety mode: `read_only → ask → auto → full_access → read_only` (session-scoped) |
 | Ctrl+V | Paste image or text from clipboard |
+| Ctrl+O | Compose the prompt in `$VISUAL`/`$EDITOR` (TUI suspends, resumes on save-quit) |
 | Ctrl+Click | Open image from chat history |
 | Drag | Select chat text (highlights; does not copy) |
 | Ctrl+Shift+C | Copy the selected chat text to the clipboard |
@@ -190,6 +191,8 @@ Everyday:
 - `/clear`, `/save [name]`, `/load [id]`, `/list` — manage the conversation
 - `/cancel [id]` — cancel the active turn or a durable task
 - `/handoff [id]`, `/report [id]` — write a current-context report or inspect a task report
+- `/theme [dark|light]` — switch the color theme (persisted); `NO_COLOR` disables colors entirely
+- `/editor` — compose the prompt in `$VISUAL`/`$EDITOR` (Ctrl+O keeps the current draft)
 - `/help` (`/h`), `/quit` (`/q`)
 
 Model and context:
@@ -432,6 +435,13 @@ checkpoint_on_mutation = true
 # Model the "auto" classifier uses to vet actions. Omit to vet with the
 # session's active model; set a smaller/faster model to cut latency and cost.
 # auto_classifier_model = "<provider>/<small-fast-model>"
+
+[ui]
+# TUI color theme: "dark" (default) or "light". Switch live with
+# `/theme dark|light` (persists here). Setting the NO_COLOR environment
+# variable (any non-empty value) disables colors entirely, regardless of
+# this value.
+theme = "dark"
 
 [non_interactive]
 # Run behavior is controlled by CLI flags:

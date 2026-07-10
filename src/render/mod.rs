@@ -52,6 +52,12 @@ pub struct RenderCache {
     /// auto-continue would deep-clone the whole transcript forever.
     stitched: Option<StitchedMemo>,
     pub theme: theme::Theme,
+    /// `(state.ui.theme, state.ui.no_color)` the current `theme` was resolved
+    /// from. `render()` diffs it each frame and swaps the palette (clearing
+    /// `wrapped_line_cache`) only on change, so `/theme` repaints instantly
+    /// without per-frame `Theme` construction. `None` (fresh cache) keeps the
+    /// `Theme::dark()` default until the first frame resolves it.
+    applied_theme: Option<(crate::app::ThemeChoice, bool)>,
     /// Host + user for the status bar's `user@host:cwd` line, read once at
     /// startup so `StatusWidget::render` doesn't hit the environment on every
     /// frame (#55). Process-constant, so caching here is exact.
@@ -79,6 +85,7 @@ impl Default for RenderCache {
                 .or_else(|_| std::env::var("USERNAME"))
                 .unwrap_or_else(|_| "user".to_string()),
             stitched: None,
+            applied_theme: None,
             last_mouse_scroll_accum: 0,
             last_scroll_to_bottom_seq: 0,
         }
@@ -99,6 +106,24 @@ impl RenderCache {
 
 /// The entrypoint. Call once per render pass from the main loop.
 pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
+    // Resolve the palette from reducer state: NO_COLOR beats the theme
+    // choice (colors off entirely); otherwise `/theme` picks dark/light.
+    let want = (state.ui.theme, state.ui.no_color);
+    if rstate.applied_theme != Some(want) {
+        rstate.theme = if state.ui.no_color {
+            theme::Theme::plain()
+        } else {
+            match state.ui.theme {
+                crate::app::ThemeChoice::Dark => theme::Theme::dark(),
+                crate::app::ThemeChoice::Light => theme::Theme::light(),
+            }
+        };
+        // The wrapped-line cache is theme-keyed, but drop stale entries
+        // eagerly rather than letting the old palette's lines linger.
+        rstate.wrapped_line_cache.clear();
+        rstate.applied_theme = Some(want);
+    }
+
     // F13: consume any pending mouse-scroll accumulator. The reducer
     // publishes a monotonic counter on `ui.mouse_scroll_accum`; we
     // apply the delta to `ChatState` since the reducer isn't allowed
@@ -787,6 +812,39 @@ mod tests {
             .draw(|f| render(state, &mut rstate, f))
             .expect("draw");
         terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn theme_choice_changes_colors_never_glyphs() {
+        // Guards the "theme changes can't break snapshots" claim: light,
+        // dark, and NO_COLOR-plain frames must be glyph-identical — a theme
+        // is a palette, not a layout.
+        let mut state = mock_state();
+        state
+            .session
+            .append(crate::models::ChatMessage::user("hello"), state.now);
+        let dark = render_to_string(&state);
+        state.ui.theme = crate::app::ThemeChoice::Light;
+        let light = render_to_string(&state);
+        assert_eq!(dark, light, "light theme changed glyphs");
+        state.ui.no_color = true;
+        let plain = render_to_string(&state);
+        assert_eq!(dark, plain, "NO_COLOR changed glyphs");
+    }
+
+    #[test]
+    fn theme_memo_swaps_palette_on_state_change() {
+        let mut state = mock_state();
+        let mut rstate = RenderCache::new();
+        render_frame(&state, &mut rstate, 80, 24);
+        assert_eq!(rstate.theme.name, "Dark");
+        state.ui.theme = crate::app::ThemeChoice::Light;
+        render_frame(&state, &mut rstate, 80, 24);
+        assert_eq!(rstate.theme.name, "Light");
+        // NO_COLOR beats the theme choice.
+        state.ui.no_color = true;
+        render_frame(&state, &mut rstate, 80, 24);
+        assert_eq!(rstate.theme.name, "Plain");
     }
 
     #[test]

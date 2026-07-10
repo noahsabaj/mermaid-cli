@@ -612,7 +612,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 if matches!(msg.kind, ChatMessageKind::RunSummary) {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", msg.content),
-                        Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)),
+                        Style::new().fg(self.theme.colors.text_meta.to_color()),
                     )));
                     lines.push(Line::from(""));
                     continue;
@@ -643,8 +643,8 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 }
 
                 let (role_prefix, role_color) = match msg.role {
-                    MessageRole::User => (">", ratatui::style::Color::White),
-                    MessageRole::Assistant => ("●", ratatui::style::Color::White),
+                    MessageRole::User => (">", self.theme.colors.text_primary.to_color()),
+                    MessageRole::Assistant => ("●", self.theme.colors.text_primary.to_color()),
                     MessageRole::System => ("●", self.theme.colors.system_message.to_color()),
                     MessageRole::Tool => unreachable!("Tool messages filtered above"),
                 };
@@ -668,7 +668,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                             lines.push(Line::from(vec![
                                 Span::styled(
                                     "● ",
-                                    Style::new().fg(ratatui::style::Color::DarkGray),
+                                    Style::new().fg(self.theme.colors.text_disabled.to_color()),
                                 ),
                                 Span::styled(
                                     "Thinking...",
@@ -823,7 +823,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                             spans.push(Span::raw(" ".repeat(pad)));
                             spans.push(Span::styled(
                                 formatted_timestamp.clone(),
-                                Style::new().fg(ratatui::style::Color::Rgb(136, 136, 136)),
+                                Style::new().fg(self.theme.colors.text_meta.to_color()),
                             ));
 
                             lines.push(Line::from(spans));
@@ -1224,8 +1224,8 @@ fn render_actions(
                     let display_lines: Vec<&str> = diff_lines.iter().take(80).copied().collect();
 
                     if !display_lines.is_empty() {
-                        let removed_bg = ratatui::style::Color::Rgb(60, 20, 20);
-                        let added_bg = ratatui::style::Color::Rgb(20, 50, 20);
+                        let removed_bg = theme.colors.diff_removed_bg.to_color();
+                        let added_bg = theme.colors.diff_added_bg.to_color();
 
                         for diff_line in &display_lines {
                             // Expand tabs first: the TUI paints a tab as zero
@@ -1668,8 +1668,8 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let theme = Theme::dark();
-        let added_bg = ratatui::style::Color::Rgb(20, 50, 20);
-        let removed_bg = ratatui::style::Color::Rgb(60, 20, 20);
+        let added_bg = theme.colors.diff_added_bg.to_color();
+        let removed_bg = theme.colors.diff_removed_bg.to_color();
         // Lines at increasing tab depth — the exact shape that staircased.
         let diff = format!(
             "  62{m}\tconst out = [];\n  63{p}\t\tlet fixed = false;\n  64{p}\t\t\tdeeplyNested();",

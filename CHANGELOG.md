@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Light theme, `/theme`, and a `[ui]` config table.** The TUI now ships a
+  light palette alongside the default dark one. `/theme dark|light` switches
+  live and persists as `ui.theme`; every previously hardcoded widget color
+  (role markers, diff backgrounds, modal text, the queued-message band) now
+  routes through the theme.
+
+- **`NO_COLOR` support.** Setting `NO_COLOR` (any non-empty value, per
+  no-color.org) renders the whole TUI in the terminal's own default colors.
+  Layout, glyphs, and bold/dim structure are unchanged.
+
+- **Compose in `$EDITOR`.** Ctrl+O (or `/editor`) suspends the TUI, opens
+  the current input draft in `$VISUAL`/`$EDITOR`, and loads the result back
+  into the composer on save-quit. Works mid-run (it only edits the draft);
+  recordings capture the returned text, so `--replay` never launches an
+  editor.
+
 - **Mid-run steering.** Messages typed while the agent is working are now
   delivered at the next tool boundary WITHIN the run — committed as user
   messages right after the tool results, so the very next model call sees

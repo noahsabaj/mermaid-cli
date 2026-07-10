@@ -62,7 +62,7 @@ impl<'a> Widget for StatusWidget<'a> {
             // Directory (fixed to left)
             Span::styled(
                 format!("{}@{}", self.username, self.hostname),
-                Style::new().fg(ratatui::style::Color::Green).bold(),
+                Style::new().fg(self.theme.colors.success.to_color()).bold(),
             ),
             Span::styled(
                 ":",
@@ -70,7 +70,7 @@ impl<'a> Widget for StatusWidget<'a> {
             ),
             Span::styled(
                 self.working_dir,
-                Style::new().fg(ratatui::style::Color::Cyan),
+                Style::new().fg(self.theme.colors.info.to_color()),
             ),
             // Padding
             Span::raw(" ".repeat(padding_width)),

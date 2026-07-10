@@ -58,6 +58,22 @@ pub struct ThemeColors {
     /// and border. Serde-defaulted so themes/configs predating it still load.
     #[serde(default = "default_brand")]
     pub brand: ColorValue,
+
+    /// Muted meta text (tool headers, byline timestamps) — deliberately a
+    /// specific mid-gray rather than the terminal's ANSI gray, which most
+    /// palettes render much brighter. Serde-defaulted like `brand`.
+    #[serde(default = "default_text_meta")]
+    pub text_meta: ColorValue,
+    /// Background band behind added diff lines.
+    #[serde(default = "default_diff_added_bg")]
+    pub diff_added_bg: ColorValue,
+    /// Background band behind removed diff lines.
+    #[serde(default = "default_diff_removed_bg")]
+    pub diff_removed_bg: ColorValue,
+    /// Highlight band behind queued (mid-run steering) messages in the
+    /// status area.
+    #[serde(default = "default_queued_bg")]
+    pub queued_bg: ColorValue,
 }
 
 /// Mermaid's aqua brand accent, used when a theme omits `brand`.
@@ -66,6 +82,40 @@ fn default_brand() -> ColorValue {
         r: 34,
         g: 211,
         b: 238,
+    }
+}
+
+/// Dark-theme values double as serde defaults so themes/configs predating
+/// these fields keep today's exact colors.
+fn default_text_meta() -> ColorValue {
+    ColorValue::Rgb {
+        r: 136,
+        g: 136,
+        b: 136,
+    }
+}
+
+fn default_diff_added_bg() -> ColorValue {
+    ColorValue::Rgb {
+        r: 20,
+        g: 50,
+        b: 20,
+    }
+}
+
+fn default_diff_removed_bg() -> ColorValue {
+    ColorValue::Rgb {
+        r: 60,
+        g: 20,
+        b: 20,
+    }
+}
+
+fn default_queued_bg() -> ColorValue {
+    ColorValue::Rgb {
+        r: 60,
+        g: 60,
+        b: 80,
     }
 }
 
@@ -81,6 +131,9 @@ impl ColorValue {
         match self {
             ColorValue::Rgb { r, g, b } => Color::Rgb(*r, *g, *b),
             ColorValue::Named(name) => match name.as_str() {
+                // The terminal's own default fg/bg — what `Theme::plain()`
+                // (NO_COLOR) is built from.
+                "default" => Color::Reset,
                 "black" => Color::Black,
                 "red" => Color::Red,
                 "green" => Color::Green,
@@ -98,12 +151,8 @@ impl ColorValue {
 }
 
 impl Theme {
-    /// Create a light theme.
-    ///
-    /// Not wired into any config reader yet — the `Deserialize` impl on
-    /// `Theme` is retained so a future patch can load
-    /// `config.ui.theme = "light" | "dark"` from config.toml and select
-    /// the constructor. Until then, call this explicitly to test.
+    /// Create a light theme. Selected by `ui.theme = "light"` in config.toml
+    /// or `/theme light` (see `render()`'s theme memo).
     pub fn light() -> Self {
         Self {
             name: "Light".to_string(),
@@ -159,6 +208,26 @@ impl Theme {
                 info: ColorValue::Named("blue".to_string()),
 
                 brand: default_brand(),
+                text_meta: ColorValue::Rgb {
+                    r: 110,
+                    g: 110,
+                    b: 110,
+                },
+                diff_added_bg: ColorValue::Rgb {
+                    r: 220,
+                    g: 245,
+                    b: 220,
+                },
+                diff_removed_bg: ColorValue::Rgb {
+                    r: 250,
+                    g: 225,
+                    b: 225,
+                },
+                queued_bg: ColorValue::Rgb {
+                    r: 225,
+                    g: 225,
+                    b: 240,
+                },
             },
         }
     }
@@ -219,7 +288,121 @@ impl Theme {
                 info: ColorValue::Named("cyan".to_string()),
 
                 brand: default_brand(),
+                text_meta: default_text_meta(),
+                diff_added_bg: default_diff_added_bg(),
+                diff_removed_bg: default_diff_removed_bg(),
+                queued_bg: default_queued_bg(),
             },
         }
+    }
+
+    /// Colorless theme for `NO_COLOR`: every slot is the terminal's own
+    /// default fg/bg (`Color::Reset`), so nothing emits a color at all.
+    /// Structure (glyphs, layout, bold/dim) is untouched — diffs still read
+    /// via their `+`/`-` prefixes.
+    pub fn plain() -> Self {
+        fn d() -> ColorValue {
+            ColorValue::Named("default".to_string())
+        }
+        Self {
+            name: "Plain".to_string(),
+            colors: ThemeColors {
+                background: d(),
+                foreground: d(),
+                border: d(),
+                border_focused: d(),
+                header: d(),
+                status_bar: d(),
+                text_primary: d(),
+                text_secondary: d(),
+                text_disabled: d(),
+                text_highlight: d(),
+                user_message: d(),
+                assistant_message: d(),
+                system_message: d(),
+                user_message_background: d(),
+                code_background: d(),
+                code_foreground: d(),
+                code_keyword: d(),
+                code_string: d(),
+                code_comment: d(),
+                mode_normal: d(),
+                mode_accept_edits: d(),
+                mode_plan: d(),
+                mode_bypass_all: d(),
+                success: d(),
+                warning: d(),
+                error: d(),
+                info: d(),
+                brand: d(),
+                text_meta: d(),
+                diff_added_bg: d(),
+                diff_removed_bg: d(),
+                queued_bg: d(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_default_maps_to_reset() {
+        assert_eq!(
+            ColorValue::Named("default".to_string()).to_color(),
+            Color::Reset
+        );
+    }
+
+    #[test]
+    fn plain_theme_is_entirely_reset() {
+        // Every slot must resolve to the terminal's own default — a single
+        // colored slot would defeat NO_COLOR. Serializing the palette and
+        // scanning for any non-"default" value covers all fields without
+        // enumerating them (new fields are covered automatically).
+        let theme = Theme::plain();
+        let json = serde_json::to_value(&theme.colors).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(!obj.is_empty());
+        for (field, value) in obj {
+            assert_eq!(
+                value.as_str(),
+                Some("default"),
+                "plain theme leaks color through `{field}`: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn dark_and_light_populate_the_new_slots() {
+        for theme in [Theme::dark(), Theme::light()] {
+            assert_ne!(theme.colors.diff_added_bg.to_color(), Color::Reset);
+            assert_ne!(theme.colors.diff_removed_bg.to_color(), Color::Reset);
+            assert_ne!(theme.colors.queued_bg.to_color(), Color::Reset);
+            assert_ne!(theme.colors.text_meta.to_color(), Color::Reset);
+        }
+    }
+
+    #[test]
+    fn theme_colors_deserialize_defaults_new_fields() {
+        // A theme serialized before the new slots existed still loads, with
+        // the dark values as defaults.
+        let dark = Theme::dark();
+        let mut json = serde_json::to_value(&dark.colors).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        for field in ["text_meta", "diff_added_bg", "diff_removed_bg", "queued_bg"] {
+            obj.remove(field);
+        }
+        let colors: ThemeColors = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            colors.text_meta.to_color(),
+            dark.colors.text_meta.to_color()
+        );
+        assert_eq!(
+            colors.diff_added_bg.to_color(),
+            dark.colors.diff_added_bg.to_color()
+        );
     }
 }
