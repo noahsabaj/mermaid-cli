@@ -27,7 +27,7 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
-use crate::models::{ChatMessage, MessageRole};
+use crate::models::{ChatMessage, MessageRole, ProviderContinuation};
 use crate::prompts::get_system_prompt;
 use crate::runtime::TaskStatus;
 
@@ -180,7 +180,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 partial_text,
                 partial_reasoning,
                 phase,
-                thinking_signature,
+                provider_continuation,
                 tokens,
                 ..
             } = &mut state.turn
@@ -189,7 +189,8 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 partial_reasoning.push_str(&chunk.text);
                 *phase = GenPhase::Thinking;
                 if let Some(sig) = chunk.signature {
-                    *thinking_signature = Some(sig);
+                    *provider_continuation =
+                        Some(ProviderContinuation::Anthropic { signature: sig });
                 }
                 // Count thinking tokens too, so the live counter climbs during a
                 // long reasoning phase instead of sitting at 0 until answer text.
@@ -389,7 +390,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::StreamDone {
             turn,
             usage,
-            thinking_signature,
+            provider_continuation,
             stop_reason,
         } => {
             handle_stream_done(
@@ -397,7 +398,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 &mut cmds,
                 turn,
                 usage,
-                thinking_signature,
+                provider_continuation,
                 stop_reason,
             );
         },
@@ -3423,7 +3424,7 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     if let TurnState::Generating {
         partial_text,
         partial_reasoning,
-        thinking_signature,
+        provider_continuation,
         continuation,
         ..
     } = &mut state.turn
@@ -3431,7 +3432,7 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     {
         let text = std::mem::take(partial_text);
         let reasoning = std::mem::take(partial_reasoning);
-        let sig = thinking_signature.take();
+        let sig = provider_continuation.take();
         let continuation = *continuation;
         let msg = commit_assistant_message(
             format!("{text}\n\n_[interrupted]_"),
@@ -3743,7 +3744,7 @@ fn handle_stream_done(
     cmds: &mut Vec<Cmd>,
     turn: TurnId,
     usage: Option<crate::models::TokenUsage>,
-    thinking_signature: Option<String>,
+    provider_continuation: Option<ProviderContinuation>,
     stop_reason: Option<crate::models::FinishReason>,
 ) {
     // Unpack the Generating state, drop it into Idle temporarily;
@@ -3754,14 +3755,14 @@ fn handle_stream_done(
             id,
             partial_text,
             partial_reasoning,
-            thinking_signature: accumulated_sig,
+            provider_continuation: accumulated_continuation,
             pending_tool_calls,
             continuation,
             ..
         } if id == turn => (
             partial_text,
             partial_reasoning,
-            accumulated_sig,
+            accumulated_continuation,
             pending_tool_calls,
             continuation,
         ),
@@ -3789,7 +3790,8 @@ fn handle_stream_done(
         },
     };
 
-    let (partial_text, partial_reasoning, accumulated_sig, tool_calls, continuation) = generating;
+    let (partial_text, partial_reasoning, accumulated_continuation, tool_calls, continuation) =
+        generating;
     // Bank this phase's generated tokens into the run total so the spinner's
     // counter carries across the tool step into the next model call (matches the
     // live estimate in StreamText/StreamReasoning).
@@ -3828,7 +3830,7 @@ fn handle_stream_done(
         state.runtime.empty_continuations = 0;
     }
 
-    let final_sig = thinking_signature.or(accumulated_sig);
+    let final_continuation = provider_continuation.or(accumulated_continuation);
 
     // Commit the assistant message (with any tool calls attached — the adapter
     // serializes them into the next conversation turn), unless it's an empty turn
@@ -3839,7 +3841,7 @@ fn handle_stream_done(
             partial_text,
             partial_reasoning,
             tool_calls.clone(),
-            final_sig,
+            final_continuation,
             state.now,
             continuation,
         );
@@ -4278,7 +4280,7 @@ fn handle_upstream_error(
         tool_calls: None,
         tool_call_id: None,
         tool_name: None,
-        thinking_signature: None,
+        provider_continuation: None,
     };
     state.session.append(msg, state.now);
 
@@ -5159,7 +5161,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
-                thinking_signature: None,
+                provider_continuation: None,
             });
         }
         let out = super::evict_stale_screenshots(msgs);
@@ -5197,7 +5199,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
-                thinking_signature: None,
+                provider_continuation: None,
             });
         }
         for i in 0..2 {
@@ -5214,7 +5216,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
-                thinking_signature: None,
+                provider_continuation: None,
             });
         }
         const { assert!(2 < MAX_RETAINED_SCREENSHOTS, "test premise") };
@@ -6800,7 +6802,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -6809,7 +6811,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -6856,7 +6858,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -6865,7 +6867,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -6921,7 +6923,7 @@ mod tests {
             partial_reasoning: "y".repeat(400), // ~100 tokens
             tokens: 200,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -6930,7 +6932,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -6952,7 +6954,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -6961,7 +6963,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -6985,7 +6987,7 @@ mod tests {
             partial_reasoning: "thinking it through".to_string(),
             tokens: 0,
             phase: GenPhase::Thinking,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -6994,7 +6996,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -7018,7 +7020,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         }
@@ -7028,7 +7030,7 @@ mod tests {
         Msg::StreamDone {
             turn: TurnId(5),
             usage: None,
-            thinking_signature: None,
+            provider_continuation: None,
             stop_reason: Some(crate::models::FinishReason::Length),
         }
     }
@@ -7170,7 +7172,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None, // not a length truncation
             },
         );
@@ -7185,7 +7187,7 @@ mod tests {
                 completion,
                 prompt + completion,
             )),
-            thinking_signature: None,
+            provider_continuation: None,
             stop_reason: Some(crate::models::FinishReason::Length),
         }
     }
@@ -7259,7 +7261,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: Some(usage),
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: Some(crate::models::FinishReason::Length),
             },
         );
@@ -7315,7 +7317,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -7331,7 +7333,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: true,
         }
@@ -7385,7 +7387,7 @@ mod tests {
             Msg::StreamDone {
                 turn: cont_id,
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -7433,7 +7435,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -7859,7 +7861,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -7869,7 +7871,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: Some(crate::models::TokenUsage::provider(120, 30, 150)),
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -7897,7 +7899,7 @@ mod tests {
             partial_reasoning: "internal thinking ".repeat(50),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -7907,7 +7909,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: Some(crate::models::TokenUsage::provider(100, 0, 100)),
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -7947,7 +7949,7 @@ mod tests {
             partial_reasoning: "thinking".to_string(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -7957,7 +7959,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -7990,7 +7992,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -8000,7 +8002,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -8018,7 +8020,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Thinking,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -9508,7 +9510,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         }
@@ -9542,7 +9544,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -9572,7 +9574,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(1),
                 usage: Some(crate::models::TokenUsage::provider(120, 30, 150)),
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );
@@ -9585,7 +9587,7 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(2),
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             },
         );

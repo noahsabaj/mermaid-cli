@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Meta Muse Spark 1.1 now uses the Responses API with reasoning continuity.**
+  `meta/muse-spark-1.1` authenticates with `MODEL_API_KEY`, streams text,
+  automatic reasoning summaries, tool calls, usage, and multimodal inputs from
+  `POST /v1/responses`. Mermaid uses Meta's stateless encrypted-replay mode
+  (`store: false`) so reasoning survives tool turns and saved-session resume
+  without server-managed response state; the opaque continuation is protected
+  by existing private-session permissions and never rendered or written to
+  diagnostic logs. Other providers keep their existing endpoints and behavior.
+  One migration note: the per-message `thinking_signature` field became the
+  provider-neutral `provider_continuation`, so Anthropic extended-thinking
+  sessions saved before this change resume without their replayed thinking
+  blocks (new turns re-establish them; no request errors).
+
 - **Rewind and fork with double-Esc.** Pressing Esc twice within a second
   while idle opens a picker of the session's earlier user messages (newest
   first). Selecting one FORKS the session at that point: the original is

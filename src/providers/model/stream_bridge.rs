@@ -83,7 +83,7 @@ mod tests {
         relay
             .send(StreamEvent::Done {
                 usage: None,
-                thinking_signature: None,
+                provider_continuation: None,
                 stop_reason: None,
             })
             .unwrap();

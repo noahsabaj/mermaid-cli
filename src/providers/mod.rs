@@ -28,7 +28,8 @@ pub use ctx::{
 };
 pub use factory::ProviderFactory;
 pub use model::{
-    AnthropicProvider, GeminiProvider, ModelProvider, OllamaProvider, OpenAICompatProvider,
+    AnthropicProvider, GeminiProvider, MetaProvider, ModelProvider, OllamaProvider,
+    OpenAICompatProvider,
 };
 pub use questions::QuestionBroker;
 pub use tool::{ToolExecutor, ToolRegistry, TuiMode};

@@ -25,11 +25,9 @@ pub struct Capabilities {
     pub max_context_tokens: Option<usize>,
     /// The model's per-response output ceiling in tokens, if known.
     pub max_output_tokens: Option<usize>,
-    /// Does the provider emit a verifiable "thinking signature" that
-    /// must round-trip on the next request (Anthropic's extended
-    /// thinking)? When true, the reducer preserves the signature on
-    /// the assistant message via `thinking_signature`.
-    pub emits_thinking_signature: bool,
+    /// Does the provider emit opaque continuation data that must round-trip on
+    /// the next request (Anthropic thinking or Meta encrypted reasoning)?
+    pub emits_provider_continuation: bool,
 }
 
 impl Capabilities {
@@ -43,15 +41,14 @@ impl Capabilities {
             supports_reasoning: caps.supports_reasoning.clone(),
             max_context_tokens: caps.max_context_tokens,
             max_output_tokens: caps.max_output_tokens,
-            // Only Anthropic emits signatures; we can't tell from
-            // `ModelCapabilities` alone. Adapters set this explicitly.
-            emits_thinking_signature: false,
+            // Provider wrappers opt into continuation explicitly.
+            emits_provider_continuation: false,
         }
     }
 
-    /// Builder: mark that this provider round-trips thinking signatures.
-    pub fn with_thinking_signature(mut self) -> Self {
-        self.emits_thinking_signature = true;
+    /// Builder: mark that this provider round-trips continuation state.
+    pub fn with_provider_continuation(mut self) -> Self {
+        self.emits_provider_continuation = true;
         self
     }
 }
@@ -74,13 +71,13 @@ mod tests {
         assert!(caps.supports_vision);
         assert_eq!(caps.max_context_tokens, Some(32_000));
         assert_eq!(caps.max_output_tokens, Some(8_192));
-        assert!(!caps.emits_thinking_signature);
+        assert!(!caps.emits_provider_continuation);
     }
 
     #[test]
-    fn with_thinking_signature_sets_flag() {
+    fn with_provider_continuation_sets_flag() {
         let legacy = ModelCapabilities::ollama_default();
-        let caps = Capabilities::from_legacy(&legacy).with_thinking_signature();
-        assert!(caps.emits_thinking_signature);
+        let caps = Capabilities::from_legacy(&legacy).with_provider_continuation();
+        assert!(caps.emits_provider_continuation);
     }
 }

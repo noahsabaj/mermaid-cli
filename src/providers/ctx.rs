@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::{ToolCallId, TurnId};
 use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{ChatMessage, FinishReason, ReasoningChunk, TokenUsage};
+use crate::models::{ChatMessage, FinishReason, ProviderContinuation, ReasoningChunk, TokenUsage};
 use crate::runtime::SafetyMode;
 
 use super::approval::ApprovalBroker;
@@ -60,28 +60,23 @@ pub enum StreamEvent {
     /// Ollama server…"). Not response content — the effect layer routes it
     /// to a transient/system line, never into the assistant message.
     Status(String),
-    /// Optional — some providers emit a signature mid-stream
-    /// (Anthropic). Adapters that only have it at the end can attach
-    /// it to `Done` instead.
-    ThinkingSignature(String),
     /// Stream complete. Carries final token usage (None if unknown),
-    /// any terminal thinking signature, and why generation stopped
+    /// any provider continuation state, and why generation stopped
     /// (so the reducer can flag truncation / a content block).
     Done {
         usage: Option<TokenUsage>,
-        thinking_signature: Option<String>,
+        provider_continuation: Option<ProviderContinuation>,
         stop_reason: Option<FinishReason>,
     },
 }
 
 /// Final response returned by `ModelProvider::chat()` after the
 /// stream drains. Carries what the reducer can't derive from the
-/// stream events themselves — token usage and the opaque thinking
-/// signature needed for Anthropic extended-thinking continuation.
+/// stream events themselves: token usage and opaque provider continuation.
 #[derive(Debug, Clone)]
 pub struct FinalResponse {
     pub usage: Option<TokenUsage>,
-    pub thinking_signature: Option<String>,
+    pub provider_continuation: Option<ProviderContinuation>,
     pub tool_calls: Vec<ModelToolCall>,
     pub stop_reason: Option<FinishReason>,
 }

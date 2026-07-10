@@ -1532,7 +1532,7 @@ async fn dispatch_call_model(
                     while let Ok(buffered) = stream_rx.try_recv() {
                         if let StreamEvent::Done {
                             usage,
-                            thinking_signature,
+                            provider_continuation,
                             stop_reason,
                         } = buffered
                         {
@@ -1540,7 +1540,7 @@ async fn dispatch_call_model(
                                 .send(Msg::StreamDone {
                                     turn,
                                     usage,
-                                    thinking_signature,
+                                    provider_continuation,
                                     stop_reason,
                                 })
                                 .await;
@@ -1560,15 +1560,14 @@ async fn dispatch_call_model(
                 // Plumbing notice ("Starting the local Ollama server…") —
                 // a turn-independent system line, not response content.
                 StreamEvent::Status(text) => Msg::TransientStatus { text },
-                StreamEvent::ThinkingSignature(_) => continue, // folded into Done below
                 StreamEvent::Done {
                     usage,
-                    thinking_signature,
+                    provider_continuation,
                     stop_reason,
                 } => Msg::StreamDone {
                     turn,
                     usage,
-                    thinking_signature,
+                    provider_continuation,
                     stop_reason,
                 },
             };
@@ -1724,7 +1723,7 @@ async fn dispatch_provider_stream(
                     while let Ok(buffered) = stream_rx.try_recv() {
                         if let StreamEvent::Done {
                             usage,
-                            thinking_signature,
+                            provider_continuation,
                             stop_reason,
                         } = buffered
                         {
@@ -1732,7 +1731,7 @@ async fn dispatch_provider_stream(
                                 .send(Msg::StreamDone {
                                     turn,
                                     usage,
-                                    thinking_signature,
+                                    provider_continuation,
                                     stop_reason,
                                 })
                                 .await;
@@ -1751,15 +1750,14 @@ async fn dispatch_provider_stream(
                 StreamEvent::ToolCall(call) => Msg::StreamToolCall { turn, call },
                 // Plumbing notice — turn-independent system line.
                 StreamEvent::Status(text) => Msg::TransientStatus { text },
-                StreamEvent::ThinkingSignature(_) => continue,
                 StreamEvent::Done {
                     usage,
-                    thinking_signature,
+                    provider_continuation,
                     stop_reason,
                 } => Msg::StreamDone {
                     turn,
                     usage,
-                    thinking_signature,
+                    provider_continuation,
                     stop_reason,
                 },
             };

@@ -25,7 +25,7 @@ use crate::app::instructions::LoadedInstructions;
 use crate::app::{Config, McpServerConfig};
 use crate::models::ChatMessage;
 use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{ReasoningLevel, TokenUsage, TokenUsageSource};
+use crate::models::{ProviderContinuation, ReasoningLevel, TokenUsage, TokenUsageSource};
 use crate::runtime::SafetyMode;
 use crate::session::ConversationHistory;
 
@@ -602,10 +602,8 @@ pub enum TurnState {
         tokens: usize,
         /// Sub-phase for richer status display (see `GenPhase`).
         phase: GenPhase,
-        /// Anthropic-only: carries forward across the turn so we can
-        /// attach it to the committed assistant message. `None` until
-        /// the Anthropic adapter emits a signature event.
-        thinking_signature: Option<String>,
+        /// Opaque provider state carried until the assistant message commits.
+        provider_continuation: Option<ProviderContinuation>,
         /// Tool calls the model has streamed so far this turn.
         /// `StreamToolCall` messages push here; `StreamDone` drains
         /// the vec, allocates `PendingToolCall` entries, and
@@ -1297,7 +1295,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Sending,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };

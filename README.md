@@ -1,10 +1,10 @@
 # Mermaid
 
-An open-source AI coding assistant with computer use for the terminal. Multi-provider — Ollama (local), Anthropic, Gemini, OpenAI, Groq, OpenRouter, and any OpenAI-compatible endpoint — with native tool calling, subagents, computer-use tools, and a clean TUI.
+An open-source AI coding assistant with computer use for the terminal. Multi-provider — Ollama (local), Anthropic, Gemini, Meta, OpenAI, Groq, OpenRouter, and any OpenAI-compatible endpoint — with native tool calling, subagents, computer-use tools, and a clean TUI.
 
 ## Features
 
-- **Multi-Provider** — Ollama (local/cloud), Anthropic Claude, Google Gemini, OpenAI, Groq, OpenRouter, Cerebras, DeepInfra, Together, NVIDIA NIM, Cloudflare Workers AI, plus fully-custom OpenAI-compatible endpoints
+- **Multi-Provider** — Ollama (local/cloud), Anthropic Claude, Google Gemini, Meta Muse, OpenAI, Groq, OpenRouter, Cerebras, DeepInfra, Together, NVIDIA NIM, Cloudflare Workers AI, plus fully-custom OpenAI-compatible endpoints
 - **Native Tool Calling** — read, write, edit, delete, create directories, execute commands, search the web, spawn subagents, and call configured MCP tools
 - **Computer Use** — screenshot, click, type, press keys, scroll, move the mouse, and list windows on supported interactive GUI backends
 - **Subagents** — spawn parallel autonomous agents for independent tasks; built-in `general` and read-only `explore` types (plus user-defined ones), per-call model override, and continuation handles to follow up with a child that kept its context
@@ -491,6 +491,10 @@ fast = "ollama/qwen3-coder:14b"
 [providers.gemini]
 # api_key_env = "MY_GOOGLE_KEY"  # default: GOOGLE_API_KEY; GEMINI_API_KEY is accepted as a legacy fallback
 
+[providers.meta]
+# api_key_env = "MY_META_KEY"  # default: MODEL_API_KEY
+# base_url = "https://api.meta.ai/v1"
+
 [providers.groq]
 # api_key_env = "MY_GROQ_KEY"    # default: GROQ_API_KEY
 # base_url = "https://api.groq.com/openai/v1"
@@ -526,6 +530,7 @@ Set the appropriate environment variable (or override via `[providers.<name>].ap
 |----------|---------|--------------|
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic/<model>` |
 | Google Gemini | `GOOGLE_API_KEY` (`GEMINI_API_KEY` legacy fallback) | `gemini/<model>` |
+| Meta | `MODEL_API_KEY` | `meta/<model>` |
 | OpenAI | `OPENAI_API_KEY` | `openai/<model>` |
 | Groq | `GROQ_API_KEY` | `groq/<model>` |
 | OpenRouter | `OPENROUTER_API_KEY` | `openrouter/<vendor>/<model>` |
@@ -535,6 +540,16 @@ Set the appropriate environment variable (or override via `[providers.<name>].ap
 | NVIDIA NIM | `NVIDIA_API_KEY` | `nvidia/<vendor>/<model>` |
 | Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | `cloudflare/@cf/<vendor>/<model>` |
 | Ollama Cloud | `OLLAMA_API_KEY` | `ollama/<model>:cloud` |
+
+Meta Muse Spark uses Meta's Responses API so encrypted reasoning state survives
+Mermaid's model/tool loop without Meta retaining the response server-side.
+Mermaid requests automatic reasoning summaries for the existing reasoning panel
+and keeps the encrypted continuation only in private local session data.
+
+```bash
+export MODEL_API_KEY="your-meta-api-key"
+mermaid --model meta/muse-spark-1.1 --reasoning high
+```
 
 Cloudflare Workers AI needs both `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` (the account id is spliced into the account-scoped endpoint URL); alternatively set `[providers.cloudflare].base_url` to a full account-scoped URL or an AI Gateway endpoint. Example model: `cloudflare/@cf/zai-org/glm-5.2`.
 

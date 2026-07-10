@@ -665,8 +665,31 @@ fn safety_mode_name(mode: crate::runtime::SafetyMode) -> &'static str {
     mode.as_str()
 }
 
+fn meta_api_key_env(config: &Config) -> &str {
+    config
+        .providers
+        .get("meta")
+        .and_then(|provider| provider.api_key_env.as_deref())
+        .unwrap_or(crate::providers::model::meta::DEFAULT_API_KEY_ENV)
+}
+
+fn meta_api_key(config: &Config) -> Option<String> {
+    resolve_api_key(meta_api_key_env(config), None)
+}
+
+fn meta_base_url(config: &Config) -> String {
+    config
+        .providers
+        .get("meta")
+        .and_then(|provider| provider.base_url.clone())
+        .unwrap_or_else(|| crate::providers::model::meta::DEFAULT_BASE_URL.to_string())
+}
+
 fn configured_remote_providers(config: &Config) -> Vec<String> {
     let mut names = Vec::new();
+    if meta_api_key(config).is_some() {
+        names.push("meta".to_string());
+    }
     for profile in PROVIDER_REGISTRY {
         let env = config
             .providers
@@ -1337,7 +1360,67 @@ async fn probe_configured_provider_models(config: &Config) -> Result<()> {
             },
         }
     }
+    probe_meta_models(&client, config).await;
     Ok(())
+}
+
+async fn probe_meta_models(client: &reqwest::Client, config: &Config) {
+    let Some(api_key) = meta_api_key(config) else {
+        return;
+    };
+    let url = format!("{}/models", meta_base_url(config).trim_end_matches('/'));
+    let mut request = client.get(&url).bearer_auth(api_key);
+    if let Some(provider) = config.providers.get("meta") {
+        for (name, value) in &provider.extra_headers {
+            request = request.header(name, value);
+        }
+        for (name, env_var) in &provider.env_headers {
+            if let Ok(value) = std::env::var(env_var) {
+                request = request.header(name, value);
+            }
+        }
+    }
+    match request.send().await {
+        Ok(response) if response.status().is_success() => {
+            let status = response.status();
+            let body: serde_json::Value = response.json().await.unwrap_or_default();
+            let ids = body
+                .get("data")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("id").and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            record_provider_probe(
+                "meta",
+                "*",
+                "models_availability",
+                &format!("available:{}:{}", status.as_u16(), ids.len()),
+                "probed",
+                None,
+            );
+            for model_id in ids.into_iter().take(200) {
+                record_provider_probe("meta", &model_id, "model_listed", "true", "listed", None);
+            }
+        },
+        Ok(response) => record_provider_probe(
+            "meta",
+            "*",
+            "models_availability",
+            "failed",
+            "failed",
+            Some(format!("HTTP {}", response.status().as_u16())),
+        ),
+        Err(error) => record_provider_probe(
+            "meta",
+            "*",
+            "models_availability",
+            "failed",
+            "failed",
+            Some(error.to_string()),
+        ),
+    }
 }
 
 fn record_provider_probe(
@@ -1783,6 +1866,10 @@ pub async fn list_models(config: &Config) -> Result<()> {
 
     println!("\nConfigured remote providers:");
     let mut any = false;
+    if meta_api_key(config).is_some() {
+        any = true;
+        println!("  - meta (via ${})", meta_api_key_env(config));
+    }
     for profile in PROVIDER_REGISTRY {
         let env = config
             .providers
@@ -2066,6 +2153,9 @@ async fn show_status(config: &Config) -> Result<()> {
     // Check remote providers by API-key env presence (matches the
     // routing ProviderFactory uses when the user picks a model).
     let mut available: Vec<&'static str> = Vec::new();
+    if meta_api_key(config).is_some() {
+        available.push("meta");
+    }
     for profile in PROVIDER_REGISTRY {
         let env = config
             .providers
@@ -2232,6 +2322,10 @@ fn show_provider_status(config: &Config) {
         configured.push(("gemini".to_string(), url));
     }
 
+    if meta_api_key(config).is_some() {
+        configured.push(("meta".to_string(), meta_base_url(config)));
+    }
+
     for profile in PROVIDER_REGISTRY {
         let user_cfg = config.providers.get(profile.name);
         let api_key_present = resolve_api_key(
@@ -2255,9 +2349,11 @@ fn show_provider_status(config: &Config) {
     }
 
     // Custom providers — anything in config.providers not in registry
-    // and not "anthropic" / "gemini" (already handled above).
+    // and not a bespoke provider already handled above.
     for (name, cfg) in &config.providers {
-        if name == "anthropic" || name == "gemini" || lookup_provider(name).is_some() {
+        if matches!(name.as_str(), "anthropic" | "gemini" | "meta")
+            || lookup_provider(name).is_some()
+        {
             continue;
         }
         if let (Some(url), Some(env)) = (&cfg.base_url, cfg.api_key_env.as_deref())

@@ -1,6 +1,104 @@
 use crate::domain::ActionDisplay;
 use serde::{Deserialize, Serialize};
 
+/// Opaque provider-owned state that must be replayed with a committed assistant
+/// turn. The reducer carries this as inert data; only the matching provider
+/// interprets it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ProviderContinuation {
+    /// Anthropic's signed extended-thinking block.
+    Anthropic { signature: String },
+    /// Meta Responses output items, including encrypted reasoning state.
+    MetaResponses { output: Vec<MetaResponseItem> },
+}
+
+impl ProviderContinuation {
+    pub fn anthropic_signature(&self) -> Option<&str> {
+        match self {
+            Self::Anthropic { signature } => Some(signature),
+            Self::MetaResponses { .. } => None,
+        }
+    }
+
+    pub fn meta_output(&self) -> Option<&[MetaResponseItem]> {
+        match self {
+            Self::MetaResponses { output } => Some(output),
+            Self::Anthropic { .. } => None,
+        }
+    }
+
+    pub fn retain_meta_function_calls(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        if let Self::MetaResponses { output } = self {
+            output.retain(|item| item.function_call_id().is_none_or(&mut keep));
+        }
+    }
+}
+
+/// One Meta Responses output item saved for stateless replay. Reasoning items
+/// split their encrypted payload from the remaining JSON so the ciphertext can
+/// be serialized as base64 bytes. This keeps generic persistence redaction from
+/// mistaking a ciphertext for a credential and corrupting the replay state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MetaResponseItem {
+    Reasoning {
+        item: serde_json::Value,
+        #[serde(with = "crate::utils::serde_base64::string")]
+        encrypted_content: String,
+    },
+    Other {
+        item: serde_json::Value,
+    },
+}
+
+impl MetaResponseItem {
+    pub fn from_wire(mut item: serde_json::Value) -> Self {
+        let is_reasoning =
+            item.get("type").and_then(serde_json::Value::as_str) == Some("reasoning");
+        if is_reasoning
+            && let Some(encrypted) = item
+                .as_object_mut()
+                .and_then(|object| object.remove("encrypted_content"))
+                .and_then(|value| value.as_str().map(str::to_string))
+        {
+            return Self::Reasoning {
+                item,
+                encrypted_content: encrypted,
+            };
+        }
+        Self::Other { item }
+    }
+
+    pub fn to_wire(&self) -> serde_json::Value {
+        match self {
+            Self::Reasoning {
+                item,
+                encrypted_content,
+            } => {
+                let mut item = item.clone();
+                if let Some(object) = item.as_object_mut() {
+                    object.insert(
+                        "encrypted_content".to_string(),
+                        serde_json::Value::String(encrypted_content.clone()),
+                    );
+                }
+                item
+            },
+            Self::Other { item } => item.clone(),
+        }
+    }
+
+    pub fn function_call_id(&self) -> Option<&str> {
+        let item = match self {
+            Self::Reasoning { item, .. } | Self::Other { item } => item,
+        };
+        (item.get("type").and_then(serde_json::Value::as_str) == Some("function_call"))
+            .then(|| item.get("call_id").and_then(serde_json::Value::as_str))
+            .flatten()
+    }
+}
+
 /// Represents a chat message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -42,13 +140,11 @@ pub struct ChatMessage {
     /// This tells the model which function's result is being returned
     #[serde(default)]
     pub tool_name: Option<String>,
-    /// Anthropic thinking-block signature — encrypted server state that
-    /// MUST round-trip back into the next request when extended thinking
-    /// is enabled, or the API returns 400 `invalid_request_error`. Set
-    /// only by the Anthropic adapter; other adapters leave it `None`
-    /// and other providers ignore it on the wire.
+    /// Provider-owned continuation state. Anthropic stores its signed thinking
+    /// block; Meta stores ordered Responses output items for encrypted replay.
+    /// Other providers leave this unset and ignore it on the wire.
     #[serde(default)]
-    pub thinking_signature: Option<String>,
+    pub provider_continuation: Option<ProviderContinuation>,
 }
 
 impl ChatMessage {
@@ -95,7 +191,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             tool_name: Some(tool_name.into()),
-            thinking_signature: None,
+            provider_continuation: None,
         }
     }
 
@@ -114,7 +210,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
-            thinking_signature: None,
+            provider_continuation: None,
         }
     }
 
@@ -142,11 +238,9 @@ impl ChatMessage {
         self
     }
 
-    /// Builder: attach an Anthropic thinking signature. Used by the
-    /// Anthropic adapter when committing assistant messages so the
-    /// signature can round-trip on the next request.
-    pub fn with_thinking_signature(mut self, signature: impl Into<String>) -> Self {
-        self.thinking_signature = Some(signature.into());
+    /// Builder: attach opaque provider continuation data.
+    pub fn with_provider_continuation(mut self, continuation: ProviderContinuation) -> Self {
+        self.provider_continuation = Some(continuation);
         self
     }
 
@@ -289,13 +383,8 @@ pub struct ModelResponse {
     /// Why generation stopped, when the provider reported it. `None` if the
     /// provider didn't say (or the adapter doesn't yet map it).
     pub stop_reason: Option<FinishReason>,
-    /// Anthropic thinking-block signature (encrypted server state). Set
-    /// only by `AnthropicAdapter`; other adapters leave it `None`. The
-    /// agent loop's commit step copies this onto the resulting assistant
-    /// `ChatMessage::thinking_signature` so it round-trips on the next
-    /// turn — without this, multi-turn Claude conversations with
-    /// extended thinking 400 with `invalid_request_error`.
-    pub thinking_signature: Option<String>,
+    /// Opaque provider continuation state, when the adapter emits one.
+    pub provider_continuation: Option<ProviderContinuation>,
 }
 
 /// Where a token count came from. Provider-reported counts are the
@@ -452,22 +541,27 @@ mod tests {
     }
 
     #[test]
-    fn thinking_signature_round_trips_through_serde() {
+    fn provider_continuation_round_trips_through_serde() {
         // Anthropic encrypted server state — must survive
         // serialize/deserialize so saved conversations resume cleanly.
-        let msg = ChatMessage::assistant("Step 3 lives.")
-            .with_thinking_signature("sig_abc123_encrypted_blob");
+        let msg = ChatMessage::assistant("Step 3 lives.").with_provider_continuation(
+            ProviderContinuation::Anthropic {
+                signature: "sig_abc123_encrypted_blob".to_string(),
+            },
+        );
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ChatMessage = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(
-            back.thinking_signature.as_deref(),
+            back.provider_continuation
+                .as_ref()
+                .and_then(ProviderContinuation::anthropic_signature),
             Some("sig_abc123_encrypted_blob")
         );
         assert_eq!(back.content, "Step 3 lives.");
     }
 
     #[test]
-    fn thinking_signature_defaults_to_none() {
+    fn provider_continuation_defaults_to_none() {
         // Backward compat: messages saved before Step 3 won't have the
         // field. Serde default kicks in — None — and deserialize
         // succeeds without errors.
@@ -477,7 +571,31 @@ mod tests {
             "timestamp": "2026-04-16T12:00:00-04:00"
         }"#;
         let msg: ChatMessage = serde_json::from_str(pre_step3_json).expect("backward compat");
-        assert!(msg.thinking_signature.is_none());
+        assert!(msg.provider_continuation.is_none());
+    }
+
+    #[test]
+    fn meta_encrypted_continuation_survives_persistence_redaction_byte_exact() {
+        let original = "eyJopaque.reasoning.payload";
+        let message = ChatMessage::assistant("done").with_provider_continuation(
+            ProviderContinuation::MetaResponses {
+                output: vec![MetaResponseItem::from_wire(serde_json::json!({
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [],
+                    "encrypted_content": original,
+                }))],
+            },
+        );
+        let mut persisted = serde_json::to_value(message).unwrap();
+        crate::utils::redact_json(&mut persisted);
+        let restored: ChatMessage = serde_json::from_value(persisted).unwrap();
+        let output = restored
+            .provider_continuation
+            .as_ref()
+            .and_then(ProviderContinuation::meta_output)
+            .unwrap();
+        assert_eq!(output[0].to_wire()["encrypted_content"], original);
     }
 
     #[test]
@@ -558,7 +676,7 @@ mod tests {
             thinking: None,
             tool_calls: None,
             stop_reason: None,
-            thinking_signature: None,
+            provider_continuation: None,
         };
 
         assert_eq!(response.content, "Hello, world!");

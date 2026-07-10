@@ -652,7 +652,7 @@ fn build_live_messages<'a>(
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
-            thinking_signature: None,
+            provider_continuation: None,
         };
         let mut out = committed.to_vec();
         out.push(msg);
@@ -853,7 +853,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Sending,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
@@ -960,7 +960,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: true,
         };
@@ -1035,7 +1035,7 @@ mod tests {
             partial_reasoning: String::new(),
             tokens: 0,
             phase: GenPhase::Streaming,
-            thinking_signature: None,
+            provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: true,
         };

@@ -23,6 +23,25 @@ pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<u8>, D::Error
         .map_err(serde::de::Error::custom)
 }
 
+/// Base64 serde adapter for opaque UTF-8 strings. The wire value is encoded
+/// before persistence redaction sees it, then validated as UTF-8 while loading.
+pub mod string {
+    use base64::{Engine as _, engine::general_purpose};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &str, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&general_purpose::STANDARD.encode(value.as_bytes()))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<String, D::Error> {
+        let encoded = String::deserialize(de)?;
+        let bytes = general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(serde::de::Error::custom)?;
+        String::from_utf8(bytes).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde::{Deserialize, Serialize};
@@ -48,5 +67,21 @@ mod tests {
     fn rejects_invalid_base64() {
         let err = serde_json::from_str::<Blob>(r#"{"data":"not base64!!"}"#);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn opaque_string_round_trips_and_rejects_non_utf8() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Opaque {
+            #[serde(with = "super::string")]
+            value: String,
+        }
+        let value = Opaque {
+            value: "eyJopaque.payload.signature".to_string(),
+        };
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(!json.contains("eyJopaque.payload.signature"));
+        assert_eq!(serde_json::from_str::<Opaque>(&json).unwrap(), value);
+        assert!(serde_json::from_str::<Opaque>(r#"{"value":"/w=="}"#).is_err());
     }
 }

@@ -1,6 +1,6 @@
 # Adding a model provider
 
-Mermaid speaks four provider shapes today: Ollama, Anthropic, Gemini, and the OpenAI-compatible long tail. Adding a fifth — whether because a new vendor ships a bespoke API or because your self-hosted model uses an untyped variant — means one file + one case in `ProviderFactory`.
+Mermaid speaks five provider shapes today: Ollama, Anthropic, Gemini, Meta Responses, and the OpenAI-compatible long tail. Adding another — whether because a new vendor ships a bespoke API or because your self-hosted model uses an untyped variant — means one file + one case in `ProviderFactory`.
 
 ## 1. Implement `ModelProvider`
 

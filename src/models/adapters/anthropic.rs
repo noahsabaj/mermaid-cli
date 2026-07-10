@@ -9,7 +9,7 @@
 //!
 //! Critical detail: thinking blocks carry an encrypted `signature` that
 //! MUST round-trip in conversation history when extended thinking is
-//! enabled. Mermaid's `ChatMessage::thinking_signature` field (Step 3
+//! enabled. Mermaid's `ChatMessage::provider_continuation` field (Step 3
 //! Wave 1) holds it across turns. The signature is per-thinking-block
 //! server state — drop it and the API returns 400 invalid_request_error
 //! claiming reasoning continuity is broken.
@@ -41,7 +41,9 @@ use crate::models::traits::Model;
 
 use super::ModelLimits;
 use super::output_budget::{OutputBudgetInputs, OutputCapMode, resolve_output_budget};
-use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
+use crate::models::types::{
+    ChatMessage, FinishReason, MessageRole, ModelResponse, ProviderContinuation, TokenUsage,
+};
 use crate::utils::drain_sse_events;
 
 const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
@@ -303,7 +305,7 @@ fn to_anthropic_tools(openai_tools: &[&Value]) -> Vec<Value> {
 /// Anthropic forbids consecutive same-role messages and tool results
 /// always render as user-role.
 ///
-/// Assistant messages with `thinking + thinking_signature` emit a
+/// Assistant messages with `thinking + provider_continuation` emit a
 /// `thinking` content block paired with the text/tool_use blocks; the
 /// signature round-trips so subsequent turns don't 400.
 fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
@@ -371,8 +373,12 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
                 // the signature is missing (failed to persist, migrated row,
                 // etc.) drop the thinking trace: the text/tool_use blocks alone
                 // are a valid assistant turn.
-                if let (Some(thinking), Some(sig)) = (&msg.thinking, &msg.thinking_signature)
-                    && !thinking.is_empty()
+                if let (Some(thinking), Some(sig)) = (
+                    &msg.thinking,
+                    msg.provider_continuation
+                        .as_ref()
+                        .and_then(ProviderContinuation::anthropic_signature),
+                ) && !thinking.is_empty()
                     && !sig.is_empty()
                 {
                     content_blocks.push(json!({
@@ -819,7 +825,8 @@ impl AnthropicAdapter {
             } else {
                 Some(tool_calls)
             },
-            thinking_signature: signature,
+            provider_continuation: signature
+                .map(|signature| ProviderContinuation::Anthropic { signature }),
         })
     }
 
@@ -978,7 +985,7 @@ impl AnthropicAdapter {
                                         // `signature_delta` arrives AFTER the
                                         // thinking deltas, so streamed reasoning
                                         // chunks can't carry it. The final
-                                        // `ModelResponse.thinking_signature`
+                                        // `ModelResponse.provider_continuation`
                                         // (captured at block stop) is correct and
                                         // is what round-trips; streamed chunks are
                                         // display-only.
@@ -1124,7 +1131,7 @@ impl AnthropicAdapter {
             .saturating_add(cache_creation_tokens)
             .saturating_add(cache_read_tokens);
         // F3: `Done` is emitted by the v0.7 wrapper from the returned
-        // `ModelResponse` so the `thinking_signature` round-trips. If we
+        // `ModelResponse` so the `provider_continuation` round-trips. If we
         // emitted it here, the reducer would commit the assistant
         // message on our signature-less Done and drop the real one.
 
@@ -1160,7 +1167,8 @@ impl AnthropicAdapter {
             } else {
                 Some(tool_calls_done)
             },
-            thinking_signature: signature_acc,
+            provider_continuation: signature_acc
+                .map(|signature| ProviderContinuation::Anthropic { signature }),
         })
     }
 }
@@ -1462,7 +1470,11 @@ mod tests {
             "unsigned thinking must be dropped"
         );
 
-        let mut signed = ChatMessage::assistant("answer").with_thinking_signature("sig123");
+        let mut signed = ChatMessage::assistant("answer").with_provider_continuation(
+            ProviderContinuation::Anthropic {
+                signature: "sig123".to_string(),
+            },
+        );
         signed.thinking = Some("private reasoning".to_string());
         let (_sys, msgs) = convert_messages(&[signed]);
         assert!(has_thinking_block(&msgs), "signed thinking must be present");
@@ -1744,7 +1756,9 @@ mod tests {
     fn convert_messages_emits_thinking_block_with_signature() {
         let mut msg = ChatMessage::assistant("Final answer.");
         msg.thinking = Some("reasoning content".to_string());
-        msg.thinking_signature = Some("sig_xyz".to_string());
+        msg.provider_continuation = Some(ProviderContinuation::Anthropic {
+            signature: "sig_xyz".to_string(),
+        });
         let messages = vec![ChatMessage::user("Q?"), msg];
         let (_, msgs) = convert_messages(&messages);
         let assistant_content = msgs[1]["content"].as_array().expect("array");
