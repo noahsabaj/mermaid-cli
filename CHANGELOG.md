@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to minimize into. Active-run rendering is unchanged, and the collapsed
   state persists: the "Next:" one-liner reappears when the next run starts.
 
+- **Tool action lines wrap instead of clipping at the viewport edge.** Long
+  tool headers (`● Bash(python3 - << 'PY'…`), result summaries, error bodies
+  (e.g. a full HTTP 404 JSON), diff rows, and write previews were painted as
+  single over-wide rows and cut off at the right edge. They now wrap with a
+  hanging indent: headers preserve a multi-line command's own line breaks
+  (previously the newlines were dropped, gluing fragments together like
+  `'PY'from PIL import`) and cap at 4 rows with a trailing `…)` so a heredoc
+  script can't flood the transcript; results and errors wrap in full; diff
+  rows keep their full-width color bar on every wrapped row.
+
 - **Safety-mode switch note: fires once, model-only.** The "earlier read-only
   policy blocks no longer apply" note used to appear in the transcript on
   every loosening step (ask, then auto, then full_access — three banners for

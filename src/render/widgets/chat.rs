@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph, StatefulWidget, Widget},
 };
@@ -600,7 +600,9 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 }
 
                 if matches!(msg.kind, ChatMessageKind::ContextCheckpoint) {
-                    if let Some(event_lines) = render_context_checkpoint_event(msg, self.theme) {
+                    if let Some(event_lines) =
+                        render_context_checkpoint_event(msg, self.theme, content_width as usize)
+                    {
                         lines.extend(event_lines);
                         lines.push(Line::from(""));
                     }
@@ -975,7 +977,11 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
     }
 }
 
-fn render_context_checkpoint_event(msg: &ChatMessage, theme: &Theme) -> Option<Vec<Line<'static>>> {
+fn render_context_checkpoint_event(
+    msg: &ChatMessage,
+    theme: &Theme,
+    viewport_width: usize,
+) -> Option<Vec<Line<'static>>> {
     if !matches!(msg.role, MessageRole::User) {
         return None;
     }
@@ -1036,16 +1042,16 @@ fn render_context_checkpoint_event(msg: &ChatMessage, theme: &Theme) -> Option<V
     }
     result = append_action_duration(result, duration_secs);
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("● ", Style::new().fg(action_color).bold()),
-            Span::styled("Compact(", Style::new().fg(action_color).bold()),
-            Span::styled(
-                trigger.to_string(),
-                Style::new().fg(theme.colors.text_secondary.to_color()),
-            ),
-            Span::styled(")", Style::new().fg(action_color).bold()),
-        ]),
+    let mut lines = vec![Line::from(vec![
+        Span::styled("● ", Style::new().fg(action_color).bold()),
+        Span::styled("Compact(", Style::new().fg(action_color).bold()),
+        Span::styled(
+            trigger.to_string(),
+            Style::new().fg(theme.colors.text_secondary.to_color()),
+        ),
+        Span::styled(")", Style::new().fg(action_color).bold()),
+    ])];
+    lines.extend(wrap_styled_line(
         Line::from(vec![
             Span::styled("  ⎿ ", Style::new().fg(action_color)),
             Span::styled(
@@ -1053,16 +1059,22 @@ fn render_context_checkpoint_event(msg: &ChatMessage, theme: &Theme) -> Option<V
                 Style::new().fg(theme.colors.text_secondary.to_color()),
             ),
         ]),
-    ];
+        viewport_width,
+        4,
+    ));
 
     if let Some(error) = verification_error.filter(|error| !error.trim().is_empty()) {
-        lines.push(Line::from(vec![
-            Span::styled("    ", Style::new().fg(action_color)),
-            Span::styled(
-                format!("verification: {}", compact_inline_error(error, 180)),
-                Style::new().fg(theme.colors.warning.to_color()),
-            ),
-        ]));
+        lines.extend(wrap_styled_line(
+            Line::from(vec![
+                Span::styled("    ", Style::new().fg(action_color)),
+                Span::styled(
+                    format!("verification: {}", compact_inline_error(error, 180)),
+                    Style::new().fg(theme.colors.warning.to_color()),
+                ),
+            ]),
+            viewport_width,
+            4,
+        ));
     }
 
     Some(lines)
@@ -1146,19 +1158,12 @@ fn render_actions(
             _ => theme.colors.info.to_color(),
         };
 
-        // Header: ● Type(target)
-        lines.push(Line::from(vec![
-            Span::styled("● ", Style::new().fg(action_color).bold()),
-            Span::styled(
-                format!("{}(", action.action_type),
-                Style::new().fg(action_color).bold(),
-            ),
-            Span::styled(
-                action.target.clone(),
-                Style::new().fg(theme.colors.text_secondary.to_color()),
-            ),
-            Span::styled(")", Style::new().fg(action_color).bold()),
-        ]));
+        // Header: ● Type(target) — the target (a command, query, path…) wraps
+        // instead of clipping at the viewport edge. Its own newlines are kept
+        // as rows and overlong rows word-wrap with a hanging indent; a huge
+        // target (e.g. a heredoc script) is capped so one Bash call can't
+        // flood the transcript — the cap row ends in "…)" like a truncation.
+        push_action_header(lines, action, action_color, theme, viewport_width);
 
         match &action.result {
             ActionResult::Success { .. } => {
@@ -1184,13 +1189,19 @@ fn render_actions(
 
                 for (idx, line) in result_msg.lines().enumerate() {
                     let prefix = if idx == 0 { "  ⎿ " } else { "    " };
-                    lines.push(Line::from(vec![
-                        Span::styled(prefix, Style::new().fg(action_color)),
-                        Span::styled(
-                            line.to_string(),
-                            Style::new().fg(theme.colors.text_secondary.to_color()),
-                        ),
-                    ]));
+                    // Word-wrap the result row (4-space hanging indent) so a
+                    // long summary is readable instead of clipped.
+                    lines.extend(wrap_styled_line(
+                        Line::from(vec![
+                            Span::styled(prefix, Style::new().fg(action_color)),
+                            Span::styled(
+                                line.to_string(),
+                                Style::new().fg(theme.colors.text_secondary.to_color()),
+                            ),
+                        ]),
+                        viewport_width,
+                        4,
+                    ));
                 }
 
                 // Write: syntax-highlighted file preview
@@ -1218,7 +1229,14 @@ fn render_actions(
                             new_spans.append(&mut parsed_line.line.spans);
                             parsed_line.line.spans = new_spans;
                         }
-                        lines.extend(parsed.into_iter().map(|ml| ml.line));
+                        // Hard-wrap (not word-wrap) so code indentation and
+                        // alignment survive; overlong rows continue with a
+                        // 6-space hanging indent instead of clipping.
+                        lines.extend(
+                            parsed
+                                .into_iter()
+                                .flat_map(|ml| wrap_preformatted(ml.line, viewport_width, 6)),
+                        );
 
                         if *line_count > 10 {
                             lines.push(Line::from(vec![
@@ -1257,33 +1275,40 @@ fn render_actions(
                             // any future format change.
                             match parse_diff_line(&diff_line) {
                                 DiffLineKind::Removed => {
-                                    let text = format!("    {}", diff_line);
-                                    let padded = pad_to_cells(&text, viewport_width);
-                                    lines.push(Line::from(vec![Span::styled(
-                                        padded,
+                                    push_wrapped_diff_rows(
+                                        lines,
+                                        format!("    {}", diff_line),
                                         Style::new()
                                             .fg(theme.colors.error.to_color())
                                             .bg(removed_bg),
-                                    )]));
+                                        viewport_width,
+                                    );
                                 },
                                 DiffLineKind::Added => {
-                                    let text = format!("    {}", diff_line);
-                                    let padded = pad_to_cells(&text, viewport_width);
-                                    lines.push(Line::from(vec![Span::styled(
-                                        padded,
+                                    push_wrapped_diff_rows(
+                                        lines,
+                                        format!("    {}", diff_line),
                                         Style::new()
                                             .fg(theme.colors.success.to_color())
                                             .bg(added_bg),
-                                    )]));
+                                        viewport_width,
+                                    );
                                 },
                                 DiffLineKind::Context => {
-                                    lines.push(Line::from(vec![
-                                        Span::styled("    ", Style::new().fg(action_color)),
-                                        Span::styled(
-                                            diff_line,
-                                            Style::new().fg(theme.colors.text_secondary.to_color()),
-                                        ),
-                                    ]));
+                                    // Hard-wrap like the colored rows so an
+                                    // overlong context line isn't clipped.
+                                    lines.extend(wrap_preformatted(
+                                        Line::from(vec![
+                                            Span::styled("    ", Style::new().fg(action_color)),
+                                            Span::styled(
+                                                diff_line,
+                                                Style::new()
+                                                    .fg(theme.colors.text_secondary.to_color()),
+                                            ),
+                                        ]),
+                                        viewport_width,
+                                        6,
+                                    ));
                                 },
                             }
                         }
@@ -1306,10 +1331,23 @@ fn render_actions(
             ActionResult::Error { error } => {
                 let error =
                     append_action_duration(format!("Error: {}", error), action.duration_seconds);
-                lines.push(Line::from(vec![
-                    Span::styled("  ⎿ ", Style::new().fg(theme.colors.error.to_color())),
-                    Span::styled(error, Style::new().fg(theme.colors.error.to_color())),
-                ]));
+                // Word-wrap so the full error body (an HTTP error JSON can run
+                // hundreds of cells) is readable instead of clipped at the
+                // viewport edge. Multi-line errors keep their own rows.
+                for (idx, err_line) in error.lines().enumerate() {
+                    let prefix = if idx == 0 { "  ⎿ " } else { "    " };
+                    lines.extend(wrap_styled_line(
+                        Line::from(vec![
+                            Span::styled(prefix, Style::new().fg(theme.colors.error.to_color())),
+                            Span::styled(
+                                err_line.to_string(),
+                                Style::new().fg(theme.colors.error.to_color()),
+                            ),
+                        ]),
+                        viewport_width,
+                        4,
+                    ));
+                }
             },
         }
     }
@@ -1371,6 +1409,79 @@ fn render_question_answers(
                 Span::styled(row, style),
             ]));
         }
+    }
+}
+
+/// Cap on wrapped action-header rows: a long target (a Bash heredoc, a huge
+/// query) wraps for readability, but past this many rows it truncates with
+/// "…)" so a single tool call can't flood the transcript.
+const MAX_ACTION_HEADER_ROWS: usize = 4;
+
+/// Push the "● Type(target)" action header, wrapping the target across rows
+/// instead of letting an over-wide one clip at the viewport edge.
+///
+/// The target's own newlines are preserved as row breaks; overlong rows
+/// word-wrap with a 4-space hanging indent (an unbroken token hard-breaks).
+/// Two cells are reserved so the closing ")" — and the "…" a capped header
+/// gains — never overflow the last row.
+fn push_action_header(
+    lines: &mut Vec<Line>,
+    action: &ActionDisplay,
+    action_color: Color,
+    theme: &Theme,
+    viewport_width: usize,
+) {
+    let bold = Style::new().fg(action_color).bold();
+    let secondary = Style::new().fg(theme.colors.text_secondary.to_color());
+    if action.target.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("● ", bold),
+            Span::styled(format!("{}()", action.action_type), bold),
+        ]));
+        return;
+    }
+
+    let open = format!("{}(", action.action_type);
+    // The first row's indent stands in for the 2-cell "● " plus the opening
+    // "Type(" so wrapping accounts for them; it is stripped and replaced with
+    // the real styled spans below.
+    let first_indent = 2 + open.width();
+    let wrap_width = viewport_width.saturating_sub(2).max(first_indent + 1);
+    let mut rows = wrap_text_with_indent(&action.target, wrap_width, first_indent, 4);
+    let truncated = rows.len() > MAX_ACTION_HEADER_ROWS;
+    rows.truncate(MAX_ACTION_HEADER_ROWS);
+
+    let last = rows.len().saturating_sub(1);
+    for (i, row) in rows.into_iter().enumerate() {
+        let mut spans = if i == 0 {
+            vec![
+                Span::styled("● ", bold),
+                Span::styled(open.clone(), bold),
+                Span::styled(row.trim_start().to_string(), secondary),
+            ]
+        } else {
+            vec![Span::styled(row, secondary)]
+        };
+        if i == last {
+            if truncated {
+                spans.push(Span::styled(
+                    "…",
+                    Style::new().fg(theme.colors.text_disabled.to_color()),
+                ));
+            }
+            spans.push(Span::styled(")", bold));
+        }
+        lines.push(Line::from(spans));
+    }
+}
+
+/// Push one colored diff row, hard-wrapped at the viewport width and padded so
+/// every produced row carries the full-width background bar (no unfilled
+/// column on a diff row — the "staircase" invariant).
+fn push_wrapped_diff_rows(lines: &mut Vec<Line>, text: String, style: Style, width: usize) {
+    for row in wrap_preformatted(Line::from(Span::raw(text)), width, 6) {
+        let padded = pad_to_cells(&line_plain_text(&row), width);
+        lines.push(Line::from(Span::styled(padded, style)));
     }
 }
 
@@ -1860,6 +1971,193 @@ mod tests {
         }
     }
 
+    /// Every rendered action row must fit the viewport width — overlong
+    /// headers, results, and errors wrap instead of clipping at the edge.
+    fn assert_rows_fit(lines: &[Line], width: usize) {
+        for (i, line) in lines.iter().enumerate() {
+            let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                w <= width,
+                "row {i} is {w} cells wide, exceeding the {width}-cell viewport: {:?}",
+                line_plain_text(line)
+            );
+        }
+    }
+
+    #[test]
+    fn action_header_and_error_wrap_instead_of_clipping() {
+        // Regression: a long Bash command in the header and a long HTTP error
+        // body in the result were painted as single over-wide rows and clipped
+        // at the viewport edge instead of wrapping.
+        let theme = Theme::dark();
+        let action = ActionDisplay {
+            action_type: "Error".to_string(),
+            target: "Backend error".to_string(),
+            result: ActionResult::Error {
+                error: r#"HTTP error 404: {"error":{"code":"model_not_found","message":"The requested model was not found.","param":null,"type":"invalid_request_error"}}"#.to_string(),
+            },
+            details: ActionDetails::Simple,
+            duration_seconds: None,
+            metadata: None,
+        };
+
+        let width = 60usize;
+        let mut lines: Vec<Line> = Vec::new();
+        render_actions(&[action], &mut lines, &theme, width);
+
+        assert_rows_fit(&lines, width);
+        let rendered = lines
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The full error body must survive the wrap (word boundaries may move,
+        // so check the tail token that clipping used to cut off).
+        assert!(rendered.contains("invalid_request_error"));
+        assert!(
+            lines.len() > 2,
+            "a 140-cell error at width 60 must span multiple rows"
+        );
+    }
+
+    #[test]
+    fn action_header_wraps_long_command_and_keeps_closing_paren() {
+        let theme = Theme::dark();
+        let action = ActionDisplay {
+            action_type: "Bash".to_string(),
+            target: "python3 -c 'print(1)' && echo a-very-long-command-line \
+                     that keeps going well past the sixty cell viewport edge"
+                .to_string(),
+            result: ActionResult::Success {
+                output: String::new(),
+                images: None,
+            },
+            details: ActionDetails::Simple,
+            duration_seconds: Some(0.1),
+            metadata: None,
+        };
+
+        let width = 60usize;
+        let mut lines: Vec<Line> = Vec::new();
+        render_actions(&[action], &mut lines, &theme, width);
+
+        assert_rows_fit(&lines, width);
+        let rows: Vec<String> = lines.iter().map(line_plain_text).collect();
+        assert!(rows[0].starts_with("● Bash("));
+        assert!(
+            rows.len() >= 2,
+            "the long command must wrap the header across rows"
+        );
+        let last_target_row = rows
+            .iter()
+            .rfind(|r| r.trim_end().ends_with(')'))
+            .expect("wrapped header must still close its paren");
+        assert!(last_target_row.trim_end().ends_with(')'));
+    }
+
+    #[test]
+    fn action_header_caps_rows_and_marks_truncation() {
+        // A heredoc-sized target must not flood the transcript: the header
+        // caps at MAX_ACTION_HEADER_ROWS and the last row signals "…)".
+        let theme = Theme::dark();
+        let action = ActionDisplay {
+            action_type: "Bash".to_string(),
+            target: "word ".repeat(400),
+            result: ActionResult::Success {
+                output: String::new(),
+                images: None,
+            },
+            details: ActionDetails::Simple,
+            duration_seconds: None,
+            metadata: None,
+        };
+
+        let width = 60usize;
+        let mut lines: Vec<Line> = Vec::new();
+        render_actions(&[action], &mut lines, &theme, width);
+
+        assert_rows_fit(&lines, width);
+        let header_rows: Vec<String> = lines
+            .iter()
+            .map(line_plain_text)
+            .take_while(|r| !r.trim_start().starts_with('⎿'))
+            .collect();
+        assert_eq!(
+            header_rows.len(),
+            MAX_ACTION_HEADER_ROWS,
+            "header must cap at MAX_ACTION_HEADER_ROWS rows"
+        );
+        assert!(
+            header_rows.last().unwrap().trim_end().ends_with("…)"),
+            "capped header must end with …) — got {:?}",
+            header_rows.last().unwrap()
+        );
+    }
+
+    #[test]
+    fn action_header_preserves_multiline_command_rows() {
+        // A multi-line command (heredoc-style) keeps its own line breaks in
+        // the header instead of the old behavior where ratatui dropped the
+        // newlines and glued fragments together ("'PY'from PIL import…").
+        let theme = Theme::dark();
+        let action = ActionDisplay {
+            action_type: "Bash".to_string(),
+            target: "python3 - << 'PY'\nfrom PIL import Image\nPY".to_string(),
+            result: ActionResult::Success {
+                output: String::new(),
+                images: None,
+            },
+            details: ActionDetails::Simple,
+            duration_seconds: None,
+            metadata: None,
+        };
+
+        let mut lines: Vec<Line> = Vec::new();
+        render_actions(&[action], &mut lines, &theme, 80);
+
+        let rows: Vec<String> = lines.iter().map(line_plain_text).collect();
+        assert!(rows[0].contains("python3 - << 'PY'"));
+        assert!(rows[1].contains("from PIL import Image"));
+        assert!(!rows[0].contains("'PY'from"), "newline must not be dropped");
+    }
+
+    #[test]
+    fn action_result_summary_wraps_instead_of_clipping() {
+        let theme = Theme::dark();
+        let action = ActionDisplay {
+            action_type: "Tasks".to_string(),
+            target: "update 3 steps".to_string(),
+            result: ActionResult::Success {
+                output: String::new(),
+                images: None,
+            },
+            details: ActionDetails::Preview {
+                text: "Tasks 5/6 · User chose SKIP for domain/phone/address - \
+                       placeholders kept intentionally until real data available. \
+                       Task 2 and 6 deferred., to revisit later"
+                    .to_string(),
+                line_count: None,
+            },
+            duration_seconds: None,
+            metadata: None,
+        };
+
+        let width = 60usize;
+        let mut lines: Vec<Line> = Vec::new();
+        render_actions(&[action], &mut lines, &theme, width);
+
+        assert_rows_fit(&lines, width);
+        let rendered = lines
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("revisit later"),
+            "the summary's tail must survive the wrap instead of being clipped"
+        );
+    }
+
     #[test]
     fn wrapped_line_cache_hit_matches_cache_miss() {
         // #134: caching the WRAPPED assistant lines must be byte-for-byte
@@ -2083,7 +2381,8 @@ mod tests {
             "verified": true,
         }));
 
-        let lines = render_context_checkpoint_event(&msg, &Theme::dark()).expect("event lines");
+        let lines =
+            render_context_checkpoint_event(&msg, &Theme::dark(), 120).expect("event lines");
         let rendered = lines
             .iter()
             .map(|line| {
@@ -2118,7 +2417,8 @@ mod tests {
             "verification_error": "provider overloaded",
         }));
 
-        let lines = render_context_checkpoint_event(&msg, &Theme::dark()).expect("event lines");
+        let lines =
+            render_context_checkpoint_event(&msg, &Theme::dark(), 120).expect("event lines");
         let rendered = lines
             .iter()
             .map(|line| {
