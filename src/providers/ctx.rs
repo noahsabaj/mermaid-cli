@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{ToolCallId, TurnId};
+use crate::domain::{Msg, ToolCallId, TurnId};
 use crate::models::tool_call::ToolCall as ModelToolCall;
 use crate::models::{ChatMessage, FinishReason, ProviderContinuation, ReasoningChunk, TokenUsage};
 use crate::runtime::SafetyMode;
@@ -85,9 +85,14 @@ pub struct FinalResponse {
 pub struct ExecContext {
     pub token: CancellationToken,
     /// Ctrl+B "background this" signal, parallel to `token`. Tools that can
-    /// detach a running child (execute_command) select on it; the live path
-    /// sets it from the turn scope, tests leave it never-fired.
+    /// detach a running child (execute_command, agent) select on it; the live
+    /// path sets it from the turn scope, tests leave it never-fired.
     pub background: CancellationToken,
+    /// Turn-independent channel back to the main reducer loop. Detached work
+    /// (a backgrounded subagent) reports through this after the owning turn
+    /// is gone — the per-turn `progress` channel dies with the turn. `None`
+    /// in tests and contexts that never detach.
+    pub notify: Option<mpsc::Sender<Msg>>,
     pub progress: mpsc::Sender<ProgressEvent>,
     pub call_id: ToolCallId,
     pub turn: TurnId,
@@ -183,8 +188,9 @@ impl ExecContext {
             token,
             // Defaults to a fresh, never-fired token ("no background
             // requested"); the live execute path overwrites it with the turn
-            // scope's background token.
+            // scope's background token (and sets `notify`).
             background: CancellationToken::new(),
+            notify: None,
             progress,
             call_id,
             turn,
@@ -247,10 +253,14 @@ pub enum ProgressEvent {
         tool_name: String,
         phase: SubagentPhase,
     },
-    /// A chunk of assistant text produced by a child subagent. Mostly
-    /// UI flavor — lets the parent status line show what the sub is
-    /// "saying" in real time.
-    SubagentText(String),
+    /// Coarse phase label for a child subagent ("starting…",
+    /// "thinking", "replying"). Emitted only on phase CHANGE — never
+    /// per stream chunk — so the parent status stays calm.
+    SubagentActivity(String),
+    /// Cumulative output-token estimate for a child subagent's current
+    /// drive. Throttled at the source (≥500ms apart); powers the live
+    /// per-agent token counters without per-chunk churn.
+    SubagentTokens(usize),
 }
 
 /// Phase a subagent tool-call is in, from the parent's perspective.

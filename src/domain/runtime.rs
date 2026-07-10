@@ -307,6 +307,21 @@ impl OllamaPlacement {
     }
 }
 
+/// A subagent detached from its turn via Ctrl+B: still running in a
+/// spawned task, no longer blocking the parent. Rows render in the live
+/// agent panel until `Msg::BackgroundAgentFinished` removes them (and the
+/// child's report arrives as a queued message).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundAgent {
+    pub agent_id: String,
+    pub description: String,
+    pub started: std::time::SystemTime,
+    #[serde(default)]
+    pub activity: String,
+    #[serde(default)]
+    pub tokens: usize,
+}
+
 /// Runtime state that is not part of the chat transcript sent to a
 /// model, but is useful for UI, slash commands, and debugging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +329,9 @@ pub struct RuntimeState {
     pub provider_capabilities: ProviderCapabilitySnapshot,
     #[serde(default)]
     pub processes: Vec<ManagedProcess>,
+    /// Subagents detached from their turn via Ctrl+B, newest last.
+    #[serde(default)]
+    pub background_agents: Vec<BackgroundAgent>,
     #[serde(default)]
     pub timeline: Vec<RuntimeTimelineEvent>,
     /// Estimated token cost of the built-in tool schemas the effect runner
@@ -389,6 +407,7 @@ impl RuntimeState {
         Self {
             provider_capabilities: ProviderCapabilitySnapshot::from_model_id(model_id),
             processes: Vec::new(),
+            background_agents: Vec::new(),
             timeline: Vec::new(),
             builtin_tool_schema_tokens: 0,
             ollama_context: None,

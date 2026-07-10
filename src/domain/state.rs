@@ -848,6 +848,15 @@ impl ToolOutcome {
     }
 }
 
+/// Live activity for one in-flight tool call (today: a subagent child).
+/// `activity` is a short stable label ("read_file…", "thinking"); `tokens`
+/// is the child's cumulative output-token estimate, throttled at the source.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveToolStatus {
+    pub activity: String,
+    pub tokens: usize,
+}
+
 /// All UI-only state. Things in `UiState` never affect what gets sent
 /// to the model — only what the user sees.
 #[derive(Debug, Clone, Default)]
@@ -910,14 +919,14 @@ pub struct UiState {
     /// queuing `Msg::Slash(cmd)`) without self-invoking the
     /// reducer. Bounded drain depth guards against runaway loops.
     pub pending_msgs: VecDeque<Msg>,
-    /// Live one-line activity per in-flight tool call, keyed by the call id.
+    /// Live activity per in-flight tool call, keyed by the call id.
     /// Fed by `Msg::ToolProgress` (today: subagent activity — the child's
-    /// current tool or latest text snippet) and rendered by the status line
-    /// next to the tool label. Entries are removed on that call's
-    /// `ToolFinished` and the map is cleared when the turn ends or cancels;
-    /// call ids are session-unique, so a stale entry can never attach to a
-    /// later call.
-    pub live_tool_status: HashMap<ToolCallId, String>,
+    /// current tool / coarse phase plus a throttled token count) and rendered
+    /// by the agent panel + status line next to the tool label. Entries are
+    /// removed on that call's `ToolFinished` and the map is cleared when the
+    /// turn ends or cancels; call ids are session-unique, so a stale entry
+    /// can never attach to a later call.
+    pub live_tool_status: HashMap<ToolCallId, LiveToolStatus>,
     /// Up-arrow history navigation cursor into
     /// `session.conversation.input_history`. `None` = not
     /// navigating (input_buffer is whatever the user typed).

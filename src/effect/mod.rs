@@ -2497,6 +2497,9 @@ async fn dispatch_execute_tool(
         questions,
     );
     ctx.background = background;
+    // Detached work (backgrounded subagents) reports back through the main
+    // msg channel after this turn's progress relay is gone.
+    ctx.notify = Some(msg_tx.clone());
     // `before_tool_use` is the one DECISION event: an enabled plugin hook may
     // deny the call, rewrite its arguments, or inject context for the next
     // model request. Every other event stays fire-and-forget.

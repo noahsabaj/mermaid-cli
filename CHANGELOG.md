@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Live agent panel + agent backgrounding.** Running `agent` tools now get
+  one stable panel row each under the status spinner — description, the
+  child's current tool or phase, elapsed time, and a live token count — so
+  parallel agents are visible from the moment they start instead of only
+  when they finish. Ctrl+B now genuinely works for agents: it detaches every
+  running subagent from the turn (the model gets an immediate "moved to
+  background" outcome), the children keep running with their rows marked
+  `bg`, and each report is delivered to the conversation through the
+  queued-message path when it finishes, with its token spend still folded
+  into the session totals. The `ctrl+b to background` hint only renders when
+  something running can actually background (shell commands or agents).
+
 - **Mid-run steering.** Messages typed while the agent is working are now
   delivered at the next tool boundary WITHIN the run — committed as user
   messages right after the tool results, so the very next model call sees
@@ -160,6 +172,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a silent fresh session.
 
 ### Fixed
+
+- **The status line no longer flickers raw subagent text.** Every child
+  stream chunk used to overwrite the status line (garbage fragments flying
+  past at stream speed); children now report only stable activity — their
+  current tool, coarse phase changes, and a token count throttled to twice a
+  second. The run token counter also keeps climbing during agent turns
+  (children's live counts ride on top) instead of freezing until the tools
+  return.
 
 - **Rate-limit errors now say what actually happened.** A provider 429 used
   to surface as the inscrutable "retry after None"; it now shows the
