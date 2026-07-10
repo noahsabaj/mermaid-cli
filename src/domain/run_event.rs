@@ -257,6 +257,7 @@ fn tool_name(detail: &ToolMetadata) -> String {
         ToolMetadata::Subagent { .. } => "agent".to_string(),
         ToolMetadata::Tasks { action, .. } => format!("task_{action}"),
         ToolMetadata::Questions { .. } => "ask_user_question".to_string(),
+        ToolMetadata::Plan { .. } => "exit_plan_mode".to_string(),
         ToolMetadata::Custom { name, .. } => name.clone(),
     }
 }

@@ -131,6 +131,10 @@ pub struct Config {
     #[serde(default)]
     pub exec: ExecConfig,
 
+    /// Plan-mode behavior (`/plan`, Alt+P).
+    #[serde(default)]
+    pub plan: PlanConfig,
+
     /// Subagent (`agent` tool) settings: drive timeout and user-defined
     /// agent types.
     #[serde(default)]
@@ -344,6 +348,33 @@ impl Default for DaemonConfig {
             outcomes_retention_days: 180,
         }
     }
+}
+
+/// What approval does once granted, when the user has pinned it in config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanPostApprove {
+    /// Approval immediately auto-submits "Implement the plan."
+    Start,
+    /// Approval finalizes the plan and returns to the idle prompt.
+    Wait,
+}
+
+/// Plan-mode settings (`[plan]`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlanConfig {
+    /// When true, `exit_plan_mode` skips the approval dialog entirely: the
+    /// plan is approved the moment the model presents it. Default false —
+    /// the dialog is the point of plan mode.
+    pub auto_approve: bool,
+    /// Pin what approval does. Unset (default) the dialog offers both
+    /// "Approve and start" and "Approve and wait" every time; set, it
+    /// collapses to a single Approve option with this behavior. Option +
+    /// skip_serializing keeps "unset" meaningful in saved configs (the
+    /// freeze-defaults rule).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_approve: Option<PlanPostApprove>,
 }
 
 /// Durable semantic memory settings (v0.10.0).
@@ -2276,5 +2307,30 @@ port = 11434
         assert!(!blob.contains("extra instructions"));
         let loaded: Config = toml::from_str(&blob).expect("deserialize");
         assert!(!loaded.prompt.is_customized());
+    }
+
+    #[test]
+    fn plan_config_defaults_parse_and_do_not_freeze() {
+        // Absent section: dialog on, nothing pinned.
+        let c: Config = toml::from_str("").expect("empty config parses");
+        assert!(!c.plan.auto_approve);
+        assert!(c.plan.post_approve.is_none());
+        // Explicit values parse.
+        let c: Config = toml::from_str("[plan]\nauto_approve = true\npost_approve = \"start\"\n")
+            .expect("plan section parses");
+        assert!(c.plan.auto_approve);
+        assert_eq!(c.plan.post_approve, Some(PlanPostApprove::Start));
+        assert_eq!(
+            toml::from_str::<Config>("[plan]\npost_approve = \"wait\"\n")
+                .expect("wait parses")
+                .plan
+                .post_approve,
+            Some(PlanPostApprove::Wait)
+        );
+        // The unset pin is never frozen into a saved config (Option +
+        // skip_serializing_if), so a future default change still reaches
+        // existing files.
+        let blob = toml::to_string(&Config::default()).expect("serialize");
+        assert!(!blob.contains("post_approve"));
     }
 }

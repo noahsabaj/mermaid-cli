@@ -21,13 +21,13 @@ pub mod terminal;
 // Public re-exports - the ONLY way to access app functionality
 pub use config::{
     AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, ExecConfig, FetchBackend,
-    FilesystemPolicy, LayeredLoad, McpServerConfig, MemoryConfig, NetworkPolicy, SafetyConfig,
-    SearchBackend, SessionFlags, ThemeChoice, UiConfig, UserProviderConfig, WebConfig,
-    get_config_dir, init_config, load_config, load_config_or_warn, load_layered_config,
-    load_layered_config_or_warn, load_project_scoped_config, persist_default_reasoning,
-    persist_last_model, persist_ollama_allow_ram_offload, persist_ollama_num_ctx_for_model,
-    persist_reasoning_for_model, persist_ui_theme, remove_user_config_key, resolve_model_id,
-    update_user_config_key,
+    FilesystemPolicy, LayeredLoad, McpServerConfig, MemoryConfig, NetworkPolicy, PlanConfig,
+    PlanPostApprove, SafetyConfig, SearchBackend, SessionFlags, ThemeChoice, UiConfig,
+    UserProviderConfig, WebConfig, get_config_dir, init_config, load_config, load_config_or_warn,
+    load_layered_config, load_layered_config_or_warn, load_project_scoped_config,
+    persist_default_reasoning, persist_last_model, persist_ollama_allow_ram_offload,
+    persist_ollama_num_ctx_for_model, persist_reasoning_for_model, persist_ui_theme,
+    remove_user_config_key, resolve_model_id, update_user_config_key,
 };
 pub use event_source::{event_to_msg, parse_slash_command};
 pub use lifecycle::RuntimeLifecycle;

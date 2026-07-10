@@ -280,6 +280,20 @@ pub enum ToolMetadata {
         #[serde(default)]
         remembered: bool,
     },
+    /// `exit_plan_mode` resolved with an APPROVED plan: the transcript
+    /// renders the plan body as a markdown block, and `handle_tool_finished`
+    /// keys the post-approval mechanics (clear `session.plan`, seed the
+    /// checklist, optionally auto-submit) on this variant. A
+    /// request-for-changes outcome carries no metadata.
+    Plan {
+        /// Plan-file path as shown to the user (project-relative).
+        path: String,
+        /// The approved plan text, re-read from disk at approval time.
+        body: String,
+        /// True when the user chose to start implementing immediately.
+        #[serde(default)]
+        start: bool,
+    },
     Custom {
         name: String,
         data: Value,
