@@ -20,6 +20,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Session Persistence** — conversations auto-save; `--continue` reopens the last one in the current directory, `--resume` opens a searchable picker of past sessions
 - **Context Compaction** — automatic checkpoint-and-continue when the window fills (or the model truncates mid-run); manual `/compact [focus]` for handoffs
 - **Record & Replay** — `--record` captures every reducer input; `--replay` reconstructs the session offline, deterministically, with a built-in purity check
+- **@-Mentions** — type `@` in the composer to fuzzy-pick a project file (gitignore-aware); the path lands in your prompt as text the agent reads with its tools
 - **Message Queuing** — type while the model generates, messages send in order
 - **Non-Interactive Mode** — script with `mermaid run "prompt"` for CI/automation
 
@@ -172,6 +173,7 @@ mermaid pr create                               # Open a PR/MR from the current 
 | Ctrl+Shift+C | Copy the selected chat text to the clipboard |
 | Shift+Drag | Native terminal selection (bypasses Mermaid's mouse capture — useful for selecting across the whole window, including the input box and status bar) |
 | `/` | Open slash-command palette (filter-as-you-type) |
+| `@` | Open the fuzzy file picker (at the start of a word); type to filter, Tab/Enter inserts `@path`, Esc dismisses |
 | Tab | In palette: complete highlighted command name |
 | Up/Down | Navigate input history; palette and conversation-list navigation |
 | Mouse Wheel | Scroll chat |

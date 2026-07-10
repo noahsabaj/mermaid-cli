@@ -897,6 +897,15 @@ impl EffectRunner {
                     let _ = tx.send(Msg::ConversationsListed(summaries)).await;
                 });
             },
+            Cmd::ListProjectFiles => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                // Filesystem walk — blocking pool, like the other sync I/O.
+                self.detached.spawn_blocking(move || {
+                    let files = walk_project_files(&workdir);
+                    let _ = tx.blocking_send(Msg::ProjectFilesListed(files));
+                });
+            },
             Cmd::ListRuntimeTasks { limit } => {
                 let tx = self.msg_tx.clone();
                 // Synchronous rusqlite read — run on the blocking pool so it
@@ -2305,6 +2314,50 @@ fn split_model_id(model_id: &str) -> (String, String) {
     }
 }
 
+/// Hard cap on paths returned by [`walk_project_files`]. Well past any
+/// project the picker is useful on; keeps a runaway monorepo walk bounded.
+const MAX_PROJECT_FILES: usize = 20_000;
+
+/// Enumerate the project for the @-mention picker: gitignore-aware
+/// (ripgrep's walker — .gitignore/.ignore/global excludes), hidden entries
+/// and `.git` skipped, symlinks not followed. Returns RELATIVE UTF-8 paths
+/// sorted lexicographically, directories with a trailing `/`, capped at
+/// [`MAX_PROJECT_FILES`]. Non-UTF-8 paths are skipped — the mention is
+/// spliced into the text prompt, so it must be valid text.
+fn walk_project_files(root: &std::path::Path) -> Vec<String> {
+    let mut files = Vec::new();
+    for entry in ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .follow_links(false)
+        .build()
+        .flatten()
+    {
+        if files.len() >= MAX_PROJECT_FILES {
+            break;
+        }
+        let path = entry.path();
+        if path == root {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let Some(mut rel) = rel.to_str().map(str::to_string) else {
+            continue;
+        };
+        // Normalize Windows separators so a mention is stable text.
+        if std::path::MAIN_SEPARATOR != '/' {
+            rel = rel.replace(std::path::MAIN_SEPARATOR, "/");
+        }
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            rel.push('/');
+        }
+        files.push(rel);
+    }
+    files.sort();
+    files
+}
+
 fn is_context_limit_error(error: &ModelError) -> bool {
     let text = error.to_string().to_lowercase();
     text.contains("context")
@@ -2850,6 +2903,36 @@ mod tests {
 
     fn runner() -> (EffectRunner, mpsc::Receiver<Msg>) {
         EffectRunner::pair(PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn project_walk_respects_gitignore_sorts_and_marks_dirs() {
+        let root = std::env::temp_dir().join(format!(
+            "mermaid-walk-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("target/out.bin"), "ignored").unwrap();
+        std::fs::write(root.join("README.md"), "readme").unwrap();
+        std::fs::write(root.join(".hidden"), "hidden").unwrap();
+
+        let files = walk_project_files(&root);
+        assert_eq!(
+            files,
+            vec![
+                "README.md".to_string(),
+                "src/".to_string(),
+                "src/main.rs".to_string(),
+            ],
+            "sorted, dirs slash-marked, target/ ignored, dotfiles hidden"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

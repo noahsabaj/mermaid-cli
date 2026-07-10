@@ -146,12 +146,12 @@ mod tests {
     }
 
     #[test]
-    fn ranking_prefers_filename_over_path_matches() {
-        let list = files(&["main/helpers.rs", "src/main.rs"]);
+    fn ranking_prefers_contiguous_filename_over_scattered_path() {
+        let list = files(&["mystic/awesome/insight/notes.md", "src/main.rs"]);
         let ranked = fuzzy_rank(&list, "main", 10);
         assert_eq!(
             ranked[0], "src/main.rs",
-            "path config weights the basename: {ranked:?}"
+            "a contiguous basename match outranks letters scattered across segments: {ranked:?}"
         );
     }
 

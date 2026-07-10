@@ -219,10 +219,16 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             state.ui.mode,
             crate::domain::UiMode::ConversationList { .. }
         );
+    let file_picker_open = approval_item.is_none()
+        && question_item.is_none()
+        && !confirm_open
+        && !conv_list_open
+        && state.ui.file_picker_open();
     let palette_open = approval_item.is_none()
         && question_item.is_none()
         && !confirm_open
         && !conv_list_open
+        && !file_picker_open
         && state.ui.input_buffer.starts_with('/');
     let bottom_height = if let Some(item) = approval_item {
         // border(2) + body lines + blank(1) + 3 option lines
@@ -234,6 +240,9 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         6
     } else if conv_list_open {
         12
+    } else if file_picker_open {
+        let rows = state.ui.file_picker_matches.len().clamp(1, 8);
+        (rows as u16) + 2
     } else if palette_open {
         let typed = state
             .ui
@@ -397,6 +406,15 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             theme: &rstate.theme,
             candidates,
             cursor: *cursor,
+        };
+        frame.render_widget(widget, chunks[3]);
+    } else if file_picker_open {
+        use widgets::FilePickerWidget;
+        let widget = FilePickerWidget {
+            theme: &rstate.theme,
+            matches: &state.ui.file_picker_matches,
+            selected_index: state.ui.file_picker_cursor.unwrap_or(0),
+            loading: state.ui.project_files_loading && state.ui.project_files.is_none(),
         };
         frame.render_widget(widget, chunks[3]);
     } else if palette_open {

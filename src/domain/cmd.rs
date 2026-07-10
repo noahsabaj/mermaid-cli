@@ -351,6 +351,7 @@ impl Cmd {
             Cmd::ConsolidateMemory { .. } => "consolidate_memory",
             Cmd::LoadConversation(_) => "load_conversation",
             Cmd::ListConversations => "list_conversations",
+            Cmd::ListProjectFiles => "list_project_files",
             Cmd::ListRuntimeTasks { .. } => "list_runtime_tasks",
             Cmd::LoadRuntimeTask { .. } => "load_runtime_task",
             Cmd::ListRuntimeProcesses { .. } => "list_runtime_processes",
@@ -481,6 +482,7 @@ impl Cmd {
             Cmd::ConsolidateMemory { .. } => "consolidate_memory".to_string(),
             Cmd::LoadConversation(id) => format!("load_conversation({})", id),
             Cmd::ListConversations => "list_conversations".to_string(),
+            Cmd::ListProjectFiles => "list_project_files".to_string(),
             Cmd::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={})", limit),
             Cmd::LoadRuntimeTask { id } => format!("load_runtime_task({})", id),
             Cmd::ListRuntimeProcesses { limit } => {

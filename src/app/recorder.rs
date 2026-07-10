@@ -667,6 +667,7 @@ mod tests {
                 | MsgKind::SessionSaved
                 | MsgKind::ConversationLoaded
                 | MsgKind::ConversationsListed
+                | MsgKind::ProjectFilesListed
                 | MsgKind::RuntimeStore
                 | MsgKind::ModelPullFinished
                 | MsgKind::ModelPullProgress
@@ -874,6 +875,7 @@ mod tests {
                 message_count: 1,
                 updated_at: "2026-07-02".to_string(),
             }]),
+            Msg::ProjectFilesListed(vec!["src/main.rs".to_string(), "docs/".to_string()]),
             Msg::RuntimeText("daemon says hi".to_string()),
             Msg::RuntimeTasksListed(Vec::new()),
             Msg::RuntimeTaskLoaded {
@@ -944,6 +946,7 @@ mod tests {
             MsgKind::SessionSaved,
             MsgKind::ConversationLoaded,
             MsgKind::ConversationsListed,
+            MsgKind::ProjectFilesListed,
             MsgKind::RuntimeStore,
             MsgKind::ModelPullFinished,
             MsgKind::ModelPullProgress,

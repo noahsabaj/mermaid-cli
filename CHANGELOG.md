@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **@-mention fuzzy file picker.** Typing `@` at the start of a word in the
+  composer opens a fuzzy picker over the project's files (ripgrep's
+  gitignore-aware walker — hidden files, `.git`, and ignored paths excluded;
+  capped at 20k entries) ranked by nucleo, the matcher Helix uses. Up/Down
+  navigate, Tab or Enter inserts the relative path as plain text
+  (`@src/foo.rs `) — the model reads it with its own tools, so mentions
+  survive persistence, compaction, replay, and every provider. Esc dismisses
+  for the current token; typing reopens. `user@host` never triggers, and the
+  slash palette keeps `/` input.
+
 - **`mermaid feedback` + an always-on TRACE ring.** A new in-memory ring
   captures the last ~2000 trace events from mermaid's crates at TRACE level
   (dependencies capped at INFO) regardless of `RUST_LOG`, with secrets
