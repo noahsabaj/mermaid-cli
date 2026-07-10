@@ -127,6 +127,10 @@ pub struct Config {
     #[serde(default)]
     pub computer_use: ComputerUseConfig,
 
+    /// Foreground `execute_command` behavior.
+    #[serde(default)]
+    pub exec: ExecConfig,
+
     /// Subagent (`agent` tool) settings: drive timeout and user-defined
     /// agent types.
     #[serde(default)]
@@ -149,6 +153,26 @@ impl Config {
     /// Effective value of [`Config::mcp_defer_tools`]: unset means ON.
     pub fn mcp_deferral_enabled(&self) -> bool {
         self.mcp_defer_tools.unwrap_or(true)
+    }
+}
+
+/// Foreground `execute_command` behavior (`[exec]` table).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecConfig {
+    /// Run foreground commands on a pseudo-terminal (Unix only; Windows
+    /// always uses pipes). On a PTY, `tty`/`isatty` report a terminal,
+    /// spinner-heavy tools emit sane progress, and `/dev/tty` resolves to
+    /// the CAPTURED pty instead of scribbling over the TUI. `Option` so the
+    /// derived default and the serde default agree (both `None` = on) and
+    /// saved configs don't freeze the value. `pty = false` restores pipes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pty: Option<bool>,
+}
+
+impl ExecConfig {
+    /// Effective value of [`ExecConfig::pty`]: unset means ON.
+    pub fn pty_enabled(&self) -> bool {
+        self.pty.unwrap_or(true)
     }
 }
 

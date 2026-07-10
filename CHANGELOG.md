@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `doctor` and `mermaid feedback` now report each key's source (`env`,
   `keyring`, `none`). `MERMAID_NO_KEYRING=1` disables keyring lookups.
 
+- **Foreground commands run on a PTY (Unix).** `execute_command` children
+  now see a real terminal: `isatty` is true, spinner-heavy tools emit sane
+  progress instead of dumping escape garbage, and `/dev/tty` resolves to the
+  CAPTURED pty — a `sudo`-style prompt lands in the tool output instead of
+  painting over the TUI. ANSI sequences are stripped from what the model
+  sees and PTY `\r\n` line endings are normalized; the tee log keeps raw
+  bytes so backgrounded (`Ctrl+B`) tails render colors. The same sandbox
+  launcher, secret-env scrubbing, timeout, cancel, and detach semantics
+  apply on both paths. Opt out with `[exec] pty = false`; any pre-spawn PTY
+  failure falls back to pipes automatically. One semantic change: a child
+  that reads stdin now hangs until its timeout instead of hitting instant
+  EOF (mitigated by `GIT_TERMINAL_PROMPT=0` and the command timeout).
+
 - **Live agent panel + agent backgrounding.** Running `agent` tools now get
   one stable panel row each under the status spinner — description, the
   child's current tool or phase, elapsed time, and a live token count — so

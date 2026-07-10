@@ -19,7 +19,7 @@ pub mod terminal;
 
 // Public re-exports - the ONLY way to access app functionality
 pub use config::{
-    AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, FetchBackend,
+    AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, ExecConfig, FetchBackend,
     FilesystemPolicy, LayeredLoad, McpServerConfig, MemoryConfig, NetworkPolicy, SafetyConfig,
     SearchBackend, SessionFlags, ThemeChoice, UiConfig, UserProviderConfig, WebConfig,
     get_config_dir, init_config, load_config, load_config_or_warn, load_layered_config,
