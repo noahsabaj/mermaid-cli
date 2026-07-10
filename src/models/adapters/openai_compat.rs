@@ -1121,8 +1121,6 @@ struct UsageWire {
     #[serde(default)]
     completion_tokens: Option<usize>,
     #[serde(default)]
-    total_tokens: Option<usize>,
-    #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetailsWire>,
     #[serde(default)]
     completion_tokens_details: Option<CompletionTokensDetailsWire>,
@@ -1146,10 +1144,7 @@ struct CompletionTokensDetailsWire {
 
 fn token_usage_from_wire(usage: UsageWire) -> TokenUsage {
     let raw_prompt_tokens = usage.prompt_tokens.unwrap_or(0);
-    let completion_tokens = usage.completion_tokens.unwrap_or(0);
-    let total_tokens = usage
-        .total_tokens
-        .unwrap_or_else(|| raw_prompt_tokens.saturating_add(completion_tokens));
+    let raw_completion_tokens = usage.completion_tokens.unwrap_or(0);
 
     let cached_input_tokens = usage
         .prompt_tokens_details
@@ -1162,11 +1157,12 @@ fn token_usage_from_wire(usage: UsageWire) -> TokenUsage {
                 .and_then(|d| d.cached_tokens)
         })
         .unwrap_or(0);
-    // OpenAI's `prompt_tokens` already INCLUDES the cached tokens (a nested
-    // breakdown), unlike Anthropic's disjoint buckets. Subtract them so the
-    // shared `TokenUsage::input_total_tokens()` (prompt + cached) doesn't
-    // double-count the cache hit. `total_tokens` stays the wire value (the
-    // billing truth); the fallback above intentionally uses the raw prompt.
+    // OpenAI's `prompt_tokens` already INCLUDES the cached tokens and its
+    // `completion_tokens` already INCLUDES the reasoning tokens (both are
+    // nested breakdowns), unlike Anthropic's disjoint buckets. Subtract
+    // each so the shared `TokenUsage` component fields stay disjoint and
+    // the derived totals don't double-count. The derived
+    // `total_tokens()` then equals the wire total exactly.
     let prompt_tokens = raw_prompt_tokens.saturating_sub(cached_input_tokens);
     let reasoning_output_tokens = usage
         .completion_tokens_details
@@ -1179,8 +1175,9 @@ fn token_usage_from_wire(usage: UsageWire) -> TokenUsage {
                 .and_then(|d| d.reasoning_tokens)
         })
         .unwrap_or(0);
+    let completion_tokens = raw_completion_tokens.saturating_sub(reasoning_output_tokens);
 
-    TokenUsage::provider(prompt_tokens, completion_tokens, total_tokens)
+    TokenUsage::provider(prompt_tokens, completion_tokens)
         .with_cached_input(cached_input_tokens)
         .with_reasoning_output(reasoning_output_tokens)
 }
@@ -1792,11 +1789,10 @@ mod tests {
     }
 
     #[test]
-    fn token_usage_from_wire_preserves_authoritative_total() {
+    fn token_usage_from_wire_derives_total_from_components() {
         let usage = token_usage_from_wire(UsageWire {
             prompt_tokens: Some(100),
             completion_tokens: Some(25),
-            total_tokens: Some(140),
             prompt_tokens_details: None,
             completion_tokens_details: None,
             input_tokens_details: None,
@@ -1805,32 +1801,17 @@ mod tests {
 
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.completion_tokens, 25);
-        assert_eq!(usage.total_tokens, 140);
+        assert_eq!(usage.total_tokens(), 125);
     }
 
     #[test]
-    fn token_usage_from_wire_falls_back_to_prompt_plus_completion() {
+    fn token_usage_from_wire_keeps_components_disjoint() {
+        // OpenAI nests cached inside prompt_tokens and reasoning inside
+        // completion_tokens; both must be carved out so the derived totals
+        // don't double-count, and the derived total equals the wire total.
         let usage = token_usage_from_wire(UsageWire {
             prompt_tokens: Some(100),
             completion_tokens: Some(25),
-            total_tokens: None,
-            prompt_tokens_details: None,
-            completion_tokens_details: None,
-            input_tokens_details: None,
-            output_tokens_details: None,
-        });
-
-        assert_eq!(usage.prompt_tokens, 100);
-        assert_eq!(usage.completion_tokens, 25);
-        assert_eq!(usage.total_tokens, 125);
-    }
-
-    #[test]
-    fn token_usage_from_wire_preserves_cache_and_reasoning_details() {
-        let usage = token_usage_from_wire(UsageWire {
-            prompt_tokens: Some(100),
-            completion_tokens: Some(25),
-            total_tokens: Some(125),
             prompt_tokens_details: Some(PromptTokensDetailsWire {
                 cached_tokens: Some(40),
             }),
@@ -1841,9 +1822,11 @@ mod tests {
             output_tokens_details: None,
         });
 
+        assert_eq!(usage.prompt_tokens, 60);
         assert_eq!(usage.cached_input_tokens, 40);
+        assert_eq!(usage.completion_tokens, 13);
         assert_eq!(usage.reasoning_output_tokens, 12);
-        assert_eq!(usage.total_tokens, 125);
+        assert_eq!(usage.total_tokens(), 125);
     }
 
     #[test]
@@ -1853,7 +1836,6 @@ mod tests {
         let usage = token_usage_from_wire(UsageWire {
             prompt_tokens: Some(100),
             completion_tokens: Some(25),
-            total_tokens: Some(125),
             prompt_tokens_details: Some(PromptTokensDetailsWire {
                 cached_tokens: Some(40),
             }),
@@ -1864,6 +1846,25 @@ mod tests {
         assert_eq!(usage.input_total_tokens(), 100);
         assert_eq!(usage.prompt_tokens, 60);
         assert_eq!(usage.cached_input_tokens, 40);
+    }
+
+    #[test]
+    fn reasoning_does_not_double_count_output_total() {
+        // OpenAI nests reasoning tokens inside completion_tokens; output_total
+        // must be 100 (the wire completion), not 100 + 40.
+        let usage = token_usage_from_wire(UsageWire {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(100),
+            prompt_tokens_details: None,
+            completion_tokens_details: Some(CompletionTokensDetailsWire {
+                reasoning_tokens: Some(40),
+            }),
+            input_tokens_details: None,
+            output_tokens_details: None,
+        });
+        assert_eq!(usage.completion_tokens, 60);
+        assert_eq!(usage.reasoning_output_tokens, 40);
+        assert_eq!(usage.output_total_tokens(), 100);
     }
 
     #[test]

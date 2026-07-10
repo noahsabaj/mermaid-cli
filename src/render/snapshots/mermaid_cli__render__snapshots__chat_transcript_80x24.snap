@@ -24,5 +24,5 @@ expression: frame
 ────────────────────────────────────────────────────────────────────────────────
 >                                                                               
 ────────────────────────────────────────────────────────────────────────────────
-snapuser@snaphost:/project/demo                        context: n/a | session: 0
+snapuser@snaphost:/project/demo                                     context: n/a
 mermaid v0.16.0 · safety: ask · reasoning: medium                    ollama/test

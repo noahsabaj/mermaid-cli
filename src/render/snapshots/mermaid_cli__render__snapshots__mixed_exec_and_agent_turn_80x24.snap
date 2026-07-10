@@ -1,6 +1,5 @@
 ---
 source: src/render/snapshots.rs
-assertion_line: 67
 expression: frame
 ---
  > run tests and audit in parallel                  January 2nd, 2026 at 3:04am 
@@ -20,10 +19,10 @@ expression: frame
                                                                                 
                                                                                 
  • Running tools: Bash cargo test...                                            
-   (esc to interrupt • ctrl+b to background • 9s • ↓ ~0 tokens)                 
+   (esc to interrupt • ctrl+b to background • 9s • ↓ 0 tokens)                  
    ◦ Audit deps  starting… · 9s                                                 
 ────────────────────────────────────────────────────────────────────────────────
 >                                                                               
 ────────────────────────────────────────────────────────────────────────────────
-snapuser@snaphost:/project/demo                        context: n/a | session: 0
+snapuser@snaphost:/project/demo                                     context: n/a
 mermaid v0.16.0 · safety: ask · reasoning: medium                    ollama/test

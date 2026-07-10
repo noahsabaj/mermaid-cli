@@ -259,7 +259,7 @@ fn emit_run_event(event: &RunEvent) {
 /// assistant response + any errors encountered.
 fn build_result(state: &State) -> RunResult {
     let mut out = RunResult {
-        total_tokens: state.session.cumulative_token_usage.total_tokens,
+        total_tokens: state.session.cumulative_token_usage.total_tokens(),
         session_id: state.session.conversation.id.clone(),
         ..RunResult::default()
     };

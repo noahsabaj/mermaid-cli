@@ -187,12 +187,13 @@ fn forward_callback(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) -> St
             }),
             ModelStreamEvent::ToolCall(tc) => StreamEvent::ToolCall(tc),
             ModelStreamEvent::Status(s) => StreamEvent::Status(s),
-            ModelStreamEvent::Done { tokens } => StreamEvent::Done {
-                usage: if tokens > 0 {
-                    Some(crate::models::TokenUsage::provider(0, tokens, tokens))
-                } else {
-                    None
-                },
+            // No adapter emits `Done` through this callback — the wrapper
+            // sends the authoritative terminal `Done` built from the
+            // returned `ModelResponse` (F3). Map defensively without
+            // inventing usage (the old placeholder misfiled everything
+            // as completion tokens).
+            ModelStreamEvent::Done { .. } => StreamEvent::Done {
+                usage: None,
                 provider_continuation: None,
                 stop_reason: None,
             },

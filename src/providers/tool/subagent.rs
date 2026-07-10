@@ -706,7 +706,7 @@ impl SubagentTool {
             );
             if let Some(notify) = notify {
                 let usage = outcome.metadata.token_usage.clone();
-                let tokens_total = usage.as_ref().map_or(tokens, |u| u.total_tokens);
+                let tokens_total = usage.as_ref().map_or(tokens, |u| u.total_tokens());
                 let _ = notify
                     .send(Msg::BackgroundAgentFinished {
                         agent_id: bg_agent_id,
@@ -804,10 +804,9 @@ fn subagent_metadata(
     usage: TokenUsageTotals,
     agent_id: String,
 ) -> ToolRunMetadata {
-    let token_usage = (usage.total_tokens > 0).then(|| crate::models::TokenUsage {
+    let token_usage = (usage.total_tokens() > 0).then(|| crate::models::TokenUsage {
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
-        total_tokens: usage.total_tokens,
         cached_input_tokens: usage.cached_input_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         reasoning_output_tokens: usage.reasoning_output_tokens,
@@ -830,7 +829,6 @@ fn usage_delta(after: TokenUsageTotals, before: TokenUsageTotals) -> TokenUsageT
         completion_tokens: after
             .completion_tokens
             .saturating_sub(before.completion_tokens),
-        total_tokens: after.total_tokens.saturating_sub(before.total_tokens),
         cached_input_tokens: after
             .cached_input_tokens
             .saturating_sub(before.cached_input_tokens),
@@ -1314,7 +1312,7 @@ mod tests {
         // piggybacks... only once the throttle allows again.
         let done = Msg::StreamDone {
             turn: TurnId(1),
-            usage: Some(crate::models::TokenUsage::provider(10, 5_000, 5_010)),
+            usage: Some(crate::models::TokenUsage::provider(10, 5_000)),
             provider_continuation: None,
             stop_reason: None,
         };
@@ -1434,13 +1432,12 @@ mod tests {
             TokenUsageTotals {
                 prompt_tokens: 100,
                 completion_tokens: 40,
-                total_tokens: 140,
                 ..TokenUsageTotals::default()
             },
             "a7".to_string(),
         );
         let usage = some.token_usage.expect("usage attached");
-        assert_eq!(usage.total_tokens, 140);
+        assert_eq!(usage.total_tokens(), 140);
         assert_eq!(usage.completion_tokens, 40);
         assert!(matches!(
             some.detail,
@@ -1463,22 +1460,20 @@ mod tests {
         let before = TokenUsageTotals {
             prompt_tokens: 1_000,
             completion_tokens: 200,
-            total_tokens: 1_200,
             ..TokenUsageTotals::default()
         };
         let after = TokenUsageTotals {
             prompt_tokens: 1_600,
             completion_tokens: 350,
-            total_tokens: 1_950,
             ..TokenUsageTotals::default()
         };
         let delta = usage_delta(after, before);
         assert_eq!(delta.prompt_tokens, 600);
         assert_eq!(delta.completion_tokens, 150);
-        assert_eq!(delta.total_tokens, 750);
+        assert_eq!(delta.total_tokens(), 750);
         // A fresh spawn's snapshot is zero — the delta IS the total.
         let fresh = usage_delta(after, TokenUsageTotals::default());
-        assert_eq!(fresh.total_tokens, 1_950);
+        assert_eq!(fresh.total_tokens(), 1_950);
     }
 
     #[test]

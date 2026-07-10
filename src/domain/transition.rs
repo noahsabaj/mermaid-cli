@@ -336,11 +336,11 @@ fn action_details_for(
             // otherwise hide.
             let mut bits = Vec::new();
             if let Some(usage) = outcome.metadata.token_usage.as_ref()
-                && usage.total_tokens > 0
+                && usage.total_tokens() > 0
             {
                 bits.push(format!(
                     "{} tokens",
-                    super::compaction::format_compact_count(usage.total_tokens)
+                    super::compaction::format_compact_count(usage.total_tokens())
                 ));
             }
             if let ToolMetadata::Subagent { model_id, agent_id } = &outcome.metadata.detail {
@@ -639,15 +639,7 @@ mod tests {
     #[test]
     fn agent_action_reports_child_model_and_tokens() {
         let call = sample_call_args(1, "agent", serde_json::json!({"description": "explore"}));
-        let usage = crate::models::TokenUsage {
-            prompt_tokens: 9_000,
-            completion_tokens: 3_300,
-            total_tokens: 12_300,
-            cached_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            reasoning_output_tokens: 0,
-            source: Default::default(),
-        };
+        let usage = crate::models::TokenUsage::provider(9_000, 3_300);
         let outcome = ToolOutcome::success("the report", "subagent completed", 62.0).with_metadata(
             ToolRunMetadata {
                 detail: ToolMetadata::Subagent {

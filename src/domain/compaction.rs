@@ -480,7 +480,6 @@ pub fn combine_usage(a: Option<TokenUsage>, b: Option<TokenUsage>) -> Option<Tok
             left.completion_tokens = left
                 .completion_tokens
                 .saturating_add(right.completion_tokens);
-            left.total_tokens = left.total_tokens.saturating_add(right.total_tokens);
             left.cached_input_tokens = left
                 .cached_input_tokens
                 .saturating_add(right.cached_input_tokens);
@@ -805,7 +804,7 @@ mod tests {
 
     #[test]
     fn classify_length_stop_discriminates_output_cap_from_context_full() {
-        let usage = TokenUsage::provider(16_600, 4_000, 20_600);
+        let usage = TokenUsage::provider(16_600, 4_000);
         // No usage → Unknown (legacy recovery path preserved).
         assert_eq!(
             classify_length_stop(None, Some(100_000), 4_000),

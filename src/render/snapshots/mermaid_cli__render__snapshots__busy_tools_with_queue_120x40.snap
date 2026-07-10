@@ -35,10 +35,10 @@ expression: frame
                                                                                                                         
                                                                                                                         
                                                                                                                         
- • Running tools: Bash npm run dev... (esc to interrupt • ctrl+b to background • 3s • ↓ ~0 tokens)                      
+ • Running tools: Bash npm run dev... (esc to interrupt • ctrl+b to background • 3s • ↓ 0 tokens)                       
  > also check the logs afterwards                                                                                       
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 >                                                                                                                       
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-snapuser@snaphost:/project/demo                                                                context: n/a | session: 0
+snapuser@snaphost:/project/demo                                                                             context: n/a
 mermaid v0.16.0 · safety: ask · reasoning: medium                                                            ollama/test

@@ -722,7 +722,7 @@ mod tests {
                 description: "audit docs".to_string(),
                 report: "all good".to_string(),
                 success: true,
-                usage: Some(crate::models::TokenUsage::provider(60_000, 30_000, 90_000)),
+                usage: Some(crate::models::TokenUsage::provider(60_000, 30_000)),
                 tokens: 90_000,
                 duration_secs: 132,
             },
@@ -834,7 +834,7 @@ mod tests {
             },
             Msg::StreamDone {
                 turn: TurnId(1),
-                usage: Some(crate::models::TokenUsage::provider(10, 5, 15)),
+                usage: Some(crate::models::TokenUsage::provider(10, 5)),
                 provider_continuation: None,
                 stop_reason: Some(crate::models::FinishReason::Stop),
             },

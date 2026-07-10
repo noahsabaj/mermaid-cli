@@ -187,17 +187,22 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         };
         let active_tool = active_tool_label(state);
         let (agent_rows, status_override, bg_available) = agent_panel_data(state);
-        // Live, char-based estimate of tokens generated so far this run (answer +
-        // thinking), accumulated across tool steps via `run_committed_tokens` so it
-        // doesn't reset each model call — while tools run, running subagents'
-        // throttled live counts ride on top so the counter keeps climbing
-        // instead of freezing for the whole child run. Marked estimated (`~`);
-        // the authoritative count lands in the footer once usage arrives.
-        let committed = state.runtime.run_committed_tokens;
+        // Tokens generated so far this run: completed phases carry real
+        // provider output counts via `run_tokens` (chars/4 only when a phase
+        // reported no usage); the live phase's char-based count rides on top
+        // and reconciles to the provider number at its `Done`. While tools
+        // run, running subagents' throttled live counts ride on top the same
+        // way so the counter keeps climbing instead of freezing for the whole
+        // child run (they reconcile when the child's real usage folds in).
+        // Marked `~` whenever any estimated component is included.
+        let committed = state.runtime.run_tokens;
         let live_child_tokens: usize = state.ui.live_tool_status.values().map(|l| l.tokens).sum();
         let (tokens_display, tokens_estimated) = match &state.turn {
-            TurnState::Generating { tokens, .. } => (committed + *tokens, true),
-            TurnState::ExecutingTools { .. } => (committed + live_child_tokens, true),
+            TurnState::Generating { tokens, .. } => (committed.output_tokens + *tokens, true),
+            TurnState::ExecutingTools { .. } => (
+                committed.output_tokens + live_child_tokens,
+                committed.contains_estimate || live_child_tokens > 0,
+            ),
             _ => (0, false),
         };
         build_status_lines(
@@ -504,8 +509,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             hostname: &rstate.hostname,
             username: &rstate.username,
             context_usage: state.session.context_usage.as_ref(),
-            last_usage: state.session.last_token_usage,
-            session_usage: state.session.cumulative_token_usage,
             model_name: &state.session.model_id,
             reasoning_level: effective,
             requested_level,

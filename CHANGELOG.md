@@ -223,6 +223,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (children's live counts ride on top) instead of freezing until the tools
   return.
 
+- **Token accounting normalized; one honest set of meters.** The footer
+  showed three token counters measuring three different things: `context`
+  and `last api` were the same number rendered twice, and `session` was a
+  naive sum of every API call's full total — the re-sent conversation input
+  (and cache reads) counted again on every call, so a short agentic run
+  read "1.2M". The footer now shows only the context gauge
+  (`context: 24.5k / 1M (2%)`); the cumulative sum lives in `/usage`,
+  labeled as what it is (all API calls, subagents included, input/output/
+  cache broken out). The run summary ("Worked for 6m · used N tokens") now
+  counts real provider-reported output tokens across the run — parent
+  turns, subagents, and mid-run compactions — falling back to the old
+  chars/4 estimate (marked `~`) only when a provider reports no usage.
+  Underneath, `TokenUsage` stores only disjoint components and derives all
+  totals, fixing two real unit bugs: each adapter previously invented its
+  own `total_tokens` (Anthropic's included cache reads, OpenAI's didn't),
+  and OpenAI-compat/Meta double-counted reasoning tokens in output totals
+  (wire `completion_tokens` already includes them) — OpenAI-visible output
+  numbers shrink accordingly.
 - **Rate-limit errors now say what actually happened.** A provider 429 used
   to surface as the inscrutable "retry after None"; it now shows the
   provider's own reason from the response body (e.g. Cloudflare's "you have

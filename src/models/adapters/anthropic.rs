@@ -783,20 +783,16 @@ impl AnthropicAdapter {
             }
         }
 
+        // Anthropic's `input_tokens` excludes both cache buckets, so the
+        // components map 1:1. Thinking tokens ride inside `output_tokens`
+        // (no separate reasoning count on this wire).
         let prompt_tokens = json.usage.input_tokens.unwrap_or(0);
         let completion_tokens = json.usage.output_tokens.unwrap_or(0);
         let cache_creation = json.usage.cache_creation_input_tokens.unwrap_or(0);
         let cache_read = json.usage.cache_read_input_tokens.unwrap_or(0);
-        let usage = TokenUsage::provider(
-            prompt_tokens,
-            completion_tokens,
-            prompt_tokens
-                .saturating_add(completion_tokens)
-                .saturating_add(cache_creation)
-                .saturating_add(cache_read),
-        )
-        .with_cache_creation(cache_creation)
-        .with_cached_input(cache_read);
+        let usage = TokenUsage::provider(prompt_tokens, completion_tokens)
+            .with_cache_creation(cache_creation)
+            .with_cached_input(cache_read);
 
         let stop_reason = json.stop_reason.as_deref().map(map_anthropic_stop_reason);
         if text_acc.is_empty()
@@ -1128,10 +1124,6 @@ impl AnthropicAdapter {
             }
         }
 
-        let total_tokens = prompt_tokens
-            .saturating_add(completion_tokens)
-            .saturating_add(cache_creation_tokens)
-            .saturating_add(cache_read_tokens);
         // F3: `Done` is emitted by the v0.7 wrapper from the returned
         // `ModelResponse` so the `provider_continuation` round-trips. If we
         // emitted it here, the reducer would commit the assistant
@@ -1154,7 +1146,7 @@ impl AnthropicAdapter {
         Ok(ModelResponse {
             content: text_acc,
             usage: Some(
-                TokenUsage::provider(prompt_tokens, completion_tokens, total_tokens)
+                TokenUsage::provider(prompt_tokens, completion_tokens)
                     .with_cache_creation(cache_creation_tokens)
                     .with_cached_input(cache_read_tokens),
             ),

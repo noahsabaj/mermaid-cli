@@ -149,7 +149,6 @@ impl State {
                 model_id,
                 reasoning,
                 safety_mode: settings.safety.mode,
-                cumulative_tokens: 0,
                 last_token_usage: None,
                 cumulative_token_usage: TokenUsageTotals::default(),
                 context_usage: None,
@@ -197,7 +196,6 @@ impl State {
         if let Some(mode) = history.safety_mode {
             self.session.safety_mode = mode;
         }
-        self.session.cumulative_tokens = history.cumulative_tokens;
         self.session.last_token_usage = history.last_token_usage;
         self.session.cumulative_token_usage = history.cumulative_token_usage;
         self.session.context_usage = history.context_usage.clone();
@@ -241,15 +239,15 @@ impl State {
     }
 }
 
-/// Prompt/completion/total token counts normalized for UI display.
-/// Providers report usage per API request; the session keeps both the
-/// last request and the cumulative API usage so the footer does not
-/// imply this is the current model context length.
+/// Per-component token counts accumulated for UI display. Components
+/// are disjoint (mirrors `TokenUsage`); totals are derived, never
+/// stored. Providers report usage per API request; the session keeps
+/// both the last request and the cumulative API usage so the footer
+/// does not imply this is the current model context length.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsageTotals {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
-    pub total_tokens: usize,
     pub cached_input_tokens: usize,
     pub cache_creation_input_tokens: usize,
     pub reasoning_output_tokens: usize,
@@ -260,7 +258,6 @@ impl TokenUsageTotals {
         Self {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
-            total_tokens: usage.total_tokens,
             cached_input_tokens: usage.cached_input_tokens,
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             reasoning_output_tokens: usage.reasoning_output_tokens,
@@ -272,7 +269,6 @@ impl TokenUsageTotals {
         self.completion_tokens = self
             .completion_tokens
             .saturating_add(other.completion_tokens);
-        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
         self.cached_input_tokens = self
             .cached_input_tokens
             .saturating_add(other.cached_input_tokens);
@@ -293,6 +289,11 @@ impl TokenUsageTotals {
     pub fn output_total_tokens(&self) -> usize {
         self.completion_tokens
             .saturating_add(self.reasoning_output_tokens)
+    }
+
+    pub fn total_tokens(&self) -> usize {
+        self.input_total_tokens()
+            .saturating_add(self.output_total_tokens())
     }
 }
 
@@ -337,8 +338,11 @@ pub struct ContextUsageSnapshot {
 
 impl ContextUsageSnapshot {
     pub fn from_usage(usage: &TokenUsage, max_tokens: Option<usize>) -> Self {
+        // input + output ≈ what the next request's prompt will occupy;
+        // derived from disjoint components so it means the same thing
+        // for every provider.
         Self::new(
-            usage.total_tokens,
+            usage.total_tokens(),
             max_tokens,
             usage.source,
             usage.prompt_tokens,
@@ -520,10 +524,6 @@ pub struct Session {
     /// The reducer threads this into `Cmd::ExecuteTool` so the policy gate
     /// enforces the *current* mode, not the startup snapshot.
     pub safety_mode: SafetyMode,
-    /// Running total of tokens consumed across every API request in
-    /// this session. Kept for CLI JSON compatibility; the richer
-    /// prompt/completion breakdown lives in `cumulative_token_usage`.
-    pub cumulative_tokens: usize,
     /// Token usage for the most recent completed provider request.
     /// `None` means the provider did not report usage for that turn.
     pub last_token_usage: Option<TokenUsageTotals>,
@@ -553,7 +553,6 @@ impl Session {
     pub fn snapshot_conversation(&self) -> ConversationHistory {
         let mut history = self.conversation.clone();
         history.safety_mode = Some(self.safety_mode);
-        history.cumulative_tokens = self.cumulative_tokens;
         history.last_token_usage = self.last_token_usage;
         history.cumulative_token_usage = self.cumulative_token_usage;
         history.context_usage = self.context_usage.clone();
@@ -1257,13 +1256,12 @@ mod tests {
         // this is exactly the save→resume path.
         let mut src = mock_state();
         src.session.safety_mode = SafetyMode::FullAccess;
-        src.session.cumulative_tokens = 4321;
         src.session.cumulative_token_usage = TokenUsageTotals {
-            total_tokens: 4321,
+            prompt_tokens: 4321,
             ..Default::default()
         };
         src.session.last_token_usage = Some(TokenUsageTotals {
-            total_tokens: 100,
+            prompt_tokens: 100,
             ..Default::default()
         });
         src.session.context_usage = Some(ContextUsageSnapshot::new(
@@ -1286,13 +1284,15 @@ mod tests {
             SafetyMode::Ask,
             "config default"
         );
-        assert_eq!(restored.session.cumulative_token_usage.total_tokens, 0);
+        assert_eq!(restored.session.cumulative_token_usage.total_tokens(), 0);
 
         restored.seed_conversation(snapshot);
         assert_eq!(restored.session.safety_mode, SafetyMode::FullAccess);
-        assert_eq!(restored.session.cumulative_tokens, 4321);
-        assert_eq!(restored.session.cumulative_token_usage.total_tokens, 4321);
-        assert_eq!(restored.session.last_token_usage.unwrap().total_tokens, 100);
+        assert_eq!(restored.session.cumulative_token_usage.total_tokens(), 4321);
+        assert_eq!(
+            restored.session.last_token_usage.unwrap().total_tokens(),
+            100
+        );
         assert_eq!(restored.session.context_usage.unwrap().used_tokens, 8000);
     }
 
