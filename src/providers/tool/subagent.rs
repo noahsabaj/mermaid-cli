@@ -706,7 +706,7 @@ impl SubagentTool {
             );
             if let Some(notify) = notify {
                 let usage = outcome.metadata.token_usage.clone();
-                let tokens_total = usage.as_ref().map_or(tokens, |u| u.total_tokens);
+                let tokens_total = usage.as_ref().map_or(tokens, |u| u.total_tokens());
                 let _ = notify
                     .send(Msg::BackgroundAgentFinished {
                         agent_id: bg_agent_id,
@@ -1312,7 +1312,7 @@ mod tests {
         // piggybacks... only once the throttle allows again.
         let done = Msg::StreamDone {
             turn: TurnId(1),
-            usage: Some(crate::models::TokenUsage::provider(10, 5_000, 5_010)),
+            usage: Some(crate::models::TokenUsage::provider(10, 5_000)),
             provider_continuation: None,
             stop_reason: None,
         };

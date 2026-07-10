@@ -743,12 +743,12 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // Fold the detached child's spend into the session totals, same
             // as `handle_tool_finished` does for foreground agent calls.
             if let Some(usage) = usage.as_ref() {
-                let totals = TokenUsageTotals::from_usage(usage);
-                state.session.cumulative_token_usage.add_assign(totals);
-                state.session.cumulative_tokens = state
-                    .session
-                    .cumulative_tokens
-                    .saturating_add(usage.total_tokens);
+                fold_token_usage(
+                    &mut state.session,
+                    &mut state.runtime,
+                    usage,
+                    UsageFold::Detached,
+                );
             }
             let verdict = if success { "finished" } else { "failed" };
             push_system(
@@ -3722,6 +3722,10 @@ enum UsageFold {
     /// inside one (auto/recovery) — a manual `/compact` is not run spend.
     /// The caller rebuilds the context gauge from the compaction snapshot.
     Compaction { mid_run: bool },
+    /// A detached background agent's final usage: cumulative only — it is
+    /// not part of whichever run may be active when it lands, so it never
+    /// touches `last_token_usage` or the run counter.
+    Detached,
 }
 
 /// The single accumulation point for provider-reported usage. Every path
@@ -3746,6 +3750,7 @@ fn fold_token_usage(
             session.last_token_usage = Some(totals);
             mid_run
         },
+        UsageFold::Detached => false,
     };
     if bank_run_output {
         runtime.run_tokens.add_provider(usage.output_total_tokens());
@@ -10775,7 +10780,7 @@ mod tests {
         // Finished while IDLE: row removed, usage folded into session totals,
         // and the report auto-submits through the queued-message path (the
         // outer update() drains pending_msgs, so the turn starts immediately).
-        let tokens_before = state.session.cumulative_tokens;
+        let tokens_before = state.session.cumulative_token_usage.total_tokens();
         let (state, _) = update(
             state,
             Msg::BackgroundAgentFinished {
@@ -10783,13 +10788,16 @@ mod tests {
                 description: "audit docs".to_string(),
                 report: "docs are fine".to_string(),
                 success: true,
-                usage: Some(crate::models::TokenUsage::provider(70_000, 20_000, 90_000)),
+                usage: Some(crate::models::TokenUsage::provider(70_000, 20_000)),
                 tokens: 90_000,
                 duration_secs: 61,
             },
         );
         assert!(state.runtime.background_agents.is_empty());
-        assert_eq!(state.session.cumulative_tokens, tokens_before + 90_000);
+        assert_eq!(
+            state.session.cumulative_token_usage.total_tokens(),
+            tokens_before + 90_000
+        );
         assert!(
             !matches!(state.turn, TurnState::Idle),
             "idle delivery must auto-submit the report"
