@@ -299,8 +299,15 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         name: "plan",
         aliases: &[],
         description: "Enter or leave plan mode (Alt+P also toggles)",
-        arg_hint: Some("[off|show]"),
+        arg_hint: Some("[off|show|config]"),
         group: SlashCommandGroup::SafetyRecovery,
+    },
+    SlashCommand {
+        name: "config",
+        aliases: &[],
+        description: "Open the settings picker (plan mode section)",
+        arg_hint: None,
+        group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
         name: "approvals",

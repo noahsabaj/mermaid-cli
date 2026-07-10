@@ -562,6 +562,7 @@ impl EffectRunner {
                 model_id,
                 safety_mode,
                 plan_file,
+                plan_permissions,
                 intent,
                 session_id,
                 message_index,
@@ -582,8 +583,11 @@ impl EffectRunner {
                 // actions. Only when a provider is bound (real wiring); the
                 // gate fails safe to "escalate" when it's `None`. The vet
                 // uses the configured classifier model, else the session model.
+                // Plan mode also gets one: profile levels set to `auto`
+                // resolve through `PolicyDecision::Classify`, which fails
+                // safe to escalate without a classifier bound.
                 let classifier: Option<Arc<dyn crate::providers::AutoClassifier>> =
-                    if safety_mode == crate::runtime::SafetyMode::Auto {
+                    if safety_mode == crate::runtime::SafetyMode::Auto || plan_file.is_some() {
                         self.providers.as_ref().map(|p| {
                             let model = config
                                 .safety
@@ -622,6 +626,7 @@ impl EffectRunner {
                         message_index,
                         safety_mode,
                         plan_file,
+                        plan_permissions,
                         intent,
                         classifier,
                         approval,
@@ -873,6 +878,13 @@ impl EffectRunner {
                             status,
                             health: None,
                         });
+                    }
+                });
+            },
+            Cmd::PersistPlanConfig(plan) => {
+                self.detached.spawn(async move {
+                    if let Err(err) = crate::app::persist_plan_config(&plan) {
+                        tracing::warn!(error = %err, "failed to persist [plan] config");
                     }
                 });
             },
@@ -2541,6 +2553,7 @@ async fn dispatch_execute_tool(
     message_index: usize,
     safety_mode: crate::runtime::SafetyMode,
     plan_file: Option<PathBuf>,
+    plan_permissions: crate::app::PlanPermissions,
     intent: Option<String>,
     classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
     approval: Option<crate::providers::ApprovalBroker>,
@@ -2664,6 +2677,7 @@ async fn dispatch_execute_tool(
     );
     ctx.background = background;
     ctx.plan_file = plan_file;
+    ctx.plan_permissions = plan_permissions;
     // Detached work (backgrounded subagents) reports back through the main
     // msg channel after this turn's progress relay is gone.
     ctx.notify = Some(msg_tx.clone());
@@ -3419,6 +3433,7 @@ mod tests {
             model_id: "ollama/test".to_string(),
             safety_mode: crate::runtime::SafetyMode::Ask,
             plan_file: None,
+            plan_permissions: crate::app::PlanPermissions::default(),
             intent: None,
             session_id: "sess-test".to_string(),
             message_index: 0,

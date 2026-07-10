@@ -32,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display diff, which is capped at 220 lines), and the segment is omitted
   entirely on runs that changed nothing.
 
+- **Plan mode: permission profile picker + plan/execute model split.**
+  `/plan config` (or `/config`) opens a settings picker: a top-level
+  permissions preset (`default` / `strict` / `open`, showing `custom` when
+  granular values diverge) over per-category levels — builds/tests, web,
+  memory writes, task tools — each cyclable through allow / auto (classifier
+  -vetted) / ask (approval modal) / deny, applied live at the policy gate on
+  the very next tool call and persisted to the `[plan]` config table. The
+  plan-mode system prompt now derives its "what runs while planning" line
+  from the live profile so it never promises what the gate will deny. New
+  `[plan] model` and `[plan] reasoning` overrides: entering plan mode swaps
+  the session onto the plan-phase model/effort and leaving (approve or
+  cancel) restores the previous one — plan on a frontier model, execute
+  locally, or invert for privacy.
+
 - **Plan mode: approval flow + task seeding.** The model now finishes a plan
   by calling `exit_plan_mode`, which re-reads the plan file from disk (your
   external edits win) and raises an approval dialog: `Approve and start` /

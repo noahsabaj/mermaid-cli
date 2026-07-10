@@ -216,6 +216,7 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
             Some(mode) => SlashCmd::Safety(crate::runtime::SafetyMode::parse(&mode.to_lowercase())),
         },
         Some("plan") => SlashCmd::Plan(arg),
+        Some("config") => SlashCmd::Config,
         Some("clear") => SlashCmd::Clear,
         Some("save") => SlashCmd::Save(arg),
         Some("load") => SlashCmd::Load(arg),

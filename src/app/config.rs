@@ -360,6 +360,97 @@ pub enum PlanPostApprove {
     Wait,
 }
 
+/// Permission level for one plan-mode category. Mirrors the safety-mode
+/// ladder so the picker reads familiarly: `allow` runs, `auto` is vetted by
+/// the Auto classifier, `ask` raises the approval modal, `deny` blocks with
+/// the plan-flavored teaching denial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanPermLevel {
+    Allow,
+    Auto,
+    Ask,
+    Deny,
+}
+
+impl PlanPermLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlanPermLevel::Allow => "allow",
+            PlanPermLevel::Auto => "auto",
+            PlanPermLevel::Ask => "ask",
+            PlanPermLevel::Deny => "deny",
+        }
+    }
+}
+
+/// Per-category permission profile applied while a plan is being drafted.
+/// The read-only floor stays the base; these levels decide how far each
+/// carve-out opens. The plan file itself is not a category — being able to
+/// author the plan IS plan mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlanPermissions {
+    /// Known-safe build/test commands (`is_plan_safe_build_command`).
+    pub builds: PlanPermLevel,
+    /// `web_search` / `web_fetch` (GET-shaped reads).
+    pub web: PlanPermLevel,
+    /// Durable memory writes.
+    pub memory: PlanPermLevel,
+    /// The checklist writers (`task_create` / `task_update`). Only `allow`
+    /// unblocks them — `auto`/`ask` collapse to `deny` (they are ungated
+    /// tools with no approval path, and the checklist is seeded from the
+    /// approved plan anyway).
+    pub tasks: PlanPermLevel,
+}
+
+impl Default for PlanPermissions {
+    fn default() -> Self {
+        Self {
+            builds: PlanPermLevel::Allow,
+            web: PlanPermLevel::Allow,
+            memory: PlanPermLevel::Allow,
+            tasks: PlanPermLevel::Deny,
+        }
+    }
+}
+
+impl PlanPermissions {
+    /// The top-level picker presets; `None` when the current values match
+    /// none of them (the picker shows "custom").
+    pub fn preset_name(&self) -> Option<&'static str> {
+        if *self == Self::default() {
+            Some("default")
+        } else if *self == Self::strict() {
+            Some("strict")
+        } else if *self == Self::open() {
+            Some("open")
+        } else {
+            None
+        }
+    }
+
+    /// Everything denied: pure read-only exploration plus the plan file.
+    pub fn strict() -> Self {
+        Self {
+            builds: PlanPermLevel::Deny,
+            web: PlanPermLevel::Deny,
+            memory: PlanPermLevel::Deny,
+            tasks: PlanPermLevel::Deny,
+        }
+    }
+
+    /// Everything allowed (the working tree stays read-only regardless).
+    pub fn open() -> Self {
+        Self {
+            builds: PlanPermLevel::Allow,
+            web: PlanPermLevel::Allow,
+            memory: PlanPermLevel::Allow,
+            tasks: PlanPermLevel::Allow,
+        }
+    }
+}
+
 /// Plan-mode settings (`[plan]`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -375,6 +466,20 @@ pub struct PlanConfig {
     /// freeze-defaults rule).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_approve: Option<PlanPostApprove>,
+    /// Per-category permission profile while planning. Edited live in the
+    /// `/plan config` picker; the reducer threads the LIVE values onto each
+    /// tool dispatch (the startup `Config` snapshot in `ExecContext` would
+    /// go stale).
+    pub permissions: PlanPermissions,
+    /// Plan-phase model override: entering plan mode swaps the session to
+    /// this model and leaving restores the previous one — plan on a frontier
+    /// model, execute locally (or invert for privacy). Unset = plan with
+    /// whatever is running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Plan-phase reasoning override, same swap/restore contract as `model`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<crate::models::ReasoningLevel>,
 }
 
 /// Durable semantic memory settings (v0.10.0).
@@ -1475,6 +1580,14 @@ fn update_user_config_table_at(
 /// config file, leaving every other key untouched.
 pub fn update_user_config_key(path: &[&str], value: toml::Value) -> Result<()> {
     update_user_config_table(|table| deep_set_segments(table, path, value))
+}
+
+/// Persist the whole `[plan]` table (the `/plan config` picker). Values the
+/// user set through the picker are explicit choices, so writing them —
+/// including ones that currently match defaults — is correct; unset Options
+/// stay absent via `skip_serializing_if`.
+pub fn persist_plan_config(plan: &PlanConfig) -> Result<()> {
+    update_user_config_key(&["plan"], toml::Value::try_from(plan)?)
 }
 
 /// Remove one key (pre-split path segments) from the USER config file.

@@ -77,6 +77,10 @@ pub enum Cmd {
         /// policy gate exempts from the read-only floor, and the flag the
         /// plan carve-outs (memory writes, known-safe builds) key on.
         plan_file: Option<std::path::PathBuf>,
+        /// LIVE per-category plan permission levels (`/plan config` edits
+        /// them mid-session; the startup `Config` snapshot in `ExecContext`
+        /// would go stale). Only consulted while `plan_file` is `Some`.
+        plan_permissions: crate::app::PlanPermissions,
         /// The user's stated intent for the turn (latest user message),
         /// passed to the Auto-mode classifier as alignment context.
         intent: Option<String>,
@@ -125,6 +129,10 @@ pub enum Cmd {
     /// cycle: rewind/fork and `/clear` (both clear it) and `--replay`
     /// re-seeding. Fire-and-forget to the broker, not turn-scoped.
     SyncTaskStore(crate::domain::tasks::TaskStore),
+    /// Persist the `[plan]` table to the user config file (the `/plan
+    /// config` picker edits live state; this writes it through the
+    /// key-scoped updater so unrelated keys and defaults stay unfrozen).
+    PersistPlanConfig(crate::app::PlanConfig),
 
     /// A user `/tasks` edit. Routed through the effect runner to the
     /// `TaskBroker` (the single writer) instead of mutating reducer state
@@ -397,6 +405,7 @@ impl Cmd {
             Cmd::ResolveApproval { .. } => "resolve_approval",
             Cmd::ResolveQuestion { .. } => "resolve_question",
             Cmd::SyncTaskStore(_) => "sync_task_store",
+            Cmd::PersistPlanConfig(_) => "persist_plan_config",
             Cmd::UserTaskEdit(_) => "user_task_edit",
             Cmd::NotifyTaskCompleted { .. } => "notify_task_completed",
             Cmd::SaveConversation(_) => "save_conversation",
@@ -523,6 +532,7 @@ impl Cmd {
                 };
                 format!("resolve_question(call={}, {})", call_id, kind)
             },
+            Cmd::PersistPlanConfig(_) => "persist_plan_config".to_string(),
             Cmd::SyncTaskStore(store) => {
                 format!("sync_task_store(tasks={})", store.tasks.len())
             },
