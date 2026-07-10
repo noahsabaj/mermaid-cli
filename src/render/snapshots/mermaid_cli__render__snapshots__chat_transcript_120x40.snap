@@ -1,0 +1,44 @@
+---
+source: src/render/snapshots.rs
+expression: frame
+---
+ > run the tests and summarize                                                              January 2nd, 2026 at 3:04am 
+                                                                                                                        
+ ● All 42 tests pass. The flaky one was fixed by pinning the clock:                                                     
+   rust                                                                                                                 
+   let now = fixed_now();                                                                                               
+   Nothing else changed.                                                                                                
+                                                                                                                        
+ ● Bash(cargo test)                                                                                                     
+   ⎿ took 2.5s                                                                                                          
+                                                                                                                        
+   Worked for 12s · 1.2k tokens                                                                                         
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>                                                                                                                       
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+snapuser@snaphost:/project/demo                                                                context: n/a | session: 0
+mermaid v0.16.0 · safety: ask · reasoning: medium                                                            ollama/test

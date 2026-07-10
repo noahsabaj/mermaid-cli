@@ -55,3 +55,4 @@ cobertura.xml
 # Temporary files
 *.tmp
 temp/
+*.snap.new

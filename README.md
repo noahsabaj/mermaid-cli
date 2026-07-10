@@ -553,6 +553,13 @@ CI additionally runs two dependency-free source guards (`.github/scripts/`): no
 emoji/pictographs in source, and `src/domain` stays a pure MVU core (no I/O, no
 wall clock).
 
+The TUI has a snapshot suite (`src/render/snapshots.rs`, unix-only) that pins
+full rendered frames for curated scenes at 80x24 and 120x40. It runs as part of
+the normal test suite; a mismatch panics with a diff and writes a gitignored
+`.snap.new` sibling. Review and accept deliberate visual changes with
+`just snapshots` (`cargo insta review`) and commit the updated `.snap` files in
+the same PR as the style change.
+
 ## License
 
 MIT OR Apache-2.0

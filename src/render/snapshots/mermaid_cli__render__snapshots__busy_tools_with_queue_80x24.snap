@@ -1,0 +1,28 @@
+---
+source: src/render/snapshots.rs
+expression: frame
+---
+ > start the server                                 January 2nd, 2026 at 3:04am 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ • Running tools: Bash npm run dev...                                           
+   (esc to interrupt • ctrl+b to background • 3s • ↓ ~0 tokens)                 
+ > also check the logs afterwards                                               
+────────────────────────────────────────────────────────────────────────────────
+>                                                                               
+────────────────────────────────────────────────────────────────────────────────
+snapuser@snaphost:/project/demo                        context: n/a | session: 0
+mermaid v0.16.0 · safety: ask · reasoning: medium                    ollama/test

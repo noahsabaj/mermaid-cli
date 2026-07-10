@@ -1,0 +1,28 @@
+---
+source: src/render/snapshots.rs
+expression: frame
+---
+ ● Safety mode changed to read-only                 January 2nd, 2026 at 3:04am 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+────────────────────────────────────────────────────────────────────────────────
+>                                                                               
+────────────────────────────────────────────────────────────────────────────────
+snapuser@snaphost:/project/demo                        context: n/a | session: 0
+mermaid v0.16.0 · safety: ask · reasoning: medium                    ollama/test

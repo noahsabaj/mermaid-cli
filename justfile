@@ -18,3 +18,7 @@ fmt:
 fix:
     cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged
     cargo fmt --all
+
+# Review render-snapshot drift interactively (accept/reject .snap.new files).
+snapshots:
+    cargo insta review
