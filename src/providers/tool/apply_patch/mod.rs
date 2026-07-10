@@ -379,6 +379,8 @@ fn build_outcome(report: ApplyReport, duration_secs: f64) -> ToolOutcome {
         },
         display_diff: Some(report.diff_lines.join("\n")),
         diff_truncated: report.diff_truncated,
+        lines_added: report.added_lines,
+        lines_removed: report.removed_lines,
         ..ToolRunMetadata::default()
     })
 }

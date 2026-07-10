@@ -490,6 +490,8 @@ impl ToolExecutor for WriteFileTool {
                             byte_count: Some(byte_count),
                             display_diff: Some(write.diff.display_diff),
                             diff_truncated: write.diff.truncated,
+                            lines_added: write.diff.added,
+                            lines_removed: write.diff.removed,
                             ..ToolRunMetadata::default()
                         })
                     },
