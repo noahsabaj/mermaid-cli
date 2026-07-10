@@ -331,10 +331,10 @@ pub enum ChatMessageKind {
     /// its own message — true to the wire, signature-safe — but the transcript
     /// stitches it into the previous assistant bubble.
     Continuation,
-    /// A system nudge injected for exactly one recovery request (auto-continue
-    /// resume, stalled-turn retry). Hidden from the transcript and swept from
-    /// history at the next turn-end — it must never outlive the request it
-    /// steers.
+    /// A system nudge injected to steer exactly one request (auto-continue
+    /// resume, stalled-turn retry, safety-mode-loosened note). Hidden from the
+    /// transcript and swept from history at the next turn-end — it must never
+    /// outlive the request it steers.
     RecoveryNudge,
     /// F74: a kind written by a NEWER build that this one doesn't model. Mapped
     /// here by `#[serde(other)]` instead of failing the whole conversation parse;
