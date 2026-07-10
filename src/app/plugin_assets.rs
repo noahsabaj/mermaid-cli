@@ -131,7 +131,9 @@ pub(crate) fn assets_from_manifest(
                 for (name, mut server) in bundle.servers {
                     // A `./`-relative command resolves against the plugin
                     // root (with containment); anything else is PATH-looked-up
-                    // like a config-defined server.
+                    // like a config-defined server. A url-only entry has an
+                    // empty command and loads un-rewritten (validated later
+                    // by `transport_kind` at server start).
                     if let Some(rel) = server
                         .command
                         .strip_prefix("./")
@@ -411,6 +413,28 @@ mod tests {
         assert!(std::path::Path::new(&assets.mcp_servers["local"].command).is_absolute());
         assert!(!assets.mcp_servers.contains_key("gone"));
         assert!(assets.warnings.iter().any(|w| w.contains("missing.sh")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn url_only_bundle_entry_loads_without_command_rewrite() {
+        // An HTTP server entry has no command; the `./`-relative rewrite must
+        // not touch it (or warn it away as a missing file).
+        let root = fixture_root("url-only");
+        std::fs::write(
+            root.join("servers.toml"),
+            "[servers.remote]\nurl = \"https://example.com/mcp\"\n",
+        )
+        .unwrap();
+        let m = manifest(&root, &["servers.toml"], &[], &[]);
+        let assets = assets_from_manifest(&root, &m);
+        assert_eq!(
+            assets.mcp_servers["remote"].url.as_deref(),
+            Some("https://example.com/mcp")
+        );
+        assert!(assets.mcp_servers["remote"].command.is_empty());
+        assert!(assets.warnings.is_empty(), "{:?}", assets.warnings);
         let _ = std::fs::remove_dir_all(&root);
     }
 

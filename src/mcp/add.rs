@@ -24,17 +24,8 @@ pub async fn add_server(
     command_args: Vec<String>,
     env_pairs: Vec<String>,
 ) -> Result<()> {
-    // Check if already configured
-    let config = load_config()?;
-    if config.mcp_servers.contains_key(name) {
-        print!("'{}' is already configured. Overwrite? [y/N]: ", name);
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Cancelled.");
-            return Ok(());
-        }
+    if !confirm_overwrite(name)? {
+        return Ok(());
     }
 
     // Raw command server: skip the whole registry resolution chain.
@@ -145,6 +136,96 @@ pub async fn add_server(
     Ok(())
 }
 
+/// If `name` is already configured, prompt before overwriting. Returns
+/// `false` (after printing) when the user declines.
+fn confirm_overwrite(name: &str) -> Result<bool> {
+    let config = load_config()?;
+    if config.mcp_servers.contains_key(name) {
+        print!("'{}' is already configured. Overwrite? [y/N]: ", name);
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Register a remote Streamable HTTP MCP server: validate by connecting to
+/// `url` (initialize + list tools + end session), then save it to config.
+///
+/// `header_pairs` are literal `'Name: Value'` headers; `env_header_pairs` are
+/// `Header=ENV_VAR` mappings resolved from the environment at request time.
+pub async fn add_http_server(
+    name: &str,
+    url: String,
+    header_pairs: Vec<String>,
+    env_header_pairs: Vec<String>,
+) -> Result<()> {
+    if !confirm_overwrite(name)? {
+        return Ok(());
+    }
+
+    let server_config = McpServerConfig {
+        url: Some(url.clone()),
+        headers: parse_header_pairs(&header_pairs)?,
+        env_headers: parse_env_header_pairs(&env_header_pairs)?,
+        ..Default::default()
+    };
+
+    println!("\nValidating '{name}' ({url})...");
+    match registry::validate_http(&server_config).await {
+        Ok(tools) => println!("Server ready: {} tool(s) available", tools.len()),
+        Err(e) => return Err(anyhow!("Server '{name}' failed to start: {e}")),
+    }
+
+    save_server(name, &server_config)?;
+
+    let config_path = crate::app::get_config_dir()?.join("config.toml");
+    println!(
+        "\nSaved to {}\nThe '{name}' tools will be available next time you start mermaid.",
+        config_path.display()
+    );
+    Ok(())
+}
+
+/// Parse repeatable `'Name: Value'` header pairs into a map.
+fn parse_header_pairs(pairs: &[String]) -> Result<HashMap<String, String>> {
+    let mut headers = HashMap::new();
+    for pair in pairs {
+        let (name, value) = pair
+            .split_once(':')
+            .ok_or_else(|| anyhow!("invalid --header (expected 'Name: Value')"))?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("invalid --header (empty header name)"));
+        }
+        headers.insert(name.to_string(), value.trim().to_string());
+    }
+    Ok(headers)
+}
+
+/// Parse repeatable `Header=ENV_VAR` pairs into a map (header name -> env var
+/// name; the env var is read at request time, so no secret lands in config).
+fn parse_env_header_pairs(pairs: &[String]) -> Result<HashMap<String, String>> {
+    let mut env_headers = HashMap::new();
+    for pair in pairs {
+        let (header, var) = pair
+            .split_once('=')
+            .ok_or_else(|| anyhow!("invalid --env-header '{pair}' (expected Header=ENV_VAR)"))?;
+        let (header, var) = (header.trim(), var.trim());
+        if header.is_empty() || var.is_empty() {
+            return Err(anyhow!(
+                "invalid --env-header '{pair}' (expected Header=ENV_VAR)"
+            ));
+        }
+        env_headers.insert(header.to_string(), var.to_string());
+    }
+    Ok(env_headers)
+}
+
 /// Persist one MCP server entry into the user config file.
 fn save_server(name: &str, server_config: &McpServerConfig) -> Result<()> {
     update_user_config_key(
@@ -235,5 +316,40 @@ mod tests {
     #[test]
     fn parse_env_pairs_rejects_missing_equals() {
         assert!(parse_env_pairs(&["NOEQUALS".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_header_pairs_splits_on_first_colon() {
+        let headers = parse_header_pairs(&[
+            "Authorization: Bearer abc:def".to_string(),
+            "X-Plain:v".to_string(),
+        ])
+        .unwrap();
+        // Only the first ':' splits — bearer tokens may contain colons.
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer abc:def")
+        );
+        assert_eq!(headers.get("X-Plain").map(String::as_str), Some("v"));
+    }
+
+    #[test]
+    fn parse_header_pairs_rejects_malformed_without_echoing_value() {
+        let err = parse_header_pairs(&["no-colon-secret".to_string()]).unwrap_err();
+        // Header values can be secrets; the error must not quote the input.
+        assert!(!err.to_string().contains("no-colon-secret"), "{err}");
+        assert!(parse_header_pairs(&[": value-only".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_env_header_pairs_maps_header_to_var_name() {
+        let map = parse_env_header_pairs(&["Authorization=MY_TOKEN".to_string()]).unwrap();
+        assert_eq!(
+            map.get("Authorization").map(String::as_str),
+            Some("MY_TOKEN")
+        );
+        assert!(parse_env_header_pairs(&["NoEquals".to_string()]).is_err());
+        assert!(parse_env_header_pairs(&["=VAR".to_string()]).is_err());
+        assert!(parse_env_header_pairs(&["Header=".to_string()]).is_err());
     }
 }

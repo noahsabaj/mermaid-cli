@@ -534,7 +534,9 @@ pub struct UserProviderConfig {
 /// MCP server configuration
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct McpServerConfig {
-    /// Command to execute (e.g., "npx", "node", "python")
+    /// Command to execute (e.g., "npx", "node", "python"). Empty = unset;
+    /// exactly one of `command` / `url` must be set (see [`Self::transport_kind`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
     /// Command-line arguments
     #[serde(default)]
@@ -542,6 +544,26 @@ pub struct McpServerConfig {
     /// Environment variables for the server process
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Streamable HTTP endpoint URL for a remote MCP server. Presence selects
+    /// the HTTP transport; mutually exclusive with `command`. Must never
+    /// serialize as a bare `None` — toml errors on unsupported None values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Literal HTTP headers sent on every request to `url` (e.g. an
+    /// `Authorization` token). Values are secrets: redacted in `Debug`.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// HTTP headers whose VALUES come from environment variables (map is
+    /// header name -> env var name), resolved at request-build time so a
+    /// secret header never has to live in config.toml. A missing env var is
+    /// skipped. Same semantics as `UserProviderConfig::env_headers`.
+    #[serde(default)]
+    pub env_headers: HashMap<String, String>,
+    /// Allow `url` to resolve to private/link-local addresses. Off by default:
+    /// plugin bundles ship MCP configs, and a malicious bundle must not be
+    /// able to point a server entry at 169.254.169.254 or the LAN.
+    #[serde(default)]
+    pub allow_private_network: bool,
     /// If non-empty, only these tool names are exposed to the model.
     #[serde(default)]
     pub enabled_tools: Vec<String>,
@@ -556,7 +578,50 @@ pub struct McpServerConfig {
     pub defer: Option<bool>,
 }
 
+/// Which transport an [`McpServerConfig`] selects: a spawned child process
+/// (stdio) or a remote Streamable HTTP endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportKind {
+    Stdio,
+    Http,
+}
+
 impl McpServerConfig {
+    /// Resolve which transport this config selects, enforcing the invariants:
+    /// exactly one of `command` / `url` set, and an HTTP url must be `https`
+    /// anywhere or `http` to a loopback host only (plaintext to a routable
+    /// host would leak `Authorization` headers in cleartext).
+    pub fn transport_kind(&self) -> Result<TransportKind> {
+        match (&self.url, self.command.is_empty()) {
+            (Some(_), false) => Err(anyhow::anyhow!(
+                "MCP server config sets both `command` and `url`; they are mutually exclusive"
+            )),
+            (None, true) => Err(anyhow::anyhow!(
+                "MCP server config sets neither `command` nor `url`"
+            )),
+            (None, false) => Ok(TransportKind::Stdio),
+            (Some(url), true) => {
+                let parsed = reqwest::Url::parse(url)
+                    .map_err(|e| anyhow::anyhow!("invalid MCP server url '{url}': {e}"))?;
+                let host = parsed.host_str().unwrap_or("");
+                match parsed.scheme() {
+                    "https" => Ok(TransportKind::Http),
+                    "http" if crate::utils::classify_host(host).is_loopback() => {
+                        Ok(TransportKind::Http)
+                    },
+                    "http" => Err(anyhow::anyhow!(
+                        "MCP server url '{url}' uses plaintext http to a non-loopback host; \
+                         use https (auth headers would travel in cleartext)"
+                    )),
+                    other => Err(anyhow::anyhow!(
+                        "MCP server url '{url}' has unsupported scheme '{other}' \
+                         (expected https, or http to loopback)"
+                    )),
+                }
+            },
+        }
+    }
+
     /// Whether `tool_name` should be exposed to the model: hidden when listed in
     /// `disabled_tools` (which wins), else allowed when `enabled_tools` is empty
     /// (allow-all) or names it.
@@ -595,6 +660,12 @@ impl std::fmt::Debug for McpServerConfig {
                     .collect::<Vec<_>>(),
             )
             .field("env", &debug_masked_map(&self.env))
+            .field("url", &self.url)
+            // Literal header values are secrets (Authorization tokens).
+            .field("headers", &debug_masked_map(&self.headers))
+            // Values are env var NAMES (not secrets), so render them.
+            .field("env_headers", &self.env_headers)
+            .field("allow_private_network", &self.allow_private_network)
             // Tool allow/deny lists are plain tool names, not secrets.
             .field("enabled_tools", &self.enabled_tools)
             .field("disabled_tools", &self.disabled_tools)
@@ -1335,8 +1406,9 @@ fn save_config(config: &Config, path: Option<PathBuf>) -> Result<()> {
 /// Write raw config bytes atomically and owner-only.
 ///
 /// The config can carry literal secrets — `mcp_servers[].env`,
-/// `mcp_servers[].args`, and `providers[].extra_headers` all accept inline
-/// credential values — so it must not be left world-readable, and a crash
+/// `mcp_servers[].args`, `mcp_servers[].headers`, and
+/// `providers[].extra_headers` all accept inline credential values — so it
+/// must not be left world-readable, and a crash
 /// mid-write must not truncate it. Write atomically (temp → fsync → rename),
 /// creating the temp 0600 on Unix so the renamed file is never even briefly
 /// world-readable (this also tightens a pre-existing config, since the new
@@ -2050,6 +2122,114 @@ mod tests {
         assert!(!cfg.tool_allowed("write"));
     }
 
+    #[test]
+    fn mcp_transport_kind_requires_exactly_one_of_command_and_url() {
+        // command-only → stdio.
+        let cfg = McpServerConfig {
+            command: "npx".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.transport_kind().unwrap(), TransportKind::Stdio);
+        // url-only → http.
+        let cfg = McpServerConfig {
+            url: Some("https://example.com/mcp".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.transport_kind().unwrap(), TransportKind::Http);
+        // Both set → error.
+        let cfg = McpServerConfig {
+            command: "npx".to_string(),
+            url: Some("https://example.com/mcp".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            cfg.transport_kind()
+                .unwrap_err()
+                .to_string()
+                .contains("mutually exclusive")
+        );
+        // Neither set → error.
+        let cfg = McpServerConfig::default();
+        assert!(
+            cfg.transport_kind()
+                .unwrap_err()
+                .to_string()
+                .contains("neither")
+        );
+    }
+
+    #[test]
+    fn mcp_transport_kind_gates_url_scheme() {
+        let with_url = |url: &str| McpServerConfig {
+            url: Some(url.to_string()),
+            ..Default::default()
+        };
+        // https anywhere is fine; http only to loopback (plaintext to a
+        // routable host would leak auth headers).
+        assert!(
+            with_url("https://mcp.example.com/x")
+                .transport_kind()
+                .is_ok()
+        );
+        assert!(
+            with_url("http://localhost:8080/mcp")
+                .transport_kind()
+                .is_ok()
+        );
+        assert!(
+            with_url("http://127.0.0.1:8080/mcp")
+                .transport_kind()
+                .is_ok()
+        );
+        assert!(with_url("http://192.168.1.5/mcp").transport_kind().is_err());
+        assert!(with_url("ftp://example.com/mcp").transport_kind().is_err());
+        assert!(with_url("not a url").transport_kind().is_err());
+    }
+
+    #[test]
+    fn mcp_server_config_debug_masks_header_values() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer sk-secret".to_string());
+        let mut env_headers = HashMap::new();
+        env_headers.insert("X-Api-Key".to_string(), "MY_TOKEN_VAR".to_string());
+        let cfg = McpServerConfig {
+            url: Some("https://example.com/mcp".to_string()),
+            headers,
+            env_headers,
+            ..Default::default()
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("sk-secret"), "{rendered}");
+        assert!(rendered.contains("Authorization"), "{rendered}");
+        // env_headers values are env var NAMES, safe to render.
+        assert!(rendered.contains("MY_TOKEN_VAR"), "{rendered}");
+    }
+
+    #[test]
+    fn mcp_url_config_round_trips_through_toml_without_command() {
+        // `mermaid add --url` persists via toml::Value::try_from; a bare None
+        // url or a forced empty `command` key would break that round-trip.
+        let cfg = McpServerConfig {
+            url: Some("https://example.com/mcp".to_string()),
+            ..Default::default()
+        };
+        let blob = toml::to_string(&toml::Value::try_from(&cfg).unwrap()).unwrap();
+        assert!(
+            !blob.contains("command"),
+            "empty command must be omitted: {blob}"
+        );
+        let back: McpServerConfig = toml::from_str(&blob).unwrap();
+        assert_eq!(back.url.as_deref(), Some("https://example.com/mcp"));
+        assert!(back.command.is_empty());
+        // And a stdio config must not serialize a `url` key at all.
+        let cfg = McpServerConfig {
+            command: "npx".to_string(),
+            ..Default::default()
+        };
+        let blob = toml::to_string(&toml::Value::try_from(&cfg).unwrap()).unwrap();
+        assert!(!blob.contains("url"), "{blob}");
+    }
+
     /// Configs persisted before Step 4 don't have a `reasoning` field on
     /// `[default_model]`. Loading them must succeed and yield the
     /// `Medium` default — otherwise existing user configs break on
@@ -2263,8 +2443,8 @@ port = 11434
     }
 
     /// Config holds inline-secret-capable fields (`mcp_servers[].env`, `args`,
-    /// `providers[].extra_headers`), so it must be written owner-only rather
-    /// than inheriting a world-readable umask.
+    /// `headers`, `providers[].extra_headers`), so it must be written
+    /// owner-only rather than inheriting a world-readable umask.
     #[cfg(unix)]
     #[test]
     fn save_config_writes_owner_only_perms() {

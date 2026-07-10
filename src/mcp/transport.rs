@@ -18,14 +18,15 @@ use crate::constants::MAX_MCP_FRAME_BYTES;
 use crate::utils::{CappedLine, read_line_capped};
 
 /// Default timeout for JSON-RPC request/response round-trips (discovery,
-/// initialize, ping — all fast control calls).
-const REQUEST_TIMEOUT_SECS: u64 = 30;
+/// initialize, ping — all fast control calls). Shared with the HTTP transport.
+pub(super) const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Timeout for a `tools/call` round-trip. Tool invocations do real work —
 /// browser automation, web research, large builds — so the fast-control 30s
 /// budget spuriously killed legitimate long-running tools. This is the ceiling;
 /// the turn's own cancellation still aborts a genuinely stuck call sooner.
-const TOOL_CALL_TIMEOUT_SECS: u64 = 300;
+/// Shared with the HTTP transport.
+pub(super) const TOOL_CALL_TIMEOUT_SECS: u64 = 300;
 
 /// Timeout for a single stdin write+flush. Separate from (and shorter than)
 /// `REQUEST_TIMEOUT_SECS`: this bounds local pipe backpressure — a child that
@@ -279,13 +280,6 @@ impl StdioTransport {
             .await
     }
 
-    /// The response-wait budget a `tools/call` should use — longer than the
-    /// fast-control default because tool work (browser automation, research,
-    /// builds) legitimately takes minutes.
-    pub fn tool_call_timeout_secs() -> u64 {
-        TOOL_CALL_TIMEOUT_SECS
-    }
-
     /// Like [`send_request`], but with an explicit response-wait budget. Used by
     /// `tools/call`, whose work can legitimately outrun the fast-control budget.
     pub async fn send_request_with_timeout(
@@ -385,21 +379,7 @@ impl StdioTransport {
             },
         };
 
-        // Check for JSON-RPC error
-        if let Some(error) = response.get("error") {
-            let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-            let message = error
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown error");
-            return Err(anyhow!("MCP error (code {}): {}", code, message));
-        }
-
-        // Extract result
-        response
-            .get("result")
-            .cloned()
-            .ok_or_else(|| anyhow!("MCP response missing 'result' field"))
+        extract_jsonrpc_result(response)
     }
 
     /// Send a JSON-RPC notification (no response expected).
@@ -494,11 +474,114 @@ impl StdioTransport {
     }
 }
 
+/// The transport an [`super::client::McpClient`] talks through: a spawned
+/// child process (stdio) or a remote Streamable HTTP endpoint. An enum rather
+/// than a trait object: async trait objects need the `async-trait` crate and
+/// generics would ripple through the manager and effect layers.
+pub(super) enum Transport {
+    Stdio(StdioTransport),
+    // Boxed: HttpTransport (client + url + header maps) is ~8x the stdio
+    // variant, and clients live behind an Arc anyway (large_enum_variant).
+    Http(Box<super::transport_http::HttpTransport>),
+}
+
+impl From<StdioTransport> for Transport {
+    fn from(t: StdioTransport) -> Self {
+        Transport::Stdio(t)
+    }
+}
+
+impl From<super::transport_http::HttpTransport> for Transport {
+    fn from(t: super::transport_http::HttpTransport) -> Self {
+        Transport::Http(Box::new(t))
+    }
+}
+
+impl Transport {
+    /// The response-wait budget a `tools/call` should use — longer than the
+    /// fast-control default because tool work (browser automation, research,
+    /// builds) legitimately takes minutes.
+    pub fn tool_call_timeout_secs() -> u64 {
+        TOOL_CALL_TIMEOUT_SECS
+    }
+
+    /// Send a JSON-RPC request and wait for the response under the default
+    /// control-call timeout.
+    pub async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
+        match self {
+            Transport::Stdio(t) => t.send_request(method, params).await,
+            Transport::Http(t) => t.send_request(method, params).await,
+        }
+    }
+
+    /// Like [`Self::send_request`], but with an explicit response-wait budget.
+    pub async fn send_request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        response_timeout_secs: u64,
+    ) -> Result<Value> {
+        match self {
+            Transport::Stdio(t) => {
+                t.send_request_with_timeout(method, params, response_timeout_secs)
+                    .await
+            },
+            Transport::Http(t) => {
+                t.send_request_with_timeout(method, params, response_timeout_secs)
+                    .await
+            },
+        }
+    }
+
+    /// Send a JSON-RPC notification (no response expected).
+    pub async fn send_notification(&self, method: &str, params: Value) -> Result<()> {
+        match self {
+            Transport::Stdio(t) => t.send_notification(method, params).await,
+            Transport::Http(t) => t.send_notification(method, params).await,
+        }
+    }
+
+    /// Record the protocol version negotiated at `initialize`. HTTP sends it
+    /// as the `MCP-Protocol-Version` header on every subsequent request;
+    /// stdio has no per-message headers, so this is a no-op there.
+    pub fn set_protocol_version(&self, version: &str) {
+        match self {
+            Transport::Stdio(_) => {},
+            Transport::Http(t) => t.set_protocol_version(version),
+        }
+    }
+
+    /// Gracefully shut the transport down (kill the child / end the session).
+    pub async fn shutdown(&self) {
+        match self {
+            Transport::Stdio(t) => t.shutdown().await,
+            Transport::Http(t) => t.shutdown().await,
+        }
+    }
+}
+
+/// Turn a full JSON-RPC response object into its `result`, mapping a JSON-RPC
+/// `error` member to an `Err`. Shared by both transports.
+pub(super) fn extract_jsonrpc_result(response: Value) -> Result<Value> {
+    if let Some(error) = response.get("error") {
+        let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+        let message = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Unknown error");
+        return Err(anyhow!("MCP error (code {}): {}", code, message));
+    }
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| anyhow!("MCP response missing 'result' field"))
+}
+
 /// Extract a u64 request id from a JSON-RPC `id` field, accepting either an
 /// integer (`{"id": 5}`) or a string-encoded integer (`{"id": "5"}`). The
 /// JSON-RPC 2.0 spec permits both shapes and a strict server may echo back
 /// the id as a different JSON type than we sent.
-fn parse_response_id(v: &Value) -> Option<u64> {
+pub(super) fn parse_response_id(v: &Value) -> Option<u64> {
     v.as_u64()
         .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
 }
@@ -509,7 +592,7 @@ fn parse_response_id(v: &Value) -> Option<u64> {
 /// `id` AND a `method`; a Notification has a `method` and no `id`. Routing a
 /// message that has a `method` to `pending` would wrongly complete a caller's
 /// oneshot — see #89.
-fn is_response(msg: &Value) -> bool {
+pub(super) fn is_response(msg: &Value) -> bool {
     msg.get("id").and_then(parse_response_id).is_some() && msg.get("method").is_none()
 }
 

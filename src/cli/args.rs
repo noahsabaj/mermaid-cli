@@ -329,6 +329,19 @@ pub enum Commands {
         /// Environment variable for --command: repeatable `KEY=VALUE`.
         #[arg(long = "env")]
         env: Vec<String>,
+        /// Register a remote Streamable HTTP server instead: the MCP endpoint
+        /// URL (`https://...`, or `http://` to localhost only).
+        #[arg(long, conflicts_with_all = ["command", "arg", "env"])]
+        url: Option<String>,
+        /// Literal HTTP header for --url: repeatable `'Name: Value'`
+        /// (e.g. `--header 'Authorization: Bearer TOKEN'`).
+        #[arg(long = "header", requires = "url")]
+        header: Vec<String>,
+        /// HTTP header for --url whose value is read from an environment
+        /// variable at request time: repeatable `Header=ENV_VAR`, so the
+        /// secret never lands in config.toml.
+        #[arg(long = "env-header", requires = "url")]
+        env_header: Vec<String>,
     },
     /// Remove a configured MCP server
     Remove {
@@ -661,6 +674,55 @@ mod tests {
         assert!(flags.deny_network && !flags.confine_fs);
         assert_eq!(flags.max_tokens, None);
         assert!(!flags.allow_untrusted_tools);
+    }
+
+    #[test]
+    fn add_url_conflicts_with_command_and_requires_url_for_headers() {
+        // Remote registration parses with its header flags...
+        let cli = Cli::try_parse_from([
+            "mermaid",
+            "add",
+            "gh",
+            "--url",
+            "https://example.com/mcp",
+            "--header",
+            "X-Token: abc",
+            "--env-header",
+            "Authorization=TOKEN_VAR",
+        ])
+        .expect("parses");
+        match cli.command {
+            Some(Commands::Add {
+                url,
+                header,
+                env_header,
+                ..
+            }) => {
+                assert_eq!(url.as_deref(), Some("https://example.com/mcp"));
+                assert_eq!(header, vec!["X-Token: abc".to_string()]);
+                assert_eq!(env_header, vec!["Authorization=TOKEN_VAR".to_string()]);
+            },
+            other => panic!("expected Add, got {other:?}"),
+        }
+        // ...but --url and --command are mutually exclusive registration paths,
+        assert!(
+            Cli::try_parse_from([
+                "mermaid",
+                "add",
+                "gh",
+                "--url",
+                "https://example.com/mcp",
+                "--command",
+                "npx"
+            ])
+            .is_err(),
+            "--url must conflict with --command"
+        );
+        // and the header flags only make sense with --url.
+        assert!(
+            Cli::try_parse_from(["mermaid", "add", "gh", "--header", "X: y"]).is_err(),
+            "--header must require --url"
+        );
     }
 
     #[test]
