@@ -4,7 +4,7 @@
 //! always-on trace ring, the log tail, and recent session IDS into one
 //! markdown (or JSON) document. Defense in depth against secret leakage:
 //! the ring redacts at capture, the log file redacts at write, the summary
-//! carries no values (only names and `key_present` booleans), and the whole
+//! carries no values (only names and `key_source` labels), and the whole
 //! rendered document passes through `redact_secrets` once more before it
 //! leaves the process. Nothing is uploaded, ever — the bundle is written to
 //! the current directory (0600) or stdout for the user to review and share.
@@ -14,7 +14,6 @@ use std::path::Path;
 
 use crate::app::Config;
 use crate::models::PROVIDER_REGISTRY;
-use crate::utils::resolve_api_key;
 
 use super::OutputFormat;
 use super::commands::DoctorReport;
@@ -41,7 +40,7 @@ struct FeedbackReport {
 }
 
 /// Names and booleans ONLY: no URLs, no headers, no env values — a provider
-/// is `{name, key_present}`, an MCP server is its name.
+/// is `{name, key_source}`, an MCP server is its name.
 #[derive(Debug, serde::Serialize)]
 struct ConfigSummary {
     default_model: String,
@@ -58,7 +57,8 @@ struct ConfigSummary {
 #[derive(Debug, serde::Serialize)]
 struct ProviderKeyStatus {
     name: String,
-    key_present: bool,
+    /// Where the key resolves from: `"env"`, `"keyring"`, or `"none"`.
+    key_source: &'static str,
 }
 
 /// Entry point for `mermaid feedback`.
@@ -128,27 +128,31 @@ fn summarize_config(config: &Config) -> ConfigSummary {
     // entries; key presence via the same env resolution the factory uses.
     let mut providers = Vec::new();
     for profile in PROVIDER_REGISTRY {
-        let env = config
+        let override_env = config
             .providers
             .get(profile.name)
-            .and_then(|c| c.api_key_env.as_deref())
-            .unwrap_or(profile.api_key_env);
+            .and_then(|c| c.api_key_env.as_deref());
         providers.push(ProviderKeyStatus {
             name: profile.name.to_string(),
-            key_present: resolve_api_key(env, None).is_some(),
+            key_source: crate::utils::provider_key_source(
+                profile.name,
+                profile.api_key_env,
+                override_env,
+            ),
         });
     }
     for (name, provider) in &config.providers {
         if providers.iter().any(|p| &p.name == name) {
             continue;
         }
-        let key_present = provider
-            .api_key_env
-            .as_deref()
-            .is_some_and(|env| resolve_api_key(env, None).is_some());
+        // Custom providers: api_key_env is their default (keyring may fill).
+        let key_source = match provider.api_key_env.as_deref() {
+            Some(env) => crate::utils::provider_key_source(name, env, None),
+            None => "none",
+        };
         providers.push(ProviderKeyStatus {
             name: name.clone(),
-            key_present,
+            key_source,
         });
     }
     providers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -228,11 +232,11 @@ fn render_markdown(report: &FeedbackReport) -> String {
         "- safety: mode={} network={} filesystem={} checkpoint_on_mutation={}",
         cfg.safety_mode, cfg.network, cfg.filesystem, cfg.checkpoint_on_mutation
     );
-    let with_keys: Vec<&str> = cfg
+    let with_keys: Vec<String> = cfg
         .providers
         .iter()
-        .filter(|p| p.key_present)
-        .map(|p| p.name.as_str())
+        .filter(|p| p.key_source != "none")
+        .map(|p| format!("{} ({})", p.name, p.key_source))
         .collect();
     let _ = writeln!(
         out,
@@ -314,11 +318,11 @@ mod tests {
                 providers: vec![
                     ProviderKeyStatus {
                         name: "anthropic".to_string(),
-                        key_present: true,
+                        key_source: "env",
                     },
                     ProviderKeyStatus {
                         name: "openai".to_string(),
-                        key_present: false,
+                        key_source: "none",
                     },
                 ],
                 mcp_servers: vec!["context7".to_string()],
@@ -390,7 +394,7 @@ mod tests {
         // only names + booleans; serialize and scan for shapes that would
         // indicate a value leak (URLs, env assignments).
         let json = serde_json::to_string(&sample_report().config).unwrap();
-        assert!(json.contains("\"key_present\":true"));
+        assert!(json.contains("\"key_source\":\"env\""));
         assert!(!json.contains("http"), "no URLs in the summary: {json}");
         assert!(!json.contains("="), "no env assignments: {json}");
     }

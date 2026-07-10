@@ -56,7 +56,7 @@ pub struct InteractiveOptions {
 /// provided) appends one JSONL line per reducer input to the file for
 /// debugging / replay.
 pub async fn run_interactive_with(
-    mut config: Config,
+    config: Config,
     cwd: PathBuf,
     model_id: String,
     mut opts: InteractiveOptions,
@@ -65,12 +65,6 @@ pub async fn run_interactive_with(
     // header: replay seeds `State::new` with the recorded value and gets the
     // same initial conversation id/title.
     let startup_now = chrono::Local::now();
-    // Fold enabled plugins' MCP servers + agent types into the merged config
-    // BEFORE anything consumes it (State::new seeds server rows, the
-    // recording header captures the merged config — replay-faithful, and the
-    // provider factory + tool registry see the same view).
-    let plugin_assets = crate::app::plugin_assets::load();
-    let plugin_warnings = crate::app::plugin_assets::apply(&mut config, &plugin_assets);
     let mut state = State::new(config.clone(), cwd.clone(), model_id.clone(), startup_now);
     let seed = opts.seed_conversation.take();
     if let Some(r) = opts.recorder.as_mut() {
@@ -100,14 +94,6 @@ pub async fn run_interactive_with(
     // Skills load once at startup (authored artifacts, no watcher); the config
     // watcher below keeps only instructions/memory fresh.
     state.skills = crate::app::skills::load(&cwd);
-    // Plugin prompt commands: same restart-to-refresh policy as skills.
-    state.plugin_commands = plugin_assets.commands;
-    for warning in plugin_warnings {
-        state
-            .ui
-            .pending_msgs
-            .push_back(Msg::TransientStatus { text: warning });
-    }
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
     let tools = ToolRegistry::build(
         &config,

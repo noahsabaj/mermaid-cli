@@ -238,6 +238,13 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
+        name: "agents",
+        aliases: &[],
+        description: "List or kill background agents",
+        arg_hint: Some("[kill <id>|all]"),
+        group: SlashCommandGroup::AdvancedRuntime,
+    },
+    SlashCommand {
         name: "processes",
         aliases: &["procs"],
         description: "List durable runtime processes",
@@ -378,68 +385,6 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::Everyday,
     },
 ];
-
-/// One row of the slash palette: a built-in registry command or a
-/// plugin-contributed prompt command. Unifying them in ONE list, produced
-/// by ONE function ([`filter_entries`]), keeps the palette widget, the
-/// row-count layout, and the reducer's cursor/Tab handling agreeing on
-/// indices.
-pub enum PaletteEntry<'a> {
-    Builtin(&'static SlashCommand),
-    Plugin(&'a crate::domain::PluginCommand),
-}
-
-impl PaletteEntry<'_> {
-    pub fn name(&self) -> &str {
-        match self {
-            PaletteEntry::Builtin(c) => c.name,
-            PaletteEntry::Plugin(p) => &p.name,
-        }
-    }
-
-    /// Palette/hint description; plugin rows carry their origin.
-    pub fn description(&self) -> String {
-        match self {
-            PaletteEntry::Builtin(c) => c.description.to_string(),
-            PaletteEntry::Plugin(p) => {
-                if p.description.is_empty() {
-                    format!("(plugin:{})", p.plugin)
-                } else {
-                    format!("{} (plugin:{})", p.description, p.plugin)
-                }
-            },
-        }
-    }
-
-    pub fn arg_hint(&self) -> Option<&'static str> {
-        match self {
-            PaletteEntry::Builtin(c) => c.arg_hint,
-            PaletteEntry::Plugin(_) => Some("[args]"),
-        }
-    }
-}
-
-/// The palette's single source of truth: built-ins (registry order) then
-/// plugin commands (already name-sorted by the loader), both prefix-filtered.
-/// EVERY palette consumer (widget rows, layout row count, reducer cursor)
-/// must use this so their indices agree.
-pub fn filter_entries<'a>(
-    typed: &str,
-    plugin: &'a [crate::domain::PluginCommand],
-) -> Vec<PaletteEntry<'a>> {
-    let needle = typed.to_lowercase();
-    let mut entries: Vec<PaletteEntry<'a>> = filter_by_prefix(typed)
-        .into_iter()
-        .map(PaletteEntry::Builtin)
-        .collect();
-    entries.extend(
-        plugin
-            .iter()
-            .filter(|p| needle.is_empty() || p.name.starts_with(&needle))
-            .map(PaletteEntry::Plugin),
-    );
-    entries
-}
 
 /// Filter the registry by a typed prefix (after stripping the leading
 /// `/`). An empty prefix returns the full registry. Matches against the

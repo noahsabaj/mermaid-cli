@@ -336,10 +336,9 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             .split_whitespace()
             .next()
             .unwrap_or("");
-        let row_count =
-            crate::domain::slash_commands::filter_entries(typed, &state.plugin_commands)
-                .len()
-                .clamp(1, 8);
+        let row_count = crate::domain::slash_commands::filter_by_prefix(typed)
+            .len()
+            .clamp(1, 8);
         (row_count as u16) + 2
     } else {
         2
@@ -536,10 +535,10 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             .split_whitespace()
             .next()
             .unwrap_or("");
-        let entries = crate::domain::slash_commands::filter_entries(typed, &state.plugin_commands);
+        let commands = crate::domain::slash_commands::filter_by_prefix(typed);
         let palette_widget = SlashPaletteWidget {
             theme: &rstate.theme,
-            entries,
+            commands,
             selected_index: state.ui.palette_cursor.unwrap_or(0),
         };
         frame.render_widget(palette_widget, chunks[4]);

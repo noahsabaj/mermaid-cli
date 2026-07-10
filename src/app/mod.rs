@@ -8,7 +8,6 @@ pub mod event_source;
 pub mod instructions;
 pub mod lifecycle;
 pub mod memory;
-pub mod plugin_assets;
 mod project_config;
 pub mod recorder;
 pub mod replay;

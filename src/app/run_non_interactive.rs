@@ -76,19 +76,12 @@ pub struct RunOptions {
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
 /// generous 20-minute wall-clock so a runaway model doesn't hang a script.
 pub async fn run_non_interactive_with(
-    mut config: Config,
+    config: Config,
     cwd: PathBuf,
     model_id: String,
     prompt: String,
     opts: RunOptions,
 ) -> Result<RunResult> {
-    // Fold enabled plugins' MCP servers + agent types into the merged
-    // config before anything consumes it (same policy as the interactive
-    // path; warnings go to stderr — there is no transcript here yet).
-    let plugin_assets = crate::app::plugin_assets::load();
-    for warning in crate::app::plugin_assets::apply(&mut config, &plugin_assets) {
-        eprintln!("mermaid: {warning}");
-    }
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
     // F6 `--no-execute`: build an empty tool registry so the model can
     // plan but never act. MCP init below is also skipped to match.
@@ -133,7 +126,6 @@ pub async fn run_non_interactive_with(
     state.instructions = instructions;
     state.memory = memory;
     state.skills = skills;
-    state.plugin_commands = plugin_assets.commands;
 
     // Bootstrap effects (MCP init) before the first prompt.
     //

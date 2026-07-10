@@ -95,6 +95,16 @@ htmd = "0.5.4"
 ignore = "0.4"
 nucleo-matcher = "0.3"
 jsonschema = "0.47.0"
+# OS credential storage for `mermaid login`. Linux uses the freedesktop
+# Secret Service over blocking dbus with a VENDORED (statically linked)
+# libdbus + pure-Rust session crypto, so neither CI nor end-user machines
+# need libdbus installed.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Direct dep ONLY to turn on its `vendored` feature (static libdbus) for
+# keyring's sync-secret-service backend; nothing imports it directly.
+dbus-secret-service = { version = "4", features = ["vendored"] }
 
 [dev-dependencies]
 # Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`

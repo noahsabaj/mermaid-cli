@@ -741,6 +741,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             description,
             report,
             success,
+            cancelled,
             usage,
             tokens,
             duration_secs,
@@ -751,6 +752,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 .retain(|a| a.agent_id != agent_id);
             // Fold the detached child's spend into the session totals, same
             // as `handle_tool_finished` does for foreground agent calls.
+            // Cancelled children fold too — that work was still billed.
             if let Some(usage) = usage.as_ref() {
                 fold_token_usage(
                     &mut state.session,
@@ -758,6 +760,20 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     usage,
                     UsageFold::Detached,
                 );
+            }
+            if cancelled {
+                // Killed on purpose (`/agents kill`, the agent tool's kill
+                // action): note it and stop — a deliberately killed child's
+                // partial report shouldn't spend a model turn.
+                push_system(
+                    &mut state,
+                    &mut cmds,
+                    format!(
+                        "Background agent '{description}' ({agent_id}) cancelled — {} tokens, took {duration_secs}s.",
+                        super::compaction::format_compact_count(tokens),
+                    ),
+                );
+                return (state, cmds);
             }
             let verdict = if success { "finished" } else { "failed" };
             push_system(
@@ -1525,16 +1541,15 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // input buffer opens with `/`. Enter falls through to the normal
     // handler below so the command actually dispatches.
     if state.ui.input_buffer.starts_with('/') {
-        use crate::domain::slash_commands::filter_entries;
+        use crate::domain::slash_commands::filter_by_prefix;
         let typed = state
             .ui
             .input_buffer
             .trim_start_matches('/')
             .split_whitespace()
             .next()
-            .unwrap_or("")
-            .to_string();
-        let candidates = filter_entries(&typed, &state.plugin_commands);
+            .unwrap_or("");
+        let candidates = filter_by_prefix(typed);
         match code {
             KeyCode::Up => {
                 let cur = state.ui.palette_cursor.unwrap_or(0);
@@ -1549,10 +1564,8 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             },
             KeyCode::Tab => {
                 let sel = state.ui.palette_cursor.unwrap_or(0);
-                if let Some(entry) = candidates.get(sel) {
-                    let completed = format!("/{} ", entry.name());
-                    drop(candidates);
-                    state.ui.input_buffer = completed;
+                if let Some(cmd) = candidates.get(sel) {
+                    state.ui.input_buffer = format!("/{} ", cmd.name);
                     state.ui.input_cursor = state.ui.input_buffer.len();
                     state.ui.palette_cursor = Some(0);
                 }
@@ -1570,16 +1583,14 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 // user already typed), then fall through to the Enter
                 // handler below so the command actually dispatches.
                 let sel = state.ui.palette_cursor.unwrap_or(0);
-                if let Some(entry) = candidates.get(sel) {
-                    let name = entry.name().to_string();
-                    drop(candidates);
+                if let Some(cmd) = candidates.get(sel) {
                     let raw = state.ui.input_buffer.clone();
                     let after_slash = raw.trim_start_matches('/');
                     let rest = match after_slash.find(char::is_whitespace) {
                         Some(idx) => &after_slash[idx..],
                         None => "",
                     };
-                    state.ui.input_buffer = format!("/{}{}", name, rest);
+                    state.ui.input_buffer = format!("/{}{}", cmd.name, rest);
                     state.ui.input_cursor = state.ui.input_buffer.len();
                 }
                 // Fall through to the Enter handler below.
@@ -2305,30 +2316,6 @@ fn submit_current_input(state: &mut State) {
         return;
     }
     if let Some(rest) = buf.strip_prefix('/') {
-        // Plugin prompt commands: an enabled plugin's `/name args` expands
-        // into a normal user prompt — the transcript shows the EXPANSION, so
-        // recordings replay without the plugin installed. Built-ins always
-        // win (the loader already refuses shadowing names; this order makes
-        // it structural).
-        let (name, args) = match rest.split_once(char::is_whitespace) {
-            Some((n, a)) => (n.to_lowercase(), a),
-            None => (rest.to_lowercase(), ""),
-        };
-        let builtin = crate::domain::slash_commands::COMMAND_REGISTRY
-            .iter()
-            .any(|c| c.name == name || c.aliases.contains(&name.as_str()));
-        if !builtin && let Some(cmd) = state.plugin_commands.iter().find(|c| c.name == name) {
-            let text = cmd.expand(args);
-            state.ui.input_buffer.clear();
-            state.ui.input_cursor = 0;
-            state.ui.palette_cursor = None;
-            let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
-            state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
-                text,
-                attachment_ids,
-            });
-            return;
-        }
         let slash = crate::app::event_source::parse_slash_command(rest);
         state.ui.input_buffer.clear();
         state.ui.input_cursor = 0;
@@ -2871,6 +2858,9 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::Processes => {
             cmds.push(Cmd::ListRuntimeProcesses { limit: 10 });
         },
+        SlashCmd::Agents(arg) => {
+            handle_slash_agents(state, cmds, arg.as_deref());
+        },
         SlashCmd::Logs(Some(id)) => {
             cmds.push(Cmd::ShowRuntimeProcessLogs { id });
         },
@@ -3012,10 +3002,9 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             });
         },
         SlashCmd::Help => {
-            state.session.append(
-                ChatMessage::system(help_text(&state.plugin_commands)),
-                state.now,
-            );
+            state
+                .session
+                .append(ChatMessage::system(help_text()), state.now);
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Quit => {
@@ -3023,6 +3012,89 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::Unknown(name) => {
             push_system(state, cmds, format!("Unknown command: /{}", name));
+        },
+    }
+}
+
+/// `/agents` — list detached background agents, or kill them
+/// (`kill <id>` / `kill all`). Kills validate against the registry here
+/// (immediate feedback for a bad id), mark the row "cancelling…", and hand
+/// the actual token fire to the effect layer via `Cmd::KillBackgroundAgent`;
+/// the dying child's `Msg::BackgroundAgentFinished { cancelled: true, .. }`
+/// posts the closing note and clears the row.
+fn handle_slash_agents(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>) {
+    let arg = arg.map(str::trim).filter(|s| !s.is_empty());
+    match arg {
+        None => {
+            if state.runtime.background_agents.is_empty() {
+                push_system(
+                    state,
+                    cmds,
+                    "No background agents. (ctrl+b detaches a running agent)",
+                );
+                return;
+            }
+            let now_sys = std::time::SystemTime::from(state.now);
+            let mut lines = vec![format!(
+                "Background agents ({}) — /agents kill <id> cancels one, /agents kill all cancels every one",
+                state.runtime.background_agents.len()
+            )];
+            for agent in &state.runtime.background_agents {
+                let elapsed = now_sys
+                    .duration_since(agent.started)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                lines.push(format!(
+                    "  {}  {} — {} · {}s · ~{} tokens",
+                    agent.agent_id,
+                    agent.description,
+                    agent.activity,
+                    elapsed,
+                    super::compaction::format_compact_count(agent.tokens),
+                ));
+            }
+            push_system(state, cmds, lines.join("\n"));
+        },
+        Some("kill all") => {
+            if state.runtime.background_agents.is_empty() {
+                push_system(state, cmds, "No background agents to kill.");
+                return;
+            }
+            for agent in &mut state.runtime.background_agents {
+                agent.activity = "cancelling…".to_string();
+            }
+            cmds.push(Cmd::KillBackgroundAgent { agent_id: None });
+        },
+        Some(rest) if rest.starts_with("kill ") || rest == "kill" => {
+            let id = rest.strip_prefix("kill").unwrap_or_default().trim();
+            if id.is_empty() {
+                push_system(
+                    state,
+                    cmds,
+                    "Usage: /agents kill <id> (or: /agents kill all)",
+                );
+                return;
+            }
+            let Some(agent) = state
+                .runtime
+                .background_agents
+                .iter_mut()
+                .find(|a| a.agent_id == id)
+            else {
+                push_system(state, cmds, format!("No background agent '{id}'."));
+                return;
+            };
+            agent.activity = "cancelling…".to_string();
+            cmds.push(Cmd::KillBackgroundAgent {
+                agent_id: Some(id.to_string()),
+            });
+        },
+        Some(_) => {
+            push_system(
+                state,
+                cmds,
+                "Usage: /agents (list), /agents kill <id>, /agents kill all",
+            );
         },
     }
 }
@@ -3149,7 +3221,7 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
     });
 }
 
-fn help_text(plugin_commands: &[crate::domain::PluginCommand]) -> String {
+fn help_text() -> String {
     let mut lines = Vec::with_capacity(COMMAND_REGISTRY.len() + COMMAND_GROUPS.len() + 2);
     lines.push("Mermaid commands".to_string());
     lines.push(
@@ -3177,22 +3249,6 @@ fn help_text(plugin_commands: &[crate::domain::PluginCommand]) -> String {
             lines.push(format!(
                 "  /{}{}{} - {}",
                 command.name, suffix, aliases, command.description
-            ));
-        }
-    }
-    if !plugin_commands.is_empty() {
-        lines.push(String::new());
-        lines.push("Plugin commands:".to_string());
-        for cmd in plugin_commands {
-            lines.push(format!(
-                "  /{} - {} (plugin:{})",
-                cmd.name,
-                if cmd.description.is_empty() {
-                    "prompt"
-                } else {
-                    &cmd.description
-                },
-                cmd.plugin
             ));
         }
     }
@@ -5668,7 +5724,7 @@ mod tests {
 
     #[test]
     fn help_text_lists_keyboard_shortcuts() {
-        let help = help_text(&[]);
+        let help = help_text();
         assert!(help.contains("Keyboard shortcuts:"));
         assert!(help.contains("PageUp"));
     }
@@ -9691,120 +9747,6 @@ mod tests {
         assert_eq!(state.ui.input_buffer, "kept");
     }
 
-    fn plugin_cmd(name: &str, body: &str) -> crate::domain::PluginCommand {
-        crate::domain::PluginCommand {
-            name: name.to_string(),
-            description: "does things".to_string(),
-            body: body.to_string(),
-            plugin: "demo".to_string(),
-        }
-    }
-
-    #[test]
-    fn plugin_command_expands_into_a_prompt_submit() {
-        let mut state = fresh_state();
-        state.plugin_commands = vec![plugin_cmd("deploy", "Deploy to $ARGUMENTS now.")];
-        state.ui.input_buffer = "/deploy prod".to_string();
-        let (mut state, _) = update(state, key(KeyCode::Enter));
-        // The reducer re-enters pending_msgs itself; the expansion lands as a
-        // committed user message (transcript shows the EXPANSION, so
-        // recordings replay without the plugin installed).
-        let last_user = state
-            .session
-            .messages()
-            .iter()
-            .rev()
-            .find(|m| m.role == crate::models::MessageRole::User)
-            .map(|m| m.content.clone());
-        assert_eq!(last_user.as_deref(), Some("Deploy to prod now."));
-        assert!(state.ui.input_buffer.is_empty());
-        // No-args + no token: body submits verbatim.
-        state.turn = crate::domain::TurnState::Idle;
-        state.plugin_commands = vec![plugin_cmd("ship", "Ship it.")];
-        state.ui.input_buffer = "/ship".to_string();
-        let (state, _) = update(state, key(KeyCode::Enter));
-        let queued_or_committed = state
-            .session
-            .messages()
-            .iter()
-            .any(|m| m.content == "Ship it.")
-            || state
-                .ui
-                .queued_messages
-                .iter()
-                .any(|q| q.text == "Ship it.");
-        assert!(queued_or_committed, "plugin body submitted or queued");
-    }
-
-    #[test]
-    fn unknown_slash_still_reports_unknown_not_plugin() {
-        let mut state = fresh_state();
-        state.plugin_commands = vec![plugin_cmd("deploy", "body")];
-        state.ui.input_buffer = "/nosuch".to_string();
-        let (state, _) = update(state, key(KeyCode::Enter));
-        let last = state.session.messages().last().unwrap().content.clone();
-        assert!(last.contains("Unknown command: /nosuch"), "{last}");
-    }
-
-    #[test]
-    fn builtin_wins_over_same_named_plugin_command() {
-        // Structural guarantee on top of the loader's shadowing filter.
-        let mut state = fresh_state();
-        state.plugin_commands = vec![plugin_cmd("help", "hijacked")];
-        state.ui.input_buffer = "/help".to_string();
-        let (state, _) = update(state, key(KeyCode::Enter));
-        let last = state.session.messages().last().unwrap().content.clone();
-        assert!(
-            last.contains("Mermaid commands"),
-            "built-in help ran: {last}"
-        );
-        assert!(!last.contains("hijacked"));
-    }
-
-    #[test]
-    fn palette_filter_entries_appends_plugins_and_agrees_on_indices() {
-        use crate::domain::slash_commands::{COMMAND_REGISTRY, filter_entries};
-        let plugin = vec![plugin_cmd("deploy", "body")];
-        let all = filter_entries("", &plugin);
-        assert_eq!(all.len(), COMMAND_REGISTRY.len() + 1);
-        assert_eq!(all.last().unwrap().name(), "deploy");
-        assert!(all.last().unwrap().description().contains("(plugin:demo)"));
-        // Prefix filtering reaches plugin rows too.
-        let d = filter_entries("dep", &plugin);
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].name(), "deploy");
-        // Tab-completion path: cursor over the plugin row completes it.
-        let mut state = fresh_state();
-        state.plugin_commands = plugin;
-        state.ui.input_buffer = "/dep".to_string();
-        state.ui.palette_cursor = Some(0);
-        let (state, _) = update(state, key(KeyCode::Tab));
-        assert_eq!(state.ui.input_buffer, "/deploy ");
-    }
-
-    #[test]
-    fn help_lists_plugin_commands() {
-        let mut state = fresh_state();
-        state.plugin_commands = vec![plugin_cmd("deploy", "body")];
-        let (state, _) = update(state, Msg::Slash(SlashCmd::Help));
-        let last = state.session.messages().last().unwrap().content.clone();
-        assert!(last.contains("Plugin commands:"), "{last}");
-        assert!(
-            last.contains("/deploy - does things (plugin:demo)"),
-            "{last}"
-        );
-    }
-
-    #[test]
-    fn plugin_command_expand_cases() {
-        let cmd = plugin_cmd("x", "Do $ARGUMENTS and $ARGUMENTS.");
-        assert_eq!(cmd.expand("this"), "Do this and this.");
-        assert_eq!(cmd.expand("  "), "Do  and .");
-        let cmd = plugin_cmd("x", "Just do it.");
-        assert_eq!(cmd.expand(""), "Just do it.");
-        assert_eq!(cmd.expand("with args"), "Just do it.\n\nwith args");
-    }
-
     #[test]
     fn paste_interleaved_with_keys_preserves_order() {
         // Reproduces the Windows paste scramble: a paste burst splits into
@@ -11380,6 +11322,7 @@ mod tests {
                 description: "audit docs".to_string(),
                 report: "docs are fine".to_string(),
                 success: true,
+                cancelled: false,
                 usage: Some(crate::models::TokenUsage::provider(70_000, 20_000)),
                 tokens: 90_000,
                 duration_secs: 61,
@@ -11415,6 +11358,7 @@ mod tests {
                 description: "security sweep".to_string(),
                 report: "no findings".to_string(),
                 success: true,
+                cancelled: false,
                 usage: None,
                 tokens: 1_000,
                 duration_secs: 5,
@@ -11427,6 +11371,113 @@ mod tests {
             "queued report carries the child's output"
         );
         assert!(matches!(state.turn, TurnState::ExecutingTools { .. }));
+    }
+
+    /// Seed a state with one detached background agent in the registry.
+    fn state_with_background_agent(agent_id: &str, description: &str) -> State {
+        let (state, _) = update(
+            fresh_state(),
+            Msg::BackgroundAgentStarted {
+                agent_id: agent_id.to_string(),
+                description: description.to_string(),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn slash_agents_lists_registry_or_reports_none() {
+        // Empty registry: a "none" note, no Cmd beyond the transcript save.
+        let (state, _) = update(fresh_state(), Msg::Slash(SlashCmd::Agents(None)));
+        let last = state.session.messages().last().expect("system note");
+        assert!(last.content.contains("No background agents"));
+
+        // Populated registry: one line per agent with id + description.
+        let state = state_with_background_agent("a3", "audit docs");
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Agents(None)));
+        let last = state.session.messages().last().expect("listing");
+        assert!(last.content.contains("Background agents (1)"));
+        assert!(last.content.contains("a3"));
+        assert!(last.content.contains("audit docs"));
+        // Listing must not kill anything.
+        assert_eq!(state.runtime.background_agents.len(), 1);
+    }
+
+    #[test]
+    fn slash_agents_kill_validates_id_and_fires_cmd() {
+        // Unknown id: feedback, no kill Cmd.
+        let state = state_with_background_agent("a3", "audit docs");
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Agents(Some("kill a99".to_string()))),
+        );
+        let last = state.session.messages().last().expect("note");
+        assert!(last.content.contains("No background agent 'a99'"));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::KillBackgroundAgent { .. })),
+            "unknown id must not fire a kill"
+        );
+
+        // Known id: row marked cancelling, targeted kill Cmd emitted.
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Agents(Some("kill a3".to_string()))),
+        );
+        assert_eq!(state.runtime.background_agents[0].activity, "cancelling…");
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            Cmd::KillBackgroundAgent { agent_id: Some(id) } if id == "a3"
+        )));
+
+        // Kill all: every row marked, broadcast Cmd emitted.
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Agents(Some("kill all".to_string()))),
+        );
+        assert!(
+            state
+                .runtime
+                .background_agents
+                .iter()
+                .all(|a| a.activity == "cancelling…")
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::KillBackgroundAgent { agent_id: None }))
+        );
+    }
+
+    #[test]
+    fn cancelled_background_agent_notes_but_never_queues_a_report() {
+        let state = state_with_background_agent("a3", "audit docs");
+        let tokens_before = state.session.cumulative_token_usage.total_tokens();
+        let (state, _) = update(
+            state,
+            Msg::BackgroundAgentFinished {
+                agent_id: "a3".to_string(),
+                description: "audit docs".to_string(),
+                report: "partial findings".to_string(),
+                success: false,
+                cancelled: true,
+                usage: Some(crate::models::TokenUsage::provider(10_000, 5_000)),
+                tokens: 15_000,
+                duration_secs: 42,
+            },
+        );
+        // Row cleared, spend still folded (the work was billed).
+        assert!(state.runtime.background_agents.is_empty());
+        assert_eq!(
+            state.session.cumulative_token_usage.total_tokens(),
+            tokens_before + 15_000
+        );
+        // Cancelled note in the transcript, but NO queued report and no
+        // auto-submitted turn — a deliberate kill must not spend a model call.
+        let last = state.session.messages().last().expect("note");
+        assert!(last.content.contains("cancelled"));
+        assert!(state.ui.queued_messages.is_empty());
+        assert!(matches!(state.turn, TurnState::Idle));
     }
 
     /// Build a one-call ExecutingTools state around an `agent` tool call,

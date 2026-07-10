@@ -2,9 +2,12 @@
 //!
 //! Mermaid's auth surface is uniform across providers: an API key lives in
 //! an environment variable, with the option to override the variable name
-//! per-provider in `config.toml`. There's no in-config secret storage —
-//! keys never sit on disk in plaintext. The Ollama cloud key follows the same
-//! rule: it is read from `OLLAMA_API_KEY` and never persisted (#88).
+//! per-provider in `config.toml`, and — since `mermaid login` — an optional
+//! OS-keyring fallback. Precedence is strict: env vars are ABSOLUTE; the
+//! keyring only fills the gap when no env var resolves. A per-provider
+//! `api_key_env` override is AUTHORITATIVE: when set, neither the default
+//! env nor the keyring is consulted (fail loudly, as before). There's no
+//! in-config secret storage — keys never sit in config.toml in plaintext.
 
 /// Resolve an API key from the environment.
 ///
@@ -22,6 +25,67 @@ pub fn resolve_api_key(default_env: &str, override_env: Option<&str>) -> Option<
         Ok(key) if !key.is_empty() => Some(key),
         _ => None,
     }
+}
+
+/// Resolve a provider's API key: env (default or authoritative override)
+/// first, then the OS keyring (`mermaid login <provider>`).
+pub fn resolve_provider_key(
+    provider: &str,
+    default_env: &str,
+    override_env: Option<&str>,
+) -> Option<String> {
+    resolve_provider_key_in(
+        super::credentials::default_store(),
+        provider,
+        default_env,
+        override_env,
+    )
+}
+
+/// [`resolve_provider_key`] against an explicit store (test seam).
+pub(crate) fn resolve_provider_key_in(
+    store: &dyn super::credentials::CredentialStore,
+    provider: &str,
+    default_env: &str,
+    override_env: Option<&str>,
+) -> Option<String> {
+    if override_env.is_some() {
+        // The user pointed at a specific env var; a stored keyring secret
+        // must not silently override that decision (mirrors the existing
+        // fail-loudly rule for unset overrides).
+        return resolve_api_key(default_env, override_env);
+    }
+    resolve_api_key(default_env, None).or_else(|| store.get(provider))
+}
+
+/// [`resolve_provider_key`] for the one legacy-fallback-env case (Gemini).
+pub fn resolve_provider_key_with_fallback(
+    provider: &str,
+    default_env: &str,
+    fallback_env: &str,
+    override_env: Option<&str>,
+) -> Option<String> {
+    if override_env.is_some() {
+        return resolve_api_key(default_env, override_env);
+    }
+    resolve_api_key_with_fallback(default_env, fallback_env, None)
+        .or_else(|| super::credentials::default_store().get(provider))
+}
+
+/// Where a provider's key would come from right now: `"env"`, `"keyring"`,
+/// or `"none"`. Drives `doctor` / `mermaid login` / feedback reporting.
+pub fn provider_key_source(
+    provider: &str,
+    default_env: &str,
+    override_env: Option<&str>,
+) -> &'static str {
+    if resolve_api_key(default_env, override_env).is_some() {
+        return "env";
+    }
+    if override_env.is_none() && super::credentials::default_store().get(provider).is_some() {
+        return "keyring";
+    }
+    "none"
 }
 
 /// Resolve an API key with a legacy fallback env var.
@@ -58,6 +122,59 @@ mod tests {
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         )
+    }
+
+    #[test]
+    fn provider_key_env_beats_keyring() {
+        use crate::utils::credentials::test_support::FakeStore;
+        let store = FakeStore::default();
+        store
+            .entries
+            .lock()
+            .unwrap()
+            .insert("groq".to_string(), "stored-key".to_string());
+        let var = unique_env("MERMAID_TEST_PK_ENV");
+        temp_env::with_var(&var, Some("env-key"), || {
+            assert_eq!(
+                resolve_provider_key_in(&store, "groq", &var, None),
+                Some("env-key".to_string()),
+                "env must have absolute precedence"
+            );
+        });
+        temp_env::with_var_unset(&var, || {
+            assert_eq!(
+                resolve_provider_key_in(&store, "groq", &var, None),
+                Some("stored-key".to_string()),
+                "keyring fills the gap when env is unset"
+            );
+        });
+    }
+
+    #[test]
+    fn override_env_blocks_keyring_fallback() {
+        use crate::utils::credentials::test_support::FakeStore;
+        let store = FakeStore::default();
+        store
+            .entries
+            .lock()
+            .unwrap()
+            .insert("groq".to_string(), "stored-key".to_string());
+        let default_var = unique_env("MERMAID_TEST_PK_DEFAULT");
+        let override_var = unique_env("MERMAID_TEST_PK_OVERRIDE");
+        // Override set but its var unset: fail loudly — no default env, no
+        // keyring (the user explicitly redirected auth).
+        temp_env::with_vars(
+            [
+                (default_var.as_str(), Some("default-key")),
+                (override_var.as_str(), None),
+            ],
+            || {
+                assert_eq!(
+                    resolve_provider_key_in(&store, "groq", &default_var, Some(&override_var)),
+                    None
+                );
+            },
+        );
     }
 
     #[test]
