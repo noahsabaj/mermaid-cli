@@ -130,7 +130,7 @@ pub fn build_status_lines(
             format!("> {}", truncate_to_cells(&queued.text, body_budget)),
             Style::new()
                 .fg(theme.colors.text_primary.to_color())
-                .bg(ratatui::style::Color::Rgb(60, 60, 80)), // Subtle purple highlight
+                .bg(theme.colors.queued_bg.to_color()),
         )]));
     }
 

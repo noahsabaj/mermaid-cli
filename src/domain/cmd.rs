@@ -146,6 +146,8 @@ pub enum Cmd {
     },
     /// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
     PersistOllamaOffload(bool),
+    /// Persist the `/theme` choice as `ui.theme` in the user config file.
+    PersistUiTheme(crate::app::ThemeChoice),
     /// List saved memories; emits `Msg::RuntimeText` with the rendered list.
     ListMemory,
     /// Save free-text to private memory; emits `Msg::MemoryChanged` + status.
@@ -259,6 +261,12 @@ pub enum Cmd {
     CopyToClipboard(String),
 
     // ── Terminal lifecycle ──────────────────────────────────────────
+    /// Suspend the TUI and open `$VISUAL`/`$EDITOR` on the input draft
+    /// (Ctrl+O / `/editor`). Intercepted by the interactive run loop — it
+    /// owns the terminal and event stream — and never reaches the effect
+    /// runner there; headless drivers log-and-drop it. The round-trip
+    /// resolves as `Msg::EditorReturned`.
+    ComposeInEditor { text: String },
     /// Exit the main loop. No reply message — the loop observes
     /// `state.should_exit` after the reducer returns and breaks out.
     Exit,
@@ -359,6 +367,7 @@ impl Cmd {
             Cmd::PersistReasoningFor { .. } => "persist_reasoning_for",
             Cmd::PersistOllamaNumCtxFor { .. } => "persist_ollama_num_ctx_for",
             Cmd::PersistOllamaOffload(_) => "persist_ollama_offload",
+            Cmd::PersistUiTheme(_) => "persist_ui_theme",
             Cmd::ListMemory => "list_memory",
             Cmd::RememberMemory { .. } => "remember_memory",
             Cmd::ForgetMemory { .. } => "forget_memory",
@@ -391,6 +400,7 @@ impl Cmd {
             Cmd::WriteImageToTemp { .. } => "write_image_to_temp",
             Cmd::ReadClipboard => "read_clipboard",
             Cmd::CopyToClipboard(_) => "copy_to_clipboard",
+            Cmd::ComposeInEditor { .. } => "compose_in_editor",
             Cmd::Exit => "exit",
             Cmd::SetTerminalTitle(_) => "set_terminal_title",
             Cmd::AlertUser => "alert_user",
@@ -491,6 +501,7 @@ impl Cmd {
             Cmd::PersistOllamaOffload(enabled) => {
                 format!("persist_ollama_offload({})", enabled)
             },
+            Cmd::PersistUiTheme(theme) => format!("persist_ui_theme({})", theme.as_str()),
             Cmd::ListMemory => "list_memory".to_string(),
             Cmd::RememberMemory { .. } => "remember_memory".to_string(),
             Cmd::ForgetMemory { .. } => "forget_memory".to_string(),
@@ -547,6 +558,9 @@ impl Cmd {
             ),
             Cmd::ReadClipboard => "read_clipboard".to_string(),
             Cmd::CopyToClipboard(t) => format!("copy_to_clipboard(n={})", t.chars().count()),
+            Cmd::ComposeInEditor { text } => {
+                format!("compose_in_editor(n={})", text.chars().count())
+            },
             Cmd::Exit => "exit".to_string(),
             Cmd::SetTerminalTitle(t) => format!("set_terminal_title({})", t),
             Cmd::AlertUser => "alert_user".to_string(),

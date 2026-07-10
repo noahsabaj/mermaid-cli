@@ -36,6 +36,7 @@ const PROJECT_ALLOWED_TOP_LEVEL: &[&str] = &[
     "memory",
     "non_interactive",
     "safety",
+    "ui",
 ];
 
 /// Keys denied INSIDE otherwise-allowed tables: `web.searxng_url` would let a
@@ -280,6 +281,13 @@ enabled = false
         assert!(warnings.is_empty(), "got {warnings:?}");
         assert_eq!(table.len(), 4);
         assert_eq!(table["default_model"]["name"].as_str(), Some("qwen3"));
+    }
+
+    #[test]
+    fn sanitize_keeps_ui_table() {
+        let (table, warnings) = sanitize("[ui]\ntheme = \"light\"\n");
+        assert!(warnings.is_empty(), "got {warnings:?}");
+        assert_eq!(table["ui"]["theme"].as_str(), Some("light"));
     }
 
     #[test]

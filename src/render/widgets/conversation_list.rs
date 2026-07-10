@@ -7,7 +7,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
@@ -66,7 +66,10 @@ impl<'a> Widget for ConversationListWidget<'a> {
                 );
                 Line::from(vec![
                     Span::raw(prefix),
-                    Span::styled(title, row_style.fg(Color::White)),
+                    Span::styled(
+                        title,
+                        row_style.fg(self.theme.colors.text_primary.to_color()),
+                    ),
                     Span::styled(
                         meta,
                         row_style.fg(self.theme.colors.text_disabled.to_color()),

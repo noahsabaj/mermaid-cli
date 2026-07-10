@@ -64,6 +64,7 @@ pub const KEYBINDINGS: &[(&str, &str)] = &[
     ("Shift+Up / Shift+Down", "Scroll the transcript one line"),
     ("End", "Jump to the newest message"),
     ("Ctrl+V", "Paste (including images)"),
+    ("Ctrl+O", "Compose the prompt in $VISUAL/$EDITOR"),
     ("Ctrl+B", "Background a running command"),
     ("Alt+T", "Cycle reasoning depth"),
     ("Shift+Tab", "Cycle the safety mode"),
@@ -339,6 +340,20 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         description: "Configure Ollama Cloud API key",
         arg_hint: None,
         group: SlashCommandGroup::Integrations,
+    },
+    SlashCommand {
+        name: "theme",
+        aliases: &[],
+        description: "Switch the color theme or show the current one",
+        arg_hint: Some("[dark|light]"),
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
+        name: "editor",
+        aliases: &[],
+        description: "Compose the prompt in $VISUAL/$EDITOR (Ctrl+O)",
+        arg_hint: None,
+        group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
         name: "help",

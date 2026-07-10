@@ -23,13 +23,11 @@ pub struct QuestionModalWidget<'a> {
 }
 
 /// A header "chip": label on the brand accent, like Claude Code's blue tag.
-fn chip(label: &str, bg: Color) -> Span<'static> {
+/// `fg` is the theme background so the label stays readable on the accent.
+fn chip(label: &str, fg: Color, bg: Color) -> Span<'static> {
     Span::styled(
         format!(" {} ", label),
-        Style::default()
-            .fg(Color::Black)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
     )
 }
 
@@ -63,7 +61,7 @@ fn push_choice_lines(
 ) {
     let brand = theme.colors.brand.to_color();
     let dim = theme.colors.text_disabled.to_color();
-    let white = Color::White;
+    let white = theme.colors.text_primary.to_color();
     let n = q.options.len();
     let multi = q.is_multi();
     const MAX_VISIBLE: usize = 8;
@@ -168,7 +166,7 @@ fn push_input_lines(
 ) {
     let brand = theme.colors.brand.to_color();
     let dim = theme.colors.text_disabled.to_color();
-    let white = Color::White;
+    let white = theme.colors.text_primary.to_color();
     let value = &sel.value;
     let mut field: Vec<Span<'static>> = vec![Span::styled("> ", Style::default().fg(brand))];
     if value.is_empty() {
@@ -222,7 +220,7 @@ fn push_rank_lines(
 ) {
     let brand = theme.colors.brand.to_color();
     let dim = theme.colors.text_disabled.to_color();
-    let white = Color::White;
+    let white = theme.colors.text_primary.to_color();
     for (pos, &opt_idx) in crate::domain::rank_order(q, sel).iter().enumerate() {
         let focused = sel.cursor == pos;
         let grabbed = focused && sel.grabbed;
@@ -257,7 +255,7 @@ fn push_rank_lines(
 pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line<'static>> {
     let brand = theme.colors.brand.to_color();
     let dim = theme.colors.text_disabled.to_color();
-    let white = Color::White;
+    let white = theme.colors.text_primary.to_color();
     let nq = set.questions.len();
     let has_memory = set.questions.iter().any(|q| q.memory_key.is_some());
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -269,7 +267,7 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
         for (qi, q) in set.questions.iter().enumerate() {
             let label = truncate_to_cells(&q.header, 12);
             if qi == set.active {
-                spans.push(chip(&label, brand));
+                spans.push(chip(&label, theme.colors.background.to_color(), brand));
             } else {
                 spans.push(Span::styled(
                     format!(" {} ", label),
@@ -279,7 +277,7 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
             spans.push(Span::raw(" "));
         }
         if set.active >= nq {
-            spans.push(chip("Submit", brand));
+            spans.push(chip("Submit", theme.colors.background.to_color(), brand));
         } else {
             spans.push(Span::styled(" Submit ", Style::default().fg(dim)));
         }
@@ -355,7 +353,11 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
     // question, so only render it here (above the title) when there's no tab
     // strip — i.e. a single question. Otherwise it's a duplicate.
     if nq == 1 {
-        lines.push(Line::from(chip(&truncate_to_cells(&q.header, 12), brand)));
+        lines.push(Line::from(chip(
+            &truncate_to_cells(&q.header, 12),
+            theme.colors.background.to_color(),
+            brand,
+        )));
     }
     lines.push(Line::from(Span::styled(
         q.question.clone(),

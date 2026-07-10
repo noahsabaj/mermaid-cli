@@ -333,6 +333,15 @@ pub enum Msg {
         text: String,
     },
 
+    /// The `$EDITOR` compose round-trip finished (Ctrl+O / `/editor`). The
+    /// run loop suspends the TUI, launches the editor, and pushes this with
+    /// the edited draft — so the recording captures the RESULT and `--replay`
+    /// never launches an editor. `Some(text)` replaces the input buffer
+    /// (empty = deliberate clear); `None` = no-op (defensive).
+    EditorReturned {
+        text: Option<String>,
+    },
+
     // ── Mouse (F13) ─────────────────────────────────────────────────
     /// Mouse-wheel scroll in the chat pane. Positive delta = scroll
     /// toward older messages (up), negative = toward newer (down). The
@@ -535,6 +544,11 @@ pub enum SlashCmd {
     ModelInfo(Option<String>),
     Plugins,
     CloudSetup,
+    /// No arg → show current theme; `Some("dark"|"light")` → switch and
+    /// persist. Anything else → usage.
+    Theme(Option<String>),
+    /// Compose the input draft in `$VISUAL`/`$EDITOR` (also Ctrl+O).
+    Editor,
     Help,
     Quit,
     /// User typed something that isn't in the registry; carries the
@@ -625,6 +639,7 @@ impl Msg {
             Msg::FocusChanged(_) => MsgKind::FocusChanged,
             Msg::OpenImageAt { .. } => MsgKind::OpenImageAt,
             Msg::TransientStatus { .. } => MsgKind::TransientStatus,
+            Msg::EditorReturned { .. } => MsgKind::EditorReturned,
             Msg::CopySelection(_) => MsgKind::CopySelection,
         }
     }
@@ -677,6 +692,7 @@ pub enum MsgKind {
     FocusChanged,
     OpenImageAt,
     TransientStatus,
+    EditorReturned,
     CopySelection,
 }
 

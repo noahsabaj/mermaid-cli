@@ -159,6 +159,7 @@ impl State {
             turn: TurnState::Idle,
             ui: UiState {
                 last_title_dispatched: Some(initial_title),
+                theme: settings.ui.theme,
                 ..UiState::default()
             },
             mcp,
@@ -853,6 +854,15 @@ impl ToolOutcome {
 #[derive(Debug, Clone, Default)]
 pub struct UiState {
     pub mode: UiMode,
+    /// Active color theme. Seeded from `config.ui.theme` in `State::new`;
+    /// `/theme` switches it live (and persists via `Cmd::PersistUiTheme`).
+    /// The render layer memoizes the resolved `Theme` off this value.
+    pub theme: crate::app::ThemeChoice,
+    /// `NO_COLOR` was set (present and non-empty) at startup. Injected by the
+    /// run loop after `State::new` — the reducer never reads the environment.
+    /// While true the render layer draws `Theme::plain()` regardless of
+    /// `theme`, and `/theme` notes that colors are disabled.
+    pub no_color: bool,
     pub input_buffer: String,
     /// Byte position within `input_buffer`. The reducer normalizes to
     /// a UTF-8 char boundary on every mutation via

@@ -272,6 +272,8 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("plugins") => SlashCmd::Plugins,
         Some("model-info") => SlashCmd::ModelInfo(arg),
         Some("cloud-setup") => SlashCmd::CloudSetup,
+        Some("theme") => SlashCmd::Theme(arg),
+        Some("editor") => SlashCmd::Editor,
         Some("help") => SlashCmd::Help,
         Some("quit") => SlashCmd::Quit,
         _ => SlashCmd::Unknown(name),
@@ -282,6 +284,16 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
 mod tests {
     use super::*;
     use crate::domain::SlashCmd;
+
+    #[test]
+    fn parses_theme_and_editor_commands() {
+        assert_eq!(parse_slash_command("theme"), SlashCmd::Theme(None));
+        assert_eq!(
+            parse_slash_command("theme light"),
+            SlashCmd::Theme(Some("light".to_string()))
+        );
+        assert_eq!(parse_slash_command("editor"), SlashCmd::Editor);
+    }
 
     #[test]
     fn translates_printable_char_key() {

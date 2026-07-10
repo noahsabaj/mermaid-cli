@@ -3,6 +3,7 @@
 
 // Private submodules - not directly accessible from outside
 mod config;
+mod editor;
 pub mod event_source;
 pub mod instructions;
 pub mod lifecycle;
@@ -20,11 +21,12 @@ pub mod terminal;
 pub use config::{
     AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, FetchBackend,
     FilesystemPolicy, LayeredLoad, McpServerConfig, MemoryConfig, NetworkPolicy, SafetyConfig,
-    SearchBackend, SessionFlags, UserProviderConfig, WebConfig, get_config_dir, init_config,
-    load_config, load_config_or_warn, load_layered_config, load_layered_config_or_warn,
-    load_project_scoped_config, persist_default_reasoning, persist_last_model,
-    persist_ollama_allow_ram_offload, persist_ollama_num_ctx_for_model,
-    persist_reasoning_for_model, remove_user_config_key, resolve_model_id, update_user_config_key,
+    SearchBackend, SessionFlags, ThemeChoice, UiConfig, UserProviderConfig, WebConfig,
+    get_config_dir, init_config, load_config, load_config_or_warn, load_layered_config,
+    load_layered_config_or_warn, load_project_scoped_config, persist_default_reasoning,
+    persist_last_model, persist_ollama_allow_ram_offload, persist_ollama_num_ctx_for_model,
+    persist_reasoning_for_model, persist_ui_theme, remove_user_config_key, resolve_model_id,
+    update_user_config_key,
 };
 pub use event_source::{event_to_msg, parse_slash_command};
 pub use lifecycle::RuntimeLifecycle;

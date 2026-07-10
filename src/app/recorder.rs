@@ -677,6 +677,7 @@ mod tests {
                 | MsgKind::FocusChanged
                 | MsgKind::OpenImageAt
                 | MsgKind::TransientStatus
+                | MsgKind::EditorReturned
                 | MsgKind::CopySelection => true,
             }
         }
@@ -906,6 +907,9 @@ mod tests {
                 message_index: 4,
                 image_index: 0,
                 image_number: None,
+            },
+            Msg::EditorReturned {
+                text: Some("edited draft".to_string()),
             },
             Msg::CopySelection("copied".to_string()),
         ];

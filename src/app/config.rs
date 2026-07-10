@@ -26,6 +26,10 @@ pub struct Config {
     #[serde(default)]
     pub web: WebConfig,
 
+    /// TUI appearance preferences (`[ui]` table).
+    #[serde(default)]
+    pub ui: UiConfig,
+
     /// Non-interactive mode configuration
     #[serde(default)]
     pub non_interactive: NonInteractiveConfig,
@@ -138,6 +142,35 @@ impl Config {
     /// Effective value of [`Config::mcp_defer_tools`]: unset means ON.
     pub fn mcp_deferral_enabled(&self) -> bool {
         self.mcp_defer_tools.unwrap_or(true)
+    }
+}
+
+/// TUI appearance preferences.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UiConfig {
+    /// Color theme the TUI renders with. Switched live via `/theme`.
+    #[serde(default)]
+    pub theme: ThemeChoice,
+}
+
+/// Which built-in color theme the TUI renders with. A typed enum (not a
+/// free string) so a typo in config.toml is a clear deserialize error and
+/// the reducer's match stays exhaustive when a theme is added.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ThemeChoice {
+    /// The lowercase config-file spelling (`/theme` echo + persistence).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThemeChoice::Dark => "dark",
+            ThemeChoice::Light => "light",
+        }
     }
 }
 
@@ -1229,6 +1262,14 @@ pub fn persist_last_model(model: &str) -> Result<()> {
     update_user_config_key(&["last_used_model"], toml::Value::String(model.to_string()))
 }
 
+/// Persist the TUI theme choice (`/theme dark|light`).
+pub fn persist_ui_theme(theme: ThemeChoice) -> Result<()> {
+    update_user_config_key(
+        &["ui", "theme"],
+        toml::Value::String(theme.as_str().to_string()),
+    )
+}
+
 /// Persist the user's default reasoning level. Used by the `/reasoning` slash
 /// command and the Alt+T cycle handler so the choice survives across sessions.
 pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
@@ -1344,6 +1385,18 @@ mod tests {
         migrate_legacy_max_tokens(&mut table);
         let (config, _) = finalize_config(table).unwrap();
         assert_eq!(config.default_model.max_tokens, 0);
+    }
+
+    #[test]
+    fn ui_theme_deserializes_defaults_and_rejects_typos() {
+        let config: Config = toml::from_str("[ui]\ntheme = \"light\"\n").unwrap();
+        assert_eq!(config.ui.theme, ThemeChoice::Light);
+        // Absent → dark, both from an empty file and from Config::default().
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.ui.theme, ThemeChoice::Dark);
+        assert_eq!(Config::default().ui.theme, ThemeChoice::Dark);
+        // Typos are a clear deserialize error, not a silent fallback.
+        assert!(toml::from_str::<Config>("[ui]\ntheme = \"solarized\"\n").is_err());
     }
 
     #[test]

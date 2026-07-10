@@ -684,6 +684,17 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // the old transient banner above the input.
             push_system(&mut state, &mut cmds, text);
         },
+        Msg::EditorReturned { text } => {
+            // $EDITOR compose round-trip (Ctrl+O / /editor). `Some` replaces
+            // the whole draft — an empty string is a deliberate clear.
+            // Editor failures arrive as `Msg::TransientStatus`, not `None`.
+            if let Some(text) = text {
+                state.ui.input_buffer = text;
+                state.ui.input_cursor = state.ui.input_buffer.len();
+                state.ui.input_history_cursor = None;
+                state.ui.history_draft.clear();
+            }
+        },
         Msg::OpenImageAt {
             message_index,
             image_index,
@@ -1174,6 +1185,23 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // above the modal handlers so a repaint works with a modal open too.
     if mods.ctrl && code == KeyCode::Char('l') {
         state.ui.full_redraw_seq = state.ui.full_redraw_seq.wrapping_add(1);
+        return;
+    }
+
+    // Ctrl+O: compose the input draft in $VISUAL/$EDITOR. Allowed while a
+    // turn is busy (it only edits the draft), but only from the plain input
+    // surface — never over a picker or a pending approval/question modal,
+    // whose keyboard focus it would steal.
+    if mods.ctrl
+        && code == KeyCode::Char('o')
+        && matches!(state.ui.mode, UiMode::EditingInput)
+        && state.pending_approval.is_empty()
+        && state.pending_question.is_empty()
+        && state.confirm.is_none()
+    {
+        cmds.push(Cmd::ComposeInEditor {
+            text: state.ui.input_buffer.clone(),
+        });
         return;
     }
 
@@ -2670,6 +2698,59 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 cmds,
                 "Run `mermaid cloud-setup` from your shell, then restart mermaid.",
             );
+        },
+        SlashCmd::Theme(arg) => {
+            use crate::app::ThemeChoice;
+            // The trailing NO_COLOR note keeps a persisted-but-invisible
+            // switch from reading as a broken command.
+            let no_color_note = if state.ui.no_color {
+                " NO_COLOR is set, so colors stay disabled until it is unset."
+            } else {
+                ""
+            };
+            let choice = match arg.as_deref().map(str::trim) {
+                None | Some("") => {
+                    push_system(
+                        state,
+                        cmds,
+                        format!(
+                            "Theme: {}. Usage: /theme <dark|light>.{}",
+                            state.ui.theme.as_str(),
+                            no_color_note
+                        ),
+                    );
+                    return;
+                },
+                Some("dark") => ThemeChoice::Dark,
+                Some("light") => ThemeChoice::Light,
+                Some(other) => {
+                    push_system(
+                        state,
+                        cmds,
+                        format!("Unknown theme '{}'. Usage: /theme <dark|light>", other),
+                    );
+                    return;
+                },
+            };
+            state.ui.theme = choice;
+            cmds.push(Cmd::PersistUiTheme(choice));
+            push_system(
+                state,
+                cmds,
+                format!(
+                    "Theme set to {} (persisted).{}",
+                    choice.as_str(),
+                    no_color_note
+                ),
+            );
+        },
+        SlashCmd::Editor => {
+            // `/editor` opens on whatever draft remains after the command
+            // itself was consumed (usually empty); Ctrl+O is the
+            // draft-preserving path.
+            cmds.push(Cmd::ComposeInEditor {
+                text: state.ui.input_buffer.clone(),
+            });
         },
         SlashCmd::Help => {
             state
@@ -9013,6 +9094,120 @@ mod tests {
         // Idle → swallowed, no BackgroundScope.
         let (_s, cmds) = update(fresh_state(), ctrl_b);
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::BackgroundScope(_))));
+    }
+
+    #[test]
+    fn theme_command_switches_persists_and_reports() {
+        use crate::app::ThemeChoice;
+        // /theme light → state flips, persist emitted, confirmation appended.
+        let (state, cmds) = update(
+            fresh_state(),
+            Msg::Slash(SlashCmd::Theme(Some("light".to_string()))),
+        );
+        assert_eq!(state.ui.theme, ThemeChoice::Light);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::PersistUiTheme(ThemeChoice::Light)))
+        );
+        // /theme (no arg) → reports current, persists nothing.
+        let (state, cmds) = update(state, Msg::Slash(SlashCmd::Theme(None)));
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::PersistUiTheme(_))));
+        let last = state.session.messages().last().unwrap().content.clone();
+        assert!(last.contains("light"), "shows current theme: {last}");
+        // Bad arg → usage, no state change, no persist.
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Theme(Some("solarized".to_string()))),
+        );
+        assert_eq!(state.ui.theme, ThemeChoice::Light);
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::PersistUiTheme(_))));
+        let last = state.session.messages().last().unwrap().content.clone();
+        assert!(last.contains("Usage: /theme"), "usage line: {last}");
+    }
+
+    #[test]
+    fn theme_command_notes_no_color() {
+        let mut state = fresh_state();
+        state.ui.no_color = true;
+        let (state, cmds) = update(
+            state,
+            Msg::Slash(SlashCmd::Theme(Some("light".to_string()))),
+        );
+        // Still persists (applies when NO_COLOR is unset) but says so.
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::PersistUiTheme(_))));
+        let last = state.session.messages().last().unwrap().content.clone();
+        assert!(last.contains("NO_COLOR"), "notes NO_COLOR: {last}");
+    }
+
+    #[test]
+    fn ctrl_o_composes_draft_in_editor() {
+        let ctrl_o = Msg::Key(Key {
+            code: KeyCode::Char('o'),
+            modifiers: KeyMods {
+                ctrl: true,
+                ..KeyMods::NONE
+            },
+        });
+        // Idle with a draft → emits ComposeInEditor carrying it.
+        let mut state = fresh_state();
+        state.ui.input_buffer = "half-typed prompt".to_string();
+        let (_s, cmds) = update(state, ctrl_o.clone());
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ComposeInEditor { text } if text == "half-typed prompt"))
+        );
+        // Busy (generating) → still allowed; it only edits the draft.
+        let mut state = fresh_state();
+        state.turn = start_generating(TurnId(3), std::time::SystemTime::now());
+        let (_s, cmds) = update(state, ctrl_o.clone());
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ComposeInEditor { .. }))
+        );
+        // Over a modal surface (model list) → swallowed.
+        let mut state = fresh_state();
+        state.ui.mode = UiMode::ModelList;
+        let (_s, cmds) = update(state, ctrl_o);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::ComposeInEditor { .. }))
+        );
+        // /editor also routes to the compose command.
+        let (_s, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::Editor));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ComposeInEditor { .. }))
+        );
+    }
+
+    #[test]
+    fn editor_returned_replaces_draft() {
+        let mut state = fresh_state();
+        state.ui.input_buffer = "old draft".to_string();
+        state.ui.input_cursor = 3;
+        let (state, cmds) = update(
+            state,
+            Msg::EditorReturned {
+                text: Some("new draft from vim".to_string()),
+            },
+        );
+        assert_eq!(state.ui.input_buffer, "new draft from vim");
+        assert_eq!(state.ui.input_cursor, state.ui.input_buffer.len());
+        assert!(cmds.is_empty());
+        // Empty Some = deliberate clear.
+        let (state, _) = update(
+            state,
+            Msg::EditorReturned {
+                text: Some(String::new()),
+            },
+        );
+        assert!(state.ui.input_buffer.is_empty());
+        // None = no-op.
+        let mut state = fresh_state();
+        state.ui.input_buffer = "kept".to_string();
+        let (state, _) = update(state, Msg::EditorReturned { text: None });
+        assert_eq!(state.ui.input_buffer, "kept");
     }
 
     #[test]

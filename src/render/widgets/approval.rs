@@ -37,7 +37,7 @@ impl<'a> Widget for ApprovalModalWidget<'a> {
         for raw in self.body.lines() {
             lines.push(Line::from(Span::styled(
                 truncate_to_cells(raw, inner_width),
-                Style::default().fg(Color::White),
+                Style::default().fg(self.theme.colors.text_primary.to_color()),
             )));
         }
         lines.push(Line::from(""));
@@ -49,7 +49,7 @@ impl<'a> Widget for ApprovalModalWidget<'a> {
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
                 Style::default()
-                    .fg(Color::White)
+                    .fg(self.theme.colors.text_primary.to_color())
                     .add_modifier(Modifier::BOLD)
             };
             lines.push(Line::from(Span::styled(format!("  {}", opt), style)));

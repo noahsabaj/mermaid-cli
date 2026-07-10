@@ -804,6 +804,19 @@ impl EffectRunner {
                     }
                 });
             },
+            Cmd::PersistUiTheme(theme) => {
+                self.detached.spawn(async move {
+                    if let Err(err) = crate::app::persist_ui_theme(theme) {
+                        tracing::warn!(error = %err, "failed to persist theme");
+                    }
+                });
+            },
+            Cmd::ComposeInEditor { .. } => {
+                // Run-loop-intercepted in the interactive TUI (it owns the
+                // terminal + event stream). Reaching the effect runner means a
+                // headless driver emitted it — nothing to suspend there.
+                tracing::warn!("compose_in_editor is unavailable outside the interactive TUI");
+            },
             Cmd::ListMemory => {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
