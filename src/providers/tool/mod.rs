@@ -74,13 +74,23 @@ pub trait ToolExecutor: Send + Sync {
 /// Built once at startup; read-only after that.
 pub struct ToolRegistry {
     entries: HashMap<&'static str, Arc<dyn ToolExecutor>>,
+    /// Direct handle to the subagent spawner (also reachable through the
+    /// `agent` tool entry, but `dyn ToolExecutor` can't be downcast). The
+    /// effect layer uses it to service `Cmd::KillBackgroundAgent`. `None`
+    /// in registries built without a spawner (child registries, tests).
+    subagent_spawner: Option<Arc<subagent::SubagentSpawner>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            subagent_spawner: None,
         }
+    }
+
+    pub fn subagent_spawner(&self) -> Option<&Arc<subagent::SubagentSpawner>> {
+        self.subagent_spawner.as_ref()
     }
 
     pub fn register(&mut self, tool: Arc<dyn ToolExecutor>) {
@@ -231,7 +241,8 @@ impl ToolRegistry {
         // calls it. Headless runs do register the agent — a CI prompt
         // may still delegate to subagents for batched work.
         let spawner = Arc::new(subagent::SubagentSpawner::new(providers));
-        r.register(Arc::new(subagent::SubagentTool::new(spawner)));
+        r.register(Arc::new(subagent::SubagentTool::new(spawner.clone())));
+        r.subagent_spawner = Some(spawner);
 
         Arc::new(r)
     }

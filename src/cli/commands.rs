@@ -13,7 +13,6 @@ use crate::{
     ollama::is_installed as is_ollama_installed,
     runtime::{NewProviderProbe, RuntimeClient, RuntimeStore, TaskRecord},
     session::ConversationManager,
-    utils::{resolve_api_key, resolve_api_key_with_fallback},
 };
 
 use super::{Commands, GitHost, OutputFormat, PairCommand, PluginCommand, PrCommand, QaCommand};
@@ -169,6 +168,14 @@ pub async fn handle_command(
         },
         Commands::Mcp => {
             show_mcp_servers();
+            Ok(true)
+        },
+        Commands::Login { provider } => {
+            login(provider.as_deref(), config)?;
+            Ok(true)
+        },
+        Commands::Logout { provider } => {
+            logout(provider, config)?;
             Ok(true)
         },
         Commands::CloudSetup => {
@@ -679,8 +686,144 @@ fn meta_api_key_env(config: &Config) -> &str {
         .unwrap_or(crate::providers::model::meta::DEFAULT_API_KEY_ENV)
 }
 
+/// Every provider `mermaid login` can store a key for: the bespoke
+/// providers, the OpenAI-compat registry, and user-defined `[providers.*]`
+/// entries. Yields `(name, default_env, override_env)`.
+fn login_providers(config: &Config) -> Vec<(String, String, Option<String>)> {
+    let over = |name: &str| {
+        config
+            .providers
+            .get(name)
+            .and_then(|c| c.api_key_env.clone())
+    };
+    let mut rows: Vec<(String, String, Option<String>)> = vec![
+        (
+            "anthropic".to_string(),
+            "ANTHROPIC_API_KEY".to_string(),
+            over("anthropic"),
+        ),
+        (
+            "gemini".to_string(),
+            "GOOGLE_API_KEY".to_string(),
+            over("gemini"),
+        ),
+        (
+            "meta".to_string(),
+            crate::providers::model::meta::DEFAULT_API_KEY_ENV.to_string(),
+            over("meta"),
+        ),
+        (
+            "ollama".to_string(),
+            "OLLAMA_API_KEY".to_string(),
+            over("ollama"),
+        ),
+    ];
+    for profile in PROVIDER_REGISTRY {
+        rows.push((
+            profile.name.to_string(),
+            profile.api_key_env.to_string(),
+            over(profile.name),
+        ));
+    }
+    for (name, cfg) in &config.providers {
+        if rows.iter().any(|(n, _, _)| n == name) {
+            continue;
+        }
+        // Custom providers: their api_key_env IS the default env.
+        if let Some(env) = &cfg.api_key_env {
+            rows.push((name.clone(), env.clone(), None));
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+/// `mermaid login [provider]`: no arg lists key status; with a provider,
+/// prompt (hidden input) and store the key in the OS keyring. Env vars keep
+/// absolute precedence over stored keys.
+fn login(provider: Option<&str>, config: &Config) -> Result<()> {
+    let rows = login_providers(config);
+    let Some(provider) = provider else {
+        println!(
+            "Provider API-key status (env beats keyring; `mermaid login <provider>` stores a key):\n"
+        );
+        for (name, default_env, override_env) in &rows {
+            let source =
+                crate::utils::provider_key_source(name, default_env, override_env.as_deref());
+            let env_name = override_env.as_deref().unwrap_or(default_env);
+            println!("  {:<14} {:<8} (${})", name, source, env_name);
+        }
+        return Ok(());
+    };
+    let provider = provider.to_lowercase();
+    let Some((name, default_env, override_env)) = rows.into_iter().find(|(n, _, _)| n == &provider)
+    else {
+        let names: Vec<String> = login_providers(config)
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        anyhow::bail!(
+            "unknown provider '{}'; known: {}",
+            provider,
+            names.join(", ")
+        );
+    };
+    let key = rpassword::prompt_password(format!("API key for {} (input hidden): ", name))
+        .context("read API key")?;
+    let key = key.trim();
+    anyhow::ensure!(!key.is_empty(), "no key entered; nothing stored");
+    let store = crate::utils::default_store();
+    store
+        .set(&name, key)
+        .with_context(|| format!("store key for {}", name))?;
+    println!(
+        "Stored key for {} in {} (service \"mermaid\").",
+        name,
+        store.label()
+    );
+    // The env var, when set, silently wins — say so now, not at 2am.
+    if crate::utils::resolve_api_key(&default_env, override_env.as_deref()).is_some() {
+        let env_name = override_env.as_deref().unwrap_or(&default_env);
+        println!(
+            "Note: ${} is currently set and takes precedence over the stored key.",
+            env_name
+        );
+    }
+    Ok(())
+}
+
+/// `mermaid logout <provider>`: delete the stored key (reports whether
+/// anything was stored).
+fn logout(provider: &str, config: &Config) -> Result<()> {
+    let provider = provider.to_lowercase();
+    // Unknown names are allowed here — a key may be stored for a provider
+    // that was since removed from config; deleting it must stay possible.
+    let _ = config;
+    let store = crate::utils::default_store();
+    if store
+        .delete(&provider)
+        .with_context(|| format!("delete key for {}", provider))?
+    {
+        println!(
+            "Removed stored key for {} from {}.",
+            provider,
+            store.label()
+        );
+    } else {
+        println!("No stored key for {}.", provider);
+    }
+    Ok(())
+}
+
 fn meta_api_key(config: &Config) -> Option<String> {
-    resolve_api_key(meta_api_key_env(config), None)
+    crate::utils::resolve_provider_key(
+        "meta",
+        crate::providers::model::meta::DEFAULT_API_KEY_ENV,
+        config
+            .providers
+            .get("meta")
+            .and_then(|provider| provider.api_key_env.as_deref()),
+    )
 }
 
 fn meta_base_url(config: &Config) -> String {
@@ -697,12 +840,13 @@ fn configured_remote_providers(config: &Config) -> Vec<String> {
         names.push("meta".to_string());
     }
     for profile in PROVIDER_REGISTRY {
-        let env = config
+        let override_env = config
             .providers
             .get(profile.name)
-            .and_then(|c| c.api_key_env.as_deref())
-            .unwrap_or(profile.api_key_env);
-        if resolve_api_key(env, None).is_some() {
+            .and_then(|c| c.api_key_env.as_deref());
+        if crate::utils::resolve_provider_key(profile.name, profile.api_key_env, override_env)
+            .is_some()
+        {
             names.push(profile.name.to_string());
         }
     }
@@ -710,8 +854,10 @@ fn configured_remote_providers(config: &Config) -> Vec<String> {
         if names.iter().any(|existing| existing == name) {
             continue;
         }
+        // Custom providers: api_key_env is their default env, so the keyring
+        // may fill the gap (matches the factory's resolution).
         if let Some(env) = provider.api_key_env.as_deref()
-            && resolve_api_key(env, None).is_some()
+            && crate::utils::resolve_provider_key(name, env, None).is_some()
         {
             names.push(name.clone());
         }
@@ -1276,10 +1422,11 @@ async fn probe_configured_provider_models(config: &Config) -> Result<()> {
         .build()?;
     for profile in PROVIDER_REGISTRY {
         let user_cfg = config.providers.get(profile.name);
-        let env = user_cfg
-            .and_then(|c| c.api_key_env.as_deref())
-            .unwrap_or(profile.api_key_env);
-        let Some(api_key) = resolve_api_key(env, None) else {
+        let Some(api_key) = crate::utils::resolve_provider_key(
+            profile.name,
+            profile.api_key_env,
+            user_cfg.and_then(|c| c.api_key_env.as_deref()),
+        ) else {
             continue;
         };
         let Some(base_url) = crate::providers::factory::discovery_base_url(
@@ -1878,14 +2025,21 @@ pub async fn list_models(config: &Config) -> Result<()> {
         println!("  - meta (via ${})", meta_api_key_env(config));
     }
     for profile in PROVIDER_REGISTRY {
-        let env = config
+        let override_env = config
             .providers
             .get(profile.name)
-            .and_then(|c| c.api_key_env.as_deref())
-            .unwrap_or(profile.api_key_env);
-        if resolve_api_key(env, None).is_some() {
-            any = true;
-            println!("  - {} (via ${})", profile.name, env);
+            .and_then(|c| c.api_key_env.as_deref());
+        match crate::utils::provider_key_source(profile.name, profile.api_key_env, override_env) {
+            "env" => {
+                any = true;
+                let env = override_env.unwrap_or(profile.api_key_env);
+                println!("  - {} (via ${})", profile.name, env);
+            },
+            "keyring" => {
+                any = true;
+                println!("  - {} (via keyring)", profile.name);
+            },
+            _ => {},
         }
     }
     if !any {
@@ -2159,22 +2313,27 @@ async fn show_status(config: &Config) -> Result<()> {
 
     // Check remote providers by API-key env presence (matches the
     // routing ProviderFactory uses when the user picks a model).
-    let mut available: Vec<&'static str> = Vec::new();
+    let mut available: Vec<String> = Vec::new();
     if meta_api_key(config).is_some() {
-        available.push("meta");
+        available.push("meta".to_string());
     }
     for profile in PROVIDER_REGISTRY {
-        let env = config
+        let override_env = config
             .providers
             .get(profile.name)
-            .and_then(|c| c.api_key_env.as_deref())
-            .unwrap_or(profile.api_key_env);
-        if resolve_api_key(env, None).is_some() {
-            available.push(profile.name);
+            .and_then(|c| c.api_key_env.as_deref());
+        match crate::utils::provider_key_source(profile.name, profile.api_key_env, override_env) {
+            "env" => available.push(profile.name.to_string()),
+            // Say where the key came from when it ISN'T the usual env var —
+            // the difference matters when debugging a stale login.
+            "keyring" => available.push(format!("{} (keyring)", profile.name)),
+            _ => {},
         }
     }
     if available.is_empty() {
-        println!("  [WARNING] Remote providers: none (no API keys in env)");
+        println!(
+            "  [WARNING] Remote providers: none (no API keys in env or keyring; `mermaid login <provider>`)"
+        );
     } else {
         println!("  [OK] Remote providers: {}", available.join(", "));
     }
@@ -2302,7 +2461,8 @@ fn show_provider_status(config: &Config) {
     // Anthropic — checked first because it's not in the OpenAI-compat
     // registry but is a top-tier provider users care about.
     let anth_cfg = config.providers.get("anthropic");
-    if resolve_api_key(
+    if crate::utils::resolve_provider_key(
+        "anthropic",
         "ANTHROPIC_API_KEY",
         anth_cfg.and_then(|c| c.api_key_env.as_deref()),
     )
@@ -2316,7 +2476,8 @@ fn show_provider_status(config: &Config) {
 
     // Gemini — also bespoke (not in OpenAI-compat registry).
     let gem_cfg = config.providers.get("gemini");
-    if resolve_api_key_with_fallback(
+    if crate::utils::resolve_provider_key_with_fallback(
+        "gemini",
         "GOOGLE_API_KEY",
         "GEMINI_API_KEY",
         gem_cfg.and_then(|c| c.api_key_env.as_deref()),
@@ -2335,7 +2496,8 @@ fn show_provider_status(config: &Config) {
 
     for profile in PROVIDER_REGISTRY {
         let user_cfg = config.providers.get(profile.name);
-        let api_key_present = resolve_api_key(
+        let api_key_present = crate::utils::resolve_provider_key(
+            profile.name,
             profile.api_key_env,
             user_cfg.and_then(|c| c.api_key_env.as_deref()),
         )
@@ -2364,7 +2526,7 @@ fn show_provider_status(config: &Config) {
             continue;
         }
         if let (Some(url), Some(env)) = (&cfg.base_url, cfg.api_key_env.as_deref())
-            && resolve_api_key(env, None).is_some()
+            && crate::utils::resolve_provider_key(name, env, None).is_some()
         {
             configured.push((name.clone(), url.clone()));
         }
