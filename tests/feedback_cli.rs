@@ -119,14 +119,17 @@ fn feedback_json_format_emits_valid_json() {
         serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string())
     );
     assert!(parsed["doctor"].is_object(), "doctor section embedded");
-    // The planted key resolves as PRESENT for openai — presence only, no value.
+    // The planted key resolves from env for openai — source only, no value.
     let openai = parsed["config"]["providers"]
         .as_array()
         .expect("providers array")
         .iter()
         .find(|p| p["name"] == "openai")
         .expect("openai row");
-    assert_eq!(openai["key_present"], serde_json::Value::Bool(true));
+    assert_eq!(
+        openai["key_source"],
+        serde_json::Value::String("env".into())
+    );
     assert!(!stdout.contains("sk-plantedsecret1234567890abcd"));
     let _ = std::fs::remove_dir_all(&home);
 }

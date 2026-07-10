@@ -95,6 +95,7 @@ htmd = "0.5.4"
 ignore = "0.4"
 nucleo-matcher = "0.3"
 jsonschema = "0.47.0"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 [dev-dependencies]
 # Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`

@@ -5,6 +5,7 @@
 mod auth;
 mod bounded;
 mod confirm;
+pub mod credentials;
 mod host_memory;
 mod logger;
 mod ndjson;
@@ -21,9 +22,13 @@ mod text;
 mod timestamp;
 
 // Public re-exports - the ONLY way to access utils functionality
-pub use auth::{resolve_api_key, resolve_api_key_with_fallback};
+pub use auth::{
+    provider_key_source, resolve_api_key, resolve_api_key_with_fallback, resolve_provider_key,
+    resolve_provider_key_with_fallback,
+};
 pub use bounded::{CappedLine, read_capped, read_file_capped, read_line_capped};
 pub use confirm::{confirm_or_refuse, is_affirmative, should_refuse_noninteractive};
+pub use credentials::{CredentialStore, default_store};
 pub use host_memory::{gpu_vram_bytes, system_ram_bytes};
 pub use logger::{
     TraceRing, init_logger, log_debug, log_error, log_file_path, log_info, log_progress, log_warn,

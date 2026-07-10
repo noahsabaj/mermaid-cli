@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its partial report for the model. Closes the follow-up from the agent
   backgrounding work below.
 
+- **OS-keyring API keys + `mermaid login`.** `mermaid login <provider>`
+  stores a provider API key in the OS keyring (macOS Keychain, Windows
+  Credential Manager, Linux Secret Service); `mermaid login` lists every
+  provider's key status; `mermaid logout <provider>` removes a stored key.
+  Environment variables keep absolute precedence, and a per-provider
+  `api_key_env` override remains authoritative (no keyring fallback).
+  `doctor` and `mermaid feedback` now report each key's source (`env`,
+  `keyring`, `none`). `MERMAID_NO_KEYRING=1` disables keyring lookups.
+
 - **Live agent panel + agent backgrounding.** Running `agent` tools now get
   one stable panel row each under the status spinner — description, the
   child's current tool or phase, elapsed time, and a live token count — so

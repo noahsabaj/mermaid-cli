@@ -33,15 +33,13 @@ pub fn setup_cloud_interactive() -> Result<bool> {
     Ok(is_cloud_configured())
 }
 
-/// Get the Ollama Cloud API key from the `OLLAMA_API_KEY` environment variable.
+/// Get the Ollama Cloud API key: the `OLLAMA_API_KEY` environment variable,
+/// falling back to the OS keyring (`mermaid login ollama`).
 ///
-/// Resolved from the environment only and never persisted to disk (#88),
-/// mirroring [`crate::utils::resolve_api_key`]. Empty values are treated as
-/// unset.
+/// Never persisted to config files (#88); the keyring is the only at-rest
+/// store and it is the OS's. Empty values are treated as unset.
 pub fn get_cloud_api_key() -> Option<String> {
-    std::env::var("OLLAMA_API_KEY")
-        .ok()
-        .filter(|key| !key.is_empty())
+    crate::utils::resolve_provider_key("ollama", "OLLAMA_API_KEY", None)
 }
 
 /// Check if a model name requires cloud access.
