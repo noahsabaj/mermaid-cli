@@ -34,6 +34,11 @@ pub struct StatusWidget<'a> {
     /// Live session safety mode. Rendered on line 2 left so the active
     /// permission level is always visible (Shift+Tab / `/safety` change it).
     pub safety_mode: SafetyMode,
+    /// True while the session is drafting a plan: the safety segment reads
+    /// `plan mode on (alt+p to toggle) - restores: <mode>` instead of
+    /// `safety: <mode>`. Never the spinner/status widget (#245 invariant) —
+    /// this is the persistent mode line.
+    pub plan_active: bool,
 }
 
 impl<'a> Widget for StatusWidget<'a> {
@@ -92,7 +97,15 @@ impl<'a> Widget for StatusWidget<'a> {
         // Prefix the app version (the one inoffensive, always-visible place we
         // surface it) and the live safety mode (Shift+Tab / `/safety` change it
         // live) ahead of the reasoning level.
-        let left_text = status_line2_left(self.safety_mode.as_str(), &reasoning_text);
+        let safety_segment = if self.plan_active {
+            format!(
+                "plan mode on (alt+p to toggle) - restores: {}",
+                self.safety_mode.as_str()
+            )
+        } else {
+            format!("safety: {}", self.safety_mode.as_str())
+        };
+        let left_text = status_line2_left(&safety_segment, &reasoning_text);
         let model_display = self.model_name;
 
         // Calculate padding between reasoning text and model name (display-cell widths).
@@ -157,13 +170,14 @@ fn format_context_snapshot(snapshot: &ContextUsageSnapshot) -> String {
 }
 
 /// Left segment of status line 2: the app version (compile-time, so it tracks
-/// the crate version automatically), then the live safety mode and reasoning
-/// level. This footer is the single place the version is surfaced in the TUI.
-fn status_line2_left(safety: &str, reasoning_text: &str) -> String {
+/// the crate version automatically), then the safety segment (`safety: <mode>`
+/// or the plan-mode badge) and reasoning level. This footer is the single
+/// place the version is surfaced in the TUI.
+fn status_line2_left(safety_segment: &str, reasoning_text: &str) -> String {
     format!(
-        "mermaid v{} · safety: {} · {}",
+        "mermaid v{} · {} · {}",
         env!("CARGO_PKG_VERSION"),
-        safety,
+        safety_segment,
         reasoning_text
     )
 }
@@ -174,13 +188,25 @@ mod tests {
 
     #[test]
     fn status_line2_left_shows_version_safety_and_reasoning() {
-        let s = status_line2_left("ask", "reasoning: high");
+        let s = status_line2_left("safety: ask", "reasoning: high");
         assert!(
             s.contains(&format!("mermaid v{}", env!("CARGO_PKG_VERSION"))),
             "status line must show the app version — got {s:?}"
         );
         assert!(s.contains("safety: ask"));
         assert!(s.contains("reasoning: high"));
+    }
+
+    #[test]
+    fn status_line2_left_carries_plan_badge_segment() {
+        // The plan badge replaces the safety segment wholesale and always
+        // names the restore target, so the user sees both facts at once.
+        let s = status_line2_left(
+            "plan mode on (alt+p to toggle) - restores: auto",
+            "reasoning: high",
+        );
+        assert!(s.contains("plan mode on (alt+p to toggle) - restores: auto"));
+        assert!(!s.contains("safety:"));
     }
 
     #[test]

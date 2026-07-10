@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display diff, which is capped at 220 lines), and the segment is omitted
   entirely on runs that changed nothing.
 
+- **Plan mode (core).** Alt+P or `/plan` puts the session in a read-only
+  collaboration state for designing work before doing it: tool dispatch
+  floors the effective safety mode to read-only at the policy gate (hard
+  enforcement, not prompt-only), with exactly three carve-outs — the plan
+  file itself (`.mermaid/plans/<slug>.md`, project-local), memory writes,
+  and known-safe build/test commands (`cargo check/build/test/clippy`,
+  `go build/test/vet`, `npm test`, `make test`, …; anchored like Allow
+  overrides, so substitutions, wrappers, redirects, and mutating tail
+  segments refuse). The model gets a short plan-mode charter (three phases,
+  decision-complete quality bar, five-section plan format whose Tasks list
+  will seed the live checklist on approval) and plan-flavored denials that
+  teach instead of frustrate; leaving plan mode neutralizes stale denials
+  the way safety-mode loosening already does. The task checklist writers
+  are firewalled during planning. Status bar shows
+  `plan mode on (alt+p to toggle) - restores: <mode>` — the previous
+  safety mode is untouched and resumes on exit. Planning-in-progress
+  survives `--resume`. Approval flow, task seeding, per-category plan
+  permissions, model split, and handoff land in follow-up PRs.
+
 - **Native structured output on Anthropic.** `mermaid run --output-schema`
   now sends the schema as `output_config.format` (JSON Schema) on the
   Anthropic formatting turn, matching the native enforcement already used

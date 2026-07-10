@@ -166,6 +166,49 @@ pub async fn gate(
         .with_overrides(ctx.config.safety.overrides.clone())
         .decide(&request);
 
+    // Plan mode: the reducer floors `ctx.safety_mode` to `ReadOnly` while a
+    // plan is being drafted, so the engine's mode-default deny covers
+    // everything — then the carve-outs below soften exactly three shapes.
+    // Keying on the deny REASON (the read-only marker) keeps the precedence
+    // ladder intact: a user `Deny` override and the destructive hard-deny
+    // carry different reasons and still win.
+    let decision = match decision {
+        PolicyDecision::Deny { risk, reason }
+            if ctx.plan_file.is_some()
+                && reason.starts_with(crate::runtime::READ_ONLY_DENIAL_MARKER) =>
+        {
+            let plan_file = ctx.plan_file.as_deref().expect("checked is_some");
+            let plan_file_edit = request.category == crate::runtime::ToolCategory::Edit
+                && request
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| is_plan_file_path(&ctx.workdir, p, plan_file));
+            let safe_build = request
+                .command
+                .as_deref()
+                .is_some_and(crate::runtime::is_plan_safe_build_command);
+            if plan_file_edit
+                || safe_build
+                || request.category == crate::runtime::ToolCategory::Memory
+            {
+                PolicyDecision::Allow {
+                    risk,
+                    checkpoint: false,
+                }
+            } else {
+                PolicyDecision::Deny {
+                    risk,
+                    reason: format!(
+                        "{} is active — planning only; capture this change in the plan \
+                         instead of performing it now",
+                        crate::runtime::PLAN_DENIAL_MARKER
+                    ),
+                }
+            }
+        },
+        other => other,
+    };
+
     match decision {
         PolicyDecision::Allow { risk, .. } => Gate::Proceed { risk },
         PolicyDecision::Ask { risk, checkpoint } => {
@@ -259,6 +302,34 @@ pub async fn gate(
             0.0,
         )),
     }
+}
+
+/// True when `raw` (a tool-supplied path, absolute or workdir-relative) names
+/// the plan file. Lexical normalization only — the plan file may not exist
+/// yet (the first write creates it), so `canonicalize` is not an option, and
+/// `..`/`.` components must not smuggle a different file past the exemption.
+fn is_plan_file_path(workdir: &std::path::Path, raw: &str, plan_file: &std::path::Path) -> bool {
+    fn normalize(p: &std::path::Path) -> PathBuf {
+        use std::path::Component;
+        let mut out = PathBuf::new();
+        for c in p.components() {
+            match c {
+                Component::CurDir => {},
+                Component::ParentDir => {
+                    out.pop();
+                },
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+    let p = std::path::Path::new(raw);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        workdir.join(p)
+    };
+    normalize(&abs) == normalize(plan_file)
 }
 
 /// Interactive approval: check the session "don't ask again" allowlist, else
@@ -788,6 +859,145 @@ mod tests {
         let mut req = ActionRequest::new("execute_command", ToolCategory::Shell, cmd);
         req.command = Some(cmd.to_string());
         req
+    }
+
+    /// Plan-mode ctx: the reducer floors the mode to ReadOnly and stamps the
+    /// plan file; mirror both here.
+    fn ctx_plan() -> ExecContext {
+        let mut c = ctx(SafetyMode::ReadOnly);
+        c.workdir = PathBuf::from("/repo");
+        c.plan_file = Some(PathBuf::from("/repo/.mermaid/plans/x.md"));
+        c
+    }
+
+    fn edit_request(path: &str) -> ActionRequest {
+        let mut req = ActionRequest::new(
+            "write_file",
+            ToolCategory::Edit,
+            format!("write_file {path}"),
+        );
+        req.path = Some(path.to_string());
+        req
+    }
+
+    #[tokio::test]
+    async fn plan_mode_exempts_only_the_plan_file_from_the_edit_deny() {
+        // The exact plan file passes — absolute, workdir-relative, and a
+        // lexically-normalizable spelling of the same path.
+        for path in [
+            "/repo/.mermaid/plans/x.md",
+            ".mermaid/plans/x.md",
+            "./.mermaid/plans/../plans/x.md",
+        ] {
+            let g = gate(
+                &ctx_plan(),
+                edit_request(path),
+                &[],
+                serde_json::json!({}),
+                true,
+            )
+            .await;
+            assert!(
+                matches!(g, Gate::Proceed { .. }),
+                "plan file spelling {path:?} must be writable"
+            );
+        }
+        // Any other file — including a `..` smuggle THROUGH the plans dir —
+        // is denied with the plan-flavored reason the neutralizer keys on.
+        for path in ["src/main.rs", "/repo/.mermaid/plans/../../src/main.rs"] {
+            match gate(
+                &ctx_plan(),
+                edit_request(path),
+                &[],
+                serde_json::json!({}),
+                true,
+            )
+            .await
+            {
+                Gate::Block(outcome) => assert!(
+                    outcome.model_content.contains(&format!(
+                        "blocked by policy: {}",
+                        crate::runtime::PLAN_DENIAL_MARKER
+                    )),
+                    "plan denial must carry the plan signature for {path:?}: {:?}",
+                    outcome.model_content
+                ),
+                Gate::Proceed { .. } => panic!("{path:?} must not be writable in plan mode"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_mode_allows_memory_and_safe_builds_but_floors_the_rest() {
+        // Memory writes: allowed while planning (exploration feeds memory)
+        // even though bare ReadOnly denies them.
+        assert!(
+            gate_external(
+                &ctx_plan(),
+                "memory",
+                ToolCategory::Memory,
+                "memory remember".to_string(),
+                &serde_json::json!({"action": "remember"}),
+            )
+            .await
+            .is_none(),
+            "plan mode must allow memory writes",
+        );
+        // Known-safe build: allowed.
+        let g = gate(
+            &ctx_plan(),
+            shell_request("cargo test policy"),
+            &[],
+            serde_json::json!({}),
+            true,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Proceed { .. }),
+            "plan mode must allow known-safe builds"
+        );
+        // Arbitrary mutation: denied with the plan-flavored reason.
+        match gate(
+            &ctx_plan(),
+            shell_request("touch src/main.rs"),
+            &[],
+            serde_json::json!({}),
+            true,
+        )
+        .await
+        {
+            Gate::Block(outcome) => {
+                assert!(
+                    outcome.model_content.contains(&format!(
+                        "blocked by policy: {}",
+                        crate::runtime::PLAN_DENIAL_MARKER
+                    )),
+                    "got {:?}",
+                    outcome.model_content
+                );
+            },
+            Gate::Proceed { .. } => panic!("mutations must not run in plan mode"),
+        }
+        // The destructive hard-deny outranks the plan carve-outs and keeps
+        // its own reason (no plan marker — it is not mode-dependent).
+        match gate(
+            &ctx_plan(),
+            shell_request("rm -rf /"),
+            &[],
+            serde_json::json!({}),
+            true,
+        )
+        .await
+        {
+            Gate::Block(outcome) => assert!(
+                !outcome
+                    .model_content
+                    .contains(crate::runtime::PLAN_DENIAL_MARKER),
+                "destructive deny must not be rewritten: {:?}",
+                outcome.model_content
+            ),
+            Gate::Proceed { .. } => panic!("destructive commands must never run"),
+        }
     }
 
     #[tokio::test]

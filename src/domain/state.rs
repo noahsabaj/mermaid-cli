@@ -169,6 +169,7 @@ impl State {
                 context_usage: None,
                 is_subagent: false,
                 agent_preamble: None,
+                plan: None,
             },
             turn: TurnState::Idle,
             ui: UiState {
@@ -214,6 +215,9 @@ impl State {
         if let Some(mode) = history.safety_mode {
             self.session.safety_mode = mode;
         }
+        // Restore planning-in-progress (None for sessions saved before the
+        // field existed, and for sessions that weren't planning).
+        self.session.plan = history.plan.clone();
         self.session.last_token_usage = history.last_token_usage;
         self.session.cumulative_token_usage = history.cumulative_token_usage;
         self.session.context_usage = history.context_usage.clone();
@@ -526,6 +530,28 @@ pub fn estimate_tool_schema_tokens(tools: &[super::cmd::ToolDefinition]) -> usiz
         .unwrap_or(0)
 }
 
+/// Live plan-mode state: present iff the session is currently drafting a
+/// plan. Plan mode is deliberately NOT a fifth `SafetyMode` — it *remembers
+/// and restores* the mode the user was in, which a flat cycle can't express.
+/// While this is `Some`, tool dispatch floors the effective safety mode to
+/// `ReadOnly` and the policy gate applies the plan carve-outs (the plan file
+/// itself, memory writes, known-safe builds).
+///
+/// `Session.safety_mode` is left untouched while planning — it IS the restore
+/// target (the status bar shows it as "restores: <mode>", and Shift+Tab /
+/// `/safety` may retune it mid-plan); only the *effective* mode at tool
+/// dispatch changes.
+///
+/// Serialized into `ConversationHistory` on every save (like `safety_mode`)
+/// so `--resume` restores planning-in-progress; sessions saved before this
+/// field existed deserialize to `None`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlanState {
+    /// Absolute path of the plan file the model authors — the single path the
+    /// policy gate exempts from the read-only floor.
+    pub plan_path: std::path::PathBuf,
+}
+
 /// Persistent conversational state that survives across turns.
 ///
 /// "Session" here means the user-visible chat session, not the tokio
@@ -560,6 +586,9 @@ pub struct Session {
     /// reconnaissance" charter), appended after the subagent contract.
     /// Only ever `Some` on subagent sessions.
     pub agent_preamble: Option<String>,
+    /// `Some` while the session is in plan mode (see [`PlanState`]). Never
+    /// `Some` on subagent sessions — children explore, they don't plan.
+    pub plan: Option<PlanState>,
 }
 
 impl Session {
@@ -571,6 +600,7 @@ impl Session {
     pub fn snapshot_conversation(&self) -> ConversationHistory {
         let mut history = self.conversation.clone();
         history.safety_mode = Some(self.safety_mode);
+        history.plan = self.plan.clone();
         history.last_token_usage = self.last_token_usage;
         history.cumulative_token_usage = self.cumulative_token_usage;
         history.context_usage = self.context_usage.clone();

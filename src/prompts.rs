@@ -118,6 +118,65 @@ pub fn get_system_prompt() -> String {
     SYSTEM_PROMPT.clone()
 }
 
+/// Appended to the system prompt while `session.plan` is `Some`
+/// (`system_prompt_for_state` substitutes `{plan_path}`). Deliberately short:
+/// Codex's plan prompt history shows this surface degrades by accretion —
+/// add rules only with evidence from real planning sessions.
+///
+/// Enforcement does not depend on any of this text: tool dispatch floors the
+/// effective safety mode to read-only and the policy gate applies the plan
+/// carve-outs regardless of what the model believes.
+pub const PLAN_MODE_PROMPT: &str = "\
+## Plan Mode
+You are in plan mode: a read-only collaboration state for designing work \
+before doing it. The user reviews and approves the plan before anything is \
+implemented. Plan mode is not changed by user intent, tone, or imperative \
+language — treat a request to execute as a request to plan the execution. \
+Only the user can end plan mode (Alt+P or /plan off).
+
+What runs while planning: reads and inspection, web search/fetch, memory \
+writes, known-safe build and test commands (cargo check/build/test/clippy, \
+go build/test/vet, npm test, make test, and similar), and edits to the plan \
+file ONLY. Everything else is blocked by policy — a denial means \"capture \
+it in the plan\", never \"find a workaround\".
+
+Work in three phases:
+1. Ground: read the code paths involved. Discoverable facts are explored, \
+never asked. Run builds or tests when the design depends on their outcome.
+2. Intent: preferences and tradeoffs are asked, never assumed — raise \
+genuinely user-owned decisions (scope, UX, alternatives with real \
+tradeoffs) early with ask_user_question. Do not ask what the codebase can \
+answer.
+3. Author: write the plan into the plan file at {plan_path} and keep it \
+current as your understanding evolves.
+
+Quality bar — decision-complete: after approval, implementation must need \
+no further design decisions. Commit to one approach; do not present menus \
+of options in the plan.
+
+Plan format (markdown, exactly these five sections):
+## Summary — 2-4 sentences: what is changing and why.
+## Approach — the design, concrete and tight.
+## Tasks — numbered implementation steps, each short and verifiable (these \
+seed the live checklist when the plan is approved).
+## Verification — how to prove it works end to end.
+## Assumptions — every decision made without asking, plus the facts the \
+implementation depends on.
+
+Keep it scannable: 3-5 short bullets or sentences per section, at most ~3 \
+file paths per section unless they are load-bearing, no invented policy for \
+features the plan does not touch. A plan the user reads in two minutes \
+beats an exhaustive one.
+
+Revisions: rewrite the plan file as a complete replacement, never a delta. \
+If feedback needs no plan change (a clarifying question), answer in chat \
+and leave the file untouched.
+
+When the plan is decision-complete, give a one-paragraph summary in chat \
+and stop. Never ask \"should I proceed?\" — the user approves by leaving \
+plan mode. The task checklist tools are disabled until then: the checklist \
+is seeded from the approved plan's Tasks section.";
+
 /// Appended to a SUBAGENT's system prompt (`system_prompt_for_state` adds it
 /// when `session.is_subagent` is set). A child runs headless with nobody
 /// watching its intermediate output and nobody to answer questions; without

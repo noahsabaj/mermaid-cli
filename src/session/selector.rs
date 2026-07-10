@@ -496,6 +496,7 @@ mod tests {
             input_history: VecDeque::new(),
             git_branch: branch.map(str::to_string),
             safety_mode: None,
+            plan: None,
             last_token_usage: None,
             cumulative_token_usage: crate::domain::TokenUsageTotals::default(),
             context_usage: None,

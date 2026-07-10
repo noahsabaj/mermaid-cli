@@ -69,6 +69,7 @@ pub const KEYBINDINGS: &[(&str, &str)] = &[
     ("Ctrl+B", "Background a running command"),
     ("Ctrl+T", "Expand or collapse the task checklist"),
     ("Alt+T", "Cycle reasoning depth"),
+    ("Alt+P", "Toggle plan mode"),
     ("Shift+Tab", "Cycle the safety mode"),
     ("Ctrl+C", "Cancel, then exit"),
     ("Ctrl+D", "Quit"),
@@ -292,6 +293,13 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["permission"],
         description: "Show or set the session safety mode (Shift+Tab also cycles)",
         arg_hint: Some("[read_only|ask|auto|full_access]"),
+        group: SlashCommandGroup::SafetyRecovery,
+    },
+    SlashCommand {
+        name: "plan",
+        aliases: &[],
+        description: "Enter or leave plan mode (Alt+P also toggles)",
+        arg_hint: Some("[off|show]"),
         group: SlashCommandGroup::SafetyRecovery,
     },
     SlashCommand {

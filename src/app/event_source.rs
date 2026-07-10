@@ -215,6 +215,7 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
             // Invalid value ⇒ `None` ⇒ the reducer shows current + options.
             Some(mode) => SlashCmd::Safety(crate::runtime::SafetyMode::parse(&mode.to_lowercase())),
         },
+        Some("plan") => SlashCmd::Plan(arg),
         Some("clear") => SlashCmd::Clear,
         Some("save") => SlashCmd::Save(arg),
         Some("load") => SlashCmd::Load(arg),

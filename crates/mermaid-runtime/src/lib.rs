@@ -51,8 +51,9 @@ pub use plugin::{
     run_plugin_hooks, validate_plugin_manifest, write_plugin_lockfile,
 };
 pub use policy::{
-    ActionRequest, PolicyDecision, PolicyEngine, PolicyOverride, PolicyOverrideDecision,
-    READ_ONLY_DENIAL_MARKER, RiskClass, SafetyMode, ToolCategory, is_destructive_command,
+    ActionRequest, PLAN_DENIAL_MARKER, PolicyDecision, PolicyEngine, PolicyOverride,
+    PolicyOverrideDecision, READ_ONLY_DENIAL_MARKER, RiskClass, SafetyMode, ToolCategory,
+    is_destructive_command, is_plan_safe_build_command,
 };
 pub use sandbox::{
     apply_fs_confinement, apply_network_killswitch, fs_confinement_available,

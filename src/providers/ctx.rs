@@ -117,8 +117,15 @@ pub struct ExecContext {
     /// `session_id` for checkpoint anchoring (see `CheckpointOrigin`).
     pub message_index: Option<i64>,
     /// Effective live safety mode for this call (from the session, not the
-    /// static config). The policy gate builds its `PolicyEngine` from this.
+    /// static config; floored to `ReadOnly` while a plan is being drafted).
+    /// The policy gate builds its `PolicyEngine` from this.
     pub safety_mode: SafetyMode,
+    /// `Some(path)` while the session is in plan mode: the one path the
+    /// policy gate exempts from the read-only floor, and the flag the plan
+    /// carve-outs (memory writes, known-safe builds) and the task tools key
+    /// on. Defaults to `None` in `new` — the live dispatch path sets it,
+    /// like `background`/`notify`.
+    pub plan_file: Option<std::path::PathBuf>,
     /// The user's stated intent for the turn (latest user message), passed to
     /// the Auto-mode classifier so it can judge whether an action is aligned.
     pub intent: Option<String>,
@@ -198,6 +205,7 @@ impl ExecContext {
             // scope's background token (and sets `notify`).
             background: CancellationToken::new(),
             notify: None,
+            plan_file: None,
             progress,
             call_id,
             turn,

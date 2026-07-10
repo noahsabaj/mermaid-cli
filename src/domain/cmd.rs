@@ -68,10 +68,15 @@ pub enum Cmd {
         call_id: ToolCallId,
         source: ModelToolCall,
         model_id: String,
-        /// Effective live safety mode (from `state.session.safety_mode`) at
-        /// the moment this call was emitted. The runner builds the policy
-        /// gate / Auto classifier from this rather than the static config.
+        /// Effective live safety mode at the moment this call was emitted
+        /// (`state.session.safety_mode`, floored to `ReadOnly` while a plan
+        /// is being drafted). The runner builds the policy gate / Auto
+        /// classifier from this rather than the static config.
         safety_mode: SafetyMode,
+        /// `Some(path)` while the session is in plan mode: the one path the
+        /// policy gate exempts from the read-only floor, and the flag the
+        /// plan carve-outs (memory writes, known-safe builds) key on.
+        plan_file: Option<std::path::PathBuf>,
         /// The user's stated intent for the turn (latest user message),
         /// passed to the Auto-mode classifier as alignment context.
         intent: Option<String>,
