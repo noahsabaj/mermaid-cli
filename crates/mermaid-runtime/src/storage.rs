@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 //
 // History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
 // the F75 covering indexes; v4 added the `outcomes` table.
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 /// `tasks.owner_kind` value for a task the daemon runs in-process. Only these are
 /// reset by `reconcile_after_restart`; a `NULL` owner (an interactive CLI run, or
@@ -348,6 +348,15 @@ pub struct CheckpointRecord {
     pub created_at: String,
     pub archived_at: Option<String>,
     pub archive_reason: Option<String>,
+    /// Conversation the checkpointed mutation belonged to, when the tool call
+    /// ran inside an interactive session. `None` for headless/daemon/manual
+    /// checkpoints.
+    pub session_id: Option<String>,
+    /// Conversation length (`messages().len()`) at tool DISPATCH. A rewind
+    /// that forks at user-message index `k` keeps `messages[..k]`, so this
+    /// checkpoint belongs to the discarded timeline iff `message_index > k`
+    /// (STRICT — see `list_for_session`).
+    pub message_index: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,6 +368,8 @@ pub struct NewCheckpoint {
     pub changed_files_json: String,
     pub pending_action_json: Option<String>,
     pub approval_id: Option<String>,
+    pub session_id: Option<String>,
+    pub message_index: Option<i64>,
 }
 
 /// Provenance of an [`OutcomeRecord`] — the axis that separates a genuine
@@ -966,7 +977,9 @@ impl RuntimeStore {
                 approval_id TEXT REFERENCES approvals(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL,
                 archived_at TEXT,
-                archive_reason TEXT
+                archive_reason TEXT,
+                session_id TEXT,
+                message_index INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS compactions (
@@ -1036,6 +1049,17 @@ impl RuntimeStore {
         ensure_column(&self.conn, "approvals", "archive_reason", "TEXT")?;
         ensure_column(&self.conn, "checkpoints", "archived_at", "TEXT")?;
         ensure_column(&self.conn, "checkpoints", "archive_reason", "TEXT")?;
+        // v6: conversation anchoring for rewind/fork. Nullable + no backfill —
+        // pre-existing checkpoints simply have no anchor and are excluded from
+        // fork notices.
+        ensure_column(&self.conn, "checkpoints", "session_id", "TEXT")?;
+        ensure_column(&self.conn, "checkpoints", "message_index", "INTEGER")?;
+        // Index AFTER the ensure_columns: on an upgraded DB the columns only
+        // exist once the lines above ran (fresh DBs have them from CREATE).
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_checkpoints_session
+                 ON checkpoints(session_id, message_index);",
+        )?;
         // F18 (RC-E): task ownership. Nullable + no backfill — existing rows stay
         // `NULL` (treated as un-owned, so reconcile leaves them alone), and only
         // tasks the daemon explicitly marks `daemon` are reset on restart.
@@ -1081,7 +1105,10 @@ impl RuntimeStore {
                 // v5: additive `tasks.prompt` column — applied by `ensure_column`
                 // in the baseline above.
                 5 => self.migrate_to_v5()?,
-                // A future v6+ adds its non-additive step here.
+                // v6: additive `checkpoints.session_id`/`message_index` columns
+                // + covering index — applied by the idempotent baseline above.
+                6 => {},
+                // A future v7+ adds its non-additive step here.
                 _ => {},
             }
         }
@@ -1816,8 +1843,8 @@ impl CheckpointsRepo<'_> {
         self.conn.execute(
             "INSERT INTO checkpoints
              (id, task_id, project_path, snapshot_path, changed_files_json,
-              pending_action_json, approval_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+              pending_action_json, approval_id, created_at, session_id, message_index)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 id,
                 new.task_id,
@@ -1827,6 +1854,8 @@ impl CheckpointsRepo<'_> {
                 new.pending_action_json,
                 new.approval_id,
                 now_rfc3339(),
+                new.session_id,
+                new.message_index,
             ],
         )?;
         self.get(&id)?
@@ -1837,7 +1866,8 @@ impl CheckpointsRepo<'_> {
         self.conn
             .query_row(
                 "SELECT id, task_id, project_path, snapshot_path, changed_files_json,
-                        pending_action_json, approval_id, created_at, archived_at, archive_reason
+                        pending_action_json, approval_id, created_at, archived_at, archive_reason,
+                        session_id, message_index
                  FROM checkpoints WHERE id = ?1",
                 [id],
                 checkpoint_from_row,
@@ -1891,10 +1921,40 @@ impl CheckpointsRepo<'_> {
         };
         let mut stmt = self.conn.prepare(&format!(
             "SELECT id, task_id, project_path, snapshot_path, changed_files_json,
-                    pending_action_json, approval_id, created_at, archived_at, archive_reason
+                    pending_action_json, approval_id, created_at, archived_at, archive_reason,
+                    session_id, message_index
              FROM checkpoints {archived_filter} ORDER BY created_at DESC LIMIT ?1"
         ))?;
         let rows = stmt.query_map([clamp_limit(limit)], checkpoint_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Unarchived checkpoints of `session_id` anchored STRICTLY past
+    /// `after_message_index`, oldest first. Strict `>` is the fork-boundary
+    /// invariant: a fork at user-message index `k` keeps `messages[..k]`, and
+    /// a checkpoint stamped `message_index == k` snapshotted state from
+    /// BEFORE that user message existed — it belongs to the kept prefix, not
+    /// the discarded timeline. Oldest-first because each checkpoint is a
+    /// PRE-mutation snapshot: the oldest one past the cut holds the file
+    /// state closest to the fork point.
+    pub fn list_for_session(
+        &self,
+        session_id: &str,
+        after_message_index: i64,
+    ) -> Result<Vec<CheckpointRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, project_path, snapshot_path, changed_files_json,
+                    pending_action_json, approval_id, created_at, archived_at, archive_reason,
+                    session_id, message_index
+             FROM checkpoints
+             WHERE session_id = ?1 AND message_index > ?2 AND archived_at IS NULL
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(
+            params![session_id, after_message_index],
+            checkpoint_from_row,
+        )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -2407,6 +2467,8 @@ fn checkpoint_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CheckpointRe
         created_at: row.get("created_at")?,
         archived_at: row.get("archived_at")?,
         archive_reason: row.get("archive_reason")?,
+        session_id: row.get("session_id")?,
+        message_index: row.get("message_index")?,
     })
 }
 
@@ -2919,6 +2981,106 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_anchor_round_trips_and_list_for_session_is_strict() {
+        let path = temp_db("checkpoint_anchor");
+        let store = RuntimeStore::open(&path).expect("open store");
+        for (id, idx) in [("cp-a", 3_i64), ("cp-b", 5), ("cp-c", 9)] {
+            store
+                .checkpoints()
+                .create(NewCheckpoint {
+                    id: Some(id.to_string()),
+                    task_id: None,
+                    project_path: "/tmp/p".to_string(),
+                    snapshot_path: format!("/data/checkpoints/{id}"),
+                    changed_files_json: "[]".to_string(),
+                    pending_action_json: None,
+                    approval_id: None,
+                    session_id: Some("sess-1".to_string()),
+                    message_index: Some(idx),
+                })
+                .expect("create checkpoint");
+        }
+        // Unanchored + other-session rows never surface.
+        store
+            .checkpoints()
+            .create(NewCheckpoint {
+                id: Some("cp-unanchored".to_string()),
+                task_id: None,
+                project_path: "/tmp/p".to_string(),
+                snapshot_path: "/x".to_string(),
+                changed_files_json: "[]".to_string(),
+                pending_action_json: None,
+                approval_id: None,
+                session_id: None,
+                message_index: None,
+            })
+            .expect("create unanchored");
+
+        let got = store.checkpoints().get("cp-a").unwrap().unwrap();
+        assert_eq!(got.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(got.message_index, Some(3));
+
+        // STRICT boundary: fork at k=3 keeps messages[..3]; cp-a (index 3)
+        // snapshotted state from BEFORE user message 3 existed — kept prefix.
+        let past = store
+            .checkpoints()
+            .list_for_session("sess-1", 3)
+            .expect("list_for_session");
+        let ids: Vec<&str> = past.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["cp-b", "cp-c"], "strict > and oldest-first");
+
+        assert!(
+            store
+                .checkpoints()
+                .list_for_session("sess-other", 0)
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn v5_database_upgrades_with_null_checkpoint_anchors() {
+        // A DB created by the previous build (schema v5, no anchor columns)
+        // must open cleanly, gain the columns, and load old rows as None.
+        let path = temp_db("v5_upgrade");
+        {
+            let conn = Connection::open(&path).expect("raw open");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE checkpoints (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT,
+                    project_path TEXT NOT NULL,
+                    snapshot_path TEXT NOT NULL,
+                    changed_files_json TEXT NOT NULL,
+                    pending_action_json TEXT,
+                    approval_id TEXT,
+                    created_at TEXT NOT NULL,
+                    archived_at TEXT,
+                    archive_reason TEXT
+                );
+                INSERT INTO checkpoints
+                    (id, task_id, project_path, snapshot_path, changed_files_json, created_at)
+                    VALUES ('old-cp', NULL, '/tmp/p', '/snap', '[]', '2026-01-01T00:00:00Z');
+                PRAGMA user_version = 5;
+                "#,
+            )
+            .expect("seed v5 schema");
+        }
+        let store = RuntimeStore::open(&path).expect("upgrade open");
+        let old = store.checkpoints().get("old-cp").unwrap().unwrap();
+        assert_eq!(old.session_id, None);
+        assert_eq!(old.message_index, None);
+        let version: i32 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn init_schema_is_idempotent_across_opens() {
         // Re-opening the same DB re-runs `init_schema`; it must succeed (the
         // create script and `ensure_column` are idempotent) and keep the
@@ -3247,6 +3409,8 @@ mod tests {
                 changed_files_json: "[]".to_string(),
                 pending_action_json: Some("{\"tool\":\"write_file\"}".to_string()),
                 approval_id: Some(approval.id.clone()),
+                session_id: None,
+                message_index: None,
             })
             .expect("create checkpoint");
 
@@ -3306,6 +3470,8 @@ mod tests {
                 changed_files_json: "[\"src/lib.rs\"]".to_string(),
                 pending_action_json: Some("{\"tool\":\"write_file\"}".to_string()),
                 approval_id: None,
+                session_id: None,
+                message_index: None,
             })
             .expect("create checkpoint");
         assert_eq!(checkpoint.id, "checkpoint-1");
@@ -4012,6 +4178,8 @@ mod tests {
                 changed_files_json: "[]".to_string(),
                 pending_action_json: None,
                 approval_id: None,
+                session_id: None,
+                message_index: None,
             })
             .expect("create checkpoint");
         assert!(store.checkpoints().get(&ckpt.id).unwrap().is_some());

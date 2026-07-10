@@ -299,6 +299,11 @@ pub enum Msg {
     RuntimeText(String),
     RuntimeApprovalsListed(Vec<ApprovalRecord>),
     RuntimeCheckpointsListed(Vec<CheckpointRecord>),
+    /// Reply to `Cmd::ListForkCheckpoints`: file checkpoints anchored past a
+    /// rewind's fork point (oldest first). The reducer emits a system notice
+    /// naming the oldest so the user can `/restore` files the discarded
+    /// timeline changed; empty means no notice.
+    ForkCheckpointsFound(Vec<CheckpointRecord>),
     RuntimePluginsListed(Vec<PluginInstallRecord>),
 
     // ── Misc model operations ───────────────────────────────────────
@@ -610,6 +615,7 @@ impl Msg {
             | Msg::RuntimeText(_)
             | Msg::RuntimeApprovalsListed(_)
             | Msg::RuntimeCheckpointsListed(_)
+            | Msg::ForkCheckpointsFound(_)
             | Msg::RuntimePluginsListed(_) => MsgKind::RuntimeStore,
             Msg::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
             Msg::ModelPullProgress(_) => MsgKind::ModelPullProgress,

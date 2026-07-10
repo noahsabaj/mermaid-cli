@@ -34,8 +34,8 @@ pub use atomic::{write_atomic, write_atomic_with_mode};
 
 pub use approval::{ApprovalReplayResult, approve_and_replay, deny_approval};
 pub use checkpoint::{
-    CheckpointFile, CheckpointManifest, create_checkpoint, create_checkpoint_for_task,
-    gc_old_checkpoint_dirs, restore_checkpoint,
+    CheckpointFile, CheckpointManifest, CheckpointOrigin, create_checkpoint,
+    create_checkpoint_for_task, gc_old_checkpoint_dirs, restore_checkpoint,
 };
 pub use daemon::{
     DEFAULT_PAIRING_TTL_DAYS, clamp_pairing_ttl_days, daemon_socket_path, generate_pairing_token,

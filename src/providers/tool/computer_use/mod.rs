@@ -281,6 +281,8 @@ mod tests {
             std::sync::Arc::new(cfg),
             String::new(),
             None,
+            None,
+            None,
             crate::runtime::SafetyMode::FullAccess,
             None,
             None,

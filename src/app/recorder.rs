@@ -886,6 +886,7 @@ mod tests {
             Msg::RuntimeProcessesListed(Vec::new()),
             Msg::RuntimeApprovalsListed(Vec::new()),
             Msg::RuntimeCheckpointsListed(Vec::new()),
+            Msg::ForkCheckpointsFound(Vec::new()),
             Msg::RuntimePluginsListed(Vec::new()),
             Msg::ModelPullFinished {
                 model: "qwen3".to_string(),

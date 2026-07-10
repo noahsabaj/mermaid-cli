@@ -75,6 +75,12 @@ pub enum Cmd {
         /// The user's stated intent for the turn (latest user message),
         /// passed to the Auto-mode classifier as alignment context.
         intent: Option<String>,
+        /// Conversation id at dispatch — checkpoint-anchoring provenance
+        /// (rides into `ExecContext` and onto any checkpoint this call takes).
+        session_id: String,
+        /// Conversation length (`messages().len()`) at dispatch. A fork at
+        /// user-message index `k` discards checkpoints with index > k.
+        message_index: usize,
     },
     /// Cancel every task in the given turn's `TurnScope`. After the
     /// scope's `JoinSet` drains (bounded by a ~2s timeout), the runner
@@ -184,6 +190,14 @@ pub enum Cmd {
     DecideRuntimeApproval { id: String, decision: String },
     /// List restore checkpoints.
     ListRuntimeCheckpoints { limit: usize },
+    /// Query checkpoints of `session_id` anchored strictly past
+    /// `message_index` — fired by rewind/fork so the reducer can tell the
+    /// user which file checkpoints the discarded timeline left behind.
+    /// Replies with `Msg::ForkCheckpointsFound`.
+    ListForkCheckpoints {
+        session_id: String,
+        message_index: usize,
+    },
     /// List installed plugins.
     ListRuntimePlugins,
     /// Update one durable task's status.
@@ -363,6 +377,7 @@ impl Cmd {
             Cmd::ListRuntimeApprovals => "list_runtime_approvals",
             Cmd::DecideRuntimeApproval { .. } => "decide_runtime_approval",
             Cmd::ListRuntimeCheckpoints { .. } => "list_runtime_checkpoints",
+            Cmd::ListForkCheckpoints { .. } => "list_fork_checkpoints",
             Cmd::ListRuntimePlugins => "list_runtime_plugins",
             Cmd::UpdateRuntimeTaskStatus { .. } => "update_runtime_task_status",
             Cmd::CreateRuntimeCheckpoint { .. } => "create_runtime_checkpoint",
@@ -496,6 +511,12 @@ impl Cmd {
             Cmd::ListRuntimeApprovals => "list_runtime_approvals".to_string(),
             Cmd::DecideRuntimeApproval { id, decision } => {
                 format!("decide_runtime_approval({}, {})", id, decision)
+            },
+            Cmd::ListForkCheckpoints {
+                session_id,
+                message_index,
+            } => {
+                format!("list_fork_checkpoints({session_id} > {message_index})")
             },
             Cmd::ListRuntimeCheckpoints { limit } => {
                 format!("list_runtime_checkpoints(limit={})", limit)

@@ -104,6 +104,13 @@ pub struct ExecContext {
     /// Durable daemon task that owns this tool call, when execution was
     /// launched through the runtime task queue.
     pub task_id: Option<String>,
+    /// Conversation id of the interactive session dispatching this call —
+    /// stamped by the reducer onto `Cmd::ExecuteTool` so checkpoints can be
+    /// anchored to a conversation position. `None` on headless/daemon paths.
+    pub session_id: Option<String>,
+    /// Conversation length (`messages().len()`) at dispatch; pairs with
+    /// `session_id` for checkpoint anchoring (see `CheckpointOrigin`).
+    pub message_index: Option<i64>,
     /// Effective live safety mode for this call (from the session, not the
     /// static config). The policy gate builds its `PolicyEngine` from this.
     pub safety_mode: SafetyMode,
@@ -133,6 +140,8 @@ impl std::fmt::Debug for ExecContext {
             .field("workdir", &self.workdir)
             .field("model_id", &self.model_id)
             .field("task_id", &self.task_id)
+            .field("session_id", &self.session_id)
+            .field("message_index", &self.message_index)
             .field("safety_mode", &self.safety_mode)
             .field("intent", &self.intent)
             .field(
@@ -162,6 +171,8 @@ impl ExecContext {
         config: Arc<crate::app::Config>,
         model_id: String,
         task_id: Option<String>,
+        session_id: Option<String>,
+        message_index: Option<i64>,
         safety_mode: SafetyMode,
         intent: Option<String>,
         classifier: Option<Arc<dyn AutoClassifier>>,
@@ -181,11 +192,24 @@ impl ExecContext {
             config,
             model_id,
             task_id,
+            session_id,
+            message_index,
             safety_mode,
             intent,
             classifier,
             approval,
             questions,
+        }
+    }
+
+    /// Checkpoint provenance for this call — every checkpoint-creating tool
+    /// passes this so file snapshots anchor to the conversation position
+    /// that produced them (rewind/fork surfaces them by anchor).
+    pub fn checkpoint_origin(&self) -> crate::runtime::CheckpointOrigin {
+        crate::runtime::CheckpointOrigin {
+            task_id: self.task_id.clone(),
+            session_id: self.session_id.clone(),
+            message_index: self.message_index,
         }
     }
 }
@@ -279,6 +303,8 @@ pub fn test_exec_context(
             workdir,
             config,
             String::new(),
+            None,
+            None,
             None,
             crate::runtime::SafetyMode::FullAccess,
             None,

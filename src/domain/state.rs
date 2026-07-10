@@ -892,11 +892,13 @@ pub struct UiState {
     /// The user Esc'd the picker for the CURRENT token; cleared on the next
     /// text mutation so typing reopens it.
     pub file_picker_dismissed: bool,
-    /// Messages the user typed while a turn was in flight. The
-    /// reducer pops the oldest and auto-submits on a successful
-    /// `StreamDone`. FIFO order. Each entry carries the attachment
-    /// ids that were present when the user submitted it, so the
-    /// auto-submit sends the images that belonged to *that* message.
+    /// Messages the user typed while a turn was in flight, FIFO. Mid-run
+    /// steering drains the WHOLE queue at each tool boundary (committed as
+    /// user messages before the follow-up model call); a message queued
+    /// mid-stream with no later tool boundary drains one-at-a-time at turn
+    /// end instead. Each entry carries the attachment ids that were present
+    /// when the user submitted it, so delivery sends the images that
+    /// belonged to *that* message.
     pub queued_messages: VecDeque<QueuedMessage>,
     /// Last terminal title dispatched via `Cmd::SetTerminalTitle`.
     /// Arms that change `session.conversation.title` consult this
