@@ -307,10 +307,21 @@ pub fn test_exec_context(
     call_id: ToolCallId,
     workdir: PathBuf,
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
-    let token = CancellationToken::new();
-    let (tx, rx) = mpsc::channel(64);
     let mut config = crate::app::Config::default();
     config.safety.mode = crate::runtime::SafetyMode::FullAccess;
+    test_exec_context_with_config(turn, call_id, workdir, config)
+}
+
+/// [`test_exec_context`] with an explicit `Config` (e.g. `exec.pty = false`
+/// to pin the pipe spawn path).
+pub fn test_exec_context_with_config(
+    turn: TurnId,
+    call_id: ToolCallId,
+    workdir: PathBuf,
+    config: crate::app::Config,
+) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
+    let token = CancellationToken::new();
+    let (tx, rx) = mpsc::channel(64);
     let config = Arc::new(config);
     (
         ExecContext::new(

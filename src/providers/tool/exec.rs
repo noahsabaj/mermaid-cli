@@ -268,6 +268,51 @@ impl ToolExecutor for ExecuteCommandTool {
             dirs.dedup();
             dirs
         });
+        // Unix default: run on a pseudo-terminal so the child sees a real
+        // tty (progress bars, isatty-gated tools) and `/dev/tty` resolves to
+        // the CAPTURED pty. `[exec] pty = false` or any pre-spawn PTY failure
+        // falls back to the pipe path below, which stays fully intact.
+        #[cfg(unix)]
+        if ctx.config.exec.pty_enabled() {
+            let invocation = shell_invocation(&command, sandbox_network, confine_writes.as_deref());
+            match run_command_pty(
+                &invocation,
+                &effective_workdir,
+                progress.clone(),
+                ctx.token.clone(),
+                ctx.background.clone(),
+                Duration::from_secs(timeout_secs),
+            )
+            .await
+            {
+                Ok(run) => {
+                    let outcome = finish_foreground_command(
+                        Ok(run),
+                        &command,
+                        &effective_workdir,
+                        start,
+                        timeout_secs,
+                        sandbox_network,
+                        sandbox_fs,
+                    );
+                    let _ = crate::runtime::run_plugin_hooks(
+                        "after_shell",
+                        &serde_json::json!({
+                            "command": command,
+                            "status": format!("{:?}", outcome.status),
+                            "summary": &outcome.summary,
+                        }),
+                    );
+                    return outcome;
+                },
+                // Every fallible step in run_command_pty precedes the spawn,
+                // so falling back here can never run the command twice.
+                Err(err) => {
+                    tracing::warn!(error = %err, "PTY exec unavailable; falling back to pipes");
+                },
+            }
+        }
+
         let mut cmd = build_sandboxed_shell(&command, sandbox_network, confine_writes.as_deref());
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -311,138 +356,22 @@ impl ToolExecutor for ExecuteCommandTool {
         // Esc-cancel and Ctrl+B arms), so a timed-out command is tree-killed and
         // its driver aborted before we return — the old outer `select!` dropped
         // the future and leaked the process tree.
-        let outcome = match run_command(
-            cmd,
-            progress,
-            ctx.token.clone(),
-            ctx.background.clone(),
-            Duration::from_secs(timeout_secs),
-        )
-        .await
-        {
-            Ok(CommandRunResult::Completed(run)) => {
-                let duration_secs = start.elapsed().as_secs_f64();
-                let output_len = run.output.len();
-                let mut metadata = command_metadata(CommandMetadataInput {
-                    command: command.clone(),
-                    working_dir: Some(effective_workdir.display().to_string()),
-                    exit_code: run.exit_code,
-                    timed_out: false,
-                    background: false,
-                    stdout_lines: run.stdout_lines,
-                    stderr_lines: run.stderr_lines,
-                    detected_urls: all_urls(&run.output),
-                    pid: None,
-                    log_path: None,
-                    byte_count: Some(output_len),
-                });
-                if sandbox_network && is_network_denial(&run) {
-                    // The seccomp kill-switch stopped a network attempt. Surface a
-                    // clear, actionable error instead of a confusing "killed".
-                    if let ToolMetadata::ExecuteCommand {
-                        denied_by_sandbox, ..
-                    } = &mut metadata.detail
-                    {
-                        *denied_by_sandbox = true;
-                    }
-                    ToolOutcome::error(NETWORK_DENIED_MESSAGE.to_string(), duration_secs)
-                        .with_metadata(metadata)
-                } else if sandbox_fs && is_fs_denial(&run) {
-                    // Landlock denials are errno-based (EACCES), so this is a
-                    // signature match, not a certainty — keep the original
-                    // output attached and hedge the wording accordingly.
-                    if let ToolMetadata::ExecuteCommand {
-                        denied_by_sandbox, ..
-                    } = &mut metadata.detail
-                    {
-                        *denied_by_sandbox = true;
-                    }
-                    let message = format!(
-                        "{FS_DENIED_MESSAGE}\n\n--- original output ---\n{}",
-                        run.output
-                    );
-                    ToolOutcome::error(message, duration_secs).with_metadata(metadata)
-                } else {
-                    ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
-                        .with_metadata(metadata)
-                }
-            },
-            Ok(CommandRunResult::Detached { pid, log_path }) => {
-                // Ctrl+B moved this command to the background.
-                let duration_secs = start.elapsed().as_secs_f64();
-                let log_path_str = log_path.display().to_string();
-                let output = format!(
-                    "Moved to background.\nPID: {pid}\nLog: {log_path_str}\nManage it with /processes, /logs {pid}, /stop {pid}."
-                );
-                let process = ManagedProcess {
-                    id: format!("bg-{pid}"),
-                    pid,
-                    command: command.to_string(),
-                    cwd: Some(effective_workdir.display().to_string()),
-                    log_path: log_path_str.clone(),
-                    detected_url: None,
-                    status: ManagedProcessStatus::Running,
-                };
-                let mut metadata = command_metadata(CommandMetadataInput {
-                    command: command.to_string(),
-                    working_dir: Some(effective_workdir.display().to_string()),
-                    exit_code: None,
-                    timed_out: false,
-                    background: true,
-                    stdout_lines: 0,
-                    stderr_lines: 0,
-                    detected_urls: Vec::new(),
-                    pid: Some(pid),
-                    log_path: Some(log_path_str),
-                    byte_count: Some(output.len()),
-                });
-                metadata.process = Some(process);
-                ToolOutcome::success(output, "moved to background", duration_secs)
-                    .with_metadata(metadata)
-            },
-            Ok(CommandRunResult::Cancelled) => ToolOutcome::cancelled(),
-            Ok(CommandRunResult::TimedOut) => {
-                let message = format!(
-                    "Command timed out after {} seconds and was killed. \
-                     For dev servers, GUI apps, or other long-running commands, call execute_command with mode=\"background\".",
-                    timeout_secs
-                );
-                let duration_secs = start.elapsed().as_secs_f64();
-                ToolOutcome::error(message, duration_secs).with_metadata(command_metadata(
-                    CommandMetadataInput {
-                        command: command.clone(),
-                        working_dir: Some(effective_workdir.display().to_string()),
-                        exit_code: None,
-                        timed_out: true,
-                        background: false,
-                        stdout_lines: 0,
-                        stderr_lines: 0,
-                        detected_urls: Vec::new(),
-                        pid: None,
-                        log_path: None,
-                        byte_count: None,
-                    },
-                ))
-            },
-            Err(e) => {
-                let duration_secs = start.elapsed().as_secs_f64();
-                ToolOutcome::error(format!("Command failed: {}", e), duration_secs).with_metadata(
-                    command_metadata(CommandMetadataInput {
-                        command: command.clone(),
-                        working_dir: Some(effective_workdir.display().to_string()),
-                        exit_code: None,
-                        timed_out: false,
-                        background: false,
-                        stdout_lines: 0,
-                        stderr_lines: 0,
-                        detected_urls: Vec::new(),
-                        pid: None,
-                        log_path: None,
-                        byte_count: None,
-                    }),
-                )
-            },
-        };
+        let outcome = finish_foreground_command(
+            run_command(
+                cmd,
+                progress,
+                ctx.token.clone(),
+                ctx.background.clone(),
+                Duration::from_secs(timeout_secs),
+            )
+            .await,
+            &command,
+            &effective_workdir,
+            start,
+            timeout_secs,
+            sandbox_network,
+            sandbox_fs,
+        );
         let _ = crate::runtime::run_plugin_hooks(
             "after_shell",
             &serde_json::json!({
@@ -452,6 +381,147 @@ impl ToolExecutor for ExecuteCommandTool {
             }),
         );
         outcome
+    }
+}
+
+/// Map a completed foreground run (either spawn path) onto the tool outcome:
+/// sandbox-denial detection, detach registration, timeout/cancel/error
+/// shaping, and command metadata. Shared by the pipe and PTY paths so their
+/// user-visible semantics cannot drift.
+#[allow(clippy::too_many_lines)]
+fn finish_foreground_command(
+    result: std::io::Result<CommandRunResult>,
+    command: &str,
+    effective_workdir: &Path,
+    start: Instant,
+    timeout_secs: u64,
+    sandbox_network: bool,
+    sandbox_fs: bool,
+) -> ToolOutcome {
+    let command = command.to_string();
+    match result {
+        Ok(CommandRunResult::Completed(run)) => {
+            let duration_secs = start.elapsed().as_secs_f64();
+            let output_len = run.output.len();
+            let mut metadata = command_metadata(CommandMetadataInput {
+                command: command.clone(),
+                working_dir: Some(effective_workdir.display().to_string()),
+                exit_code: run.exit_code,
+                timed_out: false,
+                background: false,
+                stdout_lines: run.stdout_lines,
+                stderr_lines: run.stderr_lines,
+                detected_urls: all_urls(&run.output),
+                pid: None,
+                log_path: None,
+                byte_count: Some(output_len),
+            });
+            if sandbox_network && is_network_denial(&run) {
+                // The seccomp kill-switch stopped a network attempt. Surface a
+                // clear, actionable error instead of a confusing "killed".
+                if let ToolMetadata::ExecuteCommand {
+                    denied_by_sandbox, ..
+                } = &mut metadata.detail
+                {
+                    *denied_by_sandbox = true;
+                }
+                ToolOutcome::error(NETWORK_DENIED_MESSAGE.to_string(), duration_secs)
+                    .with_metadata(metadata)
+            } else if sandbox_fs && is_fs_denial(&run) {
+                // Landlock denials are errno-based (EACCES), so this is a
+                // signature match, not a certainty — keep the original
+                // output attached and hedge the wording accordingly.
+                if let ToolMetadata::ExecuteCommand {
+                    denied_by_sandbox, ..
+                } = &mut metadata.detail
+                {
+                    *denied_by_sandbox = true;
+                }
+                let message = format!(
+                    "{FS_DENIED_MESSAGE}\n\n--- original output ---\n{}",
+                    run.output
+                );
+                ToolOutcome::error(message, duration_secs).with_metadata(metadata)
+            } else {
+                ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
+                    .with_metadata(metadata)
+            }
+        },
+        Ok(CommandRunResult::Detached { pid, log_path }) => {
+            // Ctrl+B moved this command to the background.
+            let duration_secs = start.elapsed().as_secs_f64();
+            let log_path_str = log_path.display().to_string();
+            let output = format!(
+                "Moved to background.\nPID: {pid}\nLog: {log_path_str}\nManage it with /processes, /logs {pid}, /stop {pid}."
+            );
+            let process = ManagedProcess {
+                id: format!("bg-{pid}"),
+                pid,
+                command: command.to_string(),
+                cwd: Some(effective_workdir.display().to_string()),
+                log_path: log_path_str.clone(),
+                detected_url: None,
+                status: ManagedProcessStatus::Running,
+            };
+            let mut metadata = command_metadata(CommandMetadataInput {
+                command: command.to_string(),
+                working_dir: Some(effective_workdir.display().to_string()),
+                exit_code: None,
+                timed_out: false,
+                background: true,
+                stdout_lines: 0,
+                stderr_lines: 0,
+                detected_urls: Vec::new(),
+                pid: Some(pid),
+                log_path: Some(log_path_str),
+                byte_count: Some(output.len()),
+            });
+            metadata.process = Some(process);
+            ToolOutcome::success(output, "moved to background", duration_secs)
+                .with_metadata(metadata)
+        },
+        Ok(CommandRunResult::Cancelled) => ToolOutcome::cancelled(),
+        Ok(CommandRunResult::TimedOut) => {
+            let message = format!(
+                "Command timed out after {} seconds and was killed. \
+                     For dev servers, GUI apps, or other long-running commands, call execute_command with mode=\"background\".",
+                timeout_secs
+            );
+            let duration_secs = start.elapsed().as_secs_f64();
+            ToolOutcome::error(message, duration_secs).with_metadata(command_metadata(
+                CommandMetadataInput {
+                    command: command.clone(),
+                    working_dir: Some(effective_workdir.display().to_string()),
+                    exit_code: None,
+                    timed_out: true,
+                    background: false,
+                    stdout_lines: 0,
+                    stderr_lines: 0,
+                    detected_urls: Vec::new(),
+                    pid: None,
+                    log_path: None,
+                    byte_count: None,
+                },
+            ))
+        },
+        Err(e) => {
+            let duration_secs = start.elapsed().as_secs_f64();
+            ToolOutcome::error(format!("Command failed: {}", e), duration_secs).with_metadata(
+                command_metadata(CommandMetadataInput {
+                    command: command.clone(),
+                    working_dir: Some(effective_workdir.display().to_string()),
+                    exit_code: None,
+                    timed_out: false,
+                    background: false,
+                    stdout_lines: 0,
+                    stderr_lines: 0,
+                    detected_urls: Vec::new(),
+                    pid: None,
+                    log_path: None,
+                    byte_count: None,
+                }),
+            )
+        },
     }
 }
 
@@ -896,40 +966,64 @@ fn is_fs_denial(run: &CommandRunOutput) -> bool {
 /// `__sandbox-exec` launcher (Linux) for the network kill-switch and/or
 /// Landlock write-confinement. The caller sets stdio, process group, cwd, and
 /// env scrubbing on the returned command.
-fn build_sandboxed_shell(
+/// The resolved program + argv for a foreground command — one description
+/// consumed by BOTH spawn paths (tokio pipes and the Unix PTY), so the PTY
+/// child execs the exact same `__sandbox-exec` launcher (seccomp/Landlock
+/// unchanged) as the pipe child.
+struct ShellInvocation {
+    program: PathBuf,
+    args: Vec<std::ffi::OsString>,
+}
+
+fn shell_invocation(
     command: &str,
     sandbox_network: bool,
     confine_writes: Option<&[PathBuf]>,
-) -> Command {
+) -> ShellInvocation {
     if sandbox_network || confine_writes.is_some() {
         // `mermaid __sandbox-exec [--no-network] [--confine-writes <dir>]… --
         // sh -c <command>`: the launcher installs the requested confinement on
         // itself, then execs the shell.
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mermaid"));
-        let mut cmd = Command::new(exe);
-        cmd.arg("__sandbox-exec");
+        let mut args: Vec<std::ffi::OsString> = vec!["__sandbox-exec".into()];
         if sandbox_network {
-            cmd.arg("--no-network");
+            args.push("--no-network".into());
         }
         for dir in confine_writes.unwrap_or_default() {
-            cmd.arg("--confine-writes").arg(dir);
+            args.push("--confine-writes".into());
+            args.push(dir.into());
         }
-        cmd.args(["--", "sh", "-c"]).arg(command);
-        cmd
+        args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
+        ShellInvocation { program: exe, args }
     } else {
-        let mut cmd = Command::new(if cfg!(target_os = "windows") {
-            "cmd"
-        } else {
-            "sh"
-        });
-        cmd.arg(if cfg!(target_os = "windows") {
-            "/C"
-        } else {
-            "-c"
-        })
-        .arg(command);
-        cmd
+        ShellInvocation {
+            program: PathBuf::from(if cfg!(target_os = "windows") {
+                "cmd"
+            } else {
+                "sh"
+            }),
+            args: vec![
+                (if cfg!(target_os = "windows") {
+                    "/C"
+                } else {
+                    "-c"
+                })
+                .into(),
+                command.into(),
+            ],
+        }
     }
+}
+
+fn build_sandboxed_shell(
+    command: &str,
+    sandbox_network: bool,
+    confine_writes: Option<&[PathBuf]>,
+) -> Command {
+    let invocation = shell_invocation(command, sandbox_network, confine_writes);
+    let mut cmd = Command::new(&invocation.program);
+    cmd.args(&invocation.args);
+    cmd
 }
 
 fn tail_lines(text: &str, max_lines: usize) -> String {
@@ -1060,11 +1154,19 @@ fn harden_noninteractive_env(cmd: &mut Command) {
 /// ordinary build/run commands keep `PATH`, `CARGO_HOME`, language toolchain
 /// vars, `XAUTHORITY`, etc. and still work.
 fn scrub_secret_env(cmd: &mut Command) {
-    for (name, _) in std::env::vars() {
-        if is_secret_env_name(&name) {
-            cmd.env_remove(&name);
-        }
+    for name in secret_env_names() {
+        cmd.env_remove(&name);
     }
+}
+
+/// The concrete secret-bearing names present in THIS process's environment —
+/// shared by the pipe path (`scrub_secret_env`) and the PTY path
+/// (`CommandBuilder::env_remove`), so the two spawn paths can't drift.
+fn secret_env_names() -> Vec<String> {
+    std::env::vars()
+        .map(|(name, _)| name)
+        .filter(|name| is_secret_env_name(name))
+        .collect()
 }
 
 /// True if an env var name looks like it carries a secret/credential and must
@@ -1100,6 +1202,64 @@ fn is_secret_env_name(name: &str) -> bool {
 /// spewing gigabytes would otherwise fill the temp dir.
 const TEE_LOG_CAP_BYTES: usize = 64 * 1024 * 1024;
 
+/// Bounded head+tail capture core, shared by the pipe reader (`read_capped`)
+/// and the PTY drain. Keeps the HEAD (up to cap/2) and a bounded TAIL ring:
+/// command output puts the actual error / exit summary at the END, which
+/// head-only truncation used to discard. head_cap + tail_cap == cap, so any
+/// total <= cap reconstructs exactly (no marker); only a genuine overflow
+/// drops the middle.
+struct CappedCapture {
+    head_cap: usize,
+    tail_cap: usize,
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    total: usize,
+}
+
+impl CappedCapture {
+    fn new(cap: usize) -> Self {
+        let head_cap = cap / 2;
+        Self {
+            head_cap,
+            tail_cap: cap - head_cap,
+            head: Vec::new(),
+            tail: std::collections::VecDeque::new(),
+            total: 0,
+        }
+    }
+
+    fn push(&mut self, mut chunk: &[u8]) {
+        self.total += chunk.len();
+        // Fill the head first; everything past head_cap flows into the
+        // bounded tail ring so the last tail_cap bytes always survive.
+        if self.head.len() < self.head_cap {
+            let take = (self.head_cap - self.head.len()).min(chunk.len());
+            self.head.extend_from_slice(&chunk[..take]);
+            chunk = &chunk[take..];
+        }
+        if !chunk.is_empty() {
+            self.tail.extend(chunk.iter().copied());
+            while self.tail.len() > self.tail_cap {
+                self.tail.pop_front();
+            }
+        }
+    }
+
+    /// `(text, truncated)` — bytes decoded lossily once at the end so a
+    /// multibyte char split across reads is not corrupted by the cap.
+    fn finish(self) -> (String, bool) {
+        let truncated = self.total > self.head_cap + self.tail_cap;
+        let tail_bytes: Vec<u8> = self.tail.into_iter().collect();
+        let mut out = String::from_utf8_lossy(&self.head).into_owned();
+        if truncated {
+            let dropped = self.total - self.head.len() - tail_bytes.len();
+            out.push_str(&format!("\n…[output truncated, {dropped} bytes elided]…\n"));
+        }
+        out.push_str(&String::from_utf8_lossy(&tail_bytes));
+        (out, truncated)
+    }
+}
+
 async fn read_capped<R: AsyncRead + Unpin>(
     mut reader: R,
     cap: usize,
@@ -1108,15 +1268,7 @@ async fn read_capped<R: AsyncRead + Unpin>(
     log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 ) -> (String, bool) {
     let mut buf = [0u8; 8192];
-    // Keep the HEAD (up to head_cap) and a bounded TAIL ring: command output puts
-    // the actual error / exit summary at the END, which head-only truncation used
-    // to discard. head_cap + tail_cap == cap, so any total <= cap reconstructs
-    // exactly (no marker); only a genuine overflow drops the middle.
-    let head_cap = cap / 2;
-    let tail_cap = cap - head_cap;
-    let mut head: Vec<u8> = Vec::new();
-    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
-    let mut total: usize = 0;
+    let mut capture = CappedCapture::new(cap);
     let mut logged: usize = 0;
     let mut log_capped = false;
     loop {
@@ -1150,34 +1302,57 @@ async fn read_capped<R: AsyncRead + Unpin>(
                         }
                     }
                 }
-                total += n;
-                let mut chunk = &buf[..n];
-                // Fill the head first; everything past head_cap flows into the
-                // bounded tail ring so the last tail_cap bytes always survive.
-                if head.len() < head_cap {
-                    let take = (head_cap - head.len()).min(chunk.len());
-                    head.extend_from_slice(&chunk[..take]);
-                    chunk = &chunk[take..];
-                }
-                if !chunk.is_empty() {
-                    tail.extend(chunk.iter().copied());
-                    while tail.len() > tail_cap {
-                        tail.pop_front();
-                    }
-                }
+                capture.push(&buf[..n]);
             },
             Err(_) => break,
         }
     }
-    let truncated = total > cap;
-    let tail_bytes: Vec<u8> = tail.into_iter().collect();
-    let mut out = String::from_utf8_lossy(&head).into_owned();
-    if truncated {
-        let dropped = total - head.len() - tail_bytes.len();
-        out.push_str(&format!("\n…[output truncated, {dropped} bytes elided]…\n"));
+    capture.finish()
+}
+
+/// Strip terminal escape sequences and normalize PTY line discipline for
+/// model-facing text: CSI (`ESC[…final`), OSC (`ESC]…BEL|ESC\\`), and other
+/// two-byte ESC sequences are dropped; `\r\n` (ONLCR — every PTY line)
+/// normalizes to `\n`; a lone `\r` (progress-bar rewrite) becomes `\n` so
+/// rewrites read as lines, bounded upstream by the output cap.
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                // CSI: parameters/intermediates until a final byte 0x40..=0x7E.
+                Some('[') => {
+                    for f in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&f) {
+                            break;
+                        }
+                    }
+                },
+                // OSC: terminated by BEL or ST (ESC \).
+                Some(']') => {
+                    let mut prev_esc = false;
+                    for f in chars.by_ref() {
+                        if f == '\u{7}' || (prev_esc && f == '\\') {
+                            break;
+                        }
+                        prev_esc = f == '\u{1b}';
+                    }
+                },
+                // Other two-byte escapes (charset selection, keypad modes…):
+                // the consumed char IS the sequence.
+                Some(_) | None => {},
+            },
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\n');
+            },
+            _ => out.push(c),
+        }
     }
-    out.push_str(&String::from_utf8_lossy(&tail_bytes));
-    (out, truncated)
+    out
 }
 
 async fn run_command(
@@ -1320,6 +1495,252 @@ async fn run_command(
             // DETACHED the spawned `driver` that owns the Child — so the whole
             // tree leaked despite the "was killed" message. Tree-kill the group,
             // abort the driver, drop the tee log, then report TimedOut.
+            if let Some(p) = pid {
+                crate::utils::terminate_tree(p, crate::utils::Grace::Immediate).await;
+            }
+            driver.abort();
+            let _ = tokio::fs::remove_file(&log_path).await;
+            Ok(CommandRunResult::TimedOut)
+        }
+    }
+}
+
+/// PTY drain state: tees raw bytes to the log, emits sanitized complete
+/// lines as progress, and feeds the bounded capture. One merged stream —
+/// a PTY has no stdout/stderr split (`stderr_lines` reports 0).
+#[cfg(unix)]
+struct PtyDrain {
+    capture: CappedCapture,
+    log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    logged: usize,
+    log_capped: bool,
+    line_buf: String,
+    progress: tokio::sync::mpsc::Sender<ProgressEvent>,
+}
+
+#[cfg(unix)]
+impl PtyDrain {
+    async fn push(&mut self, chunk: &[u8]) {
+        // Tee RAW bytes (ANSI kept — tailing a backgrounded log renders
+        // correctly); same bound as the pipe path (#126).
+        if let Some(file) = &self.log
+            && !self.log_capped
+        {
+            let mut f = file.lock().await;
+            if self.logged + chunk.len() <= TEE_LOG_CAP_BYTES {
+                let _ = f.write_all(chunk).await;
+                self.logged += chunk.len();
+            } else {
+                let remaining = TEE_LOG_CAP_BYTES - self.logged;
+                let _ = f.write_all(&chunk[..remaining]).await;
+                let _ = f.write_all(b"\n...[log truncated]...\n").await;
+                self.log_capped = true;
+            }
+            let _ = f.flush().await;
+        }
+        // Progress: sanitize, then emit complete lines only (an escape split
+        // across chunks is cosmetic here; the final output sanitizes whole).
+        self.line_buf
+            .push_str(&strip_ansi(&String::from_utf8_lossy(chunk)));
+        while let Some(i) = self.line_buf.find('\n') {
+            let line: String = self.line_buf.drain(..=i).collect();
+            let line = line.trim_end();
+            if !line.is_empty() {
+                let _ = self
+                    .progress
+                    .send(ProgressEvent::Output(line.to_string()))
+                    .await;
+            }
+        }
+        // Cap applies to RAW bytes pre-strip (bounded memory).
+        self.capture.push(chunk);
+    }
+}
+
+/// Foreground command on a pseudo-terminal (Unix): `tty`/`isatty` report a
+/// terminal, spinner-heavy tools behave, and `/dev/tty` resolves to THIS
+/// captured pty instead of scribbling over the TUI. Mirrors `run_command`'s
+/// select shape (detach / cancel / done / timeout) and reuses the same
+/// sandbox launcher, env scrubbing, tee log, and capture core.
+///
+/// Load-bearing differences from the pipe path:
+/// - NO `setsid` pre_exec: portable-pty already setsids and sets the
+///   controlling tty — the child is session+group leader, so
+///   `terminate_tree`'s group-kill semantics are byte-identical.
+/// - stdin is the pty slave (not /dev/null): a child that READS stdin now
+///   hangs to timeout instead of instant EOF — mitigated by
+///   GIT_TERMINAL_PROMPT=0 (still set) and the command timeout.
+/// - fixed 24x80 size: nothing resizes it (plumbing the live TUI size is
+///   not worth a resize protocol for batch commands).
+///
+/// Every fallible step happens BEFORE the child spawns, so an `Err` return
+/// can safely fall back to the pipe path without re-running side effects.
+#[cfg(unix)]
+async fn run_command_pty(
+    invocation: &ShellInvocation,
+    workdir: &Path,
+    progress: tokio::sync::mpsc::Sender<ProgressEvent>,
+    token: tokio_util::sync::CancellationToken,
+    background: tokio_util::sync::CancellationToken,
+    timeout: Duration,
+) -> std::io::Result<CommandRunResult> {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+    let pty = native_pty_system();
+    let pair = pty
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(std::io::Error::other)?;
+    // Clone the reader BEFORE spawning: after this point nothing may fail
+    // fallibly (a post-spawn fallback would re-run the command).
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(std::io::Error::other)?;
+
+    let mut builder = CommandBuilder::new(&invocation.program);
+    builder.args(&invocation.args);
+    builder.cwd(workdir);
+    for name in secret_env_names() {
+        builder.env_remove(name);
+    }
+    // Still load-bearing on a PTY: git COULD prompt here and nothing feeds
+    // the master, so it must fail fast instead of sitting on the prompt.
+    builder.env("GIT_TERMINAL_PROMPT", "0");
+    builder.env("TERM", "xterm-256color");
+
+    let mut child = pair
+        .slave
+        .spawn_command(builder)
+        .map_err(std::io::Error::other)?;
+    // Drop the slave so the master reads EOF when the child exits.
+    drop(pair.slave);
+    let pid = child.process_id();
+    let master = pair.master;
+
+    let log_path = background_log_path();
+    let log =
+        create_tee_log_blocking(&log_path).map(|f| std::sync::Arc::new(tokio::sync::Mutex::new(f)));
+
+    // Reader thread: blocking pty reads into a bounded channel.
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+    let reader_thread = tokio::task::spawn_blocking(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if chunk_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                },
+            }
+        }
+    });
+
+    let drain = tokio::spawn(async move {
+        let mut drain = PtyDrain {
+            capture: CappedCapture::new(crate::constants::MAX_TOOL_OUTPUT_BYTES),
+            log,
+            logged: 0,
+            log_capped: false,
+            line_buf: String::new(),
+            progress,
+        };
+        while let Some(chunk) = chunk_rx.recv().await {
+            drain.push(&chunk).await;
+        }
+        drain.capture.finish()
+    });
+
+    // Waiter owns the child AND the master: the master must outlive the
+    // child (dropping it early can SIGHUP the session), and dropping it
+    // right after `wait` returns unblocks the reader thread at EOF/EIO.
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let driver = tokio::spawn(async move {
+        let status = tokio::task::spawn_blocking(move || {
+            let status = child.wait();
+            drop(master);
+            status
+        })
+        .await;
+        let (output, truncated) = drain.await.unwrap_or_default();
+        let _ = reader_thread.await;
+        let _ = done_tx.send((output, truncated, status));
+    });
+
+    let timeout_fut = tokio::time::sleep(timeout);
+
+    tokio::select! {
+        biased;
+        _ = background.cancelled() => {
+            match pid {
+                // Ctrl+B detach: stop listening; the blocking wait/read
+                // threads keep running, the log keeps filling, and the child
+                // survives Mermaid's exit (nothing is kill-on-drop here).
+                Some(pid) => {
+                    drop(driver);
+                    Ok(CommandRunResult::Detached { pid, log_path })
+                },
+                None => {
+                    driver.abort();
+                    let _ = tokio::fs::remove_file(&log_path).await;
+                    Ok(CommandRunResult::Cancelled)
+                },
+            }
+        }
+        _ = token.cancelled() => {
+            // The child is the session/group leader (portable-pty setsids),
+            // so the group-kill takes the whole tree, exactly like the pipe
+            // path; the reader then unblocks at EOF/EIO.
+            if let Some(p) = pid {
+                crate::utils::terminate_tree(p, crate::utils::Grace::Immediate).await;
+            }
+            driver.abort();
+            let _ = tokio::fs::remove_file(&log_path).await;
+            Ok(CommandRunResult::Cancelled)
+        }
+        res = done_rx => {
+            let _ = tokio::fs::remove_file(&log_path).await;
+            let (raw, _truncated, status) = res
+                .map_err(|_| std::io::Error::other("pty driver dropped before completing"))?;
+            let status = status
+                .map_err(|e| std::io::Error::other(format!("pty waiter panicked: {e}")))?
+                .map_err(std::io::Error::other)?;
+            // Sanitize the WHOLE capture once (escape sequences can span
+            // chunk boundaries; per-chunk stripping is progress-only).
+            let mut output = strip_ansi(&raw);
+            // portable-pty reports a terminating signal by NAME; SIGSYS is
+            // the one downstream consumer (the seccomp denial mapping) —
+            // `128 + SIGSYS` shell-reaped exits flow through exit_code as-is.
+            let (exit_code, signal) = match status.signal() {
+                Some(name) if name.eq_ignore_ascii_case("bad system call") => {
+                    (None, Some(SANDBOX_KILL_SIGNAL))
+                },
+                Some(_) => (None, None),
+                None => (Some(status.exit_code() as i32), None),
+            };
+            if !status.success() {
+                output.push_str(&format!(
+                    "\n--- Command exited with status: {} ---",
+                    exit_code.unwrap_or(-1)
+                ));
+            }
+            let stdout_lines = output.lines().count();
+            Ok(CommandRunResult::Completed(CommandRunOutput {
+                output,
+                exit_code,
+                signal,
+                // One merged stream on a PTY — there is no stderr split.
+                stdout_lines,
+                stderr_lines: 0,
+            }))
+        }
+        _ = timeout_fut => {
             if let Some(p) = pid {
                 crate::utils::terminate_tree(p, crate::utils::Grace::Immediate).await;
             }
@@ -1617,10 +2038,40 @@ mod tests {
         );
     }
 
-    /// Direct regression for the sudo incident: a child that opens `/dev/tty`
-    /// must fail. Only meaningful where the test process itself has a
-    /// controlling terminal — CI runners have none (the open fails for
-    /// everyone there), so skip explicitly rather than pass vacuously.
+    /// The sudo-incident invariant, PTY era: `/dev/tty` must resolve to the
+    /// CAPTURED pty, never the user's terminal — a prompt writes into the
+    /// tool output instead of over the TUI. (The pipe path keeps the old
+    /// stricter guarantee — see the pipes-mode test below.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_child_dev_tty_is_the_captured_pty() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": "if echo CAPTURED_BY_PTY > /dev/tty 2>/dev/null; then echo TTY_OPEN_OK; else echo TTY_OPEN_DENIED; fi",
+                }),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
+        assert!(
+            outcome.output().contains("TTY_OPEN_OK"),
+            "PTY child should see a controlling terminal: {}",
+            outcome.output()
+        );
+        assert!(
+            outcome.output().contains("CAPTURED_BY_PTY"),
+            "/dev/tty writes must land in the CAPTURE, not the user's terminal: {}",
+            outcome.output()
+        );
+    }
+
+    /// Direct regression for the sudo incident on the PIPE path
+    /// (`[exec] pty = false`): a child that opens `/dev/tty` must fail. Only
+    /// meaningful where the test process itself has a controlling terminal —
+    /// CI runners have none (the open fails for everyone there), so skip
+    /// explicitly rather than pass vacuously.
     #[cfg(unix)]
     #[tokio::test]
     async fn foreground_child_cannot_open_dev_tty() {
@@ -1628,7 +2079,7 @@ mod tests {
             eprintln!("skipped: no controlling terminal in test environment");
             return;
         }
-        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        let (ctx, _rx) = pipes_ctx();
         let outcome = ExecuteCommandTool
             .execute(
                 serde_json::json!({
@@ -1642,6 +2093,125 @@ mod tests {
             "session-detached child could still open /dev/tty: {}",
             outcome.output()
         );
+    }
+
+    /// Pipe-mode context: `[exec] pty = false` pins the pipe spawn path.
+    #[cfg(unix)]
+    fn pipes_ctx() -> (
+        crate::providers::ctx::ExecContext,
+        tokio::sync::mpsc::Receiver<crate::providers::ctx::ProgressEvent>,
+    ) {
+        let mut config = crate::app::Config::default();
+        config.safety.mode = crate::runtime::SafetyMode::FullAccess;
+        config.exec.pty = Some(false);
+        crate::providers::ctx::test_exec_context_with_config(
+            TurnId(1),
+            ToolCallId(1),
+            PathBuf::from("/tmp"),
+            config,
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_child_sees_a_terminal_and_pipes_child_does_not() {
+        // PTY (default): isatty(stdout) is true and `tty` names a pts.
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({"command": "if [ -t 1 ]; then echo IS_TTY; fi; tty"}),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "{outcome:?}");
+        assert!(outcome.output().contains("IS_TTY"), "{}", outcome.output());
+        assert!(
+            outcome.output().contains("/dev/pts/") || outcome.output().contains("/dev/tty"),
+            "tty should name the pts: {}",
+            outcome.output()
+        );
+        // Pipes (`pty = false`): not a terminal.
+        let (ctx, _rx) = pipes_ctx();
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({"command": "if [ -t 1 ]; then echo IS_TTY; else echo NOT_TTY; fi"}),
+                ctx,
+            )
+            .await;
+        assert!(outcome.output().contains("NOT_TTY"), "{}", outcome.output());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_output_is_ansi_clean_and_crlf_normalized() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        // A color-emitting printf: the capture must carry the words, none of
+        // the escape bytes, and PTY ONLCR \r\n must read back as plain \n.
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": r"printf '\033[31mRED\033[0m\nline2\n'",
+                }),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "{outcome:?}");
+        let out = outcome.output();
+        assert!(out.contains("RED\nline2"), "clean joined lines: {out:?}");
+        assert!(!out.contains('\u{1b}'), "no escape bytes: {out:?}");
+        assert!(!out.contains('\r'), "no carriage returns: {out:?}");
+    }
+
+    #[test]
+    fn strip_ansi_drops_escapes_and_normalizes_line_endings() {
+        // CSI color + cursor movement, OSC title (BEL and ST terminated),
+        // two-byte ESC, CRLF and lone CR.
+        assert_eq!(strip_ansi("\u{1b}[31mRED\u{1b}[0m"), "RED");
+        assert_eq!(strip_ansi("\u{1b}[2K\u{1b}[1Gline"), "line");
+        assert_eq!(strip_ansi("\u{1b}]0;title\u{7}body"), "body");
+        assert_eq!(strip_ansi("\u{1b}]8;;url\u{1b}\\link"), "link");
+        assert_eq!(strip_ansi("\u{1b}=keypad"), "keypad");
+        assert_eq!(strip_ansi("a\r\nb"), "a\nb");
+        assert_eq!(strip_ansi("50%\r100%\r\n"), "50%\n100%\n");
+        // Plain text passes through untouched.
+        assert_eq!(strip_ansi("plain text"), "plain text");
+        // Truncated escape at end of input must not panic.
+        assert_eq!(strip_ansi("x\u{1b}"), "x");
+        assert_eq!(strip_ansi("x\u{1b}[31"), "x");
+    }
+
+    #[test]
+    fn capped_capture_keeps_head_and_tail() {
+        // Under the cap: byte-exact round trip.
+        let mut c = CappedCapture::new(64);
+        c.push(b"hello ");
+        c.push(b"world");
+        let (out, truncated) = c.finish();
+        assert_eq!(out, "hello world");
+        assert!(!truncated);
+        // Over the cap: head survives, tail survives, middle elided.
+        let mut c = CappedCapture::new(20);
+        c.push(b"AAAAAAAAAA");
+        c.push(&[b'x'; 100]);
+        c.push(b"BBBBBBBBBB");
+        let (out, truncated) = c.finish();
+        assert!(truncated);
+        assert!(out.starts_with("AAAAAAAAAA"), "head kept: {out:?}");
+        assert!(out.ends_with("BBBBBBBBBB"), "tail kept: {out:?}");
+        assert!(out.contains("truncated"), "marker present: {out:?}");
+    }
+
+    #[test]
+    fn secret_env_names_reports_planted_secret() {
+        // Uses the process env (read-only) — plant via temp_env.
+        temp_env::with_var("MERMAID_TEST_PLANTED_API_KEY", Some("v"), || {
+            let names = secret_env_names();
+            assert!(
+                names.iter().any(|n| n == "MERMAID_TEST_PLANTED_API_KEY"),
+                "planted secret name must be scrubbed: {names:?}"
+            );
+            assert!(!names.iter().any(|n| n == "PATH"));
+        });
     }
 
     #[test]
