@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Kill background agents: `/agents` command + `agent` tool kill action.**
+  `/agents` lists every detached (Ctrl+B backgrounded) subagent with its id,
+  description, live activity, elapsed time, and token count; `/agents kill
+  <id>` cancels one and `/agents kill all` cancels every one. The model can
+  manage its own children too: the `agent` tool now takes `action: "kill"`
+  plus an `agent_id` (killing an already-finished child evicts it from the
+  continuation cache instead). A killed child unwinds orderly, posts a
+  "cancelled" note with its billed token spend folded into the session
+  totals, and — unlike a normally-finished background agent — does not queue
+  its partial report for the model. Closes the follow-up from the agent
+  backgrounding work below.
+
 - **Live agent panel + agent backgrounding.** Running `agent` tools now get
   one stable panel row each under the status spinner — description, the
   child's current tool or phase, elapsed time, and a live token count — so

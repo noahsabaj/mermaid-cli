@@ -201,6 +201,10 @@ pub enum Cmd {
     ShowRuntimeProcessLogs { id: String },
     /// Stop a durable process by pid.
     StopRuntimeProcess { id: String },
+    /// Cancel a detached background subagent (`None` = all of them). The
+    /// effect layer fires the kill token held by the `SubagentSpawner`; the
+    /// dying child reports back via `Msg::BackgroundAgentFinished`.
+    KillBackgroundAgent { agent_id: Option<String> },
     /// Restart a durable process using its recorded command/cwd.
     RestartRuntimeProcess { id: String },
     /// Open a URL, path, or process target.
@@ -410,6 +414,7 @@ impl Cmd {
             Cmd::ListRuntimeProcesses { .. } => "list_runtime_processes",
             Cmd::ShowRuntimeProcessLogs { .. } => "show_runtime_process_logs",
             Cmd::StopRuntimeProcess { .. } => "stop_runtime_process",
+            Cmd::KillBackgroundAgent { .. } => "kill_background_agent",
             Cmd::RestartRuntimeProcess { .. } => "restart_runtime_process",
             Cmd::OpenRuntimeTarget { .. } => "open_runtime_target",
             Cmd::ShowRuntimePorts => "show_runtime_ports",
@@ -558,6 +563,10 @@ impl Cmd {
             },
             Cmd::ShowRuntimeProcessLogs { id } => format!("show_runtime_process_logs({})", id),
             Cmd::StopRuntimeProcess { id } => format!("stop_runtime_process({})", id),
+            Cmd::KillBackgroundAgent { agent_id } => format!(
+                "kill_background_agent({})",
+                agent_id.as_deref().unwrap_or("all")
+            ),
             Cmd::RestartRuntimeProcess { id } => format!("restart_runtime_process({})", id),
             Cmd::OpenRuntimeTarget { target } => format!("open_runtime_target({})", target),
             Cmd::ShowRuntimePorts => "show_runtime_ports".to_string(),
