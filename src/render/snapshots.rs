@@ -164,6 +164,104 @@ fn busy_tools_with_queue() {
 }
 
 #[test]
+fn busy_agents_panel() {
+    assert_scene("busy_agents_panel", || {
+        let mut s = scene_state();
+        s.session
+            .append(ChatMessage::user("audit the codebase (use agents)"), s.now);
+        let agent_call = |id: u64, description: &str| PendingToolCall {
+            call_id: ToolCallId(id),
+            source: crate::models::tool_call::ToolCall {
+                id: Some(format!("c{id}")),
+                function: crate::models::tool_call::FunctionCall {
+                    name: "agent".to_string(),
+                    arguments: serde_json::json!({"description": description, "type": "explore"}),
+                },
+            },
+        };
+        s.turn = TurnState::ExecutingTools {
+            id: TurnId(1),
+            started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(45)),
+            calls: vec![
+                agent_call(1, "Map repo structure"),
+                agent_call(2, "Audit source architecture"),
+                agent_call(3, "Audit security & secrets"),
+            ],
+            outcomes: vec![None, None, None],
+        };
+        s.ui.live_tool_status.insert(
+            ToolCallId(1),
+            crate::domain::LiveToolStatus {
+                activity: "read_file…".to_string(),
+                tokens: 12_300,
+            },
+        );
+        s.ui.live_tool_status.insert(
+            ToolCallId(2),
+            crate::domain::LiveToolStatus {
+                activity: "thinking".to_string(),
+                tokens: 8_100,
+            },
+        );
+        // One agent detached earlier via Ctrl+B: still on the panel, marked bg.
+        s.runtime
+            .background_agents
+            .push(crate::domain::runtime::BackgroundAgent {
+                agent_id: "a9".to_string(),
+                description: "Audit docs and conventions".to_string(),
+                started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(90)),
+                activity: "execute_command…".to_string(),
+                tokens: 27_900,
+            });
+        s
+    });
+}
+
+#[test]
+fn mixed_exec_and_agent_turn() {
+    assert_scene("mixed_exec_and_agent_turn", || {
+        let mut s = scene_state();
+        s.session
+            .append(ChatMessage::user("run tests and audit in parallel"), s.now);
+        s.turn = TurnState::ExecutingTools {
+            id: TurnId(1),
+            started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(9)),
+            calls: vec![
+                PendingToolCall {
+                    call_id: ToolCallId(1),
+                    source: crate::models::tool_call::ToolCall {
+                        id: Some("c1".to_string()),
+                        function: crate::models::tool_call::FunctionCall {
+                            name: "execute_command".to_string(),
+                            arguments: serde_json::json!({"command": "cargo test"}),
+                        },
+                    },
+                },
+                PendingToolCall {
+                    call_id: ToolCallId(2),
+                    source: crate::models::tool_call::ToolCall {
+                        id: Some("c2".to_string()),
+                        function: crate::models::tool_call::FunctionCall {
+                            name: "agent".to_string(),
+                            arguments: serde_json::json!({"description": "Audit deps"}),
+                        },
+                    },
+                },
+            ],
+            outcomes: vec![None, None],
+        };
+        s.ui.live_tool_status.insert(
+            ToolCallId(2),
+            crate::domain::LiveToolStatus {
+                activity: "starting…".to_string(),
+                tokens: 0,
+            },
+        );
+        s
+    });
+}
+
+#[test]
 fn approval_modal() {
     assert_scene("approval_modal", || {
         let mut s = scene_state();

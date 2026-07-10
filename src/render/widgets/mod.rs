@@ -24,7 +24,7 @@ pub use question::{QuestionModalWidget, question_modal_height};
 pub use rewind_picker::RewindPickerWidget;
 pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
-pub use status_line::build_status_lines;
+pub use status_line::{AgentPanelRow, build_status_lines};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 

@@ -678,6 +678,7 @@ mod tests {
                 | MsgKind::OpenImageAt
                 | MsgKind::TransientStatus
                 | MsgKind::EditorReturned
+                | MsgKind::BackgroundAgent
                 | MsgKind::CopySelection => true,
             }
         }
@@ -707,6 +708,24 @@ mod tests {
             },
             Msg::Slash(SlashCmd::Compact(None)),
             Msg::CancelTurn,
+            Msg::BackgroundAgentStarted {
+                agent_id: "a7".to_string(),
+                description: "audit docs".to_string(),
+            },
+            Msg::BackgroundAgentProgress {
+                agent_id: "a7".to_string(),
+                activity: "read_file…".to_string(),
+                tokens: 1200,
+            },
+            Msg::BackgroundAgentFinished {
+                agent_id: "a7".to_string(),
+                description: "audit docs".to_string(),
+                report: "all good".to_string(),
+                success: true,
+                usage: Some(crate::models::TokenUsage::provider(60_000, 30_000, 90_000)),
+                tokens: 90_000,
+                duration_secs: 132,
+            },
             Msg::ConfirmAccepted,
             Msg::ConfirmDeclined,
             Msg::Quit,

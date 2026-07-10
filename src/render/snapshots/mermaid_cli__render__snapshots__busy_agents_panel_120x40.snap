@@ -1,0 +1,45 @@
+---
+source: src/render/snapshots.rs
+assertion_line: 67
+expression: frame
+---
+ > audit the codebase (use agents)                                                          January 2nd, 2026 at 3:04am 
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ • Running 3 agents... (esc to interrupt • ctrl+b to background • 45s • ↓ ~20400 tokens)                                
+   ◦ Map repo structure  read_file… · 45s · ↓ ~12.3k tokens                                                             
+   ◦ Audit source architecture  thinking · 45s · ↓ ~8.1k tokens                                                         
+   ◦ Audit security & secrets  45s                                                                                      
+   ◦ bg Audit docs and conventions  execute_command… · 90s · ↓ ~27.9k tokens                                            
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>                                                                                                                       
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+snapuser@snaphost:/project/demo                                                                context: n/a | session: 0
+mermaid v0.16.0 · safety: ask · reasoning: medium                                                            ollama/test
