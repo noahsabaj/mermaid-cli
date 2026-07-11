@@ -158,8 +158,27 @@ pub async fn handle_command(
             command,
             arg,
             env,
+            url,
+            header,
+            env_header,
         } => {
-            crate::mcp::add_server(name, *yes, command.clone(), arg.clone(), env.clone()).await?;
+            // --url conflicts with --command/--arg/--env at the clap level, so
+            // exactly one registration path runs.
+            match url {
+                Some(url) => {
+                    crate::mcp::add_http_server(
+                        name,
+                        url.clone(),
+                        header.clone(),
+                        env_header.clone(),
+                    )
+                    .await?;
+                },
+                None => {
+                    crate::mcp::add_server(name, *yes, command.clone(), arg.clone(), env.clone())
+                        .await?;
+                },
+            }
             Ok(true)
         },
         Commands::Remove { name } => {
@@ -2336,11 +2355,16 @@ fn show_mcp_servers() {
 
     println!("Configured MCP servers:\n");
     for (name, server_cfg) in &config.mcp_servers {
-        let package = server_cfg
-            .args
-            .iter()
-            .find(|a| !a.starts_with('-'))
-            .unwrap_or(&server_cfg.command);
+        // Remote servers show their endpoint; stdio servers their package.
+        let package: &str = match &server_cfg.url {
+            Some(url) => url,
+            None => server_cfg
+                .args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(String::as_str)
+                .unwrap_or(server_cfg.command.as_str()),
+        };
         let env_keys: Vec<&String> = server_cfg.env.keys().collect();
         let env_display = if env_keys.is_empty() {
             String::new()
@@ -2437,11 +2461,15 @@ async fn show_status(config: &Config) -> Result<()> {
             config.mcp_servers.len()
         );
         for (name, server_cfg) in &config.mcp_servers {
-            println!(
-                "      - {} ({})",
-                name,
-                server_cfg.args.get(1).unwrap_or(&server_cfg.command)
-            );
+            let target: &str = match &server_cfg.url {
+                Some(url) => url,
+                None => server_cfg
+                    .args
+                    .get(1)
+                    .map(String::as_str)
+                    .unwrap_or(server_cfg.command.as_str()),
+            };
+            println!("      - {} ({})", name, target);
         }
     }
 

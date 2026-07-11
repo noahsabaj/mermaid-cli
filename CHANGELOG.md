@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Remote MCP servers over Streamable HTTP.** `[mcp_servers.<name>]` now
+  accepts `url = "https://…"` instead of `command`, connecting to hosted MCP
+  servers (GitHub/Sentry/Linear-class) everywhere MCP works today — TUI,
+  headless, and daemon. Auth rides as headers: literal `headers` in config,
+  or `env_headers` mapping a header to an environment variable resolved at
+  request time so the secret never lands in config.toml. Register from the
+  CLI with `mermaid add <name> --url https://… --header 'Name: Value'
+  --env-header 'Authorization=TOKEN_VAR'`. The transport tracks the server's
+  `MCP-Session-Id`, sends the negotiated `MCP-Protocol-Version` on every
+  request after initialize, drains SSE-streamed responses (including
+  reconnect-and-resume when the server closes a stream mid-request), and
+  DELETEs the session on shutdown. URLs must be `https`, or `http` to
+  loopback only; connections to private/link-local addresses are refused
+  unless the server entry opts in with `allow_private_network = true`.
+
 - **Run summary shows total line changes.** The end-of-run
   `Worked for … · used … tokens` line now appends ` · +N/-M` — the exact
   lines added and removed across every file mutation in the run

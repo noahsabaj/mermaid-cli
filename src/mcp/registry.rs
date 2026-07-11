@@ -310,7 +310,7 @@ pub async fn validate_argv(
     })?
     .map_err(|e| anyhow!("Failed to spawn server: {}", e))?;
 
-    let mut client = McpClient::new(transport);
+    let mut client = McpClient::new(transport.into());
 
     let result = tokio::time::timeout(Duration::from_secs(60), async {
         client.initialize().await?;
@@ -324,6 +324,30 @@ pub async fn validate_argv(
     // initialize/list_tools error, or the timeout — instead of only on success.
     // The old `?` short-circuit skipped this and fell back to `kill_on_drop`,
     // bypassing the close-stdin -> SIGTERM -> SIGKILL escalation (#139).
+    client.shutdown().await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => Err(anyhow!("Server initialization timed out (60s)")),
+    }
+}
+
+/// Validate a Streamable HTTP MCP server config: connect, initialize, list
+/// tools, then end the session on every path. Sibling of [`validate_argv`]
+/// for url-shaped configs.
+pub async fn validate_http(config: &crate::app::McpServerConfig) -> Result<Vec<String>> {
+    let transport = super::transport_http::HttpTransport::new(config)?;
+    let mut client = McpClient::new(transport.into());
+
+    let result = tokio::time::timeout(Duration::from_secs(60), async {
+        client.initialize().await?;
+        let tools = client.list_tools().await?;
+        let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        Ok::<Vec<String>, anyhow::Error>(tool_names)
+    })
+    .await;
+
+    // End the session on EVERY path — success, error, or timeout (#139).
     client.shutdown().await;
 
     match result {

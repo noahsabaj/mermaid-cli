@@ -9,7 +9,8 @@ mod registry;
 pub mod sanitize;
 mod server_manager;
 mod transport;
+mod transport_http;
 
-pub use add::{add_server, remove_server};
+pub use add::{add_http_server, add_server, remove_server};
 pub use client::{ContentBlock, McpClient, McpToolDef, McpToolResult};
 pub use server_manager::McpServerManager;

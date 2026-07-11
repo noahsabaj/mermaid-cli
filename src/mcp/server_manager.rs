@@ -18,8 +18,9 @@ use tracing::{info, warn};
 
 use super::client::{ContentBlock, McpClient, McpToolDef, McpToolResult};
 use super::sanitize;
-use super::transport::StdioTransport;
-use crate::app::McpServerConfig;
+use super::transport::{StdioTransport, Transport};
+use super::transport_http::HttpTransport;
+use crate::app::{McpServerConfig, TransportKind};
 use crate::domain::McpToolSpec;
 
 /// Wall-clock bound for one server's spawn + initialize + list_tools.
@@ -96,13 +97,16 @@ impl McpServerManager {
         config: &McpServerConfig,
         timeout: Duration,
     ) -> Result<Vec<McpToolSpec>> {
-        info!(
-            "Starting MCP server: {} ({} {})",
-            name,
-            config.command,
-            // Redact args — they can carry secrets (e.g. `--api-key=…`) (#93).
-            crate::utils::redact_secrets(&config.args.join(" "))
-        );
+        match &config.url {
+            Some(url) => info!("Starting MCP server: {} ({})", name, url),
+            None => info!(
+                "Starting MCP server: {} ({} {})",
+                name,
+                config.command,
+                // Redact args — they can carry secrets (e.g. `--api-key=…`) (#93).
+                crate::utils::redact_secrets(&config.args.join(" "))
+            ),
+        }
 
         let started = tokio::time::timeout(timeout, Self::start_one(name, config)).await;
         let (client, tools) = match started {
@@ -158,7 +162,14 @@ impl McpServerManager {
         name: &str,
         config: &McpServerConfig,
     ) -> Result<(McpClient, Vec<McpToolDef>)> {
-        let transport = StdioTransport::spawn(&config.command, &config.args, &config.env).await?;
+        let transport: Transport = match config.transport_kind()? {
+            TransportKind::Stdio => {
+                StdioTransport::spawn(&config.command, &config.args, &config.env)
+                    .await?
+                    .into()
+            },
+            TransportKind::Http => HttpTransport::new(config)?.into(),
+        };
         let mut client = McpClient::new(transport);
 
         client
@@ -418,6 +429,53 @@ mod tests {
             .expect_err("must time out");
         assert!(err.to_string().contains("timed out"), "{err}");
         assert!(!mgr.has_server("sleepy"));
+    }
+
+    #[tokio::test]
+    async fn http_server_starts_and_lists_tools() {
+        use super::super::transport_http::test_fixture::{fixture, json_reply, status_reply};
+        let init_result = r#"{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fx","version":"1.0"}}"#;
+        let tools_result =
+            r#"{"tools":[{"name":"echo","description":"echoes","inputSchema":{"type":"object"}}]}"#;
+        let fx = fixture(vec![
+            json_reply(&format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":{init_result}}}"#
+            )),
+            status_reply(202, "Accepted"),
+            json_reply(&format!(
+                r#"{{"jsonrpc":"2.0","id":2,"result":{tools_result}}}"#
+            )),
+        ])
+        .await;
+        let config = fx.config();
+        let mut configs = HashMap::new();
+        configs.insert("remote".to_string(), config.clone());
+        let mgr = McpServerManager::new(&configs);
+        let specs = mgr
+            .start_server_with_timeout("remote", &config, Duration::from_secs(30))
+            .await
+            .expect("http server must start");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "mcp__remote__echo");
+        assert!(mgr.has_server("remote"));
+    }
+
+    #[tokio::test]
+    async fn config_with_both_command_and_url_errors() {
+        let config = McpServerConfig {
+            command: "npx".to_string(),
+            url: Some("https://example.com/mcp".to_string()),
+            ..Default::default()
+        };
+        let mut configs = HashMap::new();
+        configs.insert("conflicted".to_string(), config.clone());
+        let mgr = McpServerManager::new(&configs);
+        let err = mgr
+            .start_server_with_timeout("conflicted", &config, Duration::from_secs(5))
+            .await
+            .expect_err("must reject");
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+        assert!(!mgr.has_server("conflicted"));
     }
 
     #[cfg(unix)]

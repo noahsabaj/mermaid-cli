@@ -1,4 +1,5 @@
-//! MCP protocol client — higher-level API built on StdioTransport.
+//! MCP protocol client — higher-level API over a [`Transport`] (stdio child
+//! process or Streamable HTTP endpoint).
 //!
 //! Implements the three protocol methods we need:
 //! - `initialize` — handshake and capability negotiation
@@ -9,11 +10,11 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::transport::StdioTransport;
+use super::transport::Transport;
 
 /// MCP protocol client for a single server connection.
 pub struct McpClient {
-    transport: StdioTransport,
+    transport: Transport,
     /// Server info from initialization
     pub server_info: Option<ServerInfo>,
     /// Set once [`Self::shutdown`] runs, so a later `call_tool` returns a clean
@@ -83,7 +84,7 @@ pub enum ContentBlock {
 
 impl McpClient {
     /// Create a new MCP client wrapping a transport.
-    pub fn new(transport: StdioTransport) -> Self {
+    pub(super) fn new(transport: Transport) -> Self {
         Self {
             transport,
             server_info: None,
@@ -129,6 +130,13 @@ impl McpClient {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
         };
+
+        // Record the negotiated protocol version BEFORE the initialized
+        // notification: over HTTP every request after initialize — including
+        // that notification — must carry the MCP-Protocol-Version header.
+        if let Some(version) = result.get("protocolVersion").and_then(|v| v.as_str()) {
+            self.transport.set_protocol_version(version);
+        }
 
         // Send initialized notification
         self.transport
@@ -203,11 +211,7 @@ impl McpClient {
 
         let result = self
             .transport
-            .send_request_with_timeout(
-                "tools/call",
-                params,
-                StdioTransport::tool_call_timeout_secs(),
-            )
+            .send_request_with_timeout("tools/call", params, Transport::tool_call_timeout_secs())
             .await?;
 
         let is_error = result
