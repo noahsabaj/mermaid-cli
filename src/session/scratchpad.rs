@@ -248,7 +248,7 @@ pub fn list_text(dir: &Path) -> String {
     let mut out = format!("Scratchpad: {}", dir.display());
     let mut entries = Vec::new();
     let mut truncated = false;
-    collect_entries(dir, Path::new(""), &mut entries, &mut truncated);
+    collect_entries(dir, "", &mut entries, &mut truncated);
     if entries.is_empty() {
         out.push_str("\n  (empty)");
         return out;
@@ -265,8 +265,10 @@ pub fn list_text(dir: &Path) -> String {
 
 /// Depth-first sorted walk feeding [`list_text`]; stops (setting
 /// `truncated`) once the entry cap is hit. Unreadable directories are
-/// skipped rather than failing the whole listing.
-fn collect_entries(dir: &Path, rel: &Path, entries: &mut Vec<String>, truncated: &mut bool) {
+/// skipped rather than failing the whole listing. `rel` is a `/`-joined
+/// string (not a `PathBuf`) so the listing renders identically on every
+/// OS — `Path::display` would print `a\nested.log` on Windows.
+fn collect_entries(dir: &Path, rel: &str, entries: &mut Vec<String>, truncated: &mut bool) {
     let Ok(read) = std::fs::read_dir(dir) else {
         return;
     };
@@ -280,13 +282,17 @@ fn collect_entries(dir: &Path, rel: &Path, entries: &mut Vec<String>, truncated:
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let child_rel = rel.join(name);
+        let child_rel = if rel.is_empty() {
+            name.to_string()
+        } else {
+            format!("{rel}/{name}")
+        };
         if path.is_dir() {
-            entries.push(format!("{}/", child_rel.display()));
+            entries.push(format!("{child_rel}/"));
             collect_entries(&path, &child_rel, entries, truncated);
         } else {
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            entries.push(format!("{} ({})", child_rel.display(), human_size(size)));
+            entries.push(format!("{child_rel} ({})", human_size(size)));
         }
     }
 }
