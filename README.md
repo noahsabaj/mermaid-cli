@@ -475,11 +475,12 @@ checkpoint_on_mutation = true
 # auto_classifier_model = "<provider>/<small-fast-model>"
 
 [exec]
-# Foreground commands run on a pseudo-terminal by default (Unix): the child
-# sees a real tty, so spinner/progress tools behave and /dev/tty resolves to
-# the captured pty instead of writing over the TUI. ANSI escapes are stripped
-# from what the model sees; a child that reads stdin hangs to its timeout
-# (use mode="background" for interactive daemons). Set false to use pipes.
+# Foreground commands run on a pseudo-terminal by default (openpty on Unix,
+# ConPTY on Windows): the child sees a real console, so spinner/progress
+# tools behave, and on Unix /dev/tty resolves to the captured pty instead of
+# writing over the TUI. ANSI escapes are stripped from what the model sees;
+# a child that reads stdin hangs to its timeout (use mode="background" for
+# interactive daemons). Set false to use pipes.
 # pty = true
 
 [ui]
