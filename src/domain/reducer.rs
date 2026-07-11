@@ -5445,6 +5445,14 @@ fn system_prompt_for_state(state: &State) -> String {
         state.cwd.display(),
         safety_line
     );
+    // The concrete path (the static prompt only describes the mechanism);
+    // absent before `Msg::ScratchpadReady` lands or when creation failed.
+    if let Some(scratch) = &state.session.scratchpad {
+        prompt.push_str(&format!(
+            "\nScratchpad directory: {}\nUse it for ALL temporary files instead of /tmp or the system temp dir.",
+            scratch.display()
+        ));
+    }
     if state.session.is_subagent {
         prompt.push_str("\n\n");
         prompt.push_str(crate::prompts::SUBAGENT_CONTRACT);
@@ -11941,6 +11949,21 @@ mod tests {
             tool_msg.content.contains("blocked by policy"),
             "read-only denial stands while the plan floor applies: {:?}",
             tool_msg.content
+        );
+    }
+
+    #[test]
+    fn system_prompt_names_the_scratchpad_path_once_ready() {
+        let mut state = fresh_state();
+        assert!(
+            !system_prompt_for_state(&state).contains("Scratchpad directory:"),
+            "no path line before ScratchpadReady lands"
+        );
+        state.session.scratchpad = Some(PathBuf::from("/tmp/mermaid-1000/-proj/s/scratchpad"));
+        let prompt = system_prompt_for_state(&state);
+        assert!(
+            prompt.contains("Scratchpad directory: /tmp/mermaid-1000/-proj/s/scratchpad"),
+            "the session block names the concrete scratchpad: {prompt}"
         );
     }
 

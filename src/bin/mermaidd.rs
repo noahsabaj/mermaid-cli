@@ -1532,19 +1532,22 @@ mod tests {
             std::env::temp_dir().join(format!("mermaidd_scratch_sweep_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let abandoned = root.join("-proj").join("abandoned");
-        std::fs::create_dir_all(&abandoned).unwrap();
-        std::fs::write(abandoned.join("out.txt"), b"stale artifact").unwrap();
+        std::fs::create_dir_all(abandoned.join("scratchpad")).unwrap();
+        std::fs::write(abandoned.join("scratchpad").join("out.txt"), b"stale").unwrap();
         let live = root.join("-proj").join("live");
-        std::fs::create_dir_all(&live).unwrap();
-        // Our own pid in the lock = a live owner; never reaped.
-        std::fs::write(live.join(".lock"), std::process::id().to_string()).unwrap();
+        std::fs::create_dir_all(live.join("scratchpad")).unwrap();
+        // A held flock = a live owner; never reaped. Hold it for the test's
+        // duration the same way a running mermaid holds it for its lifetime.
+        let lock = std::fs::File::create(live.join(".lock")).unwrap();
+        lock.try_lock().expect("acquire test lock");
 
         // Retention 0 (the daemon knob clamped) → age never protects; only
-        // the live lock does.
+        // the held lock does.
         let removed = mermaid_cli::session::scratchpad::sweep_stale_in(&root, 0).expect("sweep");
         assert_eq!(removed, 1);
-        assert!(!abandoned.exists(), "unlocked session dirs are reaped");
-        assert!(live.exists(), "a live pid lock protects the session dir");
+        assert!(!abandoned.exists(), "unheld session dirs are reaped");
+        assert!(live.exists(), "a held lock protects the session dir");
+        drop(lock);
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -1,28 +1,36 @@
 //! Per-session scratch directories.
 //!
 //! Each chat session gets a private on-disk scratch area keyed by its
-//! conversation id: `<data>/tmp/scratchpad/<project-slug>/<session-id>`.
+//! conversation id: `<system-temp>/mermaid-<uid>/<project-slug>/<session-id>/scratchpad`.
 //! Tools and spawned subprocesses use it for intermediate files instead
-//! of the shared system temp dir. The whole tree lives under the `0700`
-//! [`private_temp_dir`](crate::utils::private_temp_dir), so other local
-//! users can neither read nor pre-create paths inside it.
+//! of the shared system temp dir. Living under the system temp dir means
+//! tmpfs speed where the OS provides it and a free wipe on reboot; the
+//! `mermaid-<uid>` root and each session dir are tightened to `0700` so
+//! other local users can neither read nor pre-create paths inside them.
 //!
 //! Lifecycle: the reducer emits `Cmd::EnsureScratchpad` at startup and
 //! whenever the conversation id changes (`/clear`, `/load`, rewind fork);
 //! the effect layer materializes the directory here and reports it back
 //! via `Msg::ScratchpadReady`, which stamps `Session::scratchpad`. A
-//! `.lock` file holding the owning pid marks a directory as in use;
-//! [`sweep_stale`] reaps unlocked directories older than the retention
-//! window so abandoned sessions don't accumulate forever.
+//! `.lock` file in the session dir — deliberately *outside* the advertised
+//! `scratchpad/` child, so a stray `rm -rf $MERMAID_SCRATCHPAD` cannot
+//! remove it — is held via `File::try_lock` for the process lifetime and
+//! marks the directory as in use; [`sweep_stale`] reaps unlocked
+//! directories older than the retention window so abandoned sessions
+//! don't accumulate forever.
 
+use std::collections::HashMap;
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-/// Directory under `private_temp_dir()` holding every scratchpad.
-const ROOT_DIR: &str = "scratchpad";
-/// Pid lock marking a session directory as owned by a live process.
+/// Lock marking a session directory as owned by a live process. Sits next
+/// to (not inside) the advertised `scratchpad/` child.
 const LOCK_FILE: &str = ".lock";
+/// The advertised directory itself, as a child of the locked session dir.
+const SCRATCH_SUBDIR: &str = "scratchpad";
 /// Default retention: unlocked scratchpads older than this are reaped by
 /// [`sweep_stale`]. mermaidd overrides it via `daemon.scratchpad_retention_days`.
 pub const RETENTION_DAYS: u64 = 7;
@@ -32,6 +40,31 @@ const MAX_COMPONENT_LEN: usize = 96;
 /// Cap on the `/scratchpad` listing — keeps a scratch dir full of build
 /// output from flooding the transcript.
 const MAX_LIST_ENTRIES: usize = 100;
+
+/// Locks this process holds, keyed by session dir. Holding the open
+/// `File` keeps the OS lock alive for the process lifetime (and releases
+/// it automatically on crash); the map makes `ensure` idempotent — a
+/// second `try_lock` on a path we already own would spuriously read as
+/// "held by someone else".
+static HELD_LOCKS: OnceLock<Mutex<HashMap<PathBuf, File>>> = OnceLock::new();
+
+/// Per-user scratchpad root under the system temp dir. The uid suffix
+/// keeps roots disjoint on shared unix hosts; on Windows `%TEMP%` is
+/// already per-user, so a plain `mermaid` suffices.
+fn scratch_root_in(temp: &Path) -> PathBuf {
+    #[cfg(unix)]
+    {
+        temp.join(format!("mermaid-{}", rustix::process::getuid().as_raw()))
+    }
+    #[cfg(not(unix))]
+    {
+        temp.join("mermaid")
+    }
+}
+
+fn scratch_root() -> PathBuf {
+    scratch_root_in(&std::env::temp_dir())
+}
 
 /// Flatten a project path into a single filesystem-safe component
 /// (`/home/user/my proj` -> `-home-user-my-proj`). Never empty: a
@@ -64,50 +97,85 @@ fn sanitize_component(raw: &str, fallback: &str) -> String {
     }
 }
 
-/// Pure path computation: where the scratchpad for `(project, session_id)`
-/// lives under `root`. No filesystem access.
+/// Pure path computation: the locked session dir for
+/// `(project, session_id)` under `root`. No filesystem access. The
+/// advertised scratchpad is its [`SCRATCH_SUBDIR`] child.
 pub fn session_dir(root: &Path, project: &Path, session_id: &str) -> PathBuf {
     root.join(project_slug(project))
         .join(sanitize_component(session_id, "session"))
 }
 
-/// Create (or adopt) the scratchpad for this project + session id and
-/// stamp its pid lock. Idempotent — re-running for the same session
-/// refreshes the lock and returns the same path.
+/// Create (or adopt) the scratchpad for this project + session id, take
+/// its liveness lock, and return the advertised `scratchpad/` path.
+/// Idempotent — re-running for the same session keeps the already-held
+/// lock and returns the same path. If another live process holds the
+/// lock (the same conversation open twice), the directory is shared and
+/// that process's lock protects it.
 pub fn ensure(project: &Path, session_id: &str) -> io::Result<PathBuf> {
-    let root = crate::utils::private_temp_dir()?.join(ROOT_DIR);
-    ensure_in(&root, project, session_id)
+    ensure_in(&scratch_root(), project, session_id)
 }
 
 /// [`ensure`] against an explicit root, so tests can point it at a
 /// throwaway directory (same pattern as mermaidd's bg-log sweep).
 fn ensure_in(root: &Path, project: &Path, session_id: &str) -> io::Result<PathBuf> {
     let dir = session_dir(root, project, session_id);
-    std::fs::create_dir_all(&dir)?;
+    let scratch = dir.join(SCRATCH_SUBDIR);
+    std::fs::create_dir_all(&scratch)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         // Best-effort tighten each level to owner-only — cheap, and
         // self-heals bits loosened by an aggressive umask (mirrors
-        // `private_temp_dir`). The parent chain is root -> slug -> session.
-        for level in [root, dir.parent().unwrap_or(root), dir.as_ref()] {
+        // `private_temp_dir`). Chain: root -> slug -> session -> scratchpad.
+        for level in [root, dir.parent().unwrap_or(root), &dir, &scratch] {
             let _ = std::fs::set_permissions(level, std::fs::Permissions::from_mode(0o700));
         }
     }
-    // The lock carries the owning pid so the sweep can tell "in use by a
-    // live mermaid process" from "abandoned by a crashed one". Plain
-    // overwrite: the newest owner of a session id wins.
-    std::fs::write(dir.join(LOCK_FILE), std::process::id().to_string())?;
-    Ok(dir)
+    let held = HELD_LOCKS.get_or_init(Mutex::default);
+    let mut held = held.lock().expect("scratchpad lock registry poisoned");
+    if !held.contains_key(&dir) {
+        let lock = File::create(dir.join(LOCK_FILE))?;
+        match lock.try_lock() {
+            // Hold for the process lifetime; dropped (and OS-released) only
+            // at exit or crash.
+            Ok(()) => {
+                held.insert(dir.clone(), lock);
+            },
+            // Another live mermaid owns this session dir; its lock protects
+            // the directory, so sharing it unlocked is fine.
+            Err(std::fs::TryLockError::WouldBlock) => {},
+            Err(std::fs::TryLockError::Error(err)) => return Err(err),
+        }
+    }
+    Ok(scratch)
 }
 
-/// Reap unlocked scratchpads older than `retention_days`. Returns the
+/// Is the session dir's lock held by a live process (this one included)?
+/// Missing or unlockable-for-io lock files read as "not live" — the age
+/// check in the sweep still bounds how quickly such a dir can be reaped.
+fn lock_is_held(dir: &Path) -> bool {
+    if let Ok(held) = HELD_LOCKS.get_or_init(Mutex::default).lock()
+        && held.contains_key(dir)
+    {
+        return true;
+    }
+    let Ok(lock) = File::open(dir.join(LOCK_FILE)) else {
+        return false;
+    };
+    match lock.try_lock() {
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        // Acquired (or unreadable): no live owner. The lock drops here,
+        // releasing immediately.
+        _ => false,
+    }
+}
+
+/// Reap unheld scratchpads older than `retention_days`. Returns the
 /// number of session directories removed. Runs on session startup (the
 /// `EnsureScratchpad` effect, with [`RETENTION_DAYS`]) and on mermaidd
 /// startup (with the daemon's configured retention) — no separate timer.
 pub fn sweep_stale(retention_days: u64) -> io::Result<u64> {
-    let root = crate::utils::private_temp_dir()?.join(ROOT_DIR);
-    sweep_stale_in(&root, retention_days)
+    sweep_stale_in(&scratch_root(), retention_days)
 }
 
 /// [`sweep_stale`] against an explicit root. Public so mermaidd's tests (a
@@ -132,7 +200,7 @@ pub fn sweep_stale_in(root: &Path, retention_days: u64) -> io::Result<u64> {
             }
             // A live owner protects the directory regardless of age (a
             // week-long session keeps its scratchpad).
-            if lock_pid(&dir).is_some_and(pid_alive) {
+            if lock_is_held(&dir) {
                 continue;
             }
             // Age from the directory's mtime; a clock skewed into the
@@ -155,17 +223,17 @@ pub fn sweep_stale_in(root: &Path, retention_days: u64) -> io::Result<u64> {
 }
 
 /// Remove one session's scratchpad — the delete-conversation cascade. A
-/// directory whose lock names a live process is left alone (that session is
-/// still open, possibly in another mermaid); the sweep reaps it later.
+/// directory whose lock is held by a live process is left alone (that
+/// session is still open, possibly in another mermaid); the sweep reaps
+/// it later.
 pub fn remove(project: &Path, session_id: &str) -> io::Result<()> {
-    let root = crate::utils::private_temp_dir()?.join(ROOT_DIR);
-    remove_in(&root, project, session_id)
+    remove_in(&scratch_root(), project, session_id)
 }
 
 /// [`remove`] against an explicit root, for tests.
 fn remove_in(root: &Path, project: &Path, session_id: &str) -> io::Result<()> {
     let dir = session_dir(root, project, session_id);
-    if !dir.exists() || lock_pid(&dir).is_some_and(pid_alive) {
+    if !dir.exists() || lock_is_held(&dir) {
         return Ok(());
     }
     std::fs::remove_dir_all(&dir)
@@ -174,7 +242,8 @@ fn remove_in(root: &Path, project: &Path, session_id: &str) -> io::Result<()> {
 /// Bounded ASCII listing of a scratchpad's contents, for `/scratchpad`.
 /// Deterministic (sorted, directories recursed depth-first), relative
 /// paths, human-readable sizes, capped at [`MAX_LIST_ENTRIES`] lines with
-/// an explicit "more" marker. The internal `.lock` file is elided.
+/// an explicit "more" marker. The lock file lives outside the advertised
+/// directory, so everything found here is user content.
 pub fn list_text(dir: &Path) -> String {
     let mut out = format!("Scratchpad: {}", dir.display());
     let mut entries = Vec::new();
@@ -211,9 +280,6 @@ fn collect_entries(dir: &Path, rel: &Path, entries: &mut Vec<String>, truncated:
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if rel.as_os_str().is_empty() && name == LOCK_FILE {
-            continue; // internal pid lock, not user content
-        }
         let child_rel = rel.join(name);
         if path.is_dir() {
             entries.push(format!("{}/", child_rel.display()));
@@ -236,40 +302,6 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// The pid recorded in a session directory's lock file, if parseable.
-fn lock_pid(dir: &Path) -> Option<u32> {
-    let raw = std::fs::read_to_string(dir.join(LOCK_FILE)).ok()?;
-    raw.trim().parse::<u32>().ok()
-}
-
-/// Is the lock's owner still running? Everything under the 0700 root
-/// belongs to this user, so on Unix a plain `kill(pid, 0)` probe suffices
-/// (EPERM can't mean "someone else's live process" here). On non-Unix
-/// only our own pid is provably alive; other dirs fall back to the age
-/// check, which the retention window already bounds.
-fn pid_alive(pid: u32) -> bool {
-    if pid == std::process::id() {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        // A lock value outside the valid pid range (0, or > i32::MAX —
-        // `Pid::from_raw` debug-asserts on negatives) can't be a live
-        // process; read it as "not alive" and let the age check decide.
-        let Ok(raw) = i32::try_from(pid) else {
-            return false;
-        };
-        match rustix::process::Pid::from_raw(raw) {
-            Some(p) => rustix::process::test_kill_process(p).is_ok(),
-            None => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +315,28 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// Drop this process's held lock for a session dir, simulating the
+    /// owning process having exited (the OS releases the flock with it).
+    fn release_lock(session_dir: &Path) {
+        HELD_LOCKS
+            .get_or_init(Mutex::default)
+            .lock()
+            .expect("registry")
+            .remove(session_dir);
+    }
+
+    #[test]
+    fn scratch_root_is_per_user_under_system_temp() {
+        let root = scratch_root_in(Path::new("/tmp"));
+        #[cfg(unix)]
+        assert_eq!(
+            root,
+            Path::new("/tmp").join(format!("mermaid-{}", rustix::process::getuid().as_raw()))
+        );
+        #[cfg(not(unix))]
+        assert_eq!(root, Path::new("/tmp").join("mermaid"));
     }
 
     #[test]
@@ -325,18 +379,25 @@ mod tests {
     }
 
     #[test]
-    fn ensure_creates_the_dir_and_stamps_the_pid_lock() {
+    fn ensure_creates_the_advertised_child_and_holds_the_lock() {
         let root = temp_root("ensure");
-        let dir = ensure_in(&root, Path::new("/proj"), "20260710_120000_000").expect("ensure");
-        assert!(dir.is_dir());
-        assert_eq!(
-            lock_pid(&dir),
-            Some(std::process::id()),
-            "lock file carries the owning pid"
+        let scratch = ensure_in(&root, Path::new("/proj"), "20260710_120000_000").expect("ensure");
+        assert!(scratch.is_dir());
+        assert!(
+            scratch.ends_with(SCRATCH_SUBDIR),
+            "advertised path is the scratchpad child: {}",
+            scratch.display()
         );
-        // Idempotent: same inputs, same path.
+        let session = scratch.parent().expect("session dir");
+        assert!(
+            session.join(LOCK_FILE).is_file(),
+            "lock sits OUTSIDE the advertised dir"
+        );
+        assert!(lock_is_held(session), "ensure holds the liveness lock");
+        // Idempotent: same inputs, same path, lock still held once.
         let again = ensure_in(&root, Path::new("/proj"), "20260710_120000_000").expect("ensure");
-        assert_eq!(dir, again);
+        assert_eq!(scratch, again);
+        release_lock(session);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -345,11 +406,13 @@ mod tests {
     fn ensure_tightens_perms_to_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let root = temp_root("perms");
-        let dir = ensure_in(&root, Path::new("/proj"), "20260710_120000_000").expect("ensure");
-        for level in [&root, &dir] {
+        let scratch = ensure_in(&root, Path::new("/proj"), "20260710_120000_000").expect("ensure");
+        let session = scratch.parent().expect("session dir").to_path_buf();
+        for level in [&root, &session, &scratch] {
             let mode = std::fs::metadata(level).expect("meta").permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "mode of {}", level.display());
         }
+        release_lock(&session);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -361,28 +424,29 @@ mod tests {
         // retention instead of forging mtimes (portable across CI OSes).
         let root = temp_root("sweep");
         let live = ensure_in(&root, Path::new("/proj"), "live").expect("ensure");
-        let unlocked = ensure_in(&root, Path::new("/proj"), "unlocked").expect("ensure");
-        std::fs::remove_file(unlocked.join(LOCK_FILE)).expect("drop lock");
-        let dead = ensure_in(&root, Path::new("/proj"), "dead").expect("ensure");
-        // Far above any real pid_max (Linux caps at 2^22) — reliably not
-        // running, while still a valid i32 so the real kill probe runs.
-        std::fs::write(dead.join(LOCK_FILE), "999999999").expect("forge pid");
-        let garbled = ensure_in(&root, Path::new("/proj"), "garbled").expect("ensure");
-        std::fs::write(garbled.join(LOCK_FILE), "not a pid").expect("garble");
+        let live_session = live.parent().expect("session").to_path_buf();
+        let abandoned = ensure_in(&root, Path::new("/proj"), "abandoned").expect("ensure");
+        let abandoned_session = abandoned.parent().expect("session").to_path_buf();
+        release_lock(&abandoned_session); // owner "exited"
+        let lockless = ensure_in(&root, Path::new("/proj"), "lockless").expect("ensure");
+        let lockless_session = lockless.parent().expect("session").to_path_buf();
+        release_lock(&lockless_session);
+        std::fs::remove_file(lockless_session.join(LOCK_FILE)).expect("drop lock file");
 
         let removed = sweep_stale_in(&root, 0).expect("sweep");
-        assert_eq!(removed, 3, "unlocked + dead-pid + garbled-lock reaped");
-        assert!(live.is_dir(), "live-pid lock protects the dir");
-        assert!(!unlocked.exists());
-        assert!(!dead.exists());
-        assert!(!garbled.exists());
+        assert_eq!(removed, 2, "released + lockless reaped");
+        assert!(live.is_dir(), "a held lock protects the dir");
+        assert!(!abandoned_session.exists());
+        assert!(!lockless_session.exists());
 
-        // Fresh + unlocked survives a normal retention window.
+        // Fresh + unheld survives a normal retention window.
         let fresh = ensure_in(&root, Path::new("/proj"), "fresh").expect("ensure");
-        std::fs::remove_file(fresh.join(LOCK_FILE)).expect("drop lock");
+        let fresh_session = fresh.parent().expect("session").to_path_buf();
+        release_lock(&fresh_session);
         let removed = sweep_stale_in(&root, RETENTION_DAYS).expect("sweep");
         assert_eq!(removed, 0);
         assert!(fresh.is_dir(), "young dirs are kept even without a lock");
+        release_lock(&live_session);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -393,30 +457,34 @@ mod tests {
     }
 
     #[test]
-    fn remove_cascades_unlocked_dirs_but_spares_live_ones() {
+    fn remove_cascades_unheld_dirs_but_spares_live_ones() {
         let root = temp_root("remove");
-        // Own-pid lock = "session open somewhere" — spared.
+        // Held lock = "session open somewhere" — spared.
         let live = ensure_in(&root, Path::new("/proj"), "live").expect("ensure");
+        let live_session = live.parent().expect("session").to_path_buf();
         remove_in(&root, Path::new("/proj"), "live").expect("remove");
-        assert!(live.is_dir(), "a live lock protects the dir from cascade");
-        // Unlocked = abandoned — removed regardless of age.
+        assert!(live.is_dir(), "a held lock protects the dir from cascade");
+        // Released = abandoned — removed regardless of age.
         let gone = ensure_in(&root, Path::new("/proj"), "gone").expect("ensure");
-        std::fs::remove_file(gone.join(LOCK_FILE)).expect("drop lock");
+        let gone_session = gone.parent().expect("session").to_path_buf();
+        release_lock(&gone_session);
         remove_in(&root, Path::new("/proj"), "gone").expect("remove");
-        assert!(!gone.exists());
+        assert!(!gone_session.exists());
         // Missing dir is a noop, not an error.
         remove_in(&root, Path::new("/proj"), "never-existed").expect("remove");
+        release_lock(&live_session);
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn list_text_is_sorted_bounded_and_elides_the_lock() {
+    fn list_text_is_sorted_and_bounded() {
         let root = temp_root("list");
         let dir = ensure_in(&root, Path::new("/proj"), "s").expect("ensure");
+        let session = dir.parent().expect("session").to_path_buf();
         assert_eq!(
             list_text(&dir),
             format!("Scratchpad: {}\n  (empty)", dir.display()),
-            "the pid lock alone reads as empty"
+            "a fresh scratchpad reads as empty (the lock is outside it)"
         );
         std::fs::write(dir.join("b.txt"), b"hello").expect("write");
         std::fs::create_dir(dir.join("a")).expect("mkdir");
@@ -441,6 +509,7 @@ mod tests {
             "header + cap + marker"
         );
         assert!(text.ends_with("... (listing capped)"));
+        release_lock(&session);
         let _ = std::fs::remove_dir_all(&root);
     }
 

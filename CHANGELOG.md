@@ -104,9 +104,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survives `--resume`. Approval flow, task seeding, per-category plan
   permissions, model split, and handoff land in follow-up PRs.
 
-- **Per-session scratchpad.** Every session now gets a private scratch
-  directory under the 0700 private temp dir, keyed by project and
-  conversation id and recreated on `/clear`, `/load`, and rewind forks.
+- **Per-session scratchpad.** Every session now gets a private 0700 scratch
+  directory under the system temp dir
+  (`<temp>/mermaid-<uid>/<project-slug>/<session-id>/scratchpad`), recreated
+  on `/clear`, `/load`, and rewind forks.
   Shell commands receive its absolute path as `MERMAID_SCRATCHPAD`, the
   file tools accept absolute paths inside it, and subagents share the
   parent session's directory. Writes there are never checkpointed and skip
