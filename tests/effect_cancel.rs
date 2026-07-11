@@ -125,6 +125,7 @@ async fn effect_runner_cancels_scope_on_command() {
         resolved_context_window: None,
         resolved_max_output: None,
         output_schema: None,
+        suppress_auto_compact: false,
     };
     runner.dispatch(Cmd::CallModel {
         turn: TurnId(1),

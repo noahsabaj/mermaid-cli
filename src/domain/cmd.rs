@@ -384,6 +384,14 @@ pub struct ChatRequest {
     /// degrade tool calling). When `Some`, the request carries no tools:
     /// the reducer sends none and the effect runner skips the built-ins.
     pub output_schema: Option<serde_json::Value>,
+    /// Pause automatic threshold compaction for this turn. Set from
+    /// `RuntimeState::auto_compact_suppressed` after an auto-compaction
+    /// failure, so a chronically failing summarizer doesn't burn a model call
+    /// every turn. Rides on the request like `ollama_num_ctx` because the
+    /// effect preflight sees only the request, never `RuntimeState`. Cleared
+    /// by a successful compaction, a manual `/compact`, or a conversation
+    /// switch.
+    pub suppress_auto_compact: bool,
 }
 
 /// Provider-agnostic tool definition sent in the request. Concrete
@@ -684,6 +692,7 @@ mod tests {
             resolved_context_window: None,
             resolved_max_output: None,
             output_schema: None,
+            suppress_auto_compact: false,
         };
         assert!(
             Cmd::CallModel {

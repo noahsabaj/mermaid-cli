@@ -39,6 +39,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use tokio::sync::mpsc;
@@ -82,6 +83,179 @@ pub type MsgSender = mpsc::Sender<Msg>;
 /// output.
 pub const MSG_CHANNEL_CAPACITY: usize = 512;
 
+#[derive(Clone)]
+enum PersistenceJob {
+    Conversation(Box<crate::session::ConversationHistory>),
+    Compaction(Box<PendingCompactionSave>),
+}
+
+#[derive(Clone)]
+struct PendingCompactionSave {
+    archive: crate::domain::CompactionArchive,
+    record: crate::domain::CompactionRecord,
+    conversation: crate::session::ConversationHistory,
+    task_id: Option<String>,
+}
+
+struct PersistedCompaction {
+    id: String,
+    task_id: Option<String>,
+    session_id: String,
+    archive_path: PathBuf,
+}
+
+struct PersistenceState {
+    workdir: PathBuf,
+    manager: Option<crate::session::ConversationManager>,
+    blocked: HashMap<String, VecDeque<PendingCompactionSave>>,
+}
+
+impl PersistenceState {
+    fn new(workdir: PathBuf) -> Self {
+        Self {
+            workdir,
+            manager: None,
+            blocked: HashMap::new(),
+        }
+    }
+
+    fn manager(&mut self) -> anyhow::Result<&crate::session::ConversationManager> {
+        if self.manager.is_none() {
+            self.manager = Some(crate::session::ConversationManager::new(&self.workdir)?);
+        }
+        Ok(self.manager.as_ref().expect("manager initialized"))
+    }
+
+    /// Run one job. Returns every compaction event that persisted durably —
+    /// even when the job as a whole failed — so partially-drained barriers
+    /// still fire their hooks and `SessionSaved`; a dropped event would never
+    /// be re-emitted (its save is already popped).
+    fn process(&mut self, job: PersistenceJob) -> (Vec<PersistedCompaction>, anyhow::Result<()>) {
+        match job {
+            PersistenceJob::Conversation(history) => {
+                // Barrier: a still-blocked compaction must persist before any
+                // newer (stripped) conversation snapshot may overwrite the file.
+                let (persisted, retried) = self.retry_blocked(&history.id);
+                if retried.is_err() {
+                    return (persisted, retried);
+                }
+                let saved = self
+                    .manager()
+                    .and_then(|manager| manager.save_conversation(&history).map(|_| ()));
+                (persisted, saved)
+            },
+            PersistenceJob::Compaction(save) => {
+                // Queue first, then drain. The archive is the only durable copy
+                // of the stripped messages, so the save must survive an Err AND
+                // a panic in the write path (pop happens only after success),
+                // and it must land behind any older still-blocked saves (FIFO).
+                let conversation_id = save.archive.conversation_id.clone();
+                self.blocked
+                    .entry(conversation_id.clone())
+                    .or_default()
+                    .push_back(*save);
+                self.retry_blocked(&conversation_id)
+            },
+        }
+    }
+
+    fn retry_blocked(
+        &mut self,
+        conversation_id: &str,
+    ) -> (Vec<PersistedCompaction>, anyhow::Result<()>) {
+        let mut persisted = Vec::new();
+        if !self.blocked.contains_key(conversation_id) {
+            return (persisted, Ok(()));
+        }
+        if let Err(error) = self.manager() {
+            return (persisted, Err(error));
+        }
+        // Disjoint field borrows: the manager stays immutably borrowed while
+        // the queue is drained in place — no per-retry clone of the (large)
+        // pending conversation snapshots.
+        let manager = self.manager.as_ref().expect("manager initialized");
+        let queue = self
+            .blocked
+            .get_mut(conversation_id)
+            .expect("checked above");
+        while let Some(save) = queue.front() {
+            match Self::persist_compaction(manager, save) {
+                // Pop only after a successful write: `persist_compaction` runs
+                // inside `spawn_blocking`, and a panic there must not lose the
+                // save (the mutex is poison-tolerant, so the state survives).
+                Ok(event) => {
+                    persisted.push(event);
+                    queue.pop_front();
+                },
+                Err(error) => return (persisted, Err(error)),
+            }
+        }
+        self.blocked.remove(conversation_id);
+        (persisted, Ok(()))
+    }
+
+    fn retry_all_blocked(&mut self) -> (Vec<PersistedCompaction>, anyhow::Result<()>) {
+        let ids: Vec<String> = self.blocked.keys().cloned().collect();
+        let mut persisted = Vec::new();
+        let mut first_error = None;
+        for id in ids {
+            // Keep draining the other conversations' barriers; one
+            // conversation's bad disk state must not strand the rest.
+            let (events, result) = self.retry_blocked(&id);
+            persisted.extend(events);
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            None => (persisted, Ok(())),
+            Some(error) => (persisted, Err(error)),
+        }
+    }
+
+    fn persist_compaction(
+        manager: &crate::session::ConversationManager,
+        save: &PendingCompactionSave,
+    ) -> anyhow::Result<PersistedCompaction> {
+        let path = manager.save_compaction_archive(&save.archive)?;
+        manager.save_conversation(&save.conversation)?;
+
+        if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
+            let _ = store.compactions().create(crate::runtime::NewCompaction {
+                id: Some(save.record.id.clone()),
+                task_id: save.task_id.clone(),
+                session_id: Some(save.archive.conversation_id.clone()),
+                source_token_estimate: Some(save.record.before_tokens as i64),
+                summary_token_count: Some(save.record.summary_tokens as i64),
+                preserved_turns: Some(save.record.preserved_turn_count as i64),
+                archive_path: Some(path.display().to_string()),
+                verification_status: Some(save.record.review_status.as_str().to_string()),
+            });
+        }
+
+        Ok(PersistedCompaction {
+            id: save.record.id.clone(),
+            task_id: save.task_id.clone(),
+            session_id: save.archive.conversation_id.clone(),
+            archive_path: path,
+        })
+    }
+}
+
+/// Fire the plugin `compaction` hook for one durably persisted archive.
+async fn fire_compaction_hook(event: &PersistedCompaction) {
+    fire_plugin_hooks(
+        "compaction",
+        serde_json::json!({
+            "id": event.id,
+            "task_id": event.task_id,
+            "session_id": event.session_id,
+            "archive_path": event.archive_path.display().to_string(),
+        }),
+    )
+    .await;
+}
+
 /// The runner. One instance per process, constructed by
 /// `app::run` and consumed when the main loop exits.
 pub struct EffectRunner {
@@ -102,6 +276,11 @@ pub struct EffectRunner {
     /// This one set never gets cancelled piecemeal — shutdown drains
     /// it during `EffectRunner::shutdown`.
     detached: tokio::task::JoinSet<()>,
+    /// FIFO chain for conversation and compaction writes. Keeping persistence
+    /// separate from `detached` prevents an older compaction snapshot from
+    /// racing a newer normal save and winning last-write-wins.
+    persistence_state: Arc<Mutex<PersistenceState>>,
+    persistence_tail: Option<tokio::task::JoinHandle<()>>,
     /// MCP manager handle is held elsewhere (`crate::mcp` has a
     /// `OnceLock` for its global manager); we just note workdir so
     /// handlers can construct absolute paths.
@@ -148,12 +327,15 @@ pub struct EffectRunner {
 impl EffectRunner {
     /// Create an unused runner. Pair with `msg_rx` from `channel()`.
     pub fn new(msg_tx: MsgSender, workdir: PathBuf) -> Self {
+        let persistence_state = Arc::new(Mutex::new(PersistenceState::new(workdir.clone())));
         Self {
             tasks: crate::providers::TaskBroker::new(msg_tx.clone()),
             msg_tx,
             scopes: HashMap::new(),
             cancelled_turns: VecDeque::new(),
             detached: tokio::task::JoinSet::new(),
+            persistence_state,
+            persistence_tail: None,
             workdir,
             providers: None,
             tools: None,
@@ -811,86 +993,21 @@ impl EffectRunner {
                 self.scope_mut(turn).background();
             },
             Cmd::SaveConversation(history) => {
-                let tx = self.msg_tx.clone();
-                let workdir = self.workdir.clone();
-                self.detached.spawn(async move {
-                    match crate::session::ConversationManager::new(&workdir) {
-                        Ok(manager) => match manager.save_conversation(&history) {
-                            Ok(_) => {
-                                let _ = tx.send(Msg::SessionSaved).await;
-                            },
-                            Err(err) => tracing::warn!(
-                                error = %err,
-                                "SaveConversation: failed to write conversation to disk"
-                            ),
-                        },
-                        Err(err) => tracing::warn!(
-                            error = %err,
-                            "SaveConversation: failed to open the conversation manager"
-                        ),
-                    }
-                });
+                self.queue_persistence(PersistenceJob::Conversation(Box::new(history)));
             },
             Cmd::SaveCompactionArchive {
                 archive,
                 record,
                 conversation,
             } => {
-                let tx = self.msg_tx.clone();
-                let workdir = self.workdir.clone();
-                let task_id = self.task_id.clone();
-                self.detached.spawn(async move {
-                    let Ok(manager) = crate::session::ConversationManager::new(&workdir) else {
-                        return;
-                    };
-                    // Archive FIRST — it is the only durable copy of the
-                    // dropped messages. Only overwrite the (stripped)
-                    // conversation once the archive has persisted, so a
-                    // failed archive can never lose messages.
-                    match manager.save_compaction_archive(&archive) {
-                        Ok(path) => {
-                            if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
-                                let compaction_id = record.id.clone();
-                                let conversation_id = archive.conversation_id.clone();
-                                let _ =
-                                    store.compactions().create(crate::runtime::NewCompaction {
-                                        id: Some(record.id),
-                                        task_id: task_id.clone(),
-                                        session_id: Some(archive.conversation_id),
-                                        source_token_estimate: Some(record.before_tokens as i64),
-                                        summary_token_count: Some(record.summary_tokens as i64),
-                                        preserved_turns: Some(record.preserved_message_count as i64),
-                                        archive_path: Some(path.display().to_string()),
-                                        verification_status: Some("verified".to_string()),
-                                    });
-                                fire_plugin_hooks(
-                                    "compaction",
-                                    serde_json::json!({
-                                        "id": compaction_id,
-                                        "task_id": task_id.clone(),
-                                        "session_id": conversation_id,
-                                        "archive_path": path.display().to_string(),
-                                    }),
-                                )
-                                .await;
-                            }
-                            if let Err(err) = manager.save_conversation(&conversation) {
-                                tracing::warn!(
-                                    error = %err,
-                                    "SaveCompactionArchive: archive persisted but conversation save failed"
-                                );
-                            } else {
-                                let _ = tx.send(Msg::SessionSaved).await;
-                            }
-                        },
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                "SaveCompactionArchive: archive write failed; NOT overwriting conversation",
-                            );
-                        },
-                    }
-                });
+                self.queue_persistence(PersistenceJob::Compaction(Box::new(
+                    PendingCompactionSave {
+                        archive,
+                        record,
+                        conversation,
+                        task_id: self.task_id.clone(),
+                    },
+                )));
             },
             Cmd::SaveProcess(process) => {
                 let task_id = self.task_id.clone();
@@ -1432,6 +1549,48 @@ impl EffectRunner {
         }
     }
 
+    fn queue_persistence(&mut self, job: PersistenceJob) {
+        let previous = self.persistence_tail.take();
+        let state = Arc::clone(&self.persistence_state);
+        let tx = self.msg_tx.clone();
+        self.persistence_tail = Some(tokio::spawn(async move {
+            if let Some(previous) = previous
+                && let Err(error) = previous.await
+            {
+                tracing::warn!(error = %error, "previous persistence job panicked");
+            }
+
+            let result = tokio::task::spawn_blocking(move || {
+                state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .process(job)
+            })
+            .await;
+
+            match result {
+                Ok((events, outcome)) => {
+                    // Events report durable writes even when the job as a
+                    // whole failed — a partially drained barrier already
+                    // persisted those archives, and they are never re-emitted.
+                    if outcome.is_ok() || !events.is_empty() {
+                        let _ = tx.send(Msg::SessionSaved).await;
+                    }
+                    for event in events {
+                        fire_compaction_hook(&event).await;
+                    }
+                    if let Err(error) = outcome {
+                        tracing::warn!(
+                            error = %error,
+                            "persistence job failed; compaction barriers remain queued"
+                        );
+                    }
+                },
+                Err(error) => tracing::warn!(error = %error, "persistence job panicked"),
+            }
+        }));
+    }
+
     /// Async shutdown: cancel every scope, then wait for all spawned
     /// work to drain. Bounded by 5 seconds — a hung task past that
     /// gets aborted outright by `JoinSet::drop`.
@@ -1451,7 +1610,40 @@ impl EffectRunner {
         let shutdown_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
 
         let owns_global_mcp = self.owns_global_mcp;
+        let persistence_tail = self.persistence_tail.take();
+        let persistence_state = Arc::clone(&self.persistence_state);
         let drain = async {
+            if let Some(tail) = persistence_tail
+                && let Err(error) = tail.await
+            {
+                tracing::warn!(error = %error, "shutdown: persistence chain panicked");
+            }
+            match tokio::task::spawn_blocking(move || {
+                persistence_state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .retry_all_blocked()
+            })
+            .await
+            {
+                Ok((events, outcome)) => {
+                    // A barrier drained at shutdown still owes its hooks —
+                    // these events are never re-emitted.
+                    for event in events {
+                        fire_compaction_hook(&event).await;
+                    }
+                    if let Err(error) = outcome {
+                        tracing::warn!(
+                            error = %error,
+                            "shutdown: compaction persistence barrier retry failed"
+                        );
+                    }
+                },
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "shutdown: compaction persistence barrier panicked"
+                ),
+            }
             // Only the top-level runner reaps the process-global MCP manager.
             // A subagent's child runner shares it; reaping here would kill the
             // parent's servers the moment the first subagent finished.
@@ -2148,6 +2340,7 @@ async fn consolidate_memory(
         resolved_context_window: None,
         resolved_max_output: None,
         output_schema: None,
+        suppress_auto_compact: false,
     };
 
     let provider = match factory.resolve(&model_id).await {
@@ -2365,15 +2558,12 @@ async fn run_compaction(
         request.instructions.as_deref(),
         request.policy,
     );
+    ensure_compaction_request_fits(&summary_request, max_context_tokens)?;
     let (draft, draft_usage) =
         collect_compaction_text(Arc::clone(&provider), turn, summary_request, token.clone())
             .await?;
     let draft_summary = crate::domain::normalize_summary(&draft);
-    if draft_summary.trim().is_empty() {
-        return Err(ModelError::InvalidRequest(
-            "compaction produced an empty summary".to_string(),
-        ));
-    }
+    let draft_validation = crate::domain::validate_summary_structure(&draft_summary);
 
     let verify_request = crate::domain::build_verification_request(
         &request.chat,
@@ -2382,24 +2572,66 @@ async fn run_compaction(
         request.instructions.as_deref(),
         request.policy,
     );
-    let (final_summary, verify_usage, verified, verification_error) =
+    let review_fits = compaction_request_fits(&verify_request, max_context_tokens);
+    let (final_summary, verify_usage, review_status, review_error) = if review_fits {
         match collect_compaction_text(Arc::clone(&provider), turn, verify_request, token).await {
             Ok((verified_text, verify_usage)) => {
                 let verified_summary = crate::domain::normalize_summary(&verified_text);
-                if verified_summary.trim().is_empty() {
-                    (
-                        draft_summary,
+                match crate::domain::validate_summary_structure(&verified_summary) {
+                    Ok(()) => (
+                        verified_summary,
                         verify_usage,
-                        false,
-                        Some("verification returned an empty summary".to_string()),
-                    )
-                } else {
-                    (verified_summary, verify_usage, true, None)
+                        crate::domain::CompactionReviewStatus::Reviewed,
+                        None,
+                    ),
+                    Err(error) => match draft_validation {
+                        Ok(()) => (
+                            draft_summary,
+                            verify_usage,
+                            crate::domain::CompactionReviewStatus::DraftValidated,
+                            Some(format!("review returned an invalid checkpoint: {error}")),
+                        ),
+                        Err(draft_error) => {
+                            return Err(ModelError::InvalidRequest(format!(
+                                "compaction produced no structurally valid checkpoint (draft: {draft_error}; review: {error})"
+                            )));
+                        },
+                    },
                 }
             },
             Err(ModelError::Cancelled) => return Err(ModelError::Cancelled),
-            Err(err) => (draft_summary, None, false, Some(err.to_string())),
-        };
+            Err(err) => match draft_validation {
+                Ok(()) => (
+                    draft_summary,
+                    None,
+                    crate::domain::CompactionReviewStatus::DraftValidated,
+                    Some(format!("review failed: {err}")),
+                ),
+                Err(draft_error) => {
+                    return Err(ModelError::InvalidRequest(format!(
+                        "compaction draft was invalid and review failed (draft: {draft_error}; review: {err})"
+                    )));
+                },
+            },
+        }
+    } else {
+        match draft_validation {
+            Ok(()) => (
+                draft_summary,
+                None,
+                crate::domain::CompactionReviewStatus::DraftValidated,
+                Some(
+                    "review skipped because the complete request would exceed the context window"
+                        .to_string(),
+                ),
+            ),
+            Err(error) => {
+                return Err(ModelError::InvalidRequest(format!(
+                    "compaction draft was invalid and the review request did not fit: {error}"
+                )));
+            },
+        }
+    };
 
     let id = format!(
         "compact_{}",
@@ -2413,10 +2645,15 @@ async fn run_compaction(
         after_tokens: 0,
         archived_message_count: prepared.archived_messages.len(),
         preserved_message_count: prepared.preserved_messages.len(),
+        preserved_turn_count: prepared
+            .preserved_messages
+            .iter()
+            .filter(|message| message.role == crate::models::MessageRole::User)
+            .count(),
         summary_tokens: final_summary.len().div_ceil(4),
         duration_secs: started.elapsed().as_secs_f64(),
-        verified,
-        verification_error,
+        review_status,
+        review_error,
         focus: request.instructions.clone(),
         archive_path: None,
     };
@@ -2460,7 +2697,37 @@ async fn run_compaction(
         before_snapshot,
         after_snapshot,
         usage: crate::domain::combine_usage(draft_usage, verify_usage),
+        source_boundaries: request
+            .chat
+            .messages
+            .iter()
+            .map(crate::domain::CompactionBoundary::from_message)
+            .collect(),
     })
+}
+
+fn compaction_request_fits(
+    request: &crate::domain::ChatRequest,
+    max_context_tokens: Option<usize>,
+) -> bool {
+    let Some(max_tokens) = max_context_tokens else {
+        return true;
+    };
+    let used = crate::domain::estimate_context_usage_for_request(request, Some(max_tokens));
+    used.used_tokens.saturating_add(request.max_tokens) <= max_tokens
+}
+
+fn ensure_compaction_request_fits(
+    request: &crate::domain::ChatRequest,
+    max_context_tokens: Option<usize>,
+) -> Result<(), ModelError> {
+    if compaction_request_fits(request, max_context_tokens) {
+        Ok(())
+    } else {
+        Err(ModelError::InvalidRequest(
+            "complete compaction request exceeds the model context window".to_string(),
+        ))
+    }
 }
 
 async fn collect_compaction_text(
@@ -3406,6 +3673,7 @@ mod tests {
             resolved_context_window: None,
             resolved_max_output: None,
             output_schema: None,
+            suppress_auto_compact: false,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -3433,6 +3701,7 @@ mod tests {
             resolved_context_window: None,
             resolved_max_output: None,
             output_schema: None,
+            suppress_auto_compact: false,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -3519,6 +3788,7 @@ mod tests {
                 resolved_context_window: None,
                 resolved_max_output: None,
                 output_schema: None,
+                suppress_auto_compact: false,
             },
         });
         assert_eq!(r.scope_count(), 1);
@@ -3549,6 +3819,7 @@ mod tests {
             resolved_context_window: None,
             resolved_max_output: None,
             output_schema: None,
+            suppress_auto_compact: false,
         };
         let turn = TurnId(123);
 
@@ -3601,5 +3872,239 @@ mod tests {
         let start = std::time::Instant::now();
         r.shutdown().await;
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    fn persistence_fixture(
+        root: &std::path::Path,
+        archive_id: &str,
+    ) -> (crate::session::ConversationHistory, PendingCompactionSave) {
+        let now = chrono::Local::now();
+        let mut full = crate::session::ConversationHistory::new(
+            root.display().to_string(),
+            "test/model".to_string(),
+            now,
+        );
+        full.add_messages(&[crate::models::ChatMessage::user("raw history")], now);
+        let mut compacted = full.clone();
+        compacted.replace_messages(
+            vec![crate::models::ChatMessage::user("compacted checkpoint")],
+            now,
+        );
+        let archive = crate::domain::CompactionArchive {
+            id: archive_id.to_string(),
+            conversation_id: full.id.clone(),
+            created_at: now,
+            messages: full.messages.clone(),
+        };
+        let record = crate::domain::CompactionRecord {
+            id: archive_id.to_string(),
+            trigger: crate::domain::CompactionTrigger::Manual,
+            created_at: now,
+            before_tokens: 100,
+            after_tokens: 20,
+            archived_message_count: 1,
+            preserved_message_count: 1,
+            preserved_turn_count: 1,
+            summary_tokens: 10,
+            duration_secs: 0.1,
+            review_status: crate::domain::CompactionReviewStatus::Reviewed,
+            review_error: None,
+            focus: None,
+            archive_path: None,
+        };
+        (
+            full,
+            PendingCompactionSave {
+                archive,
+                record,
+                conversation: compacted,
+                task_id: None,
+            },
+        )
+    }
+
+    #[test]
+    fn persistence_orders_compaction_before_newer_conversation_save() {
+        let root = std::env::temp_dir().join(format!(
+            "mermaid-persistence-order-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (full, compaction) = persistence_fixture(&root, "compact_ordered");
+        let manager = crate::session::ConversationManager::new(&root).unwrap();
+        manager.save_conversation(&full).unwrap();
+
+        let mut state = PersistenceState::new(root.clone());
+        let (events, outcome) =
+            state.process(PersistenceJob::Compaction(Box::new(compaction.clone())));
+        outcome.unwrap();
+        assert_eq!(events.len(), 1);
+        let mut newer = compaction.conversation;
+        newer.add_messages(
+            &[crate::models::ChatMessage::assistant("new assistant reply")],
+            chrono::Local::now(),
+        );
+        let (_, outcome) = state.process(PersistenceJob::Conversation(Box::new(newer)));
+        outcome.unwrap();
+
+        let loaded = crate::session::ConversationManager::new(&root)
+            .unwrap()
+            .load_conversation(&full.id)
+            .unwrap();
+        assert!(
+            loaded
+                .messages
+                .iter()
+                .any(|message| message.content == "new assistant reply")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_archive_blocks_later_stripped_conversation_save() {
+        let root = std::env::temp_dir().join(format!(
+            "mermaid-persistence-barrier-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (full, compaction) = persistence_fixture(&root, "../invalid");
+        let manager = crate::session::ConversationManager::new(&root).unwrap();
+        manager.save_conversation(&full).unwrap();
+
+        let mut state = PersistenceState::new(root.clone());
+        assert!(
+            state
+                .process(PersistenceJob::Compaction(Box::new(compaction.clone())))
+                .1
+                .is_err()
+        );
+        assert!(
+            state
+                .process(PersistenceJob::Conversation(Box::new(
+                    compaction.conversation,
+                )))
+                .1
+                .is_err()
+        );
+        assert_eq!(state.blocked.get(&full.id).map(VecDeque::len), Some(1));
+
+        let loaded = crate::session::ConversationManager::new(&root)
+            .unwrap()
+            .load_conversation(&full.id)
+            .unwrap();
+        assert_eq!(loaded.messages[0].content, "raw history");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blocked_barrier_queues_a_new_compaction_instead_of_dropping_it() {
+        let root = std::env::temp_dir().join(format!(
+            "mermaid-persistence-queue-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (full, first) = persistence_fixture(&root, "../invalid");
+        let mut second = first.clone();
+        second.archive.id = "compact_second".to_string();
+        second.record.id = "compact_second".to_string();
+
+        let mut state = PersistenceState::new(root.clone());
+        assert!(
+            state
+                .process(PersistenceJob::Compaction(Box::new(first)))
+                .1
+                .is_err()
+        );
+        // The older barrier still fails; the new save must queue behind it —
+        // its archive is the only durable copy of the stripped messages.
+        assert!(
+            state
+                .process(PersistenceJob::Compaction(Box::new(second)))
+                .1
+                .is_err()
+        );
+        let queued = state.blocked.get(&full.id).expect("barrier queue");
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].archive.id, "../invalid");
+        assert_eq!(queued[1].archive.id, "compact_second");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retry_all_blocked_attempts_every_conversation() {
+        let root = std::env::temp_dir().join(format!(
+            "mermaid-persistence-drain-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (bad_full, bad) = persistence_fixture(&root, "../invalid");
+        let (mut good_full, mut good) = persistence_fixture(&root, "compact_good");
+        // Conversation ids are millisecond timestamps; two fixtures minted in
+        // the same instant would collide into one barrier queue. Force the
+        // second conversation onto a distinct (still format-valid) id.
+        good_full.id = "20990101_000000_001".to_string();
+        good.archive.conversation_id = good_full.id.clone();
+        good.conversation.id = good_full.id.clone();
+
+        let mut state = PersistenceState::new(root.clone());
+        state
+            .blocked
+            .entry(bad_full.id.clone())
+            .or_default()
+            .push_back(bad);
+        state
+            .blocked
+            .entry(good_full.id.clone())
+            .or_default()
+            .push_back(good);
+
+        // One conversation's bad disk state must not strand the other's
+        // barrier at shutdown: the error surfaces, but the good save lands —
+        // and its durably persisted event is reported alongside the error.
+        let (events, outcome) = state.retry_all_blocked();
+        assert!(outcome.is_err());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "compact_good");
+        assert!(!state.blocked.contains_key(&good_full.id));
+        assert_eq!(state.blocked.get(&bad_full.id).map(VecDeque::len), Some(1));
+        let loaded = crate::session::ConversationManager::new(&root)
+            .unwrap()
+            .load_conversation(&good_full.id)
+            .unwrap();
+        assert_eq!(loaded.messages[0].content, "compacted checkpoint");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn partially_drained_barrier_reports_its_persisted_events() {
+        let root = std::env::temp_dir().join(format!(
+            "mermaid-persistence-partial-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (full, good) = persistence_fixture(&root, "compact_good");
+        let mut bad = good.clone();
+        bad.archive.id = "../invalid".to_string();
+        bad.record.id = "../invalid".to_string();
+
+        let mut state = PersistenceState::new(root.clone());
+        let queue = state.blocked.entry(full.id.clone()).or_default();
+        queue.push_back(good);
+        queue.push_back(bad);
+
+        // The good save at the head of the queue persists durably before the
+        // bad one fails. Its event must surface with the error — it is popped
+        // and would otherwise never fire SessionSaved or the compaction hook.
+        let (events, outcome) = state.retry_blocked(&full.id);
+        assert!(outcome.is_err());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "compact_good");
+        assert_eq!(state.blocked.get(&full.id).map(VecDeque::len), Some(1));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

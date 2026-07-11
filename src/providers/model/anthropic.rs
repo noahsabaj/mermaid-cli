@@ -169,6 +169,7 @@ mod tests {
             resolved_context_window: None,
             resolved_max_output: None,
             output_schema: None,
+            suppress_auto_compact: false,
         };
         let cfg = build_model_config(&req);
         assert_eq!(cfg.reasoning, crate::models::ReasoningLevel::XHigh);

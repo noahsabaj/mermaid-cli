@@ -487,10 +487,11 @@ fn compaction_finished_replaces_history_and_archives_head() {
             after_tokens: 30,
             archived_message_count: 2,
             preserved_message_count: 1,
+            preserved_turn_count: 1,
             summary_tokens: 10,
             duration_secs: 0.5,
-            verified: true,
-            verification_error: None,
+            review_status: mermaid_cli::domain::CompactionReviewStatus::Reviewed,
+            review_error: None,
             focus: None,
             archive_path: None,
         },
@@ -502,6 +503,7 @@ fn compaction_finished_replaces_history_and_archives_head() {
         before_snapshot: before,
         after_snapshot: after,
         usage: None,
+        source_boundaries: Vec::new(),
     };
 
     let (state, cmds) = update(state, Msg::CompactionFinished { turn, result });
@@ -651,10 +653,11 @@ fn manual_compaction_finish_drains_queued_message() {
             after_tokens: 30,
             archived_message_count: 2,
             preserved_message_count: 1,
+            preserved_turn_count: 1,
             summary_tokens: 10,
             duration_secs: 0.5,
-            verified: true,
-            verification_error: None,
+            review_status: mermaid_cli::domain::CompactionReviewStatus::Reviewed,
+            review_error: None,
             focus: None,
             archive_path: None,
         },
@@ -666,6 +669,7 @@ fn manual_compaction_finish_drains_queued_message() {
         before_snapshot: snap(90),
         after_snapshot: snap(20),
         usage: None,
+        source_boundaries: Vec::new(),
     };
 
     let (state, cmds) = update(state, Msg::CompactionFinished { turn, result });

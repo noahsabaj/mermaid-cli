@@ -605,6 +605,7 @@ mod tests {
             resolved_context_window: Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
             resolved_max_output: Some(crate::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS),
             output_schema: None,
+            suppress_auto_compact: false,
         }
     }
 

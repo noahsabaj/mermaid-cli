@@ -585,6 +585,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             state.session.conversation = history;
             state.turn = TurnState::Idle;
             state.ui.mode = UiMode::EditingInput;
+            // The pause belonged to the previous conversation's failing
+            // compaction; the loaded one starts fresh.
+            state.runtime.auto_compact_suppressed = false;
             // The loaded conversation has its own id — the previous session's
             // scratch dir no longer applies. Recompute (same as `/clear`).
             refresh_scratchpad(&mut state, &mut cmds);
@@ -3334,6 +3337,9 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
     // The live "Compacting…" status comes from the TurnState::Compacting status
     // line (the blue indicator); no separate gray status message — it was a
     // redundant duplicate. The completion receipt is set on CompactionFinished.
+    // An explicit /compact is the user's retry lever: un-pause auto-compaction
+    // so this attempt (and later turns) get a fresh shot.
+    state.runtime.auto_compact_suppressed = false;
     cmds.push(Cmd::CompactConversation {
         turn,
         request: CompactionRequest::manual(build_chat_request(state), instructions),
@@ -3665,18 +3671,25 @@ fn context_text(state: &State) -> String {
         "Auto compact threshold: {}%",
         policy.auto_threshold_percent
     ));
-    let auto_status = match should_auto_compact(&next_snapshot, &request, policy) {
+    let auto_skip = should_auto_compact(&next_snapshot, &request, policy);
+    let auto_status = match &auto_skip {
         Ok(()) => "would run before the next model call".to_string(),
+        // Paused is not "not needed" — the threshold may well be exceeded;
+        // the pause is the reason it won't run.
+        Err(reason @ crate::domain::compaction::CompactionSkip::Suppressed) => reason.to_string(),
         Err(reason) => format!("not needed ({reason})"),
     };
     lines.push(format!("Auto compact: {auto_status}"));
-    if auto_status.starts_with("would run") {
-        lines.push(
+    match &auto_skip {
+        Ok(()) => lines.push(
             "Suggested action: continue normally; Mermaid will compact before the next model call."
                 .to_string(),
-        );
-    } else {
-        lines.push("Suggested action: no manual compaction needed unless you want a handoff checkpoint now.".to_string());
+        ),
+        Err(crate::domain::compaction::CompactionSkip::Suppressed) => lines.push(
+            "Suggested action: run /compact to checkpoint now and re-enable automatic compaction."
+                .to_string(),
+        ),
+        Err(_) => lines.push("Suggested action: no manual compaction needed unless you want a handoff checkpoint now.".to_string()),
     }
     lines.push(format!(
         "Hard limit risk: {}",
@@ -3756,14 +3769,14 @@ fn context_text(state: &State) -> String {
             last.preserved_message_count
         ));
         lines.push(format!(
-            "- verification: {}",
-            if last.verified {
-                "verified".to_string()
-            } else {
-                last.verification_error
+            "- review: {}",
+            match last.review_status {
+                crate::domain::CompactionReviewStatus::Reviewed => "reviewed".to_string(),
+                crate::domain::CompactionReviewStatus::DraftValidated => last
+                    .review_error
                     .as_ref()
-                    .map(|err| format!("draft fallback ({err})"))
-                    .unwrap_or_else(|| "draft fallback".to_string())
+                    .map(|err| format!("validated draft ({err})"))
+                    .unwrap_or_else(|| "validated draft".to_string()),
             }
         ));
         if let Some(path) = &last.archive_path {
@@ -4093,6 +4106,7 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
             state.session.context_usage = None;
+            state.runtime.auto_compact_suppressed = false;
             state.turn = TurnState::Idle;
             // The fresh conversation starts with an empty checklist; the
             // broker must forget the old one too (single-writer sync).
@@ -4198,6 +4212,15 @@ fn handle_compaction_finished(
         _ => return,
     };
 
+    // Compaction runs asynchronously from a request snapshot. Preserve every
+    // message that arrived after dispatch (MCP/runtime notices, run summaries,
+    // and similar non-turn-scoped events) instead of letting the replacement
+    // clobber them. Match the request-visible source as an ordered subsequence;
+    // anything else in the live history is intervening state.
+    let intervening =
+        compaction_intervening_messages(state.session.messages(), &result.source_boundaries);
+    let intervening_tokens = super::compaction::estimate_messages_tokens(&intervening);
+
     let conversation_id = state.session.conversation.id.clone();
     let mut record = result.record;
     record.archive_path = Some(format!(
@@ -4215,11 +4238,59 @@ fn handle_compaction_finished(
         .session
         .conversation
         .replace_messages(result.replacement_messages, state.now);
+    if !intervening.is_empty() {
+        let messages = &mut state.session.conversation.messages;
+        let before_pending_tail = messages.last().is_some_and(|message| {
+            message.role == MessageRole::Assistant
+                && message
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+        });
+        if before_pending_tail {
+            // A tool result that answers the pending tail must land AFTER its
+            // call — a `tool_result` preceding its `tool_use` 400s providers
+            // and gets scrubbed as an orphan. Split at the FIRST such result:
+            // everything before it goes ahead of the tail, and everything from
+            // it onward follows the tail, so a notice that arrived after (and
+            // may reference) the result keeps its arrival order too.
+            let tail_ids: std::collections::HashSet<String> = messages
+                .last()
+                .and_then(|message| message.tool_calls.as_ref())
+                .into_iter()
+                .flatten()
+                .filter_map(|call| call.id.clone())
+                .collect();
+            let split = intervening.iter().position(|message| {
+                message.role == MessageRole::Tool
+                    && message
+                        .tool_call_id
+                        .as_ref()
+                        .is_some_and(|id| tail_ids.contains(id))
+            });
+            let mut before_tail = intervening;
+            let after_tail = match split {
+                Some(index) => before_tail.split_off(index),
+                None => Vec::new(),
+            };
+            let position = messages.len() - 1;
+            messages.splice(position..position, before_tail);
+            messages.extend(after_tail);
+        } else {
+            messages.extend(intervening);
+        }
+    }
     state
         .session
         .conversation
         .add_compaction(record.clone(), state.now);
-    state.session.context_usage = Some(result.after_snapshot);
+    state.session.context_usage = Some(
+        result
+            .after_snapshot
+            .with_additional_tokens(intervening_tokens),
+    );
+    // A successful compaction un-pauses auto-compaction regardless of trigger.
+    state.runtime.auto_compact_suppressed = false;
 
     if let Some(usage) = result.usage {
         fold_token_usage(
@@ -4270,6 +4341,34 @@ fn handle_compaction_finished(
     });
 }
 
+fn compaction_intervening_messages(
+    current: &[ChatMessage],
+    source: &[crate::domain::CompactionBoundary],
+) -> Vec<ChatMessage> {
+    if source.is_empty() {
+        return Vec::new();
+    }
+    let mut source_index = 0usize;
+    let mut intervening = Vec::new();
+    for message in current {
+        // One hash per live message; the lookahead below compares strings.
+        let fingerprint = crate::domain::CompactionBoundary::fingerprint_of(message);
+        if source_index < source.len() && source[source_index].fingerprint == fingerprint {
+            source_index += 1;
+            continue;
+        }
+        if let Some(offset) = source[source_index..]
+            .iter()
+            .position(|boundary| boundary.fingerprint == fingerprint)
+        {
+            source_index += offset + 1;
+        } else {
+            intervening.push(message.clone());
+        }
+    }
+    intervening
+}
+
 fn handle_compaction_failed(
     state: &mut State,
     turn: TurnId,
@@ -4300,11 +4399,24 @@ fn handle_compaction_failed(
             return;
         },
         CompactionTrigger::Manual => "Compaction failed",
-        // Auto-compaction is best-effort preflight: when it can't run (e.g. too
-        // little history to compact) Mermaid just proceeds with the un-compacted
-        // request, so there's nothing for the user to act on. Stay silent rather
-        // than printing a scary "Invalid request" every turn (still logged at WARN).
-        CompactionTrigger::AutoThreshold => return,
+        // Auto-compaction is best-effort preflight: Mermaid proceeds with the
+        // un-compacted request (the provider's own context limit is the real
+        // gate). But a failing summarizer must not silently retry — and pay
+        // for — a draft + review model call on every later turn: pause it
+        // until a compaction succeeds, `/compact` runs, or the conversation
+        // switches, and tell the user once.
+        CompactionTrigger::AutoThreshold => {
+            if !state.runtime.auto_compact_suppressed {
+                state.runtime.auto_compact_suppressed = true;
+                state.session.append(
+                    ChatMessage::system(format!(
+                        "Auto-compaction paused after a failed attempt ({message}) — run /compact to retry."
+                    )),
+                    state.now,
+                );
+            }
+            return;
+        },
         CompactionTrigger::ContextLimitRetry => "Context-limit compaction failed",
         // The response truncated and recovery couldn't reduce the context (e.g. the
         // preserved tail already fills the window). Stop the run cleanly with the
@@ -4550,10 +4662,12 @@ fn handle_stream_done(
                     .as_ref()
                     .and_then(|s| s.max_tokens)
                     .or(state.runtime.provider_capabilities.max_context_tokens);
+                let reserve =
+                    CompactionPolicy::default().response_reserve(&build_chat_request(state));
                 match crate::domain::compaction::classify_length_stop(
                     usage.as_ref(),
                     window,
-                    crate::constants::COMPACTION_MIN_RESPONSE_RESERVE_TOKENS,
+                    reserve,
                 ) {
                     crate::domain::compaction::LengthCause::OutputCapped => {
                         // Never compact for an output-cap stop — the input
@@ -4577,6 +4691,12 @@ fn handle_stream_done(
                     },
                     crate::domain::compaction::LengthCause::ContextFull
                     | crate::domain::compaction::LengthCause::Unknown => {
+                        // Visible assistant text is real forward progress even if
+                        // the context filled again. The guard bounds only repeated
+                        // no-output thrashing, as the config promises.
+                        if !no_visible_output {
+                            state.runtime.truncation_recoveries = 0;
+                        }
                         // The window filled mid-turn (or usage was absent and we
                         // assume so). If there's history to compact and we're
                         // under the per-run cap, recover (compact + continue)
@@ -5416,6 +5536,10 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         resolved_context_window: None,
         resolved_max_output: None,
         output_schema: state.output_schema.clone(),
+        // Pause auto-compaction after a failed attempt (cleared by a successful
+        // compaction, manual /compact, or a conversation switch). Rides on the
+        // request because the effect preflight never sees RuntimeState.
+        suppress_auto_compact: state.runtime.auto_compact_suppressed,
     }
 }
 
@@ -8889,7 +9013,7 @@ mod tests {
     }
 
     #[test]
-    fn length_truncation_at_cap_stops_with_hint() {
+    fn length_truncation_without_progress_at_cap_stops_with_hint() {
         let mut state = fresh_state();
         state
             .session
@@ -8900,7 +9024,7 @@ mod tests {
         // Already at the default cap of consecutive recoveries.
         state.runtime.truncation_recoveries =
             state.settings.compaction.max_truncation_recoveries as u32;
-        state.turn = truncating_turn("more");
+        state.turn = truncating_turn("");
         let (state, cmds) = update(state, length_done());
 
         assert!(matches!(state.turn, TurnState::Idle), "run ends at the cap");
@@ -9443,10 +9567,14 @@ mod tests {
                 after_tokens: 40,
                 archived_message_count: 2,
                 preserved_message_count: replacement.len(),
+                preserved_turn_count: replacement
+                    .iter()
+                    .filter(|message| message.role == MessageRole::User)
+                    .count(),
                 summary_tokens: 10,
                 duration_secs: 0.0,
-                verified: true,
-                verification_error: None,
+                review_status: crate::domain::CompactionReviewStatus::Reviewed,
+                review_error: None,
                 focus: None,
                 archive_path: None,
             },
@@ -9455,7 +9583,264 @@ mod tests {
             before_snapshot: snap.clone(),
             after_snapshot: snap,
             usage: None,
+            source_boundaries: Vec::new(),
         }
+    }
+
+    #[test]
+    fn compaction_finish_preserves_messages_appended_after_dispatch() {
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("old"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("old answer"), state.now);
+        state.session.append(ChatMessage::user("latest"), state.now);
+        let boundaries = state
+            .session
+            .messages()
+            .iter()
+            .map(crate::domain::CompactionBoundary::from_message)
+            .collect();
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::Manual,
+            resume_continuation: false,
+        };
+        state.session.append(
+            ChatMessage::system("MCP server failed during compaction"),
+            state.now,
+        );
+
+        let mut result = fake_recovery_result(vec![ChatMessage::user("compacted context")]);
+        result.source_boundaries = boundaries;
+        let (state, _) = update(
+            state,
+            Msg::CompactionFinished {
+                turn: TurnId(7),
+                result,
+            },
+        );
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|message| { message.content == "MCP server failed during compaction" })
+        );
+    }
+
+    #[test]
+    fn compaction_finish_places_late_tool_results_after_the_pending_tail() {
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("old"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("old answer"), state.now);
+        state.session.append(ChatMessage::user("latest"), state.now);
+        let boundaries = state
+            .session
+            .messages()
+            .iter()
+            .map(crate::domain::CompactionBoundary::from_message)
+            .collect();
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::TruncationRecovery,
+            resume_continuation: false,
+        };
+        // All three arrive while compaction runs: a notice, a tool result that
+        // answers the pending assistant tail the checkpoint preserves, and a
+        // report that (chronologically and textually) follows the result.
+        state
+            .session
+            .append(ChatMessage::system("notice during compaction"), state.now);
+        state.session.append(
+            ChatMessage::tool("call_9", "execute_command", "late result"),
+            state.now,
+        );
+        state
+            .session
+            .append(ChatMessage::system("report about the result"), state.now);
+
+        let mut pending_tail = ChatMessage::assistant("");
+        pending_tail.tool_calls = Some(vec![tool_call_fixture("call_9", "execute_command")]);
+        let mut result =
+            fake_recovery_result(vec![ChatMessage::user("compacted context"), pending_tail]);
+        result.source_boundaries = boundaries;
+        let (state, _) = update(
+            state,
+            Msg::CompactionFinished {
+                turn: TurnId(7),
+                result,
+            },
+        );
+
+        let contents: Vec<&str> = state
+            .session
+            .messages()
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        let tail_call = contents
+            .iter()
+            .position(|content| content.is_empty())
+            .expect("pending tail kept");
+        let tail_result = contents
+            .iter()
+            .position(|content| *content == "late result")
+            .expect("late tool result kept");
+        let notice = contents
+            .iter()
+            .position(|content| *content == "notice during compaction")
+            .expect("notice kept");
+        let report = contents
+            .iter()
+            .position(|content| *content == "report about the result")
+            .expect("report kept");
+        assert!(
+            notice < tail_call,
+            "pre-result intervening messages go before the pending tail"
+        );
+        assert!(
+            tail_call < tail_result,
+            "a tool result must follow its tool call"
+        );
+        assert!(
+            tail_result < report,
+            "a message that arrived after the result must stay after it"
+        );
+    }
+
+    fn tool_call_fixture(id: &str, name: &str) -> crate::models::tool_call::ToolCall {
+        crate::models::tool_call::ToolCall {
+            id: Some(id.to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: name.to_string(),
+                arguments: serde_json::json!({}),
+            },
+        }
+    }
+
+    #[test]
+    fn auto_compaction_failure_pauses_retries_until_reset() {
+        let mut state = fresh_state();
+        state.turn = truncating_turn("");
+        let turn = state.turn.id().expect("generating turn");
+
+        let (mut state, _) = update(
+            state,
+            Msg::CompactionFailed {
+                turn,
+                trigger: CompactionTrigger::AutoThreshold,
+                message: "checkpoint invalid".to_string(),
+                kind: StatusKind::Warn,
+            },
+        );
+        assert!(state.runtime.auto_compact_suppressed);
+        assert!(build_chat_request(&state).suppress_auto_compact);
+        let notices = |state: &State| {
+            state
+                .session
+                .messages()
+                .iter()
+                .filter(|message| message.content.contains("Auto-compaction paused"))
+                .count()
+        };
+        assert_eq!(notices(&state), 1);
+
+        // A second failure stays silent — the pause was already announced.
+        state.turn = truncating_turn("");
+        let turn = state.turn.id().expect("generating turn");
+        let (state, _) = update(
+            state,
+            Msg::CompactionFailed {
+                turn,
+                trigger: CompactionTrigger::AutoThreshold,
+                message: "checkpoint invalid".to_string(),
+                kind: StatusKind::Warn,
+            },
+        );
+        assert!(state.runtime.auto_compact_suppressed);
+        assert_eq!(notices(&state), 1);
+
+        // A successful compaction (any trigger) lifts the pause.
+        let mut state = state;
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::Manual,
+            resume_continuation: false,
+        };
+        let result = fake_recovery_result(vec![ChatMessage::user("compacted context")]);
+        let (state, _) = update(
+            state,
+            Msg::CompactionFinished {
+                turn: TurnId(7),
+                result,
+            },
+        );
+        assert!(!state.runtime.auto_compact_suppressed);
+        assert!(!build_chat_request(&state).suppress_auto_compact);
+    }
+
+    #[test]
+    fn manual_compact_lifts_the_auto_compaction_pause() {
+        let mut state = fresh_state();
+        state.runtime.auto_compact_suppressed = true;
+        state.session.append(ChatMessage::user("one"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("two"), state.now);
+        state.session.append(ChatMessage::user("three"), state.now);
+
+        let (state, cmds) = update(state, Msg::Slash(SlashCmd::Compact(None)));
+        assert!(!state.runtime.auto_compact_suppressed);
+        let Some(Cmd::CompactConversation { request, .. }) = cmds
+            .iter()
+            .find(|command| matches!(command, Cmd::CompactConversation { .. }))
+        else {
+            panic!("expected a CompactConversation command");
+        };
+        assert!(!request.chat.suppress_auto_compact);
+    }
+
+    #[test]
+    fn model_switch_lifts_the_auto_compaction_pause() {
+        let mut state = fresh_state();
+        state.runtime.auto_compact_suppressed = true;
+
+        // The pause is model-scoped: switching models is the natural reaction
+        // to a summarizer that can't produce the checkpoint structure, and the
+        // new model deserves a fresh shot.
+        let (state, _) = update(
+            state,
+            Msg::Slash(SlashCmd::Model(Some("ollama/other".to_string()))),
+        );
+        assert!(!state.runtime.auto_compact_suppressed);
+    }
+
+    #[test]
+    fn visible_context_full_progress_resets_recovery_guard() {
+        let mut state = fresh_state();
+        state.runtime.provider_capabilities.max_context_tokens = Some(20_000);
+        state.settings.compaction.max_truncation_recoveries = 3;
+        state.runtime.truncation_recoveries = 2;
+        state.session.append(ChatMessage::user("one"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("two"), state.now);
+        state.session.append(ChatMessage::user("three"), state.now);
+        state.turn = truncating_turn("visible progress");
+
+        let (state, cmds) = update(state, length_done_with_usage(18_000, 1_500));
+        assert!(matches!(state.turn, TurnState::Compacting { .. }));
+        assert_eq!(state.runtime.truncation_recoveries, 1);
+        assert!(
+            cmds.iter()
+                .any(|command| matches!(command, Cmd::CompactConversation { .. }))
+        );
     }
 
     #[test]
