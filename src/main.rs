@@ -77,6 +77,8 @@ async fn async_main() -> Result<()> {
         format,
         no_execute,
         output_schema,
+        plan,
+        plan_autoaccept,
         ..
     }) = &cli.command
     {
@@ -91,8 +93,12 @@ async fn async_main() -> Result<()> {
             config,
             prompt.clone(),
             *format,
-            *no_execute,
             output_schema,
+            HeadlessFlags {
+                no_execute: *no_execute,
+                plan: *plan,
+                plan_autoaccept: *plan_autoaccept,
+            },
         )
         .await;
     }
@@ -263,13 +269,21 @@ fn load_output_schema(path: &std::path::Path) -> Result<serde_json::Value> {
     Ok(schema)
 }
 
+/// The `mermaid run` boolean switches, grouped so the dispatch signature
+/// stays readable as flags accrue.
+struct HeadlessFlags {
+    no_execute: bool,
+    plan: bool,
+    plan_autoaccept: bool,
+}
+
 async fn dispatch_non_interactive(
     cli: &Cli,
     mut config: mermaid_cli::app::Config,
     prompt: Option<String>,
     format: OutputFormat,
-    no_execute: bool,
     output_schema: Option<serde_json::Value>,
+    flags: HeadlessFlags,
 ) -> Result<()> {
     let prompt = resolve_prompt_from_stdin(prompt)?;
     let cli_model_provided = cli.model.is_some();
@@ -298,18 +312,20 @@ async fn dispatch_non_interactive(
     if cli.continue_session && seed.is_none() {
         anyhow::bail!("--continue: no saved session found for {}", cwd.display());
     }
-    let runtime_task_id = create_run_task(&cwd, &model_id, &prompt, no_execute);
+    let runtime_task_id = create_run_task(&cwd, &model_id, &prompt, flags.no_execute);
     let run_result = run_non_interactive_with(
         config,
         cwd,
         model_id,
         prompt,
         RunOptions {
-            no_execute,
+            no_execute: flags.no_execute,
             task_id: runtime_task_id.clone(),
             stream_ndjson: matches!(format, OutputFormat::Ndjson),
             seed,
             output_schema,
+            plan: flags.plan,
+            plan_autoaccept: flags.plan_autoaccept,
             ..RunOptions::default()
         },
     )

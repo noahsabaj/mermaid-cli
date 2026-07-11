@@ -75,6 +75,12 @@ pub struct RunOptions {
     /// Every event that would print on an NDJSON stream is also broadcast
     /// here (send is sync + non-blocking; no-receiver errors are ignored).
     pub event_tx: Option<tokio::sync::broadcast::Sender<crate::domain::RunEvent>>,
+    /// `mermaid run --plan`: enter plan mode before the prompt seeds, so the
+    /// run explores read-only and delivers a plan file.
+    pub plan: bool,
+    /// `--plan-autoaccept`: the headless approval starts implementation
+    /// immediately instead of ending the run at the plan.
+    pub plan_autoaccept: bool,
 }
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
@@ -86,6 +92,14 @@ pub async fn run_non_interactive_with(
     prompt: String,
     opts: RunOptions,
 ) -> Result<RunResult> {
+    // `--plan-autoaccept`: the headless exit_plan_mode path consults these —
+    // auto-approve with post_approve=start flows the run straight from the
+    // approved plan into implementation.
+    if opts.plan_autoaccept {
+        config.plan.auto_approve = true;
+        config.plan.post_approve = Some(crate::app::PlanPostApprove::Start);
+    }
+
     // Fold enabled plugins' MCP servers + agent types into the merged
     // config before anything consumes it (same policy as the interactive
     // path; warnings go to stderr — there is no transcript here yet).
@@ -172,6 +186,18 @@ pub async fn run_non_interactive_with(
     }
     if let Some(tx) = &opts.event_tx {
         let _ = tx.send(started);
+    }
+
+    // `--plan`: flip into plan mode BEFORE the prompt seeds, through the
+    // same reducer path as the interactive `/plan` (path allocation, model
+    // swap, prompt injection all included).
+    if opts.plan {
+        state.now = chrono::Local::now();
+        let (new_state, cmds) = update(state, Msg::Slash(crate::domain::SlashCmd::Plan(None)));
+        state = new_state;
+        for cmd in cmds {
+            runner.dispatch(cmd);
+        }
     }
 
     // Seed the turn.

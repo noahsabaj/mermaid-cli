@@ -12,6 +12,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Image Paste** — Ctrl+V to attach images for vision models (X11/Wayland/macOS/Windows)
 - **Reasoning Levels** — seven tiers (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`); cycle with Alt+T or set via `/reasoning`; persisted per-model
 - **Safety Modes** — `read_only`/`ask`/`auto`/`full_access`; `auto` is classifier-backed (an LLM vets each borderline action against your intent, auto-running aligned ones and escalating risky ones); cycle live with Shift+Tab or `/safety`
+- **Plan Mode** — Alt+P or `/plan`: a hard read-only collaboration state where the agent explores, asks structured questions, and authors a plan file you approve before anything changes. Approval seeds the live task checklist from the plan's Tasks section and can start implementation in place, in a cleared context, or hand off to a fork/fresh session on a different model (plan on a frontier model, execute locally). Per-category permissions (builds, web, memory, task tools), plan-phase model/reasoning overrides, and approval behavior live in `/plan config`; `mermaid run --plan` does it headless
 - **Inline approvals** — in `ask` mode (and `auto` escalations) a gated action pauses and prompts inline (`1` Yes · `2` Yes, don't ask again · `3`/Esc No); the agent waits for your answer instead of erroring out
 - **Checkpoints** — shadow-git snapshots before mutations (`checkpoint_on_mutation`, on by default); inspect with `/checkpoints`, roll back with `/restore <id>`
 - **Project Instructions** — auto-loads `AGENTS.md` and `MERMAID.md` (MERMAID.md wins on conflict); edits take effect on the next turn
@@ -133,6 +134,8 @@ mermaid --record /tmp/session.jsonl              # Record reducer events for rep
 mermaid --replay /tmp/session.jsonl              # Reconstruct a recorded session (headless, deterministic)
 mermaid --append-system-prompt "Prefer small diffs" # Add one-off runtime instructions
 mermaid --system-prompt-file ./prompt.md         # Replace the default prompt for one run
+mermaid run --plan "refactor the auth flow"      # Headless plan mode: read-only run that delivers a plan file
+mermaid run --plan --plan-autoaccept "..."       # ...and continue straight into implementation
 mermaid list                                    # List available models across providers
 mermaid doctor                                  # First-run readiness check
 mermaid status                                  # Lower-level Ollama, MCP, and provider config
@@ -176,6 +179,7 @@ mermaid pr create                               # Open a PR/MR from the current 
 | Ctrl+D | Quit when the input box is empty (auto-saves the session) |
 | Ctrl+B | While tools are running, send the foreground command to the background (it keeps running as a `/processes` entry) |
 | Alt+T | Cycle reasoning level: `None → Minimal → Low → Medium → High → XHigh → Max → None` |
+| Alt+P | Toggle plan mode (read-only exploration + an approvable plan file) |
 | Shift+Tab | Cycle safety mode: `read_only → ask → auto → full_access → read_only` (session-scoped) |
 | Ctrl+V | Paste image or text from clipboard |
 | Ctrl+O | Compose the prompt in `$VISUAL`/`$EDITOR` (TUI suspends, resumes on save-quit) |
@@ -221,6 +225,7 @@ Durable memory:
 Safety and recovery:
 
 - `/safety [read_only|ask|auto|full_access]` (alias `/permission`) — show or set the session safety mode; Shift+Tab cycles it
+- `/plan [off|show|config]` — enter/leave plan mode (Alt+P toggles), show the plan file, or open the plan settings picker (`/config` opens the same picker)
 - `/approvals`, `/approve <id>`, `/deny <id>`
 - `/checkpoint <path...>`, `/checkpoints`, `/restore <id>`
 

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Plan mode: headless runs + SDK visibility.** `mermaid run --plan` enters
+  plan mode before the prompt seeds: the run explores read-only and
+  delivers a plan file (`.mermaid/plans/`) as its result — with no approval
+  UI the plan is accepted but implementation does not start.
+  `--plan-autoaccept` flows the same run straight from the approved plan
+  into implementation. `RunEvent::ToolFinished` gains an additive `plan`
+  payload (path + start/fresh/fork disposition) when the finishing call is
+  `exit_plan_mode`, so NDJSON streams and daemon `subscribe_task`
+  subscribers get first-class plan visibility without any change to
+  existing event shapes.
+
 - **Plan mode: clear-context execute + handoff.** The approval dialog gains
   `Approve, clear context and start` — execution continues in a fresh
   conversation seeded with a handoff preamble plus the approved plan (the

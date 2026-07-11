@@ -402,6 +402,18 @@ pub enum Commands {
         /// run's errors; the text answer is still returned.
         #[arg(long, value_name = "FILE")]
         output_schema: Option<PathBuf>,
+
+        /// Run in plan mode: the agent explores read-only and produces a plan
+        /// file (`.mermaid/plans/`) instead of making changes. With no
+        /// approval UI the plan is accepted as the run's deliverable but
+        /// implementation does NOT start.
+        #[arg(long)]
+        plan: bool,
+
+        /// With --plan: the moment the plan is presented, accept it and
+        /// continue straight into implementation in the same run.
+        #[arg(long, requires = "plan")]
+        plan_autoaccept: bool,
     },
 }
 

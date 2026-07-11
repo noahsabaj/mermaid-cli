@@ -74,6 +74,13 @@ pub enum RunEvent {
         /// Error detail, when the tool failed.
         #[serde(default)]
         error: Option<String>,
+        /// Present when this call is `exit_plan_mode` resolving with an
+        /// APPROVED plan — first-class plan visibility for SDK/daemon
+        /// subscribers without breaking the started/finished pairing.
+        /// Additive: absent for every other tool, and omitted from the wire
+        /// when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<PlanApproved>,
     },
     /// A gated tool is waiting for approval. Headless runs surface this so a
     /// supervising process can decide.
@@ -136,6 +143,23 @@ pub enum RunEvent {
     },
 }
 
+/// Plan payload on a [`RunEvent::ToolFinished`] for `exit_plan_mode`: the
+/// approved plan's location and the execution disposition the user chose.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanApproved {
+    /// Plan-file path, project-relative.
+    pub path: String,
+    /// Implementation starts immediately.
+    #[serde(default)]
+    pub start: bool,
+    /// Execution continues in a fresh conversation.
+    #[serde(default)]
+    pub fresh: bool,
+    /// Execution continues in a forked conversation.
+    #[serde(default)]
+    pub fork: bool,
+}
+
 impl RunEvent {
     /// Project a lifecycle [`Msg`] into a public `RunEvent`, or `None` for the
     /// many messages that have no place in the SDK stream.
@@ -163,6 +187,21 @@ impl RunEvent {
                 status: status_str(outcome.status).to_string(),
                 summary: outcome.summary.clone(),
                 error: outcome.error.clone(),
+                plan: match &outcome.metadata.detail {
+                    ToolMetadata::Plan {
+                        path,
+                        start,
+                        fresh,
+                        fork,
+                        ..
+                    } => Some(PlanApproved {
+                        path: path.clone(),
+                        start: *start,
+                        fresh: *fresh,
+                        fork: *fork,
+                    }),
+                    _ => None,
+                },
             },
             Msg::ApprovalRequested {
                 call_id,
@@ -315,6 +354,7 @@ mod tests {
                 status: "success".to_string(),
                 summary: "command completed".to_string(),
                 error: None,
+                plan: None,
             },
             RunEvent::ApprovalRequired {
                 call_id: "tool#4".to_string(),
@@ -535,7 +575,49 @@ mod tests {
                 status: "success".to_string(),
                 summary: "command completed".to_string(),
                 error: None,
+                plan: None,
             })
         );
+    }
+
+    #[test]
+    fn approved_plan_rides_tool_finished_as_an_additive_payload() {
+        let outcome =
+            ToolOutcome::success("approved", "plan approved", 0.1).with_metadata(ToolRunMetadata {
+                detail: ToolMetadata::Plan {
+                    path: ".mermaid/plans/x.md".to_string(),
+                    body: "## Summary".to_string(),
+                    start: true,
+                    fresh: true,
+                    fork: false,
+                    model: None,
+                },
+                ..ToolRunMetadata::default()
+            });
+        let event = RunEvent::from_msg(&Msg::ToolFinished {
+            turn: TurnId(1),
+            call_id: ToolCallId(7),
+            outcome,
+        })
+        .expect("mapped");
+        let RunEvent::ToolFinished { name, plan, .. } = &event else {
+            panic!("expected ToolFinished, got {event:?}");
+        };
+        assert_eq!(name, "exit_plan_mode");
+        let plan = plan.as_ref().expect("plan payload");
+        assert_eq!(plan.path, ".mermaid/plans/x.md");
+        assert!(plan.start && plan.fresh && !plan.fork);
+        // The wire stays clean for every other tool: `plan` is omitted, not
+        // null, so existing consumers see byte-identical lines.
+        let json = serde_json::to_string(&RunEvent::ToolFinished {
+            call_id: "tool#1".to_string(),
+            name: "read_file".to_string(),
+            status: "success".to_string(),
+            summary: "read".to_string(),
+            error: None,
+            plan: None,
+        })
+        .unwrap();
+        assert!(!json.contains("\"plan\""));
     }
 }
