@@ -2,11 +2,14 @@
 //!
 //! The exec tool spawns `mermaid __sandbox-exec [flags] -- <program> <args…>`
 //! instead of running a command directly when OS confinement is requested. This
-//! process applies the requested sandbox — the Linux seccomp network
-//! kill-switch (`--no-network`) and/or Landlock filesystem write-confinement
-//! (repeatable `--confine-writes <dir>`) — to **itself**, from ordinary
-//! single-threaded code, then `execve`s the real command. Both restrictions
-//! survive `execve`, so the command and everything it spawns inherit them.
+//! process asks the platform backend ([`crate::runtime::enforce`]) to enforce
+//! the requested sandbox — network denial (`--no-network`) and/or filesystem
+//! write-confinement (repeatable `--confine-writes <dir>`) — from ordinary
+//! single-threaded code, then runs the real command. On Linux the seccomp /
+//! Landlock restrictions are installed on this process and survive `execve`;
+//! on macOS the command is exec'd under `/usr/bin/sandbox-exec` instead. Either
+//! way the command and everything it spawns inherit the restriction, and any
+//! enforcement failure exits 126 — never an unconfined run.
 //!
 //! Applying from a fresh process (rather than a `pre_exec` closure in the
 //! parent) side-steps the async-signal-safety hazard of the post-`fork`
@@ -66,32 +69,32 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
         return Some(2);
     }
 
-    // Landlock first (its setup opens the allowed dirs), then seccomp. A real
-    // setup failure fails closed; a kernel that simply can't enforce Landlock
-    // degrades to a warned no-op (documented best-effort — pre-5.13 kernels).
-    if !confine_writes.is_empty() {
-        match crate::runtime::apply_fs_confinement(&confine_writes) {
-            Ok(true) => {},
-            Ok(false) => eprintln!(
-                "mermaid {SANDBOX_EXEC_SUBCOMMAND}: filesystem confinement not enforced (kernel without Landlock); continuing"
-            ),
-            Err(err) => {
+    // Platform enforcement lives behind one facade (Linux: seccomp/Landlock
+    // self-applied here; macOS: argv rewritten onto sandbox-exec). Fail
+    // closed: if the caller asked for confinement and the platform cannot
+    // apply it, exit 126 — never run the command unconfined.
+    let policy = crate::runtime::SandboxPolicy {
+        deny_network: no_network,
+        allowed_writes: confine_writes,
+    };
+    match crate::runtime::enforce(&policy, &argv) {
+        Ok(crate::runtime::Enforcement::SelfApplied { fs_enforced }) => {
+            // A kernel that simply can't enforce Landlock degrades to a
+            // warned no-op (documented best-effort — pre-5.13 kernels).
+            if !fs_enforced {
                 eprintln!(
-                    "mermaid {SANDBOX_EXEC_SUBCOMMAND}: filesystem sandbox unavailable: {err}"
+                    "mermaid {SANDBOX_EXEC_SUBCOMMAND}: filesystem confinement not enforced (kernel without Landlock); continuing"
                 );
-                return Some(126);
-            },
-        }
+            }
+            Some(exec_wrapped(&argv))
+        },
+        Ok(crate::runtime::Enforcement::ExecArgv(wrapped)) => Some(exec_wrapped(&wrapped)),
+        Ok(crate::runtime::Enforcement::Ran(code)) => Some(code),
+        Err(err) => {
+            eprintln!("mermaid {SANDBOX_EXEC_SUBCOMMAND}: sandbox unavailable: {err:#}");
+            Some(126)
+        },
     }
-
-    // Fail closed: if the caller asked for confinement and we cannot apply it,
-    // do not run the command unconfined.
-    if no_network && let Err(err) = crate::runtime::apply_network_killswitch() {
-        eprintln!("mermaid {SANDBOX_EXEC_SUBCOMMAND}: network sandbox unavailable: {err}");
-        return Some(126);
-    }
-
-    Some(exec_wrapped(&argv))
 }
 
 /// Replace the current process image with `argv`. On unix this `execve`s (never

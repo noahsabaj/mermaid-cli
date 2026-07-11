@@ -56,8 +56,7 @@ pub use policy::{
     is_destructive_command, is_plan_safe_build_command,
 };
 pub use sandbox::{
-    apply_fs_confinement, apply_network_killswitch, fs_confinement_available,
-    network_killswitch_available,
+    Enforcement, SandboxPolicy, enforce, fs_confinement_available, network_killswitch_available,
 };
 pub use storage::{
     ApprovalRecord, ApprovalsRepo, CheckpointRecord, CheckpointsRepo, CompactionRecord,

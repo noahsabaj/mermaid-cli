@@ -1,13 +1,13 @@
-//! Integration coverage for the `mermaid __sandbox-exec` Landlock filesystem
-//! write-confinement, end-to-end through the real binary. Linux-only;
-//! `#[ignore]`d so it runs in the dedicated integration CI job rather than the
-//! default suite.
+//! Integration coverage for the `mermaid __sandbox-exec` filesystem
+//! write-confinement, end-to-end through the real binary. Linux (Landlock) +
+//! macOS (Seatbelt); `#[ignore]`d so it runs in the dedicated integration CI
+//! jobs rather than the default suite.
 //!
 //! The Landlock mechanism itself is unit-tested in `mermaid-runtime::sandbox`
 //! (fork + write + assert EACCES); this proves the launcher wiring: that
 //! `mermaid __sandbox-exec --confine-writes <dir> -- <cmd>` actually restricts
 //! the wrapped command.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -15,7 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Whether this kernel has Landlock in its active LSM list. When it doesn't,
 /// confinement is documented best-effort no-op and the assertions below would
-/// be vacuous — skip instead of failing.
+/// be vacuous — skip instead of failing. Linux-only gate: macOS Seatbelt is
+/// always enforcing when `sandbox-exec` exists (and the launcher fails closed
+/// when it doesn't).
+#[cfg(target_os = "linux")]
 fn landlock_active() -> bool {
     std::fs::read_to_string("/sys/kernel/security/lsm")
         .map(|lsms| lsms.split(',').any(|l| l.trim() == "landlock"))
@@ -39,6 +42,7 @@ fn fresh_base() -> PathBuf {
 #[test]
 #[ignore = "spawns the real binary; run with: cargo test --test sandbox_fs -- --ignored"]
 fn confine_writes_allows_inside_and_denies_outside() {
+    #[cfg(target_os = "linux")]
     if !landlock_active() {
         eprintln!("skipping: kernel has no active landlock LSM");
         return;
@@ -94,6 +98,77 @@ fn confine_writes_allows_inside_and_denies_outside() {
         "write outside the allowed dir should fail"
     );
     assert!(!out_file.exists(), "denied write must not create the file");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// macOS: `std::env::temp_dir()` is `/var/folders/...` — an UNcanonicalized
+/// firmlink alias of `/private/var/folders/...`, which is what Seatbelt
+/// actually sees. `fresh_base()` deliberately passes that uncanonicalized
+/// path; the profile must emit both literal and canonicalized `subpath`
+/// params or this inside-write would be denied.
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "spawns the real binary; run with: cargo test --test sandbox_fs -- --ignored"]
+fn confine_writes_honors_uncanonicalized_tmpdir_root() {
+    let bin = env!("CARGO_BIN_EXE_mermaid");
+    let base = fresh_base();
+    let base_arg = base.to_str().unwrap().to_string();
+
+    let inside = Command::new(bin)
+        .args([
+            "__sandbox-exec",
+            "--confine-writes",
+            &base_arg,
+            "--confine-writes",
+            "/dev",
+            "--",
+            "sh",
+            "-c",
+            &format!("echo hi > {}/in.txt", base.display()),
+        ])
+        .output()
+        .expect("spawn confined shell (tmpdir)");
+    assert!(
+        inside.status.success(),
+        "write inside an uncanonicalized TMPDIR root should succeed (stderr={})",
+        String::from_utf8_lossy(&inside.stderr)
+    );
+    assert!(base.join("in.txt").exists());
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// macOS Tahoe canary: the full profile (network denial including the
+/// AF_UNIX-sparing filters, plus write confinement with dual params) must
+/// COMPILE under this OS's `sandbox-exec`. If Apple's SBPL grammar rejects
+/// anything we generate, sandbox-exec exits non-zero before running the
+/// command and this fails loudly in CI.
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "spawns the real binary; run with: cargo test --test sandbox_fs -- --ignored"]
+fn seatbelt_profile_compiles_under_both_policies() {
+    let bin = env!("CARGO_BIN_EXE_mermaid");
+    let base = fresh_base();
+    let base_arg = base.to_str().unwrap().to_string();
+
+    let output = Command::new(bin)
+        .args([
+            "__sandbox-exec",
+            "--no-network",
+            "--confine-writes",
+            &base_arg,
+            "--",
+            "/usr/bin/true",
+        ])
+        .output()
+        .expect("spawn confined /usr/bin/true");
+    assert!(
+        output.status.success(),
+        "the generated SBPL profile failed to compile or apply (status={:?}, stderr={})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let _ = std::fs::remove_dir_all(&base);
 }

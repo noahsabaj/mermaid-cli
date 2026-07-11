@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DCS/SOS/PM/APC string payloads, drops bare BEL, and applies backspace
   erasures — artifacts ConPTY repaints emit.
 
+- **macOS exec sandbox (Seatbelt).** `--no-network` and `--confine-fs` /
+  `--sandbox` now confine model-run shell commands on macOS via
+  `/usr/bin/sandbox-exec`, behind the same launcher that applies
+  seccomp/Landlock on Linux. The generated allow-default profile denies
+  network (sparing `AF_UNIX` sockets, matching Linux) and denies writes
+  outside the allowed roots, matching both the literal and canonicalized
+  path so macOS `TMPDIR` firmlinks work. Fail-closed: if the sandbox cannot
+  be applied the command exits 126 instead of running unconfined.
+  `mermaid self-test` now reports real per-platform sandbox availability
+  instead of a hardcoded "yes" off-Linux, and CI gains a macOS
+  sandbox-integration job with a Seatbelt profile-compile canary.
+
 - **Plan mode: headless runs + SDK visibility.** `mermaid run --plan` enters
   plan mode before the prompt seeds: the run explores read-only and
   delivers a plan file (`.mermaid/plans/`) as its result — with no approval
