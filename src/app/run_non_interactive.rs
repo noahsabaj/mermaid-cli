@@ -172,12 +172,19 @@ pub async fn run_non_interactive_with(
         ));
     }
 
-    // Materialize the per-session scratch dir (same bootstrap as the
-    // interactive path). `session_id` was captured after any seed, so a
-    // resumed run adopts the dir keyed by its restored conversation id.
-    runner.dispatch(crate::domain::Cmd::EnsureScratchpad {
-        session_id: session_id.clone(),
-    });
+    // Materialize the per-session scratch dir SYNCHRONOUSLY and stamp it
+    // before the seed. The interactive path goes through
+    // `Cmd::EnsureScratchpad` -> `Msg::ScratchpadReady`, but here the first
+    // (often only) request is built immediately below — the async round
+    // trip loses that race and the prompt ships without the scratchpad
+    // path, so the model can't address it until a tool turn has elapsed.
+    // Same rationale as the synchronous project-context load above.
+    // `session_id` was captured after any seed, so a resumed run adopts
+    // the dir keyed by its restored conversation id.
+    match crate::session::scratchpad::ensure(&cwd, &session_id) {
+        Ok(path) => state.session.scratchpad = Some(path),
+        Err(err) => tracing::warn!(%err, "scratchpad unavailable for this run"),
+    }
 
     // First line of the NDJSON stream: protocol + run identity. Broadcast
     // to any daemon subscriber regardless of stdout streaming.
