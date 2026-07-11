@@ -66,12 +66,13 @@ fn target_triple() -> Option<&'static str> {
 
 /// Pure OS/arch → asset-triple mapping, unit-testable off-host. Covers exactly
 /// the targets the `mermaid-searxng` release publishes; Windows (SearXNG needs
-/// Unix-only modules) and Intel macOS (CI runner scarcity) are unsupported.
+/// Unix-only modules) is unsupported.
 fn triple_for(os: &str, arch: &str) -> Option<&'static str> {
     Some(match (os, arch) {
         ("linux", "x86_64") => "linux-x86_64",
         ("linux", "aarch64") => "linux-aarch64",
         ("macos", "aarch64") => "macos-aarch64",
+        ("macos", "x86_64") => "macos-x86_64",
         _ => return None,
     })
 }
@@ -202,19 +203,19 @@ mod tests {
         assert_eq!(triple_for("linux", "x86_64"), Some("linux-x86_64"));
         assert_eq!(triple_for("linux", "aarch64"), Some("linux-aarch64"));
         assert_eq!(triple_for("macos", "aarch64"), Some("macos-aarch64"));
+        assert_eq!(triple_for("macos", "x86_64"), Some("macos-x86_64"));
     }
 
     #[test]
     fn triple_is_none_for_unpublished_platforms() {
         assert_eq!(triple_for("windows", "x86_64"), None); // SearXNG needs `pwd`
-        assert_eq!(triple_for("macos", "x86_64"), None); // Intel-mac runner scarcity
         assert_eq!(triple_for("freebsd", "x86_64"), None);
     }
 
     #[test]
     fn every_published_triple_has_a_pinned_checksum() {
         // The platform list and the checksum table must not drift apart.
-        for t in ["linux-x86_64", "linux-aarch64", "macos-aarch64"] {
+        for t in ["linux-x86_64", "linux-aarch64", "macos-aarch64", "macos-x86_64"] {
             let sha = bundle_manifest::bundle_sha256(t).unwrap_or_else(|| panic!("no sha for {t}"));
             assert_eq!(sha.len(), 64, "{t} sha is not 64 hex chars");
             assert!(
