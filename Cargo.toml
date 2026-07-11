@@ -104,6 +104,10 @@ shell-words = "1.1"
 # libdbus + pure-Rust session crypto, so neither CI nor end-user machines
 # need libdbus installed.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+# Pseudo-terminal for foreground execute_command ([exec] pty = true): the
+# child sees a real console — openpty on Unix, ConPTY on Windows. Same
+# crate the exit-regression test harness uses as a dev-dependency.
+portable-pty = "0.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Direct dep ONLY to turn on its `vendored` feature (static libdbus) for
@@ -130,10 +134,6 @@ opt-level = 3
 [target."cfg(unix)".dependencies]
 ruzstd = "0.8.3"
 tar = "0.4.46"
-# Pseudo-terminal for foreground execute_command ([exec] pty = true): the
-# child sees a real tty (isatty, /dev/tty resolve to the captured pty).
-# Same crate the exit-regression test harness uses as a dev-dependency.
-portable-pty = "0.9"
 # `setsid(2)` in the exec tool's pre_exec hook: model-run commands start in
 # their own session with no controlling terminal, so a child can never open
 # `/dev/tty` and paint prompts into the TUI. Same FFI-free style and version

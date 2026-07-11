@@ -163,10 +163,11 @@ impl Config {
 /// Foreground `execute_command` behavior (`[exec]` table).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecConfig {
-    /// Run foreground commands on a pseudo-terminal (Unix only; Windows
-    /// always uses pipes). On a PTY, `tty`/`isatty` report a terminal,
-    /// spinner-heavy tools emit sane progress, and `/dev/tty` resolves to
-    /// the CAPTURED pty instead of scribbling over the TUI. `Option` so the
+    /// Run foreground commands on a pseudo-terminal (openpty on Unix,
+    /// ConPTY on Windows). On a PTY, `tty`/`isatty` report a terminal,
+    /// spinner-heavy tools emit sane progress, and on Unix `/dev/tty`
+    /// resolves to the CAPTURED pty instead of scribbling over the TUI.
+    /// `Option` so the
     /// derived default and the serde default agree (both `None` = on) and
     /// saved configs don't freeze the value. `pty = false` restores pipes.
     #[serde(default, skip_serializing_if = "Option::is_none")]

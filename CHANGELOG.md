@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Windows: PTY-fidelity foreground exec via ConPTY.** Foreground
+  `execute_command` on Windows now runs on a real pseudoconsole (the same
+  portable-pty path Unix uses) instead of always degrading to pipes: the
+  child sees a console (`isatty`-gated color and progress tools behave),
+  and the capture reaches the model ANSI-stripped and CRLF-normalized.
+  `[exec] pty = false` still forces pipes, and any pre-spawn PTY failure
+  falls back to the pipe path. `strip_ansi` now also consumes
+  DCS/SOS/PM/APC string payloads, drops bare BEL, and applies backspace
+  erasures — artifacts ConPTY repaints emit.
+
 - **Plan mode: headless runs + SDK visibility.** `mermaid run --plan` enters
   plan mode before the prompt seeds: the run explores read-only and
   delivers a plan file (`.mermaid/plans/`) as its result — with no approval

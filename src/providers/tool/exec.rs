@@ -293,11 +293,12 @@ impl ToolExecutor for ExecuteCommandTool {
             dirs.dedup();
             dirs
         });
-        // Unix default: run on a pseudo-terminal so the child sees a real
-        // tty (progress bars, isatty-gated tools) and `/dev/tty` resolves to
-        // the CAPTURED pty. `[exec] pty = false` or any pre-spawn PTY failure
-        // falls back to the pipe path below, which stays fully intact.
-        #[cfg(unix)]
+        // Default: run on a pseudo-terminal — openpty on Unix, ConPTY on
+        // Windows — so the child sees a real console (progress bars,
+        // isatty-gated tools); on Unix `/dev/tty` additionally resolves to
+        // the CAPTURED pty. `[exec] pty = false` or any pre-spawn PTY
+        // failure falls back to the pipe path below, which stays fully
+        // intact.
         if ctx.config.exec.pty_enabled() {
             let invocation = shell_invocation(&command, sandbox_network, confine_writes.as_deref());
             match run_command_pty(
@@ -1443,10 +1444,13 @@ async fn read_capped<R: AsyncRead + Unpin>(
 }
 
 /// Strip terminal escape sequences and normalize PTY line discipline for
-/// model-facing text: CSI (`ESC[…final`), OSC (`ESC]…BEL|ESC\\`), and other
-/// two-byte ESC sequences are dropped; `\r\n` (ONLCR — every PTY line)
-/// normalizes to `\n`; a lone `\r` (progress-bar rewrite) becomes `\n` so
-/// rewrites read as lines, bounded upstream by the output cap.
+/// model-facing text: CSI (`ESC[…final`), OSC (`ESC]…BEL|ESC\\`), string
+/// sequences (DCS/SOS/PM/APC — `ESC P/X/^/_ … ST`, payload included), and
+/// other two-byte ESC sequences are dropped; a bare BEL is dropped; a
+/// backspace erases the previous character (ConPTY repaints emit both);
+/// `\r\n` (ONLCR — every PTY line) normalizes to `\n`; a lone `\r`
+/// (progress-bar rewrite) becomes `\n` so rewrites read as lines, bounded
+/// upstream by the output cap.
 fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -1471,9 +1475,31 @@ fn strip_ansi(input: &str) -> String {
                         prev_esc = f == '\u{1b}';
                     }
                 },
+                // DCS/SOS/PM/APC string sequences: the whole PAYLOAD is
+                // device data, not text, so it must be consumed through the
+                // ST terminator (ESC \) — dropping only the introducer
+                // would leak the payload into the capture.
+                Some('P' | 'X' | '^' | '_') => {
+                    let mut prev_esc = false;
+                    for f in chars.by_ref() {
+                        if prev_esc && f == '\\' {
+                            break;
+                        }
+                        prev_esc = f == '\u{1b}';
+                    }
+                },
                 // Other two-byte escapes (charset selection, keypad modes…):
                 // the consumed char IS the sequence.
                 Some(_) | None => {},
+            },
+            // Bare BEL rings the bell; it is never text.
+            '\u{7}' => {},
+            // Backspace: the terminal would erase the previous cell, so pop
+            // the previous character — but never across a line break.
+            '\u{8}' => {
+                if out.ends_with(|p: char| p != '\n') {
+                    out.pop();
+                }
             },
             '\r' => {
                 if chars.peek() == Some(&'\n') {
@@ -1640,7 +1666,6 @@ async fn run_command(
 /// PTY drain state: tees raw bytes to the log, emits sanitized complete
 /// lines as progress, and feeds the bounded capture. One merged stream —
 /// a PTY has no stdout/stderr split (`stderr_lines` reports 0).
-#[cfg(unix)]
 struct PtyDrain {
     capture: CappedCapture,
     log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
@@ -1650,7 +1675,6 @@ struct PtyDrain {
     progress: tokio::sync::mpsc::Sender<ProgressEvent>,
 }
 
-#[cfg(unix)]
 impl PtyDrain {
     async fn push(&mut self, chunk: &[u8]) {
         // Tee RAW bytes (ANSI kept — tailing a backgrounded log renders
@@ -1689,16 +1713,19 @@ impl PtyDrain {
     }
 }
 
-/// Foreground command on a pseudo-terminal (Unix): `tty`/`isatty` report a
-/// terminal, spinner-heavy tools behave, and `/dev/tty` resolves to THIS
-/// captured pty instead of scribbling over the TUI. Mirrors `run_command`'s
-/// select shape (detach / cancel / done / timeout) and reuses the same
-/// sandbox launcher, env scrubbing, tee log, and capture core.
+/// Foreground command on a pseudo-terminal (openpty on Unix, ConPTY on
+/// Windows): `tty`/`isatty` report a terminal, spinner-heavy tools behave,
+/// and on Unix `/dev/tty` resolves to THIS captured pty instead of
+/// scribbling over the TUI. Mirrors `run_command`'s select shape (detach /
+/// cancel / done / timeout) and reuses the same sandbox launcher, env
+/// scrubbing, tee log, and capture core.
 ///
 /// Load-bearing differences from the pipe path:
-/// - NO `setsid` pre_exec: portable-pty already setsids and sets the
-///   controlling tty — the child is session+group leader, so
-///   `terminate_tree`'s group-kill semantics are byte-identical.
+/// - NO `setsid` pre_exec: on Unix portable-pty already setsids and sets
+///   the controlling tty — the child is session+group leader, so
+///   `terminate_tree`'s group-kill semantics are byte-identical. On
+///   Windows `terminate_tree` kills the tree by pid (`taskkill /T`), so no
+///   group setup is needed on either spawn path.
 /// - stdin is the pty slave (not /dev/null): a child that READS stdin now
 ///   hangs to timeout instead of instant EOF — mitigated by
 ///   GIT_TERMINAL_PROMPT=0 (still set) and the command timeout.
@@ -1706,8 +1733,9 @@ impl PtyDrain {
 ///   not worth a resize protocol for batch commands).
 ///
 /// Every fallible step happens BEFORE the child spawns, so an `Err` return
-/// can safely fall back to the pipe path without re-running side effects.
-#[cfg(unix)]
+/// can safely fall back to the pipe path without re-running side effects —
+/// openpty, clone_reader, and (Windows) the CPR priming write are the only
+/// `?` points ahead of `spawn_command`.
 async fn run_command_pty(
     invocation: &ShellInvocation,
     workdir: &Path,
@@ -1734,6 +1762,22 @@ async fn run_command_pty(
         .master
         .try_clone_reader()
         .map_err(std::io::Error::other)?;
+
+    // portable-pty opens the ConPTY with PSEUDOCONSOLE_INHERIT_CURSOR, so
+    // conhost emits a cursor-position query (ESC[6n) and stalls ALL output
+    // until it reads a reply. Prime it once with "cursor at 1;1": conhost
+    // consumes the reply itself, so the child never sees these bytes. The
+    // writer must then live exactly as long as the master (an early close
+    // can detach the pseudoconsole), so it moves into the waiter below and
+    // drops alongside the master. Both steps sit BEFORE the spawn, so a
+    // failure here still falls back to pipes without double-running.
+    #[cfg(windows)]
+    let writer = {
+        use std::io::Write as _;
+        let mut writer = pair.master.take_writer().map_err(std::io::Error::other)?;
+        writer.write_all(b"\x1b[1;1R")?;
+        writer
+    };
 
     let mut builder = CommandBuilder::new(&invocation.program);
     builder.args(&invocation.args);
@@ -1796,12 +1840,22 @@ async fn run_command_pty(
     });
 
     // Waiter owns the child AND the master: the master must outlive the
-    // child (dropping it early can SIGHUP the session), and dropping it
-    // right after `wait` returns unblocks the reader thread at EOF/EIO.
+    // child (dropping it early can SIGHUP the session on Unix / detach the
+    // ConPTY on Windows), and dropping it right after `wait` returns
+    // unblocks the reader thread — EOF/EIO on Unix; on Windows the master
+    // and (already-dropped) slave share the pseudoconsole, so the last drop
+    // runs ClosePseudoConsole, conhost exits, and the reader's duplicated
+    // handle EOFs — the drain always finishes. (A reader wedged by a hung
+    // conhost would leak bounded-by-process; the timeout arm below is an
+    // independent backstop, so no read timeout on the drain.)
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let driver = tokio::spawn(async move {
         let status = tokio::task::spawn_blocking(move || {
             let status = child.wait();
+            // The CPR priming writer must drop WITH the master, never
+            // before it (early close = detach risk).
+            #[cfg(windows)]
+            drop(writer);
             drop(master);
             status
         })
@@ -1832,9 +1886,14 @@ async fn run_command_pty(
             }
         }
         _ = token.cancelled() => {
-            // The child is the session/group leader (portable-pty setsids),
-            // so the group-kill takes the whole tree, exactly like the pipe
-            // path; the reader then unblocks at EOF/EIO.
+            // Unix: the child is the session/group leader (portable-pty
+            // setsids), so the group-kill takes the whole tree, exactly like
+            // the pipe path; the reader then unblocks at EOF/EIO. Windows:
+            // `terminate_tree` kills the tree by pid (`taskkill /T`); the
+            // waiter's `wait` then returns and drops the master, which
+            // closes the pseudoconsole and EOFs the reader. Neither arm
+            // reads the exit status, so killed-child exit-code quirks on
+            // Windows never surface here.
             if let Some(p) = pid {
                 crate::utils::terminate_tree(p, crate::utils::Grace::Immediate).await;
             }
@@ -1855,6 +1914,9 @@ async fn run_command_pty(
             // portable-pty reports a terminating signal by NAME; SIGSYS is
             // the one downstream consumer (the seccomp denial mapping) —
             // `128 + SIGSYS` shell-reaped exits flow through exit_code as-is.
+            // On Windows `signal()` is always None, so the exit-code arm is
+            // taken unconditionally (the seccomp sandbox is Linux-only
+            // anyway) — no cfg needed on these arms.
             let (exit_code, signal) = match status.signal() {
                 Some(name) if name.eq_ignore_ascii_case("bad system call") => {
                     (None, Some(SANDBOX_KILL_SIGNAL))
@@ -2234,7 +2296,6 @@ mod tests {
     }
 
     /// Pipe-mode context: `[exec] pty = false` pins the pipe spawn path.
-    #[cfg(unix)]
     fn pipes_ctx() -> (
         crate::providers::ctx::ExecContext,
         tokio::sync::mpsc::Receiver<crate::providers::ctx::ProgressEvent>,
@@ -2245,7 +2306,7 @@ mod tests {
         crate::providers::ctx::test_exec_context_with_config(
             TurnId(1),
             ToolCallId(1),
-            PathBuf::from("/tmp"),
+            std::env::temp_dir(),
             config,
         )
     }
@@ -2300,6 +2361,60 @@ mod tests {
         assert!(!out.contains('\r'), "no carriage returns: {out:?}");
     }
 
+    /// Windows twin of the unix isatty split: under ConPTY the child gets a
+    /// real console (`IsOutputRedirected` is False); under `pty = false`
+    /// pipes it sees redirected handles (True).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn pty_child_sees_a_console_and_pipes_child_does_not() {
+        let probe = "powershell -NoProfile -Command [Console]::IsOutputRedirected";
+        // ConPTY (default): stdout is a console.
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), std::env::temp_dir());
+        let outcome = ExecuteCommandTool
+            .execute(serde_json::json!({ "command": probe }), ctx)
+            .await;
+        assert!(outcome.is_success(), "{outcome:?}");
+        assert!(
+            outcome.output().contains("False"),
+            "ConPTY child must see a console: {}",
+            outcome.output()
+        );
+        // Pipes (`pty = false`): stdout is redirected.
+        let (ctx, _rx) = pipes_ctx();
+        let outcome = ExecuteCommandTool
+            .execute(serde_json::json!({ "command": probe }), ctx)
+            .await;
+        assert!(outcome.is_success(), "{outcome:?}");
+        assert!(
+            outcome.output().contains("True"),
+            "pipe child must see redirected stdout: {}",
+            outcome.output()
+        );
+    }
+
+    /// Windows twin of the unix ANSI/CRLF test: ConPTY output reaches the
+    /// model with escapes stripped and CRLF normalized. Line matching is
+    /// whitespace-tolerant because ConPTY repaints pad lines to the
+    /// pseudoconsole width.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn pty_output_is_ansi_clean_and_crlf_normalized_windows() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), std::env::temp_dir());
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({ "command": "echo RED& echo line2" }),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "{outcome:?}");
+        let out = outcome.output();
+        assert!(!out.contains('\u{1b}'), "no escape bytes: {out:?}");
+        assert!(!out.contains('\r'), "no carriage returns: {out:?}");
+        let lines: Vec<&str> = out.lines().map(str::trim).collect();
+        assert!(lines.contains(&"RED"), "RED line present: {out:?}");
+        assert!(lines.contains(&"line2"), "line2 line present: {out:?}");
+    }
+
     #[test]
     fn strip_ansi_drops_escapes_and_normalizes_line_endings() {
         // CSI color + cursor movement, OSC title (BEL and ST terminated),
@@ -2311,11 +2426,24 @@ mod tests {
         assert_eq!(strip_ansi("\u{1b}=keypad"), "keypad");
         assert_eq!(strip_ansi("a\r\nb"), "a\nb");
         assert_eq!(strip_ansi("50%\r100%\r\n"), "50%\n100%\n");
+        // String sequences (DCS/SOS/PM/APC): the payload is consumed
+        // through the ST terminator, not leaked into the text.
+        assert_eq!(strip_ansi("\u{1b}P1$r0m\u{1b}\\text"), "text");
+        assert_eq!(strip_ansi("\u{1b}_payload\u{1b}\\ok"), "ok");
+        assert_eq!(strip_ansi("\u{1b}Xsos\u{1b}\\a\u{1b}^pm\u{1b}\\b"), "ab");
+        // Backspace erases the previous character; bare BEL disappears.
+        assert_eq!(strip_ansi("ab\u{8}c"), "ac");
+        assert_eq!(strip_ansi("x\u{7}y"), "xy");
+        // Backspace never eats a line break (or pops from empty output).
+        assert_eq!(strip_ansi("a\n\u{8}b"), "a\nb");
+        assert_eq!(strip_ansi("\u{8}b"), "b");
         // Plain text passes through untouched.
         assert_eq!(strip_ansi("plain text"), "plain text");
         // Truncated escape at end of input must not panic.
         assert_eq!(strip_ansi("x\u{1b}"), "x");
         assert_eq!(strip_ansi("x\u{1b}[31"), "x");
+        // Truncated string sequence at end of input must not panic either.
+        assert_eq!(strip_ansi("x\u{1b}Pdangling"), "x");
     }
 
     #[test]
