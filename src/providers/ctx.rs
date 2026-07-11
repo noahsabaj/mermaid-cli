@@ -126,6 +126,10 @@ pub struct ExecContext {
     /// on. Defaults to `None` in `new` — the live dispatch path sets it,
     /// like `background`/`notify`.
     pub plan_file: Option<std::path::PathBuf>,
+    /// LIVE per-category plan permission levels, threaded from the reducer
+    /// (the frozen startup `config` would go stale under `/plan config`
+    /// edits). Only consulted while `plan_file` is `Some`; defaults in `new`.
+    pub plan_permissions: crate::app::PlanPermissions,
     /// The user's stated intent for the turn (latest user message), passed to
     /// the Auto-mode classifier so it can judge whether an action is aligned.
     pub intent: Option<String>,
@@ -206,6 +210,7 @@ impl ExecContext {
             background: CancellationToken::new(),
             notify: None,
             plan_file: None,
+            plan_permissions: crate::app::PlanPermissions::default(),
             progress,
             call_id,
             turn,

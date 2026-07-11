@@ -325,11 +325,16 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         && question_item.is_none()
         && !confirm_open
         && matches!(state.ui.mode, crate::domain::UiMode::RewindPicker { .. });
+    let plan_config_open = approval_item.is_none()
+        && question_item.is_none()
+        && !confirm_open
+        && matches!(state.ui.mode, crate::domain::UiMode::PlanConfig { .. });
     let file_picker_open = approval_item.is_none()
         && question_item.is_none()
         && !confirm_open
         && !conv_list_open
         && !rewind_open
+        && !plan_config_open
         && state.ui.file_picker_open();
     let palette_open = approval_item.is_none()
         && question_item.is_none()
@@ -347,6 +352,8 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         6
     } else if conv_list_open || rewind_open {
         12
+    } else if plan_config_open {
+        widgets::PLAN_CONFIG_HEIGHT
     } else if file_picker_open {
         let rows = state.ui.file_picker_matches.len().clamp(1, 8);
         (rows as u16) + 2
@@ -547,6 +554,15 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let widget = RewindPickerWidget {
             theme: &rstate.theme,
             candidates,
+            cursor: *cursor,
+        };
+        frame.render_widget(widget, chunks[4]);
+    } else if let crate::domain::UiMode::PlanConfig { cursor } = &state.ui.mode {
+        use widgets::PlanConfigWidget;
+        let widget = PlanConfigWidget {
+            theme: &rstate.theme,
+            plan: &state.settings.plan,
+            session_model: &state.session.model_id,
             cursor: *cursor,
         };
         frame.render_widget(widget, chunks[4]);

@@ -550,6 +550,14 @@ pub struct PlanState {
     /// Absolute path of the plan file the model authors — the single path the
     /// policy gate exempts from the read-only floor.
     pub plan_path: std::path::PathBuf,
+    /// Model to restore when plan mode ends. `Some` only when `[plan] model`
+    /// swapped the session onto a plan-phase model at entry.
+    #[serde(default)]
+    pub prev_model_id: Option<String>,
+    /// Reasoning level to restore when plan mode ends. `Some` only when
+    /// `[plan] reasoning` overrode it at entry.
+    #[serde(default)]
+    pub prev_reasoning: Option<crate::models::ReasoningLevel>,
 }
 
 /// Persistent conversational state that survives across turns.
@@ -1112,6 +1120,10 @@ pub enum UiMode {
     /// at. Candidates are user-role Normal messages, newest first. Selecting
     /// one forks into a NEW session (original preserved, lineage stamped)
     /// with the composer pre-filled.
+    /// The `/plan config` settings picker: per-category permission levels,
+    /// model/reasoning overrides, approval behavior. `cursor` is the
+    /// highlighted row.
+    PlanConfig { cursor: usize },
     RewindPicker {
         candidates: Vec<RewindCandidate>,
         cursor: usize,

@@ -168,45 +168,14 @@ pub async fn gate(
 
     // Plan mode: the reducer floors `ctx.safety_mode` to `ReadOnly` while a
     // plan is being drafted, so the engine's mode-default deny covers
-    // everything — then the carve-outs below soften exactly three shapes.
-    // Keying on the deny REASON (the read-only marker) keeps the precedence
-    // ladder intact: a user `Deny` override and the destructive hard-deny
-    // carry different reasons and still win.
-    let decision = match decision {
-        PolicyDecision::Deny { risk, reason }
-            if ctx.plan_file.is_some()
-                && reason.starts_with(crate::runtime::READ_ONLY_DENIAL_MARKER) =>
-        {
-            let plan_file = ctx.plan_file.as_deref().expect("checked is_some");
-            let plan_file_edit = request.category == crate::runtime::ToolCategory::Edit
-                && request
-                    .path
-                    .as_deref()
-                    .is_some_and(|p| is_plan_file_path(&ctx.workdir, p, plan_file));
-            let safe_build = request
-                .command
-                .as_deref()
-                .is_some_and(crate::runtime::is_plan_safe_build_command);
-            if plan_file_edit
-                || safe_build
-                || request.category == crate::runtime::ToolCategory::Memory
-            {
-                PolicyDecision::Allow {
-                    risk,
-                    checkpoint: false,
-                }
-            } else {
-                PolicyDecision::Deny {
-                    risk,
-                    reason: format!(
-                        "{} is active — planning only; capture this change in the plan \
-                         instead of performing it now",
-                        crate::runtime::PLAN_DENIAL_MARKER
-                    ),
-                }
-            }
-        },
-        other => other,
+    // everything — then the per-category profile decides how far each
+    // carve-out opens. Keying on the deny REASON (the read-only marker)
+    // keeps the precedence ladder intact: a user `Deny` override and the
+    // destructive hard-deny carry different reasons and still win.
+    let decision = if ctx.plan_file.is_some() {
+        apply_plan_profile(ctx, &request, decision)
+    } else {
+        decision
     };
 
     match decision {
@@ -301,6 +270,94 @@ pub async fn gate(
             format!("{} blocked by policy: {}", request.summary, reason),
             0.0,
         )),
+    }
+}
+
+/// The plan-flavored teaching denial. Its reason starts with
+/// [`crate::runtime::PLAN_DENIAL_MARKER`] so the history neutralizer can
+/// retire it once plan mode ends.
+fn plan_deny(risk: RiskClass) -> PolicyDecision {
+    PolicyDecision::Deny {
+        risk,
+        reason: format!(
+            "{} is active — planning only; capture this change in the plan \
+             instead of performing it now",
+            crate::runtime::PLAN_DENIAL_MARKER
+        ),
+    }
+}
+
+/// Map one profile level onto a policy decision. `checkpoint: false`
+/// throughout — nothing in plan mode mutates the tree, so there is nothing
+/// to snapshot.
+fn plan_level_decision(level: crate::app::PlanPermLevel, risk: RiskClass) -> PolicyDecision {
+    use crate::app::PlanPermLevel as L;
+    match level {
+        L::Allow => PolicyDecision::Allow {
+            risk,
+            checkpoint: false,
+        },
+        L::Auto => PolicyDecision::Classify {
+            risk,
+            checkpoint: false,
+        },
+        L::Ask => PolicyDecision::Ask {
+            risk,
+            checkpoint: false,
+        },
+        L::Deny => plan_deny(risk),
+    }
+}
+
+/// Apply the plan permission profile on top of the read-only floor's
+/// decision: soften the mode-default deny per category (plan file, memory,
+/// known-safe builds), and tighten the floor's Web allowance when the
+/// profile says so. Override denies and the destructive hard-deny carry
+/// different reasons and pass through untouched.
+fn apply_plan_profile(
+    ctx: &ExecContext,
+    request: &ActionRequest,
+    decision: PolicyDecision,
+) -> PolicyDecision {
+    use crate::app::PlanPermLevel as L;
+    use crate::runtime::ToolCategory as C;
+    let perms = ctx.plan_permissions;
+    match decision {
+        PolicyDecision::Deny { risk, reason }
+            if reason.starts_with(crate::runtime::READ_ONLY_DENIAL_MARKER) =>
+        {
+            let plan_file = ctx.plan_file.as_deref().expect("plan mode ctx");
+            let plan_file_edit = request.category == C::Edit
+                && request
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| is_plan_file_path(&ctx.workdir, p, plan_file));
+            if plan_file_edit {
+                // Authoring the plan IS plan mode — not a profile category.
+                PolicyDecision::Allow {
+                    risk,
+                    checkpoint: false,
+                }
+            } else if request.category == C::Memory {
+                plan_level_decision(perms.memory, risk)
+            } else if request
+                .command
+                .as_deref()
+                .is_some_and(crate::runtime::is_plan_safe_build_command)
+            {
+                plan_level_decision(perms.builds, risk)
+            } else {
+                plan_deny(risk)
+            }
+        },
+        // The read-only floor allows Web (GET-shaped reads); the profile can
+        // tighten it while planning.
+        PolicyDecision::Allow { risk, .. }
+            if request.category == C::Web && perms.web != L::Allow =>
+        {
+            plan_level_decision(perms.web, risk)
+        },
+        other => other,
     }
 }
 
@@ -998,6 +1055,68 @@ mod tests {
             ),
             Gate::Proceed { .. } => panic!("destructive commands must never run"),
         }
+    }
+
+    #[tokio::test]
+    async fn plan_profile_strict_denies_the_default_carve_outs() {
+        let mut c = ctx_plan();
+        c.plan_permissions = crate::app::PlanPermissions::strict();
+        // Memory: default-allow flips to the plan deny.
+        assert!(
+            gate_external(
+                &c,
+                "memory",
+                ToolCategory::Memory,
+                "memory remember".to_string(),
+                &serde_json::json!({"action": "remember"}),
+            )
+            .await
+            .is_some(),
+            "strict profile must deny memory writes",
+        );
+        // Builds: default-allow flips to the plan deny.
+        match gate(
+            &c,
+            shell_request("cargo test policy"),
+            &[],
+            serde_json::json!({}),
+            true,
+        )
+        .await
+        {
+            Gate::Block(outcome) => assert!(
+                outcome
+                    .model_content
+                    .contains(crate::runtime::PLAN_DENIAL_MARKER),
+                "got {:?}",
+                outcome.model_content
+            ),
+            Gate::Proceed { .. } => panic!("strict profile must deny builds"),
+        }
+        // Web: the read-only floor allows it; the profile tightens it.
+        assert!(
+            gate_external(
+                &c,
+                "web_fetch",
+                ToolCategory::Web,
+                "web_fetch https://example.com".to_string(),
+                &serde_json::json!({"url": "https://example.com"}),
+            )
+            .await
+            .is_some(),
+            "strict profile must deny web reads while planning",
+        );
+        // The plan file stays writable regardless — authoring the plan IS
+        // plan mode.
+        let g = gate(
+            &c,
+            edit_request("/repo/.mermaid/plans/x.md"),
+            &[],
+            serde_json::json!({}),
+            true,
+        )
+        .await;
+        assert!(matches!(g, Gate::Proceed { .. }));
     }
 
     #[tokio::test]

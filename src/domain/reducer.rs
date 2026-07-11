@@ -1559,6 +1559,13 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
+    // Plan-mode settings picker (/plan config): ↑/↓ navigate, Enter/←/→
+    // cycle the highlighted value, Esc closes.
+    if matches!(state.ui.mode, UiMode::PlanConfig { .. }) {
+        handle_plan_config_key(state, cmds, code);
+        return;
+    }
+
     // Slash-palette navigation — intercepts ↑/↓/Tab/Esc while the
     // input buffer opens with `/`. Enter falls through to the normal
     // handler below so the command actually dispatches.
@@ -2661,7 +2668,13 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 },
                 None => push_system(state, cmds, "Not in plan mode (Alt+P or /plan enters it)"),
             },
-            Some(_) => push_system(state, cmds, "Usage: /plan [off|show]"),
+            Some("config") => {
+                state.ui.mode = UiMode::PlanConfig { cursor: 0 };
+            },
+            Some(_) => push_system(state, cmds, "Usage: /plan [off|show|config]"),
+        },
+        SlashCmd::Config => {
+            state.ui.mode = UiMode::PlanConfig { cursor: 0 };
         },
         SlashCmd::VisibleReasoning(arg) => {
             match visible_reasoning_value(arg.as_deref(), state.ui.show_reasoning) {
@@ -4638,6 +4651,7 @@ fn handle_stream_done(
                 model_id: state.session.model_id.clone(),
                 safety_mode: effective_safety,
                 plan_file: plan_file.clone(),
+                plan_permissions: state.settings.plan.permissions,
                 intent: intent.clone(),
                 // Checkpoint anchoring: conversation id + length at DISPATCH.
                 // History here is [..., user@k, assistant(tool_use)], so any
@@ -5365,10 +5379,36 @@ fn system_prompt_for_state(state: &State) -> String {
         prompt.push_str("\n\n");
         prompt.push_str(
             &crate::prompts::PLAN_MODE_PROMPT
-                .replace("{plan_path}", &plan.plan_path.display().to_string()),
+                .replace("{plan_path}", &plan.plan_path.display().to_string())
+                .replace(
+                    "{plan_capabilities}",
+                    &plan_capabilities_line(&state.settings.plan.permissions),
+                ),
         );
     }
     prompt
+}
+
+/// Compose the "what runs while planning" sentence from the LIVE permission
+/// profile, so the prompt never promises a capability the gate will deny
+/// (`/plan config` can retune the profile mid-session).
+fn plan_capabilities_line(perms: &crate::app::PlanPermissions) -> String {
+    use crate::app::PlanPermLevel as L;
+    let mut parts = vec!["reads and inspection".to_string()];
+    let mut push = |label: &str, level: L| match level {
+        L::Allow => parts.push(label.to_string()),
+        L::Auto | L::Ask => parts.push(format!("{label} (each use is reviewed first)")),
+        L::Deny => {},
+    };
+    push(
+        "known-safe build and test commands (cargo check/build/test/clippy, go build/test/vet, npm test, make test, and similar)",
+        perms.builds,
+    );
+    push("web search/fetch", perms.web);
+    push("memory writes", perms.memory);
+    let mut line = parts.join(", ");
+    line.push_str(", and edits to the plan file ONLY.");
+    line
 }
 
 /// Walk the message log and retain only the `MAX_RETAINED_SCREENSHOTS`
@@ -5618,6 +5658,122 @@ fn plan_path_display(state: &State, path: &std::path::Path) -> String {
         .to_string()
 }
 
+/// Rows in the plan-config picker. Cross-checked against the widget's
+/// `plan_config_rows` by a test in `render::widgets::plan_config`.
+const PLAN_CONFIG_ROW_COUNT: usize = 9;
+
+/// `/plan config` picker keys: ↑/↓ navigate, Enter/←/→ cycle the highlighted
+/// value (persisting the `[plan]` table on every change), Esc closes.
+fn handle_plan_config_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+    let UiMode::PlanConfig { ref mut cursor } = state.ui.mode else {
+        return;
+    };
+    match code {
+        KeyCode::Up => {
+            *cursor = cursor.saturating_sub(1);
+        },
+        KeyCode::Down => {
+            *cursor = (*cursor + 1).min(PLAN_CONFIG_ROW_COUNT - 1);
+        },
+        KeyCode::Enter | KeyCode::Right => {
+            let row = *cursor;
+            cycle_plan_config_row(state, row, true);
+            cmds.push(Cmd::PersistPlanConfig(state.settings.plan.clone()));
+        },
+        KeyCode::Left => {
+            let row = *cursor;
+            cycle_plan_config_row(state, row, false);
+            cmds.push(Cmd::PersistPlanConfig(state.settings.plan.clone()));
+        },
+        KeyCode::Escape => {
+            state.ui.mode = UiMode::EditingInput;
+        },
+        _ => {},
+    }
+}
+
+/// Advance one picker row's value. Every change takes effect immediately —
+/// the permission profile rides each tool dispatch, and the model/reasoning
+/// overrides are read at the next plan-mode entry.
+fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
+    use crate::app::{PlanPermLevel as L, PlanPermissions, PlanPostApprove};
+    fn cycle<T: Copy + PartialEq>(order: &[T], current: T, forward: bool) -> T {
+        let idx = order.iter().position(|v| *v == current).unwrap_or(0);
+        let len = order.len();
+        let next = if forward {
+            (idx + 1) % len
+        } else {
+            (idx + len - 1) % len
+        };
+        order[next]
+    }
+    const LEVELS: [L; 4] = [L::Allow, L::Auto, L::Ask, L::Deny];
+    let session_model = state.session.model_id.clone();
+    let plan = &mut state.settings.plan;
+    match row {
+        0 => {
+            // Preset cycle; a custom profile snaps to the nearest preset
+            // boundary (default going forward, open going back).
+            let presets = [
+                PlanPermissions::default(),
+                PlanPermissions::strict(),
+                PlanPermissions::open(),
+            ];
+            let idx = presets.iter().position(|p| *p == plan.permissions);
+            plan.permissions = match (idx, forward) {
+                (Some(i), true) => presets[(i + 1) % 3],
+                (Some(i), false) => presets[(i + 2) % 3],
+                (None, true) => presets[0],
+                (None, false) => presets[2],
+            };
+        },
+        1 => plan.permissions.builds = cycle(&LEVELS, plan.permissions.builds, forward),
+        2 => plan.permissions.web = cycle(&LEVELS, plan.permissions.web, forward),
+        3 => plan.permissions.memory = cycle(&LEVELS, plan.permissions.memory, forward),
+        // Task tools are ungated (no approval path): allow/deny only.
+        4 => {
+            plan.permissions.tasks = if plan.permissions.tasks == L::Allow {
+                L::Deny
+            } else {
+                L::Allow
+            };
+        },
+        // Unset <-> pin to the current session model. Other models are set
+        // by editing `[plan] model` in config.toml (the handoff picker is
+        // the searchable surface).
+        5 => {
+            plan.model = match plan.model {
+                Some(_) => None,
+                None => Some(session_model),
+            };
+        },
+        6 => {
+            use crate::models::ReasoningLevel as R;
+            const REASONING: [Option<R>; 8] = [
+                None,
+                Some(R::None),
+                Some(R::Minimal),
+                Some(R::Low),
+                Some(R::Medium),
+                Some(R::High),
+                Some(R::XHigh),
+                Some(R::Max),
+            ];
+            plan.reasoning = cycle(&REASONING, plan.reasoning, forward);
+        },
+        7 => plan.auto_approve = !plan.auto_approve,
+        8 => {
+            const POST: [Option<PlanPostApprove>; 3] = [
+                None,
+                Some(PlanPostApprove::Start),
+                Some(PlanPostApprove::Wait),
+            ];
+            plan.post_approve = cycle(&POST, plan.post_approve, forward);
+        },
+        _ => {},
+    }
+}
+
 /// The pure state flip of entering plan mode: allocate the plan file path,
 /// set `session.plan`, retract stale nudges, persist. Shared by the
 /// interactive entry (Alt+P / `/plan`) and the `enter_plan_mode` tool — the
@@ -5635,8 +5791,32 @@ fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::
         return None;
     }
     let plan_path = plan_path_for(state);
+    // The `[plan]` model/reasoning overrides: swap on entry, stash what to
+    // restore. Per-request routing makes this safe — the very next dispatch
+    // resolves the new model lazily.
+    let mut prev_model_id = None;
+    let mut prev_reasoning = None;
+    if let Some(plan_model) = state.settings.plan.model.clone()
+        && plan_model != state.session.model_id
+    {
+        prev_model_id = Some(std::mem::replace(
+            &mut state.session.model_id,
+            plan_model.clone(),
+        ));
+        state.runtime.set_model(&plan_model);
+    }
+    if let Some(plan_reasoning) = state.settings.plan.reasoning
+        && plan_reasoning != state.session.reasoning
+    {
+        prev_reasoning = Some(std::mem::replace(
+            &mut state.session.reasoning,
+            plan_reasoning,
+        ));
+    }
     state.session.plan = Some(super::state::PlanState {
         plan_path: plan_path.clone(),
+        prev_model_id,
+        prev_reasoning,
     });
     // Retract any pending mode-change nudge: "re-attempt gated actions" would
     // steer the model wrong now that the read-only floor applies.
@@ -5671,14 +5851,26 @@ fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     }
 }
 
+/// Undo the `[plan]` model/reasoning overrides stashed at entry.
+fn restore_plan_overrides(state: &mut State, plan: &super::state::PlanState) {
+    if let Some(prev) = &plan.prev_model_id {
+        state.session.model_id = prev.clone();
+        state.runtime.set_model(prev);
+    }
+    if let Some(prev) = plan.prev_reasoning {
+        state.session.reasoning = prev;
+    }
+}
+
 /// Leave plan mode without an approval flow (Alt+P toggle / `/plan off`).
 /// The effective safety mode reverts to `session.safety_mode` simply because
 /// the floor stops applying.
 fn exit_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
-    if state.session.plan.take().is_none() {
+    let Some(plan) = state.session.plan.take() else {
         push_system(state, cmds, "Not in plan mode (Alt+P or /plan enters it)");
         return;
-    }
+    };
+    restore_plan_overrides(state, &plan);
     note_plan_mode_exit(state, cmds);
     push_system(
         state,
@@ -5804,10 +5996,11 @@ fn plan_tool_transition(
 /// Plan`): leave plan mode, seed the checklist from the plan's Tasks section,
 /// and optionally queue the implementation kickoff.
 fn finish_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>, body: &str, start: bool) {
-    if state.session.plan.take().is_none() {
+    let Some(plan) = state.session.plan.take() else {
         // Stale or duplicate approval — nothing to transition.
         return;
-    }
+    };
+    restore_plan_overrides(state, &plan);
     // Retract any pending plan nudge; the per-request neutralizer rewrites
     // the denials themselves, and the tool result already tells the model
     // plan mode is off — no extra message here (see `plan_tool_transition`).
@@ -11301,6 +11494,8 @@ mod tests {
         let plan_path = PathBuf::from("/tmp/project/.mermaid/plans/x.md");
         state.session.plan = Some(crate::domain::PlanState {
             plan_path: plan_path.clone(),
+            prev_model_id: None,
+            prev_reasoning: None,
         });
         state.turn = TurnState::Generating {
             id: TurnId(9),
@@ -11378,6 +11573,8 @@ mod tests {
         // While planning: the denial stands verbatim.
         state.session.plan = Some(crate::domain::PlanState {
             plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+            prev_model_id: None,
+            prev_reasoning: None,
         });
         let req = build_chat_request(&state);
         let tool_msg = req
@@ -11417,6 +11614,8 @@ mod tests {
         state.session.safety_mode = SafetyMode::FullAccess;
         state.session.plan = Some(crate::domain::PlanState {
             plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+            prev_model_id: None,
+            prev_reasoning: None,
         });
         let call = crate::models::tool_call::ToolCall {
             id: Some("call-1".to_string()),
@@ -11460,6 +11659,8 @@ mod tests {
         assert!(!prompt.contains("## Plan Mode"));
         state.session.plan = Some(crate::domain::PlanState {
             plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+            prev_model_id: None,
+            prev_reasoning: None,
         });
         let prompt = system_prompt_for_state(&state);
         assert!(prompt.contains("## Plan Mode"));
@@ -11490,6 +11691,8 @@ mod tests {
         // Planning: exit_plan_mode only.
         state.session.plan = Some(crate::domain::PlanState {
             plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+            prev_model_id: None,
+            prev_reasoning: None,
         });
         let n = names(&state);
         assert!(n.contains(&"exit_plan_mode".to_string()));
@@ -11545,6 +11748,8 @@ mod tests {
         let mut state = state_with_two_exchanges();
         state.session.plan = Some(crate::domain::PlanState {
             plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+            prev_model_id: None,
+            prev_reasoning: None,
         });
         let call_id = drive_single_tool_call(&mut state, "exit_plan_mode");
 
@@ -11600,6 +11805,8 @@ mod tests {
         let mut state = fresh_state();
         state.session.plan = Some(crate::domain::PlanState {
             plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+            prev_model_id: None,
+            prev_reasoning: None,
         });
         // Prior round: one completed, one still open.
         let mut store = crate::domain::tasks::TaskStore::default();
@@ -11671,6 +11878,71 @@ mod tests {
         );
         let plan = state.session.plan.expect("tool success enters plan mode");
         assert!(plan.plan_path.starts_with("/tmp/project/.mermaid/plans"));
+    }
+
+    #[test]
+    fn plan_config_picker_cycles_values_and_persists() {
+        use crate::app::{PlanPermLevel, PlanPermissions};
+        let (mut state, _) = update(
+            fresh_state(),
+            Msg::Slash(SlashCmd::Plan(Some("config".into()))),
+        );
+        assert!(matches!(state.ui.mode, UiMode::PlanConfig { cursor: 0 }));
+        let key = |code| {
+            Msg::Key(Key {
+                code,
+                modifiers: KeyMods::NONE,
+            })
+        };
+        // Row 0 forward: default -> strict.
+        let (next, cmds) = update(state, key(KeyCode::Enter));
+        assert_eq!(next.settings.plan.permissions, PlanPermissions::strict());
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::PersistPlanConfig(_))),
+            "every change persists the [plan] table"
+        );
+        state = next;
+        // Down to builds, cycle allow -> auto (strict starts at deny -> allow).
+        let (next, _) = update(state, key(KeyCode::Down));
+        let (next, _) = update(next, key(KeyCode::Right));
+        assert_eq!(next.settings.plan.permissions.builds, PlanPermLevel::Allow);
+        // Custom values flip the preset display to none.
+        assert!(next.settings.plan.permissions.preset_name().is_none());
+        // Esc closes.
+        let (next, _) = update(next, key(KeyCode::Escape));
+        assert!(matches!(next.ui.mode, UiMode::EditingInput));
+    }
+
+    #[test]
+    fn plan_model_override_swaps_on_entry_and_restores_on_exit() {
+        let mut state = fresh_state();
+        state.settings.plan.model = Some("anthropic/frontier".to_string());
+        state.settings.plan.reasoning = Some(crate::models::ReasoningLevel::High);
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Plan(None)));
+        assert_eq!(state.session.model_id, "anthropic/frontier");
+        assert_eq!(state.session.reasoning, crate::models::ReasoningLevel::High);
+        let plan = state.session.plan.clone().expect("planning");
+        assert_eq!(plan.prev_model_id.as_deref(), Some("ollama/test"));
+        // Exit restores.
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Plan(Some("off".into()))));
+        assert_eq!(state.session.model_id, "ollama/test");
+        assert_eq!(
+            state.session.reasoning,
+            crate::models::ReasoningLevel::Medium,
+            "reasoning restored to the pre-plan default"
+        );
+    }
+
+    #[test]
+    fn plan_capabilities_line_tracks_the_profile() {
+        use crate::app::PlanPermissions;
+        let line = plan_capabilities_line(&PlanPermissions::default());
+        assert!(line.contains("build and test"));
+        assert!(line.contains("web search/fetch"));
+        let line = plan_capabilities_line(&PlanPermissions::strict());
+        assert!(!line.contains("build and test"));
+        assert!(!line.contains("web search/fetch"));
+        assert!(line.contains("plan file ONLY"));
     }
 
     #[test]

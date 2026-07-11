@@ -135,11 +135,9 @@ language — treat a request to execute as a request to plan the execution. \
 Plan mode ends only through the user: their approval when you call \
 exit_plan_mode, or Alt+P / /plan off on their keyboard.
 
-What runs while planning: reads and inspection, web search/fetch, memory \
-writes, known-safe build and test commands (cargo check/build/test/clippy, \
-go build/test/vet, npm test, make test, and similar), and edits to the plan \
-file ONLY. Everything else is blocked by policy — a denial means \"capture \
-it in the plan\", never \"find a workaround\".
+What runs while planning: {plan_capabilities} Everything else is blocked \
+by policy — a denial means \"capture it in the plan\", never \"find a \
+workaround\".
 
 Work in three phases:
 1. Ground: read the code paths involved. Discoverable facts are explored, \

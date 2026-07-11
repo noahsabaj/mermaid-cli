@@ -78,6 +78,11 @@ fn no_broker(secs: f64) -> ToolOutcome {
 /// (Codex shipped the same runtime error for the same reason). `task_list`
 /// stays available — reading is harmless.
 fn plan_mode_block(ctx: &crate::providers::ExecContext, secs: f64) -> Option<ToolOutcome> {
+    // Only an explicit `allow` in the plan profile unblocks the writers —
+    // `auto`/`ask` collapse to deny (ungated tools have no approval path).
+    if ctx.plan_permissions.tasks == crate::app::PlanPermLevel::Allow {
+        return None;
+    }
     ctx.plan_file.as_ref().map(|_| {
         ToolOutcome::error(
             "task tools are disabled in plan mode: the checklist is seeded from the \

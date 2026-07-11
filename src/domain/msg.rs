@@ -558,8 +558,12 @@ pub enum SlashCmd {
     /// session (`Shift+Tab` cycles the same field). Session-scoped.
     Safety(Option<SafetyMode>),
     /// Plan mode: no arg / `on` → enter; `off` → leave; `show` → print the
-    /// plan-file path. `Alt+P` toggles the same state. Session-scoped.
+    /// plan-file path; `config` → open the settings picker. `Alt+P` toggles
+    /// the same state. Session-scoped.
     Plan(Option<String>),
+    /// Open the settings picker (currently the plan-mode section; more
+    /// sections join it as they exist).
+    Config,
     Clear,
     Save(Option<String>),
     Load(Option<String>),
