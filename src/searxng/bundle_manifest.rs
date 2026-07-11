@@ -12,12 +12,16 @@ pub const BUNDLE_VERSION: &str = "v0.1.0";
 
 /// sha256 (lowercase hex) of `mermaid-searxng-<target>.tar.zst` for
 /// [`BUNDLE_VERSION`], or `None` on a platform with no published bundle
-/// (Windows: SearXNG needs Unix-only modules; Intel macOS: CI runner scarcity).
+/// (Windows: SearXNG needs Unix-only modules).
 pub fn bundle_sha256(target: &str) -> Option<&'static str> {
     Some(match target {
         "linux-x86_64" => "412415fbbf3d5111bad14c3ae373b89ffb184ee69431d6fa55504da307846ac3",
         "linux-aarch64" => "449c6680b5ddbe880e6aec3e9295428461661dc9fd2c395c13f5ecd28bf07296",
         "macos-aarch64" => "c16316a2a2e858fce0427f2bf56a53cc7d717f92a2ea0422d370babf2df73727",
+        // Placeholder slot until the first release that publishes macos-x86_64
+        // (mermaid-searxng v0.3.0): all-zeros matches no real digest, so a
+        // fetch fails closed until the automated bump PR fills it in.
+        "macos-x86_64" => "0000000000000000000000000000000000000000000000000000000000000000",
         _ => return None,
     })
 }

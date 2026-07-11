@@ -14,7 +14,7 @@ import re
 import sys
 
 MANIFEST = pathlib.Path("src/searxng/bundle_manifest.rs")
-ASSET_RE = re.compile(r"^mermaid-searxng-(?P<target>.+?)\.(?:tar\.zst|zip)$")
+ASSET_RE = re.compile(r"^mermaid-searxng-(?P<target>.+?)\.tar\.zst$")
 
 
 def parse_sha256sums(text: str) -> dict[str, str]:

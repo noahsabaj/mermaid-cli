@@ -172,8 +172,15 @@ fn write_settings() -> Result<PathBuf> {
 }
 
 fn settings_yml() -> String {
+    // ahmia + torch are onion engines that cannot work without a Tor proxy and
+    // fail registration at every startup, spamming ERROR logs; removing them
+    // from the defaults keeps the log clean at zero functional cost.
     format!(
-        "use_default_settings: true\n\
+        "use_default_settings:\n\
+        \x20 engines:\n\
+        \x20   remove:\n\
+        \x20     - ahmia\n\
+        \x20     - torch\n\
          server:\n\
         \x20 secret_key: \"{}\"\n\
         \x20 limiter: false\n\
@@ -231,7 +238,11 @@ mod tests {
     #[test]
     fn settings_enable_json_and_disable_limiter_and_valkey() {
         let s = settings_yml();
-        assert!(s.contains("use_default_settings: true"));
+        assert!(s.contains("use_default_settings:"));
+        assert!(
+            s.contains("- ahmia") && s.contains("- torch"),
+            "dead onion engines must be removed:\n{s}"
+        );
         assert!(s.contains("- json"), "JSON format must be enabled:\n{s}");
         assert!(s.contains("limiter: false"));
         assert!(s.contains("url: false"), "Valkey must be disabled:\n{s}");
