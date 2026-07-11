@@ -81,6 +81,9 @@ pub enum Cmd {
         /// them mid-session; the startup `Config` snapshot in `ExecContext`
         /// would go stale). Only consulted while `plan_file` is `Some`.
         plan_permissions: crate::app::PlanPermissions,
+        /// Context-window fill at dispatch, when known. `exit_plan_mode`
+        /// shows it on the clear-context option so the tradeoff is legible.
+        context_percent: Option<u8>,
         /// The user's stated intent for the turn (latest user message),
         /// passed to the Auto-mode classifier as alignment context.
         intent: Option<String>,

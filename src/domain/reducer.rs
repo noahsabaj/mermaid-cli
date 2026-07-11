@@ -4652,6 +4652,11 @@ fn handle_stream_done(
                 safety_mode: effective_safety,
                 plan_file: plan_file.clone(),
                 plan_permissions: state.settings.plan.permissions,
+                context_percent: state
+                    .session
+                    .context_usage
+                    .as_ref()
+                    .and_then(|c| c.used_percent),
                 intent: intent.clone(),
                 // Checkpoint anchoring: conversation id + length at DISPATCH.
                 // History here is [..., user@k, assistant(tool_use)], so any
@@ -5107,7 +5112,19 @@ fn handle_tool_finished(
     // are filled, before the follow-up model call is built — so the next
     // request's system prompt, tool list, and dispatch flooring all see the
     // new plan state, and an approval's queued kickoff rides the drain below.
-    plan_tool_transition(state, cmds, call_id, &outcome);
+    if plan_tool_transition(state, cmds, call_id, &outcome) {
+        // A handoff replaced the conversation. The executing turn belongs to
+        // the exploration transcript (already saved); cancel its scope and go
+        // Idle — the handoff's queued kickoff drives the next turn in the new
+        // conversation. Appending this turn's tool results would strand them
+        // in the wrong transcript.
+        if let Some(id) = state.turn.id() {
+            cmds.push(Cmd::CancelScope(id));
+        }
+        state.turn = TurnState::Idle;
+        state.ui.live_tool_status.clear();
+        return;
+    }
 
     if let Some(completed_outcomes) = completed
         && let TurnState::ExecutingTools { id, calls, .. } =
@@ -5925,6 +5942,123 @@ fn neutralize_superseded_plan_denials(messages: &mut [ChatMessage], plan_active:
     }
 }
 
+/// Seed the checklist from the plan's Tasks section. Re-plan reconcile:
+/// completed items survive (their subjects aren't re-seeded), everything
+/// still open is replaced by the new plan's steps. `Stamp::default()` keeps
+/// it replay-deterministic; the wholesale `SyncTaskStore` mirrors the
+/// fork/clear reset path (the broker's `seed` doesn't publish — the reducer
+/// already holds the truth).
+fn seed_plan_tasks(state: &mut State, cmds: &mut Vec<Cmd>, body: &str) {
+    let specs = super::plan::parse_plan_tasks(body);
+    if specs.is_empty() {
+        return;
+    }
+    use super::tasks::{Stamp, TaskEdit, TaskOrigin, TaskStatus};
+    let mut store = state.session.conversation.tasks.clone();
+    let completed: std::collections::HashSet<String> = store
+        .visible()
+        .filter(|t| t.status == TaskStatus::Completed)
+        .map(|t| t.subject.trim().to_ascii_lowercase())
+        .collect();
+    let stale: Vec<TaskEdit> = store
+        .visible()
+        .filter(|t| t.status != TaskStatus::Completed)
+        .map(|t| TaskEdit {
+            id: t.id,
+            status: Some(TaskStatus::Deleted),
+            subject: None,
+            active_form: None,
+            description: None,
+        })
+        .collect();
+    if !stale.is_empty() {
+        store.apply(&stale, Stamp::default());
+    }
+    let fresh: Vec<_> = specs
+        .into_iter()
+        .filter(|s| !completed.contains(&s.subject.trim().to_ascii_lowercase()))
+        .collect();
+    if !fresh.is_empty() {
+        store.create(fresh, TaskOrigin::Model, Stamp::default());
+    }
+    state.session.conversation.tasks = store.clone();
+    cmds.push(Cmd::SyncTaskStore(store));
+}
+
+/// The user approved the plan into a NEW conversation (clear-context
+/// execute, or an explicit handoff): persist the exploration transcript,
+/// mint the next conversation (fork carries the transcript + checklist;
+/// fresh starts from the plan alone), optionally switch models, seed the
+/// checklist, and drive the kickoff turn.
+fn handoff_plan_mode(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    body: &str,
+    fresh: bool,
+    fork: bool,
+    model: Option<String>,
+) {
+    let Some(plan) = state.session.plan.take() else {
+        return;
+    };
+    restore_plan_overrides(state, &plan);
+    // The exploration conversation is history now — save it under its own id
+    // BEFORE swapping (the fork_conversation_at ordering).
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    let original = &state.session.conversation;
+    let mut next = crate::session::ConversationHistory::new(
+        original.project_path.clone(),
+        original.model_name.clone(),
+        state.now,
+    );
+    // Millisecond-derived ids: bump deterministically on collision (the
+    // rewind-fork precedent) so the two sessions never share a save file.
+    if next.id == original.id {
+        next = crate::session::ConversationHistory::new(
+            original.project_path.clone(),
+            original.model_name.clone(),
+            state.now + chrono::Duration::milliseconds(1),
+        );
+    }
+    if fork {
+        next.title = original.title.clone();
+        next.messages = original.messages.clone();
+        next.input_history = original.input_history.clone();
+        next.git_branch = original.git_branch.clone();
+        next.tasks = original.tasks.clone();
+        next.forked_from = Some(original.id.clone());
+    }
+    state.session.conversation = next;
+    if let Some(model) = model {
+        state.session.model_id = model.clone();
+        state.runtime.set_model(&model);
+    }
+    seed_plan_tasks(state, cmds, body);
+    // Fresh contexts get the handoff preamble + the plan as their opening
+    // user message (the plan IS the brief); a fork already carries the plan
+    // in its transcript, so a bare kickoff suffices.
+    let kickoff = if fresh {
+        format!(
+            "{}
+
+{}",
+            crate::prompts::PLAN_HANDOFF_PREAMBLE,
+            body
+        )
+    } else {
+        "Implement the plan.".to_string()
+    };
+    state
+        .ui
+        .queued_messages
+        .push_back(super::state::QueuedMessage {
+            text: kickoff,
+            attachment_ids: vec![],
+        });
+    drain_next_queued_message(state);
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+}
+
 /// Content prefix of the plan-mode-exit nudge — how [`enter_plan_mode`] and
 /// [`note_plan_mode_exit`] recognize a pending one to retract it.
 const PLAN_NUDGE_PREFIX: &str = "Plan mode is now off";
@@ -5960,12 +6094,15 @@ fn note_plan_mode_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// would interleave between the assistant `tool_use` and its tool results);
 /// the transcript record is the rendered `ToolMetadata::Plan` block, and the
 /// per-request denial neutralizer handles history hygiene.
+/// Returns `true` when the outcome triggered a conversation handoff (fresh
+/// or fork) — the caller must then abandon the executing turn instead of
+/// appending its tool results into the NEW conversation.
 fn plan_tool_transition(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     call_id: super::ids::ToolCallId,
     outcome: &ToolOutcome,
-) {
+) -> bool {
     use super::plan::{ENTER_PLAN_MODE_TOOL, EXIT_PLAN_MODE_TOOL};
     let tool_name = match &state.turn {
         TurnState::ExecutingTools { calls, .. } => calls
@@ -5982,14 +6119,27 @@ fn plan_tool_transition(
             enter_plan_mode_state(state, cmds);
         },
         Some(name) if name == EXIT_PLAN_MODE_TOOL => {
-            if let crate::domain::ToolMetadata::Plan { body, start, .. } = &outcome.metadata.detail
+            if let crate::domain::ToolMetadata::Plan {
+                body,
+                start,
+                fresh,
+                fork,
+                model,
+                ..
+            } = &outcome.metadata.detail
             {
+                if *fresh || *fork || model.is_some() {
+                    let (body, fresh, fork, model) = (body.clone(), *fresh, *fork, model.clone());
+                    handoff_plan_mode(state, cmds, &body, fresh, fork, model);
+                    return true;
+                }
                 let (body, start) = (body.clone(), *start);
                 finish_plan_mode(state, cmds, &body, start);
             }
         },
         _ => {},
     }
+    false
 }
 
 /// The user approved the plan (`exit_plan_mode` returned `ToolMetadata::
@@ -6008,44 +6158,7 @@ fn finish_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>, body: &str, start: b
         m.kind != crate::models::ChatMessageKind::RecoveryNudge
             || !m.content.starts_with(PLAN_NUDGE_PREFIX)
     });
-    // Seed the checklist. Re-plan reconcile: completed items survive (their
-    // subjects aren't re-seeded), everything still open is replaced by the
-    // new plan's steps. `Stamp::default()` keeps it replay-deterministic;
-    // the wholesale `SyncTaskStore` mirrors the fork/clear reset path (the
-    // broker's `seed` doesn't publish — the reducer already holds the truth).
-    let specs = super::plan::parse_plan_tasks(body);
-    if !specs.is_empty() {
-        use super::tasks::{Stamp, TaskEdit, TaskOrigin, TaskStatus};
-        let mut store = state.session.conversation.tasks.clone();
-        let completed: std::collections::HashSet<String> = store
-            .visible()
-            .filter(|t| t.status == TaskStatus::Completed)
-            .map(|t| t.subject.trim().to_ascii_lowercase())
-            .collect();
-        let stale: Vec<TaskEdit> = store
-            .visible()
-            .filter(|t| t.status != TaskStatus::Completed)
-            .map(|t| TaskEdit {
-                id: t.id,
-                status: Some(TaskStatus::Deleted),
-                subject: None,
-                active_form: None,
-                description: None,
-            })
-            .collect();
-        if !stale.is_empty() {
-            store.apply(&stale, Stamp::default());
-        }
-        let fresh: Vec<_> = specs
-            .into_iter()
-            .filter(|s| !completed.contains(&s.subject.trim().to_ascii_lowercase()))
-            .collect();
-        if !fresh.is_empty() {
-            store.create(fresh, TaskOrigin::Model, Stamp::default());
-        }
-        state.session.conversation.tasks = store.clone();
-        cmds.push(Cmd::SyncTaskStore(store));
-    }
+    seed_plan_tasks(state, cmds, body);
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
     if start {
         // Auto-submit implementation through the queued-message path (the
@@ -11760,6 +11873,9 @@ mod tests {
                     path: ".mermaid/plans/x.md".to_string(),
                     body: body.to_string(),
                     start: true,
+                    fresh: false,
+                    fork: false,
+                    model: None,
                 },
                 ..Default::default()
             });
@@ -11943,6 +12059,111 @@ mod tests {
         assert!(!line.contains("build and test"));
         assert!(!line.contains("web search/fetch"));
         assert!(line.contains("plan file ONLY"));
+    }
+
+    fn plan_outcome(fresh: bool, fork: bool, model: Option<&str>) -> ToolOutcome {
+        ToolOutcome::success("approved", "plan approved", 0.1).with_metadata(
+            crate::domain::ToolRunMetadata {
+                detail: crate::domain::ToolMetadata::Plan {
+                    path: ".mermaid/plans/x.md".to_string(),
+                    body: "## Tasks\n1. Step one\n2. Step two\n".to_string(),
+                    start: true,
+                    fresh,
+                    fork,
+                    model: model.map(str::to_string),
+                },
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn clear_context_approval_hands_off_to_a_fresh_conversation() {
+        let mut state = state_with_two_exchanges();
+        state.session.plan = Some(crate::domain::PlanState {
+            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+            prev_model_id: None,
+            prev_reasoning: None,
+        });
+        let original_id = state.session.conversation.id.clone();
+        let call_id = drive_single_tool_call(&mut state, "exit_plan_mode");
+        let (state, cmds) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(9),
+                call_id,
+                outcome: plan_outcome(true, false, Some("ollama/executor")),
+            },
+        );
+        assert!(state.session.plan.is_none());
+        assert_ne!(
+            state.session.conversation.id, original_id,
+            "execution continues in a new conversation"
+        );
+        assert_eq!(state.session.model_id, "ollama/executor");
+        assert_eq!(state.session.conversation.tasks.visible().count(), 2);
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::CancelScope(_))),
+            "the exploration turn's scope is cancelled"
+        );
+        // The kickoff self-submitted within this update: the fresh transcript
+        // holds exactly the preamble+plan user message, and its turn is live.
+        let users: Vec<&ChatMessage> = state
+            .session
+            .messages()
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .collect();
+        assert_eq!(users.len(), 1, "only the kickoff rides the fresh context");
+        assert!(
+            users[0]
+                .content
+                .starts_with(crate::prompts::PLAN_HANDOFF_PREAMBLE)
+        );
+        assert!(users[0].content.contains("## Tasks"));
+        assert!(
+            matches!(state.turn, TurnState::Generating { .. }),
+            "the kickoff turn starts immediately"
+        );
+    }
+
+    #[test]
+    fn fork_handoff_carries_the_transcript() {
+        let mut state = state_with_two_exchanges();
+        state.session.plan = Some(crate::domain::PlanState {
+            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
+            prev_model_id: None,
+            prev_reasoning: None,
+        });
+        let original_id = state.session.conversation.id.clone();
+        let original_len = state.session.messages().len();
+        let call_id = drive_single_tool_call(&mut state, "exit_plan_mode");
+        let mid_len = state.session.messages().len();
+        assert!(mid_len >= original_len, "tool_use assistant committed");
+        let (state, _cmds) = update(
+            state,
+            Msg::ToolFinished {
+                turn: TurnId(9),
+                call_id,
+                outcome: plan_outcome(false, true, None),
+            },
+        );
+        assert_ne!(state.session.conversation.id, original_id);
+        assert_eq!(
+            state.session.conversation.forked_from.as_deref(),
+            Some(original_id.as_str())
+        );
+        // The transcript carried over, plus the self-submitted kickoff.
+        assert_eq!(
+            state.session.messages().len(),
+            mid_len + 1,
+            "fork carries the transcript and appends the kickoff"
+        );
+        assert_eq!(
+            state.session.messages().last().map(|m| m.content.as_str()),
+            Some("Implement the plan.")
+        );
+        assert!(matches!(state.turn, TurnState::Generating { .. }));
     }
 
     #[test]

@@ -178,6 +178,18 @@ requests changes, revise the plan file and call it again. The task \
 checklist tools are disabled until approval: the checklist is seeded from \
 the approved plan's Tasks section.";
 
+/// Seeds the FIRST user message of a fresh-context execution conversation
+/// (clear-context approve, or a fresh-session handoff). Adapted from Codex's
+/// battle-tested handoff prompt: the plan must be treated as the user's
+/// intent, and the new context re-reads files instead of assuming.
+pub const PLAN_HANDOFF_PREAMBLE: &str = "\
+A previous agent explored this project and produced the approved plan below. \
+Implement it in this fresh context: treat the plan as the source of user \
+intent, re-read files as needed (earlier exploration is not in your context), \
+follow the plan's Assumptions section, and carry the work through \
+implementation and verification. The task checklist has already been seeded \
+from the plan's Tasks section — keep it live as you work.";
+
 /// Appended to a SUBAGENT's system prompt (`system_prompt_for_state` adds it
 /// when `session.is_subagent` is set). A child runs headless with nobody
 /// watching its intermediate output and nobody to answer questions; without

@@ -563,6 +563,7 @@ impl EffectRunner {
                 safety_mode,
                 plan_file,
                 plan_permissions,
+                context_percent,
                 intent,
                 session_id,
                 message_index,
@@ -627,6 +628,7 @@ impl EffectRunner {
                         safety_mode,
                         plan_file,
                         plan_permissions,
+                        context_percent,
                         intent,
                         classifier,
                         approval,
@@ -2554,6 +2556,7 @@ async fn dispatch_execute_tool(
     safety_mode: crate::runtime::SafetyMode,
     plan_file: Option<PathBuf>,
     plan_permissions: crate::app::PlanPermissions,
+    context_percent: Option<u8>,
     intent: Option<String>,
     classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
     approval: Option<crate::providers::ApprovalBroker>,
@@ -2678,6 +2681,7 @@ async fn dispatch_execute_tool(
     ctx.background = background;
     ctx.plan_file = plan_file;
     ctx.plan_permissions = plan_permissions;
+    ctx.context_percent = context_percent;
     // Detached work (backgrounded subagents) reports back through the main
     // msg channel after this turn's progress relay is gone.
     ctx.notify = Some(msg_tx.clone());
@@ -3434,6 +3438,7 @@ mod tests {
             safety_mode: crate::runtime::SafetyMode::Ask,
             plan_file: None,
             plan_permissions: crate::app::PlanPermissions::default(),
+            context_percent: None,
             intent: None,
             session_id: "sess-test".to_string(),
             message_index: 0,

@@ -293,6 +293,18 @@ pub enum ToolMetadata {
         /// True when the user chose to start implementing immediately.
         #[serde(default)]
         start: bool,
+        /// Execution begins in a FRESH conversation seeded with the handoff
+        /// preamble + plan (clear-context execute, or a fresh-session
+        /// handoff). The exploration context is left behind on disk.
+        #[serde(default)]
+        fresh: bool,
+        /// Handoff variant that copies the transcript into a new
+        /// conversation before starting (mutually exclusive with `fresh`).
+        #[serde(default)]
+        fork: bool,
+        /// Handoff: switch the session to this model for execution.
+        #[serde(default)]
+        model: Option<String>,
     },
     Custom {
         name: String,
