@@ -5915,8 +5915,10 @@ fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::
     Some(plan_path)
 }
 
-/// Interactive plan-mode entry (Alt+P / `/plan`): the state flip plus the
-/// transcript announcement.
+/// Interactive plan-mode entry (Alt+P / `/plan`): the state flip only — the
+/// status band announces the mode (it shows `plan mode on … restores: <mode>`
+/// while `session.plan` is set), so no transcript row is added. The model
+/// learns the mode + plan path from the system prompt.
 fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     if let Some(plan) = &state.session.plan {
         let path = plan_path_display(state, &plan.plan_path.clone());
@@ -5927,14 +5929,7 @@ fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
         );
         return;
     }
-    if let Some(plan_path) = enter_plan_mode_state(state, cmds) {
-        let display = plan_path_display(state, &plan_path);
-        push_system(
-            state,
-            cmds,
-            format!("Planning: {display} — plan mode on (Alt+P to toggle)"),
-        );
-    }
+    enter_plan_mode_state(state, cmds);
 }
 
 /// Undo the `[plan]` model/reasoning overrides stashed at entry.
@@ -5958,14 +5953,8 @@ fn exit_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     };
     restore_plan_overrides(state, &plan);
     note_plan_mode_exit(state, cmds);
-    push_system(
-        state,
-        cmds,
-        format!(
-            "Plan mode off — safety mode: {}",
-            state.session.safety_mode.as_str()
-        ),
-    );
+    // No transcript row: the status band reverting to the plain safety mode
+    // is the announcement.
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
 }
 
@@ -11748,18 +11737,21 @@ mod tests {
             plan.plan_path
         );
         assert!(plan.plan_path.extension().is_some_and(|e| e == "md"));
+        // The status band announces the mode — toggling adds no transcript row.
         assert!(
-            state
-                .session
-                .messages()
-                .iter()
-                .any(|m| m.content.starts_with("Planning: ")),
-            "entry announces the plan file"
+            state.session.messages().is_empty(),
+            "entry adds no transcript row (status band carries the mode): {:?}",
+            state.session.messages()
         );
         // The restore target is untouched — plan mode is not a safety mode.
         assert_eq!(state.session.safety_mode, Config::default().safety.mode);
         let (state, _) = update(state, key());
         assert!(state.session.plan.is_none(), "Alt+P toggles back off");
+        assert!(
+            state.session.messages().is_empty(),
+            "exit adds no transcript row either: {:?}",
+            state.session.messages()
+        );
     }
 
     #[test]

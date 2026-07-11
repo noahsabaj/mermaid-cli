@@ -212,6 +212,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Quiet system notices.** Toggling plan mode no longer writes transcript
+  rows ("Planning: … — plan mode on", "Plan mode off — safety mode: …") —
+  the status band under the prompt is the single source of truth for the
+  live mode, so a toggle just updates that line. Every remaining system
+  notice (VRAM/vision warnings, MCP errors, background-agent completions,
+  command replies) drops the colored role bullet and right-aligned
+  timestamp and renders as indented muted-gray meta text, so transcript
+  furniture never competes with the conversation.
+
 - **Typed daemon control protocol.** Every `mermaidd` socket command now
   parses into one exhaustive `DaemonRequest` enum (wire shape unchanged —
   this is a contract made exhaustive, not a compat shim): a malformed
