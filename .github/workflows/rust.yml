@@ -135,3 +135,32 @@ jobs:
         run: cargo test --test sandbox_fs -- --ignored
       - name: Self-test (deterministic, model-free)
         run: cargo run --bin mermaid -- self-test --format json
+
+  # OS-sandbox enforcement on the non-Linux platforms with a real backend
+  # (the Linux `integration` job above already runs these tests). macOS-only
+  # for now; the Windows AppContainer port adds windows-latest. The
+  # `#[ignore]`d tests include the Seatbelt profile-compile canary, so an SBPL
+  # grammar change in a new macOS release fails this job loudly.
+  sandbox-integration:
+    name: OS Sandbox
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: sandbox-${{ matrix.os }}
+      - name: Build binaries
+        run: cargo build --workspace
+      - name: Sandbox network denial (ignored)
+        run: cargo test --test sandbox_network -- --ignored
+      - name: Sandbox filesystem confinement (ignored)
+        run: cargo test --test sandbox_fs -- --ignored
+      - name: Self-test (real sandbox availability probes)
+        run: cargo run --bin mermaid -- self-test --format json

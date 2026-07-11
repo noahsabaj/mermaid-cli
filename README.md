@@ -158,8 +158,8 @@ mermaid --resume <id> run "and now the tests"   # Continue a saved session headl
                                                 #   ndjson session_started/result, json result,
                                                 #   or the `session:` line on stderr)
 mermaid --continue run "keep going"             # Resume this directory's most recent session
-mermaid --no-network run "audit the code"       # Deny network to shell commands (Linux seccomp)
-mermaid --sandbox run "refactor this"           # Also confine writes to the project (Linux Landlock)
+mermaid --no-network run "audit the code"       # Deny network to shell commands (Linux/macOS)
+mermaid --sandbox run "refactor this"           # Also confine writes to the project (Linux/macOS)
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
 mermaid remove <name>                           # Remove a configured MCP server
 mermaid mcp                                     # List configured MCP servers
@@ -281,6 +281,33 @@ searxng_url = "http://localhost:8080"
 
 - **`web_fetch` defaults to `native`**: it fetches the URL directly from your machine and converts the HTML to markdown — no API key, no third party. Set `fetch_backend = "ollama"` to route through Ollama Cloud's server-side fetch instead (handles JS-heavy pages and bot-walls better; needs `OLLAMA_API_KEY`).
 - **`web_search` defaults to `auto`**, which just works with zero setup: if `OLLAMA_API_KEY` is set it uses Ollama Cloud; otherwise mermaid **downloads and runs a self-contained local [SearXNG](https://github.com/searxng/searxng) bundle** on your first search and tears it down when it exits — no Docker, no Podman, nothing to install. The bundle (a portable Python plus the [Granian](https://github.com/emmett-framework/granian) server and SearXNG) is fetched once from [mermaid-searxng](https://github.com/noahsabaj/mermaid-searxng), sha256-verified, and cached under your data dir; after that startup is a couple of seconds. Force a backend with `search_backend = "ollama"` (Ollama Cloud) or `"searxng"` (your own instance at `searxng_url`, which must have `json` in its `search.formats`).
+
+## OS Sandbox
+
+Model-run shell commands can be confined by the operating system, independently of the
+approval policy. Two dimensions, each with its own flag (or config key):
+
+- `--no-network` (`safety.network = "deny"`): commands cannot reach the network. Local
+  `AF_UNIX` sockets stay open so D-Bus/nscd-style IPC keeps working.
+- `--confine-fs` (`safety.filesystem = "project"`): write-class filesystem access is allowed
+  only beneath the project root, the working directory, the system temp directory, and (on
+  unix) `/dev`. Reads and execution stay unrestricted.
+- `--sandbox`: both at once.
+
+Enforcement is per-platform, behind one facade:
+
+| Platform | Network deny | Write confinement | Denial signature |
+| --- | --- | --- | --- |
+| Linux | seccomp-BPF kill-switch: creating an `AF_INET`/`AF_INET6` socket dies with `SIGSYS` | Landlock (kernel 5.13+; best-effort no-op with a warning on older kernels) | network: precise (`SIGSYS`); filesystem: hedged permission-error text |
+| macOS | Seatbelt (`sandbox-exec`) allow-default profile with `(deny network*)`, sparing `AF_UNIX` | Seatbelt `deny file-write*` outside the allowed roots, matched on both the literal and canonicalized path (so `TMPDIR` firmlinks work) | both hedged: `EPERM` "Operation not permitted", no signal |
+| Windows / other | not yet enforced | not yet enforced | n/a |
+
+The sandbox is applied by the hidden `mermaid __sandbox-exec` launcher just before it runs
+the real command, and is inherited by everything the command spawns. It fails closed: if
+requested confinement cannot be applied, the command exits 126 instead of running
+unconfined. On platforms without a backend the exec tool does not request confinement at
+all — it logs a once-per-process warning, and `mermaid self-test` reports the real
+per-platform availability.
 
 ## Project Instructions
 

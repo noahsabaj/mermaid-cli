@@ -613,25 +613,47 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
         },
     };
 
+    // Real per-platform probes (Linux: the seccomp filter / Landlock ruleset
+    // assemble; macOS: /usr/bin/sandbox-exec exists; elsewhere: no backend
+    // yet, truthfully "no" instead of the old hardcoded "yes").
     let sandbox_available = crate::runtime::network_killswitch_available();
     let fs_sandbox_available = crate::runtime::fs_confinement_available();
+    let (network_check, fs_check) = if cfg!(target_os = "linux") {
+        (
+            "network kill-switch (seccomp) builds on this platform",
+            "filesystem confinement (Landlock) ruleset builds on this platform",
+        )
+    } else if cfg!(target_os = "macos") {
+        (
+            "network sandbox (Seatbelt via sandbox-exec) available on this platform",
+            "filesystem confinement (Seatbelt via sandbox-exec) available on this platform",
+        )
+    } else {
+        (
+            "network sandbox backend available on this platform",
+            "filesystem confinement backend available on this platform",
+        )
+    };
     let checks = vec![
         "compact smoke exercises reducer compaction path".to_string(),
         "compact smoke persists conversation and archive artifacts".to_string(),
         "local runtime store opens without daemon".to_string(),
         format!(
-            "network kill-switch builds on this platform: {}",
+            "{network_check}: {}",
             if sandbox_available { "yes" } else { "no" }
         ),
         format!(
-            "filesystem confinement ruleset builds on this platform: {}",
+            "{fs_check}: {}",
             if fs_sandbox_available { "yes" } else { "no" }
         ),
     ];
+    // Platforms with a sandbox backend must have it working; platforms
+    // without one (Windows until the AppContainer port) truthfully report
+    // "no" above without failing the whole self-test.
+    let sandbox_expected = cfg!(any(target_os = "linux", target_os = "macos"));
     let ok = compact_smoke.ok
         && runtime_store.status == "ok"
-        && sandbox_available
-        && fs_sandbox_available;
+        && (!sandbox_expected || (sandbox_available && fs_sandbox_available));
     let report = SelfTestReport {
         ok,
         workspace: workspace.display().to_string(),
