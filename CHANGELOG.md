@@ -139,6 +139,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Word-wrap no longer styles or invents spaces at span boundaries.** On
+  chat lines long enough to wrap, the wrapper re-joined words with a
+  separator space styled like the following span — so the gap before a
+  markdown link rendered underlined (and before inline code would carry the
+  code background) — and treated every span boundary as a word boundary, so
+  spans adjacent without source whitespace gained a phantom space
+  (`(url) .` after a link, `` `code` , ``, `bold suffix` for
+  `**bold**suffix`). Wrapping now flattens spans into a word stream where
+  boundaries exist only at real whitespace, emits separator spaces
+  unstyled, and hard-breaks over-long multi-style tokens while preserving
+  each fragment's style.
+
 - **Compaction preserves the complete live context and persists in order.**
   Summary requests now budget the entire request, include redacted tool
   arguments and referenced images, count cached and reasoning tokens, and
