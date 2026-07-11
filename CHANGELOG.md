@@ -147,6 +147,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after visible progress, checkpoint metadata reports review status and actual
   preserved turns, and serialized archive-plus-conversation saves prevent a
   newer stripped transcript from bypassing a failed or delayed archive.
+  A compaction save that arrives while an older archive write is still
+  failing queues behind it instead of being dropped, shutdown drains every
+  conversation's pending barrier, and quoted `## ` lines inside checkpoint
+  bodies no longer fail structural validation. A failed auto-compaction now
+  pauses further automatic attempts (with a one-time notice) until a
+  compaction succeeds, `/compact` runs, or the conversation switches. A late
+  tool result that lands during compaction is re-inserted after its pending
+  call, and mid-compaction message matching uses compact sha256 fingerprints
+  instead of cloning the full transcript into the result. Persisted
+  compaction records and recorded compaction events changed shape
+  (`review_status`/`preserved_turn_count` replace
+  `verified`/`verification_error`; boundaries are now fingerprints), so
+  session files with compaction records and session recordings with
+  compaction events from earlier unreleased builds will not load or replay.
 
 - **The status spinner never names tools; the transcript does.** The spinner
   headline used to splice in the executing tool and its arguments

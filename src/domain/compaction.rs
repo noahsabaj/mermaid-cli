@@ -227,27 +227,50 @@ pub struct CompactionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionBoundary {
-    pub role: MessageRole,
-    pub content: String,
-    pub timestamp: DateTime<Local>,
-    pub kind: ChatMessageKind,
+    /// sha256 hex over (role Debug, kind Debug, UTC RFC3339-nanos timestamp,
+    /// content), NUL-separated, content last. A fingerprint instead of a full
+    /// message clone: `source_boundaries` rides `CompactionFinished` into the
+    /// session recording, and cloning the entire pre-compaction transcript
+    /// would double both memory and recording size. UTC-normalized because
+    /// `DateTime<Local>` re-localizes on deserialize — a recording replayed
+    /// under a different TZ must still match on the instant.
+    pub fingerprint: String,
 }
 
 impl CompactionBoundary {
     pub fn from_message(message: &ChatMessage) -> Self {
         Self {
-            role: message.role.clone(),
-            content: message.content.clone(),
-            timestamp: message.timestamp,
-            kind: message.kind,
+            fingerprint: Self::fingerprint_of(message),
         }
     }
 
+    pub fn fingerprint_of(message: &ChatMessage) -> String {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write as _;
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{:?}", message.role).as_bytes());
+        hasher.update([0u8]);
+        hasher.update(format!("{:?}", message.kind).as_bytes());
+        hasher.update([0u8]);
+        hasher.update(
+            message
+                .timestamp
+                .to_utc()
+                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+                .as_bytes(),
+        );
+        hasher.update([0u8]);
+        hasher.update(message.content.as_bytes());
+        let digest = hasher.finalize();
+        let mut out = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    }
+
     pub fn matches(&self, message: &ChatMessage) -> bool {
-        self.role == message.role
-            && self.content == message.content
-            && self.timestamp == message.timestamp
-            && self.kind == message.kind
+        Self::fingerprint_of(message) == self.fingerprint
     }
 }
 
@@ -264,6 +287,7 @@ pub struct PreparedCompaction {
 pub enum CompactionSkip {
     NoKnownContextLimit,
     AutoDisabled,
+    Suppressed,
     BelowThreshold,
     NothingToCompact,
 }
@@ -273,6 +297,10 @@ impl std::fmt::Display for CompactionSkip {
         match self {
             Self::NoKnownContextLimit => write!(f, "model context limit is unknown"),
             Self::AutoDisabled => write!(f, "automatic compaction is disabled"),
+            Self::Suppressed => write!(
+                f,
+                "automatic compaction is paused after a failed attempt; run /compact to retry"
+            ),
             Self::BelowThreshold => write!(f, "context is below compaction threshold"),
             Self::NothingToCompact => write!(f, "not enough conversation history to summarize"),
         }
@@ -286,6 +314,9 @@ pub fn should_auto_compact(
 ) -> Result<(), CompactionSkip> {
     if !policy.auto_enabled {
         return Err(CompactionSkip::AutoDisabled);
+    }
+    if request.suppress_auto_compact {
+        return Err(CompactionSkip::Suppressed);
     }
     let Some(max_tokens) = snapshot.max_tokens else {
         return Err(CompactionSkip::NoKnownContextLimit);
@@ -371,21 +402,34 @@ pub fn prepare_compaction(
         .filter(|max| *max > 0)
         .unwrap_or(request.policy.summarizer_input_token_budget)
         .min(request.policy.summarizer_input_token_budget);
-    let mut sizing_prepared = PreparedCompaction {
+    let sizing_prepared = PreparedCompaction {
         archived_messages: Vec::new(),
         preserved_messages: Vec::new(),
         previous_summary: previous_summary.clone(),
         history_excerpt: String::new(),
         summary_images: Vec::new(),
     };
-    let fixed_chars = compaction_system_prompt()
-        .len()
-        .saturating_add(summary_prompt(&sizing_prepared, request.instructions.as_deref()).len());
-    let mut remaining_tokens = max_input_tokens.saturating_sub(fixed_chars.div_ceil(4));
+    // Measure the fixed request scaffold (system prompt, template, previous
+    // checkpoint, focus, role metadata) with the SAME estimator the dispatch
+    // fit check uses, so the two can never diverge. The per-image and excerpt
+    // allocations below each round up at least as aggressively as the
+    // estimator's summed rounding, so the assembled request stays within
+    // `max_input_tokens` by construction.
+    let probe = build_summary_request(
+        &request.chat,
+        &sizing_prepared,
+        request.instructions.as_deref(),
+        request.policy,
+    );
+    let fixed_tokens = super::state::estimate_context_usage_for_request(&probe, None).used_tokens;
+    let mut remaining_tokens = max_input_tokens.saturating_sub(fixed_tokens);
 
     // Images are model-visible source material, not merely transcript markers.
-    // Keep the newest images that fit; the text projection states how many were
-    // omitted so the checkpoint cannot silently imply complete visual coverage.
+    // Keep every image that fits, scanning newest first so recency wins the
+    // budget — but do NOT stop at the first oversized one: a single giant
+    // recent screenshot must not evict older small diagrams that fit. The text
+    // projection states how many were omitted so the checkpoint cannot
+    // silently imply complete visual coverage.
     let all_images: Vec<String> = archived_messages
         .iter()
         .flat_map(|message| message.images.iter().flatten().cloned())
@@ -399,7 +443,6 @@ pub fn prepare_compaction(
         }
     }
     summary_images.reverse();
-    sizing_prepared.summary_images = summary_images.clone();
 
     let history = format_history_excerpt(
         &archived_messages,
@@ -442,6 +485,7 @@ pub fn build_summary_request(
         resolved_context_window: base.resolved_context_window,
         resolved_max_output: base.resolved_max_output,
         output_schema: None,
+        suppress_auto_compact: false,
     }
 }
 
@@ -475,6 +519,7 @@ pub fn build_verification_request(
         resolved_context_window: base.resolved_context_window,
         resolved_max_output: base.resolved_max_output,
         output_schema: None,
+        suppress_auto_compact: false,
     }
 }
 
@@ -565,14 +610,16 @@ pub fn validate_summary_structure(summary: &str) -> Result<(), String> {
         "## Next Steps",
     ];
 
+    // Only the ten known headings are structure. Other `## `-prefixed lines
+    // are body content — checkpoints legitimately quote markdown (commands,
+    // error output, README excerpts) and must not fail closed over it.
     let lines: Vec<&str> = summary.lines().collect();
     let headings: Vec<(usize, &str)> = lines
         .iter()
         .enumerate()
         .filter_map(|(index, line)| {
-            line.trim()
-                .starts_with("## ")
-                .then_some((index, line.trim()))
+            let trimmed = line.trim();
+            HEADINGS.contains(&trimmed).then_some((index, trimmed))
         })
         .collect();
     let actual: Vec<&str> = headings.iter().map(|(_, heading)| *heading).collect();
@@ -951,6 +998,7 @@ mod tests {
             resolved_context_window: None,
             resolved_max_output: None,
             output_schema: None,
+            suppress_auto_compact: false,
         }
     }
 
@@ -1062,6 +1110,47 @@ mod tests {
     }
 
     #[test]
+    fn auto_compaction_pause_rides_the_request() {
+        let snapshot = ContextUsageSnapshot::from_estimate(
+            super::super::state::PromptTokenBreakdown {
+                system_tokens: 0,
+                instructions_tokens: 0,
+                message_tokens: 86,
+                tool_schema_tokens: 0,
+                image_count: 0,
+                message_count: 2,
+                tool_count: 0,
+            },
+            Some(100),
+        );
+        let mut req = request_with(vec![ChatMessage::user("hello")]);
+        req.suppress_auto_compact = true;
+        assert_eq!(
+            should_auto_compact(&snapshot, &req, CompactionPolicy::default()),
+            Err(CompactionSkip::Suppressed)
+        );
+    }
+
+    #[test]
+    fn boundary_fingerprint_matches_only_the_identical_message() {
+        let message = ChatMessage::user("hello");
+        let boundary = CompactionBoundary::from_message(&message);
+        assert!(boundary.matches(&message));
+
+        let mut other_content = message.clone();
+        other_content.content = "hello!".to_string();
+        assert!(!boundary.matches(&other_content));
+
+        let mut other_kind = message.clone();
+        other_kind.kind = ChatMessageKind::ContextCheckpoint;
+        assert!(!boundary.matches(&other_kind));
+
+        let mut other_time = message.clone();
+        other_time.timestamp += chrono::Duration::nanoseconds(1);
+        assert!(!boundary.matches(&other_time));
+    }
+
+    #[test]
     fn prepare_preserves_recent_two_user_turns() {
         let messages = vec![
             ChatMessage::user("one"),
@@ -1137,10 +1226,78 @@ mod tests {
     }
 
     #[test]
+    fn complete_summary_request_with_images_fits_known_window() {
+        let mut old = ChatMessage::user("old ".repeat(40_000));
+        old.images = Some(vec!["i".repeat(40_000), "j".repeat(40_000)]);
+        let messages = vec![
+            old,
+            ChatMessage::assistant("old answer ".repeat(20_000)),
+            ChatMessage::user("second"),
+            ChatMessage::assistant("second answer"),
+            ChatMessage::user("third"),
+        ];
+        let request = CompactionRequest::manual(request_with(messages), Some("focus".repeat(500)));
+        let window = 32_000;
+        let prepared = prepare_compaction(&request, Some(window)).expect("prepared");
+        let summary = build_summary_request(
+            &request.chat,
+            &prepared,
+            request.instructions.as_deref(),
+            request.policy,
+        );
+        assert!(
+            !prepared.summary_images.is_empty(),
+            "the newest image fits the budget and must be attached"
+        );
+        let usage = crate::domain::estimate_context_usage_for_request(&summary, Some(window));
+        assert!(
+            usage.used_tokens.saturating_add(summary.max_tokens) <= window,
+            "used {} + max_tokens {} > window {}",
+            usage.used_tokens,
+            summary.max_tokens,
+            window
+        );
+    }
+
+    #[test]
+    fn image_budget_keeps_every_fitting_image_newest_first() {
+        let mut old = ChatMessage::user("inspect");
+        // Oldest image is tiny, newest exceeds the whole input budget. One
+        // oversized recent screenshot must not evict older small diagrams
+        // that fit — the older image still rides along, and the projection
+        // reports the omission honestly.
+        old.images = Some(vec!["a".repeat(400), "b".repeat(400_000)]);
+        let messages = vec![
+            old,
+            ChatMessage::assistant("looked"),
+            ChatMessage::user("second"),
+            ChatMessage::assistant("second answer"),
+            ChatMessage::user("third"),
+        ];
+        let request = CompactionRequest::manual(request_with(messages), None);
+        let prepared = prepare_compaction(&request, None).expect("prepared");
+        assert_eq!(prepared.summary_images, vec!["a".repeat(400)]);
+        assert!(
+            prepared
+                .history_excerpt
+                .contains("1 of 2 archived image attachment(s)")
+        );
+    }
+
+    #[test]
     fn summary_structure_requires_ordered_non_placeholder_sections() {
         let valid = "## Goal\n- ship the fix\n\n## User Preferences And Constraints\n- none\n\n## Project State\n- ready\n\n## Completed Work\n- audit\n\n## Current Work\n- implementation\n\n## Key Decisions\n- preserve data\n\n## Critical Files And Symbols\n- compaction.rs\n\n## Commands Tests And Results\n- tests pass\n\n## Open Questions Or Risks\n- none\n\n## Next Steps\n- finish";
         assert!(validate_summary_structure(valid).is_ok());
         assert!(validate_summary_structure("## Goal\n- [single-sentence task summary]").is_err());
+    }
+
+    #[test]
+    fn summary_structure_tolerates_quoted_markdown_in_bodies() {
+        // Checkpoints legitimately quote markdown — a `## `-prefixed line
+        // inside a section body is content, not structure, and must not fail
+        // the checkpoint closed.
+        let with_quoted_heading = "## Goal\n- ship the fix\n\n## User Preferences And Constraints\n- none\n\n## Project State\n- ready\n\n## Completed Work\n- audit\n\n## Current Work\n- implementation\n\n## Key Decisions\n- preserve data\n\n## Critical Files And Symbols\n- compaction.rs\n\n## Commands Tests And Results\n- README now starts with:\n## Quick Start\ninstall the CLI\n\n## Open Questions Or Risks\n- none\n\n## Next Steps\n- finish";
+        assert!(validate_summary_structure(with_quoted_heading).is_ok());
     }
 
     fn tool_call(id: &str, name: &str) -> crate::models::tool_call::ToolCall {
