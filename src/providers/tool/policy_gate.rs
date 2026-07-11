@@ -1130,6 +1130,7 @@ mod tests {
             &[],
             serde_json::json!({}),
             true,
+            false,
         )
         .await
         {
@@ -1163,6 +1164,7 @@ mod tests {
             &[],
             serde_json::json!({}),
             true,
+            false,
         )
         .await;
         assert!(matches!(g, Gate::Proceed { .. }));
