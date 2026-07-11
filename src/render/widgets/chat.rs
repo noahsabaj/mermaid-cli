@@ -646,6 +646,21 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     continue;
                 }
 
+                // System notices (warnings, agent completions, command
+                // replies): muted meta text — no bullet, no timestamp. The
+                // same gray as the run summary, so transcript furniture never
+                // competes with the conversation.
+                if matches!(msg.role, MessageRole::System) {
+                    let meta = Style::new().fg(self.theme.colors.text_meta.to_color());
+                    for wrapped_line in
+                        wrap_text_with_indent(&msg.content, content_width as usize, 2, 2)
+                    {
+                        lines.push(Line::from(Span::styled(wrapped_line, meta)));
+                    }
+                    lines.push(Line::from(""));
+                    continue;
+                }
+
                 // Auto-continue stitch, streaming half: a `Continuation`
                 // extending a mergeable assistant bubble draws as that
                 // bubble's tail — no fresh `●`, no blank separator — so the
@@ -666,8 +681,9 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 let (role_prefix, role_color) = match msg.role {
                     MessageRole::User => (">", self.theme.colors.text_primary.to_color()),
                     MessageRole::Assistant => ("●", self.theme.colors.text_primary.to_color()),
-                    MessageRole::System => ("●", self.theme.colors.system_message.to_color()),
-                    MessageRole::Tool => unreachable!("Tool messages filtered above"),
+                    MessageRole::System | MessageRole::Tool => {
+                        unreachable!("System and Tool messages handled above")
+                    },
                 };
                 // A stitched continuation keeps the 2-cell gutter but no
                 // bullet: a single space prefix renders as the same margin
@@ -858,8 +874,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     // Claude-Code-style highlight band: paint a subtle full-width
                     // background behind every line of the user's submitted prompt. The
                     // ">" marker, text, and timestamp keep their own foreground colors;
-                    // only the row background is added. Other roles (system notices)
-                    // share this layout but must NOT be highlighted.
+                    // only the row background is added.
                     if matches!(msg.role, MessageRole::User) {
                         let user_bg = self.theme.colors.user_message_background.to_color();
                         let cw = content_width as usize;
@@ -2284,6 +2299,67 @@ mod tests {
         let mut cold_cache = FxHashMap::default();
         let cold = render_once(&mut cold_cache);
         assert_eq!(hit, cold, "warm-cache frame must equal a cold-cache frame");
+    }
+
+    #[test]
+    fn system_notice_renders_as_dim_meta_text_without_bullet_or_timestamp() {
+        // System notices are transcript furniture, not conversation: they must
+        // render as indented muted-gray text — no role bullet, no right-aligned
+        // timestamp (both belonged to the old user-layout share).
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let theme = Theme::dark();
+        let messages = vec![ChatMessage::system(
+            "Heads up: this model reports no vision capability",
+        )];
+        let (width, height): (u16, u16) = (60, 10);
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut state = ChatState::new();
+        let mut cache = FxHashMap::default();
+        term.draw(|f| {
+            let widget = ChatWidget {
+                messages: &messages,
+                theme: &theme,
+                wrapped_line_cache: &mut cache,
+                show_reasoning: true,
+                blink_on: true,
+            };
+            f.render_stateful_widget(widget, Rect::new(0, 0, width, height), &mut state);
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let rows: Vec<String> = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        let all = rows.join("\n");
+        assert!(
+            !all.contains('●'),
+            "no role bullet on system notices: {all}"
+        );
+        assert!(
+            !all.contains("Today at"),
+            "no timestamp on system notices: {all}"
+        );
+        let row = rows
+            .iter()
+            .position(|r| r.contains("Heads up"))
+            .expect("notice rendered");
+        assert!(
+            rows[row].starts_with("  Heads up"),
+            "2-space indent, nothing in the gutter: {:?}",
+            rows[row]
+        );
+        let col = rows[row].find("Heads up").unwrap(); // ASCII row: byte == cell
+        assert_eq!(
+            buf[(col as u16, row as u16)].fg,
+            theme.colors.text_meta.to_color(),
+            "notice text uses the muted meta gray"
+        );
     }
 
     #[test]
