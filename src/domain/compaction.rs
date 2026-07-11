@@ -133,11 +133,7 @@ pub fn classify_length_stop(
     match window {
         None => LengthCause::OutputCapped,
         Some(w) => {
-            if u.prompt_tokens
-                .saturating_add(u.completion_tokens)
-                .saturating_add(reserve)
-                >= w
-            {
+            if u.total_tokens().saturating_add(reserve) >= w {
                 LengthCause::ContextFull
             } else {
                 LengthCause::OutputCapped
@@ -151,7 +147,6 @@ pub struct CompactionRequest {
     pub chat: ChatRequest,
     pub trigger: CompactionTrigger,
     pub instructions: Option<String>,
-    pub force: bool,
     pub policy: CompactionPolicy,
 }
 
@@ -161,7 +156,6 @@ impl CompactionRequest {
             chat,
             trigger: CompactionTrigger::Manual,
             instructions,
-            force: true,
             policy: CompactionPolicy::default(),
         }
     }
@@ -171,8 +165,23 @@ impl CompactionRequest {
             chat,
             trigger,
             instructions: None,
-            force: false,
             policy: CompactionPolicy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionReviewStatus {
+    Reviewed,
+    DraftValidated,
+}
+
+impl CompactionReviewStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reviewed => "reviewed",
+            Self::DraftValidated => "draft_validated",
         }
     }
 }
@@ -186,20 +195,15 @@ pub struct CompactionRecord {
     pub after_tokens: usize,
     pub archived_message_count: usize,
     pub preserved_message_count: usize,
+    pub preserved_turn_count: usize,
     pub summary_tokens: usize,
     pub duration_secs: f64,
-    #[serde(default = "default_verified")]
-    pub verified: bool,
-    #[serde(default)]
-    pub verification_error: Option<String>,
+    pub review_status: CompactionReviewStatus,
+    pub review_error: Option<String>,
     #[serde(default)]
     pub focus: Option<String>,
     #[serde(default)]
     pub archive_path: Option<String>,
-}
-
-fn default_verified() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +222,33 @@ pub struct CompactionResult {
     pub before_snapshot: ContextUsageSnapshot,
     pub after_snapshot: ContextUsageSnapshot,
     pub usage: Option<TokenUsage>,
+    pub source_boundaries: Vec<CompactionBoundary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionBoundary {
+    pub role: MessageRole,
+    pub content: String,
+    pub timestamp: DateTime<Local>,
+    pub kind: ChatMessageKind,
+}
+
+impl CompactionBoundary {
+    pub fn from_message(message: &ChatMessage) -> Self {
+        Self {
+            role: message.role.clone(),
+            content: message.content.clone(),
+            timestamp: message.timestamp,
+            kind: message.kind,
+        }
+    }
+
+    pub fn matches(&self, message: &ChatMessage) -> bool {
+        self.role == message.role
+            && self.content == message.content
+            && self.timestamp == message.timestamp
+            && self.kind == message.kind
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -226,6 +257,7 @@ pub struct PreparedCompaction {
     pub preserved_messages: Vec<ChatMessage>,
     pub previous_summary: Option<String>,
     pub history_excerpt: String,
+    pub summary_images: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,22 +362,59 @@ pub fn prepare_compaction(
         })
         .map(|m| m.content.clone());
 
+    // Size the complete summarizer input against its own output cap, not the
+    // interrupted turn's response reserve. Account for the fixed prompt,
+    // previous checkpoint, focus, and attached image payloads before assigning
+    // the remainder to history.
     let max_input_tokens = max_context_tokens
-        .map(|max| max.saturating_sub(request.policy.response_reserve(&request.chat)))
+        .map(|max| max.saturating_sub(request.policy.summary_max_tokens))
         .filter(|max| *max > 0)
         .unwrap_or(request.policy.summarizer_input_token_budget)
         .min(request.policy.summarizer_input_token_budget);
-    let max_chars = max_input_tokens.saturating_mul(4).max(4_000);
-    let history_excerpt = truncate_middle(
-        &format_history_excerpt(&archived_messages, request.policy),
-        max_chars,
+    let mut sizing_prepared = PreparedCompaction {
+        archived_messages: Vec::new(),
+        preserved_messages: Vec::new(),
+        previous_summary: previous_summary.clone(),
+        history_excerpt: String::new(),
+        summary_images: Vec::new(),
+    };
+    let fixed_chars = compaction_system_prompt()
+        .len()
+        .saturating_add(summary_prompt(&sizing_prepared, request.instructions.as_deref()).len());
+    let mut remaining_tokens = max_input_tokens.saturating_sub(fixed_chars.div_ceil(4));
+
+    // Images are model-visible source material, not merely transcript markers.
+    // Keep the newest images that fit; the text projection states how many were
+    // omitted so the checkpoint cannot silently imply complete visual coverage.
+    let all_images: Vec<String> = archived_messages
+        .iter()
+        .flat_map(|message| message.images.iter().flatten().cloned())
+        .collect();
+    let mut summary_images = Vec::new();
+    for image in all_images.iter().rev() {
+        let image_tokens = image.len().div_ceil(4);
+        if image_tokens <= remaining_tokens {
+            summary_images.push(image.clone());
+            remaining_tokens = remaining_tokens.saturating_sub(image_tokens);
+        }
+    }
+    summary_images.reverse();
+    sizing_prepared.summary_images = summary_images.clone();
+
+    let history = format_history_excerpt(
+        &archived_messages,
+        request.policy,
+        all_images.len(),
+        summary_images.len(),
     );
+    let history_excerpt = truncate_middle(&history, remaining_tokens.saturating_mul(4));
 
     Ok(PreparedCompaction {
         archived_messages,
         preserved_messages,
         previous_summary,
         history_excerpt,
+        summary_images,
     })
 }
 
@@ -355,9 +424,13 @@ pub fn build_summary_request(
     focus: Option<&str>,
     policy: CompactionPolicy,
 ) -> ChatRequest {
+    let mut message = ChatMessage::user(summary_prompt(prepared, focus));
+    if !prepared.summary_images.is_empty() {
+        message.images = Some(prepared.summary_images.clone());
+    }
     ChatRequest {
         model_id: base.model_id.clone(),
-        messages: vec![ChatMessage::user(summary_prompt(prepared, focus))],
+        messages: vec![message],
         system_prompt: compaction_system_prompt().to_string(),
         instructions: None,
         reasoning: compaction_reasoning(base.reasoning),
@@ -384,9 +457,13 @@ pub fn build_verification_request(
         summary_prompt(prepared, focus),
         draft_summary.trim()
     );
+    let mut message = ChatMessage::user(prompt);
+    if !prepared.summary_images.is_empty() {
+        message.images = Some(prepared.summary_images.clone());
+    }
     ChatRequest {
         model_id: base.model_id.clone(),
-        messages: vec![ChatMessage::user(prompt)],
+        messages: vec![message],
         system_prompt: compaction_system_prompt().to_string(),
         instructions: None,
         reasoning: compaction_reasoning(base.reasoning),
@@ -430,9 +507,10 @@ pub fn build_replacement_messages(
         "after_tokens": record.after_tokens,
         "archived_message_count": record.archived_message_count,
         "preserved_message_count": record.preserved_message_count,
+        "preserved_turn_count": record.preserved_turn_count,
         "duration_secs": record.duration_secs,
-        "verified": record.verified,
-        "verification_error": record.verification_error,
+        "review_status": record.review_status.as_str(),
+        "review_error": record.review_error,
     }));
 
     let mut assistant = ChatMessage::assistant(compaction_receipt(record));
@@ -447,12 +525,12 @@ pub fn build_replacement_messages(
 }
 
 pub fn compaction_receipt(record: &CompactionRecord) -> String {
-    let verification = if record.verified {
-        "Verified.".to_string()
-    } else if let Some(error) = &record.verification_error {
-        format!("Used draft summary because verification failed: {error}.")
-    } else {
-        "Used draft summary without verification.".to_string()
+    let review = match record.review_status {
+        CompactionReviewStatus::Reviewed => "Reviewed in a second pass.".to_string(),
+        CompactionReviewStatus::DraftValidated => match &record.review_error {
+            Some(error) => format!("Used the structurally validated draft: {error}."),
+            None => "Used the structurally validated draft.".to_string(),
+        },
     };
     format!(
         "Context compacted: {} -> {} tokens, archived {} messages, preserved {} messages, took {:.1}s. {} I will continue from this checkpoint.",
@@ -461,7 +539,7 @@ pub fn compaction_receipt(record: &CompactionRecord) -> String {
         record.archived_message_count,
         record.preserved_message_count,
         record.duration_secs,
-        verification
+        review
     )
 }
 
@@ -471,6 +549,54 @@ pub fn normalize_summary(text: &str) -> String {
         return summary.trim().to_string();
     }
     trimmed.to_string()
+}
+
+pub fn validate_summary_structure(summary: &str) -> Result<(), String> {
+    const HEADINGS: [&str; 10] = [
+        "## Goal",
+        "## User Preferences And Constraints",
+        "## Project State",
+        "## Completed Work",
+        "## Current Work",
+        "## Key Decisions",
+        "## Critical Files And Symbols",
+        "## Commands Tests And Results",
+        "## Open Questions Or Risks",
+        "## Next Steps",
+    ];
+
+    let lines: Vec<&str> = summary.lines().collect();
+    let headings: Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            line.trim()
+                .starts_with("## ")
+                .then_some((index, line.trim()))
+        })
+        .collect();
+    let actual: Vec<&str> = headings.iter().map(|(_, heading)| *heading).collect();
+    if actual != HEADINGS {
+        return Err(format!(
+            "checkpoint headings must exactly match the required order; got {}",
+            actual.join(", ")
+        ));
+    }
+
+    for (index, (line_index, heading)) in headings.iter().enumerate() {
+        let body_end = headings
+            .get(index + 1)
+            .map(|(next_index, _)| *next_index)
+            .unwrap_or(lines.len());
+        let body = lines[line_index + 1..body_end].join("\n");
+        let body = body.trim();
+        if body.is_empty() || body == "-" || (body.starts_with("- [") && body.ends_with(']')) {
+            return Err(format!(
+                "checkpoint heading {heading} has placeholder content"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn combine_usage(a: Option<TokenUsage>, b: Option<TokenUsage>) -> Option<TokenUsage> {
@@ -680,8 +806,19 @@ fn tail_start_index(messages: &[ChatMessage], policy: CompactionPolicy) -> Optio
     Some(start)
 }
 
-fn format_history_excerpt(messages: &[ChatMessage], policy: CompactionPolicy) -> String {
+fn format_history_excerpt(
+    messages: &[ChatMessage],
+    policy: CompactionPolicy,
+    total_images: usize,
+    included_images: usize,
+) -> String {
     let mut out = String::new();
+    if total_images > 0 {
+        out.push_str(&format!(
+            "\n[Visual context: {included_images} of {total_images} archived image attachment(s) supplied with this request; {} omitted by the input budget.]\n",
+            total_images.saturating_sub(included_images)
+        ));
+    }
     for (idx, msg) in messages.iter().enumerate() {
         let role = match msg.role {
             MessageRole::User => "USER",
@@ -700,16 +837,28 @@ fn format_history_excerpt(messages: &[ChatMessage], policy: CompactionPolicy) ->
             out.push_str(&format!("tool_call_id: {}\n", id));
         }
         if let Some(calls) = &msg.tool_calls {
-            let names: Vec<&str> = calls
-                .iter()
-                .map(|call| call.function.name.as_str())
-                .collect();
-            out.push_str(&format!("tool_calls: {}\n", names.join(", ")));
+            for call in calls {
+                let mut arguments = call.function.arguments.clone();
+                crate::utils::redact_json(&mut arguments);
+                let arguments = truncate_middle(
+                    &arguments.to_string(),
+                    policy.tool_output_max_chars.saturating_mul(4),
+                );
+                out.push_str(&format!(
+                    "tool_call: id={} name={} arguments={}\n",
+                    call.id.as_deref().unwrap_or("<missing>"),
+                    call.function.name,
+                    arguments
+                ));
+            }
         }
         if let Some(images) = &msg.images
             && !images.is_empty()
         {
-            out.push_str(&format!("[{} image attachment(s) omitted]\n", images.len()));
+            out.push_str(&format!(
+                "[{} image attachment(s) referenced above]\n",
+                images.len()
+            ));
         }
         for action in &msg.actions {
             out.push_str(&format!(
@@ -832,6 +981,19 @@ mod tests {
     }
 
     #[test]
+    fn classify_length_stop_counts_cached_and_reasoning_tokens() {
+        let usage = TokenUsage::provider(100, 100)
+            .with_cached_input(700)
+            .with_cache_creation(50)
+            .with_reasoning_output(50);
+        assert_eq!(usage.total_tokens(), 1_000);
+        assert_eq!(
+            classify_length_stop(Some(&usage), Some(1_100), 100),
+            LengthCause::ContextFull
+        );
+    }
+
+    #[test]
     fn summary_and_verification_requests_copy_resolved_limits() {
         // The summarizer calls the same model — its request must inherit the
         // live-discovered limits or Anthropic AUTO would fall to the 8192
@@ -844,6 +1006,7 @@ mod tests {
             preserved_messages: vec![],
             previous_summary: None,
             history_excerpt: "excerpt".to_string(),
+            summary_images: Vec::new(),
         };
         let policy = CompactionPolicy::default();
         let summary = build_summary_request(&base, &prepared, None, policy);
@@ -912,6 +1075,72 @@ mod tests {
         assert_eq!(prepared.archived_messages.len(), 2);
         assert_eq!(prepared.preserved_messages.len(), 3);
         assert_eq!(prepared.preserved_messages[0].content, "two");
+    }
+
+    #[test]
+    fn prepare_projects_redacted_tool_arguments_and_archived_images() {
+        let mut old = ChatMessage::user("inspect the screenshot");
+        old.images = Some(vec!["aGVsbG8=".to_string()]);
+        let mut call = ChatMessage::assistant("");
+        call.tool_calls = Some(vec![crate::models::tool_call::ToolCall {
+            id: Some("call_1".to_string()),
+            function: crate::models::tool_call::FunctionCall {
+                name: "execute_command".to_string(),
+                arguments: serde_json::json!({
+                    "cmd": "cargo test --workspace",
+                    "api_key": "opaque-secret-value"
+                }),
+            },
+        }]);
+        let messages = vec![
+            old,
+            call,
+            ChatMessage::tool("call_1", "execute_command", "tests passed"),
+            ChatMessage::user("second"),
+            ChatMessage::assistant("second answer"),
+            ChatMessage::user("third"),
+        ];
+        let request = CompactionRequest::manual(request_with(messages), None);
+        let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
+        assert!(prepared.history_excerpt.contains("cargo test --workspace"));
+        assert!(prepared.history_excerpt.contains("[REDACTED]"));
+        assert!(!prepared.history_excerpt.contains("opaque-secret-value"));
+        assert_eq!(prepared.summary_images, vec!["aGVsbG8=".to_string()]);
+        let summary =
+            build_summary_request(&request.chat, &prepared, None, CompactionPolicy::default());
+        assert_eq!(
+            summary.messages[0].images.as_deref(),
+            Some(prepared.summary_images.as_slice())
+        );
+    }
+
+    #[test]
+    fn complete_summary_request_fits_known_window() {
+        let messages = vec![
+            ChatMessage::user("old ".repeat(40_000)),
+            ChatMessage::assistant("old answer ".repeat(20_000)),
+            ChatMessage::user("second"),
+            ChatMessage::assistant("second answer"),
+            ChatMessage::user("third"),
+        ];
+        let request = CompactionRequest::manual(request_with(messages), Some("focus".repeat(500)));
+        let window = 32_000;
+        let prepared = prepare_compaction(&request, Some(window)).expect("prepared");
+        let summary = build_summary_request(
+            &request.chat,
+            &prepared,
+            request.instructions.as_deref(),
+            request.policy,
+        );
+        let usage = crate::domain::estimate_context_usage_for_request(&summary, Some(window));
+        assert!(usage.used_tokens.saturating_add(summary.max_tokens) <= window);
+    }
+
+    #[test]
+    fn summary_structure_requires_ordered_non_placeholder_sections() {
+        let valid = "## Goal\n- ship the fix\n\n## User Preferences And Constraints\n- none\n\n## Project State\n- ready\n\n## Completed Work\n- audit\n\n## Current Work\n- implementation\n\n## Key Decisions\n- preserve data\n\n## Critical Files And Symbols\n- compaction.rs\n\n## Commands Tests And Results\n- tests pass\n\n## Open Questions Or Risks\n- none\n\n## Next Steps\n- finish";
+        assert!(validate_summary_structure(valid).is_ok());
+        assert!(validate_summary_structure("## Goal\n- [single-sentence task summary]").is_err());
     }
 
     fn tool_call(id: &str, name: &str) -> crate::models::tool_call::ToolCall {
@@ -1176,6 +1405,7 @@ mod tests {
             preserved_messages: vec![ChatMessage::user("new")],
             previous_summary: None,
             history_excerpt: "old".to_string(),
+            summary_images: Vec::new(),
         };
         let record = CompactionRecord {
             id: "c1".to_string(),
@@ -1185,10 +1415,11 @@ mod tests {
             after_tokens: 25,
             archived_message_count: 1,
             preserved_message_count: 1,
+            preserved_turn_count: 1,
             summary_tokens: 10,
             duration_secs: 1.0,
-            verified: true,
-            verification_error: None,
+            review_status: CompactionReviewStatus::Reviewed,
+            review_error: None,
             focus: None,
             archive_path: None,
         };
@@ -1199,12 +1430,13 @@ mod tests {
     }
 
     #[test]
-    fn replacement_metadata_records_verification_status() {
+    fn replacement_metadata_records_review_status() {
         let prepared = PreparedCompaction {
             archived_messages: vec![ChatMessage::user("old")],
             preserved_messages: vec![ChatMessage::user("new")],
             previous_summary: None,
             history_excerpt: "old".to_string(),
+            summary_images: Vec::new(),
         };
         let record = CompactionRecord {
             id: "c1".to_string(),
@@ -1214,23 +1446,24 @@ mod tests {
             after_tokens: 25,
             archived_message_count: 1,
             preserved_message_count: 1,
+            preserved_turn_count: 1,
             summary_tokens: 10,
             duration_secs: 1.0,
-            verified: false,
-            verification_error: Some("provider overloaded".to_string()),
+            review_status: CompactionReviewStatus::DraftValidated,
+            review_error: Some("provider overloaded".to_string()),
             focus: None,
             archive_path: None,
         };
         let messages = build_replacement_messages("## Goal\n- continue", &prepared, &record);
         let metadata = messages[0].metadata.as_ref().expect("metadata");
         assert_eq!(
-            metadata.get("verified").and_then(|v| v.as_bool()),
-            Some(false)
+            metadata.get("review_status").and_then(|v| v.as_str()),
+            Some("draft_validated")
         );
         assert_eq!(
-            metadata.get("verification_error").and_then(|v| v.as_str()),
+            metadata.get("review_error").and_then(|v| v.as_str()),
             Some("provider overloaded")
         );
-        assert!(messages[1].content.contains("Used draft summary"));
+        assert!(messages[1].content.contains("structurally validated draft"));
     }
 }

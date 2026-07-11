@@ -139,6 +139,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Compaction preserves the complete live context and persists in order.**
+  Summary requests now budget the entire request, include redacted tool
+  arguments and referenced images, count cached and reasoning tokens, and
+  require the documented summary structure before replacing history. Messages
+  that arrive while compaction runs are retained, truncation recovery resets
+  after visible progress, checkpoint metadata reports review status and actual
+  preserved turns, and serialized archive-plus-conversation saves prevent a
+  newer stripped transcript from bypassing a failed or delayed archive.
+
 - **The status spinner never names tools; the transcript does.** The spinner
   headline used to splice in the executing tool and its arguments
   (`Running tools: Bash pwd; ls -la…`, `Running tools: ask_user_question...`)

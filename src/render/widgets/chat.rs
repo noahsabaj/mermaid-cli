@@ -1033,11 +1033,11 @@ fn render_context_checkpoint_event(
     let duration_secs = metadata
         .and_then(|value| value.get("duration_secs"))
         .and_then(|value| value.as_f64());
-    let verified = metadata
-        .and_then(|value| value.get("verified"))
-        .and_then(|value| value.as_bool());
-    let verification_error = metadata
-        .and_then(|value| value.get("verification_error"))
+    let review_status = metadata
+        .and_then(|value| value.get("review_status"))
+        .and_then(|value| value.as_str());
+    let review_error = metadata
+        .and_then(|value| value.get("review_error"))
         .and_then(|value| value.as_str());
 
     let action_color = theme.colors.info.to_color();
@@ -1066,11 +1066,11 @@ fn render_context_checkpoint_event(
             if count == 1 { "message" } else { "messages" }
         ));
     }
-    if let Some(verified) = verified {
-        if verified {
-            result.push_str(", verified");
-        } else {
-            result.push_str(", draft fallback");
+    if let Some(status) = review_status {
+        match status {
+            "reviewed" => result.push_str(", reviewed"),
+            "draft_validated" => result.push_str(", validated draft"),
+            _ => {},
         }
     }
     result = append_action_duration(result, duration_secs);
@@ -1096,12 +1096,12 @@ fn render_context_checkpoint_event(
         4,
     ));
 
-    if let Some(error) = verification_error.filter(|error| !error.trim().is_empty()) {
+    if let Some(error) = review_error.filter(|error| !error.trim().is_empty()) {
         lines.extend(wrap_styled_line(
             Line::from(vec![
                 Span::styled("    ", Style::new().fg(action_color)),
                 Span::styled(
-                    format!("verification: {}", compact_inline_error(error, 180)),
+                    format!("review: {}", compact_inline_error(error, 180)),
                     Style::new().fg(theme.colors.warning.to_color()),
                 ),
             ]),
@@ -2532,7 +2532,7 @@ mod tests {
             "archived_message_count": 18,
             "preserved_message_count": 4,
             "duration_secs": 2.4,
-            "verified": true,
+            "review_status": "reviewed",
         }));
 
         let lines =
@@ -2552,12 +2552,12 @@ mod tests {
         assert!(rendered.contains("43.8k -> 9.2k tokens"));
         assert!(rendered.contains("archived 18 messages"));
         assert!(rendered.contains("preserved 4 messages"));
-        assert!(rendered.contains("verified"));
+        assert!(rendered.contains("reviewed"));
         assert!(!rendered.contains("full checkpoint summary"));
     }
 
     #[test]
-    fn context_checkpoint_renders_verification_fallback() {
+    fn context_checkpoint_renders_validated_draft() {
         let mut msg = ChatMessage::user("full checkpoint summary hidden from the chat log");
         msg.kind = ChatMessageKind::ContextCheckpoint;
         msg.metadata = Some(serde_json::json!({
@@ -2567,8 +2567,8 @@ mod tests {
             "archived_message_count": 18,
             "preserved_message_count": 4,
             "duration_secs": 2.4,
-            "verified": false,
-            "verification_error": "provider overloaded",
+            "review_status": "draft_validated",
+            "review_error": "provider overloaded",
         }));
 
         let lines =
@@ -2585,8 +2585,8 @@ mod tests {
             .join("\n");
 
         assert!(rendered.contains("Compact(auto_threshold)"));
-        assert!(rendered.contains("draft fallback"));
-        assert!(rendered.contains("verification: provider overloaded"));
+        assert!(rendered.contains("validated draft"));
+        assert!(rendered.contains("review: provider overloaded"));
     }
 
     /// CJK characters are 3 bytes but 2 display cells each. The

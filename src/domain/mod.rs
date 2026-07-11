@@ -31,10 +31,11 @@ pub mod transition;
 pub use action::{ActionDetails, ActionDisplay, ActionResult};
 pub use cmd::{ChatRequest, Cmd, ToolDefinition};
 pub use compaction::{
-    CompactionArchive, CompactionPolicy, CompactionRecord, CompactionRequest, CompactionResult,
-    CompactionTrigger, PreparedCompaction, build_replacement_messages, build_summary_request,
-    build_verification_request, combine_usage, compaction_receipt, context_exceeds_hard_limit,
-    format_compact_count, normalize_summary, prepare_compaction, should_auto_compact,
+    CompactionArchive, CompactionBoundary, CompactionPolicy, CompactionRecord, CompactionRequest,
+    CompactionResult, CompactionReviewStatus, CompactionTrigger, PreparedCompaction,
+    build_replacement_messages, build_summary_request, build_verification_request, combine_usage,
+    compaction_receipt, context_exceeds_hard_limit, format_compact_count, normalize_summary,
+    prepare_compaction, should_auto_compact, validate_summary_structure,
 };
 pub use ids::{IdAllocator, ToolCallId, TurnId};
 pub use msg::{

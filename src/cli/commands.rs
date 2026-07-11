@@ -976,10 +976,15 @@ fn run_qa_compact_smoke(
         after_tokens: 0,
         archived_message_count: prepared.archived_messages.len(),
         preserved_message_count: prepared.preserved_messages.len(),
+        preserved_turn_count: prepared
+            .preserved_messages
+            .iter()
+            .filter(|message| message.role == crate::models::MessageRole::User)
+            .count(),
         summary_tokens: summary.len().div_ceil(4),
         duration_secs: 0.0,
-        verified: true,
-        verification_error: None,
+        review_status: crate::domain::CompactionReviewStatus::DraftValidated,
+        review_error: None,
         focus: Some("qa compact smoke".to_string()),
         archive_path: None,
     };
@@ -999,6 +1004,7 @@ fn run_qa_compact_smoke(
         before_snapshot,
         after_snapshot,
         usage: None,
+        source_boundaries: Vec::new(),
     };
     let (final_state, save_cmds) =
         update(state_after_slash, Msg::CompactionFinished { turn, result });

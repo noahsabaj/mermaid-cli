@@ -3756,14 +3756,14 @@ fn context_text(state: &State) -> String {
             last.preserved_message_count
         ));
         lines.push(format!(
-            "- verification: {}",
-            if last.verified {
-                "verified".to_string()
-            } else {
-                last.verification_error
+            "- review: {}",
+            match last.review_status {
+                crate::domain::CompactionReviewStatus::Reviewed => "reviewed".to_string(),
+                crate::domain::CompactionReviewStatus::DraftValidated => last
+                    .review_error
                     .as_ref()
-                    .map(|err| format!("draft fallback ({err})"))
-                    .unwrap_or_else(|| "draft fallback".to_string())
+                    .map(|err| format!("validated draft ({err})"))
+                    .unwrap_or_else(|| "validated draft".to_string()),
             }
         ));
         if let Some(path) = &last.archive_path {
@@ -4198,6 +4198,15 @@ fn handle_compaction_finished(
         _ => return,
     };
 
+    // Compaction runs asynchronously from a request snapshot. Preserve every
+    // message that arrived after dispatch (MCP/runtime notices, run summaries,
+    // and similar non-turn-scoped events) instead of letting the replacement
+    // clobber them. Match the request-visible source as an ordered subsequence;
+    // anything else in the live history is intervening state.
+    let intervening =
+        compaction_intervening_messages(state.session.messages(), &result.source_boundaries);
+    let intervening_tokens = super::compaction::estimate_messages_tokens(&intervening);
+
     let conversation_id = state.session.conversation.id.clone();
     let mut record = result.record;
     record.archive_path = Some(format!(
@@ -4215,11 +4224,31 @@ fn handle_compaction_finished(
         .session
         .conversation
         .replace_messages(result.replacement_messages, state.now);
+    if !intervening.is_empty() {
+        let messages = &mut state.session.conversation.messages;
+        let before_pending_tail = messages.last().is_some_and(|message| {
+            message.role == MessageRole::Assistant
+                && message
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+        });
+        if before_pending_tail {
+            let position = messages.len() - 1;
+            messages.splice(position..position, intervening);
+        } else {
+            messages.extend(intervening);
+        }
+    }
     state
         .session
         .conversation
         .add_compaction(record.clone(), state.now);
-    state.session.context_usage = Some(result.after_snapshot);
+    state.session.context_usage = Some(
+        result
+            .after_snapshot
+            .with_additional_tokens(intervening_tokens),
+    );
 
     if let Some(usage) = result.usage {
         fold_token_usage(
@@ -4268,6 +4297,32 @@ fn handle_compaction_finished(
         record,
         conversation: state.session.conversation.clone(),
     });
+}
+
+fn compaction_intervening_messages(
+    current: &[ChatMessage],
+    source: &[crate::domain::CompactionBoundary],
+) -> Vec<ChatMessage> {
+    if source.is_empty() {
+        return Vec::new();
+    }
+    let mut source_index = 0usize;
+    let mut intervening = Vec::new();
+    for message in current {
+        if source_index < source.len() && source[source_index].matches(message) {
+            source_index += 1;
+            continue;
+        }
+        if let Some(offset) = source[source_index..]
+            .iter()
+            .position(|boundary| boundary.matches(message))
+        {
+            source_index += offset + 1;
+        } else {
+            intervening.push(message.clone());
+        }
+    }
+    intervening
 }
 
 fn handle_compaction_failed(
@@ -4550,10 +4605,12 @@ fn handle_stream_done(
                     .as_ref()
                     .and_then(|s| s.max_tokens)
                     .or(state.runtime.provider_capabilities.max_context_tokens);
+                let reserve =
+                    CompactionPolicy::default().response_reserve(&build_chat_request(state));
                 match crate::domain::compaction::classify_length_stop(
                     usage.as_ref(),
                     window,
-                    crate::constants::COMPACTION_MIN_RESPONSE_RESERVE_TOKENS,
+                    reserve,
                 ) {
                     crate::domain::compaction::LengthCause::OutputCapped => {
                         // Never compact for an output-cap stop — the input
@@ -4577,6 +4634,12 @@ fn handle_stream_done(
                     },
                     crate::domain::compaction::LengthCause::ContextFull
                     | crate::domain::compaction::LengthCause::Unknown => {
+                        // Visible assistant text is real forward progress even if
+                        // the context filled again. The guard bounds only repeated
+                        // no-output thrashing, as the config promises.
+                        if !no_visible_output {
+                            state.runtime.truncation_recoveries = 0;
+                        }
                         // The window filled mid-turn (or usage was absent and we
                         // assume so). If there's history to compact and we're
                         // under the per-run cap, recover (compact + continue)
@@ -8889,7 +8952,7 @@ mod tests {
     }
 
     #[test]
-    fn length_truncation_at_cap_stops_with_hint() {
+    fn length_truncation_without_progress_at_cap_stops_with_hint() {
         let mut state = fresh_state();
         state
             .session
@@ -8900,7 +8963,7 @@ mod tests {
         // Already at the default cap of consecutive recoveries.
         state.runtime.truncation_recoveries =
             state.settings.compaction.max_truncation_recoveries as u32;
-        state.turn = truncating_turn("more");
+        state.turn = truncating_turn("");
         let (state, cmds) = update(state, length_done());
 
         assert!(matches!(state.turn, TurnState::Idle), "run ends at the cap");
@@ -9443,10 +9506,14 @@ mod tests {
                 after_tokens: 40,
                 archived_message_count: 2,
                 preserved_message_count: replacement.len(),
+                preserved_turn_count: replacement
+                    .iter()
+                    .filter(|message| message.role == MessageRole::User)
+                    .count(),
                 summary_tokens: 10,
                 duration_secs: 0.0,
-                verified: true,
-                verification_error: None,
+                review_status: crate::domain::CompactionReviewStatus::Reviewed,
+                review_error: None,
                 focus: None,
                 archive_path: None,
             },
@@ -9455,7 +9522,73 @@ mod tests {
             before_snapshot: snap.clone(),
             after_snapshot: snap,
             usage: None,
+            source_boundaries: Vec::new(),
         }
+    }
+
+    #[test]
+    fn compaction_finish_preserves_messages_appended_after_dispatch() {
+        let mut state = fresh_state();
+        state.session.append(ChatMessage::user("old"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("old answer"), state.now);
+        state.session.append(ChatMessage::user("latest"), state.now);
+        let boundaries = state
+            .session
+            .messages()
+            .iter()
+            .map(crate::domain::CompactionBoundary::from_message)
+            .collect();
+        state.turn = TurnState::Compacting {
+            id: TurnId(7),
+            started: std::time::SystemTime::now(),
+            trigger: CompactionTrigger::Manual,
+            resume_continuation: false,
+        };
+        state.session.append(
+            ChatMessage::system("MCP server failed during compaction"),
+            state.now,
+        );
+
+        let mut result = fake_recovery_result(vec![ChatMessage::user("compacted context")]);
+        result.source_boundaries = boundaries;
+        let (state, _) = update(
+            state,
+            Msg::CompactionFinished {
+                turn: TurnId(7),
+                result,
+            },
+        );
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|message| { message.content == "MCP server failed during compaction" })
+        );
+    }
+
+    #[test]
+    fn visible_context_full_progress_resets_recovery_guard() {
+        let mut state = fresh_state();
+        state.runtime.provider_capabilities.max_context_tokens = Some(20_000);
+        state.settings.compaction.max_truncation_recoveries = 3;
+        state.runtime.truncation_recoveries = 2;
+        state.session.append(ChatMessage::user("one"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("two"), state.now);
+        state.session.append(ChatMessage::user("three"), state.now);
+        state.turn = truncating_turn("visible progress");
+
+        let (state, cmds) = update(state, length_done_with_usage(18_000, 1_500));
+        assert!(matches!(state.turn, TurnState::Compacting { .. }));
+        assert_eq!(state.runtime.truncation_recoveries, 1);
+        assert!(
+            cmds.iter()
+                .any(|command| matches!(command, Cmd::CompactConversation { .. }))
+        );
     }
 
     #[test]
