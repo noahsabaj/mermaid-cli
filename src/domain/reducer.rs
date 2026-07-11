@@ -554,6 +554,15 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::SessionSaved => {
             // Silent. Reducer already committed; save is just durability.
         },
+        Msg::ScratchpadReady { session_id, path } => {
+            // Stamp only while the id still names the live conversation — a
+            // `/clear` or `/load` racing the effect's mkdir leaves a ready
+            // for a discarded id, which must not attach to the new session
+            // (its own `EnsureScratchpad` is already in flight).
+            if state.session.conversation.id == session_id {
+                state.session.scratchpad = Some(path);
+            }
+        },
         Msg::ConversationLoaded(history) => {
             // If a turn was in flight when the user loaded another conversation
             // (`/load` mid-generation), cancel its scope first. Otherwise we
@@ -576,6 +585,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             state.session.conversation = history;
             state.turn = TurnState::Idle;
             state.ui.mode = UiMode::EditingInput;
+            // The loaded conversation has its own id — the previous session's
+            // scratch dir no longer applies. Recompute (same as `/clear`).
+            refresh_scratchpad(&mut state, &mut cmds);
             emit_title_if_changed(&mut state, &mut cmds);
         },
         Msg::ConversationsListed(candidates) => {
@@ -2095,6 +2107,10 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     state.session.context_usage = None;
     state.session.last_token_usage = None;
     cmds.push(Cmd::SyncTaskStore(crate::domain::TaskStore::default()));
+    // The fork minted a fresh conversation id, so it gets its own scratch
+    // dir too — the original session's scratch contents describe work on
+    // the timeline being discarded.
+    refresh_scratchpad(state, cmds);
 
     // 4. `state.ids.image` is NOT re-based: the allocator stays monotonic, so
     //    image numbers remain unique across the fork (seed_conversation's
@@ -2150,6 +2166,18 @@ fn restage_image(state: &mut State, cmds: &mut Vec<Cmd>, base64_data: &str, numb
         path: temp_path,
         bytes,
         format,
+    });
+}
+
+/// The conversation id just changed (`/clear`, `/load`, rewind fork): drop
+/// the old session's scratch dir handle and ask the effect layer to
+/// materialize one for the new id. Pure — the directory creation happens in
+/// the `EnsureScratchpad` handler, and `Msg::ScratchpadReady` stamps the
+/// path back onto the session.
+fn refresh_scratchpad(state: &mut State, cmds: &mut Vec<Cmd>) {
+    state.session.scratchpad = None;
+    cmds.push(Cmd::EnsureScratchpad {
+        session_id: state.session.conversation.id.clone(),
     });
 }
 
@@ -2726,6 +2754,23 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::Todos(arg) => {
             handle_todos_command(state, cmds, arg.as_deref());
+        },
+        SlashCmd::Scratchpad => {
+            // Listing needs the filesystem, so it runs as an effect; the
+            // reducer only answers when there is no directory to list.
+            match &state.session.scratchpad {
+                Some(path) => cmds.push(Cmd::ListScratchpad { path: path.clone() }),
+                None => {
+                    state.session.append(
+                        ChatMessage::system(
+                            "No scratchpad yet for this session — it is created at startup \
+                             and stamped shortly after; try again in a moment."
+                                .to_string(),
+                        ),
+                        state.now,
+                    );
+                },
+            }
         },
         SlashCmd::Context(cmd) => {
             use crate::domain::ContextCmd;
@@ -3376,6 +3421,15 @@ fn doctor_text(state: &State) -> String {
         "Safety: mode={}, checkpoint_on_mutation={}",
         state.settings.safety.mode.as_str(),
         state.settings.safety.checkpoint_on_mutation
+    ));
+    lines.push(format!(
+        "Scratchpad: {}",
+        state
+            .session
+            .scratchpad
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not ready".to_string())
     ));
     lines.push(format!(
         "Prompt: {}",
@@ -4043,6 +4097,9 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             // The fresh conversation starts with an empty checklist; the
             // broker must forget the old one too (single-writer sync).
             cmds.push(Cmd::SyncTaskStore(crate::domain::TaskStore::default()));
+            // New conversation id -> new scratch dir. The old one stays on
+            // disk until the sweep reaps it (its pid lock expires with us).
+            refresh_scratchpad(state, cmds);
             emit_title_if_changed(state, cmds);
         },
     }
@@ -4664,6 +4721,10 @@ fn handle_stream_done(
                 // fork at k discards it iff message_index > k (strict).
                 session_id: state.session.conversation.id.clone(),
                 message_index: state.session.messages().len(),
+                // The session's scratch dir, when already materialized —
+                // `None` before `Msg::ScratchpadReady` lands (tools fall
+                // back to workdir-relative temp space).
+                scratchpad: state.session.scratchpad.clone(),
             });
         }
         state.turn = super::transition::start_executing_tools(
@@ -7590,6 +7651,116 @@ mod tests {
         let (state, cmds) = update(state, Msg::ConversationLoaded(history));
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::CancelScope(_))));
         assert!(matches!(state.turn, TurnState::Idle));
+    }
+
+    #[test]
+    fn scratchpad_ready_stamps_the_matching_session() {
+        let state = fresh_state();
+        let id = state.session.conversation.id.clone();
+        let path = std::path::PathBuf::from("/data/tmp/scratchpad/-proj/x");
+        let (state, cmds) = update(
+            state,
+            Msg::ScratchpadReady {
+                session_id: id,
+                path: path.clone(),
+            },
+        );
+        assert_eq!(state.session.scratchpad.as_deref(), Some(path.as_path()));
+        assert!(cmds.is_empty(), "stamping is silent");
+    }
+
+    #[test]
+    fn scratchpad_ready_for_a_stale_session_is_dropped() {
+        // A `/clear` or `/load` racing the effect's mkdir leaves a ready for
+        // a discarded conversation id — it must not attach to the new one.
+        let state = fresh_state();
+        let (state, _) = update(
+            state,
+            Msg::ScratchpadReady {
+                session_id: "some_other_session".to_string(),
+                path: std::path::PathBuf::from("/data/tmp/scratchpad/-proj/stale"),
+            },
+        );
+        assert_eq!(state.session.scratchpad, None);
+    }
+
+    #[test]
+    fn clear_recomputes_the_scratchpad_for_the_new_conversation_id() {
+        let mut state = fresh_state();
+        let old_id = state.session.conversation.id.clone();
+        state.session.scratchpad = Some(std::path::PathBuf::from("/data/tmp/scratchpad/-proj/old"));
+        // Ids are minted from `state.now`; advance it so the cleared
+        // conversation provably gets a different id than the original.
+        state.now += chrono::Duration::seconds(1);
+        state.confirm = Some(super::super::state::Confirmation {
+            prompt: "Clear conversation history?".to_string(),
+            accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
+        });
+        let (state, cmds) = update(state, Msg::ConfirmAccepted);
+        let new_id = state.session.conversation.id.clone();
+        assert_ne!(new_id, old_id);
+        assert_eq!(
+            state.session.scratchpad, None,
+            "the old session's scratch dir must not leak into the new one"
+        );
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, Cmd::EnsureScratchpad { session_id } if *session_id == new_id)
+            ),
+            "clear must request a scratch dir keyed by the NEW conversation id"
+        );
+    }
+
+    #[test]
+    fn slash_scratchpad_lists_the_stamped_dir_or_explains_its_absence() {
+        // Stamped: the listing runs as an effect against the stamped path.
+        let mut state = fresh_state();
+        let path = std::path::PathBuf::from("/data/tmp/scratchpad/-proj/s");
+        state.session.scratchpad = Some(path.clone());
+        let (_, cmds) = update(state, Msg::Slash(SlashCmd::Scratchpad));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::ListScratchpad { path: p } if *p == path)),
+            "expected ListScratchpad carrying the stamped path, got {cmds:?}"
+        );
+        // Not stamped (`fresh_state` starts with `scratchpad: None`): a
+        // system message instead of a doomed effect.
+        let state = fresh_state();
+        let (state, cmds) = update(state, Msg::Slash(SlashCmd::Scratchpad));
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::ListScratchpad { .. })));
+        let msg = state.session.messages().last().expect("system message");
+        assert!(msg.content.contains("No scratchpad yet"), "{}", msg.content);
+    }
+
+    #[test]
+    fn doctor_reports_the_scratchpad_path() {
+        let mut state = fresh_state();
+        state.session.scratchpad = Some(std::path::PathBuf::from("/data/tmp/scratchpad/-proj/s"));
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Doctor));
+        let report = &state.session.messages().last().expect("report").content;
+        assert!(
+            report.contains("Scratchpad: /data/tmp/scratchpad/-proj/s"),
+            "{report}"
+        );
+        // Before the ready lands, /doctor says so instead of omitting the line.
+        let state = fresh_state();
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Doctor));
+        let report = &state.session.messages().last().expect("report").content;
+        assert!(report.contains("Scratchpad: not ready"), "{report}");
+    }
+
+    #[test]
+    fn load_conversation_recomputes_the_scratchpad() {
+        let mut state = fresh_state();
+        state.session.scratchpad = Some(std::path::PathBuf::from("/data/tmp/scratchpad/-proj/old"));
+        let mut history = fresh_state().session.conversation.clone();
+        history.id = "loaded_session".to_string();
+        let (state, cmds) = update(state, Msg::ConversationLoaded(history));
+        assert_eq!(state.session.scratchpad, None);
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            Cmd::EnsureScratchpad { session_id } if session_id == "loaded_session"
+        )));
     }
 
     #[test]
@@ -11497,6 +11668,8 @@ mod tests {
     fn execute_tool_cmd_carries_the_session_anchor() {
         let mut state = state_with_two_exchanges();
         let expected_session = state.session.conversation.id.clone();
+        let expected_scratchpad = std::path::PathBuf::from("/data/tmp/scratchpad/-proj/s");
+        state.session.scratchpad = Some(expected_scratchpad.clone());
         state.turn = TurnState::Generating {
             id: TurnId(9),
             started: std::time::SystemTime::now(),
@@ -11523,18 +11696,24 @@ mod tests {
                 stop_reason: None,
             },
         );
-        let (session_id, message_index) = cmds
+        let (session_id, message_index, scratchpad) = cmds
             .iter()
             .find_map(|c| match c {
                 Cmd::ExecuteTool {
                     session_id,
                     message_index,
+                    scratchpad,
                     ..
-                } => Some((session_id.clone(), *message_index)),
+                } => Some((session_id.clone(), *message_index, scratchpad.clone())),
                 _ => None,
             })
             .expect("ExecuteTool dispatched");
         assert_eq!(session_id, expected_session);
+        assert_eq!(
+            scratchpad.as_deref(),
+            Some(expected_scratchpad.as_path()),
+            "the materialized scratch dir rides on the dispatch"
+        );
         assert_eq!(
             message_index,
             state.session.messages().len(),

@@ -170,6 +170,10 @@ impl State {
                 is_subagent: false,
                 agent_preamble: None,
                 plan: None,
+                // Materialized by the effect layer after startup dispatches
+                // `Cmd::EnsureScratchpad`; the pure constructor never touches
+                // the filesystem.
+                scratchpad: None,
             },
             turn: TurnState::Idle,
             ui: UiState {
@@ -597,6 +601,13 @@ pub struct Session {
     /// `Some` while the session is in plan mode (see [`PlanState`]). Never
     /// `Some` on subagent sessions — children explore, they don't plan.
     pub plan: Option<PlanState>,
+    /// Per-session scratch directory, once the effect layer has materialized
+    /// it on disk (`Cmd::EnsureScratchpad` -> `Msg::ScratchpadReady`). `None`
+    /// until then, and reset whenever the conversation id changes (`/clear`,
+    /// `/load`, rewind fork) — the reducer re-emits `EnsureScratchpad` at
+    /// those points. The reducer stamps this onto `Cmd::ExecuteTool` so tools
+    /// see it via `ExecContext::scratchpad`. Runtime-only, never persisted.
+    pub scratchpad: Option<PathBuf>,
 }
 
 impl Session {

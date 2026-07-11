@@ -28,6 +28,10 @@ Maintain memory proactively: the moment you notice a saved fact is wrong or obso
 
 Keep each fact atomic (one idea per memory) and `update`/`forget` whole facts; never merge or re-summarize the corpus — rewriting stored facts drifts them from the truth. Scope defaults to project-private (machine-local, not committed); pass `shared: true` for team facts committed to the repo, or `global: true` for facts that hold across every project.
 
+## Scratchpad
+
+Each session has a private scratch directory for intermediate files — one-off scripts, downloads, generated data, working notes. Every shell command receives its absolute path in the MERMAID_SCRATCHPAD environment variable, and the file tools accept absolute paths inside it. Prefer it over the system temp dir or the project tree for throwaway files: writes there are never checkpointed and skip approval gating (read-only mode still blocks them). It is swept after the session ends, so anything worth keeping belongs in the project or in memory. The user can inspect it with `/scratchpad`.
+
 ## Task Planning
 
 For multi-step work (3 or more distinct steps), plan with the task checklist: `task_create` the FULL initial plan in one call, in execution order, then keep it live with `task_update` as you work. The user sees the checklist in the terminal at all times, so never repeat its contents in prose — summarize what changed and move on. Skip the checklist entirely for trivial or single-step requests; a one-item plan is noise.
@@ -332,6 +336,29 @@ mod tests {
         assert!(
             prompt.contains("always in your context") && prompt.contains("read_file"),
             "Memory section must teach the always-loaded index + on-demand read"
+        );
+    }
+
+    /// The Scratchpad section must teach the env var, the file-tool access
+    /// path, the no-checkpoint/no-gate incentive, and the sweep caveat.
+    #[test]
+    fn prompt_has_scratchpad_section() {
+        let prompt = get_system_prompt();
+        assert!(
+            prompt.contains("## Scratchpad"),
+            "prompt must have a Scratchpad section"
+        );
+        assert!(
+            prompt.contains("MERMAID_SCRATCHPAD"),
+            "Scratchpad section must name the exported env var"
+        );
+        assert!(
+            prompt.contains("never checkpointed") && prompt.contains("skip approval gating"),
+            "Scratchpad section must teach why it's the cheap place for throwaway files"
+        );
+        assert!(
+            prompt.contains("swept after the session"),
+            "Scratchpad section must warn the dir is ephemeral"
         );
     }
 

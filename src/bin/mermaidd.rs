@@ -331,6 +331,15 @@ fn startup_recovery() {
     {
         tracing::info!(removed, "reaped stale background-command logs");
     }
+    // Per-session scratch directories: interactive sessions sweep with the
+    // built-in default on startup; the daemon adds a knob-driven pass so
+    // long-lived daemon-only boxes still converge.
+    if let Ok(removed) = mermaid_cli::session::scratchpad::sweep_stale(
+        daemon.scratchpad_retention_days.max(0) as u64,
+    ) && removed > 0
+    {
+        tracing::info!(removed, "reaped stale session scratchpads");
+    }
 }
 
 /// Reap background-command tee logs (`mermaid-bg-<pid>-<nanos>.log`) left in the
@@ -1512,6 +1521,32 @@ mod tests {
         assert!(other_log.exists(), "non-bg logs must survive");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scratchpad_sweep_honors_the_lock_and_the_daemon_retention() {
+        // The daemon's startup sweep is `scratchpad::sweep_stale` over the
+        // knob; drive its `_in` seam against a fixture root the same way the
+        // bg-log test does. Layout: <root>/<project-slug>/<session-id>.
+        let root =
+            std::env::temp_dir().join(format!("mermaidd_scratch_sweep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let abandoned = root.join("-proj").join("abandoned");
+        std::fs::create_dir_all(&abandoned).unwrap();
+        std::fs::write(abandoned.join("out.txt"), b"stale artifact").unwrap();
+        let live = root.join("-proj").join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        // Our own pid in the lock = a live owner; never reaped.
+        std::fs::write(live.join(".lock"), std::process::id().to_string()).unwrap();
+
+        // Retention 0 (the daemon knob clamped) → age never protects; only
+        // the live lock does.
+        let removed = mermaid_cli::session::scratchpad::sweep_stale_in(&root, 0).expect("sweep");
+        assert_eq!(removed, 1);
+        assert!(!abandoned.exists(), "unlocked session dirs are reaped");
+        assert!(live.exists(), "a live pid lock protects the session dir");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn temp_db(name: &str) -> std::path::PathBuf {

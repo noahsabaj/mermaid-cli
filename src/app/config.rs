@@ -337,6 +337,11 @@ pub struct DaemonConfig {
     /// history survives the shorter task/session window; each outcome's
     /// denormalized context keeps it usable after its task row is pruned.
     pub outcomes_retention_days: i64,
+    /// Days to retain unlocked per-session scratch directories before the
+    /// daemon's startup sweep reaps them. Sessions whose owning process is
+    /// still alive are never reaped regardless of age. Interactive sessions
+    /// sweep with the built-in default; this knob only tunes mermaidd.
+    pub scratchpad_retention_days: i64,
 }
 
 impl Default for DaemonConfig {
@@ -346,6 +351,7 @@ impl Default for DaemonConfig {
             task_timeout_minutes: None,
             retention_days: 30,
             outcomes_retention_days: 180,
+            scratchpad_retention_days: crate::session::scratchpad::RETENTION_DAYS as i64,
         }
     }
 }

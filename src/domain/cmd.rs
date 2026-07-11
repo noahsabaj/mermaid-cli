@@ -93,6 +93,10 @@ pub enum Cmd {
         /// Conversation length (`messages().len()`) at dispatch. A fork at
         /// user-message index `k` discards checkpoints with index > k.
         message_index: usize,
+        /// Per-session scratch directory (`Session::scratchpad`) at dispatch.
+        /// `None` until `Msg::ScratchpadReady` lands — the runner threads it
+        /// into `ExecContext::scratchpad` for tools to use as temp space.
+        scratchpad: Option<PathBuf>,
     },
     /// Cancel every task in the given turn's `TurnScope`. After the
     /// scope's `JoinSet` drains (bounded by a ~2s timeout), the runner
@@ -151,6 +155,20 @@ pub enum Cmd {
         completed: u32,
         total: u32,
     },
+
+    /// Materialize the per-session scratch directory for this conversation
+    /// id (creating it under the private temp dir + stamping its pid lock),
+    /// then report the path back via `Msg::ScratchpadReady`. Emitted at
+    /// startup and whenever the conversation id changes (`/clear`, `/load`,
+    /// rewind fork). The handler also opportunistically sweeps stale sibling
+    /// scratchpads. Fire-and-forget, not turn-scoped.
+    EnsureScratchpad { session_id: String },
+
+    /// `/scratchpad` — list the session scratch directory's contents back
+    /// into the transcript (bounded ASCII listing via `Msg::RuntimeText`).
+    /// Only emitted while `Session::scratchpad` is stamped; carries the
+    /// path so the effect never re-derives it. Fire-and-forget.
+    ListScratchpad { path: PathBuf },
 
     // ── Persistence ─────────────────────────────────────────────────
     /// Save the current conversation to disk. No-op if unchanged since
@@ -411,6 +429,8 @@ impl Cmd {
             Cmd::PersistPlanConfig(_) => "persist_plan_config",
             Cmd::UserTaskEdit(_) => "user_task_edit",
             Cmd::NotifyTaskCompleted { .. } => "notify_task_completed",
+            Cmd::EnsureScratchpad { .. } => "ensure_scratchpad",
+            Cmd::ListScratchpad { .. } => "list_scratchpad",
             Cmd::SaveConversation(_) => "save_conversation",
             Cmd::SaveCompactionArchive { .. } => "save_compaction_archive",
             Cmd::SaveProcess(_) => "save_process",
@@ -548,6 +568,12 @@ impl Cmd {
                 "notify_task_completed(id={}, {}/{})",
                 task.id, completed, total
             ),
+            Cmd::EnsureScratchpad { session_id } => {
+                format!("ensure_scratchpad(session={})", session_id)
+            },
+            Cmd::ListScratchpad { path } => {
+                format!("list_scratchpad({})", path.display())
+            },
             Cmd::SaveConversation(c) => format!("save_conversation(id={})", c.id),
             Cmd::SaveCompactionArchive {
                 archive, record, ..

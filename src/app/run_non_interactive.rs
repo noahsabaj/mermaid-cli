@@ -172,6 +172,13 @@ pub async fn run_non_interactive_with(
         ));
     }
 
+    // Materialize the per-session scratch dir (same bootstrap as the
+    // interactive path). `session_id` was captured after any seed, so a
+    // resumed run adopts the dir keyed by its restored conversation id.
+    runner.dispatch(crate::domain::Cmd::EnsureScratchpad {
+        session_id: session_id.clone(),
+    });
+
     // First line of the NDJSON stream: protocol + run identity. Broadcast
     // to any daemon subscriber regardless of stdout streaming.
     let started = RunEvent::SessionStarted {

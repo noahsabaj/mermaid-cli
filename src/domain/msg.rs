@@ -302,6 +302,15 @@ pub enum Msg {
     /// @-mention picker (gitignore-aware walk, capped, sorted; directories
     /// carry a trailing `/`).
     ProjectFilesListed(Vec<String>),
+    /// Response to `Cmd::EnsureScratchpad`: the per-session scratch directory
+    /// exists on disk at `path`. Carries the conversation id it was minted
+    /// for so the reducer can drop a stale ready that raced a `/clear` or
+    /// `/load` — it stamps `Session::scratchpad` only when the id still
+    /// matches the live conversation.
+    ScratchpadReady {
+        session_id: String,
+        path: PathBuf,
+    },
     /// Response to `/tasks`.
     RuntimeTasksListed(Vec<TaskRecord>),
     /// Response to `/task <id>`.
@@ -572,6 +581,9 @@ pub enum SlashCmd {
     /// The task checklist: no arg → show; `add <subject>` / `rm <id>` /
     /// `done <id>` / `clear` edit it (routed through the TaskBroker).
     Todos(Option<String>),
+    /// Show the session scratch directory and a bounded listing of its
+    /// contents (via `Cmd::ListScratchpad`).
+    Scratchpad,
     Context(ContextCmd),
     Compact(Option<String>),
     /// List saved durable memories.
@@ -689,6 +701,7 @@ impl Msg {
             Msg::ConversationLoaded(_) => MsgKind::ConversationLoaded,
             Msg::ConversationsListed(_) => MsgKind::ConversationsListed,
             Msg::ProjectFilesListed(_) => MsgKind::ProjectFilesListed,
+            Msg::ScratchpadReady { .. } => MsgKind::ScratchpadReady,
             Msg::RuntimeTasksListed(_)
             | Msg::RuntimeTaskLoaded { .. }
             | Msg::RuntimeProcessesListed(_)
@@ -754,6 +767,7 @@ pub enum MsgKind {
     ConversationLoaded,
     ConversationsListed,
     ProjectFilesListed,
+    ScratchpadReady,
     RuntimeStore,
     ModelPullFinished,
     ModelPullProgress,

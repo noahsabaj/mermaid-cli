@@ -1,5 +1,6 @@
 /// Session management module - Gateway
 mod conversation;
+pub mod scratchpad;
 mod selector;
 
 pub use conversation::{

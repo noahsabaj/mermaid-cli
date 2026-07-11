@@ -361,6 +361,9 @@ static CONFLICT_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Manages conversation persistence for a project
 #[derive(Clone)]
 pub struct ConversationManager {
+    /// The project directory the manager was built for — keys the
+    /// scratchpad cascade in [`delete_conversation`].
+    project_dir: PathBuf,
     conversations_dir: PathBuf,
     compactions_dir: PathBuf,
     /// Per-id `(mtime, len)` of the conversation file as THIS process last
@@ -384,6 +387,7 @@ impl ConversationManager {
         fs::create_dir_all(&compactions_dir)?;
 
         Ok(Self {
+            project_dir: project_dir.as_ref().to_path_buf(),
             conversations_dir,
             compactions_dir,
             seen: Arc::new(Mutex::new(HashMap::new())),
@@ -674,6 +678,10 @@ impl ConversationManager {
         }
         // Best-effort sidecar cleanup — its absence is harmless.
         let _ = fs::remove_file(self.conversations_dir.join(format!("{}.meta", id)));
+        // Cascade to the session's scratch directory (skipped if another
+        // live mermaid still holds its pid lock). Best-effort: the sweep
+        // eventually reaps whatever this misses.
+        let _ = crate::session::scratchpad::remove(&self.project_dir, id);
 
         Ok(())
     }
@@ -843,6 +851,7 @@ mod tests {
             ChatMessage::assistant("a").with_images(vec!["SHOTBYTES".to_string()]),
         ];
         let store = ConversationManager {
+            project_dir: dir.clone(),
             conversations_dir: dir.clone(),
             compactions_dir: dir.clone(),
             seen: Arc::new(Mutex::new(HashMap::new())),
@@ -874,6 +883,7 @@ mod tests {
             ChatMessage::assistant("OPENAI_API_KEY=sk-abcdefghijklmnop1234"),
         ];
         let store = ConversationManager {
+            project_dir: dir.clone(),
             conversations_dir: dir.clone(),
             compactions_dir: dir.clone(),
             seen: Arc::new(Mutex::new(HashMap::new())),
