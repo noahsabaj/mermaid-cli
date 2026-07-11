@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Plan mode: clear-context execute + handoff.** The approval dialog gains
+  `Approve, clear context and start` — execution continues in a fresh
+  conversation seeded with a handoff preamble plus the approved plan (the
+  option shows how full the context is, so the tradeoff is legible), with
+  the checklist re-seeded and the exploration transcript saved to disk —
+  and `Hand off...`, a two-step sub-dialog: fork of this session (carries
+  the transcript) or fresh session, then the execution model (same model,
+  a recently-used or locally-pulled model from `ollama list`, or any
+  free-typed `provider/model`). Handoffs mint a new conversation id (the
+  rewind-fork machinery), switch models per-request, and auto-start
+  implementation.
+
 - **Remote MCP servers over Streamable HTTP.** `[mcp_servers.<name>]` now
   accepts `url = "https://…"` instead of `command`, connecting to hosted MCP
   servers (GitHub/Sentry/Linear-class) everywhere MCP works today — TUI,

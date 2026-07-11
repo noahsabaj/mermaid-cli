@@ -31,12 +31,35 @@ pub struct ExitPlanModeTool;
 /// Option labels. Matching is by prefix because the recommended option
 /// carries the "(Recommended)" suffix the modal convention expects.
 const APPROVE_START: &str = "Approve and start";
+const APPROVE_CLEAR: &str = "Approve, clear context and start";
 const APPROVE_WAIT: &str = "Approve and wait";
 const APPROVE_PINNED: &str = "Approve";
+const HAND_OFF: &str = "Hand off...";
 const REQUEST_CHANGES: &str = "Request changes";
+const HANDOFF_FORK: &str = "Fork of this session";
+const HANDOFF_FRESH: &str = "Fresh session";
+const SAME_MODEL: &str = "Same model";
 
-fn approved_outcome(path: String, body: String, start: bool, secs: f64) -> ToolOutcome {
-    let text = if start {
+/// How execution proceeds after approval, as chosen in the dialog.
+#[derive(Clone, Copy, Default)]
+struct PlanDecision {
+    start: bool,
+    fresh: bool,
+    fork: bool,
+}
+
+fn approved_outcome(
+    path: String,
+    body: String,
+    decision: PlanDecision,
+    model: Option<String>,
+    secs: f64,
+) -> ToolOutcome {
+    let text = if decision.fresh || decision.fork {
+        // This outcome never reaches a follow-up model call — the reducer
+        // swaps conversations instead — but keep it honest for the record.
+        "The user approved the plan; execution continues in a new conversation."
+    } else if decision.start {
         "The user approved the plan. Plan mode is off and the checklist has been seeded from \
          the plan's Tasks section — implementation starts now."
     } else {
@@ -45,7 +68,14 @@ fn approved_outcome(path: String, body: String, start: bool, secs: f64) -> ToolO
          acknowledgment and stop."
     };
     ToolOutcome::success(text, "plan approved", secs).with_metadata(ToolRunMetadata {
-        detail: ToolMetadata::Plan { path, body, start },
+        detail: ToolMetadata::Plan {
+            path,
+            body,
+            start: decision.start,
+            fresh: decision.fresh,
+            fork: decision.fork,
+            model,
+        },
         ..ToolRunMetadata::default()
     })
 }
@@ -72,6 +102,137 @@ fn option(label: &str, description: &str) -> QuestionOption {
         recommended: label.to_lowercase().contains("(recommended)"),
         preview: None,
     }
+}
+
+impl ExitPlanModeTool {
+    /// The two-step handoff dialog: (1) fork vs fresh, (2) execution model.
+    /// Both questions ride one modal; a free-typed "Other" on the model
+    /// question is any `provider/model` id.
+    async fn handoff_flow(
+        &self,
+        ctx: &ExecContext,
+        broker: &crate::providers::QuestionBroker,
+        path: String,
+        body: String,
+        secs: f64,
+    ) -> ToolOutcome {
+        let mut model_options = vec![option(
+            &format!("{SAME_MODEL} (Recommended)"),
+            "Keep the current session model.",
+        )];
+        for candidate in handoff_model_candidates(ctx).await.into_iter().take(12) {
+            model_options.push(option(&candidate, "Recently used or local model."));
+        }
+        let questions = vec![
+            Question {
+                header: "Hand off".to_string(),
+                question: "Continue the approved plan in:".to_string(),
+                kind: QuestionKind::Select,
+                options: vec![
+                    option(
+                        &format!("{HANDOFF_FRESH} (Recommended)"),
+                        "New conversation seeded with the plan and checklist only.",
+                    ),
+                    option(
+                        HANDOFF_FORK,
+                        "New conversation carrying this full transcript.",
+                    ),
+                ],
+                memory_key: None,
+            },
+            Question {
+                header: "Model".to_string(),
+                question: "Execute with which model? (type any provider/model as Other)"
+                    .to_string(),
+                kind: QuestionKind::Select,
+                options: model_options,
+                memory_key: None,
+            },
+        ];
+        match broker
+            .request(&ctx.token, ctx.turn, ctx.call_id, questions)
+            .await
+        {
+            QuestionResolution::Answered { answers, .. } => {
+                let pick = |i: usize| {
+                    answers
+                        .get(i)
+                        .map(|a| a.selected.join(", "))
+                        .unwrap_or_default()
+                };
+                let fork = pick(0).starts_with(HANDOFF_FORK);
+                let model_choice = pick(1);
+                let model = if model_choice.is_empty() || model_choice.starts_with(SAME_MODEL) {
+                    None
+                } else {
+                    Some(model_choice)
+                };
+                approved_outcome(
+                    path,
+                    body,
+                    PlanDecision {
+                        start: true,
+                        fresh: !fork,
+                        fork,
+                    },
+                    model,
+                    secs,
+                )
+            },
+            QuestionResolution::Dismissed | QuestionResolution::Reformulate => {
+                ToolOutcome::success(
+                    "The user backed out of the handoff. Still in plan mode — continue the \
+                     conversation; call exit_plan_mode again when they are ready.",
+                    "handoff cancelled",
+                    secs,
+                )
+            },
+        }
+    }
+}
+
+/// Candidate execution models for the handoff picker: models this install
+/// has used before (the per-model reasoning table doubles as a recency
+/// record) plus whatever the local Ollama daemon has pulled (best-effort,
+/// short timeout). The current model is excluded — "Same model" covers it.
+async fn handoff_model_candidates(ctx: &ExecContext) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for m in ctx.config.reasoning_per_model.keys() {
+        if *m != ctx.model_id && seen.insert(m.clone()) {
+            out.push(m.clone());
+        }
+    }
+    let url = format!(
+        "http://{}:{}/api/tags",
+        ctx.config.ollama.host, ctx.config.ollama.port
+    );
+    let fetched = async {
+        let resp = reqwest::Client::new()
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?;
+        resp.json::<serde_json::Value>().await.ok()
+    }
+    .await;
+    if let Some(v) = fetched {
+        for m in v
+            .get("models")
+            .and_then(|m| m.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(name) = m.get("name").and_then(|n| n.as_str()) {
+                let id = format!("ollama/{name}");
+                if id != ctx.model_id && seen.insert(id.clone()) {
+                    out.push(id);
+                }
+            }
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -121,24 +282,47 @@ impl ToolExecutor for ExitPlanModeTool {
         let pinned = ctx.config.plan.post_approve;
         let pinned_start = !matches!(pinned, Some(PlanPostApprove::Wait));
         if ctx.config.plan.auto_approve {
-            return approved_outcome(display_path, body, pinned_start, secs());
+            return approved_outcome(
+                display_path,
+                body,
+                PlanDecision {
+                    start: pinned_start,
+                    ..PlanDecision::default()
+                },
+                None,
+                secs(),
+            );
         }
         let Some(broker) = ctx.questions.as_ref() else {
             // Headless: nobody to run the dialog. Approve without starting —
             // the plan is the run's deliverable (the full `--plan` headless
             // flow is a separate feature).
-            return approved_outcome(display_path, body, false, secs());
+            return approved_outcome(display_path, body, PlanDecision::default(), None, secs());
         };
 
+        let clear_desc = match ctx.context_percent {
+            Some(pct) => format!(
+                "Fresh conversation seeded with the plan (context: {pct}% used). The \
+                 exploration transcript stays on disk."
+            ),
+            None => "Fresh conversation seeded with the plan. The exploration transcript \
+                 stays on disk."
+                .to_string(),
+        };
         let options = match pinned {
             None => vec![
                 option(
                     &format!("{APPROVE_START} (Recommended)"),
                     "End plan mode, seed the checklist, and begin implementing now.",
                 ),
+                option(APPROVE_CLEAR, &clear_desc),
                 option(
                     APPROVE_WAIT,
                     "End plan mode and seed the checklist, but wait at the prompt.",
+                ),
+                option(
+                    HAND_OFF,
+                    "Continue in a fork or fresh session, optionally on a different model.",
                 ),
                 option(
                     REQUEST_CHANGES,
@@ -153,6 +337,11 @@ impl ToolExecutor for ExitPlanModeTool {
                     } else {
                         "End plan mode and seed the checklist, but wait at the prompt."
                     },
+                ),
+                option(APPROVE_CLEAR, &clear_desc),
+                option(
+                    HAND_OFF,
+                    "Continue in a fork or fresh session, optionally on a different model.",
                 ),
                 option(
                     REQUEST_CHANGES,
@@ -177,11 +366,45 @@ impl ToolExecutor for ExitPlanModeTool {
                 let selected = answer.map(|a| a.selected.join(", ")).unwrap_or_default();
                 let note = answer.and_then(|a| a.note.clone()).unwrap_or_default();
                 if selected.starts_with(APPROVE_START) {
-                    approved_outcome(display_path, body, true, secs())
+                    approved_outcome(
+                        display_path,
+                        body,
+                        PlanDecision {
+                            start: true,
+                            ..PlanDecision::default()
+                        },
+                        None,
+                        secs(),
+                    )
+                } else if selected.starts_with(APPROVE_CLEAR) {
+                    approved_outcome(
+                        display_path,
+                        body,
+                        PlanDecision {
+                            start: true,
+                            fresh: true,
+                            fork: false,
+                        },
+                        None,
+                        secs(),
+                    )
+                } else if selected.starts_with(HAND_OFF) {
+                    return self
+                        .handoff_flow(&ctx, broker, display_path, body, secs())
+                        .await;
                 } else if selected.starts_with(APPROVE_WAIT) {
-                    approved_outcome(display_path, body, false, secs())
+                    approved_outcome(display_path, body, PlanDecision::default(), None, secs())
                 } else if pinned.is_some() && selected.starts_with(APPROVE_PINNED) {
-                    approved_outcome(display_path, body, pinned_start, secs())
+                    approved_outcome(
+                        display_path,
+                        body,
+                        PlanDecision {
+                            start: pinned_start,
+                            ..PlanDecision::default()
+                        },
+                        None,
+                        secs(),
+                    )
                 } else if selected.starts_with(REQUEST_CHANGES) {
                     changes_outcome(&note, secs())
                 } else {
@@ -224,12 +447,30 @@ mod tests {
 
     #[test]
     fn approved_outcome_rides_the_plan_metadata() {
-        let out = approved_outcome(".mermaid/plans/x.md".into(), "## Summary".into(), true, 0.0);
+        let out = approved_outcome(
+            ".mermaid/plans/x.md".into(),
+            "## Summary".into(),
+            PlanDecision {
+                start: true,
+                ..PlanDecision::default()
+            },
+            None,
+            0.0,
+        );
         match &out.metadata.detail {
-            ToolMetadata::Plan { path, body, start } => {
+            ToolMetadata::Plan {
+                path,
+                body,
+                start,
+                fresh,
+                fork,
+                model,
+            } => {
                 assert_eq!(path, ".mermaid/plans/x.md");
                 assert_eq!(body, "## Summary");
                 assert!(start);
+                assert!(!fresh && !fork);
+                assert!(model.is_none());
             },
             other => panic!("expected Plan metadata, got {other:?}"),
         }

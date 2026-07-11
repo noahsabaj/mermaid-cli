@@ -130,6 +130,9 @@ pub struct ExecContext {
     /// (the frozen startup `config` would go stale under `/plan config`
     /// edits). Only consulted while `plan_file` is `Some`; defaults in `new`.
     pub plan_permissions: crate::app::PlanPermissions,
+    /// Context-window fill at dispatch, when known (`exit_plan_mode` shows
+    /// it on the clear-context approval option). Defaults to `None` in `new`.
+    pub context_percent: Option<u8>,
     /// The user's stated intent for the turn (latest user message), passed to
     /// the Auto-mode classifier so it can judge whether an action is aligned.
     pub intent: Option<String>,
@@ -211,6 +214,7 @@ impl ExecContext {
             notify: None,
             plan_file: None,
             plan_permissions: crate::app::PlanPermissions::default(),
+            context_percent: None,
             progress,
             call_id,
             turn,
