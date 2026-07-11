@@ -615,6 +615,13 @@ impl ToolExecutor for SubagentTool {
         // ask questions — nobody is watching to answer them).
         child_state.session.is_subagent = true;
         child_state.session.agent_preamble = agent_type.preamble.clone();
+        // The child shares the parent session's scratchpad: subagent work is
+        // part of the same session, and a child never receives its own
+        // `EnsureScratchpad`. Sitting in the refresh block means both fresh
+        // spawns AND continuations pick up the parent's current dir (which
+        // may have appeared, or moved after a `/clear`, since the child was
+        // first built).
+        child_state.session.scratchpad = ctx.scratchpad.clone();
         let (instructions, memory, skills) =
             crate::app::instructions::load_project_context(&cwd, &config.memory);
         child_state.instructions = instructions;
@@ -1484,6 +1491,25 @@ mod tests {
         // …and the fix: the parent's live ctx.safety_mode overrides it.
         child_state.session.safety_mode = SafetyMode::Ask;
         assert_eq!(child_state.session.safety_mode, SafetyMode::Ask);
+    }
+
+    #[test]
+    fn child_state_inherits_the_parent_scratchpad() {
+        // A subagent shares the parent session's scratch directory — the
+        // child never receives its own `EnsureScratchpad`, so without the
+        // refresh-block inheritance it would run with `scratchpad: None`.
+        let (mut ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        ctx.scratchpad = Some(PathBuf::from("/data/tmp/scratchpad/-proj/s"));
+        // The bug source: a fresh (or cached) child State starts without one…
+        let mut child_state = test_state();
+        assert_eq!(child_state.session.scratchpad, None);
+        // …and the fix: the refresh block copies the parent's live dir onto
+        // the child, fresh spawns and continuations alike.
+        child_state.session.scratchpad = ctx.scratchpad.clone();
+        assert_eq!(
+            child_state.session.scratchpad.as_deref(),
+            Some(std::path::Path::new("/data/tmp/scratchpad/-proj/s"))
+        );
     }
 
     /// F7: when `ExecContext::model_id` is empty (the test builder's

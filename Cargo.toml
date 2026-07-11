@@ -95,6 +95,10 @@ htmd = "0.5.4"
 ignore = "0.4"
 nucleo-matcher = "0.3"
 jsonschema = "0.47.0"
+# POSIX-shell tokenization for the exec tool's scratch-containment prover
+# (`command_provably_in_scratch`): the command must be split exactly as
+# `sh -c` would. Same crate + version mermaid-runtime already uses.
+shell-words = "1.1"
 # OS credential storage for `mermaid login`. Linux uses the freedesktop
 # Secret Service over blocking dbus with a VENDORED (statically linked)
 # libdbus + pure-Rust session crypto, so neither CI nor end-user machines

@@ -78,7 +78,7 @@ impl ToolExecutor for ExecuteCommandTool {
         ToolDefinition {
             name: "execute_command".to_string(),
             description:
-                "Run a shell command. Use mode='wait' for finite commands, or mode='background' for dev servers and GUI/daemon-style commands that should keep running after the tool returns. Ctrl+C during foreground execution aborts the child immediately."
+                "Run a shell command. Use mode='wait' for finite commands, or mode='background' for dev servers and GUI/daemon-style commands that should keep running after the tool returns. Ctrl+C during foreground execution aborts the child immediately. The session scratchpad directory (for throwaway files) is exported to the child as MERMAID_SCRATCHPAD."
                     .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -122,10 +122,12 @@ impl ToolExecutor for ExecuteCommandTool {
             return ToolOutcome::error(format!("Dangerous command blocked: {}", command), 0.0);
         }
 
-        // Resolve the effective working directory and decide containment. An
-        // out-of-project cwd is allowed but escalated to ExternalDirectory so
-        // the gate won't auto-allow even a read-only command run outside the
-        // project — closing the working_dir containment bypass.
+        // Resolve the effective working directory and decide containment. A
+        // cwd inside the session scratchpad stays a plain Shell request; any
+        // other out-of-project cwd is allowed but escalated to
+        // ExternalDirectory so the gate won't auto-allow even a read-only
+        // command run outside the project — closing the working_dir
+        // containment bypass.
         let (effective_workdir, within_project) = match args
             .get("working_dir")
             .and_then(|v| v.as_str())
@@ -138,16 +140,29 @@ impl ToolExecutor for ExecuteCommandTool {
             },
             None => (ctx.workdir.clone(), true),
         };
+        let containment = classify_cwd(
+            within_project,
+            &effective_workdir,
+            ctx.scratchpad.as_deref(),
+        );
 
-        let category = if within_project {
-            crate::runtime::ToolCategory::Shell
-        } else {
-            crate::runtime::ToolCategory::ExternalDirectory
+        let category = match containment {
+            CwdContainment::Project | CwdContainment::Scratchpad => {
+                crate::runtime::ToolCategory::Shell
+            },
+            CwdContainment::External => crate::runtime::ToolCategory::ExternalDirectory,
         };
+        // Scratch containment must be PROVEN, fail closed: the cwd sits in
+        // the scratchpad AND every token of the command lexically stays there.
+        let scratch_contained = containment == CwdContainment::Scratchpad
+            && ctx
+                .scratchpad
+                .as_deref()
+                .is_some_and(|scratch| command_provably_in_scratch(command, scratch));
         let mut policy_request =
             crate::runtime::ActionRequest::new("execute_command", category, command.to_string());
         policy_request.command = Some(command.to_string());
-        if !within_project {
+        if containment == CwdContainment::External {
             policy_request.path = Some(effective_workdir.display().to_string());
         }
         let pending_action = serde_json::json!({
@@ -162,12 +177,22 @@ impl ToolExecutor for ExecuteCommandTool {
         // (checkpoint + approval row + blocking outcome). Allow returns the
         // classified risk so we can take the pre-existing Allow-path
         // checkpoint below.
-        match super::policy_gate::gate(&ctx, policy_request, &[], pending_action.clone(), true)
-            .await
+        match super::policy_gate::gate(
+            &ctx,
+            policy_request,
+            &[],
+            pending_action.clone(),
+            true,
+            scratch_contained,
+        )
+        .await
         {
             super::policy_gate::Gate::Block(outcome) => return outcome,
             super::policy_gate::Gate::Proceed { risk } => {
-                if ctx.config.safety.checkpoint_on_mutation
+                // A proven scratch-contained command can't touch the project,
+                // so there is nothing worth snapshotting.
+                if !scratch_contained
+                    && ctx.config.safety.checkpoint_on_mutation
                     && risk != crate::runtime::RiskClass::ReadOnly
                 {
                     let _ = crate::runtime::create_checkpoint_for_task(
@@ -278,6 +303,7 @@ impl ToolExecutor for ExecuteCommandTool {
             match run_command_pty(
                 &invocation,
                 &effective_workdir,
+                ctx.scratchpad.as_deref(),
                 progress.clone(),
                 ctx.token.clone(),
                 ctx.background.clone(),
@@ -351,6 +377,7 @@ impl ToolExecutor for ExecuteCommandTool {
         cmd.current_dir(&effective_workdir);
         scrub_secret_env(&mut cmd);
         harden_noninteractive_env(&mut cmd);
+        export_scratchpad_env(&mut cmd, ctx.scratchpad.as_deref());
 
         // The timeout now lives INSIDE `run_command`'s select (alongside the
         // Esc-cancel and Ctrl+B arms), so a timed-out command is tree-killed and
@@ -544,12 +571,15 @@ async fn run_background_command(
 
     {
         let log_path = background_log_path();
-        let pid = match launch_background_process(command, workdir, &log_path).await {
-            Ok(pid) => pid,
-            Err(error) => {
-                return ToolOutcome::error(error, start.elapsed().as_secs_f64());
-            },
-        };
+        let pid =
+            match launch_background_process(command, workdir, &log_path, ctx.scratchpad.as_deref())
+                .await
+            {
+                Ok(pid) => pid,
+                Err(error) => {
+                    return ToolOutcome::error(error, start.elapsed().as_secs_f64());
+                },
+            };
 
         let startup = match wait_for_background_startup(
             pid,
@@ -640,6 +670,7 @@ async fn launch_background_process(
     command: &str,
     workdir: &Path,
     log_path: &Path,
+    scratchpad: Option<&Path>,
 ) -> Result<u32, String> {
     // Pre-create the log owner-only with O_EXCL BEFORE the launcher runs, so a
     // symlink pre-planted at the predictable path can't redirect the script's
@@ -679,6 +710,7 @@ printf '%s\n' "$!""#,
         .stderr(Stdio::piped());
     scrub_secret_env(&mut launcher);
     harden_noninteractive_env(&mut launcher);
+    export_scratchpad_env(&mut launcher, scratchpad);
 
     let output = launcher
         .output()
@@ -708,6 +740,7 @@ async fn launch_background_process(
     command: &str,
     workdir: &Path,
     log_path: &Path,
+    scratchpad: Option<&Path>,
 ) -> Result<u32, String> {
     use crate::utils::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
     let log = std::fs::File::create(log_path).map_err(|e| {
@@ -730,6 +763,7 @@ async fn launch_background_process(
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     scrub_secret_env(&mut launcher);
     harden_noninteractive_env(&mut launcher);
+    export_scratchpad_env(&mut launcher, scratchpad);
     let child = launcher
         .spawn()
         .map_err(|e| format!("failed to launch background command: {e}"))?;
@@ -1024,6 +1058,104 @@ fn build_sandboxed_shell(
     let mut cmd = Command::new(&invocation.program);
     cmd.args(&invocation.args);
     cmd
+}
+
+/// Where the effective working directory landed: inside the project, inside
+/// the session scratchpad, or outside both (escalated to ExternalDirectory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CwdContainment {
+    Project,
+    Scratchpad,
+    External,
+}
+
+/// Classify the (already-canonicalized) effective workdir. The scratchpad
+/// check canonicalizes the scratch root itself; if that fails (dir missing,
+/// permissions) the cwd fails closed to `External` — never to a downgrade.
+fn classify_cwd(
+    within_project: bool,
+    effective_workdir: &Path,
+    scratchpad: Option<&Path>,
+) -> CwdContainment {
+    if within_project {
+        return CwdContainment::Project;
+    }
+    match scratchpad.and_then(|s| std::fs::canonicalize(s).ok()) {
+        Some(scratch) if effective_workdir.starts_with(&scratch) => CwdContainment::Scratchpad,
+        _ => CwdContainment::External,
+    }
+}
+
+/// Fail-closed lexical prover: true only when the command, run with its cwd
+/// inside the scratchpad, provably cannot touch anything outside it. Any
+/// construct we cannot reason about — shell metacharacters, substitutions,
+/// expansions, `..`, absolute or embedded paths pointing elsewhere, even a
+/// parse failure — fails the proof and the command keeps its normal gating.
+/// Over-rejecting is fine here (the command merely prompts as usual);
+/// under-rejecting would silently skip an approval.
+fn command_provably_in_scratch(command: &str, scratch: &Path) -> bool {
+    // Metacharacters make the command opaque to token-level reasoning:
+    // separators/pipes can chain arbitrary commands, redirection retargets
+    // writes, `$`/backtick substitute or expand unseen text, `~`/globs
+    // re-expand at run time, and grouping braces/parens introduce subshells.
+    // Checked on the RAW string so even quoted occurrences fail closed.
+    const OPAQUE: &[char] = &[
+        ';', '|', '&', '<', '>', '$', '`', '~', '*', '?', '[', ']', '(', ')', '{', '}', '!', '\n',
+        '\r',
+    ];
+    if command.contains(OPAQUE) {
+        return false;
+    }
+    let Ok(tokens) = shell_words::split(command) else {
+        return false;
+    };
+    if tokens.is_empty() {
+        return false;
+    }
+    tokens.iter().all(|t| token_provably_in_scratch(t, scratch))
+}
+
+/// One token of a scratch-candidate command. Rules, all fail-closed:
+/// - `..` anywhere: rejected (can climb out of the scratch cwd).
+/// - `:/` anywhere: rejected (URL / remote-host / list-of-paths shapes).
+/// - Drive-designator shape (`C:x`, `c:\x`): rejected on every platform —
+///   on Windows it targets a drive root or a per-drive cwd, never scratch.
+/// - No path separator: fine — a bare word, flag, or PATH-resolved argv0.
+/// - Rooted: must sit lexically inside the scratchpad. `has_root`, not
+///   `is_absolute` — on Windows `/etc/passwd` is rooted but not "absolute"
+///   (no drive prefix), yet still escapes the scratch cwd via the drive
+///   root, so every rooted token gets the containment check.
+/// - Relative with a separator: accepted only as a PLAIN path (no leading
+///   `-`, no `=`) so flag-embedded paths (`-t/etc`, `--output=/etc/x`,
+///   `VAR=/etc`) can't smuggle a target past the rooted check.
+fn token_provably_in_scratch(token: &str, scratch: &Path) -> bool {
+    if token.contains("..") || token.contains(":/") {
+        return false;
+    }
+    let bytes = token.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return false;
+    }
+    if !token.contains(['/', '\\']) {
+        return true;
+    }
+    if Path::new(token).has_root() {
+        return Path::new(token).starts_with(scratch);
+    }
+    !token.starts_with('-') && !token.contains('=')
+}
+
+/// Advertised to spawned commands so scripts have a ready-made place for
+/// throwaway files that never dirties the project tree.
+const SCRATCHPAD_ENV_VAR: &str = "MERMAID_SCRATCHPAD";
+
+/// Export the session scratchpad to a child command (pipe + background spawn
+/// paths; the PTY path sets the same variable on its `CommandBuilder`). No-op
+/// when the session has no scratchpad materialized.
+fn export_scratchpad_env(cmd: &mut Command, scratchpad: Option<&Path>) {
+    if let Some(dir) = scratchpad {
+        cmd.env(SCRATCHPAD_ENV_VAR, dir);
+    }
 }
 
 fn tail_lines(text: &str, max_lines: usize) -> String {
@@ -1579,6 +1711,7 @@ impl PtyDrain {
 async fn run_command_pty(
     invocation: &ShellInvocation,
     workdir: &Path,
+    scratchpad: Option<&Path>,
     progress: tokio::sync::mpsc::Sender<ProgressEvent>,
     token: tokio_util::sync::CancellationToken,
     background: tokio_util::sync::CancellationToken,
@@ -1612,6 +1745,11 @@ async fn run_command_pty(
     // the master, so it must fail fast instead of sitting on the prompt.
     builder.env("GIT_TERMINAL_PROMPT", "0");
     builder.env("TERM", "xterm-256color");
+    // Same export the pipe/background paths apply via `export_scratchpad_env`
+    // — keep the spawn paths from drifting.
+    if let Some(dir) = scratchpad {
+        builder.env(SCRATCHPAD_ENV_VAR, dir);
+    }
 
     let mut child = pair
         .slave
@@ -2496,5 +2634,191 @@ mod tests {
         let (out, truncated) = read_capped(&b"short output"[..], 100, 10_000, None, None).await;
         assert!(!truncated, "small output must not be truncated");
         assert_eq!(out, "short output");
+    }
+
+    #[test]
+    fn scratch_prover_accepts_only_provably_contained_commands() {
+        let scratch = Path::new("/tmp/mermaid_scratch/proj/sess");
+
+        // Provable: bare words, flags, relative paths under the scratch cwd,
+        // and absolute paths inside the scratchpad.
+        for cmd in [
+            "ls",
+            "ls -la",
+            "mkdir out",
+            "touch notes.txt",
+            "cp a.txt sub/b.txt",
+            "cat /tmp/mermaid_scratch/proj/sess/notes.txt",
+            "rm -f old.log",
+        ] {
+            assert!(
+                command_provably_in_scratch(cmd, scratch),
+                "{cmd:?} should prove scratch-contained",
+            );
+        }
+
+        // Unprovable — every one must fail closed.
+        for cmd in [
+            "",                            // nothing to prove
+            "cat ../secret",               // parent escape
+            "cat /etc/passwd",             // absolute path outside
+            "/bin/rm -rf notes.txt",       // absolute argv0 outside
+            "echo hi > out.txt",           // redirection
+            "ls; touch pwned",             // separator
+            "true && touch pwned",         // chaining
+            "cat file | tee other",        // pipe
+            "cat $(pwd)/x",                // command substitution
+            "cat `pwd`/x",                 // backtick substitution
+            "cat $HOME/x",                 // variable expansion
+            "ls ~",                        // tilde expansion
+            "rm *",                        // glob
+            "cp -t/etc x",                 // flag-embedded absolute path
+            "tar --directory=/ x",         // flag=value absolute path
+            "env VAR=/etc cmd",            // assignment-embedded path
+            "curl https://evil.example/x", // URL shape (`:/`)
+            "type C:secret.txt",           // Windows drive-relative path
+            "copy C:\\evil x",             // Windows drive-absolute path
+            "unclosed 'quote",             // parse failure
+        ] {
+            assert!(
+                !command_provably_in_scratch(cmd, scratch),
+                "{cmd:?} must NOT prove scratch-contained",
+            );
+        }
+    }
+
+    #[test]
+    fn classify_cwd_three_way_containment() {
+        let base = std::env::temp_dir().join(format!("mermaid_cwd3_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("project");
+        let scratch = base.join("scratch");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch_real = std::fs::canonicalize(&scratch).unwrap();
+        let outside = std::fs::canonicalize(&base).unwrap();
+
+        // In-project wins regardless of scratchpad.
+        assert_eq!(
+            classify_cwd(true, &project, Some(&scratch)),
+            CwdContainment::Project
+        );
+        // A cwd inside the scratchpad is Scratchpad, not External — no
+        // ExternalDirectory escalation for scratch work.
+        assert_eq!(
+            classify_cwd(false, &scratch_real, Some(&scratch)),
+            CwdContainment::Scratchpad
+        );
+        // Without a scratchpad the same cwd stays External.
+        assert_eq!(
+            classify_cwd(false, &scratch_real, None),
+            CwdContainment::External
+        );
+        // Outside both roots is External even with a scratchpad bound.
+        assert_eq!(
+            classify_cwd(false, &outside, Some(&scratch)),
+            CwdContainment::External
+        );
+        // A missing scratch dir can't match — fails closed to External.
+        assert_eq!(
+            classify_cwd(false, &scratch_real, Some(&base.join("missing"))),
+            CwdContainment::External
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn scratch_cwd_is_not_escalated_to_external_directory() {
+        // Mirror of `out_of_project_working_dir_is_escalated_and_blocked`: the
+        // same read-only command that is BLOCKED in a random outside dir must
+        // RUN when the outside dir is the session scratchpad — proving the
+        // scratch cwd keeps the plain Shell category.
+        let base = std::env::temp_dir().join(format!("mermaid_scwd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("project");
+        let scratch = base.join("scratch");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        // ReadOnly gate: an ExternalDirectory escalation would classify as
+        // ExternalAccess and be denied; a Shell read-only command is allowed.
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut config = crate::app::Config::default();
+        config.safety.mode = crate::runtime::SafetyMode::ReadOnly;
+        let mut ctx = crate::providers::ctx::ExecContext::new(
+            tokio_util::sync::CancellationToken::new(),
+            tx,
+            ToolCallId(1),
+            TurnId(1),
+            project.clone(),
+            std::sync::Arc::new(config),
+            String::new(),
+            None,
+            None,
+            None,
+            crate::runtime::SafetyMode::ReadOnly,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        ctx.scratchpad = Some(scratch.clone());
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": "echo hi",
+                    "working_dir": scratch.display().to_string(),
+                }),
+                ctx,
+            )
+            .await;
+        assert!(
+            outcome.is_success(),
+            "scratch cwd must not be escalated to ExternalDirectory: {outcome:?}",
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn child_env_carries_scratchpad_export() {
+        // cfg-gated sh/cmd probe: the exported MERMAID_SCRATCHPAD must reach
+        // the child, and must be absent when the session has no scratchpad.
+        let dir = std::env::temp_dir().join(format!("mermaid_env_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        let probe = r#"printf %s "${MERMAID_SCRATCHPAD:-UNSET}""#;
+        #[cfg(windows)]
+        let probe = "if defined MERMAID_SCRATCHPAD (echo %MERMAID_SCRATCHPAD%) else (echo UNSET)";
+
+        let run = |scratchpad: Option<PathBuf>| {
+            let dir = dir.clone();
+            async move {
+                let mut cmd = build_sandboxed_shell(probe, false, None);
+                cmd.current_dir(&dir)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    // The parent test process must not leak a value into the
+                    // negative case.
+                    .env_remove(SCRATCHPAD_ENV_VAR);
+                export_scratchpad_env(&mut cmd, scratchpad.as_deref());
+                let out = cmd.output().await.expect("probe spawns");
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            }
+        };
+
+        let exported = run(Some(dir.clone())).await;
+        assert_eq!(
+            exported,
+            dir.display().to_string(),
+            "child must see the scratchpad path",
+        );
+        let absent = run(None).await;
+        assert_eq!(absent, "UNSET", "no scratchpad -> no exported variable");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

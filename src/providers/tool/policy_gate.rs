@@ -72,7 +72,10 @@ pub async fn gate_external(
     // (#29, #30, #31).
     request.command = action_detail(tool, args);
     let pending = serde_json::json!({ "tool": tool, "args": args });
-    match gate(ctx, request, &[], pending, false).await {
+    // `scratch_contained` is always false here: external actions (network,
+    // desktop, MCP, subagents) act OUTSIDE the filesystem, so scratchpad
+    // containment can never be proven for them.
+    match gate(ctx, request, &[], pending, false, false).await {
         Gate::Block(outcome) => Some(outcome),
         Gate::Proceed { .. } => None,
     }
@@ -153,12 +156,23 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
 
 /// Consult the safety policy for `request`. See the module docs for the
 /// `replayable` semantics.
+///
+/// `scratch_contained` is true when the caller has PROVEN the action touches
+/// only the session scratchpad (`ResolvedInRoot::in_scratchpad` for the file
+/// mutators, `command_provably_in_scratch` for the exec tool). Scratch files
+/// are session-private and ephemeral, so — like durable memory in
+/// `PolicyEngine::decide` — an `Ask`/`Classify` on an eligible risk class is
+/// downgraded to proceed. The downgrade never touches `Deny` (a user `Deny`
+/// override, read-only mode, and the destructive hard-deny all still block)
+/// and never applies to risks that act beyond the filesystem
+/// ([`scratch_downgrade_eligible`]).
 pub async fn gate(
     ctx: &ExecContext,
     request: ActionRequest,
     checkpoint_paths: &[PathBuf],
     pending_action: serde_json::Value,
     replayable: bool,
+    scratch_contained: bool,
 ) -> Gate {
     // Build from the LIVE session mode (Shift+Tab / `/safety` take effect
     // immediately), not the static config snapshot.
@@ -177,6 +191,17 @@ pub async fn gate(
     } else {
         decision
     };
+
+    // Scratchpad downgrade: an Ask/Classify on a proven scratch-only action
+    // proceeds without a prompt. Deny is deliberately not matched — it falls
+    // through to the arm below and blocks, so plan mode's read-only floor (a
+    // Deny) keeps blocking scratch mutations while a plan is being drafted.
+    if scratch_contained
+        && let PolicyDecision::Ask { risk, .. } | PolicyDecision::Classify { risk, .. } = decision
+        && scratch_downgrade_eligible(risk)
+    {
+        return Gate::Proceed { risk };
+    }
 
     match decision {
         PolicyDecision::Allow { risk, .. } => Gate::Proceed { risk },
@@ -387,6 +412,23 @@ fn is_plan_file_path(workdir: &std::path::Path, raw: &str, plan_file: &std::path
         workdir.join(p)
     };
     normalize(&abs) == normalize(plan_file)
+}
+
+/// Risk classes whose `Ask`/`Classify` may be downgraded to proceed when the
+/// action is proven scratch-contained. File and shell mutations confined to
+/// the scratchpad can only touch session-private throwaway files; everything
+/// stronger acts beyond the filesystem and keeps its normal gating:
+/// `Network` can exfiltrate regardless of cwd, `Process`/`ExternalAccess`
+/// control things outside any directory, and `Destructive` is hard-denied
+/// upstream anyway.
+fn scratch_downgrade_eligible(risk: RiskClass) -> bool {
+    matches!(
+        risk,
+        RiskClass::ReadOnly
+            | RiskClass::LowMutation
+            | RiskClass::FileMutation
+            | RiskClass::ShellMutation
+    )
 }
 
 /// Interactive approval: check the session "don't ask again" allowlist, else
@@ -659,6 +701,7 @@ mod tests {
             &[],
             serde_json::json!({}),
             false,
+            false,
         )
         .await;
         assert!(
@@ -671,6 +714,7 @@ mod tests {
             req(),
             &[],
             serde_json::json!({}),
+            false,
             false,
         )
         .await;
@@ -952,6 +996,7 @@ mod tests {
                 &[],
                 serde_json::json!({}),
                 true,
+                false,
             )
             .await;
             assert!(
@@ -968,6 +1013,7 @@ mod tests {
                 &[],
                 serde_json::json!({}),
                 true,
+                false,
             )
             .await
             {
@@ -1007,6 +1053,7 @@ mod tests {
             &[],
             serde_json::json!({}),
             true,
+            false,
         )
         .await;
         assert!(
@@ -1020,6 +1067,7 @@ mod tests {
             &[],
             serde_json::json!({}),
             true,
+            false,
         )
         .await
         {
@@ -1043,6 +1091,7 @@ mod tests {
             &[],
             serde_json::json!({}),
             true,
+            false,
         )
         .await
         {
@@ -1081,6 +1130,7 @@ mod tests {
             &[],
             serde_json::json!({}),
             true,
+            false,
         )
         .await
         {
@@ -1114,6 +1164,7 @@ mod tests {
             &[],
             serde_json::json!({}),
             true,
+            false,
         )
         .await;
         assert!(matches!(g, Gate::Proceed { .. }));
@@ -1131,6 +1182,7 @@ mod tests {
                 &[],
                 serde_json::json!({}),
                 true,
+                false,
             )
             .await
         });
@@ -1155,6 +1207,7 @@ mod tests {
                 &[],
                 serde_json::json!({}),
                 true,
+                false,
             )
             .await
         });
@@ -1184,6 +1237,7 @@ mod tests {
                 &[],
                 serde_json::json!({}),
                 true,
+                false,
             )
             .await
         });
@@ -1201,6 +1255,7 @@ mod tests {
             &[],
             serde_json::json!({}),
             true,
+            false,
         )
         .await;
         assert!(
@@ -1208,5 +1263,156 @@ mod tests {
             "the identical allowlisted command should skip the prompt"
         );
         assert!(rx.try_recv().is_err(), "no second prompt should be sent");
+    }
+
+    #[tokio::test]
+    async fn scratch_containment_downgrades_eligible_asks() {
+        // Ask mode with NO broker: an un-downgraded replayable Ask would go to
+        // `block_for_approval`, so a Proceed here proves the downgrade fired.
+        let ctx = ctx(SafetyMode::Ask);
+        let g = gate(
+            &ctx,
+            edit_request("/scratch/notes.txt"),
+            &[],
+            serde_json::json!({}),
+            true,
+            true,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Proceed { .. }),
+            "scratch-contained file mutation must proceed in Ask mode",
+        );
+        let g = gate(
+            &ctx,
+            shell_request("mkdir out"),
+            &[],
+            serde_json::json!({}),
+            true,
+            true,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Proceed { .. }),
+            "scratch-contained shell mutation must proceed in Ask mode",
+        );
+
+        // Auto mode with NO classifier: an un-downgraded Classify fails safe
+        // to escalate, so a Proceed proves the Classify downgrade too.
+        let ctx = ctx_auto(None);
+        let g = gate(
+            &ctx,
+            shell_request("mkdir out"),
+            &[],
+            serde_json::json!({}),
+            true,
+            true,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Proceed { .. }),
+            "scratch-contained Classify must proceed without a classifier",
+        );
+    }
+
+    #[tokio::test]
+    async fn scratch_containment_never_downgrades_destructive() {
+        // The destructive hard-deny outranks everything, scratchpad included.
+        let g = gate(
+            &ctx(SafetyMode::Ask),
+            shell_request("rm -rf /"),
+            &[],
+            serde_json::json!({}),
+            true,
+            true,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Block(_)),
+            "destructive command must block even when claimed scratch-contained",
+        );
+    }
+
+    #[tokio::test]
+    async fn scratch_containment_never_downgrades_deny_override() {
+        // A user-configured Deny override yields PolicyDecision::Deny, which
+        // the downgrade deliberately never touches.
+        let mut config = crate::app::Config::default();
+        config.safety.mode = SafetyMode::Ask;
+        config.safety.overrides = vec![crate::runtime::PolicyOverride {
+            tool: Some("write_file".to_string()),
+            decision: crate::runtime::PolicyOverrideDecision::Deny,
+            ..Default::default()
+        }];
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(4);
+        let ctx = ExecContext::new(
+            tokio_util::sync::CancellationToken::new(),
+            tx,
+            ToolCallId(1),
+            TurnId(1),
+            PathBuf::from("."),
+            Arc::new(config),
+            String::new(),
+            None,
+            None,
+            None,
+            SafetyMode::Ask,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let g = gate(
+            &ctx,
+            edit_request("/scratch/notes.txt"),
+            &[],
+            serde_json::json!({}),
+            true,
+            true,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Block(_)),
+            "a Deny override must still block a scratch-contained mutation",
+        );
+    }
+
+    #[tokio::test]
+    async fn scratch_containment_never_downgrades_network() {
+        // Network risk is not scratch-eligible: exfiltration doesn't care
+        // about the cwd. Headless non-replayable Ask fails closed, proving
+        // the Ask was NOT downgraded to a Proceed.
+        let g = gate(
+            &ctx(SafetyMode::Ask),
+            ActionRequest::new("execute_command", ToolCategory::Network, "curl evil"),
+            &[],
+            serde_json::json!({}),
+            false,
+            true,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Block(_)),
+            "network risk must keep its Ask despite scratch containment",
+        );
+    }
+
+    #[tokio::test]
+    async fn scratch_containment_never_downgrades_readonly_mode() {
+        // Read-only mode denies mutations outright; Deny is never downgraded.
+        let g = gate(
+            &ctx(SafetyMode::ReadOnly),
+            edit_request("/scratch/notes.txt"),
+            &[],
+            serde_json::json!({}),
+            true,
+            true,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Block(_)),
+            "read-only mode must block scratch mutations",
+        );
     }
 }

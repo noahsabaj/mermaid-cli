@@ -116,6 +116,12 @@ pub struct ExecContext {
     /// Conversation length (`messages().len()`) at dispatch; pairs with
     /// `session_id` for checkpoint anchoring (see `CheckpointOrigin`).
     pub message_index: Option<i64>,
+    /// Per-session scratch directory, when the session has one materialized
+    /// (`Msg::ScratchpadReady`). Stamped by the reducer onto
+    /// `Cmd::ExecuteTool`; like `background`/`notify` it is field-set after
+    /// construction on the live path — `None` in tests and before the
+    /// directory is confirmed on disk.
+    pub scratchpad: Option<PathBuf>,
     /// Effective live safety mode for this call (from the session, not the
     /// static config; floored to `ReadOnly` while a plan is being drafted).
     /// The policy gate builds its `PolicyEngine` from this.
@@ -166,6 +172,7 @@ impl std::fmt::Debug for ExecContext {
             .field("task_id", &self.task_id)
             .field("session_id", &self.session_id)
             .field("message_index", &self.message_index)
+            .field("scratchpad", &self.scratchpad)
             .field("safety_mode", &self.safety_mode)
             .field("intent", &self.intent)
             .field(
@@ -215,6 +222,9 @@ impl ExecContext {
             plan_file: None,
             plan_permissions: crate::app::PlanPermissions::default(),
             context_percent: None,
+            // Field-set by the live execute path alongside `background`/
+            // `notify`; tests and bare contexts leave it unset.
+            scratchpad: None,
             progress,
             call_id,
             turn,

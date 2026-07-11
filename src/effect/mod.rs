@@ -567,6 +567,7 @@ impl EffectRunner {
                 intent,
                 session_id,
                 message_index,
+                scratchpad,
             } => {
                 let tx = self.msg_tx.clone();
                 let tools = self.tools.clone();
@@ -625,6 +626,7 @@ impl EffectRunner {
                         task_id,
                         session_id,
                         message_index,
+                        scratchpad,
                         safety_mode,
                         plan_file,
                         plan_permissions,
@@ -683,6 +685,42 @@ impl EffectRunner {
                 // startup resume). Synchronous; the broker does not publish
                 // back — the reducer already holds this store.
                 self.tasks.seed(store);
+            },
+            Cmd::EnsureScratchpad { session_id } => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    match crate::session::scratchpad::ensure(&workdir, &session_id) {
+                        Ok(path) => {
+                            let _ = tx.send(Msg::ScratchpadReady { session_id, path }).await;
+                        },
+                        Err(err) => {
+                            // Non-fatal: the session runs without a scratch
+                            // dir (`Session::scratchpad` stays `None`).
+                            tracing::warn!(error = %err, "failed to create session scratchpad");
+                        },
+                    }
+                    // Best-effort reap of unlocked scratchpads past retention —
+                    // piggybacks on session startup, no separate timer.
+                    if let Err(err) = crate::session::scratchpad::sweep_stale(
+                        crate::session::scratchpad::RETENTION_DAYS,
+                    ) {
+                        tracing::warn!(error = %err, "scratchpad sweep failed");
+                    }
+                });
+            },
+            Cmd::ListScratchpad { path } => {
+                // `/scratchpad` — bounded directory listing back into the
+                // transcript. Blocking filesystem walk, so off the runner.
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let text = tokio::task::spawn_blocking(move || {
+                        crate::session::scratchpad::list_text(&path)
+                    })
+                    .await
+                    .unwrap_or_else(|e| format!("Couldn't list the scratchpad: {e}"));
+                    let _ = tx.send(Msg::RuntimeText(text)).await;
+                });
             },
             Cmd::UserTaskEdit(edit) => {
                 // Route the user's /tasks edit through the broker (single
@@ -2553,6 +2591,7 @@ async fn dispatch_execute_tool(
     task_id: Option<String>,
     session_id: String,
     message_index: usize,
+    scratchpad: Option<PathBuf>,
     safety_mode: crate::runtime::SafetyMode,
     plan_file: Option<PathBuf>,
     plan_permissions: crate::app::PlanPermissions,
@@ -2685,6 +2724,8 @@ async fn dispatch_execute_tool(
     // Detached work (backgrounded subagents) reports back through the main
     // msg channel after this turn's progress relay is gone.
     ctx.notify = Some(msg_tx.clone());
+    // Per-session scratch dir, when the session has one materialized.
+    ctx.scratchpad = scratchpad;
     // `before_tool_use` is the one DECISION event: an enabled plugin hook may
     // deny the call, rewrite its arguments, or inject context for the next
     // model request. Every other event stays fire-and-forget.
@@ -3442,6 +3483,7 @@ mod tests {
             intent: None,
             session_id: "sess-test".to_string(),
             message_index: 0,
+            scratchpad: None,
         });
         let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await

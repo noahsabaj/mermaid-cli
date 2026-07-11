@@ -22,9 +22,9 @@ use crate::runtime::apply_patch::{Hunk, UpdateFileChunk, derive_new_contents, pa
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
 use super::filesystem::{after_file_mutation, diff_summary, mutation_policy_outcome};
-use super::path_safety::{relative_within, resolve_path_safe};
+use super::path_safety::{AllowedRoots, ResolvedInRoot, resolve_in_roots};
 
-const APPLY_PATCH_DESCRIPTION: &str = "Edit files with a patch. Pass `patch` as one string in this exact envelope:\n*** Begin Patch\n*** Update File: <path>\n@@ <optional anchor line, e.g. a function signature>\n <unchanged context line>\n-<line to remove>\n+<line to add>\n*** End Patch\nUse '*** Add File: <path>' then '+'-prefixed lines to create a file; '*** Delete File: <path>' to remove one; '*** Move to: <path>' immediately after an Update File line to rename. Include a few unchanged context lines (prefixed with a space) around each change so the edit can be located; matching tolerates whitespace/quote drift.";
+const APPLY_PATCH_DESCRIPTION: &str = "Edit files with a patch. Pass `patch` as one string in this exact envelope:\n*** Begin Patch\n*** Update File: <path>\n@@ <optional anchor line, e.g. a function signature>\n <unchanged context line>\n-<line to remove>\n+<line to add>\n*** End Patch\nUse '*** Add File: <path>' then '+'-prefixed lines to create a file; '*** Delete File: <path>' to remove one; '*** Move to: <path>' immediately after an Update File line to rename. Include a few unchanged context lines (prefixed with a space) around each change so the edit can be located; matching tolerates whitespace/quote drift. Paths must resolve inside the project directory or the session scratchpad.";
 
 /// The `apply_patch` tool: apply a `*** Begin Patch … *** End Patch` envelope.
 pub struct ApplyPatchTool;
@@ -61,7 +61,7 @@ impl ToolExecutor for ApplyPatchTool {
             Ok(h) => h,
             Err(e) => return ToolOutcome::error(format!("apply_patch: {e}"), 0.0),
         };
-        let (ops, abs_paths) = match plan_ops(&ctx, &hunks) {
+        let (ops, paths) = match plan_ops(&ctx, &hunks) {
             Ok(v) => v,
             Err(e) => return ToolOutcome::error(format!("apply_patch: {e}"), 0.0),
         };
@@ -79,12 +79,15 @@ impl ToolExecutor for ApplyPatchTool {
             "call_id": ctx.call_id.0,
             "task_id": ctx.task_id.clone(),
         });
+        // Only project files are checkpointable; the gate bypasses entirely
+        // when EVERY hunk lands in the session scratchpad.
         if let Some(outcome) = mutation_policy_outcome(
             &ctx,
             "apply_patch",
             &summary_path,
-            &abs_paths,
+            &paths.project,
             pending_action,
+            paths.all_scratch,
         )
         .await
         {
@@ -96,12 +99,15 @@ impl ToolExecutor for ApplyPatchTool {
         let _guards = tokio::select! {
             biased;
             _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
-            g = super::path_lock::lock_paths(&abs_paths) => g,
+            g = super::path_lock::lock_paths(&paths.all) => g,
         };
+        // Scratchpad files are session-private and ephemeral — checkpoint only
+        // the project-rooted subset, and skip entirely when there is none.
         if ctx.config.safety.checkpoint_on_mutation
+            && !paths.project.is_empty()
             && let Err(e) = crate::runtime::create_checkpoint_for_task(
                 &ctx.workdir,
-                &abs_paths,
+                &paths.project,
                 Some(serde_json::json!({ "tool": "apply_patch" })),
                 ctx.checkpoint_origin(),
             )
@@ -109,11 +115,10 @@ impl ToolExecutor for ApplyPatchTool {
             return ToolOutcome::error(format!("apply_patch checkpoint failed: {e}"), 0.0);
         }
 
-        let workdir = ctx.workdir.clone();
         let report = tokio::select! {
             biased;
             _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || apply_all_blocking(&workdir, &ops)) => {
+            result = tokio::task::spawn_blocking(move || apply_all_blocking(&ops)) => {
                 match result {
                     Ok(Ok(report)) => report,
                     Ok(Err(e)) => {
@@ -131,18 +136,24 @@ impl ToolExecutor for ApplyPatchTool {
 }
 
 /// One resolved file operation, ready to apply under the confined pathguard.
+/// Each op carries the root it resolved into (project workdir or session
+/// scratchpad); `rel` paths are relative to that root.
 enum PlannedOp {
     Add {
+        root: PathBuf,
         rel: PathBuf,
         display: String,
         contents: String,
     },
     Delete {
+        root: PathBuf,
         rel: PathBuf,
         display: String,
     },
     Update {
+        src_root: PathBuf,
         src_rel: PathBuf,
+        dst_root: PathBuf,
         dst_rel: PathBuf,
         src_display: String,
         dst_display: String,
@@ -159,33 +170,52 @@ impl PlannedOp {
     }
 }
 
-/// Resolve each hunk's path(s) into workdir-relative ops, rejecting any escape,
-/// and collect the sorted, de-duplicated absolute paths (for locking + one
-/// checkpoint).
-fn plan_ops(ctx: &ExecContext, hunks: &[Hunk]) -> Result<(Vec<PlannedOp>, Vec<PathBuf>), String> {
+/// Path bookkeeping for one patch: every affected canonical path (for
+/// locking), the project-rooted subset (for gating + checkpointing), and
+/// whether every hunk landed in the session scratchpad (which ungates the
+/// mutation, see `mutation_policy_outcome`).
+struct PatchPaths {
+    all: Vec<PathBuf>,
+    project: Vec<PathBuf>,
+    all_scratch: bool,
+}
+
+/// Resolve each hunk's path(s) into root-relative ops (project workdir or
+/// session scratchpad), rejecting any escape, and collect the sorted,
+/// de-duplicated absolute paths.
+fn plan_ops(ctx: &ExecContext, hunks: &[Hunk]) -> Result<(Vec<PlannedOp>, PatchPaths), String> {
+    let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
     let mut ops = Vec::new();
-    let mut abs: Vec<PathBuf> = Vec::new();
-    let remember = |p: PathBuf, set: &mut Vec<PathBuf>| {
-        if !set.contains(&p) {
-            set.push(p);
+    let mut all: Vec<PathBuf> = Vec::new();
+    let mut project: Vec<PathBuf> = Vec::new();
+    fn remember(r: &ResolvedInRoot, all: &mut Vec<PathBuf>, project: &mut Vec<PathBuf>) {
+        if !all.contains(&r.abs) {
+            all.push(r.abs.clone());
         }
-    };
+        if !r.in_scratchpad && !project.contains(&r.abs) {
+            project.push(r.abs.clone());
+        }
+    }
     for hunk in hunks {
         match hunk {
             Hunk::AddFile { path, contents } => {
                 let raw = path.to_string_lossy().to_string();
-                remember(resolve_path_safe(&ctx.workdir, &raw)?, &mut abs);
+                let resolved = resolve_in_roots(&roots, &raw)?;
+                remember(&resolved, &mut all, &mut project);
                 ops.push(PlannedOp::Add {
-                    rel: relative_within(&ctx.workdir, &raw)?,
+                    root: resolved.root,
+                    rel: resolved.rel,
                     display: raw,
                     contents: contents.clone(),
                 });
             },
             Hunk::DeleteFile { path } => {
                 let raw = path.to_string_lossy().to_string();
-                remember(resolve_path_safe(&ctx.workdir, &raw)?, &mut abs);
+                let resolved = resolve_in_roots(&roots, &raw)?;
+                remember(&resolved, &mut all, &mut project);
                 ops.push(PlannedOp::Delete {
-                    rel: relative_within(&ctx.workdir, &raw)?,
+                    root: resolved.root,
+                    rel: resolved.rel,
                     display: raw,
                 });
             },
@@ -195,18 +225,21 @@ fn plan_ops(ctx: &ExecContext, hunks: &[Hunk]) -> Result<(Vec<PlannedOp>, Vec<Pa
                 chunks,
             } => {
                 let raw = path.to_string_lossy().to_string();
-                remember(resolve_path_safe(&ctx.workdir, &raw)?, &mut abs);
-                let src_rel = relative_within(&ctx.workdir, &raw)?;
-                let (dst_rel, dst_display) = match move_path {
+                let src = resolve_in_roots(&roots, &raw)?;
+                remember(&src, &mut all, &mut project);
+                let (dst_root, dst_rel, dst_display) = match move_path {
                     Some(mv) => {
                         let mv_raw = mv.to_string_lossy().to_string();
-                        remember(resolve_path_safe(&ctx.workdir, &mv_raw)?, &mut abs);
-                        (relative_within(&ctx.workdir, &mv_raw)?, mv_raw)
+                        let dst = resolve_in_roots(&roots, &mv_raw)?;
+                        remember(&dst, &mut all, &mut project);
+                        (dst.root, dst.rel, mv_raw)
                     },
-                    None => (src_rel.clone(), raw.clone()),
+                    None => (src.root.clone(), src.rel.clone(), raw.clone()),
                 };
                 ops.push(PlannedOp::Update {
-                    src_rel,
+                    src_root: src.root,
+                    src_rel: src.rel,
+                    dst_root,
                     dst_rel,
                     src_display: raw,
                     dst_display,
@@ -215,16 +248,27 @@ fn plan_ops(ctx: &ExecContext, hunks: &[Hunk]) -> Result<(Vec<PlannedOp>, Vec<Pa
             },
         }
     }
-    abs.sort();
-    Ok((ops, abs))
+    all.sort();
+    project.sort();
+    let all_scratch = !all.is_empty() && project.is_empty();
+    Ok((
+        ops,
+        PatchPaths {
+            all,
+            project,
+            all_scratch,
+        },
+    ))
 }
 
-/// Apply every planned op under `workdir`, accumulating a report + display diff.
-fn apply_all_blocking(workdir: &Path, ops: &[PlannedOp]) -> Result<ApplyReport, String> {
+/// Apply every planned op under its resolved root, accumulating a report +
+/// display diff.
+fn apply_all_blocking(ops: &[PlannedOp]) -> Result<ApplyReport, String> {
     let mut report = ApplyReport::default();
     for op in ops {
         match op {
             PlannedOp::Add {
+                root,
                 rel,
                 display,
                 contents,
@@ -236,26 +280,28 @@ fn apply_all_blocking(workdir: &Path, ops: &[PlannedOp]) -> Result<ApplyReport, 
                 } else {
                     format!("{contents}\n")
                 };
-                ensure_parent(workdir, rel)?;
-                crate::runtime::write_atomic_beneath(workdir, rel, body.as_bytes())
+                ensure_parent(root, rel)?;
+                crate::runtime::write_atomic_beneath(root, rel, body.as_bytes())
                     .map_err(|e| format!("{display}: {e}"))?;
                 report.added.push(display.clone());
                 report.push_diff(&format!("A {display}"), &generate_display_diff("", &body));
             },
-            PlannedOp::Delete { rel, display } => {
-                crate::runtime::remove_file_beneath(workdir, rel)
+            PlannedOp::Delete { root, rel, display } => {
+                crate::runtime::remove_file_beneath(root, rel)
                     .map_err(|e| format!("{display}: {e}"))?;
                 report.deleted.push(display.clone());
                 report.push_line(format!("=== D {display} ==="));
             },
             PlannedOp::Update {
+                src_root,
                 src_rel,
+                dst_root,
                 dst_rel,
                 src_display,
                 dst_display,
                 chunks,
             } => {
-                let original = read_capped_beneath(workdir, src_rel, MAX_PATCH_FILE_BYTES)
+                let original = read_capped_beneath(src_root, src_rel, MAX_PATCH_FILE_BYTES)
                     .map_err(|e| format!("{src_display}: {e}"))?
                     .ok_or_else(|| {
                         format!(
@@ -265,19 +311,19 @@ fn apply_all_blocking(workdir: &Path, ops: &[PlannedOp]) -> Result<ApplyReport, 
                 let applied = derive_new_contents(&original, chunks)
                     .map_err(|e| format!("{dst_display}: {e}"))?;
                 report.fuzzy |= applied.fuzzy;
-                ensure_parent(workdir, dst_rel)?;
+                ensure_parent(dst_root, dst_rel)?;
                 crate::runtime::write_atomic_beneath(
-                    workdir,
+                    dst_root,
                     dst_rel,
                     applied.new_contents.as_bytes(),
                 )
                 .map_err(|e| format!("{dst_display}: {e}"))?;
                 let diff = generate_display_diff(&original, &applied.new_contents);
-                if src_rel == dst_rel {
+                if src_root == dst_root && src_rel == dst_rel {
                     report.modified.push(dst_display.clone());
                     report.push_diff(&format!("M {dst_display}"), &diff);
                 } else {
-                    crate::runtime::remove_file_beneath(workdir, src_rel)
+                    crate::runtime::remove_file_beneath(src_root, src_rel)
                         .map_err(|e| format!("{src_display}: {e}"))?;
                     report
                         .renamed
@@ -290,22 +336,22 @@ fn apply_all_blocking(workdir: &Path, ops: &[PlannedOp]) -> Result<ApplyReport, 
     Ok(report)
 }
 
-fn ensure_parent(workdir: &Path, rel: &Path) -> Result<(), String> {
+fn ensure_parent(root: &Path, rel: &Path) -> Result<(), String> {
     if let Some(parent) = rel.parent()
         && !parent.as_os_str().is_empty()
     {
-        crate::runtime::create_dir_all_beneath(workdir, parent)
+        crate::runtime::create_dir_all_beneath(root, parent)
             .map_err(|e| format!("{}: {e}", rel.display()))?;
     }
     Ok(())
 }
 
-/// Bounded read of `rel` beneath `workdir` via the confined helper. Returns
+/// Bounded read of `rel` beneath `root` via the confined helper. Returns
 /// `None` when the file exceeds `cap` (so the caller refuses rather than patch a
 /// partially-read file).
-fn read_capped_beneath(workdir: &Path, rel: &Path, cap: usize) -> std::io::Result<Option<String>> {
+fn read_capped_beneath(root: &Path, rel: &Path, cap: usize) -> std::io::Result<Option<String>> {
     use std::io::Read;
-    let file = crate::runtime::open_beneath(workdir, rel, crate::runtime::OpenIntent::Read)?;
+    let file = crate::runtime::open_beneath(root, rel, crate::runtime::OpenIntent::Read)?;
     let mut buf = Vec::new();
     file.take(cap as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() > cap {

@@ -104,6 +104,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survives `--resume`. Approval flow, task seeding, per-category plan
   permissions, model split, and handoff land in follow-up PRs.
 
+- **Per-session scratchpad.** Every session now gets a private 0700 scratch
+  directory under the system temp dir
+  (`<temp>/mermaid-<uid>/<project-slug>/<session-id>/scratchpad`), recreated
+  on `/clear`, `/load`, and rewind forks.
+  Shell commands receive its absolute path as `MERMAID_SCRATCHPAD`, the
+  file tools accept absolute paths inside it, and subagents share the
+  parent session's directory. Writes there are never checkpointed and skip
+  approval gating (read-only mode still blocks them), making it the cheap
+  place for intermediate artifacts. New `/scratchpad` command prints a
+  bounded listing, `/doctor` reports the path, deleting a saved
+  conversation removes its scratchpad, and stale unlocked directories are
+  swept on session startup (mermaidd tunes the window via
+  `daemon.scratchpad_retention_days`).
+
 - **Native structured output on Anthropic.** `mermaid run --output-schema`
   now sends the schema as `output_config.format` (JSON Schema) on the
   Anthropic formatting turn, matching the native enforcement already used

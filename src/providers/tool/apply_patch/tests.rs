@@ -181,3 +181,65 @@ async fn malformed_patch_is_an_error() {
     assert!(!out.is_success(), "a non-patch string must error");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A patch whose every hunk lands in the session scratchpad is ungated: it
+/// applies in Ask mode with NO approval broker bound (the all-hunks-contained
+/// flag bypasses the policy gate), writing into the scratch root.
+#[tokio::test]
+async fn all_scratch_patch_is_ungated() {
+    let base = tmp("scratch");
+    let project = base.join("project");
+    let scratch = base.join("scratch");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&scratch).unwrap();
+
+    let mut config = crate::app::Config::default();
+    config.safety.mode = crate::runtime::SafetyMode::Ask;
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let mut ctx = crate::providers::ctx::ExecContext::new(
+        tokio_util::sync::CancellationToken::new(),
+        tx,
+        ToolCallId(1),
+        TurnId(1),
+        project.clone(),
+        std::sync::Arc::new(config),
+        String::new(),
+        None,
+        None,
+        None,
+        crate::runtime::SafetyMode::Ask,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    ctx.scratchpad = Some(scratch.clone());
+
+    let target = scratch.join("plan.md");
+    let patch = format!(
+        "*** Begin Patch\n*** Add File: {}\n+scratch plan\n*** End Patch",
+        target.display()
+    );
+    let out = ApplyPatchTool
+        .execute(serde_json::json!({ "patch": patch }), ctx)
+        .await;
+    assert!(out.is_success(), "{out:?}");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "scratch plan\n");
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// Without a scratchpad, an absolute scratch-shaped path stays rejected.
+#[tokio::test]
+async fn absolute_path_without_scratchpad_is_rejected() {
+    let dir = tmp("noscratch");
+    let outside = std::env::temp_dir().join("mermaid_applypatch_not_a_root/x.txt");
+    let patch = format!(
+        "*** Begin Patch\n*** Add File: {}\n+pwned\n*** End Patch",
+        outside.display()
+    );
+    let out = run(&dir, &patch).await;
+    assert!(!out.is_success(), "outside-root add must be rejected");
+    assert!(!outside.exists());
+    let _ = fs::remove_dir_all(&dir);
+}

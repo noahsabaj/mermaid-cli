@@ -670,6 +670,7 @@ mod tests {
                 | MsgKind::ConversationLoaded
                 | MsgKind::ConversationsListed
                 | MsgKind::ProjectFilesListed
+                | MsgKind::ScratchpadReady
                 | MsgKind::RuntimeStore
                 | MsgKind::ModelPullFinished
                 | MsgKind::ModelPullProgress
@@ -922,6 +923,10 @@ mod tests {
                 updated_at: "2026-07-02".to_string(),
             }]),
             Msg::ProjectFilesListed(vec!["src/main.rs".to_string(), "docs/".to_string()]),
+            Msg::ScratchpadReady {
+                session_id: "20260702_120000_123".to_string(),
+                path: std::path::PathBuf::from("/data/tmp/scratchpad/-proj/20260702_120000_123"),
+            },
             Msg::RuntimeText("daemon says hi".to_string()),
             Msg::RuntimeTasksListed(Vec::new()),
             Msg::RuntimeTaskLoaded {

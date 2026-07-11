@@ -139,7 +139,7 @@ pub async fn run_interactive_with(
 
     // Boot effects: MCP server init (if configured). Instructions/memory are
     // loaded by the config watcher started above (#45), not here.
-    for cmd in bootstrap_cmds(&config) {
+    for cmd in bootstrap_cmds(&config, &state.session.conversation.id) {
         runner.dispatch(cmd);
     }
     // A resumed session may carry an in-flight checklist; hand it to the
@@ -413,15 +413,22 @@ pub async fn run_interactive_with(
 }
 
 /// Commands dispatched on startup before the first iteration of the
-/// loop. Fires MCP init (if configured). Instructions/memory are loaded
-/// by the config watcher (#45), not here.
-fn bootstrap_cmds(config: &Config) -> Vec<Cmd> {
+/// loop. Fires MCP init (if configured) and materializes the session's
+/// scratch directory. Instructions/memory are loaded by the config
+/// watcher (#45), not here.
+fn bootstrap_cmds(config: &Config, session_id: &str) -> Vec<Cmd> {
     // Instructions/memory load + stay fresh via the config watcher (#45),
-    // started in `run_interactive_with`. Bootstrap only handles MCP init.
+    // started in `run_interactive_with`.
     let mut cmds = Vec::new();
     if !config.mcp_servers.is_empty() {
         cmds.push(Cmd::InitMcpServers(config.mcp_servers.clone()));
     }
+    // Every session gets a scratch dir — `session_id` is captured AFTER any
+    // `--continue`/`--resume` seed, so a resumed session adopts the dir
+    // keyed by its restored conversation id.
+    cmds.push(Cmd::EnsureScratchpad {
+        session_id: session_id.to_string(),
+    });
     cmds
 }
 
@@ -430,16 +437,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bootstrap_is_empty_without_mcp_servers() {
-        // Instructions/memory load via the config watcher (#45), not bootstrap;
-        // with no MCP servers configured, bootstrap emits nothing.
-        let cmds = bootstrap_cmds(&Config::default());
-        assert!(cmds.is_empty());
+    fn bootstrap_always_ensures_the_session_scratchpad() {
+        // Instructions/memory load via the config watcher (#45), not
+        // bootstrap; with no MCP servers configured, only the scratchpad
+        // ensure remains — keyed by the caller's session id.
+        let cmds = bootstrap_cmds(&Config::default(), "sess-1");
+        assert_eq!(cmds.len(), 1);
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, Cmd::EnsureScratchpad { session_id } if session_id == "sess-1")
+            )
+        );
     }
 
     #[test]
     fn bootstrap_skips_mcp_init_when_no_servers_configured() {
-        let cmds = bootstrap_cmds(&Config::default());
+        let cmds = bootstrap_cmds(&Config::default(), "sess-1");
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::InitMcpServers(_))));
     }
 
@@ -455,7 +468,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let cmds = bootstrap_cmds(&cfg);
+        let cmds = bootstrap_cmds(&cfg, "sess-1");
         assert!(cmds.iter().any(|c| matches!(c, Cmd::InitMcpServers(_))));
     }
 }

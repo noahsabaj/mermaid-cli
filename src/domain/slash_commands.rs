@@ -135,6 +135,13 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
+        name: "scratchpad",
+        aliases: &[],
+        description: "Show the session scratch directory and its contents",
+        arg_hint: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
         name: "usage",
         aliases: &[],
         description: "Show provider token usage and session totals",

@@ -21,7 +21,7 @@ use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
-use super::path_safety::{relative_within, resolve_path_safe};
+use super::path_safety::{AllowedRoots, ResolvedInRoot, resolve_in_roots};
 
 /// Small helper for building a `ToolDefinition` with a typical
 /// JSON-schema-shaped input_schema. Keeps the per-tool definitions
@@ -54,7 +54,7 @@ impl ToolExecutor for ReadFileTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "read_file",
-            "Read the contents of one or more files from disk. Prefer relative paths; absolute paths must resolve inside the project directory or the call is rejected.",
+            "Read the contents of one or more files from disk. Prefer relative paths; absolute paths must resolve inside the project directory or the session scratchpad or the call is rejected.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -83,7 +83,7 @@ impl ToolExecutor for ReadFileTool {
         }
 
         let start = std::time::Instant::now();
-        let workdir = ctx.workdir.clone();
+        let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
         let mut combined = String::new();
         let mut any_truncated = false;
 
@@ -95,7 +95,7 @@ impl ToolExecutor for ReadFileTool {
                 _ = ctx.token.cancelled() => {
                     return ToolOutcome::cancelled();
                 },
-                read = read_one(&workdir, raw_path) => {
+                read = read_one(&roots, raw_path) => {
                     match read {
                         Ok((content, was_truncated)) => {
                             any_truncated |= was_truncated;
@@ -176,7 +176,7 @@ impl ToolExecutor for DeleteFileTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "delete_file",
-            "Remove a file from disk. Fails on directories — use `execute_command rm -rf` for those.",
+            "Remove a file from disk. Paths must resolve inside the project directory or the session scratchpad. Fails on directories — use `execute_command rm -rf` for those.",
             serde_json::json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -190,11 +190,13 @@ impl ToolExecutor for DeleteFileTool {
             return err("delete_file requires 'path'", 0.0);
         };
         let start = std::time::Instant::now();
-        let abs = match resolve_path_safe(&ctx.workdir, raw_path) {
-            Ok(p) => p,
-            Err(e) => return err(&format!("delete_file: {}", e), 0.0),
-        };
-        let rel = match relative_within(&ctx.workdir, raw_path) {
+        let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
+        let ResolvedInRoot {
+            abs,
+            rel,
+            root,
+            in_scratchpad,
+        } = match resolve_in_roots(&roots, raw_path) {
             Ok(r) => r,
             Err(e) => return err(&format!("delete_file: {}", e), 0.0),
         };
@@ -212,6 +214,7 @@ impl ToolExecutor for DeleteFileTool {
             raw_path,
             std::slice::from_ref(&abs),
             pending_action,
+            in_scratchpad,
         )
         .await
         {
@@ -226,7 +229,10 @@ impl ToolExecutor for DeleteFileTool {
             _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
             g = super::path_lock::lock_path(&abs) => g,
         };
+        // Scratchpad files are session-private and ephemeral — never
+        // checkpointed into the project's restore history.
         if ctx.config.safety.checkpoint_on_mutation
+            && !in_scratchpad
             && let Err(e) = crate::runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 std::slice::from_ref(&abs),
@@ -240,12 +246,11 @@ impl ToolExecutor for DeleteFileTool {
             return err(&format!("delete_file checkpoint failed: {}", e), 0.0);
         }
         let display = raw_path.to_string();
-        let workdir = ctx.workdir.clone();
 
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || crate::runtime::remove_file_beneath(&workdir, &rel)) => {
+            result = tokio::task::spawn_blocking(move || crate::runtime::remove_file_beneath(&root, &rel)) => {
                 match result {
                     Ok(Ok(())) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -282,7 +287,7 @@ impl ToolExecutor for CreateDirectoryTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "create_directory",
-            "Create a directory (and any missing parents) at the given path.",
+            "Create a directory (and any missing parents) at the given path, inside the project directory or the session scratchpad.",
             serde_json::json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -296,11 +301,13 @@ impl ToolExecutor for CreateDirectoryTool {
             return err("create_directory requires 'path'", 0.0);
         };
         let start = std::time::Instant::now();
-        let abs = match resolve_path_safe(&ctx.workdir, raw_path) {
-            Ok(p) => p,
-            Err(e) => return err(&format!("create_directory: {}", e), 0.0),
-        };
-        let rel = match relative_within(&ctx.workdir, raw_path) {
+        let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
+        let ResolvedInRoot {
+            abs,
+            rel,
+            root,
+            in_scratchpad,
+        } = match resolve_in_roots(&roots, raw_path) {
             Ok(r) => r,
             Err(e) => return err(&format!("create_directory: {}", e), 0.0),
         };
@@ -318,6 +325,7 @@ impl ToolExecutor for CreateDirectoryTool {
             raw_path,
             std::slice::from_ref(&abs),
             pending_action,
+            in_scratchpad,
         )
         .await
         {
@@ -330,7 +338,9 @@ impl ToolExecutor for CreateDirectoryTool {
             _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
             g = super::path_lock::lock_path(&abs) => g,
         };
+        // Scratchpad dirs are session-private and ephemeral — never checkpointed.
         if ctx.config.safety.checkpoint_on_mutation
+            && !in_scratchpad
             && let Err(e) = crate::runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 std::slice::from_ref(&abs),
@@ -344,12 +354,11 @@ impl ToolExecutor for CreateDirectoryTool {
             return err(&format!("create_directory checkpoint failed: {}", e), 0.0);
         }
         let display = raw_path.to_string();
-        let workdir = ctx.workdir.clone();
 
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || crate::runtime::create_dir_all_beneath(&workdir, &rel)) => {
+            result = tokio::task::spawn_blocking(move || crate::runtime::create_dir_all_beneath(&root, &rel)) => {
                 match result {
                     Ok(Ok(())) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -386,7 +395,7 @@ impl ToolExecutor for WriteFileTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "write_file",
-            "Write (overwrite) a file at `path` with `content`. Creates parent directories automatically. Prefer `edit_file` for small targeted changes.",
+            "Write (overwrite) a file at `path` with `content`. Creates parent directories automatically. Paths must resolve inside the project directory or the session scratchpad. Prefer `edit_file` for small targeted changes.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -407,12 +416,15 @@ impl ToolExecutor for WriteFileTool {
         };
 
         let start = std::time::Instant::now();
-        let abs_path = match resolve_path_safe(&ctx.workdir, path) {
-            Ok(p) => p,
-            Err(e) => return ToolOutcome::error(format!("write_file: {}", e), 0.0),
-        };
-        // Workdir-relative name for the confined fd write (the actual byte path).
-        let rel = match relative_within(&ctx.workdir, path) {
+        let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
+        // `rel` is the root-relative name for the confined fd write (the actual
+        // byte path).
+        let ResolvedInRoot {
+            abs: abs_path,
+            rel,
+            root,
+            in_scratchpad,
+        } = match resolve_in_roots(&roots, path) {
             Ok(r) => r,
             Err(e) => return ToolOutcome::error(format!("write_file: {}", e), 0.0),
         };
@@ -430,6 +442,7 @@ impl ToolExecutor for WriteFileTool {
             path,
             std::slice::from_ref(&abs_path),
             pending_action,
+            in_scratchpad,
         )
         .await
         {
@@ -444,7 +457,9 @@ impl ToolExecutor for WriteFileTool {
             _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
             g = super::path_lock::lock_path(&abs_path) => g,
         };
+        // Scratchpad files are session-private and ephemeral — never checkpointed.
         if ctx.config.safety.checkpoint_on_mutation
+            && !in_scratchpad
             && let Err(e) = crate::runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 std::slice::from_ref(&abs_path),
@@ -461,7 +476,6 @@ impl ToolExecutor for WriteFileTool {
         let line_count = content.lines().count();
         let byte_count = content.len();
         let content = content.to_string();
-        let workdir = ctx.workdir.clone();
 
         tokio::select! {
             biased;
@@ -469,7 +483,7 @@ impl ToolExecutor for WriteFileTool {
             // The prior-content read (for the display diff) now happens INSIDE
             // this blocking job and BOUNDED (#F44/RC-L) — never a synchronous
             // unbounded `read_to_string` on the async worker thread.
-            result = tokio::task::spawn_blocking(move || write_with_diff_blocking(&workdir, &abs_path, &rel, &content)) => {
+            result = tokio::task::spawn_blocking(move || write_with_diff_blocking(&root, &abs_path, &rel, &content)) => {
                 match result {
                     Ok(Ok(write)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -540,19 +554,16 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
 /// REAL truncation flag from the bounded read, so the caller propagates that
 /// rather than sniffing the output for the marker string — which a file whose
 /// own content contains that literal text would otherwise falsely trip (#78).
-async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<(String, bool)> {
-    // Canonical containment gate — rejects escapes (incl. existing symlinks that
-    // resolve outside the project) before we touch the file.
-    resolve_path_safe(workdir, raw)
+async fn read_one(roots: &AllowedRoots<'_>, raw: &str) -> std::io::Result<(String, bool)> {
+    // Canonical containment gate — rejects escapes (incl. existing symlinks
+    // that resolve outside the allowed roots) before we touch the file, and
+    // names the root-relative path for the confined fd read, so the bytes come
+    // from the inode the kernel resolved under RESOLVE_BENEATH rather than
+    // whatever a concurrently-swapped symlink now points at (#77).
+    let ResolvedInRoot { rel, root, .. } = resolve_in_roots(roots, raw)
         .map_err(|msg| std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg))?;
-    // Workdir-relative name for the confined fd read, so the bytes come from the
-    // inode the kernel resolved under RESOLVE_BENEATH rather than whatever a
-    // concurrently-swapped symlink now points at (#77).
-    let rel = relative_within(workdir, raw)
-        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg))?;
-    let workdir = workdir.to_path_buf();
     let result = tokio::task::spawn_blocking(move || {
-        let file = crate::runtime::open_beneath(&workdir, &rel, crate::runtime::OpenIntent::Read)?;
+        let file = crate::runtime::open_beneath(&root, &rel, crate::runtime::OpenIntent::Read)?;
         // Bounded read: never pull more than the cap (+1 probe byte) into RAM,
         // so a model pointing `read_file` at a multi-gigabyte file can't OOM the
         // process — a full read would have slurped the whole thing first (#15).
@@ -571,20 +582,21 @@ async fn read_one(workdir: &Path, raw: &str) -> std::io::Result<(String, bool)> 
     Ok(result)
 }
 
-/// Write `content` to `rel` beneath `workdir` through the symlink-confined
-/// *atomic* writer, creating parent dirs the same confined way. The bytes are
-/// written to a temp and `renameat`-swapped over the target, all beneath the
-/// directory fd the kernel resolved under `RESOLVE_BENEATH`: a parent dir
-/// swapped for an escaping symlink can't redirect the write (#77), and a
-/// crash/kill/disk-full mid-write leaves the previous file intact rather than a
-/// truncated or half-written one.
-fn write_one_blocking(workdir: &Path, rel: &Path, content: &str) -> std::io::Result<usize> {
+/// Write `content` to `rel` beneath `root` (the project workdir or the session
+/// scratchpad) through the symlink-confined *atomic* writer, creating parent
+/// dirs the same confined way. The bytes are written to a temp and
+/// `renameat`-swapped over the target, all beneath the directory fd the kernel
+/// resolved under `RESOLVE_BENEATH`: a parent dir swapped for an escaping
+/// symlink can't redirect the write (#77), and a crash/kill/disk-full
+/// mid-write leaves the previous file intact rather than a truncated or
+/// half-written one.
+fn write_one_blocking(root: &Path, rel: &Path, content: &str) -> std::io::Result<usize> {
     if let Some(parent) = rel.parent()
         && !parent.as_os_str().is_empty()
     {
-        crate::runtime::create_dir_all_beneath(workdir, parent)?;
+        crate::runtime::create_dir_all_beneath(root, parent)?;
     }
-    crate::runtime::write_atomic_beneath(workdir, rel, content.as_bytes())?;
+    crate::runtime::write_atomic_beneath(root, rel, content.as_bytes())?;
     Ok(content.lines().count())
 }
 
@@ -601,7 +613,7 @@ struct WriteResult {
 /// larger than the read cap (or otherwise unreadable) is elided from the diff
 /// rather than read whole.
 fn write_with_diff_blocking(
-    workdir: &Path,
+    root: &Path,
     abs_path: &Path,
     rel: &Path,
     content: &str,
@@ -629,7 +641,7 @@ fn write_with_diff_blocking(
     } else {
         crate::render::diff::generate_display_diff(&old_content, content)
     };
-    let line_count = write_one_blocking(workdir, rel, content)?;
+    let line_count = write_one_blocking(root, rel, content)?;
     Ok(WriteResult {
         line_count,
         created,
@@ -637,12 +649,18 @@ fn write_with_diff_blocking(
     })
 }
 
+/// `scratch_contained` is true when the mutation touches ONLY the session
+/// scratchpad (`ResolvedInRoot::in_scratchpad`). The gate downgrades an
+/// `Ask`/`Classify` on such a mutation to proceed — scratch files are
+/// session-private and ephemeral — while read-only mode and `Deny` overrides
+/// still block it.
 pub(super) async fn mutation_policy_outcome(
     ctx: &ExecContext,
     tool: &str,
     path: &str,
     checkpoint_paths: &[PathBuf],
     pending_action: serde_json::Value,
+    scratch_contained: bool,
 ) -> Option<ToolOutcome> {
     let mut request = crate::runtime::ActionRequest::new(
         tool,
@@ -652,7 +670,16 @@ pub(super) async fn mutation_policy_outcome(
     request.path = Some(path.to_string());
     // File mutations are replayable: an Ask decision checkpoints, records an
     // approval, and blocks (handled inside the gate).
-    match super::policy_gate::gate(ctx, request, checkpoint_paths, pending_action, true).await {
+    match super::policy_gate::gate(
+        ctx,
+        request,
+        checkpoint_paths,
+        pending_action,
+        true,
+        scratch_contained,
+    )
+    .await
+    {
         super::policy_gate::Gate::Block(outcome) => Some(outcome),
         super::policy_gate::Gate::Proceed { .. } => {
             let _ = crate::runtime::run_plugin_hooks(
@@ -718,23 +745,23 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn resolve_path_safe_contains_to_workdir() {
+    fn resolve_in_roots_contains_to_workdir() {
         let root = std::env::temp_dir().join(format!("mermaid_rps_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("sub")).unwrap();
+        let roots = AllowedRoots::new(&root, None);
 
         // In-root existing + not-yet-existing targets resolve inside root.
-        assert!(resolve_path_safe(&root, "sub").is_ok());
-        assert!(resolve_path_safe(&root, "sub/new.txt").is_ok());
-        let resolved = resolve_path_safe(&root, "sub/new.txt").unwrap();
+        assert!(resolve_in_roots(&roots, "sub").is_ok());
+        let resolved = resolve_in_roots(&roots, "sub/new.txt").unwrap();
         let canon_root = fs::canonicalize(&root).unwrap();
-        assert!(resolved.starts_with(&canon_root));
+        assert!(resolved.abs.starts_with(&canon_root));
 
         // `..` escape and absolute outside are rejected.
-        assert!(resolve_path_safe(&root, "../escape.txt").is_err());
-        assert!(resolve_path_safe(&root, "../../etc/passwd").is_err());
+        assert!(resolve_in_roots(&roots, "../escape.txt").is_err());
+        assert!(resolve_in_roots(&roots, "../../etc/passwd").is_err());
         let outside = std::env::temp_dir().join("definitely_outside.txt");
-        assert!(resolve_path_safe(&root, &outside.display().to_string()).is_err());
+        assert!(resolve_in_roots(&roots, &outside.display().to_string()).is_err());
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1074,7 +1101,7 @@ mod tests {
 
     /// Relative `..`-escape must also be blocked — they resolve against
     /// the workdir and land outside it, so the lexical normalization
-    /// in `resolve_path_safe` catches them.
+    /// in `resolve_in_roots` catches them.
     #[tokio::test]
     async fn write_file_rejects_relative_parent_escape() {
         let dir = temp_root("write_dotdot_escape");
@@ -1117,5 +1144,206 @@ mod tests {
             error
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ─── session-scratchpad dual root ────────────────────────────────
+
+    /// Build an `ExecContext` with an explicit safety mode, NO approval
+    /// broker, and (optionally) a materialized scratchpad. Unlike
+    /// `test_exec_context` (pinned to FullAccess) this exercises the gate.
+    fn scratch_ctx(
+        mode: crate::runtime::SafetyMode,
+        workdir: PathBuf,
+        scratchpad: Option<PathBuf>,
+    ) -> (ExecContext, tokio::sync::mpsc::Receiver<ProgressEvent>) {
+        let mut config = crate::app::Config::default();
+        config.safety.mode = mode;
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let mut ctx = ExecContext::new(
+            tokio_util::sync::CancellationToken::new(),
+            tx,
+            ToolCallId(1),
+            TurnId(1),
+            workdir,
+            std::sync::Arc::new(config),
+            String::new(),
+            None,
+            None,
+            None,
+            mode,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        ctx.scratchpad = scratchpad;
+        (ctx, rx)
+    }
+
+    /// Project + scratch fixture pair with a unique, greppable name.
+    fn scratch_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "mermaid_fs_scratch_{}_{}",
+            name,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let project = base.join("project");
+        let scratch = base.join("scratch");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&scratch).unwrap();
+        (project, scratch)
+    }
+
+    /// True when any checkpoint manifest on disk references `marker`. The
+    /// fixture paths are unique per test+pid, so a hit can only come from
+    /// the mutation under test.
+    fn any_checkpoint_mentions(marker: &str) -> bool {
+        let Ok(data) = crate::runtime::data_dir() else {
+            return false;
+        };
+        let Ok(entries) = fs::read_dir(data.join("checkpoints")) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            fs::read_to_string(entry.path().join("manifest.json"))
+                .is_ok_and(|manifest| manifest.contains(marker))
+        })
+    }
+
+    /// Scratchpad mutations proceed in Ask mode with NO approval broker
+    /// bound (the gate is bypassed entirely) and never take a checkpoint.
+    #[tokio::test]
+    async fn scratch_mutations_are_ungated_and_never_checkpointed() {
+        let (project, scratch) = scratch_fixture("ungated");
+        let marker = scratch.display().to_string();
+
+        // write_file into the scratchpad via absolute path.
+        let file = scratch.join("notes.txt");
+        let (ctx, _rx) = scratch_ctx(
+            crate::runtime::SafetyMode::Ask,
+            project.clone(),
+            Some(scratch.clone()),
+        );
+        let outcome = WriteFileTool
+            .execute(
+                serde_json::json!({
+                    "path": file.to_str().unwrap(),
+                    "content": "scratch note\n",
+                }),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "scratch write: {outcome:?}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "scratch note\n");
+
+        // create_directory inside the scratchpad.
+        let subdir = scratch.join("work/area");
+        let (ctx, _rx) = scratch_ctx(
+            crate::runtime::SafetyMode::Ask,
+            project.clone(),
+            Some(scratch.clone()),
+        );
+        let outcome = CreateDirectoryTool
+            .execute(serde_json::json!({"path": subdir.to_str().unwrap()}), ctx)
+            .await;
+        assert!(outcome.is_success(), "scratch mkdir: {outcome:?}");
+        assert!(subdir.is_dir());
+
+        // delete_file inside the scratchpad.
+        let (ctx, _rx) = scratch_ctx(
+            crate::runtime::SafetyMode::Ask,
+            project.clone(),
+            Some(scratch.clone()),
+        );
+        let outcome = DeleteFileTool
+            .execute(serde_json::json!({"path": file.to_str().unwrap()}), ctx)
+            .await;
+        assert!(outcome.is_success(), "scratch delete: {outcome:?}");
+        assert!(!file.exists());
+
+        // None of the mutations checkpointed the ephemeral scratch paths.
+        assert!(
+            !any_checkpoint_mentions(&marker),
+            "scratch mutation must not create a checkpoint"
+        );
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    /// ReadOnly still blocks scratchpad mutations — the bypass only skips
+    /// the approval flow, never the mode's mutation ban.
+    #[tokio::test]
+    async fn scratch_mutation_blocked_in_read_only() {
+        let (project, scratch) = scratch_fixture("readonly");
+        let file = scratch.join("blocked.txt");
+        let (ctx, _rx) = scratch_ctx(
+            crate::runtime::SafetyMode::ReadOnly,
+            project.clone(),
+            Some(scratch.clone()),
+        );
+        let outcome = WriteFileTool
+            .execute(
+                serde_json::json!({
+                    "path": file.to_str().unwrap(),
+                    "content": "nope",
+                }),
+                ctx,
+            )
+            .await;
+        let error = outcome.error_message().expect("expected block");
+        assert!(
+            error.contains("blocked by policy"),
+            "expected policy block, got: {error}"
+        );
+        assert!(!file.exists());
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    /// A path outside BOTH roots is rejected at resolution — before the gate.
+    #[tokio::test]
+    async fn write_outside_both_roots_is_rejected() {
+        let (project, scratch) = scratch_fixture("outside");
+        let outside = project.parent().unwrap().join("elsewhere/out.txt");
+        let (ctx, _rx) = scratch_ctx(
+            crate::runtime::SafetyMode::Ask,
+            project.clone(),
+            Some(scratch.clone()),
+        );
+        let outcome = WriteFileTool
+            .execute(
+                serde_json::json!({
+                    "path": outside.to_str().unwrap(),
+                    "content": "should not write",
+                }),
+                ctx,
+            )
+            .await;
+        let error = outcome.error_message().expect("expected error");
+        assert!(
+            error.contains("outside the project"),
+            "expected containment reject, got: {error}"
+        );
+        assert!(!outside.exists());
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    /// read_file follows a materialized scratchpad too.
+    #[tokio::test]
+    async fn read_file_reads_from_scratchpad() {
+        let (project, scratch) = scratch_fixture("read");
+        let file = scratch.join("stash.txt");
+        fs::write(&file, "stashed").unwrap();
+        let (ctx, _rx) = scratch_ctx(
+            crate::runtime::SafetyMode::Ask,
+            project.clone(),
+            Some(scratch.clone()),
+        );
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": file.to_str().unwrap()}), ctx)
+            .await;
+        assert!(outcome.is_success(), "scratch read: {outcome:?}");
+        assert_eq!(outcome.output(), "stashed");
+        let _ = fs::remove_dir_all(project.parent().unwrap());
     }
 }
