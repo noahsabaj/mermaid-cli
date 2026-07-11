@@ -1755,11 +1755,14 @@ fn wrap_text_with_indent(
     wrapped_lines
 }
 
-/// Hard-break a single over-long token into the styled line accumulator,
+/// Hard-break a single over-long word into the styled line accumulator,
 /// splitting at char boundaries (UTF-8-safe, display-cell aware) and keeping
-/// `style` on every produced piece, so a giant unbroken token (e.g. a long URL)
-/// wraps across rows instead of overflowing the viewport and being clipped
-/// (F33). The styled counterpart of `hard_break_plain_token`.
+/// each fragment's own style on every produced piece, so a giant unbroken
+/// token (e.g. a long URL) wraps across rows instead of overflowing the
+/// viewport and being clipped (F33). The styled counterpart of
+/// `hard_break_plain_token`. The word arrives as styled fragments (see the
+/// flattening pass in `wrap_styled_line`) because a token can change style
+/// mid-word (`**bold**suffix`); the break must not flatten that to one style.
 ///
 /// `current_line_spans`/`current_line_width` carry the in-progress row;
 /// finished rows are pushed to `result_lines`; each new row opens with a
@@ -1769,9 +1772,8 @@ fn wrap_text_with_indent(
 /// `continuation_capacity` (the caller's `available_width`, with the indent in
 /// a separate span and not counted).
 #[allow(clippy::too_many_arguments)]
-fn hard_break_styled_token(
-    token: &str,
-    style: Style,
+fn hard_break_styled_word(
+    fragments: &[(String, Style)],
     result_lines: &mut Vec<Line<'static>>,
     current_line_spans: &mut Vec<Span<'static>>,
     current_line_width: &mut usize,
@@ -1779,30 +1781,40 @@ fn hard_break_styled_token(
     continuation_capacity: usize,
     mut line_capacity: usize,
 ) {
-    let mut buf = String::new();
-    for ch in token.chars() {
-        let cw = ch.width().unwrap_or(0);
-        // Break before this char if it would overflow and the row already holds
-        // at least one glyph (so a single too-wide glyph never loops).
-        if *current_line_width + cw > line_capacity && *current_line_width > 0 {
-            if !buf.is_empty() {
-                current_line_spans.push(Span::styled(std::mem::take(&mut buf), style));
+    for (text, style) in fragments {
+        let mut buf = String::new();
+        for ch in text.chars() {
+            let cw = ch.width().unwrap_or(0);
+            // Break before this char if it would overflow and the row already
+            // holds at least one glyph (so a single too-wide glyph never loops).
+            if *current_line_width + cw > line_capacity && *current_line_width > 0 {
+                if !buf.is_empty() {
+                    current_line_spans.push(Span::styled(std::mem::take(&mut buf), *style));
+                }
+                result_lines.push(Line::from(std::mem::take(current_line_spans)));
+                current_line_spans.push(Span::raw(" ".repeat(continuation_indent)));
+                *current_line_width = 0;
+                line_capacity = continuation_capacity.max(1);
             }
-            result_lines.push(Line::from(std::mem::take(current_line_spans)));
-            current_line_spans.push(Span::raw(" ".repeat(continuation_indent)));
-            *current_line_width = 0;
-            line_capacity = continuation_capacity.max(1);
+            buf.push(ch);
+            *current_line_width += cw;
         }
-        buf.push(ch);
-        *current_line_width += cw;
-    }
-    if !buf.is_empty() {
-        current_line_spans.push(Span::styled(buf, style));
+        if !buf.is_empty() {
+            current_line_spans.push(Span::styled(buf, *style));
+        }
     }
 }
 
-/// Wrap a styled Line with hanging indent, preserving all span styles
-/// Returns multiple Line objects with proper indentation
+/// Wrap a styled Line with hanging indent, preserving all span styles.
+/// Returns multiple Line objects with proper indentation.
+///
+/// Wrapping runs over a word stream flattened ACROSS spans: a word is a run of
+/// styled fragments, and a word boundary exists only where the source text has
+/// whitespace. A span ending mid-word glues onto the next span's text, so
+/// `**bold**suffix` stays one token and a `.` right after a link's dimmed URL
+/// stays attached (no phantom space at a style boundary). Separator spaces
+/// between words are re-emitted UNSTYLED so a link's underline or inline
+/// code's background never paints the gap before it.
 fn wrap_styled_line(
     line: Line<'static>,
     width: usize,
@@ -1821,17 +1833,17 @@ fn wrap_styled_line(
 
     // Line needs wrapping - extract all text and styles
     let mut result_lines = Vec::new();
-    let mut current_line_spans = Vec::new();
+    let mut current_line_spans: Vec<Span<'static>> = Vec::new();
     let mut current_line_width = 0usize;
     let available_width = width.saturating_sub(continuation_indent);
 
     // Preserve the line's existing left margin (the "  " continuation gutter the
     // caller prepends to every non-first message line) on the *first* wrapped
-    // segment. `split_whitespace` below drops leading spaces and the "first word,
-    // no indent" rule would then flush the segment to column 0 — that's the
+    // segment. The whitespace split below drops leading spaces and the "first
+    // word, no indent" rule would then flush the segment to column 0 — that's the
     // recurring bug where a wrapped paragraph escapes the message gutter while its
     // own continuation lines (which get `continuation_indent`) stay aligned. A
-    // non-whitespace prefix like "● " is unaffected (it survives `split_whitespace`).
+    // non-whitespace prefix like "● " is unaffected (it survives the split).
     let leading_indent: usize = {
         let mut n = 0;
         for span in &line.spans {
@@ -1844,78 +1856,107 @@ fn wrap_styled_line(
         n
     };
 
-    for span in line.spans.clone() {
-        let span_text = span.content.to_string();
-        let span_style = span.style;
-
-        // Split span text by words
-        let words: Vec<&str> = span_text.split_whitespace().collect();
-
-        for (word_idx, word) in words.iter().enumerate() {
-            let word_with_space = if word_idx > 0 || current_line_width > 0 {
-                format!(" {}", word)
+    // Flatten the spans into words: each word is a run of styled fragments.
+    // Whitespace anywhere closes the current word (runs collapse to a single
+    // boundary); a span ending mid-word leaves the word open so the next
+    // span's text glues on — a style change is NOT a word boundary.
+    let mut words: Vec<Vec<(String, Style)>> = Vec::new();
+    let mut current_word: Vec<(String, Style)> = Vec::new();
+    for span in &line.spans {
+        let mut frag = String::new();
+        for ch in span.content.chars() {
+            if ch.is_whitespace() {
+                if !frag.is_empty() {
+                    current_word.push((std::mem::take(&mut frag), span.style));
+                }
+                if !current_word.is_empty() {
+                    words.push(std::mem::take(&mut current_word));
+                }
             } else {
-                word.to_string()
-            };
+                frag.push(ch);
+            }
+        }
+        if !frag.is_empty() {
+            current_word.push((frag, span.style));
+        }
+    }
+    if !current_word.is_empty() {
+        words.push(current_word);
+    }
 
-            let word_width = word_with_space.width();
+    fn emit_word(spans: &mut Vec<Span<'static>>, word: Vec<(String, Style)>) {
+        for (text, style) in word {
+            spans.push(Span::styled(text, style));
+        }
+    }
 
-            if current_line_width == 0 && result_lines.is_empty() {
-                // First word of the first line: re-apply the original left margin
-                // (dropped by split_whitespace) so the segment keeps the gutter
-                // instead of flushing to column 0.
-                if leading_indent > 0 {
-                    current_line_spans.push(Span::raw(" ".repeat(leading_indent)));
-                    current_line_width += leading_indent;
-                }
-                if word_width <= available_width {
-                    current_line_spans.push(Span::styled(word_with_space, span_style));
-                    current_line_width += word_width;
-                } else {
-                    // A single token wider than the line (e.g. a long URL):
-                    // hard-break it at width boundaries so it wraps instead of
-                    // being clipped by the viewport (F33). The first row may use
-                    // the full `width` (its indent is already counted above);
-                    // continuation rows fall back to `available_width`.
-                    hard_break_styled_token(
-                        word,
-                        span_style,
-                        &mut result_lines,
-                        &mut current_line_spans,
-                        &mut current_line_width,
-                        continuation_indent,
-                        available_width,
-                        width,
-                    );
-                }
-            } else if current_line_width + word_width <= available_width {
-                // Word fits on current line
-                current_line_spans.push(Span::styled(word_with_space, span_style));
+    for word in words {
+        let word_width: usize = word.iter().map(|(text, _)| text.width()).sum();
+
+        if current_line_width == 0 && result_lines.is_empty() {
+            // First word of the first line: re-apply the original left margin
+            // (dropped by the whitespace split) so the segment keeps the gutter
+            // instead of flushing to column 0.
+            if leading_indent > 0 {
+                current_line_spans.push(Span::raw(" ".repeat(leading_indent)));
+                current_line_width += leading_indent;
+            }
+            if word_width <= available_width {
                 current_line_width += word_width;
-            } else if word.width() <= available_width {
-                // Word doesn't fit - finish current line and start new one
-                result_lines.push(Line::from(current_line_spans));
-                current_line_spans = vec![Span::raw(" ".repeat(continuation_indent))];
-                current_line_spans.push(Span::styled(word.to_string(), span_style));
-                current_line_width = word.width();
+                emit_word(&mut current_line_spans, word);
             } else {
-                // Over-long token mid-line: finish the current line, then
-                // hard-break the token across continuation rows (F33), keeping
-                // the span's style on every produced piece.
-                result_lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-                current_line_spans.push(Span::raw(" ".repeat(continuation_indent)));
-                current_line_width = 0;
-                hard_break_styled_token(
-                    word,
-                    span_style,
+                // A single token wider than the line (e.g. a long URL):
+                // hard-break it at width boundaries so it wraps instead of
+                // being clipped by the viewport (F33). The first row may use
+                // the full `width` (its indent is already counted above);
+                // continuation rows fall back to `available_width`.
+                hard_break_styled_word(
+                    &word,
                     &mut result_lines,
                     &mut current_line_spans,
                     &mut current_line_width,
                     continuation_indent,
                     available_width,
-                    available_width,
+                    width,
                 );
             }
+            continue;
+        }
+
+        // Separator space before this word — only when the row already holds
+        // content, and always UNSTYLED: the space between words belongs to
+        // neither word's style (an underlined link must not underline the gap
+        // in front of it).
+        let sep = usize::from(current_line_width > 0);
+        if current_line_width + sep + word_width <= available_width {
+            // Word fits on current line
+            if sep == 1 {
+                current_line_spans.push(Span::raw(" "));
+            }
+            current_line_width += sep + word_width;
+            emit_word(&mut current_line_spans, word);
+        } else if word_width <= available_width {
+            // Word doesn't fit - finish current line and start new one
+            result_lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+            current_line_spans.push(Span::raw(" ".repeat(continuation_indent)));
+            current_line_width = word_width;
+            emit_word(&mut current_line_spans, word);
+        } else {
+            // Over-long token mid-line: finish the current line, then
+            // hard-break the token across continuation rows (F33), keeping
+            // each fragment's style on every produced piece.
+            result_lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+            current_line_spans.push(Span::raw(" ".repeat(continuation_indent)));
+            current_line_width = 0;
+            hard_break_styled_word(
+                &word,
+                &mut result_lines,
+                &mut current_line_spans,
+                &mut current_line_width,
+                continuation_indent,
+                available_width,
+                available_width,
+            );
         }
     }
 
@@ -2812,6 +2853,177 @@ mod tests {
             }
         }
         assert_eq!(reconstructed, token, "hard-break must preserve the token");
+    }
+
+    /// The separator space re-inserted between words must be unstyled: when a
+    /// wrapped line contains an underlined link span, the gap before the link
+    /// used to inherit the underline (visibly underlined space in the TUI).
+    #[test]
+    fn wrap_styled_line_separator_before_styled_span_is_unstyled() {
+        let underlined = Style::new().add_modifier(ratatui::style::Modifier::UNDERLINED);
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::raw("some filler words long enough to force a wrap here "),
+            Span::styled("underlined-link-text", underlined),
+            Span::raw(" and a bit more trailing filler after the link"),
+        ]);
+        let wrapped = wrap_styled_line(line, 30, 2);
+        assert!(wrapped.len() >= 2, "fixture must actually wrap");
+        for l in &wrapped {
+            for s in &l.spans {
+                if s.content.chars().all(|c| c == ' ') {
+                    assert_eq!(
+                        s.style,
+                        Style::default(),
+                        "whitespace span {:?} must be unstyled",
+                        s.content
+                    );
+                }
+            }
+        }
+    }
+
+    /// A span boundary WITHOUT source whitespace is not a word boundary: the
+    /// dimmed "(url)" suffix a markdown link gets, followed by a bare "." text
+    /// span, must stay "(url)." — not gain a phantom space ("(url) .").
+    #[test]
+    fn wrap_styled_line_no_phantom_space_at_span_boundary() {
+        let dim = Style::new().fg(ratatui::style::Color::DarkGray);
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::raw("filler text that pushes the line well past the width limit "),
+            Span::styled("(https://example.com)".to_string(), dim),
+            Span::raw("."),
+        ]);
+        let wrapped = wrap_styled_line(line, 30, 2);
+        assert!(wrapped.len() >= 2, "fixture must actually wrap");
+        let text: String = wrapped
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            text.contains("(https://example.com)."),
+            "period must stay glued to the URL suffix; got {text:?}"
+        );
+        assert!(
+            !text.contains("(https://example.com) ."),
+            "no phantom space before the period; got {text:?}"
+        );
+    }
+
+    /// A style change mid-word ("**bold**suffix") is not a word boundary: the
+    /// two fragments must land on the same row as one token, each keeping its
+    /// own style.
+    #[test]
+    fn wrap_styled_line_keeps_mid_word_style_change_glued() {
+        let bold = Style::new().add_modifier(ratatui::style::Modifier::BOLD);
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::raw("leading filler words to force wrapping "),
+            Span::styled("bold", bold),
+            Span::raw("suffix"),
+            Span::raw(" trailing filler words to force more wrapping"),
+        ]);
+        let wrapped = wrap_styled_line(line, 30, 2);
+        assert!(wrapped.len() >= 2, "fixture must actually wrap");
+        let rows: Vec<String> = wrapped
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("boldsuffix")).count(),
+            1,
+            "glued token must land whole on exactly one row; rows: {rows:?}"
+        );
+        for l in &wrapped {
+            for s in &l.spans {
+                if s.content.as_ref() == "bold" {
+                    assert_eq!(s.style, bold, "bold fragment keeps its modifier");
+                }
+                if s.content.as_ref() == "suffix" {
+                    assert_eq!(s.style, Style::default(), "suffix fragment stays plain");
+                }
+            }
+        }
+    }
+
+    /// An over-long glued token made of differently styled fragments must
+    /// hard-break across rows with each fragment's style preserved and no
+    /// content lost — it enters the break path as ONE token, not two words.
+    #[test]
+    fn wrap_styled_line_hard_breaks_multi_fragment_token_preserving_styles() {
+        let red = Style::new().fg(ratatui::style::Color::Red);
+        let blue = Style::new().fg(ratatui::style::Color::Blue);
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::styled("a".repeat(40), red),
+            Span::styled("b".repeat(40), blue),
+        ]);
+        let width = 24;
+        let wrapped = wrap_styled_line(line, width, 2);
+        assert!(
+            wrapped.len() >= 4,
+            "80-cell token at width 24 must span >= 4 rows; got {}",
+            wrapped.len()
+        );
+        let mut reconstructed = String::new();
+        for l in &wrapped {
+            let row_cells: usize = l.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                row_cells <= width,
+                "row exceeds width: {row_cells} > {width}"
+            );
+            for s in &l.spans {
+                if s.content.trim().is_empty() {
+                    continue;
+                }
+                let expected = if s.content.contains('a') { red } else { blue };
+                assert!(
+                    !(s.content.contains('a') && s.content.contains('b')),
+                    "fragments must not merge across the style boundary"
+                );
+                assert_eq!(s.style, expected, "fragment style preserved across break");
+                reconstructed.push_str(s.content.as_ref());
+            }
+        }
+        assert_eq!(
+            reconstructed,
+            format!("{}{}", "a".repeat(40), "b".repeat(40)),
+            "hard-break must preserve the whole glued token"
+        );
+    }
+
+    /// A whitespace-only span between two text spans still separates words —
+    /// gluing only happens where the source truly has no whitespace.
+    #[test]
+    fn wrap_styled_line_whitespace_only_span_is_word_boundary() {
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::raw("filler words that push this line past the wrap width "),
+            Span::raw("foo"),
+            Span::raw(" "),
+            Span::raw("bar"),
+        ]);
+        let wrapped = wrap_styled_line(line, 30, 2);
+        assert!(wrapped.len() >= 2, "fixture must actually wrap");
+        let text: String = wrapped
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("foo bar") || text.contains("foo\n  bar"),
+            "whitespace-only span must keep the words apart; got {text:?}"
+        );
+        assert!(
+            !text.contains("foobar"),
+            "words must not glue; got {text:?}"
+        );
     }
 
     #[test]
