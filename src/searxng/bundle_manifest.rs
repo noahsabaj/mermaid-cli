@@ -18,9 +18,6 @@ pub fn bundle_sha256(target: &str) -> Option<&'static str> {
         "linux-x86_64" => "1d315ab5235cac5182021585cea6567ebc6e90e6c39474e29004974044e06822",
         "linux-aarch64" => "d5a982de009b534635a435cf06e0f09c9f1dafcb9d14bd391f18b1efb7823cb7",
         "macos-aarch64" => "332bb48e3529cdb5ce99faa59460364710a237ac3c3a0b10182c6323ce18d3a0",
-        // Placeholder slot until the first release that publishes macos-x86_64
-        // (mermaid-searxng v0.3.0): all-zeros matches no real digest, so a
-        // fetch fails closed until the automated bump PR fills it in.
         "macos-x86_64" => "12b236f0072649793da41a31ea14be30afd2d014598f24f17ab502908374af02",
         _ => return None,
     })
