@@ -1103,6 +1103,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (failing if the tag has none) and smoke-test each built binary (`version` +
   `self-test`) and the published install script.
 
+- **Render snapshots survive release bumps.** The status footer's version
+  string now threads through `RenderCache` (like the pinned hostname and
+  username) instead of being read from `env!("CARGO_PKG_VERSION")` at render
+  time, and the snapshot suite pins it — so version bumps no longer invalidate
+  every pinned TUI frame.
+
 ## [0.16.0] - 2026-07-04
 
 ### Added
