@@ -21,6 +21,9 @@ pub struct StatusWidget<'a> {
     /// every frame.
     pub hostname: &'a str,
     pub username: &'a str,
+    /// App version for the line-2 footer, threaded from `RenderCache` (like
+    /// hostname/username) so the snapshot suite can pin it.
+    pub version: &'a str,
     pub context_usage: Option<&'a ContextUsageSnapshot>,
     pub model_name: &'a str,
     /// Effective reasoning depth — what the API actually saw after
@@ -105,7 +108,7 @@ impl<'a> Widget for StatusWidget<'a> {
         } else {
             format!("safety: {}", self.safety_mode.as_str())
         };
-        let left_text = status_line2_left(&safety_segment, &reasoning_text);
+        let left_text = status_line2_left(self.version, &safety_segment, &reasoning_text);
         let model_display = self.model_name;
 
         // Calculate padding between reasoning text and model name (display-cell widths).
@@ -169,17 +172,12 @@ fn format_context_snapshot(snapshot: &ContextUsageSnapshot) -> String {
     }
 }
 
-/// Left segment of status line 2: the app version (compile-time, so it tracks
-/// the crate version automatically), then the safety segment (`safety: <mode>`
-/// or the plan-mode badge) and reasoning level. This footer is the single
-/// place the version is surfaced in the TUI.
-fn status_line2_left(safety_segment: &str, reasoning_text: &str) -> String {
-    format!(
-        "mermaid v{} · {} · {}",
-        env!("CARGO_PKG_VERSION"),
-        safety_segment,
-        reasoning_text
-    )
+/// Left segment of status line 2: the app version (threaded from
+/// `RenderCache`, which defaults it to the compile-time crate version), then
+/// the safety segment (`safety: <mode>` or the plan-mode badge) and reasoning
+/// level. This footer is the single place the version is surfaced in the TUI.
+fn status_line2_left(version: &str, safety_segment: &str, reasoning_text: &str) -> String {
+    format!("mermaid v{version} · {safety_segment} · {reasoning_text}")
 }
 
 #[cfg(test)]
@@ -188,7 +186,7 @@ mod tests {
 
     #[test]
     fn status_line2_left_shows_version_safety_and_reasoning() {
-        let s = status_line2_left("safety: ask", "reasoning: high");
+        let s = status_line2_left(env!("CARGO_PKG_VERSION"), "safety: ask", "reasoning: high");
         assert!(
             s.contains(&format!("mermaid v{}", env!("CARGO_PKG_VERSION"))),
             "status line must show the app version — got {s:?}"
@@ -202,6 +200,7 @@ mod tests {
         // The plan badge replaces the safety segment wholesale and always
         // names the restore target, so the user sees both facts at once.
         let s = status_line2_left(
+            "0.0.0",
             "plan mode on (alt+p to toggle) - restores: auto",
             "reasoning: high",
         );

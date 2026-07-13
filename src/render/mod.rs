@@ -63,6 +63,10 @@ pub struct RenderCache {
     /// frame (#55). Process-constant, so caching here is exact.
     pub hostname: String,
     pub username: String,
+    /// App version for the status footer. Defaults to the compile-time crate
+    /// version; the snapshot suite pins it (like hostname/username) so pinned
+    /// frames survive release bumps.
+    pub version: String,
     /// F13: last `state.ui.mouse_scroll_accum` value we applied to
     /// `chat.scroll_up/down`. Diffing lets the reducer stay pure —
     /// it just publishes a counter; render owns the chat-state side.
@@ -84,6 +88,7 @@ impl Default for RenderCache {
             username: std::env::var("USER")
                 .or_else(|_| std::env::var("USERNAME"))
                 .unwrap_or_else(|_| "user".to_string()),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             stitched: None,
             applied_theme: None,
             last_mouse_scroll_accum: 0,
@@ -597,6 +602,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             working_dir: &cwd,
             hostname: &rstate.hostname,
             username: &rstate.username,
+            version: &rstate.version,
             context_usage: state.session.context_usage.as_ref(),
             model_name: &state.session.model_id,
             reasoning_level: effective,

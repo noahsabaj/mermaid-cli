@@ -36,12 +36,14 @@ fn fixed_now() -> chrono::DateTime<chrono::Local> {
         .with_timezone(&chrono::Local)
 }
 
-/// A `RenderCache` with the process-environment reads pinned (the status bar
-/// renders `user@host`).
+/// A `RenderCache` with the process-environment and compile-time reads pinned
+/// (the status bar renders `user@host` and `mermaid v<version>`; a pinned
+/// version keeps the suite immune to release bumps).
 fn snapshot_cache() -> RenderCache {
     let mut cache = RenderCache::new();
     cache.hostname = "snaphost".to_string();
     cache.username = "snapuser".to_string();
+    cache.version = "0.0.0".to_string();
     cache
 }
 
