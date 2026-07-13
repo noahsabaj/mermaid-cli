@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-13
+
 ### Added
 
 - **Windows: PTY-fidelity foreground exec via ConPTY.** Foreground
@@ -149,98 +151,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `output_schema:` error, and the client-side validator remains the final
   gate.
 
-### Fixed
-
-- **Word-wrap no longer styles or invents spaces at span boundaries.** On
-  chat lines long enough to wrap, the wrapper re-joined words with a
-  separator space styled like the following span — so the gap before a
-  markdown link rendered underlined (and before inline code would carry the
-  code background) — and treated every span boundary as a word boundary, so
-  spans adjacent without source whitespace gained a phantom space
-  (`(url) .` after a link, `` `code` , ``, `bold suffix` for
-  `**bold**suffix`). Wrapping now flattens spans into a word stream where
-  boundaries exist only at real whitespace, emits separator spaces
-  unstyled, and hard-breaks over-long multi-style tokens while preserving
-  each fragment's style.
-
-- **Compaction preserves the complete live context and persists in order.**
-  Summary requests now budget the entire request, include redacted tool
-  arguments and referenced images, count cached and reasoning tokens, and
-  require the documented summary structure before replacing history. Messages
-  that arrive while compaction runs are retained, truncation recovery resets
-  after visible progress, checkpoint metadata reports review status and actual
-  preserved turns, and serialized archive-plus-conversation saves prevent a
-  newer stripped transcript from bypassing a failed or delayed archive.
-  A compaction save that arrives while an older archive write is still
-  failing queues behind it instead of being dropped, shutdown drains every
-  conversation's pending barrier, and quoted `## ` lines inside checkpoint
-  bodies no longer fail structural validation. A failed auto-compaction now
-  pauses further automatic attempts (with a one-time notice) until a
-  compaction succeeds, `/compact` runs, or the conversation switches. A late
-  tool result that lands during compaction is re-inserted after its pending
-  call, and mid-compaction message matching uses compact sha256 fingerprints
-  instead of cloning the full transcript into the result. Persisted
-  compaction records and recorded compaction events changed shape
-  (`review_status`/`preserved_turn_count` replace
-  `verified`/`verification_error`; boundaries are now fingerprints), so
-  session files with compaction records and session recordings with
-  compaction events from earlier unreleased builds will not load or replay.
-
-- **The status spinner never names tools; the transcript does.** The spinner
-  headline used to splice in the executing tool and its arguments
-  (`Running tools: Bash pwd; ls -la…`, `Running tools: ask_user_question...`)
-  — detail that belongs in the chat window, not the status widget (Claude
-  Code parity). The headline is now only the task's active form, the
-  "Running N agents" override, or the bare phase word, followed by the usual
-  `(esc to interrupt • time • tokens)` metadata. Instead, each executing
-  tool call gets its `● Bash(cmd)` action row in the transcript the moment
-  it starts — with a blinking header dot while it runs — and its result
-  elbow folds in underneath as soon as that call completes, not only when
-  the whole batch commits. Pending `agent` calls keep their live panel rows
-  (no duplicate transcript row), and a pending `ask_user_question` is
-  represented by its modal alone, with the question → answer block landing
-  once answered.
-
-- **The question modal owns the screen.** While an `ask_user_question` modal
-  is up, the status spinner, task checklist band, and the input box (keys
-  already routed exclusively to the modal) are hidden — matching Claude
-  Code, where the modal is the only thing below the transcript instead of
-  sitting under a ticking `Running tools: ask_user_question...` spinner and
-  an inert prompt.
-
-- **Task checklist no longer dangles a `⎿` connector when idle.** The elbow
-  glyph on the checklist's first row exists to attach the band to the
-  status/spinner line above it; once the run went idle and that widget
-  disappeared, the elbow was left hanging from nothing. Idle now renders the
-  expanded checklist flush-left with no connector, and a collapsed (Ctrl+T)
-  checklist disappears entirely between runs — collapse is a
-  minimize-while-working affordance, so with no status line there is nothing
-  to minimize into. Active-run rendering is unchanged, and the collapsed
-  state persists: the "Next:" one-liner reappears when the next run starts.
-
-- **Tool action lines wrap instead of clipping at the viewport edge.** Long
-  tool headers (`● Bash(python3 - << 'PY'…`), result summaries, error bodies
-  (e.g. a full HTTP 404 JSON), diff rows, and write previews were painted as
-  single over-wide rows and cut off at the right edge. They now wrap with a
-  hanging indent: headers preserve a multi-line command's own line breaks
-  (previously the newlines were dropped, gluing fragments together like
-  `'PY'from PIL import`) and cap at 4 rows with a trailing `…)` so a heredoc
-  script can't flood the transcript; results and errors wrap in full; diff
-  rows keep their full-width color bar on every wrapped row.
-
-- **Safety-mode switch note: fires once, model-only.** The "earlier read-only
-  policy blocks no longer apply" note used to appear in the transcript on
-  every loosening step (ask, then auto, then full_access — three banners for
-  one Shift+Tab cycle), because the trigger was "any loosening while a
-  read-only denial exists in history" and the denial text is never removed
-  from stored history. The note now injects only when actually leaving
-  read_only past a stale denial, is hidden from the transcript (the status
-  bar already shows the mode; only the model sees it), and steers exactly
-  one request before being swept. Cycling onward renames the one pending
-  note instead of stacking new ones, and tightening back to read_only
-  retracts it.
-
-### Added
 
 - **Ctrl+J inserts a newline in the input box.** Multi-line prompts can now
   be composed directly: Ctrl+J breaks the line at the cursor (matching
@@ -266,6 +176,252 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an already-finished task gets one synthesized result from the persisted
   record; slow clients are dropped by a per-write timeout so they can't
   block the daemon; lagged subscribers get an in-band error event.
+
+
+- **Auto-continued replies are now seamless.** A reply that crosses the
+  model's per-response output cap reads as ONE uninterrupted assistant
+  bubble: the transcript stitches the continuation into its bubble (a code
+  fence cut open at the seam renders as a single intact block), a
+  conservative overlap trim drops the resume-echo some models emit, and the
+  in-flight continuation streams into the same bubble live. The "continuing"
+  system note is gone from view and — once its one request has gone out —
+  retired from history entirely, so it can never steer a later, unrelated
+  turn (the stalled-turn retry nudge gets the same treatment). Canonical
+  history still stores the true wire-level messages (provider-correct,
+  thinking-signature-safe); the stitch is display-only.
+- **Data-driven model-capability catalog.** Thinking wire shape (anthropic
+  adaptive-vs-budget, gemini level-vs-budget floors, gpt-oss think-string),
+  temperature support, effort-tier ceiling, vision markers, static context
+  windows, and documented output ceilings now live in one first-match-wins
+  const table (`src/models/catalog.rs`) instead of model-name string gates
+  scattered across four adapters and the domain. Every known model's behavior
+  is pinned unchanged by table-driven tests; Ollama's `/api/show` probe stays
+  authoritative for local models. Two deliberate accuracy fixes: matching is
+  uniformly case-insensitive, and gpt-5/gpt-4.1's 400k static window now
+  applies through any provider (previously `openai/` only).
+- **Cloudflare Workers AI is now a built-in provider.** Reach Cloudflare-hosted
+  models through their OpenAI-compatible endpoint with
+  `mermaid --model cloudflare/@cf/<vendor>/<model>` — for example
+  `cloudflare/@cf/zai-org/glm-5.2` (GLM-5.2). Set `CLOUDFLARE_API_TOKEN` and
+  `CLOUDFLARE_ACCOUNT_ID` (the account id is spliced into the endpoint URL), or
+  point `[providers.cloudflare].base_url` at a full account-scoped URL / AI
+  Gateway endpoint. Exposes the reasoning-level selector and streams GLM-5.2's
+  thinking trace. Discovery surfaces (`doctor`, the best-effort `/models` probe)
+  use the same account-scoped URL and report a missing account id instead of
+  probing a placeholder; a setup missing both env vars gets one error naming
+  both.
+- **Project-local config.** A repo can now commit `.mermaid/config.toml` at its
+  git root; it layers between your user config and session flags. Safe by
+  construction, with no trust prompt: security-sensitive keys (`mcp_servers`,
+  `providers`, `agents`, `daemon`, `last_used_model`, `web.searxng_url`,
+  `ollama.host`/`port`, and most of `safety`) are stripped with a warning, and
+  the allowed `safety.mode`/`network`/`filesystem` can only TIGHTEN your user
+  settings — a cloned repo can pick models and UX defaults but can never spawn
+  commands, redirect prompt traffic, or relax approvals. Startup prints a
+  one-line notice whenever a project config contributes keys, and runtime
+  memory-setting re-reads honor the project layer too.
+
+- **Layered config engine.** Configuration now merges as ordered layers —
+  built-in defaults < `~/.config/mermaid/config.toml` < session flags (`-c`
+  plus `--no-network`/`--confine-fs`/`--sandbox`, `run --max-tokens`,
+  `run --allow-untrusted-tools`) — through one recursive TOML deep-merge and a
+  single typed deserialize. Unknown-key warnings name the layer that contains
+  the typo, and in-app settings changes now rewrite only their own keys in the
+  user file: unrecognized keys survive persists, defaults are no longer frozen
+  into the file, and per-model entries whose ids contain dots
+  (`gemini/gemini-2.5-pro`) persist correctly. A corrupt config file degrades
+  to defaults while the session flags still apply.
+- **Long responses auto-continue across the model's per-response output cap.**
+  When a reply is cut by the provider's per-response output ceiling with
+  context-window room to spare, mermaid now continues it in a fresh turn (the
+  committed partial rides in history and a note nudges the model to resume, not
+  restart), bounded per run so a re-truncating model can't loop. A mid-reasoning
+  cutoff or a capped run still stops with the accurate output-limit message. So
+  an answer that "wants 40000 tokens" completes even on providers that cap
+  single responses lower.
+- **Live model-limit discovery — `Context: unknown` gets real numbers.** Most
+  OpenAI-compatible providers attach the model's context window and output
+  ceiling to their `/models` metadata (OpenRouter, Cloudflare, …); mermaid
+  previously threw that data away. It's now parsed, cached across sessions in
+  `provider_probes`, and refreshed into the live capability snapshot — so the
+  status bar shows a real window for remote models, proactive auto-compaction
+  works for them, the truncation classifier gets real windows, and
+  `mermaid model-info` gains an `Output limit:` line. Anthropic models report
+  their documented window/ceiling statically.
+- **Truncation is now diagnosed correctly — no more false "Context window
+  full".** A `length` stop is classified from the response usage: hitting the
+  per-response output cap (window still has room — the common case on remote
+  providers) now stops with an accurate message naming the real limit, instead
+  of misreporting a full window and looping through futile conversation
+  compactions that couldn't help. A genuinely full window still compacts and
+  continues exactly as before.
+- **Model-scaled output budget — the hardcoded 4096-token cap is gone.**
+  `default_model.max_tokens` now defaults to `0` = **auto**: OpenAI-compatible
+  providers and Gemini get no cap at all (the provider applies the model's own
+  per-response maximum), Ollama's `num_predict` gets the full room the context
+  window leaves after the prompt, and Anthropic (which requires `max_tokens`)
+  gets the model's documented output ceiling clamped to the window. Reasoning
+  models like GLM-5.2 can finally emit tens of thousands of thinking tokens
+  without tripping a stale 2024-era limit. A positive `max_tokens` remains an
+  explicit hard cap (cost control); existing config files carrying the frozen
+  legacy `4096` are migrated to auto on load. Compaction's response reserve is
+  now reasoning-aware instead of mirroring the send-cap.
+- **Optional filesystem write-confinement for shell commands (Linux).**
+  `mermaid --confine-fs …` (or `safety.filesystem = "project"`) confines
+  model-run shell commands with a Landlock ruleset: writes are allowed only
+  beneath the project directory, the system temp directory, and `/dev`; reads
+  and execution stay unrestricted. A failure matching the denial signature
+  while confinement is active is reported with a clear "filesystem sandbox"
+  explanation and the `denied_by_sandbox` marker. `mermaid --sandbox …` is
+  shorthand for `--no-network --confine-fs`. Best-effort by design: kernels
+  without Landlock (pre-5.13) and other platforms degrade to a warned no-op.
+  Off by default.
+- **Optional network kill-switch for shell commands (Linux).** `mermaid
+  --no-network …` (or `safety.network = "deny"`) confines model-run shell
+  commands with a seccomp-BPF filter that denies internet sockets
+  (`AF_INET`/`AF_INET6`) while leaving `AF_UNIX` and local IPC working, so a
+  sandboxed command can't reach the network but ordinary local work still runs.
+  A blocked attempt is reported with a clear "blocked by the network sandbox"
+  message and a `denied_by_sandbox` marker instead of a confusing crash. Applied
+  via a hidden `__sandbox-exec` re-exec launcher; a no-op on macOS/Windows
+  (Seatbelt/AppContainer are follow-ups). Off by default.
+- **Typed NDJSON event stream for `mermaid run`.** `mermaid run --format ndjson`
+  streams the run lifecycle as one JSON object per line — `session_started`,
+  `text`/`reasoning` deltas, `tool_started`/`tool_finished`, `approval_required`,
+  `turn_done`, and a terminal `result` — so `mermaid run` can be driven as an
+  SDK/subprocess. The event shape is a stable, versioned contract
+  (`protocol_version`) pinned by a golden serialization test; `--format json`
+  now emits that same typed `result` object.
+- **Startup process hardening + per-turn timing.** On Linux, Mermaid now disables
+  core dumps (`RLIMIT_CORE=0`) and ptrace attachment (`PR_SET_DUMPABLE=0`) at
+  startup, so a crash can't leave a core file carrying secrets and the process
+  isn't trivially attachable. Each model turn also emits a structured timing
+  event (turn id, model, elapsed) to the log / diagnostic bundle.
+- **Faster session listing + session provenance.** Each saved session now writes
+  a tiny `<id>.meta` sidecar, so listing sessions (`/list`) reads metadata
+  instead of parsing every transcript (older sessions fall back to a full read).
+  Sessions also record their creation environment — git branch, git SHA, and CLI
+  version — plus `forked_from` / `parent_session` lineage fields (ready for a
+  future fork/rewind).
+- **TUI: attention bell, keyboard scrolling, and a shortcut list.** The terminal
+  title now reflects run state (`mermaid · working`, else the conversation
+  title), and Mermaid rings the bell when a run finishes or an approval is
+  waiting while the terminal is unfocused. PageUp/PageDown scroll the transcript
+  (Shift+Up/Down by a line, End jumps back to the newest message), and `/help`
+  now lists the keyboard shortcuts.
+- **Providers & MCP: keyless local servers, env-sourced headers, per-server tool
+  filters, raw command servers.** Local OpenAI-compatible endpoints (llama.cpp,
+  vLLM, LM Studio) now work with no API key when the base URL is loopback/LAN;
+  a missing key for a public provider gives an actionable "get a key at …" hint.
+  Providers can source secret headers from env vars (`[providers.x] env_headers`)
+  instead of writing them into config. Each MCP server accepts `enabled_tools` /
+  `disabled_tools` to scope which of its tools reach the model. And `mermaid add
+  --command <cmd> --arg … --env K=V` registers an arbitrary command MCP server
+  without going through the package registry. (Also fixes a latent bug where a
+  built-in provider's static analytics headers were dropped.)
+- **Config: typo warnings, `-c` overrides, and stdin prompts.** Unknown keys in
+  `config.toml` now warn with their dotted path instead of being silently
+  ignored. A repeatable `-c key.path=value` flag overrides any config value for
+  one invocation (`mermaid -c default_model.max_tokens=8192 run "…"`; the value
+  is parsed as TOML). And `mermaid run` reads its prompt from stdin when given
+  `-` or no prompt (`echo "explain this" | mermaid run -`); piped stdin
+  alongside an explicit prompt is appended as a fenced block.
+- **Sharper prompt + searchable memory.** The system prompt gained a `## Web`
+  section (browse for time-sensitive or externally-verifiable facts, prefer
+  primary sources, cite inline) and a memory "signal gate" (save a fact only if
+  a future session would act better for it). The `memory` tool gained a `search`
+  action that substring-matches across fact names, descriptions, and bodies — a
+  targeted read that stays available in every safety mode.
+- **`apply_patch` — robust, multi-file editing.** A new patch-based editor
+  (`*** Begin Patch … *** End Patch` with Add / Update / Delete / Move hunks and
+  optional `@@` context anchors) backed by a graduated fuzzy matcher that
+  tolerates whitespace and curly-quote drift, so an edit no longer fails on a
+  stray trailing space. It edits several files in one call under a single
+  checkpoint, and warns when a hunk matched fuzzily. Replaces `edit_file` (the
+  old single exact-match replacement is removed).
+- **The daemon now schedules its tasks instead of stampeding.** `run` requests
+  enqueue; a scheduler executes queued tasks bounded by
+  `[daemon] max_concurrent_tasks` (default 1 — one agent run at a time, honest
+  for a single local GPU), ordered by priority (`run` accepts
+  `"priority": "low"|"normal"|"high"`) then FIFO. The queue is durable: tasks
+  submitted while the daemon is down or busy survive restarts and drain
+  automatically.
+- **Daemon tasks can be cancelled.** New `cancel_task` daemon command and
+  `mermaid cancel <task-id>` CLI: a running task gets the same graceful
+  teardown as pressing Esc in the TUI (current tool's process tree killed,
+  turn unwound, status `cancelled` persisted), with a hard stop if it doesn't
+  unwind within a grace window; a queued task is cancelled before it starts.
+- **Per-task wall-clock budgets.** `[daemon] task_timeout_minutes` bounds each
+  daemon task's runtime (unset keeps the existing 20-minute headless default),
+  so an unattended run's worst case is bounded.
+- **The agent can ask you structured multiple-choice questions.** A new
+  `ask_user_question` tool lets the model pause mid-run and pose 1–4 questions in
+  an interactive terminal modal — single-select, multi-select, rank, or typed
+  inputs (text/number/date/path) — each with an "Other" free-text escape,
+  optional side-by-side previews (including diffs), and a "remember this answer"
+  toggle that persists settled preferences across sessions. Answers flow back as
+  the tool result so the run continues with your decision; headless runs with no
+  TTY proceed with best judgment instead of blocking.
+
+- **NVIDIA NIM is now a built-in provider.** Reach NVIDIA-hosted models through
+  their OpenAI-compatible endpoint with `mermaid --model nvidia/<model>` and an
+  `NVIDIA_API_KEY` — for example `nvidia/z-ai/glm-5.2` (GLM-5.2). Reasoning-model
+  traces (streamed as `delta.reasoning_content`) are surfaced, and tool calling
+  works as with any built-in provider.
+
+- **Mermaid warns when you attach an image to a model that can't see it.** Some
+  Ollama models have no vision capability, so a pasted image is silently ignored
+  — which looks exactly like a bug. Mermaid now probes the model's advertised
+  `vision` capability (Ollama `/api/show`) the moment you paste an image (and on
+  `/model` switch), and posts a one-line notice *before* you send if the model
+  can't see it, so you can switch to a vision-capable model instead of wasting a
+  turn. The notice is shown once per model per session; a per-turn re-check backs
+  it up for a fast paste-then-send. This also makes `/doctor` report Ollama
+  vision support accurately instead of always claiming "no".
+
+- **Pasted images are now inline `[Image #N]` tokens in the prompt.** Instead of
+  a separate `[Image #1] (PNG, 1KB)  (↑ to select)` bar floating above the input
+  box, Ctrl+V splices an inline `[Image #N]` pill into the message text at the
+  cursor — you can type around it and it deletes as a unit (Backspace on the pill
+  removes both the token and the image). `N` is a **stable, conversation-global**
+  number (it keeps climbing across messages and survives `--resume`/`--continue`),
+  so "in image #16 you can see…" is unambiguous for you and the model; the
+  submitted text carries the tokens so the model can correlate each image with
+  its reference, and the transcript shows the same number. This also retires the
+  attachment-focus bar entirely, so the up-arrow always steps through prompt
+  history with no contention.
+
+- **`read_only` safety mode now permits `web_search` and `web_fetch`.**
+  Searching and fetching the public web are reads — reading is what
+  read-only mode is for — so they no longer die with "blocks mutations and
+  control actions". The SSRF guard (refusing internal / loopback / metadata
+  hosts) lives in the web tools and applies in every mode, and an operator
+  `Deny` override on the `web` category still outranks the carve-out.
+  Anything that *acts* on the network keeps the `network` category and stays
+  blocked.
+
+- **`web_search`'s managed backend is now sovereign — no Docker or Podman.**
+  The default `auto` backend (when `OLLAMA_API_KEY` is unset) no longer runs a
+  SearXNG container. Instead the first search downloads a self-contained,
+  sha256-verified bundle — a portable CPython plus the Granian server and
+  SearXNG — from [mermaid-searxng](https://github.com/noahsabaj/mermaid-searxng),
+  unpacks it under the data dir, and runs Granian bound to loopback, reaped on
+  mermaid exit. No container runtime, no VM, nothing to install; the bundle is
+  fetched once and cached. Forcing your own instance (`search_backend =
+  "searxng"` / `searxng_url`) or Ollama Cloud (`OLLAMA_API_KEY`) is unchanged.
+
+- **The Ollama auto-start is no longer silent.** At the moment mermaid
+  commits to spawning `ollama serve`, one line — "Starting the local Ollama
+  server (it stays running after mermaid exits)…" — now reaches the user:
+  as a system line in the TUI transcript (via a new out-of-band
+  `StreamEvent::Status` → `Msg::TransientStatus` path, recorded/replayed
+  like any other Msg), on stderr for headless `mermaid run` (stdout stays
+  clean for the response payload), and on stderr for the startup model
+  check. The line fires only when a spawn actually happens — never when the
+  server was already up, never on remote URLs, never from the read-only
+  verbs — closing the latency-feedback, discoverability, and consent gaps
+  of a revival that can otherwise hide up to ~15s behind a generic spinner
+  and leave behind a detached server with no breadcrumb.
 
 ### Changed
 
@@ -563,7 +719,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session or asks for `--continue` with none saved gets a hard error instead
   of a silent fresh session.
 
-### Changed
 
 - **The transcript now records what you answered in `ask_user_question`.**
   An answered question set renders as a `User answered the model's
@@ -576,7 +731,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model-id prefix to `alias:`) to free the "profile" name for the config
   overlays above. Bare alias names still resolve unchanged.
 
+
+- **Ctrl+C now requires a second press to exit.** The first Ctrl+C does the
+  useful thing — interrupts a running turn (like Esc) or clears typed input —
+  and shows "press ctrl+c again to exit" for 3 seconds; a second press inside
+  the window exits. Ctrl+D on empty input and `/quit` still exit immediately.
+
+
+- **Tool-call transcript labels distinguish creating a file from changing one.**
+  A `write_file` that overwrites an existing file now reads `Update`, not
+  `Write` — `Write` is reserved for a genuinely new file — and targeted
+  `edit_file` calls read `Update` too. The vocabulary is now
+  `Write` / `Update` / `Delete` (previously `Write` / `Edit` / `Delete`),
+  matching Claude Code, so it's clear at a glance whether a call created,
+  modified, or removed a file. The create-vs-modify distinction comes from the
+  `created` flag the write tool already records, so it's accurate even when the
+  model rewrites a whole file with `write_file` instead of `edit_file`.
+
+- **File-diff summaries read as words, like Claude Code.** The `⎿` line under a
+  `Write` / `Update` now reads `Added 49 lines, took 25ms` or
+  `Added 7 lines, removed 1 line, took 25ms` (and `Removed 9 lines, took 25ms`),
+  replacing the terse `Success, +49 -0, took 25ms`. Empty clauses are dropped and
+  `line`/`lines` agree with the count; the timing is kept, the redundant
+  `Success,` prefix removed.
+
+- **`apply_patch` reads as `Update`, and `Success` is dropped from result lines.**
+  An `apply_patch` call now shows `● Update(<file>)` — or `Write` / `Delete` by
+  operation, `Update(N files)` for a multi-file patch — instead of the model's raw
+  `Apply patch()` with empty parens, matching the `Write` / `Update` / `Delete`
+  vocabulary. Separately, the redundant `Success` prefix is gone from every result
+  line (a failure renders differently, so a plain success needs no label): e.g.
+  `3 lines read, took 1.2s`, and a delete shows just `took 35ms`.
+
+- **`mermaid list` and `mermaid models` no longer start Ollama.** All four
+  read-only verbs (`list` / `models` / `status` / `doctor`) now enumerate
+  with auto-start hard-off: observing state never mutates it, so a
+  cloud-model user who deliberately stopped Ollama to free VRAM can run any
+  of them without resurrecting the daemon. A dead server is reported
+  honestly ("Ollama is installed but not running — local models can't be
+  listed") instead of the misleading "No Ollama models installed locally."
+  Auto-start remains on the paths that actually use Ollama: chat and the
+  startup model check.
+
 ### Fixed
+
+- **Word-wrap no longer styles or invents spaces at span boundaries.** On
+  chat lines long enough to wrap, the wrapper re-joined words with a
+  separator space styled like the following span — so the gap before a
+  markdown link rendered underlined (and before inline code would carry the
+  code background) — and treated every span boundary as a word boundary, so
+  spans adjacent without source whitespace gained a phantom space
+  (`(url) .` after a link, `` `code` , ``, `bold suffix` for
+  `**bold**suffix`). Wrapping now flattens spans into a word stream where
+  boundaries exist only at real whitespace, emits separator spaces
+  unstyled, and hard-breaks over-long multi-style tokens while preserving
+  each fragment's style.
+
+- **Compaction preserves the complete live context and persists in order.**
+  Summary requests now budget the entire request, include redacted tool
+  arguments and referenced images, count cached and reasoning tokens, and
+  require the documented summary structure before replacing history. Messages
+  that arrive while compaction runs are retained, truncation recovery resets
+  after visible progress, checkpoint metadata reports review status and actual
+  preserved turns, and serialized archive-plus-conversation saves prevent a
+  newer stripped transcript from bypassing a failed or delayed archive.
+  A compaction save that arrives while an older archive write is still
+  failing queues behind it instead of being dropped, shutdown drains every
+  conversation's pending barrier, and quoted `## ` lines inside checkpoint
+  bodies no longer fail structural validation. A failed auto-compaction now
+  pauses further automatic attempts (with a one-time notice) until a
+  compaction succeeds, `/compact` runs, or the conversation switches. A late
+  tool result that lands during compaction is re-inserted after its pending
+  call, and mid-compaction message matching uses compact sha256 fingerprints
+  instead of cloning the full transcript into the result. Persisted
+  compaction records and recorded compaction events changed shape
+  (`review_status`/`preserved_turn_count` replace
+  `verified`/`verification_error`; boundaries are now fingerprints), so
+  session files with compaction records and session recordings with
+  compaction events from earlier unreleased builds will not load or replay.
+
+- **The status spinner never names tools; the transcript does.** The spinner
+  headline used to splice in the executing tool and its arguments
+  (`Running tools: Bash pwd; ls -la…`, `Running tools: ask_user_question...`)
+  — detail that belongs in the chat window, not the status widget (Claude
+  Code parity). The headline is now only the task's active form, the
+  "Running N agents" override, or the bare phase word, followed by the usual
+  `(esc to interrupt • time • tokens)` metadata. Instead, each executing
+  tool call gets its `● Bash(cmd)` action row in the transcript the moment
+  it starts — with a blinking header dot while it runs — and its result
+  elbow folds in underneath as soon as that call completes, not only when
+  the whole batch commits. Pending `agent` calls keep their live panel rows
+  (no duplicate transcript row), and a pending `ask_user_question` is
+  represented by its modal alone, with the question → answer block landing
+  once answered.
+
+- **The question modal owns the screen.** While an `ask_user_question` modal
+  is up, the status spinner, task checklist band, and the input box (keys
+  already routed exclusively to the modal) are hidden — matching Claude
+  Code, where the modal is the only thing below the transcript instead of
+  sitting under a ticking `Running tools: ask_user_question...` spinner and
+  an inert prompt.
+
+- **Task checklist no longer dangles a `⎿` connector when idle.** The elbow
+  glyph on the checklist's first row exists to attach the band to the
+  status/spinner line above it; once the run went idle and that widget
+  disappeared, the elbow was left hanging from nothing. Idle now renders the
+  expanded checklist flush-left with no connector, and a collapsed (Ctrl+T)
+  checklist disappears entirely between runs — collapse is a
+  minimize-while-working affordance, so with no status line there is nothing
+  to minimize into. Active-run rendering is unchanged, and the collapsed
+  state persists: the "Next:" one-liner reappears when the next run starts.
+
+- **Tool action lines wrap instead of clipping at the viewport edge.** Long
+  tool headers (`● Bash(python3 - << 'PY'…`), result summaries, error bodies
+  (e.g. a full HTTP 404 JSON), diff rows, and write previews were painted as
+  single over-wide rows and cut off at the right edge. They now wrap with a
+  hanging indent: headers preserve a multi-line command's own line breaks
+  (previously the newlines were dropped, gluing fragments together like
+  `'PY'from PIL import`) and cap at 4 rows with a trailing `…)` so a heredoc
+  script can't flood the transcript; results and errors wrap in full; diff
+  rows keep their full-width color bar on every wrapped row.
+
+- **Safety-mode switch note: fires once, model-only.** The "earlier read-only
+  policy blocks no longer apply" note used to appear in the transcript on
+  every loosening step (ask, then auto, then full_access — three banners for
+  one Shift+Tab cycle), because the trigger was "any loosening while a
+  read-only denial exists in history" and the denial text is never removed
+  from stored history. The note now injects only when actually leaving
+  read_only past a stale denial, is hidden from the transcript (the status
+  bar already shows the mode; only the model sees it), and steers exactly
+  one request before being swept. Cycling onward renames the one pending
+  note instead of stacking new ones, and tightening back to read_only
+  retracts it.
+
 
 - **Existing `[model_profiles]` config tables migrate automatically.** The
   rename to `[model_aliases]` left older config files warning about an
@@ -665,298 +952,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two chords are physically identical on the wire — there the new press-twice
   behavior below keeps a stray copy attempt harmless.
 
-### Changed
-
-- **Ctrl+C now requires a second press to exit.** The first Ctrl+C does the
-  useful thing — interrupts a running turn (like Esc) or clears typed input —
-  and shows "press ctrl+c again to exit" for 3 seconds; a second press inside
-  the window exits. Ctrl+D on empty input and `/quit` still exit immediately.
-
-### Added
-
-- **Auto-continued replies are now seamless.** A reply that crosses the
-  model's per-response output cap reads as ONE uninterrupted assistant
-  bubble: the transcript stitches the continuation into its bubble (a code
-  fence cut open at the seam renders as a single intact block), a
-  conservative overlap trim drops the resume-echo some models emit, and the
-  in-flight continuation streams into the same bubble live. The "continuing"
-  system note is gone from view and — once its one request has gone out —
-  retired from history entirely, so it can never steer a later, unrelated
-  turn (the stalled-turn retry nudge gets the same treatment). Canonical
-  history still stores the true wire-level messages (provider-correct,
-  thinking-signature-safe); the stitch is display-only.
-- **Data-driven model-capability catalog.** Thinking wire shape (anthropic
-  adaptive-vs-budget, gemini level-vs-budget floors, gpt-oss think-string),
-  temperature support, effort-tier ceiling, vision markers, static context
-  windows, and documented output ceilings now live in one first-match-wins
-  const table (`src/models/catalog.rs`) instead of model-name string gates
-  scattered across four adapters and the domain. Every known model's behavior
-  is pinned unchanged by table-driven tests; Ollama's `/api/show` probe stays
-  authoritative for local models. Two deliberate accuracy fixes: matching is
-  uniformly case-insensitive, and gpt-5/gpt-4.1's 400k static window now
-  applies through any provider (previously `openai/` only).
-- **Cloudflare Workers AI is now a built-in provider.** Reach Cloudflare-hosted
-  models through their OpenAI-compatible endpoint with
-  `mermaid --model cloudflare/@cf/<vendor>/<model>` — for example
-  `cloudflare/@cf/zai-org/glm-5.2` (GLM-5.2). Set `CLOUDFLARE_API_TOKEN` and
-  `CLOUDFLARE_ACCOUNT_ID` (the account id is spliced into the endpoint URL), or
-  point `[providers.cloudflare].base_url` at a full account-scoped URL / AI
-  Gateway endpoint. Exposes the reasoning-level selector and streams GLM-5.2's
-  thinking trace. Discovery surfaces (`doctor`, the best-effort `/models` probe)
-  use the same account-scoped URL and report a missing account id instead of
-  probing a placeholder; a setup missing both env vars gets one error naming
-  both.
-- **Project-local config.** A repo can now commit `.mermaid/config.toml` at its
-  git root; it layers between your user config and session flags. Safe by
-  construction, with no trust prompt: security-sensitive keys (`mcp_servers`,
-  `providers`, `agents`, `daemon`, `last_used_model`, `web.searxng_url`,
-  `ollama.host`/`port`, and most of `safety`) are stripped with a warning, and
-  the allowed `safety.mode`/`network`/`filesystem` can only TIGHTEN your user
-  settings — a cloned repo can pick models and UX defaults but can never spawn
-  commands, redirect prompt traffic, or relax approvals. Startup prints a
-  one-line notice whenever a project config contributes keys, and runtime
-  memory-setting re-reads honor the project layer too.
-
-- **Layered config engine.** Configuration now merges as ordered layers —
-  built-in defaults < `~/.config/mermaid/config.toml` < session flags (`-c`
-  plus `--no-network`/`--confine-fs`/`--sandbox`, `run --max-tokens`,
-  `run --allow-untrusted-tools`) — through one recursive TOML deep-merge and a
-  single typed deserialize. Unknown-key warnings name the layer that contains
-  the typo, and in-app settings changes now rewrite only their own keys in the
-  user file: unrecognized keys survive persists, defaults are no longer frozen
-  into the file, and per-model entries whose ids contain dots
-  (`gemini/gemini-2.5-pro`) persist correctly. A corrupt config file degrades
-  to defaults while the session flags still apply.
-- **Long responses auto-continue across the model's per-response output cap.**
-  When a reply is cut by the provider's per-response output ceiling with
-  context-window room to spare, mermaid now continues it in a fresh turn (the
-  committed partial rides in history and a note nudges the model to resume, not
-  restart), bounded per run so a re-truncating model can't loop. A mid-reasoning
-  cutoff or a capped run still stops with the accurate output-limit message. So
-  an answer that "wants 40000 tokens" completes even on providers that cap
-  single responses lower.
-- **Live model-limit discovery — `Context: unknown` gets real numbers.** Most
-  OpenAI-compatible providers attach the model's context window and output
-  ceiling to their `/models` metadata (OpenRouter, Cloudflare, …); mermaid
-  previously threw that data away. It's now parsed, cached across sessions in
-  `provider_probes`, and refreshed into the live capability snapshot — so the
-  status bar shows a real window for remote models, proactive auto-compaction
-  works for them, the truncation classifier gets real windows, and
-  `mermaid model-info` gains an `Output limit:` line. Anthropic models report
-  their documented window/ceiling statically.
-- **Truncation is now diagnosed correctly — no more false "Context window
-  full".** A `length` stop is classified from the response usage: hitting the
-  per-response output cap (window still has room — the common case on remote
-  providers) now stops with an accurate message naming the real limit, instead
-  of misreporting a full window and looping through futile conversation
-  compactions that couldn't help. A genuinely full window still compacts and
-  continues exactly as before.
-- **Model-scaled output budget — the hardcoded 4096-token cap is gone.**
-  `default_model.max_tokens` now defaults to `0` = **auto**: OpenAI-compatible
-  providers and Gemini get no cap at all (the provider applies the model's own
-  per-response maximum), Ollama's `num_predict` gets the full room the context
-  window leaves after the prompt, and Anthropic (which requires `max_tokens`)
-  gets the model's documented output ceiling clamped to the window. Reasoning
-  models like GLM-5.2 can finally emit tens of thousands of thinking tokens
-  without tripping a stale 2024-era limit. A positive `max_tokens` remains an
-  explicit hard cap (cost control); existing config files carrying the frozen
-  legacy `4096` are migrated to auto on load. Compaction's response reserve is
-  now reasoning-aware instead of mirroring the send-cap.
-- **Optional filesystem write-confinement for shell commands (Linux).**
-  `mermaid --confine-fs …` (or `safety.filesystem = "project"`) confines
-  model-run shell commands with a Landlock ruleset: writes are allowed only
-  beneath the project directory, the system temp directory, and `/dev`; reads
-  and execution stay unrestricted. A failure matching the denial signature
-  while confinement is active is reported with a clear "filesystem sandbox"
-  explanation and the `denied_by_sandbox` marker. `mermaid --sandbox …` is
-  shorthand for `--no-network --confine-fs`. Best-effort by design: kernels
-  without Landlock (pre-5.13) and other platforms degrade to a warned no-op.
-  Off by default.
-- **Optional network kill-switch for shell commands (Linux).** `mermaid
-  --no-network …` (or `safety.network = "deny"`) confines model-run shell
-  commands with a seccomp-BPF filter that denies internet sockets
-  (`AF_INET`/`AF_INET6`) while leaving `AF_UNIX` and local IPC working, so a
-  sandboxed command can't reach the network but ordinary local work still runs.
-  A blocked attempt is reported with a clear "blocked by the network sandbox"
-  message and a `denied_by_sandbox` marker instead of a confusing crash. Applied
-  via a hidden `__sandbox-exec` re-exec launcher; a no-op on macOS/Windows
-  (Seatbelt/AppContainer are follow-ups). Off by default.
-- **Typed NDJSON event stream for `mermaid run`.** `mermaid run --format ndjson`
-  streams the run lifecycle as one JSON object per line — `session_started`,
-  `text`/`reasoning` deltas, `tool_started`/`tool_finished`, `approval_required`,
-  `turn_done`, and a terminal `result` — so `mermaid run` can be driven as an
-  SDK/subprocess. The event shape is a stable, versioned contract
-  (`protocol_version`) pinned by a golden serialization test; `--format json`
-  now emits that same typed `result` object.
-- **Startup process hardening + per-turn timing.** On Linux, Mermaid now disables
-  core dumps (`RLIMIT_CORE=0`) and ptrace attachment (`PR_SET_DUMPABLE=0`) at
-  startup, so a crash can't leave a core file carrying secrets and the process
-  isn't trivially attachable. Each model turn also emits a structured timing
-  event (turn id, model, elapsed) to the log / diagnostic bundle.
-- **Faster session listing + session provenance.** Each saved session now writes
-  a tiny `<id>.meta` sidecar, so listing sessions (`/list`) reads metadata
-  instead of parsing every transcript (older sessions fall back to a full read).
-  Sessions also record their creation environment — git branch, git SHA, and CLI
-  version — plus `forked_from` / `parent_session` lineage fields (ready for a
-  future fork/rewind).
-- **TUI: attention bell, keyboard scrolling, and a shortcut list.** The terminal
-  title now reflects run state (`mermaid · working`, else the conversation
-  title), and Mermaid rings the bell when a run finishes or an approval is
-  waiting while the terminal is unfocused. PageUp/PageDown scroll the transcript
-  (Shift+Up/Down by a line, End jumps back to the newest message), and `/help`
-  now lists the keyboard shortcuts.
-- **Providers & MCP: keyless local servers, env-sourced headers, per-server tool
-  filters, raw command servers.** Local OpenAI-compatible endpoints (llama.cpp,
-  vLLM, LM Studio) now work with no API key when the base URL is loopback/LAN;
-  a missing key for a public provider gives an actionable "get a key at …" hint.
-  Providers can source secret headers from env vars (`[providers.x] env_headers`)
-  instead of writing them into config. Each MCP server accepts `enabled_tools` /
-  `disabled_tools` to scope which of its tools reach the model. And `mermaid add
-  --command <cmd> --arg … --env K=V` registers an arbitrary command MCP server
-  without going through the package registry. (Also fixes a latent bug where a
-  built-in provider's static analytics headers were dropped.)
-- **Config: typo warnings, `-c` overrides, and stdin prompts.** Unknown keys in
-  `config.toml` now warn with their dotted path instead of being silently
-  ignored. A repeatable `-c key.path=value` flag overrides any config value for
-  one invocation (`mermaid -c default_model.max_tokens=8192 run "…"`; the value
-  is parsed as TOML). And `mermaid run` reads its prompt from stdin when given
-  `-` or no prompt (`echo "explain this" | mermaid run -`); piped stdin
-  alongside an explicit prompt is appended as a fenced block.
-- **Sharper prompt + searchable memory.** The system prompt gained a `## Web`
-  section (browse for time-sensitive or externally-verifiable facts, prefer
-  primary sources, cite inline) and a memory "signal gate" (save a fact only if
-  a future session would act better for it). The `memory` tool gained a `search`
-  action that substring-matches across fact names, descriptions, and bodies — a
-  targeted read that stays available in every safety mode.
-- **`apply_patch` — robust, multi-file editing.** A new patch-based editor
-  (`*** Begin Patch … *** End Patch` with Add / Update / Delete / Move hunks and
-  optional `@@` context anchors) backed by a graduated fuzzy matcher that
-  tolerates whitespace and curly-quote drift, so an edit no longer fails on a
-  stray trailing space. It edits several files in one call under a single
-  checkpoint, and warns when a hunk matched fuzzily. Replaces `edit_file` (the
-  old single exact-match replacement is removed).
-- **The daemon now schedules its tasks instead of stampeding.** `run` requests
-  enqueue; a scheduler executes queued tasks bounded by
-  `[daemon] max_concurrent_tasks` (default 1 — one agent run at a time, honest
-  for a single local GPU), ordered by priority (`run` accepts
-  `"priority": "low"|"normal"|"high"`) then FIFO. The queue is durable: tasks
-  submitted while the daemon is down or busy survive restarts and drain
-  automatically.
-- **Daemon tasks can be cancelled.** New `cancel_task` daemon command and
-  `mermaid cancel <task-id>` CLI: a running task gets the same graceful
-  teardown as pressing Esc in the TUI (current tool's process tree killed,
-  turn unwound, status `cancelled` persisted), with a hard stop if it doesn't
-  unwind within a grace window; a queued task is cancelled before it starts.
-- **Per-task wall-clock budgets.** `[daemon] task_timeout_minutes` bounds each
-  daemon task's runtime (unset keeps the existing 20-minute headless default),
-  so an unattended run's worst case is bounded.
-- **The agent can ask you structured multiple-choice questions.** A new
-  `ask_user_question` tool lets the model pause mid-run and pose 1–4 questions in
-  an interactive terminal modal — single-select, multi-select, rank, or typed
-  inputs (text/number/date/path) — each with an "Other" free-text escape,
-  optional side-by-side previews (including diffs), and a "remember this answer"
-  toggle that persists settled preferences across sessions. Answers flow back as
-  the tool result so the run continues with your decision; headless runs with no
-  TTY proceed with best judgment instead of blocking.
-
-- **NVIDIA NIM is now a built-in provider.** Reach NVIDIA-hosted models through
-  their OpenAI-compatible endpoint with `mermaid --model nvidia/<model>` and an
-  `NVIDIA_API_KEY` — for example `nvidia/z-ai/glm-5.2` (GLM-5.2). Reasoning-model
-  traces (streamed as `delta.reasoning_content`) are surfaced, and tool calling
-  works as with any built-in provider.
-
-- **Mermaid warns when you attach an image to a model that can't see it.** Some
-  Ollama models have no vision capability, so a pasted image is silently ignored
-  — which looks exactly like a bug. Mermaid now probes the model's advertised
-  `vision` capability (Ollama `/api/show`) the moment you paste an image (and on
-  `/model` switch), and posts a one-line notice *before* you send if the model
-  can't see it, so you can switch to a vision-capable model instead of wasting a
-  turn. The notice is shown once per model per session; a per-turn re-check backs
-  it up for a fast paste-then-send. This also makes `/doctor` report Ollama
-  vision support accurately instead of always claiming "no".
-
-- **Pasted images are now inline `[Image #N]` tokens in the prompt.** Instead of
-  a separate `[Image #1] (PNG, 1KB)  (↑ to select)` bar floating above the input
-  box, Ctrl+V splices an inline `[Image #N]` pill into the message text at the
-  cursor — you can type around it and it deletes as a unit (Backspace on the pill
-  removes both the token and the image). `N` is a **stable, conversation-global**
-  number (it keeps climbing across messages and survives `--resume`/`--continue`),
-  so "in image #16 you can see…" is unambiguous for you and the model; the
-  submitted text carries the tokens so the model can correlate each image with
-  its reference, and the transcript shows the same number. This also retires the
-  attachment-focus bar entirely, so the up-arrow always steps through prompt
-  history with no contention.
-
-- **`read_only` safety mode now permits `web_search` and `web_fetch`.**
-  Searching and fetching the public web are reads — reading is what
-  read-only mode is for — so they no longer die with "blocks mutations and
-  control actions". The SSRF guard (refusing internal / loopback / metadata
-  hosts) lives in the web tools and applies in every mode, and an operator
-  `Deny` override on the `web` category still outranks the carve-out.
-  Anything that *acts* on the network keeps the `network` category and stays
-  blocked.
-
-- **`web_search`'s managed backend is now sovereign — no Docker or Podman.**
-  The default `auto` backend (when `OLLAMA_API_KEY` is unset) no longer runs a
-  SearXNG container. Instead the first search downloads a self-contained,
-  sha256-verified bundle — a portable CPython plus the Granian server and
-  SearXNG — from [mermaid-searxng](https://github.com/noahsabaj/mermaid-searxng),
-  unpacks it under the data dir, and runs Granian bound to loopback, reaped on
-  mermaid exit. No container runtime, no VM, nothing to install; the bundle is
-  fetched once and cached. Forcing your own instance (`search_backend =
-  "searxng"` / `searxng_url`) or Ollama Cloud (`OLLAMA_API_KEY`) is unchanged.
-
-- **The Ollama auto-start is no longer silent.** At the moment mermaid
-  commits to spawning `ollama serve`, one line — "Starting the local Ollama
-  server (it stays running after mermaid exits)…" — now reaches the user:
-  as a system line in the TUI transcript (via a new out-of-band
-  `StreamEvent::Status` → `Msg::TransientStatus` path, recorded/replayed
-  like any other Msg), on stderr for headless `mermaid run` (stdout stays
-  clean for the response payload), and on stderr for the startup model
-  check. The line fires only when a spawn actually happens — never when the
-  server was already up, never on remote URLs, never from the read-only
-  verbs — closing the latency-feedback, discoverability, and consent gaps
-  of a revival that can otherwise hide up to ~15s behind a generic spinner
-  and leave behind a detached server with no breadcrumb.
-
-### Changed
-
-- **Tool-call transcript labels distinguish creating a file from changing one.**
-  A `write_file` that overwrites an existing file now reads `Update`, not
-  `Write` — `Write` is reserved for a genuinely new file — and targeted
-  `edit_file` calls read `Update` too. The vocabulary is now
-  `Write` / `Update` / `Delete` (previously `Write` / `Edit` / `Delete`),
-  matching Claude Code, so it's clear at a glance whether a call created,
-  modified, or removed a file. The create-vs-modify distinction comes from the
-  `created` flag the write tool already records, so it's accurate even when the
-  model rewrites a whole file with `write_file` instead of `edit_file`.
-
-- **File-diff summaries read as words, like Claude Code.** The `⎿` line under a
-  `Write` / `Update` now reads `Added 49 lines, took 25ms` or
-  `Added 7 lines, removed 1 line, took 25ms` (and `Removed 9 lines, took 25ms`),
-  replacing the terse `Success, +49 -0, took 25ms`. Empty clauses are dropped and
-  `line`/`lines` agree with the count; the timing is kept, the redundant
-  `Success,` prefix removed.
-
-- **`apply_patch` reads as `Update`, and `Success` is dropped from result lines.**
-  An `apply_patch` call now shows `● Update(<file>)` — or `Write` / `Delete` by
-  operation, `Update(N files)` for a multi-file patch — instead of the model's raw
-  `Apply patch()` with empty parens, matching the `Write` / `Update` / `Delete`
-  vocabulary. Separately, the redundant `Success` prefix is gone from every result
-  line (a failure renders differently, so a plain success needs no label): e.g.
-  `3 lines read, took 1.2s`, and a delete shows just `took 35ms`.
-
-- **`mermaid list` and `mermaid models` no longer start Ollama.** All four
-  read-only verbs (`list` / `models` / `status` / `doctor`) now enumerate
-  with auto-start hard-off: observing state never mutates it, so a
-  cloud-model user who deliberately stopped Ollama to free VRAM can run any
-  of them without resurrecting the daemon. A dead server is reported
-  honestly ("Ollama is installed but not running — local models can't be
-  listed") instead of the misleading "No Ollama models installed locally."
-  Auto-start remains on the paths that actually use Ollama: chat and the
-  startup model check.
-
-### Fixed
 
 - **Read-only shell commands prefixed with `cd` are no longer blocked.** A
   `cd DIR && <read>` command (e.g. `cd repo && git status`) classified as a
@@ -2486,7 +2481,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.14.2...v0.15.0
