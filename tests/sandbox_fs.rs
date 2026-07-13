@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Whether this kernel has Landlock in its active LSM list. When it doesn't,
@@ -26,14 +27,22 @@ fn landlock_active() -> bool {
 }
 
 fn fresh_base() -> PathBuf {
+    // (pid, nanos) alone is NOT unique here: libtest runs these tests as
+    // threads of one process (same pid) and starts them in the same instant,
+    // while the macOS realtime clock ticks in ~1µs steps — so two tests can
+    // draw identical nonces, share a base, and one test's remove_dir_all
+    // teardown then deletes the other's live base mid-run (the sandboxed
+    // child fails with ENOENT). The per-process counter breaks the tie.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time before epoch")
         .as_nanos();
     let base = std::env::temp_dir().join(format!(
-        "mermaid-sandbox-fs-{}-{}",
+        "mermaid-sandbox-fs-{}-{}-{}",
         std::process::id(),
-        nonce
+        nonce,
+        SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&base).expect("create test base dir");
     base
