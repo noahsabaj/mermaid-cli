@@ -78,7 +78,7 @@ impl ToolExecutor for ExecuteCommandTool {
         ToolDefinition {
             name: "execute_command".to_string(),
             description:
-                "Run a shell command. Use mode='wait' for finite commands, or mode='background' for dev servers and GUI/daemon-style commands that should keep running after the tool returns. Ctrl+C during foreground execution aborts the child immediately. The session scratchpad directory (for throwaway files) is exported to the child as MERMAID_SCRATCHPAD."
+                "Run a shell command — PowerShell on Windows, sh on Linux/macOS; write the command in that shell's syntax. Use mode='wait' for finite commands, or mode='background' for dev servers and GUI/daemon-style commands that should keep running after the tool returns. Ctrl+C during foreground execution aborts the child immediately. The session scratchpad directory (for throwaway files) is exported to the child as MERMAID_SCRATCHPAD."
                     .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -773,7 +773,7 @@ async fn launch_background_process(
     log_path: &Path,
     scratchpad: Option<&Path>,
 ) -> Result<u32, String> {
-    use crate::utils::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    use crate::utils::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
     let log = std::fs::File::create(log_path).map_err(|e| {
         format!(
             "failed to create background log {}: {e}",
@@ -783,15 +783,17 @@ async fn launch_background_process(
     let log_err = log
         .try_clone()
         .map_err(|e| format!("failed to clone background log handle: {e}"))?;
-    let mut launcher = Command::new("cmd");
+    let mut launcher = Command::new(powershell_program());
     launcher
-        .arg("/C")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
         .arg(command)
         .current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        // CREATE_NO_WINDOW, not DETACHED_PROCESS: PowerShell needs a console
+        // (hidden is fine) or it dies during startup; see proc.rs.
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     scrub_secret_env(&mut launcher);
     harden_noninteractive_env(&mut launcher);
     export_scratchpad_env(&mut launcher, scratchpad);
@@ -1110,6 +1112,31 @@ struct ShellInvocation {
     args: Vec<std::ffi::OsString>,
 }
 
+/// The PowerShell executable model commands run under on Windows: PowerShell 7
+/// (`pwsh`) when installed, else the always-present Windows PowerShell 5.1.
+/// Resolved once — a PATH scan per spawn would be pure waste.
+fn powershell_program() -> &'static str {
+    static PROGRAM: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
+        let has_pwsh = std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|dir| dir.join("pwsh.exe").is_file())
+        });
+        if has_pwsh { "pwsh" } else { "powershell" }
+    });
+    &PROGRAM
+}
+
+/// Wrap a model command for `-Command` so PowerShell behaves like a
+/// non-interactive script runner: cmdlet errors terminate instead of limping
+/// on, and the process exit code is the last native command's exit code
+/// rather than PowerShell's bare 0/1. Same shape GitHub Actions uses for its
+/// `powershell`/`pwsh` shells — without the trailer, `cargo build` failing
+/// with 101 surfaces as exit 0.
+fn powershell_wrap(command: &str) -> String {
+    format!(
+        "$ErrorActionPreference='Stop'\n{command}\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) {{ exit $LASTEXITCODE }}"
+    )
+}
+
 fn shell_invocation(
     command: &str,
     sandbox_network: bool,
@@ -1118,7 +1145,8 @@ fn shell_invocation(
     if sandbox_network || confine_writes.is_some() {
         // `mermaid __sandbox-exec [--no-network] [--confine-writes <dir>]… --
         // sh -c <command>`: the launcher installs the requested confinement on
-        // itself, then execs the shell.
+        // itself, then execs the shell. Unix-only path — Windows never sets
+        // these flags.
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mermaid"));
         let mut args: Vec<std::ffi::OsString> = vec!["__sandbox-exec".into()];
         if sandbox_network {
@@ -1130,22 +1158,20 @@ fn shell_invocation(
         }
         args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
         ShellInvocation { program: exe, args }
+    } else if cfg!(target_os = "windows") {
+        ShellInvocation {
+            program: PathBuf::from(powershell_program()),
+            args: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                powershell_wrap(command).into(),
+            ],
+        }
     } else {
         ShellInvocation {
-            program: PathBuf::from(if cfg!(target_os = "windows") {
-                "cmd"
-            } else {
-                "sh"
-            }),
-            args: vec![
-                (if cfg!(target_os = "windows") {
-                    "/C"
-                } else {
-                    "-c"
-                })
-                .into(),
-                command.into(),
-            ],
+            program: PathBuf::from("sh"),
+            args: vec!["-c".into(), command.into()],
         }
     }
 }
@@ -2178,7 +2204,7 @@ mod tests {
         let plain = build_sandboxed_shell("echo hi", false, None);
         let plain_prog = plain.as_std().get_program().to_string_lossy().into_owned();
         assert!(
-            plain_prog.ends_with("sh") || plain_prog.ends_with("cmd"),
+            ["sh", "pwsh", "powershell"].contains(&plain_prog.as_str()),
             "plain shell program: {plain_prog}"
         );
 
@@ -2213,6 +2239,66 @@ mod tests {
         );
         assert!(args.contains(&"/proj".to_string()));
         assert!(args.contains(&"/dev".to_string()));
+    }
+
+    #[test]
+    fn powershell_wrap_carries_stop_pref_and_exit_code_trailer() {
+        let wrapped = powershell_wrap("cargo build");
+        assert!(wrapped.starts_with("$ErrorActionPreference='Stop'\n"));
+        assert!(wrapped.contains("cargo build"));
+        assert!(wrapped.ends_with("{ exit $LASTEXITCODE }"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_shell_invocation_is_powershell() {
+        let inv = shell_invocation("echo hi", false, None);
+        let prog = inv.program.to_string_lossy().into_owned();
+        assert!(prog == "pwsh" || prog == "powershell", "program: {prog}");
+        let args: Vec<String> = inv
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
+        assert!(args[3].contains("echo hi"), "args: {args:?}");
+    }
+
+    /// Without the powershell_wrap trailer, PowerShell collapses a native
+    /// child's exit code to 0/1 — `cargo build` failing with 101 would look
+    /// clean. `cmd /c exit 7` is the minimal native command with a nonzero code.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_native_exit_code_propagates() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), std::env::temp_dir());
+        let outcome = ExecuteCommandTool
+            .execute(serde_json::json!({"command": "cmd /c exit 7"}), ctx)
+            .await;
+        match &outcome.metadata.detail {
+            crate::domain::ToolMetadata::ExecuteCommand { exit_code, .. } => {
+                assert_eq!(*exit_code, Some(7), "outcome: {outcome:?}");
+            },
+            other => panic!("unexpected metadata: {other:?}"),
+        }
+    }
+
+    /// The point of the switch: PowerShell-native syntax must actually run.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_powershell_syntax_works() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), std::env::temp_dir());
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({"command": "Write-Output ('mermaid-' + 'ps')"}),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "outcome: {outcome:?}");
+        assert!(
+            outcome.output().contains("mermaid-ps"),
+            "output: {}",
+            outcome.output()
+        );
     }
 
     #[tokio::test]
@@ -2363,8 +2449,10 @@ mod tests {
     #[tokio::test]
     async fn safe_command_runs_and_captures_output() {
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        // Quoted so PowerShell's echo (Write-Output) prints one line, not one
+        // line per bare argument.
         let outcome = ExecuteCommandTool
-            .execute(serde_json::json!({"command": "echo hello world"}), ctx)
+            .execute(serde_json::json!({"command": "echo 'hello world'"}), ctx)
             .await;
         assert!(outcome.is_success(), "expected success: {:?}", outcome);
         assert!(outcome.output().contains("hello world"));
@@ -2558,7 +2646,7 @@ mod tests {
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), std::env::temp_dir());
         let outcome = ExecuteCommandTool
             .execute(
-                serde_json::json!({ "command": "echo RED& echo line2" }),
+                serde_json::json!({ "command": "echo RED; echo line2" }),
                 ctx,
             )
             .await;
@@ -2789,7 +2877,7 @@ mod tests {
         let outcome = ExecuteCommandTool
             .execute(
                 serde_json::json!({
-                    "command": "echo ready & ping -n 30 127.0.0.1",
+                    "command": "echo ready; ping -n 30 127.0.0.1",
                     "mode": "background",
                     "startup_timeout_secs": 3,
                     "ready_pattern": "ready"
@@ -3075,7 +3163,7 @@ mod tests {
         #[cfg(unix)]
         let probe = r#"printf %s "${MERMAID_SCRATCHPAD:-UNSET}""#;
         #[cfg(windows)]
-        let probe = "if defined MERMAID_SCRATCHPAD (echo %MERMAID_SCRATCHPAD%) else (echo UNSET)";
+        let probe = "if ($env:MERMAID_SCRATCHPAD) { Write-Output $env:MERMAID_SCRATCHPAD } else { Write-Output UNSET }";
 
         let run = |scratchpad: Option<PathBuf>| {
             let dir = dir.clone();

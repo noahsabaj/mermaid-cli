@@ -59,6 +59,14 @@ pub const DETACHED_PROCESS: u32 = 0x0000_0008;
 /// console control events aimed at mermaid's group never reach it.
 #[cfg(target_os = "windows")]
 pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+/// `CREATE_NO_WINDOW`: the child gets its OWN console with no window —
+/// same isolation from mermaid's console as `DETACHED_PROCESS` (exempt from
+/// Ctrl+C fan-out, survives mermaid exiting) but console APIs still work.
+/// PowerShell dies at startup under `DETACHED_PROCESS` (no console at all),
+/// so the exec tool's background launcher uses this instead. Mutually
+/// exclusive with `DETACHED_PROCESS`.
+#[cfg(target_os = "windows")]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// pids 0 and 1 are never legitimate teardown targets. On Unix we signal the
 /// *process group* `-pid`, so `kill -KILL -- -0` hits our OWN process group
