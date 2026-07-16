@@ -489,14 +489,21 @@ auto_start = true
 # Approval policy. Default is "ask": prompt before mutations / shell / network
 # actions. "auto" runs an LLM classifier that vets each borderline action
 # against your stated intent — aligned actions run automatically, risky ones
-# escalate to an approval prompt. "full_access" auto-runs everything (the
-# legacy default); "read_only" blocks all mutations but keeps reads flowing —
-# including web_search / web_fetch, which are reads of the public web (the
-# SSRF guard on internal hosts applies in every mode). Change it live with
-# Shift+Tab or `/safety <mode>` (session-scoped; this value is the persistent
-# default each session starts from).
+# escalate to an approval prompt. "full_access" auto-runs everything local;
+# write-shaped MCP tools (no read-only annotation) are still vetted against
+# your intent per `external_writes` below. "read_only" blocks all mutations
+# but keeps reads flowing — including web_search / web_fetch, which are reads
+# of the public web (the SSRF guard on internal hosts applies in every mode).
+# Change it live with Shift+Tab or `/safety <mode>` (session-scoped; this
+# value is the persistent default each session starts from).
 mode = "ask"
 checkpoint_on_mutation = true
+# Enforcement floor for write-shaped MCP tools (send / deploy / delete-remote
+# — anything without a server-advertised readOnlyHint): safety mode alone
+# never authorizes an external side effect. "allow" restores unconditional
+# runs, "auto" (default) vets against your intent, "ask" always prompts,
+# "deny" blocks.
+# external_writes = "auto"
 # Model the "auto" classifier uses to vet actions. Omit to vet with the
 # session's active model; set a smaller/faster model to cut latency and cost.
 # auto_classifier_model = "<provider>/<small-fast-model>"

@@ -91,7 +91,7 @@ When asked to read, inspect, familiarize yourself with, or review a codebase:
 - Match local style and existing abstractions. Avoid unrelated rewrites, renames, formatting churn, dependency swaps, or architectural pivots.
 - Make the smallest change that fully does the task. No speculative features, options, abstractions, or error handling for cases that can't happen, and no cleanup of code you didn't touch — three similar lines beat a premature abstraction.
 - If something becomes unused, delete it — after checking it isn't exported public API consumed outside the repo. No backwards-compat shims, renamed `_vars`, or "removed" tombstone comments. Don't add comments, docstrings, or type annotations to code you didn't change; comment only where the logic isn't self-evident.
-- Don't create files unless the task needs them; prefer editing an existing one. Never create README or other docs unless asked.
+- Don't create files unless the task needs them; prefer editing an existing one. Never create README or other docs unless asked. But when your change makes an existing doc false — flags, commands, config keys, API surface, or setup steps it describes — updating that doc is part of the change, not optional extra work.
 - Don't introduce security holes (command/SQL injection, path traversal, leaked secrets); validate untrusted input at boundaries, and fix insecure code you notice you wrote. Flag pre-existing vulnerabilities to the user instead of silently fixing or ignoring them.
 - Never echo credentials or secret-file contents into your output; redact when reporting.
 - Preserve worktree changes you didn't make. Never discard or rewrite user work without explicit request.
@@ -863,12 +863,23 @@ mod tests {
         );
     }
 
+    /// Doc policy is two-sided: creation stays banned unless asked, but a
+    /// change that falsifies an existing doc must repair it in the same
+    /// change — otherwise documented user-facing behavior silently rots.
     #[test]
     fn prompt_restrains_file_creation() {
         let prompt = get_system_prompt();
         assert!(
             prompt.contains("Don't create files unless"),
             "Prompt must restrain gratuitous file creation"
+        );
+        assert!(
+            prompt.contains("Never create README"),
+            "doc creation must stay opt-in"
+        );
+        assert!(
+            prompt.contains("makes an existing doc false"),
+            "doc maintenance must be part of the change"
         );
     }
 
