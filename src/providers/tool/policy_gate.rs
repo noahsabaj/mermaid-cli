@@ -211,6 +211,7 @@ pub async fn gate(
     let decision = PolicyEngine::new(ctx.safety_mode)
         .with_overrides(ctx.config.safety.overrides.clone())
         .with_external_writes(ctx.config.safety.external_writes)
+        .with_system_installs(ctx.config.safety.system_installs)
         .decide(&request);
 
     // Plan mode: the reducer floors `ctx.safety_mode` to `ReadOnly` while a

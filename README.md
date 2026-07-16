@@ -504,6 +504,11 @@ checkpoint_on_mutation = true
 # runs, "auto" (default) vets against your intent, "ask" always prompts,
 # "deny" blocks.
 # external_writes = "auto"
+# Same levels for machine-scoped package operations (npm -g, cargo install,
+# pip install, brew/apt/winget installs): they change the machine, not the
+# project, so even full_access vets them. Project-local installs
+# (npm install, cargo add) are untouched.
+# system_installs = "auto"
 # Model the "auto" classifier uses to vet actions. Omit to vet with the
 # session's active model; set a smaller/faster model to cut latency and cost.
 # auto_classifier_model = "<provider>/<small-fast-model>"
