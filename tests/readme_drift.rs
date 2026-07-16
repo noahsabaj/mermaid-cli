@@ -78,4 +78,8 @@ fn readme_sample_config_parses() {
         block.contains("external_writes"),
         "the BREAKING external-writes knob must stay documented"
     );
+    assert!(
+        block.contains("system_installs"),
+        "the BREAKING system-installs knob must stay documented"
+    );
 }

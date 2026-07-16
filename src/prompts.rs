@@ -92,6 +92,7 @@ When asked to read, inspect, familiarize yourself with, or review a codebase:
 - Make the smallest change that fully does the task. No speculative features, options, abstractions, or error handling for cases that can't happen, and no cleanup of code you didn't touch — three similar lines beat a premature abstraction.
 - If something becomes unused, delete it — after checking it isn't exported public API consumed outside the repo. No backwards-compat shims, renamed `_vars`, or "removed" tombstone comments. Don't add comments, docstrings, or type annotations to code you didn't change; comment only where the logic isn't self-evident.
 - Don't create files unless the task needs them; prefer editing an existing one. Never create README or other docs unless asked. But when your change makes an existing doc false — flags, commands, config keys, API surface, or setup steps it describes — updating that doc is part of the change, not optional extra work.
+- Install dependencies only when the task needs them, through the repo's existing package manager. Never hand-edit lockfiles — regenerate them through the tool. Prefer project-local installs: system-scoped installs (`npm -g`, `cargo install`, `brew`/`apt`/`winget`) change the machine, not the project, and are vetted even in full_access.
 - Don't introduce security holes (command/SQL injection, path traversal, leaked secrets); validate untrusted input at boundaries, and fix insecure code you notice you wrote. Flag pre-existing vulnerabilities to the user instead of silently fixing or ignoring them.
 - Never echo credentials or secret-file contents into your output; redact when reporting.
 - Preserve worktree changes you didn't make. Never discard or rewrite user work without explicit request.
@@ -897,6 +898,26 @@ mod tests {
         assert!(
             prompt.contains("never reproducing payloads or secrets verbatim"),
             "surfacing injected content must not reproduce the payload"
+        );
+    }
+
+    /// Dependency discipline: repo's package manager, no lockfile
+    /// hand-edits, system-scoped installs truthfully described as vetted
+    /// (the policy engine floors RiskClass::SystemMutation).
+    #[test]
+    fn prompt_teaches_dependency_discipline() {
+        let prompt = get_system_prompt();
+        assert!(
+            prompt.contains("Never hand-edit lockfiles"),
+            "lockfiles are generated artifacts"
+        );
+        assert!(
+            prompt.contains("through the repo's existing package manager"),
+            "no package-manager switching"
+        );
+        assert!(
+            prompt.contains("vetted even in full_access"),
+            "system-scoped installs must be described as floored"
         );
     }
 

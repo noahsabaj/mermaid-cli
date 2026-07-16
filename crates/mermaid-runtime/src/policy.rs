@@ -105,6 +105,13 @@ pub enum RiskClass {
     Network,
     Process,
     ExternalAccess,
+    /// Machine-scoped package operations (`npm -g`, `cargo install`,
+    /// `pip install`, `brew`/`apt`/`winget` installs): they mutate the
+    /// MACHINE, not the project — outside checkpoint reach, visible to every
+    /// other project — so the `system_installs` floor vets them even in
+    /// full_access. Project-local installs (`npm install`, `cargo add`)
+    /// deliberately stay Process.
+    SystemMutation,
     Destructive,
 }
 
@@ -118,6 +125,7 @@ impl RiskClass {
             RiskClass::Network => "network",
             RiskClass::Process => "process",
             RiskClass::ExternalAccess => "external_access",
+            RiskClass::SystemMutation => "system_mutation",
             RiskClass::Destructive => "destructive",
         }
     }
@@ -234,17 +242,17 @@ impl PolicyDecision {
     }
 }
 
-/// Enforcement floor for write-shaped external actions — today, MCP tools
-/// without a server-advertised `readOnlyHint`. Safety mode alone never
-/// authorizes an external side effect: the mode's decision is strengthened
-/// to at least this level (severity order `Allow < Auto < Ask < Deny`).
-/// Default `Auto`: the intent classifier vets the call against the user's
-/// request — aligned runs silently, off-task escalates — even in
-/// full_access. Configure via `[safety] external_writes` (`allow` restores
-/// the old unconditional-allow behavior).
+/// Enforcement floor for actions whose blast radius exceeds the project:
+/// write-shaped MCP tools (`external_writes`) and machine-scoped package
+/// operations (`system_installs`). Safety mode alone never authorizes them:
+/// the mode's decision is strengthened to at least this level (severity
+/// order `Allow < Auto < Ask < Deny`). Default `Auto`: the intent
+/// classifier vets the call against the user's request — aligned runs
+/// silently, off-task escalates — even in full_access. `allow` restores
+/// the old unconditional-allow behavior per knob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExternalWriteLevel {
+pub enum FloorLevel {
     Allow,
     #[default]
     Auto,
@@ -256,7 +264,8 @@ pub enum ExternalWriteLevel {
 pub struct PolicyEngine {
     mode: SafetyMode,
     overrides: Vec<PolicyOverride>,
-    external_writes: ExternalWriteLevel,
+    external_writes: FloorLevel,
+    system_installs: FloorLevel,
 }
 
 impl PolicyEngine {
@@ -264,7 +273,8 @@ impl PolicyEngine {
         Self {
             mode,
             overrides: Vec::new(),
-            external_writes: ExternalWriteLevel::default(),
+            external_writes: FloorLevel::default(),
+            system_installs: FloorLevel::default(),
         }
     }
 
@@ -273,8 +283,13 @@ impl PolicyEngine {
         self
     }
 
-    pub fn with_external_writes(mut self, level: ExternalWriteLevel) -> Self {
+    pub fn with_external_writes(mut self, level: FloorLevel) -> Self {
         self.external_writes = level;
+        self
+    }
+
+    pub fn with_system_installs(mut self, level: FloorLevel) -> Self {
+        self.system_installs = level;
         self
     }
 
@@ -377,7 +392,8 @@ impl PolicyEngine {
                 RiskClass::ShellMutation
                 | RiskClass::Network
                 | RiskClass::Process
-                | RiskClass::ExternalAccess => PolicyDecision::Classify {
+                | RiskClass::ExternalAccess
+                | RiskClass::SystemMutation => PolicyDecision::Classify {
                     risk,
                     checkpoint: true,
                 },
@@ -397,7 +413,14 @@ impl PolicyEngine {
         // decision unchanged (the hint is untrusted, so it can only restore
         // pre-floor permissiveness, never exceed the mode).
         if request.category == ToolCategory::Mcp && !request.mcp_read_only_hint {
-            return strengthen_external(decision, self.external_writes, risk);
+            return strengthen_to_floor(decision, self.external_writes, risk);
+        }
+        // System-install floor: machine-scoped package operations mutate the
+        // machine, not the project — outside checkpoint reach — so they get
+        // the same never-weaken treatment even in full_access. Project-local
+        // installs never classify SystemMutation and are untouched.
+        if risk == RiskClass::SystemMutation {
+            return strengthen_to_floor(decision, self.system_installs, risk);
         }
         decision
     }
@@ -408,9 +431,9 @@ impl PolicyEngine {
 /// (nothing on the local filesystem to snapshot), but the level decisions
 /// mirror the Ask/Auto mode arms' `checkpoint: true` so downstream handling
 /// is identical either way.
-fn strengthen_external(
+fn strengthen_to_floor(
     decision: PolicyDecision,
-    level: ExternalWriteLevel,
+    level: FloorLevel,
     risk: RiskClass,
 ) -> PolicyDecision {
     fn severity(decision: &PolicyDecision) -> u8 {
@@ -422,19 +445,19 @@ fn strengthen_external(
         }
     }
     let floor = match level {
-        ExternalWriteLevel::Allow => PolicyDecision::Allow {
+        FloorLevel::Allow => PolicyDecision::Allow {
             risk,
             checkpoint: false,
         },
-        ExternalWriteLevel::Auto => PolicyDecision::Classify {
+        FloorLevel::Auto => PolicyDecision::Classify {
             risk,
             checkpoint: true,
         },
-        ExternalWriteLevel::Ask => PolicyDecision::Ask {
+        FloorLevel::Ask => PolicyDecision::Ask {
             risk,
             checkpoint: true,
         },
-        ExternalWriteLevel::Deny => PolicyDecision::Deny {
+        FloorLevel::Deny => PolicyDecision::Deny {
             risk,
             reason: "external-writes policy blocks write-shaped MCP tools".to_string(),
         },
@@ -1173,7 +1196,7 @@ fn shell_severity(risk: RiskClass) -> u8 {
         RiskClass::ReadOnly => 0,
         RiskClass::ShellMutation => 1,
         RiskClass::Process => 2,
-        RiskClass::Network => 3,
+        RiskClass::Network | RiskClass::SystemMutation => 3,
         RiskClass::Destructive => 4,
         _ => 1,
     }
@@ -1233,6 +1256,9 @@ fn classify_head(head: &str, segment: &[String]) -> RiskClass {
     if head == "date" && segment_has_flag(segment, 's', "set") {
         return RiskClass::ShellMutation;
     }
+    if system_install_shape(head, segment) {
+        return RiskClass::SystemMutation;
+    }
     if PROCESS_BINARIES.contains(&head) {
         return RiskClass::Process;
     }
@@ -1269,6 +1295,88 @@ fn classify_head(head: &str, segment: &[String]) -> RiskClass {
     }
     // Unknown binary ⇒ assume it can mutate. This is the safe default.
     RiskClass::ShellMutation
+}
+
+/// Machine-scoped package operations — see `RiskClass::SystemMutation`.
+/// `sudo`/`env` wrappers are stripped by the caller, so `head` is the
+/// manager itself; matching is case-insensitive for the Windows managers.
+/// Project-local installs (`npm install`, `cargo add`, `yarn add`)
+/// deliberately return false — they land inside the project and stay
+/// Process.
+fn system_install_shape(head: &str, segment: &[String]) -> bool {
+    let head = head.to_ascii_lowercase();
+    let sub = segment
+        .iter()
+        .skip(1)
+        .find(|t| !t.starts_with('-'))
+        .map(|s| s.to_ascii_lowercase());
+    let sub = sub.as_deref();
+    let global_flag = segment.iter().skip(1).any(|t| {
+        t == "--global" || (t.starts_with('-') && !t.starts_with("--") && t[1..].contains('g'))
+    });
+    const INSTALL_VERBS: &[&str] = &[
+        "install",
+        "add",
+        "uninstall",
+        "remove",
+        "update",
+        "upgrade",
+        "link",
+    ];
+    match head.as_str() {
+        // JS package managers: only the GLOBAL forms are machine-scoped.
+        "npm" | "pnpm" | "bun" => sub.is_some_and(|s| INSTALL_VERBS.contains(&s)) && global_flag,
+        // yarn v1 spells it `yarn global add`.
+        "yarn" => {
+            sub == Some("global")
+                || (sub.is_some_and(|s| INSTALL_VERBS.contains(&s)) && global_flag)
+        },
+        // Toolchain installers that land in machine-wide bin dirs.
+        "cargo" => matches!(sub, Some("install" | "uninstall")),
+        "go" => sub == Some("install"),
+        "gem" => matches!(sub, Some("install" | "uninstall" | "update")),
+        // pipx exists to install global tools; pip's venv membership is
+        // undetectable from the command string, so it fails toward vetting
+        // (ask/auto/read_only behavior is unchanged — installs were already
+        // gated there).
+        "pipx" => true,
+        "pip" | "pip2" | "pip3" => matches!(sub, Some("install" | "uninstall")),
+        "dotnet" => {
+            sub == Some("tool")
+                && segment
+                    .iter()
+                    .skip(1)
+                    .filter(|t| !t.starts_with('-'))
+                    .nth(1)
+                    .is_some_and(|s| {
+                        matches!(
+                            s.to_ascii_lowercase().as_str(),
+                            "install" | "uninstall" | "update"
+                        )
+                    })
+        },
+        // OS package managers: any mutating verb is machine-scoped.
+        "brew" | "apt" | "apt-get" | "dnf" | "yum" | "zypper" | "apk" | "snap" | "flatpak"
+        | "choco" | "scoop" | "winget" | "port" => matches!(
+            sub,
+            Some(
+                "install"
+                    | "uninstall"
+                    | "remove"
+                    | "purge"
+                    | "upgrade"
+                    | "update"
+                    | "add"
+                    | "dist-upgrade"
+            )
+        ),
+        // pacman mutates via -S/-R/-U flag groups.
+        "pacman" => segment
+            .iter()
+            .skip(1)
+            .any(|t| t.starts_with("-S") || t.starts_with("-R") || t.starts_with("-U")),
+        _ => false,
+    }
 }
 
 /// Classify an `awk` invocation by inspecting its program + flags. Read-only
@@ -1991,6 +2099,136 @@ mod tests {
     }
 
     #[test]
+    fn system_install_shapes_classify_as_system_mutation() {
+        // Machine-scoped forms are floored…
+        for cmd in [
+            "npm install -g typescript",
+            "npm uninstall --global eslint",
+            "pnpm add -g turbo",
+            "yarn global add serve",
+            "bun add --global elysia",
+            "cargo install ripgrep",
+            "cargo install --path .",
+            "go install golang.org/x/tools/gopls@latest",
+            "pip install requests",
+            "pip3 uninstall requests",
+            "pipx install poetry",
+            "gem install rails",
+            "dotnet tool install -g dotnet-ef",
+            "brew install jq",
+            "sudo apt install ripgrep",
+            "apt-get install -y build-essential",
+            "winget install Casey.Just",
+            "scoop install just",
+            "choco install nodejs",
+            "pacman -S ripgrep",
+            "snap install go",
+        ] {
+            assert_eq!(
+                super::classify_shell_command(cmd),
+                RiskClass::SystemMutation,
+                "machine-scoped install must classify SystemMutation: {cmd}"
+            );
+        }
+        // …project-local and read-shaped forms are not.
+        for cmd in [
+            "npm install",
+            "npm ci",
+            "npm install lodash",
+            "npm run build",
+            "yarn add lodash",
+            "pnpm add -D vitest",
+            "cargo add serde",
+            "cargo build",
+            "go build ./...",
+            "gem list",
+            "brew list",
+            "apt list --installed",
+            "dotnet tool list",
+            "npm root -g",
+        ] {
+            assert_ne!(
+                super::classify_shell_command(cmd),
+                RiskClass::SystemMutation,
+                "project-local/read form must not be floored: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_installs_floor_governs_modes_and_levels() {
+        use FloorLevel as L;
+        let install = || shell("cargo install ripgrep");
+        // Default (auto): full_access classifies instead of blanket-allowing.
+        let decision = PolicyEngine::new(SafetyMode::FullAccess).decide(&install());
+        assert!(
+            matches!(decision, PolicyDecision::Classify { .. }),
+            "{decision:?}"
+        );
+        // read_only still denies; ask still asks; auto still classifies.
+        let decision = PolicyEngine::new(SafetyMode::ReadOnly).decide(&install());
+        assert!(
+            matches!(decision, PolicyDecision::Deny { .. }),
+            "{decision:?}"
+        );
+        let decision = PolicyEngine::new(SafetyMode::Ask).decide(&install());
+        assert!(
+            matches!(decision, PolicyDecision::Ask { .. }),
+            "{decision:?}"
+        );
+        let decision = PolicyEngine::new(SafetyMode::Auto).decide(&install());
+        assert!(
+            matches!(decision, PolicyDecision::Classify { .. }),
+            "{decision:?}"
+        );
+        // `allow` restores the old full_access behavior but never weakens
+        // read_only; `ask`/`deny` floor upward.
+        let decision = PolicyEngine::new(SafetyMode::FullAccess)
+            .with_system_installs(L::Allow)
+            .decide(&install());
+        assert!(
+            matches!(decision, PolicyDecision::Allow { .. }),
+            "{decision:?}"
+        );
+        let decision = PolicyEngine::new(SafetyMode::ReadOnly)
+            .with_system_installs(L::Allow)
+            .decide(&install());
+        assert!(
+            matches!(decision, PolicyDecision::Deny { .. }),
+            "{decision:?}"
+        );
+        let decision = PolicyEngine::new(SafetyMode::FullAccess)
+            .with_system_installs(L::Ask)
+            .decide(&install());
+        assert!(
+            matches!(decision, PolicyDecision::Ask { .. }),
+            "{decision:?}"
+        );
+        for mode in [SafetyMode::Ask, SafetyMode::Auto, SafetyMode::FullAccess] {
+            let decision = PolicyEngine::new(mode)
+                .with_system_installs(L::Deny)
+                .decide(&install());
+            assert!(
+                matches!(decision, PolicyDecision::Deny { .. }),
+                "{mode:?}: {decision:?}"
+            );
+        }
+        // A user Deny override outranks a permissive level.
+        let decision = PolicyEngine::new(SafetyMode::FullAccess)
+            .with_system_installs(L::Allow)
+            .with_overrides(vec![PolicyOverride {
+                category: Some(ToolCategory::Shell),
+                decision: PolicyOverrideDecision::Deny,
+                ..PolicyOverride::default()
+            }])
+            .decide(&install());
+        assert!(
+            matches!(decision, PolicyDecision::Deny { .. }),
+            "{decision:?}"
+        );
+    }
+
+    #[test]
     fn external_writes_default_floors_full_access_mcp_writes() {
         // The closed hole: mode alone no longer authorizes an external side
         // effect. Default level (auto) ⇒ full_access classifies write-shaped
@@ -2029,7 +2267,7 @@ mod tests {
 
     #[test]
     fn external_writes_levels_floor_but_never_weaken() {
-        use ExternalWriteLevel as L;
+        use FloorLevel as L;
         // `allow` restores the old unconditional-allow in full_access…
         let decision = PolicyEngine::new(SafetyMode::FullAccess)
             .with_external_writes(L::Allow)

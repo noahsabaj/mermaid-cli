@@ -291,7 +291,15 @@ pub struct SafetyConfig {
     /// (aligned runs silently, off-task escalates). `allow` restores the old
     /// unconditional-allow behavior.
     #[serde(default)]
-    pub external_writes: crate::runtime::ExternalWriteLevel,
+    pub external_writes: crate::runtime::FloorLevel,
+    /// Enforcement floor for machine-scoped package operations (`npm -g`,
+    /// `cargo install`, `pip install`, `brew`/`apt`/`winget` installs) —
+    /// same levels and default as `external_writes`. They mutate the
+    /// MACHINE, not the project (outside checkpoint reach), so even
+    /// full_access vets them. Project-local installs (`npm install`,
+    /// `cargo add`) are untouched.
+    #[serde(default)]
+    pub system_installs: crate::runtime::FloorLevel,
     /// Model id the `Auto`-mode safety classifier uses to vet borderline
     /// actions. `None` ⇒ vet with the session's active model. Set this to
     /// point the vet at a cheaper/faster model than the one driving the work.
@@ -317,7 +325,8 @@ impl Default for SafetyConfig {
             network: NetworkPolicy::default(),
             filesystem: FilesystemPolicy::default(),
             overrides: Vec::new(),
-            external_writes: crate::runtime::ExternalWriteLevel::default(),
+            external_writes: crate::runtime::FloorLevel::default(),
+            system_installs: crate::runtime::FloorLevel::default(),
             auto_classifier_model: None,
             allow_untrusted_headless_tools: false,
         }
