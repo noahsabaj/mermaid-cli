@@ -69,16 +69,19 @@ pub fn build_task_lines(
     }
 
     let visible: Vec<&TaskItem> = store.visible().collect();
-    let (window, hidden_completed, hidden_pending) = window_rows(&visible);
+    let (window, hidden_completed, hidden_pending, hidden_blocked) = window_rows(&visible);
 
     let mut lines = Vec::with_capacity(window.len() + 1);
     for (i, task) in window.iter().enumerate() {
         lines.push(task_row(task, i == 0, attached, width, theme, meta_style));
     }
-    if hidden_completed + hidden_pending > 0 {
+    if hidden_completed + hidden_pending + hidden_blocked > 0 {
         let mut bits = Vec::new();
         if hidden_pending > 0 {
             bits.push(format!("+{hidden_pending} pending"));
+        }
+        if hidden_blocked > 0 {
+            bits.push(format!("+{hidden_blocked} blocked"));
         }
         if hidden_completed > 0 {
             bits.push(format!("{hidden_completed} completed"));
@@ -110,9 +113,9 @@ pub fn tasks_height(store: &TaskStore, collapsed: bool) -> u16 {
 /// Pick the rows to show: everything when it fits; otherwise start at the
 /// first non-completed task (completed rows scroll away first, matching the
 /// screenshots) and summarize the rest in the footer.
-fn window_rows<'a>(visible: &[&'a TaskItem]) -> (Vec<&'a TaskItem>, usize, usize) {
+fn window_rows<'a>(visible: &[&'a TaskItem]) -> (Vec<&'a TaskItem>, usize, usize, usize) {
     if visible.len() <= MAX_ROWS {
-        return (visible.to_vec(), 0, 0);
+        return (visible.to_vec(), 0, 0, 0);
     }
     let start = visible
         .iter()
@@ -134,6 +137,7 @@ fn window_rows<'a>(visible: &[&'a TaskItem]) -> (Vec<&'a TaskItem>, usize, usize
             + hidden(after, TaskStatus::Pending)
             + hidden(before, TaskStatus::InProgress)
             + hidden(after, TaskStatus::InProgress),
+        hidden(before, TaskStatus::Blocked) + hidden(after, TaskStatus::Blocked),
     )
 }
 
@@ -187,6 +191,12 @@ fn task_row(
         },
         TaskStatus::Pending => {
             spans.push(Span::styled("□ ", meta_style));
+            spans.push(Span::styled(subject, text));
+        },
+        // ⊘ (U+2298, Mathematical Operators) stays outside the banned emoji
+        // ranges like the other glyphs.
+        TaskStatus::Blocked => {
+            spans.push(Span::styled("⊘ ", warning));
             spans.push(Span::styled(subject, text));
         },
         // Deleted never reaches here (filtered by `visible()`), but the
@@ -380,6 +390,28 @@ mod tests {
         assert!(footer.contains("+2 pending"), "{footer:?}");
         assert!(footer.contains("2 completed"), "{footer:?}");
         assert_eq!(tasks_height(&store, false), 9);
+    }
+
+    #[test]
+    fn blocked_rows_render_glyph_and_footer_counts_them() {
+        use TaskStatus::*;
+        let store = store_of(&[Blocked, InProgress, Pending]);
+        let lines = build_task_lines(&store, false, true, 80, &Theme::dark());
+        let rows = rendered(&lines);
+        assert!(rows[0].starts_with(" ⎿ ⊘ "), "{:?}", rows[0]);
+
+        // A blocked task hidden past the window shows up in the footer.
+        let statuses: Vec<TaskStatus> = [InProgress]
+            .into_iter()
+            .chain(std::iter::repeat_n(Pending, 7))
+            .chain([Blocked])
+            .chain(std::iter::repeat_n(Pending, 2))
+            .collect();
+        let store = store_of(&statuses);
+        let lines = build_task_lines(&store, false, true, 80, &Theme::dark());
+        let footer = rendered(&lines).last().unwrap().clone();
+        assert!(footer.contains("+1 blocked"), "{footer:?}");
+        assert!(footer.contains("+2 pending"), "{footer:?}");
     }
 
     #[test]

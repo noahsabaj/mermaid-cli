@@ -22,6 +22,11 @@ use serde::{Deserialize, Serialize};
 pub enum TaskStatus {
     Pending,
     InProgress,
+    /// Stalled on something outside the task itself (a failing dependency, a
+    /// missing decision). Stays visibly blocked instead of masquerading as
+    /// pending; the blocker gets its own task, which becomes the in_progress
+    /// one.
+    Blocked,
     Completed,
     Deleted,
 }
@@ -31,6 +36,7 @@ impl TaskStatus {
         match self {
             Self::Pending => "pending",
             Self::InProgress => "in_progress",
+            Self::Blocked => "blocked",
             Self::Completed => "completed",
             Self::Deleted => "deleted",
         }
@@ -40,6 +46,7 @@ impl TaskStatus {
         match s {
             "pending" => Some(Self::Pending),
             "in_progress" => Some(Self::InProgress),
+            "blocked" => Some(Self::Blocked),
             "completed" => Some(Self::Completed),
             "deleted" => Some(Self::Deleted),
             _ => None,
@@ -341,7 +348,9 @@ fn transition(task: &mut TaskItem, status: TaskStatus, stamp: Stamp) {
                 .tokens_at_start
                 .map(|start| stamp.run_tokens.saturating_sub(start));
         },
-        TaskStatus::Pending | TaskStatus::Deleted => {},
+        // Blocked keeps `started_at`, so a later return to in_progress
+        // preserves the original start stamp (see the InProgress arm).
+        TaskStatus::Pending | TaskStatus::Blocked | TaskStatus::Deleted => {},
     }
     task.status = status;
 }
@@ -369,7 +378,7 @@ fn check_single_in_progress(after: &TaskStore) -> Option<String> {
             .map(|id| format!("#{id}"))
             .collect::<Vec<_>>()
             .join(", ");
-        format!("Note: {ids} are all in_progress; keep exactly one task in_progress at a time.")
+        format!("Note: {ids} are all in_progress; keep at most one task in_progress at a time.")
     })
 }
 
@@ -459,6 +468,56 @@ mod tests {
         assert!(report.applied.is_empty());
         assert_eq!(report.errors.len(), 1);
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn blocked_round_trips_and_stays_out_of_the_flow() {
+        assert_eq!(TaskStatus::parse("blocked"), Some(TaskStatus::Blocked));
+        assert_eq!(TaskStatus::Blocked.as_str(), "blocked");
+
+        let mut store = store_with(2);
+        store.apply(&[edit(1, TaskStatus::Blocked)], Stamp::default());
+        // Blocked is neither the active task nor the next pending one, and it
+        // keeps the list from reading all-done.
+        assert!(store.active().is_none());
+        assert_eq!(store.next_pending().map(|t| t.id), Some(2));
+        store.apply(&[edit(2, TaskStatus::Completed)], Stamp::default());
+        assert!(!store.all_done());
+        assert_eq!(store.counts(), (1, 2));
+    }
+
+    #[test]
+    fn blocked_preserves_the_original_start_stamp() {
+        let mut store = store_with(1);
+        store.apply(
+            &[edit(1, TaskStatus::InProgress)],
+            Stamp {
+                now_epoch: 100,
+                run_tokens: 1_000,
+            },
+        );
+        store.apply(
+            &[edit(1, TaskStatus::Blocked)],
+            Stamp {
+                now_epoch: 200,
+                run_tokens: 2_000,
+            },
+        );
+        store.apply(
+            &[edit(1, TaskStatus::InProgress)],
+            Stamp {
+                now_epoch: 300,
+                run_tokens: 3_000,
+            },
+        );
+        let task = store.tasks.iter().find(|t| t.id == 1).unwrap();
+        assert_eq!(task.status, TaskStatus::InProgress);
+        assert_eq!(
+            task.started_at,
+            Some(100),
+            "unblocking must keep the original start stamp"
+        );
+        assert_eq!(task.tokens_at_start, Some(1_000));
     }
 
     #[test]
