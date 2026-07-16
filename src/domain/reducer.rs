@@ -11793,6 +11793,7 @@ mod tests {
                         raw_name: "do".to_string(),
                         description: "d".to_string(),
                         input_schema: serde_json::json!({}),
+                        read_only_hint: false,
                     }],
                 },
             );
@@ -11835,6 +11836,7 @@ mod tests {
                     raw_name: "alpha".to_string(),
                     description: "does alpha things".to_string(),
                     input_schema: serde_json::json!({"type": "object"}),
+                    read_only_hint: false,
                 }],
             },
         );

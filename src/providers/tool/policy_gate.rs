@@ -64,6 +64,37 @@ pub async fn gate_external(
     summary: String,
     args: &serde_json::Value,
 ) -> Option<ToolOutcome> {
+    gate_external_inner(ctx, tool, category, summary, args, false).await
+}
+
+/// MCP variant of [`gate_external`]: carries the server-advertised
+/// `readOnlyHint` so the policy's external-writes floor can tell read-shaped
+/// calls from write-shaped ones. Pass `false` when the hint is unknown.
+pub async fn gate_external_mcp(
+    ctx: &ExecContext,
+    summary: String,
+    args: &serde_json::Value,
+    read_only_hint: bool,
+) -> Option<ToolOutcome> {
+    gate_external_inner(
+        ctx,
+        "mcp_proxy",
+        crate::runtime::ToolCategory::Mcp,
+        summary,
+        args,
+        read_only_hint,
+    )
+    .await
+}
+
+async fn gate_external_inner(
+    ctx: &ExecContext,
+    tool: &'static str,
+    category: crate::runtime::ToolCategory,
+    summary: String,
+    args: &serde_json::Value,
+    mcp_read_only_hint: bool,
+) -> Option<ToolOutcome> {
     let mut request = ActionRequest::new(tool, category, summary);
     // Surface a concrete, content-bearing detail (the text being typed, the URL
     // being fetched, the MCP server__tool + args). Without this the Auto-mode
@@ -71,6 +102,7 @@ pub async fn gate_external(
     // generic summary — so they can't actually vet *what* the action does
     // (#29, #30, #31).
     request.command = action_detail(tool, args);
+    request.mcp_read_only_hint = mcp_read_only_hint;
     let pending = serde_json::json!({ "tool": tool, "args": args });
     // `scratch_contained` is always false here: external actions (network,
     // desktop, MCP, subagents) act OUTSIDE the filesystem, so scratchpad
@@ -178,6 +210,7 @@ pub async fn gate(
     // immediately), not the static config snapshot.
     let decision = PolicyEngine::new(ctx.safety_mode)
         .with_overrides(ctx.config.safety.overrides.clone())
+        .with_external_writes(ctx.config.safety.external_writes)
         .decide(&request);
 
     // Plan mode: the reducer floors `ctx.safety_mode` to `ReadOnly` while a

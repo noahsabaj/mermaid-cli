@@ -148,6 +148,7 @@ pub fn sanitize_server_tools(
             raw_name: def.name.clone(),
             description: def.description.clone(),
             input_schema: sanitize_schema(&def.input_schema),
+            read_only_hint: def.read_only_hint,
         });
     }
     (specs, raw_names)
@@ -324,7 +325,18 @@ mod tests {
             name: name.to_string(),
             description: format!("{name} description"),
             input_schema: schema,
+            read_only_hint: false,
         }
+    }
+
+    #[test]
+    fn sanitize_carries_the_read_only_hint() {
+        let mut read = def("get_thing", json!({"type": "object"}));
+        read.read_only_hint = true;
+        let write = def("send_thing", json!({"type": "object"}));
+        let (specs, _) = sanitize_server_tools("srv", &[read, write]);
+        assert!(specs[0].read_only_hint, "hint must survive sanitization");
+        assert!(!specs[1].read_only_hint);
     }
 
     #[test]

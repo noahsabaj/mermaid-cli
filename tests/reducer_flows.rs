@@ -877,6 +877,7 @@ fn configured_mcp_servers_seed_state_and_ready_updates() {
                 raw_name: "resolve-library-id".to_string(),
                 description: "Resolve a library name".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
+                read_only_hint: false,
             }],
         },
     );

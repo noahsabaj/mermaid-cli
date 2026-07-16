@@ -251,6 +251,7 @@ mod tests {
             raw_name: tool.to_string(),
             description: desc.to_string(),
             input_schema: serde_json::json!({"type": "object"}),
+            read_only_hint: false,
         }
     }
 

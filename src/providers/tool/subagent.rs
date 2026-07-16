@@ -1552,6 +1552,7 @@ mod tests {
                     raw_name: "send".to_string(),
                     description: "send a message".to_string(),
                     input_schema: serde_json::json!({"type": "object"}),
+                    read_only_hint: false,
                 },
             ),
             // A tool from a server the child doesn't have configured must
@@ -1563,6 +1564,7 @@ mod tests {
                     raw_name: "x".to_string(),
                     description: String::new(),
                     input_schema: serde_json::json!({}),
+                    read_only_hint: false,
                 },
             ),
         ];
