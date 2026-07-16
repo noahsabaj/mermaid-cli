@@ -52,7 +52,7 @@ Each session has a private scratch directory for intermediate files — one-off 
 
 For multi-step work (3 or more distinct steps), plan with the task checklist: `task_create` the FULL initial plan in one call, in execution order, then keep it live with `task_update` as you work. The terminal renders the checklist for the user, so never repeat its contents in prose — summarize what changed and move on. Skip the checklist entirely for trivial or single-step requests; a one-item plan is noise.
 
-Write meaningful, verifiable steps (short imperative `subject`, present-tense `active_form`). Keep at most one task in_progress: mark a task in_progress BEFORE starting its work and completed IMMEDIATELY after it is done and verified — never batch-complete at the end, and never jump a task from pending straight to completed. Only mark completed when the work truly succeeded (tests pass, errors resolved). If a task hits a blocker, move it back to pending with a one-line `explanation`, add a task for the blocker, and mark that one in_progress.
+Write meaningful, verifiable steps (short imperative `subject`, present-tense `active_form`). Keep at most one task in_progress: mark a task in_progress BEFORE starting its work and completed IMMEDIATELY after it is done and verified — never batch-complete at the end, and never jump a task from pending straight to completed. Only mark completed when the work truly succeeded (tests pass, errors resolved). If a task hits a blocker, mark it blocked with a one-line `explanation`, add a task for the blocker, and mark that one in_progress.
 
 Do not let the plan go stale. When scope pivots — steps split, merge, reorder, or drop — update or delete tasks in the same turn and give a one-line `explanation`. After a context compaction, call `task_list` to re-anchor on ids and statuses. The user can edit the checklist too (`/todos`); when a notice reports their edit, acknowledge it and fold it into your plan.
 
@@ -100,7 +100,7 @@ When asked to read, inspect, familiarize yourself with, or review a codebase:
 ## Validation Contract
 
 - Run relevant formatting, builds, tests, or smoke checks after code changes.
-- For a smoke check, prefer a finite command that runs and exits — a build, a one-shot test run (`--run`, `--watch=false`, `CI=true`), a `--version`/`--help`. Do NOT start a dev server or file watcher just to "see if it works": those never exit, so in the default foreground mode they block until the timeout (30s) and look hung.
+- For a smoke check, prefer a finite command that runs and exits — a build, a one-shot test run (`--run`, `--watch=false`, `CI=true`), a `--version`/`--help`. Do NOT start a dev server or file watcher just to "see if it works": those never exit, so in the default foreground mode they block until the timeout ({timeout_secs}s) and look hung.
 - When you do need a server, daemon, watcher, or GUI app, run it with `execute_command` `mode="background"` — it watches startup briefly, then returns a process id. The user manages it with `/processes`, `/logs <id>`, `/stop <id>`, and `/restart <id>`.
 - Separate environment problems from code problems, and failures you introduced from pre-existing ones. Do not call a code change broken when the real blocker is missing credentials, missing services, denied permissions, or unavailable hardware.
 - Report what changed and what verification passed. Never end silently after tool calls.
@@ -131,6 +131,10 @@ static SYSTEM_PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| 
     SYSTEM_PROMPT_TEMPLATE
         .replace("{os}", std::env::consts::OS)
         .replace("{arch}", std::env::consts::ARCH)
+        .replace(
+            "{timeout_secs}",
+            &crate::constants::COMMAND_TIMEOUT_SECS.to_string(),
+        )
 });
 
 /// Get the system prompt with platform info injected. Returns an owned
@@ -384,8 +388,8 @@ mod tests {
         assert!(prompt.contains("never jump a task from pending straight to completed"));
         assert!(prompt.contains("Do not let the plan go stale"));
         assert!(
-            prompt.contains("move it back to pending"),
-            "blocker flow must be satisfiable alongside at-most-one-in_progress"
+            prompt.contains("mark it blocked"),
+            "blocker flow must use the blocked status alongside at-most-one-in_progress"
         );
         assert!(
             prompt.contains("call `task_list` to re-anchor"),
@@ -892,6 +896,75 @@ mod tests {
     }
 
     // ── Auxiliary prompt guards ──────────────────────────────────────
+
+    /// The foreground timeout the prompt states is substituted from the same
+    /// constant the executor enforces, so the two can never drift.
+    #[test]
+    fn rendered_timeout_matches_constant() {
+        let prompt = get_system_prompt();
+        assert!(
+            !prompt.contains("{timeout_secs}"),
+            "timeout placeholder must be substituted"
+        );
+        assert!(
+            prompt.contains(&format!("({}s)", crate::constants::COMMAND_TIMEOUT_SECS)),
+            "rendered prompt must state the executor's real foreground timeout"
+        );
+    }
+
+    /// Every backticked `/command` the prompts name must resolve in the slash
+    /// command registry (names or aliases) — the systematic version of the
+    /// old hand-picked /model//reasoning asserts, catching renames/removals.
+    #[test]
+    fn advertised_slash_commands_exist() {
+        fn backticked_commands(text: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut rest = text;
+            while let Some(pos) = rest.find("`/") {
+                let name: String = rest[pos + 2..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                    .collect();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+                rest = &rest[pos + 2..];
+            }
+            out
+        }
+        let registry = crate::domain::slash_commands::COMMAND_REGISTRY;
+        for text in [SYSTEM_PROMPT_TEMPLATE, PLAN_MODE_PROMPT] {
+            let commands = backticked_commands(text);
+            assert!(
+                !commands.is_empty() || text == PLAN_MODE_PROMPT,
+                "expected the main template to advertise slash commands"
+            );
+            for name in commands {
+                assert!(
+                    registry
+                        .iter()
+                        .any(|c| c.name == name || c.aliases.contains(&name.as_str())),
+                    "prompt advertises `/{name}` but no such slash command is registered"
+                );
+            }
+        }
+    }
+
+    /// Every keybinding the prompt names must exist in the authoritative
+    /// KEYBINDINGS table.
+    #[test]
+    fn advertised_keybindings_exist() {
+        let prompt = get_system_prompt();
+        for key in ["Shift+Tab", "Alt+P", "Esc"] {
+            assert!(prompt.contains(key), "prompt must mention the {key} key");
+            assert!(
+                crate::domain::slash_commands::KEYBINDINGS
+                    .iter()
+                    .any(|(k, _)| *k == key),
+                "prompt names {key} but the KEYBINDINGS table does not bind it"
+            );
+        }
+    }
 
     /// Rendered prompts must never leak template placeholders; the plan-mode
     /// placeholders must stay present in the TEMPLATE for

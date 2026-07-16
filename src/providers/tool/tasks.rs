@@ -299,8 +299,8 @@ impl ToolExecutor for TaskUpdateTool {
                 in_progress BEFORE you start the work and completed IMMEDIATELY after it is \
                 done and verified — never batch-complete at the end, and never jump a task \
                 from pending straight to completed. Only mark completed when the work truly \
-                succeeded; if you hit a blocker, move the blocked task back to pending with \
-                an `explanation`, create a task for the blocker, and mark that one \
+                succeeded; if you hit a blocker, mark the stuck task blocked with an \
+                `explanation`, create a task for the blocker, and mark that one \
                 in_progress. When the plan changes shape (splitting, merging, dropping \
                 work), update or delete tasks and say why in `explanation` — do not let the \
                 checklist go stale while you work."
@@ -320,8 +320,8 @@ impl ToolExecutor for TaskUpdateTool {
                                 },
                                 "status": {
                                     "type": "string",
-                                    "enum": ["pending", "in_progress", "completed", "deleted"],
-                                    "description": "New status. \"deleted\" permanently removes the task from the list."
+                                    "enum": ["pending", "in_progress", "blocked", "completed", "deleted"],
+                                    "description": "New status. \"blocked\" marks a task stalled on something outside it (pair it with a new task for the blocker); \"deleted\" permanently removes the task from the list."
                                 },
                                 "subject": { "type": "string", "description": "Replacement subject." },
                                 "active_form": { "type": "string", "description": "Replacement active form." },
@@ -489,7 +489,7 @@ mod tests {
         assert!(
             outcome
                 .model_content
-                .contains("exactly one task in_progress")
+                .contains("at most one task in_progress")
         );
         assert_eq!(outcome.summary, "Tasks 1/3");
     }
