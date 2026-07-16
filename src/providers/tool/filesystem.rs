@@ -21,7 +21,9 @@ use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
-use super::path_safety::{AllowedRoots, ResolvedInRoot, resolve_in_roots};
+use super::path_safety::{
+    AllowedRoots, ResolvedInRoot, relative_within, resolve_in_roots, resolve_path_within,
+};
 
 /// Small helper for building a `ToolDefinition` with a typical
 /// JSON-schema-shaped input_schema. Keeps the per-tool definitions
@@ -54,7 +56,7 @@ impl ToolExecutor for ReadFileTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "read_file",
-            "Read the contents of one or more files from disk. Prefer relative paths; absolute paths must resolve inside the project directory or the session scratchpad or the call is rejected.",
+            "Read the contents of one or more files from disk. Prefer relative paths; absolute paths must resolve inside the project directory, the session scratchpad, or the memory directories, or the call is rejected.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -395,7 +397,7 @@ impl ToolExecutor for WriteFileTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "write_file",
-            "Write (overwrite) a file at `path` with `content`. Creates parent directories automatically. Paths must resolve inside the project directory or the session scratchpad. Prefer `edit_file` for small targeted changes.",
+            "Write (overwrite) a file at `path` with `content`. Creates parent directories automatically. Paths must resolve inside the project directory or the session scratchpad. Prefer `apply_patch` for small targeted changes.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -550,6 +552,27 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
     Err("read_file requires 'path' or 'paths'".to_string())
 }
 
+/// Read-only carve-out for memory facts. Global and project-private memory
+/// live under the OS data dir — outside both allowed roots — and the memory
+/// index tells the model to `read_file` the fact's path, so reads resolve
+/// against the memory roots too. Absolute paths only, with the same
+/// canonical (symlink-resolving) containment as the scratchpad arm. The
+/// write tools never consult this: memory mutation goes through the `memory`
+/// tool, where the policy gate can see it.
+fn resolve_in_memory_roots(workdir: &Path, raw: &str) -> Option<(PathBuf, PathBuf)> {
+    if !Path::new(raw).is_absolute() {
+        return None;
+    }
+    for (root, _scope) in crate::app::memory::memory_roots(workdir) {
+        if let Ok((_abs, true)) = resolve_path_within(&root, raw)
+            && let Ok(rel) = relative_within(&root, raw)
+        {
+            return Some((root, rel));
+        }
+    }
+    None
+}
+
 /// Read one file (bounded). Returns the (possibly marker-footed) text and the
 /// REAL truncation flag from the bounded read, so the caller propagates that
 /// rather than sniffing the output for the marker string — which a file whose
@@ -560,8 +583,19 @@ async fn read_one(roots: &AllowedRoots<'_>, raw: &str) -> std::io::Result<(Strin
     // names the root-relative path for the confined fd read, so the bytes come
     // from the inode the kernel resolved under RESOLVE_BENEATH rather than
     // whatever a concurrently-swapped symlink now points at (#77).
-    let ResolvedInRoot { rel, root, .. } = resolve_in_roots(roots, raw)
-        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg))?;
+    let ResolvedInRoot { rel, root, .. } = match resolve_in_roots(roots, raw) {
+        Ok(resolved) => resolved,
+        Err(msg) => {
+            let (root, rel) = resolve_in_memory_roots(roots.workdir, raw)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg))?;
+            ResolvedInRoot {
+                abs: root.join(&rel),
+                rel,
+                root,
+                in_scratchpad: false,
+            }
+        },
+    };
     let result = tokio::task::spawn_blocking(move || {
         let file = crate::runtime::open_beneath(&root, &rel, crate::runtime::OpenIntent::Read)?;
         // Bounded read: never pull more than the cap (+1 probe byte) into RAM,
@@ -743,6 +777,38 @@ mod tests {
     use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use std::fs;
+
+    /// Memory facts live outside the project/scratchpad roots and the index
+    /// tells the model to `read_file` them — reads must resolve against the
+    /// memory roots (here the ProjectShared root, reached by putting the
+    /// workdir in a subdir of the git root), while unrelated outside paths
+    /// stay rejected.
+    #[tokio::test]
+    async fn read_file_resolves_memory_roots_read_only() {
+        let base = std::env::temp_dir().join(format!("mermaid_memread_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        let workdir = repo.join("src");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let mem_dir = repo.join(".mermaid").join("memory");
+        fs::create_dir_all(&mem_dir).unwrap();
+        let fact = mem_dir.join("fact.md");
+        fs::write(&fact, "the fact body").unwrap();
+
+        let roots = AllowedRoots::new(&workdir, None);
+        let (content, truncated) = read_one(&roots, fact.to_str().unwrap()).await.unwrap();
+        assert!(!truncated);
+        assert_eq!(content, "the fact body");
+
+        // Still confined: an outside path that is NOT under a memory root
+        // rejects exactly as before.
+        let stray = base.join("stray.txt");
+        fs::write(&stray, "nope").unwrap();
+        assert!(read_one(&roots, stray.to_str().unwrap()).await.is_err());
+
+        let _ = fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn resolve_in_roots_contains_to_workdir() {

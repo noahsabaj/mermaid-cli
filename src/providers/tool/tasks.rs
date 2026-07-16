@@ -11,7 +11,7 @@
 //! these tools are ungated (they never touch the policy gate) and run in
 //! every safety mode, including read_only.
 //!
-//! Discipline ("exactly one in_progress", no pending->completed jumps) is
+//! Discipline ("at most one in_progress", no pending->completed jumps) is
 //! soft-enforced: violations come back as advisory notes in the tool result,
 //! never rejections — a hard reject risks retry loops, while silence (codex)
 //! lets malformed checklists render unremarked.
@@ -295,13 +295,14 @@ impl ToolExecutor for TaskUpdateTool {
             name: "task_update".to_string(),
             description: "Update checklist tasks by id (from task_create). Batch related \
                 transitions in one call — completing one task and starting the next is ONE \
-                call with two updates. Keep exactly one task in_progress at all times: set it \
+                call with two updates. Keep at most one task in_progress: set it \
                 in_progress BEFORE you start the work and completed IMMEDIATELY after it is \
                 done and verified — never batch-complete at the end, and never jump a task \
                 from pending straight to completed. Only mark completed when the work truly \
-                succeeded; if you hit a blocker, leave it in_progress and create a task for \
-                the blocker. When the plan changes shape (splitting, merging, dropping work), \
-                update or delete tasks and say why in `explanation` — do not let the \
+                succeeded; if you hit a blocker, move the blocked task back to pending with \
+                an `explanation`, create a task for the blocker, and mark that one \
+                in_progress. When the plan changes shape (splitting, merging, dropping \
+                work), update or delete tasks and say why in `explanation` — do not let the \
                 checklist go stale while you work."
                 .to_string(),
             input_schema: serde_json::json!({

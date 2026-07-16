@@ -5604,7 +5604,11 @@ fn system_prompt_for_state(state: &State) -> String {
 /// (`/plan config` can retune the profile mid-session).
 fn plan_capabilities_line(perms: &crate::app::PlanPermissions) -> String {
     use crate::app::PlanPermLevel as L;
-    let mut parts = vec!["reads and inspection".to_string()];
+    // Read-only subagent fan-out is always allowed under the plan-mode floor
+    // (policy_gate leaves the Subagent Allow untouched) — without naming it,
+    // "everything else is blocked" suppresses legitimate parallel exploration.
+    let mut parts =
+        vec!["reads and inspection (including spawning read-only subagents)".to_string()];
     let mut push = |label: &str, level: L| match level {
         L::Allow => parts.push(label.to_string()),
         L::Auto | L::Ask => parts.push(format!("{label} (each use is reviewed first)")),
@@ -14062,7 +14066,7 @@ mod tests {
         let prompt = system_prompt_for_state(&state);
         assert!(prompt.contains("## Subagent Contract"), "got {prompt}");
         assert!(
-            prompt.contains("returned verbatim to the parent"),
+            prompt.contains("returned to the parent as the tool result"),
             "the contract must state the report semantics",
         );
         // An agent type's preamble rides after the contract.

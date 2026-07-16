@@ -2,11 +2,12 @@
 //! semantic memory.
 //!
 //! Reading needs no tool: the memory index is always in context and the full
-//! facts are fetched with `read_file` on the listed paths. This tool only
-//! *changes* memory, with three actions:
+//! facts are fetched with `read_file` on the listed paths. This tool changes
+//! memory (plus one lookup verb):
 //!   - `remember` — create a new atomic fact.
 //!   - `update`   — replace one fact's body (clean replace, never a merge).
 //!   - `forget`   — delete a fact.
+//!   - `search`   — find facts by keyword across names/descriptions/bodies.
 //!
 //! The directory chosen by `scope` is authoritative (private by default,
 //! `shared`/`global` opt-in). Writes are ungated in every safety mode except
@@ -243,7 +244,9 @@ impl ToolExecutor for MemoryTool {
                 }
             },
             other => ToolOutcome::error(
-                format!("memory: unknown action '{other}' (expected remember, update, or forget)"),
+                format!(
+                    "memory: unknown action '{other}' (expected remember, update, forget, or search)"
+                ),
                 secs(),
             ),
         }
