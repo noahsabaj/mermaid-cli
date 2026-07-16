@@ -2749,28 +2749,32 @@ mod tests {
     async fn cancellation_aborts_long_running_command() {
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let token = ctx.token.clone();
+        // `sleep` is a real long-runner on BOTH shells now (PowerShell aliases
+        // it to Start-Sleep) — under cmd this errored instantly and the test
+        // never actually killed a live child on Windows. 30s of sleep against
+        // a 15s guard: a cancellation regression that waits the child out
+        // blows the guard, while a slow-but-working cancel on a cold, loaded
+        // CI runner (pwsh startup alone can take seconds there) still passes.
         let handle = tokio::spawn(async move {
             ExecuteCommandTool
-                .execute(serde_json::json!({"command": "sleep 10"}), ctx)
+                .execute(serde_json::json!({"command": "sleep 30"}), ctx)
                 .await
         });
         // Give the child a beat to spawn, then cancel.
         tokio::time::sleep(Duration::from_millis(30)).await;
         token.cancel();
         let start = Instant::now();
-        // The 5s outer timeout is the real "didn't hang" guard — a propagation
-        // regression would block until the 10s sleep, past 5s.
-        let outcome = tokio::time::timeout(Duration::from_secs(5), handle)
+        let outcome = tokio::time::timeout(Duration::from_secs(15), handle)
             .await
             .expect("didn't hang")
             .expect("join");
         let elapsed = start.elapsed();
         assert!(outcome.was_cancelled());
-        // "Aborts promptly", not a hard sub-200ms SLA — a tight bound measured
-        // CI scheduling / process-teardown jitter and flaked on loaded windows
-        // runners. 2s keeps a wide margin while still catching a real hang.
+        // "Aborts promptly", with margin for process-teardown jitter and cold
+        // shell startup on loaded runners — the hard hang case is the 15s
+        // guard above.
         assert!(
-            elapsed < Duration::from_secs(2),
+            elapsed < Duration::from_secs(10),
             "cancellation took {:?} — far slower than expected (regression?)",
             elapsed
         );
@@ -2876,10 +2880,18 @@ mod tests {
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), std::env::temp_dir());
         let outcome = ExecuteCommandTool
             .execute(
+                // The ready marker comes from cmd.exe (native, writes straight
+                // to the inherited log handle) rather than a PowerShell cmdlet:
+                // pwsh buffers cmdlet stdout when redirected to a file, so
+                // `echo ready` can land seconds late — or after ping's own
+                // native output — on a loaded runner. Real dev servers are
+                // native writers too, so this matches what the ready-pattern
+                // watch actually exists for. The wide startup window absorbs
+                // cold pwsh starts on CI.
                 serde_json::json!({
-                    "command": "echo ready; ping -n 30 127.0.0.1",
+                    "command": "cmd /c echo ready; ping -n 60 127.0.0.1",
                     "mode": "background",
-                    "startup_timeout_secs": 3,
+                    "startup_timeout_secs": 15,
                     "ready_pattern": "ready"
                 }),
                 ctx,
