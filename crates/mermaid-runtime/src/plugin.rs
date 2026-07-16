@@ -602,7 +602,7 @@ fn ensure_relative_paths(kind: &str, paths: &[String], root: &Path) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_hook_output, run_hooks_for_plugin};
+    use super::parse_hook_output;
     use crate::*;
 
     #[test]
@@ -765,6 +765,8 @@ mod tests {
     #[test]
     fn fixture_scripts_deny_via_json_and_exit2_and_timeout_allows() {
         use std::os::unix::fs::PermissionsExt;
+
+        use super::run_hooks_for_plugin;
         let dir = std::env::temp_dir().join(format!(
             "mermaid_hook_fixtures_{}_{}",
             std::process::id(),

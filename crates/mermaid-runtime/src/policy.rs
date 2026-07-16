@@ -700,6 +700,56 @@ const READ_ONLY_BINARIES: &[&str] = &[
     "seq",
 ];
 
+/// PowerShell cmdlets (and single-word aliases) that only read state. Matched
+/// case-insensitively — PowerShell command names are. The scriptblock-taking
+/// pipeline cmdlets (ForEach-Object, Where-Object, Select-Object, Sort-Object,
+/// Measure-Object, Format-*) are deliberately absent: a scriptblock or
+/// calculated-property argument can run anything, so they classify as a
+/// mutation and defer to the gate. Model commands run under PowerShell on
+/// Windows, so these heads are as common there as `cat`/`ls` are on unix.
+const PS_READ_ONLY_CMDLETS: &[&str] = &[
+    "get-content",
+    "get-childitem",
+    "get-item",
+    "get-itemproperty",
+    "get-location",
+    "get-date",
+    "get-command",
+    "get-alias",
+    "get-variable",
+    "get-process",
+    "get-service",
+    "get-member",
+    "get-history",
+    "get-psdrive",
+    "get-filehash",
+    "get-host",
+    "get-error",
+    "select-string",
+    "test-path",
+    "resolve-path",
+    "split-path",
+    "join-path",
+    "compare-object",
+    "out-string",
+    "write-output",
+    "write-host",
+    "dir",
+    // Single-word aliases of the cmdlets above (`cat`/`ls`/`pwd`/`echo`/`ps`
+    // style aliases are already in READ_ONLY_BINARIES).
+    "gc",
+    "gci",
+    "gi",
+    "gl",
+    "gal",
+    "gv",
+    "gps",
+    "gsv",
+    "gm",
+    "gcm",
+    "sls",
+];
+
 /// `git` subcommands that only read repository state. Deliberately excludes
 /// `config` (writes global hooks/pager → code-exec), `branch` (`-D` deletes
 /// refs), and `tag` (`-d` deletes); the argv0-only classifier can't see their
@@ -1101,6 +1151,34 @@ fn classify_head(head: &str, segment: &[String]) -> RiskClass {
     if READ_ONLY_BINARIES.contains(&head) {
         return RiskClass::ReadOnly;
     }
+    // PowerShell cmdlet heads, matched case-insensitively like PowerShell
+    // itself. Remote/download cmdlets rate Network, arbitrary-code launchers
+    // rate Process, the audited pure readers rate ReadOnly; everything else
+    // (Set-*, Remove-*, New-*, Out-File, scriptblock pipelines) falls through
+    // to the mutation default below.
+    let ps_head = head.to_ascii_lowercase();
+    if matches!(
+        ps_head.as_str(),
+        "invoke-webrequest"
+            | "invoke-restmethod"
+            | "iwr"
+            | "irm"
+            | "invoke-command"
+            | "icm"
+            | "enter-pssession"
+            | "new-pssession"
+    ) {
+        return RiskClass::Network;
+    }
+    if matches!(
+        ps_head.as_str(),
+        "invoke-expression" | "iex" | "invoke-item" | "ii" | "start-process" | "saps" | "start"
+    ) {
+        return RiskClass::Process;
+    }
+    if PS_READ_ONLY_CMDLETS.contains(&ps_head.as_str()) {
+        return RiskClass::ReadOnly;
+    }
     // Unknown binary ⇒ assume it can mutate. This is the safe default.
     RiskClass::ShellMutation
 }
@@ -1464,6 +1542,30 @@ fn is_sensitive_write_target(path: &str) -> bool {
     p.contains("\\windows\\") || p.contains("\\system32\\") || p.contains("\\startup\\")
 }
 
+/// True if `tok` is a PowerShell parameter that resolves to `-<full>`.
+/// PowerShell accepts any parameter prefix (`-r`, `-rec`, `-recurse` all mean
+/// `-Recurse`); over-matching an ambiguous prefix is the safe direction here.
+fn ps_param(tok: &str, full: &str) -> bool {
+    tok.strip_prefix('-')
+        .is_some_and(|p| !p.is_empty() && full.starts_with(&p.to_ascii_lowercase()))
+}
+
+/// Recursive delete of a dangerous root in either Windows spelling: cmd.exe
+/// (`del /s` / `rd /s`) or PowerShell (`Remove-Item -Recurse`, alias `ri`;
+/// `del`/`erase`/`rd`/`rmdir` alias the same cmdlet, so they pair with
+/// `-Recurse` too). PowerShell resolves any unambiguous parameter prefix, so
+/// `-r`/`-rec` count.
+fn windows_recursive_delete(head: &str, rest: &[String]) -> bool {
+    if !matches!(
+        head,
+        "remove-item" | "ri" | "del" | "erase" | "rd" | "rmdir"
+    ) {
+        return false;
+    }
+    let recursive = rest.iter().any(|a| a == "/s" || ps_param(a, "recurse"));
+    recursive && rest.iter().any(|a| is_dangerous_root(a))
+}
+
 /// Hard-deny check for catastrophic commands. Operates on the TOKENIZED,
 /// case-normalized form so it survives extra whitespace, flag reordering,
 /// and absolute-path binaries (`/bin/rm`). This remains best-effort
@@ -1489,7 +1591,10 @@ fn destructive_with_depth(command: &str, depth: u8) -> bool {
     }
     let tokens = tokenize(&lower);
     for (i, tok) in tokens.iter().enumerate() {
+        // `.exe`-qualified heads (`rm.exe`, `powershell.exe`) must hit the
+        // same checks as their bare spellings.
         let head = basename(tok);
+        let head = head.strip_suffix(".exe").unwrap_or(head);
         let rest = &tokens[i + 1..];
         if head.starts_with("mkfs") {
             return true;
@@ -1500,11 +1605,9 @@ fn destructive_with_depth(command: &str, depth: u8) -> bool {
         if matches!(head, "rm" | "chmod" | "chown") && recursive_on_root {
             return true;
         }
-        // Windows recursive delete (`del /s` / `rd /s`) of a dangerous root.
-        if matches!(head, "del" | "erase" | "rd" | "rmdir")
-            && rest.iter().any(|a| a == "/s")
-            && rest.iter().any(|a| is_dangerous_root(a))
-        {
+        // Windows recursive delete of a dangerous root — the cmd.exe (`del
+        // /s`) and PowerShell (`Remove-Item -Recurse`) spellings.
+        if windows_recursive_delete(head, rest) {
             return true;
         }
         // Formatting a drive.
@@ -1532,6 +1635,28 @@ fn destructive_with_depth(command: &str, depth: u8) -> bool {
             if depth >= 3 || destructive_with_depth(script, depth + 1) {
                 return true;
             }
+        }
+        // PowerShell running `-Command <script>` — the same smuggling shape
+        // as `sh -c`, same bounded recursion, same fail-safe at the cap.
+        if matches!(head, "pwsh" | "powershell")
+            && let Some(pos) = rest.iter().position(|a| ps_param(a, "command"))
+            && let Some(script) = rest.get(pos + 1)
+            && (depth >= 3 || destructive_with_depth(script, depth + 1))
+        {
+            return true;
+        }
+    }
+    // The POSIX tokenizer reads a trailing backslash as an escape, so
+    // `Remove-Item C:\ -Recurse` merges `c:\ -recurse` into ONE token and the
+    // loop above never sees the delete target. Re-scan the Windows delete
+    // shapes on plain whitespace tokens — quote-unaware, but over-matching is
+    // the safe direction for a hard-deny.
+    let ws: Vec<String> = lower.split_whitespace().map(str::to_string).collect();
+    for (i, tok) in ws.iter().enumerate() {
+        let head = basename(tok);
+        let head = head.strip_suffix(".exe").unwrap_or(head);
+        if windows_recursive_delete(head, &ws[i + 1..]) {
+            return true;
         }
     }
     // Redirect / `tee` to a sensitive target (cron, dotfiles, ssh, system
@@ -2391,6 +2516,97 @@ mod tests {
                 super::classify_shell_command(cmd),
                 RiskClass::ReadOnly,
                 "mutation must never classify as read-only: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_read_only_cmdlets_classify_as_reads() {
+        // Model commands run under PowerShell on Windows, so the audited
+        // pure-read cmdlets (any case, alias or full name) must classify as
+        // reads or read_only mode blocks every inspection command.
+        for cmd in [
+            "Get-Content foo.txt",
+            "get-content foo.txt",
+            "Get-ChildItem -Recurse src",
+            "gci src",
+            "dir src",
+            "Select-String -Pattern fn -Path src/main.rs",
+            "sls fn src/main.rs",
+            "Test-Path Cargo.toml",
+            "Get-Item Cargo.toml",
+            "Get-Command cargo",
+            "Get-Process",
+            "Compare-Object (gc a) (gc b)",
+            "Write-Output hello",
+            "Get-FileHash Cargo.lock",
+        ] {
+            assert_eq!(
+                super::classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "audited read-only cmdlet must classify as a read: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_control_group_never_read_only() {
+        // Control group: mutating / code-running / network cmdlets, including
+        // the scriptblock pipelines deliberately left off the read-only list.
+        for cmd in [
+            "Remove-Item foo.txt",
+            "Set-Content foo.txt bar",
+            "New-Item -ItemType File foo.txt",
+            "Move-Item a b",
+            "Copy-Item a b",
+            "Out-File -FilePath foo.txt",
+            "Get-Content a | Out-File b",
+            "ForEach-Object { Remove-Item $_ }",
+            "Where-Object { Remove-Item $_ }",
+            "Invoke-Expression 'rm -rf /'",
+            "iex $payload",
+            "Start-Process notepad",
+            "Invoke-WebRequest http://x",
+            "iwr http://x",
+            "Invoke-RestMethod http://x",
+            "Invoke-Command -ComputerName x { ls }",
+        ] {
+            assert_ne!(
+                super::classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "must never classify as read-only: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_destructive_shapes_hard_denied() {
+        // The PowerShell spellings of the catastrophic shapes: recursive
+        // deletes of dangerous roots (parameter prefixes included) and
+        // `-Command` smuggling, with and without `.exe`.
+        for cmd in [
+            "Remove-Item -Recurse -Force C:\\",
+            "Remove-Item C:\\ -Recurse",
+            "remove-item -rec -force $HOME",
+            "ri -r ~",
+            "del -Recurse C:\\",
+            "powershell -Command \"rm -rf /\"",
+            "pwsh -c \"rm -rf /\"",
+            "powershell.exe -command \"rm -rf /\"",
+            "rm.exe -rf /",
+        ] {
+            assert!(super::is_destructive_command(cmd), "must hard-deny: {cmd}");
+        }
+        // Benign neighbours must NOT trip the new shapes.
+        for cmd in [
+            "Remove-Item foo.txt",
+            "Remove-Item -Recurse target/debug",
+            "Get-ChildItem -Recurse C:\\",
+            "powershell -Command \"Get-Date\"",
+        ] {
+            assert!(
+                !super::is_destructive_command(cmd),
+                "must not hard-deny: {cmd}"
             );
         }
     }
