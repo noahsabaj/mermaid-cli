@@ -901,6 +901,7 @@ mod tests {
                     raw_name: "t".to_string(),
                     description: "d".to_string(),
                     input_schema: serde_json::json!({"type": "object"}),
+                    read_only_hint: false,
                 }],
             },
             Msg::McpServerErrored {

@@ -68,24 +68,12 @@ impl ToolExecutor for McpToolProxy {
             .cloned()
             .unwrap_or(serde_json::json!({}));
 
-        // Safety gate: MCP servers are untrusted external processes.
-        // ReadOnly (or a Deny override) blocks them; other modes proceed.
-        if let Some(blocked) = super::policy_gate::gate_external(
-            &ctx,
-            "mcp_proxy",
-            crate::runtime::ToolCategory::Mcp,
-            format!("mcp {}__{}", server_name, tool_name),
-            &args,
-        )
-        .await
-        {
-            return blocked;
-        }
-
         // If init is still racing, park briefly — the model might
         // have sprinted ahead on its very first message. If it never
         // finishes within a reasonable bound we still fall through
-        // to a clean error rather than hanging forever.
+        // to a clean error rather than hanging forever. This runs BEFORE the
+        // gate because the gate needs the manager's readOnlyHint lookup;
+        // waiting has no side effects, so nothing runs ungated.
         if !manager_ref::is_ready() {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
@@ -96,6 +84,22 @@ impl ToolExecutor for McpToolProxy {
         let Some(manager) = manager_ref::get() else {
             return ToolOutcome::error("MCP servers not initialized", 0.0);
         };
+
+        // Safety gate: MCP servers are untrusted external processes.
+        // ReadOnly (or a Deny override) blocks them; write-shaped tools
+        // (no server-advertised readOnlyHint) are additionally floored by
+        // the external-writes policy in every mode, full_access included.
+        let read_only_hint = manager.read_only_hint(server_name, tool_name);
+        if let Some(blocked) = super::policy_gate::gate_external_mcp(
+            &ctx,
+            format!("mcp {}__{}", server_name, tool_name),
+            &args,
+            read_only_hint,
+        )
+        .await
+        {
+            return blocked;
+        }
 
         let start = std::time::Instant::now();
         let call = manager.call_tool(server_name, tool_name, &tool_args);

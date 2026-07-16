@@ -130,6 +130,13 @@ pub struct ActionRequest {
     pub summary: String,
     pub command: Option<String>,
     pub path: Option<String>,
+    /// For `ToolCategory::Mcp` only: the server-advertised `readOnlyHint`.
+    /// UNTRUSTED (servers self-declare), so it can only keep a read at the
+    /// permissiveness every MCP tool had before the external-writes floor
+    /// existed — it never grants more than the safety mode gives. `false`
+    /// (the default, and every unannotated tool) means write-shaped and
+    /// subject to the floor.
+    pub mcp_read_only_hint: bool,
 }
 
 impl ActionRequest {
@@ -144,6 +151,7 @@ impl ActionRequest {
             summary: summary.into(),
             command: None,
             path: None,
+            mcp_read_only_hint: false,
         }
     }
 }
@@ -226,10 +234,29 @@ impl PolicyDecision {
     }
 }
 
+/// Enforcement floor for write-shaped external actions — today, MCP tools
+/// without a server-advertised `readOnlyHint`. Safety mode alone never
+/// authorizes an external side effect: the mode's decision is strengthened
+/// to at least this level (severity order `Allow < Auto < Ask < Deny`).
+/// Default `Auto`: the intent classifier vets the call against the user's
+/// request — aligned runs silently, off-task escalates — even in
+/// full_access. Configure via `[safety] external_writes` (`allow` restores
+/// the old unconditional-allow behavior).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalWriteLevel {
+    Allow,
+    #[default]
+    Auto,
+    Ask,
+    Deny,
+}
+
 #[derive(Debug, Clone)]
 pub struct PolicyEngine {
     mode: SafetyMode,
     overrides: Vec<PolicyOverride>,
+    external_writes: ExternalWriteLevel,
 }
 
 impl PolicyEngine {
@@ -237,11 +264,17 @@ impl PolicyEngine {
         Self {
             mode,
             overrides: Vec::new(),
+            external_writes: ExternalWriteLevel::default(),
         }
     }
 
     pub fn with_overrides(mut self, overrides: Vec<PolicyOverride>) -> Self {
         self.overrides = overrides;
+        self
+    }
+
+    pub fn with_external_writes(mut self, level: ExternalWriteLevel) -> Self {
+        self.external_writes = level;
         self
     }
 
@@ -287,7 +320,7 @@ impl PolicyEngine {
             };
         }
 
-        match self.mode {
+        let decision = match self.mode {
             SafetyMode::ReadOnly => {
                 // Subagent spawn is allowed even though it classifies as
                 // Process: the child inherits the parent's LIVE safety mode
@@ -354,7 +387,62 @@ impl PolicyEngine {
                 risk,
                 checkpoint: risk != RiskClass::ReadOnly,
             },
+        };
+
+        // External-writes floor: mode alone never authorizes an external
+        // side effect. A write-shaped MCP call (no readOnlyHint) is
+        // strengthened to at least the configured level — with the default
+        // `Auto`, full_access routes it through the intent classifier
+        // instead of blanket-allowing. Read-hinted calls keep the mode's
+        // decision unchanged (the hint is untrusted, so it can only restore
+        // pre-floor permissiveness, never exceed the mode).
+        if request.category == ToolCategory::Mcp && !request.mcp_read_only_hint {
+            return strengthen_external(decision, self.external_writes, risk);
         }
+        decision
+    }
+}
+
+/// Return the stricter of the mode's decision and the external-writes level
+/// (severity: Allow < Classify < Ask < Deny). Checkpoints are moot for MCP
+/// (nothing on the local filesystem to snapshot), but the level decisions
+/// mirror the Ask/Auto mode arms' `checkpoint: true` so downstream handling
+/// is identical either way.
+fn strengthen_external(
+    decision: PolicyDecision,
+    level: ExternalWriteLevel,
+    risk: RiskClass,
+) -> PolicyDecision {
+    fn severity(decision: &PolicyDecision) -> u8 {
+        match decision {
+            PolicyDecision::Allow { .. } => 0,
+            PolicyDecision::Classify { .. } => 1,
+            PolicyDecision::Ask { .. } => 2,
+            PolicyDecision::Deny { .. } => 3,
+        }
+    }
+    let floor = match level {
+        ExternalWriteLevel::Allow => PolicyDecision::Allow {
+            risk,
+            checkpoint: false,
+        },
+        ExternalWriteLevel::Auto => PolicyDecision::Classify {
+            risk,
+            checkpoint: true,
+        },
+        ExternalWriteLevel::Ask => PolicyDecision::Ask {
+            risk,
+            checkpoint: true,
+        },
+        ExternalWriteLevel::Deny => PolicyDecision::Deny {
+            risk,
+            reason: "external-writes policy blocks write-shaped MCP tools".to_string(),
+        },
+    };
+    if severity(&floor) > severity(&decision) {
+        floor
+    } else {
+        decision
     }
 }
 
@@ -1894,6 +1982,103 @@ mod tests {
         let mut req = ActionRequest::new("execute_command", ToolCategory::Shell, command);
         req.command = Some(command.to_string());
         req
+    }
+
+    fn mcp(read_only_hint: bool) -> ActionRequest {
+        let mut req = ActionRequest::new("mcp_proxy", ToolCategory::Mcp, "mcp srv__tool");
+        req.mcp_read_only_hint = read_only_hint;
+        req
+    }
+
+    #[test]
+    fn external_writes_default_floors_full_access_mcp_writes() {
+        // The closed hole: mode alone no longer authorizes an external side
+        // effect. Default level (auto) ⇒ full_access classifies write-shaped
+        // MCP calls instead of blanket-allowing; read-hinted calls keep the
+        // old permissiveness.
+        let decision = PolicyEngine::new(SafetyMode::FullAccess).decide(&mcp(false));
+        assert!(
+            matches!(decision, PolicyDecision::Classify { .. }),
+            "write-shaped MCP in full_access must be vetted: {decision:?}"
+        );
+        let decision = PolicyEngine::new(SafetyMode::FullAccess).decide(&mcp(true));
+        assert!(
+            matches!(decision, PolicyDecision::Allow { .. }),
+            "read-hinted MCP in full_access stays allowed: {decision:?}"
+        );
+        // The hint is untrusted: it grants NOTHING below the mode.
+        for hint in [false, true] {
+            let decision = PolicyEngine::new(SafetyMode::ReadOnly).decide(&mcp(hint));
+            assert!(
+                matches!(decision, PolicyDecision::Deny { .. }),
+                "read_only denies MCP regardless of hint: {decision:?}"
+            );
+        }
+        // Ask and auto keep their existing behavior under the default level.
+        let decision = PolicyEngine::new(SafetyMode::Ask).decide(&mcp(false));
+        assert!(
+            matches!(decision, PolicyDecision::Ask { .. }),
+            "{decision:?}"
+        );
+        let decision = PolicyEngine::new(SafetyMode::Auto).decide(&mcp(false));
+        assert!(
+            matches!(decision, PolicyDecision::Classify { .. }),
+            "{decision:?}"
+        );
+    }
+
+    #[test]
+    fn external_writes_levels_floor_but_never_weaken() {
+        use ExternalWriteLevel as L;
+        // `allow` restores the old unconditional-allow in full_access…
+        let decision = PolicyEngine::new(SafetyMode::FullAccess)
+            .with_external_writes(L::Allow)
+            .decide(&mcp(false));
+        assert!(
+            matches!(decision, PolicyDecision::Allow { .. }),
+            "{decision:?}"
+        );
+        // …but never weakens a stricter mode: read_only + allow still denies.
+        let decision = PolicyEngine::new(SafetyMode::ReadOnly)
+            .with_external_writes(L::Allow)
+            .decide(&mcp(false));
+        assert!(
+            matches!(decision, PolicyDecision::Deny { .. }),
+            "{decision:?}"
+        );
+        // `ask` floors auto and full_access up to a prompt.
+        for mode in [SafetyMode::Auto, SafetyMode::FullAccess] {
+            let decision = PolicyEngine::new(mode)
+                .with_external_writes(L::Ask)
+                .decide(&mcp(false));
+            assert!(
+                matches!(decision, PolicyDecision::Ask { .. }),
+                "{mode:?}: {decision:?}"
+            );
+        }
+        // `deny` floors every permissive mode.
+        for mode in [SafetyMode::Ask, SafetyMode::Auto, SafetyMode::FullAccess] {
+            let decision = PolicyEngine::new(mode)
+                .with_external_writes(L::Deny)
+                .decide(&mcp(false));
+            assert!(
+                matches!(decision, PolicyDecision::Deny { .. }),
+                "{mode:?}: {decision:?}"
+            );
+        }
+        // A user Deny override outranks a permissive level.
+        let decision = PolicyEngine::new(SafetyMode::FullAccess)
+            .with_external_writes(L::Allow)
+            .with_overrides(vec![PolicyOverride {
+                category: Some(ToolCategory::Mcp),
+                decision: PolicyOverrideDecision::Deny,
+                ..PolicyOverride::default()
+            }])
+            .decide(&mcp(false));
+        assert!(
+            matches!(decision, PolicyDecision::Deny { .. }),
+            "{decision:?}"
+        );
     }
 
     #[test]

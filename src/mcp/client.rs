@@ -36,6 +36,10 @@ pub struct McpToolDef {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// The server's `annotations.readOnlyHint` — an UNTRUSTED self-declaration
+    /// that the tool has no side effects. Absent ⇒ false, i.e. write-shaped
+    /// (fail closed). Feeds the external-writes policy floor.
+    pub read_only_hint: bool,
 }
 
 /// Result of calling an MCP tool
@@ -80,6 +84,33 @@ pub enum ContentBlock {
         text: Option<String>,
         blob: Option<String>,
     },
+}
+
+/// Parse one `tools/list` entry. `None` for nameless entries (skipped, as
+/// before). Annotations are optional per the MCP spec; a missing or
+/// non-boolean `readOnlyHint` is treated as false — write-shaped, fail
+/// closed.
+fn tool_def_from_json(tool: &Value) -> Option<McpToolDef> {
+    let name = tool.get("name").and_then(|v| v.as_str())?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(McpToolDef {
+        name: name.to_string(),
+        description: tool
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        input_schema: tool
+            .get("inputSchema")
+            .cloned()
+            .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+        read_only_hint: tool
+            .pointer("/annotations/readOnlyHint")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
 }
 
 impl McpClient {
@@ -169,27 +200,8 @@ impl McpClient {
                 .ok_or_else(|| anyhow!("MCP tools/list response missing 'tools' array"))?;
 
             for tool in tools_array {
-                let name = tool
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let description = tool
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let input_schema = tool
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
-
-                if !name.is_empty() {
-                    tools.push(McpToolDef {
-                        name,
-                        description,
-                        input_schema,
-                    });
+                if let Some(def) = tool_def_from_json(tool) {
+                    tools.push(def);
                 }
             }
 
@@ -330,5 +342,40 @@ impl McpClient {
     /// error rather than a broken-pipe transport failure.
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_def_parses_read_only_hint() {
+        // Annotated read-only tool carries the hint through.
+        let def = tool_def_from_json(&json!({
+            "name": "get_thing",
+            "description": "d",
+            "inputSchema": {"type": "object"},
+            "annotations": {"readOnlyHint": true}
+        }))
+        .unwrap();
+        assert!(def.read_only_hint);
+
+        // Absent annotations (the common case) ⇒ write-shaped, fail closed.
+        let def = tool_def_from_json(&json!({"name": "send_thing"})).unwrap();
+        assert!(!def.read_only_hint);
+        assert_eq!(
+            def.input_schema,
+            json!({"type": "object", "properties": {}})
+        );
+
+        // Non-boolean hints and nameless entries are rejected safely.
+        let def = tool_def_from_json(&json!({
+            "name": "odd",
+            "annotations": {"readOnlyHint": "yes"}
+        }))
+        .unwrap();
+        assert!(!def.read_only_hint);
+        assert!(tool_def_from_json(&json!({"description": "nameless"})).is_none());
     }
 }

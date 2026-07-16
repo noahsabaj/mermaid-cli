@@ -1239,6 +1239,12 @@ pub struct McpToolSpec {
     pub raw_name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// Server-advertised `annotations.readOnlyHint` (UNTRUSTED; absent ⇒
+    /// false = write-shaped). Feeds the external-writes policy floor: it can
+    /// only keep a read at its old permissiveness, never grant more than the
+    /// safety mode gives.
+    #[serde(default)]
+    pub read_only_hint: bool,
 }
 
 /// A pending user confirmation (modal). Examples: confirming `/clear`,

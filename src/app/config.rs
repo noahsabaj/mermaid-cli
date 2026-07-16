@@ -284,6 +284,14 @@ pub struct SafetyConfig {
     pub filesystem: FilesystemPolicy,
     #[serde(default)]
     pub overrides: Vec<PolicyOverride>,
+    /// Enforcement floor for write-shaped MCP tools (no server-advertised
+    /// `readOnlyHint`): `allow` | `auto` | `ask` | `deny`. Safety mode alone
+    /// never authorizes an external side effect — with the default `auto`,
+    /// even full_access routes MCP writes through the intent classifier
+    /// (aligned runs silently, off-task escalates). `allow` restores the old
+    /// unconditional-allow behavior.
+    #[serde(default)]
+    pub external_writes: crate::runtime::ExternalWriteLevel,
     /// Model id the `Auto`-mode safety classifier uses to vet borderline
     /// actions. `None` ⇒ vet with the session's active model. Set this to
     /// point the vet at a cheaper/faster model than the one driving the work.
@@ -309,6 +317,7 @@ impl Default for SafetyConfig {
             network: NetworkPolicy::default(),
             filesystem: FilesystemPolicy::default(),
             overrides: Vec::new(),
+            external_writes: crate::runtime::ExternalWriteLevel::default(),
             auto_classifier_model: None,
             allow_untrusted_headless_tools: false,
         }

@@ -230,6 +230,33 @@ impl McpServerManager {
     /// uses a shared pending-response map for JSON-RPC correlation). Calls to
     /// *different* servers run fully in parallel. The registry read lock is
     /// dropped before awaiting the call.
+    /// The server-advertised `readOnlyHint` for a tool; `false` when the
+    /// server, the tool, or the annotation is unknown — an unannotated tool
+    /// is write-shaped, fail closed. Mirrors `call_tool`'s server/alias
+    /// resolution so the hint is read for exactly the tool that would run.
+    pub fn read_only_hint(&self, server: &str, tool: &str) -> bool {
+        let guard = self.inner.read().expect("mcp registry lock poisoned");
+        let (raw_server, runtime) = match guard.get_key_value(server) {
+            Some(hit) => hit,
+            None => {
+                let Some(raw) = self.aliases.get(server) else {
+                    return false;
+                };
+                let Some(hit) = guard.get_key_value(raw.as_str()) else {
+                    return false;
+                };
+                hit
+            },
+        };
+        let alias = self.alias_for(raw_server);
+        let advertised = format!("mcp__{alias}__{tool}");
+        runtime
+            .specs
+            .iter()
+            .find(|s| s.name == advertised)
+            .is_some_and(|s| s.read_only_hint)
+    }
+
     pub async fn call_tool(
         &self,
         server: &str,
