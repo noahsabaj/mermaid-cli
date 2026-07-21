@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-21
+
+### Changed
+
+- **BREAKING: Windows commands now run under PowerShell instead of `cmd`.**
+  Foreground and background `execute_command` on Windows spawn PowerShell
+  (`pwsh`, falling back to Windows PowerShell 5.1) with `-NoProfile
+  -NonInteractive` rather than `cmd /C`. Write commands in PowerShell syntax
+  (`$env:VAR`, `Get-ChildItem`, `Select-String`); `cmd`-only syntax
+  (`%VAR%`, `if defined`, `&` chaining) no longer works. Native exit codes
+  now propagate — a failing `cargo build` surfaces its real code instead of
+  collapsing to 0/1 — and background processes get a hidden console so they
+  survive detached. The read-only-command allowlist and the
+  destructive-command hard-deny both learned the PowerShell spellings
+  (read-only cmdlets like `Get-Content`/`Test-Path`, and blocked shapes like
+  `Remove-Item -Recurse` on dangerous roots).
+
+- **BREAKING: write-capable MCP tools are vetted even in `full_access`.** A
+  new `[safety] external_writes` floor (`allow` | `auto` | `ask` | `deny`,
+  default `auto`) means safety mode alone no longer authorizes an external
+  side effect: an MCP tool without a server-advertised `readOnlyHint` is
+  vetted against your request by the intent classifier — aligned calls run
+  silently, off-task calls escalate to approval — in every mode,
+  `full_access` included. Read-annotated tools are unaffected, and the hint
+  is treated as untrusted (it never grants more than the mode already
+  allows). Set `external_writes = "allow"` to restore the previous
+  unconditional behavior.
+
+- **BREAKING: machine-scoped package installs are vetted even in
+  `full_access`.** A new `[safety] system_installs` floor (same levels and
+  `auto` default) gates system-scoped package operations — `npm -g`, `cargo
+  install`, `pip install`, `pipx`, `gem install`, `go install`, `dotnet tool
+  install`, and `brew`/`apt`/`dnf`/`pacman`/`winget`/`scoop`/`choco`/…
+  installs — because they mutate the machine, not the project, and sit
+  outside checkpoint reach. Project-local installs (`npm install`, `cargo
+  add`, `yarn add`) are untouched. Set `system_installs = "allow"` to restore
+  the previous behavior.
+
+### Added
+
+- **`blocked` task-checklist status.** A task stalled on an external
+  dependency can be marked `blocked` — rendered with its own glyph and
+  overflow-footer count — instead of masquerading as pending. Unblocking a
+  task preserves its original start time and token accounting. The blocker
+  workflow the agent follows: mark the stuck task blocked, add a task for the
+  blocker, and make that one in-progress.
+
+### Fixed
+
+- **System prompt corrected against runtime behavior.** The agent's system
+  prompt is now truthful about what the runtime actually does: the real
+  per-platform shells, the exact tool inventory (memory verbs,
+  `ask_user_question`, `tool_search`-deferred MCP tools), the read-only
+  mode's true allow/deny surface, scratchpad sweep timing, plan-mode gating,
+  and the reduced subagent toolset. Memory facts are now readable via
+  `read_file` in every scope, the `write_file` schema no longer points at a
+  removed tool, and the `memory` tool reports its `search` action. New
+  regression guards hold the prompt, the README's slash commands, and the
+  sample config to the runtime so they cannot silently drift again.
+
 ## [0.17.0] - 2026-07-13
 
 ### Added
@@ -2487,7 +2547,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.15.0...v0.15.1
