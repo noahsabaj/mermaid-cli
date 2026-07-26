@@ -71,7 +71,9 @@ use crate::models::reasoning::{
 use crate::models::stream::{StreamCallback, StreamEvent};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
-use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
+use crate::models::types::{
+    ChatMessage, FinishReason, MessageAudience, MessageRole, ModelResponse, TokenUsage,
+};
 use crate::utils::drain_sse_events;
 
 use super::ModelLimits;
@@ -203,10 +205,27 @@ fn to_gemini_tools(openai_tools: &[&Value]) -> Vec<Value> {
     }
 }
 
+/// Gemini's spelling of the `<system-reminder>` contract — see the Anthropic
+/// adapter's `push_system_reminder` for why the text rides a user turn.
+fn push_system_reminder(out: &mut Vec<Value>, text: &str) {
+    let part = json!({"text": format!("<system-reminder>\n{text}\n</system-reminder>")});
+    if let Some(last) = out.last_mut()
+        && last["role"] == "user"
+        && let Some(parts) = last["parts"].as_array_mut()
+    {
+        parts.push(part);
+        return;
+    }
+    out.push(json!({"role": "user", "parts": [part]}));
+}
+
 /// Translate Mermaid's `ChatMessage` history into Gemini's
 /// `(systemInstruction, contents)` shape.
 ///
-/// - `MessageRole::System` → top-level `systemInstruction` (first wins).
+/// - `MessageRole::System` → top-level `systemInstruction` (first wins), or,
+///   when it is model-directed harness steering
+///   (`MessageAudience::ModelDirected`), a tagged part on the adjacent user
+///   turn — it must reach the model, not be dropped.
 /// - `MessageRole::User` → `{role: "user", parts: [text + inlineData]}`.
 /// - `MessageRole::Assistant` → `{role: "model", parts: [text + functionCall]}`.
 ///   Note the role rename: Mermaid's `Assistant` serializes as Gemini's
@@ -223,6 +242,18 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
     while i < messages.len() {
         let msg = &messages[i];
         match msg.role {
+            MessageRole::System
+                if msg.kind.audience() == MessageAudience::ModelDirected
+                    && !msg.content.is_empty() =>
+            {
+                // Gemini has only a top-level `systemInstruction`, so harness
+                // steering used to be dropped here. Deliver it as a tagged
+                // part on the adjacent user turn — same contract as the
+                // Anthropic adapter, same reasons (tail position, cached
+                // prefix untouched, provenance explicit).
+                push_system_reminder(&mut out, &msg.content);
+                i += 1;
+            },
             MessageRole::System => {
                 if system.is_none() && !msg.content.is_empty() {
                     system = Some(json!({
@@ -1325,9 +1356,30 @@ mod tests {
         let (system, contents) = convert_messages(&messages);
         let sys = system.expect("system extracted");
         assert_eq!(sys["parts"][0]["text"], "You are helpful.");
-        // System messages are NOT included in contents.
+        // Conversation-audience system messages are NOT included in contents.
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0]["role"], "user");
+    }
+
+    /// Model-directed system messages are steering, not TUI affordances: they
+    /// must reach the model even though Gemini has only a top-level
+    /// `systemInstruction`. They used to be dropped on every `gemini/*` model.
+    #[test]
+    fn model_directed_system_messages_reach_the_wire_as_tagged_user_parts() {
+        use crate::models::ChatMessageKind;
+        let mut nudge = ChatMessage::system("Reminder: plan mode is active.");
+        nudge.kind = ChatMessageKind::RecoveryNudge;
+        let messages = vec![ChatMessage::user("ok"), nudge];
+
+        let (_system, contents) = convert_messages(&messages);
+        assert_eq!(contents.len(), 1, "merged into the adjacent user turn");
+        let parts = contents[0]["parts"].as_array().expect("parts array");
+        assert_eq!(parts.len(), 2);
+        let tagged = parts[1]["text"].as_str().unwrap();
+        assert!(
+            tagged.contains("<system-reminder>") && tagged.contains("plan mode is active"),
+            "steering must be delivered and tagged: {tagged}",
+        );
     }
 
     #[test]

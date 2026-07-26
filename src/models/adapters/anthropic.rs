@@ -42,7 +42,8 @@ use crate::models::traits::Model;
 use super::ModelLimits;
 use super::output_budget::{OutputBudgetInputs, OutputCapMode, resolve_output_budget};
 use crate::models::types::{
-    ChatMessage, FinishReason, MessageRole, ModelResponse, ProviderContinuation, TokenUsage,
+    ChatMessage, FinishReason, MessageAudience, MessageRole, ModelResponse, ProviderContinuation,
+    TokenUsage,
 };
 use crate::utils::drain_sse_events;
 
@@ -295,10 +296,42 @@ fn to_anthropic_tools(openai_tools: &[&Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Wrap harness steering in a `<system-reminder>` tag and attach it to the
+/// user turn at this position, creating one if the previous message is not a
+/// user turn.
+///
+/// The tag matters: untagged, the text reads as something the USER said, and
+/// models answer it, thank the user for it, or treat it as a new instruction.
+/// Creating a user turn after an assistant message is safe here because the
+/// continuation design deliberately carries no assistant-prefill dependency.
+fn push_system_reminder(out: &mut Vec<Value>, text: &str) {
+    let block = json!({
+        "type": "text",
+        "text": format!("<system-reminder>\n{text}\n</system-reminder>"),
+    });
+    if let Some(last) = out.last_mut()
+        && last["role"] == "user"
+    {
+        // User content is a string when it was a lone text block (the wire
+        // optimization above), otherwise an array. Normalize, then append.
+        if let Some(existing) = last["content"].as_str() {
+            last["content"] = json!([{"type": "text", "text": existing}, block]);
+        } else if let Some(arr) = last["content"].as_array_mut() {
+            arr.push(block);
+        } else {
+            last["content"] = json!([block]);
+        }
+        return;
+    }
+    out.push(json!({"role": "user", "content": [block]}));
+}
+
 /// Translate Mermaid's `ChatMessage` history into Anthropic's
 /// `(system, messages)` shape. The system prompt comes from
-/// `ModelConfig::system_prompt`; `MessageRole::System` messages in the
-/// history are dropped (they're TUI affordances, not model input).
+/// `ModelConfig::system_prompt`. `MessageRole::System` messages in the history
+/// are TUI affordances and stay out of `messages` — EXCEPT model-directed ones
+/// (`MessageAudience::ModelDirected`), which are harness steering the model
+/// must see and ride a tagged user block instead of being dropped.
 ///
 /// Consecutive `MessageRole::Tool` messages are merged into a single
 /// user-role message with multiple `tool_result` content blocks because
@@ -316,6 +349,21 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
     while i < messages.len() {
         let msg = &messages[i];
         match msg.role {
+            MessageRole::System
+                if msg.kind.audience() == MessageAudience::ModelDirected
+                    && !msg.content.is_empty() =>
+            {
+                // Anthropic has no mid-conversation system role, but this
+                // content exists to steer the model and must not be dropped
+                // (it silently was — plan reminders, context markers,
+                // auto-continue and stalled-turn nudges all vanished here).
+                // Deliver it as a tagged block on the adjacent user turn:
+                // that keeps the tail position the steering depends on and
+                // leaves the cached system prefix untouched, while the tag
+                // keeps it distinguishable from what the user actually typed.
+                push_system_reminder(&mut out, &msg.content);
+                i += 1;
+            },
             MessageRole::System => {
                 // Use the FIRST system message as the top-level system
                 // value. Subsequent system messages (rare) are dropped.
@@ -1855,6 +1903,53 @@ mod tests {
         };
         let body = adapter.build_request_body(&[ChatMessage::user("Hello")], &config);
         assert_eq!(body["max_tokens"], 16_384 - 2 - 1_024);
+    }
+
+    /// Harness steering (`RecoveryNudge`, `ContextMarker`) MUST reach the
+    /// model. Anthropic has no mid-conversation system role, and this adapter
+    /// used to drop such messages outright — silently deleting the plan-mode
+    /// reminder, context markers, and the auto-continue and stalled-turn
+    /// nudges on every `claude/*` model.
+    #[test]
+    fn model_directed_system_messages_reach_the_wire_as_tagged_user_blocks() {
+        use crate::models::ChatMessageKind;
+        let mut nudge = ChatMessage::system("Reminder: plan mode is active.");
+        nudge.kind = ChatMessageKind::RecoveryNudge;
+        let messages = vec![ChatMessage::user("ok"), nudge];
+
+        let (_system, out) = convert_messages(&messages);
+        assert_eq!(out.len(), 1, "merged into the adjacent user turn");
+        assert_eq!(out[0]["role"], "user");
+        let blocks = out[0]["content"].as_array().expect("content array");
+        assert_eq!(blocks.len(), 2, "original text plus the reminder");
+        assert_eq!(blocks[0]["text"], "ok");
+        let tagged = blocks[1]["text"].as_str().unwrap();
+        assert!(
+            tagged.contains("<system-reminder>") && tagged.contains("plan mode is active"),
+            "steering must be delivered and tagged: {tagged}",
+        );
+    }
+
+    /// With no user turn to attach to, one is created rather than dropping the
+    /// steering. (The output-cap continuation nudge lands right after an
+    /// assistant partial; that design carries no prefill dependency.)
+    #[test]
+    fn model_directed_system_message_creates_a_user_turn_when_needed() {
+        use crate::models::ChatMessageKind;
+        let mut nudge = ChatMessage::system("Resume where you stopped.");
+        nudge.kind = ChatMessageKind::ContextMarker;
+        let messages = vec![ChatMessage::assistant("partial reply"), nudge];
+
+        let (_system, out) = convert_messages(&messages);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "assistant");
+        assert_eq!(out[1]["role"], "user", "alternation stays valid");
+        assert!(
+            out[1]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Resume where you stopped"),
+        );
     }
 
     #[test]

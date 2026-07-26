@@ -43,8 +43,11 @@ use super::super::ctx::ExecContext;
 pub enum Gate {
     /// The tool may run. `risk` is the classified risk (callers that take
     /// their own post-approval checkpoint, like `execute_command`, use it to
-    /// decide whether to snapshot).
-    Proceed { risk: RiskClass },
+    /// decide whether to snapshot). `plan_write` records that the approval
+    /// came from plan mode's plan-file carve-out, so the caller can stamp
+    /// `ToolRunMetadata::plan_file_written` instead of guessing from the tool
+    /// name.
+    Proceed { risk: RiskClass, plan_write: bool },
     /// The tool must NOT run; return this outcome verbatim to the model.
     Block(ToolOutcome),
 }
@@ -220,10 +223,14 @@ pub async fn gate(
     // carve-out opens. Keying on the deny REASON (the read-only marker)
     // keeps the precedence ladder intact: a user `Deny` override and the
     // destructive hard-deny carry different reasons and still win.
-    let decision = if ctx.plan_file.is_some() {
+    // `plan_write` is the FACT that this action's approval WAS the plan-file
+    // carve-out — recorded here, where the reason is still known, so callers
+    // never have to re-derive it from the tool name (see
+    // `ToolRunMetadata::plan_file_written`).
+    let (decision, plan_write) = if ctx.plan_file.is_some() {
         apply_plan_profile(ctx, &request, decision)
     } else {
-        decision
+        (decision, false)
     };
 
     // Scratchpad downgrade: an Ask/Classify on a proven scratch-only action
@@ -234,11 +241,14 @@ pub async fn gate(
         && let PolicyDecision::Ask { risk, .. } | PolicyDecision::Classify { risk, .. } = decision
         && scratch_downgrade_eligible(risk)
     {
-        return Gate::Proceed { risk };
+        return Gate::Proceed {
+            risk,
+            plan_write: false,
+        };
     }
 
     match decision {
-        PolicyDecision::Allow { risk, .. } => Gate::Proceed { risk },
+        PolicyDecision::Allow { risk, .. } => Gate::Proceed { risk, plan_write },
         PolicyDecision::Ask { risk, checkpoint } => {
             if let Some(broker) = &ctx.approval {
                 // Interactive: prompt the user inline. This works for
@@ -256,7 +266,7 @@ pub async fn gate(
                         tool = %request.tool,
                         "policy Ask on non-replayable tool; proceeding (--allow-untrusted-tools)",
                     );
-                    Gate::Proceed { risk }
+                    Gate::Proceed { risk, plan_write }
                 } else {
                     Gate::Block(ToolOutcome::error(
                         format!(
@@ -299,7 +309,7 @@ pub async fn gate(
                 None => crate::providers::VetVerdict::escalate("no Auto-mode classifier available"),
             };
             if verdict.allow {
-                Gate::Proceed { risk }
+                Gate::Proceed { risk, plan_write }
             } else if let Some(broker) = &ctx.approval {
                 // Interactive: escalate to an inline prompt carrying the reason.
                 inline_decision(ctx, broker, &request, risk, Some(verdict.reason)).await
@@ -334,14 +344,21 @@ pub async fn gate(
 
 /// The plan-flavored teaching denial. Its reason starts with
 /// [`crate::runtime::PLAN_DENIAL_MARKER`] so the history neutralizer can
-/// retire it once plan mode ends.
-fn plan_deny(risk: RiskClass) -> PolicyDecision {
+/// retire it once plan mode ends — and it must name the escape hatch:
+/// without the plan path and the allowed tools in the error, models
+/// generalize "writes are blocked" and doom-loop through shell probes
+/// instead of calling `write_file` (observed for 7+ minutes on a real
+/// session).
+fn plan_deny(risk: RiskClass, plan_file: &std::path::Path) -> PolicyDecision {
     PolicyDecision::Deny {
         risk,
         reason: format!(
-            "{} is active — planning only; capture this change in the plan \
-             instead of performing it now",
-            crate::runtime::PLAN_DENIAL_MARKER
+            "{} is active — planning only. Capture this change in the plan file at {} \
+             instead of performing it now: write_file or apply_patch on that exact path \
+             are the allowed mutations (a shell redirect writing ONLY that file also \
+             works). When the plan is complete, call exit_plan_mode",
+            crate::runtime::PLAN_DENIAL_MARKER,
+            plan_file.display(),
         ),
     }
 }
@@ -349,7 +366,11 @@ fn plan_deny(risk: RiskClass) -> PolicyDecision {
 /// Map one profile level onto a policy decision. `checkpoint: false`
 /// throughout — nothing in plan mode mutates the tree, so there is nothing
 /// to snapshot.
-fn plan_level_decision(level: crate::app::PlanPermLevel, risk: RiskClass) -> PolicyDecision {
+fn plan_level_decision(
+    level: crate::app::PlanPermLevel,
+    risk: RiskClass,
+    plan_file: &std::path::Path,
+) -> PolicyDecision {
     use crate::app::PlanPermLevel as L;
     match level {
         L::Allow => PolicyDecision::Allow {
@@ -364,7 +385,7 @@ fn plan_level_decision(level: crate::app::PlanPermLevel, risk: RiskClass) -> Pol
             risk,
             checkpoint: false,
         },
-        L::Deny => plan_deny(risk),
+        L::Deny => plan_deny(risk, plan_file),
     }
 }
 
@@ -373,11 +394,17 @@ fn plan_level_decision(level: crate::app::PlanPermLevel, risk: RiskClass) -> Pol
 /// known-safe builds), and tighten the floor's Web allowance when the
 /// profile says so. Override denies and the destructive hard-deny carry
 /// different reasons and pass through untouched.
+///
+/// The returned flag is `true` when the allowance came from the plan-file
+/// carve-out — either spelling, `write_file`/`apply_patch` on the plan path or
+/// a shell redirect that provably writes only it. Callers stamp it onto the
+/// outcome so nothing downstream has to re-derive "was that a plan write?"
+/// from the tool name.
 fn apply_plan_profile(
     ctx: &ExecContext,
     request: &ActionRequest,
     decision: PolicyDecision,
-) -> PolicyDecision {
+) -> (PolicyDecision, bool) {
     use crate::app::PlanPermLevel as L;
     use crate::runtime::ToolCategory as C;
     let perms = ctx.plan_permissions;
@@ -386,27 +413,50 @@ fn apply_plan_profile(
             if reason.starts_with(crate::runtime::READ_ONLY_DENIAL_MARKER) =>
         {
             let plan_file = ctx.plan_file.as_deref().expect("plan mode ctx");
+            // Command-relative paths resolve against the directory the action
+            // actually runs in (an explicit `working_dir`), not the project
+            // root — otherwise the carve-out approves a write that lands
+            // somewhere else. `Edit` paths are already project-rooted.
+            let action_dir = request.resolve_dir(&ctx.workdir);
             let plan_file_edit = request.category == C::Edit
                 && request
                     .path
                     .as_deref()
-                    .is_some_and(|p| is_plan_file_path(&ctx.workdir, p, plan_file));
+                    .is_some_and(|p| crate::runtime::is_plan_file_path(&ctx.workdir, p, plan_file));
             if plan_file_edit {
                 // Authoring the plan IS plan mode — not a profile category.
-                PolicyDecision::Allow {
-                    risk,
-                    checkpoint: false,
-                }
+                (
+                    PolicyDecision::Allow {
+                        risk,
+                        checkpoint: false,
+                    },
+                    true,
+                )
             } else if request.category == C::Memory {
-                plan_level_decision(perms.memory, risk)
+                (plan_level_decision(perms.memory, risk, plan_file), false)
+            } else if request
+                .command
+                .as_deref()
+                .is_some_and(|c| crate::runtime::is_plan_file_only_write(c, action_dir, plan_file))
+            {
+                // The shell spelling of plan authoring (`echo … > plan.md`,
+                // `cat > plan.md <<'EOF'`) — same exemption as the Edit
+                // path above, same no-checkpoint rationale.
+                (
+                    PolicyDecision::Allow {
+                        risk,
+                        checkpoint: false,
+                    },
+                    true,
+                )
             } else if request
                 .command
                 .as_deref()
                 .is_some_and(crate::runtime::is_plan_safe_build_command)
             {
-                plan_level_decision(perms.builds, risk)
+                (plan_level_decision(perms.builds, risk, plan_file), false)
             } else {
-                plan_deny(risk)
+                (plan_deny(risk, plan_file), false)
             }
         },
         // The read-only floor allows Web (GET-shaped reads); the profile can
@@ -414,38 +464,11 @@ fn apply_plan_profile(
         PolicyDecision::Allow { risk, .. }
             if request.category == C::Web && perms.web != L::Allow =>
         {
-            plan_level_decision(perms.web, risk)
+            let plan_file = ctx.plan_file.as_deref().expect("plan mode ctx");
+            (plan_level_decision(perms.web, risk, plan_file), false)
         },
-        other => other,
+        other => (other, false),
     }
-}
-
-/// True when `raw` (a tool-supplied path, absolute or workdir-relative) names
-/// the plan file. Lexical normalization only — the plan file may not exist
-/// yet (the first write creates it), so `canonicalize` is not an option, and
-/// `..`/`.` components must not smuggle a different file past the exemption.
-fn is_plan_file_path(workdir: &std::path::Path, raw: &str, plan_file: &std::path::Path) -> bool {
-    fn normalize(p: &std::path::Path) -> PathBuf {
-        use std::path::Component;
-        let mut out = PathBuf::new();
-        for c in p.components() {
-            match c {
-                Component::CurDir => {},
-                Component::ParentDir => {
-                    out.pop();
-                },
-                other => out.push(other.as_os_str()),
-            }
-        }
-        out
-    }
-    let p = std::path::Path::new(raw);
-    let abs = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        workdir.join(p)
-    };
-    normalize(&abs) == normalize(plan_file)
 }
 
 /// Risk classes whose `Ask`/`Classify` may be downgraded to proceed when the
@@ -479,8 +502,15 @@ async fn inline_decision(
     let key = allowlist_key(&request.tool, request.command.as_deref());
     // An empty key marks a non-allowlistable action — always prompt, never
     // match a stored entry (#6, #31).
+    // `plan_write: false` throughout this function: the plan-file carve-out
+    // resolves to `Allow` in `apply_plan_profile` and never reaches an
+    // approval path, so anything approved here is by definition not a plan
+    // write.
     if !key.is_empty() && broker.is_allowlisted(&key) {
-        return Gate::Proceed { risk };
+        return Gate::Proceed {
+            risk,
+            plan_write: false,
+        };
     }
     let kind = if classifier_reason.is_some() {
         ApprovalKind::Classify
@@ -501,7 +531,10 @@ async fn inline_decision(
         )
         .await;
     match decision {
-        ApprovalDecision::Approve | ApprovalDecision::ApproveAlways => Gate::Proceed { risk },
+        ApprovalDecision::Approve | ApprovalDecision::ApproveAlways => Gate::Proceed {
+            risk,
+            plan_write: false,
+        },
         ApprovalDecision::Deny => Gate::Block(ToolOutcome::error(
             format!("{} — denied by you", request.summary),
             0.0,
@@ -1061,6 +1094,82 @@ mod tests {
                 ),
                 Gate::Proceed { .. } => panic!("{path:?} must not be writable in plan mode"),
             }
+        }
+    }
+
+    /// The shell spelling of plan authoring is allowed; anything with a
+    /// second effect keeps the plan denial.
+    #[tokio::test]
+    async fn plan_mode_allows_a_shell_write_that_only_touches_the_plan_file() {
+        for cmd in [
+            "echo '## Summary' > .mermaid/plans/x.md",
+            "printf '%s\\n' more >> /repo/.mermaid/plans/x.md",
+            "cat > .mermaid/plans/x.md <<'EOF'\n## Tasks\n1. step\nEOF",
+        ] {
+            let g = gate(
+                &ctx_plan(),
+                shell_request(cmd),
+                &[],
+                serde_json::json!({}),
+                true,
+                false,
+            )
+            .await;
+            assert!(
+                matches!(g, Gate::Proceed { .. }),
+                "plan-file-only shell write must proceed: {cmd}"
+            );
+        }
+        let g = gate(
+            &ctx_plan(),
+            shell_request("echo x > .mermaid/plans/x.md && git push"),
+            &[],
+            serde_json::json!({}),
+            true,
+            false,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Block(_)),
+            "a second effect keeps the block"
+        );
+    }
+
+    /// The plan denial is a TEACHING error: it must name the plan file and
+    /// the tools that can write it (the escape hatch), while still starting
+    /// with the exact signature the history neutralizer keys on.
+    #[tokio::test]
+    async fn plan_denial_teaches_the_plan_file_and_tools() {
+        let g = gate(
+            &ctx_plan(),
+            shell_request("echo hi > src/main.rs"),
+            &[],
+            serde_json::json!({}),
+            true,
+            false,
+        )
+        .await;
+        match g {
+            Gate::Block(outcome) => {
+                assert!(
+                    outcome
+                        .model_content
+                        .contains("blocked by policy: plan mode"),
+                    "neutralizer signature must survive the new wording: {:?}",
+                    outcome.model_content
+                );
+                assert!(
+                    outcome.model_content.contains("/repo/.mermaid/plans/x.md"),
+                    "denial must name the plan path: {:?}",
+                    outcome.model_content
+                );
+                assert!(
+                    outcome.model_content.contains("write_file"),
+                    "denial must name the allowed tool: {:?}",
+                    outcome.model_content
+                );
+            },
+            Gate::Proceed { .. } => panic!("non-plan shell write must be blocked in plan mode"),
         }
     }
 

@@ -1364,6 +1364,7 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            suppressed_builtin_tools: Vec::new(),
         };
         let sizing = live.resolve_context_window(&probe_request).await;
         if let Some(window) = sizing.model_max.or(sizing.effective) {
