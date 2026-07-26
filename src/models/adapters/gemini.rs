@@ -207,16 +207,34 @@ fn to_gemini_tools(openai_tools: &[&Value]) -> Vec<Value> {
 
 /// Gemini's spelling of the `<system-reminder>` contract — see the Anthropic
 /// adapter's `push_system_reminder` for why the text rides a user turn.
+/// `coalesce_consecutive_roles` folds it into a neighbouring user turn.
 fn push_system_reminder(out: &mut Vec<Value>, text: &str) {
-    let part = json!({"text": format!("<system-reminder>\n{text}\n</system-reminder>")});
-    if let Some(last) = out.last_mut()
-        && last["role"] == "user"
-        && let Some(parts) = last["parts"].as_array_mut()
-    {
-        parts.push(part);
-        return;
+    out.push(json!({
+        "role": "user",
+        "parts": [{"text": format!("<system-reminder>\n{text}\n</system-reminder>")}],
+    }));
+}
+
+/// Collapse same-role neighbours so `contents` always alternates — Gemini's
+/// spelling of the Anthropic adapter's `coalesce_consecutive_roles`, and see
+/// that one for which ordinary histories produce same-role neighbours in the
+/// first place. Gemini has no must-lead part kind, so merging is a plain
+/// concatenation of `parts`.
+fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(msgs.len());
+    for msg in msgs {
+        let same_role = out.last().is_some_and(|prev| prev["role"] == msg["role"]);
+        if same_role
+            && let Some(incoming) = msg["parts"].as_array()
+            && let Some(prev) = out.last_mut()
+            && let Some(parts) = prev["parts"].as_array_mut()
+        {
+            parts.extend(incoming.iter().cloned());
+            continue;
+        }
+        out.push(msg);
     }
-    out.push(json!({"role": "user", "parts": [part]}));
+    out
 }
 
 /// Translate Mermaid's `ChatMessage` history into Gemini's
@@ -343,7 +361,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
         }
     }
 
-    (system, out)
+    (system, coalesce_consecutive_roles(out))
 }
 
 /// Google Gemini adapter.
@@ -1382,6 +1400,97 @@ mod tests {
         );
     }
 
+    // ── Role alternation ────────────────────────────────────────────────
+
+    /// Gemini's `contents` must alternate user/model. Same property, same
+    /// shapes and same reasoning as the Anthropic adapter's version of this
+    /// test — see there for why each shape is reachable.
+    #[test]
+    fn convert_messages_never_emits_consecutive_same_role_turns() {
+        use crate::models::ChatMessageKind;
+        let steering = || {
+            let mut m = ChatMessage::system("Reminder: plan mode is active.");
+            m.kind = ChatMessageKind::ContextMarker;
+            m
+        };
+        let tool_call = || {
+            let mut m = ChatMessage::assistant("");
+            m.tool_calls = Some(vec![ToolCall {
+                id: Some("c1".to_string()),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: json!({"path": "a.txt"}),
+                },
+            }]);
+            m
+        };
+
+        let shapes: Vec<(&str, Vec<ChatMessage>)> = vec![
+            (
+                "steering between two user turns",
+                vec![
+                    ChatMessage::user("first"),
+                    steering(),
+                    ChatMessage::user("second"),
+                ],
+            ),
+            (
+                "two user turns in a row",
+                vec![ChatMessage::user("first"), ChatMessage::user("second")],
+            ),
+            (
+                "user types while tool results are pending",
+                vec![
+                    ChatMessage::user("read it"),
+                    tool_call(),
+                    ChatMessage::tool("c1", "read_file", "contents"),
+                    ChatMessage::user("actually, stop"),
+                ],
+            ),
+            (
+                "two assistant turns from an interrupted continuation",
+                vec![
+                    ChatMessage::user("go"),
+                    ChatMessage::assistant("part one"),
+                    ChatMessage::assistant("part two"),
+                ],
+            ),
+            (
+                "back-to-back steering",
+                vec![ChatMessage::user("go"), steering(), steering()],
+            ),
+            (
+                "steering with no user turn to attach to",
+                vec![ChatMessage::assistant("partial"), steering()],
+            ),
+        ];
+
+        for (name, messages) in shapes {
+            let (_system, contents) = convert_messages(&messages);
+            assert!(!contents.is_empty(), "{name}: the history must not vanish");
+            for pair in contents.windows(2) {
+                assert_ne!(
+                    pair[0]["role"], pair[1]["role"],
+                    "{name}: emitted consecutive {} turns, which Gemini rejects: {contents:#?}",
+                    pair[0]["role"],
+                );
+            }
+        }
+    }
+
+    /// Coalescing must not lose parts — dropping the second turn outright
+    /// would also satisfy the alternation property above.
+    #[test]
+    fn coalescing_two_user_turns_keeps_both_texts() {
+        let messages = vec![ChatMessage::user("first"), ChatMessage::user("second")];
+        let (_system, contents) = convert_messages(&messages);
+        assert_eq!(contents.len(), 1);
+        let parts = contents[0]["parts"].as_array().expect("parts array");
+        assert_eq!(parts.len(), 2, "both texts survive: {parts:#?}");
+        assert_eq!(parts[0]["text"], "first");
+        assert_eq!(parts[1]["text"], "second");
+    }
+
     #[test]
     fn convert_messages_renames_assistant_to_model() {
         let messages = vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")];
@@ -1393,17 +1502,39 @@ mod tests {
 
     #[test]
     fn convert_messages_merges_consecutive_tool_messages() {
+        // The real agent-loop shape: the tool results answer an assistant
+        // turn that requested them. (A `functionResponse` with no preceding
+        // `functionCall` is not a history Gemini would accept, so the test
+        // has to spell the call out to be exercising anything real.)
+        let mut call = ChatMessage::assistant("");
+        call.tool_calls = Some(vec![
+            ToolCall {
+                id: Some("call_0".to_string()),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: json!({"path": "a.txt"}),
+                },
+            },
+            ToolCall {
+                id: Some("call_1".to_string()),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: json!({"path": "b.txt"}),
+                },
+            },
+        ]);
         let messages = vec![
             ChatMessage::user("read two files"),
+            call,
             ChatMessage::tool("call_0", "read_file", "contents of A"),
             ChatMessage::tool("call_1", "read_file", "contents of B"),
-            ChatMessage::user("now compare them"),
         ];
         let (_, contents) = convert_messages(&messages);
-        // user → user (merged tool results) → user
+        // user → model(functionCall) → user(both functionResponses)
         assert_eq!(contents.len(), 3);
-        assert_eq!(contents[1]["role"], "user");
-        let parts = contents[1]["parts"].as_array().unwrap();
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(contents[2]["role"], "user");
+        let parts = contents[2]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 2, "two functionResponse parts");
         assert_eq!(parts[0]["functionResponse"]["name"], "read_file");
         assert_eq!(
