@@ -230,7 +230,18 @@ impl State {
         // result, or a result whose call was archived out) would otherwise resume
         // with an orphan and 400 the first request. Repair pairing on the loaded
         // prefix so both the transcript and the next request are valid.
-        crate::domain::compaction::normalize_history(&mut self.session.conversation.messages);
+        crate::domain::compaction::normalize_history(self.session.conversation.messages_mut());
+        // Checklist retirement deliberately does NOT happen here. There is one
+        // retirement rule and it lives at natural run end
+        // (`handle_stream_done`), where the summary line absorbs the count so
+        // retirement reads as completion rather than data loss.
+        //
+        // Retiring again at seed time made a SECOND rule with different
+        // behavior: run end preserves the list when a run is cancelled or
+        // errors, but a seed-time clear discarded any all-done list on the
+        // next `--resume`/`--continue` — including one the user cancelled and
+        // came back to. The transcript is not a substitute for the checklist
+        // the next run resumes against.
         // Continue global image numbering past the highest number already in the
         // loaded transcript, so `[Image #16]` keeps referring to that same image
         // across --resume/--continue. Sessions saved before image numbering (no
@@ -239,7 +250,7 @@ impl State {
         let max_image = self
             .session
             .conversation
-            .messages
+            .messages()
             .iter()
             .filter_map(|m| m.image_numbers.as_ref())
             .flatten()
@@ -549,7 +560,7 @@ pub fn estimate_tool_schema_tokens(tools: &[super::cmd::ToolDefinition]) -> usiz
 /// Serialized into `ConversationHistory` on every save (like `safety_mode`)
 /// so `--resume` restores planning-in-progress; sessions saved before this
 /// field existed deserialize to `None`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlanState {
     /// Absolute path of the plan file the model authors — the single path the
     /// policy gate exempts from the read-only floor.
@@ -562,6 +573,48 @@ pub struct PlanState {
     /// `[plan] reasoning` overrode it at entry.
     #[serde(default)]
     pub prev_reasoning: Option<crate::models::ReasoningLevel>,
+    /// The safety mode to return to when plan mode ends — captured at entry,
+    /// and re-targeted by Shift+Tab WHILE planning.
+    ///
+    /// `safety_mode` is `Plan` for the duration, so Shift+Tab has to act on
+    /// something else. Staging it here is what makes "pre-set full_access for
+    /// after approval" work without the live mode and the plan floor ever
+    /// disagreeing — the contradiction that used to produce a permanent
+    /// "safety mode changed to full_access" marker while the floor still held.
+    #[serde(default)]
+    pub resume_safety_mode: crate::runtime::SafetyMode,
+}
+
+/// The mode-defining facts the model was last told about, snapshotted at
+/// each dispatch by the context-delta injector
+/// (`reducer::advertise_context_changes`): the reducer diffs live state
+/// against this and injects one persistent history marker per change, then
+/// re-stamps it. One un-bypassable announcement path for plan entry/exit,
+/// safety-mode flips, and model swaps — transitions themselves stay
+/// message-log-free (the codex snapshot+diff pattern).
+///
+/// Lives on `ConversationHistory` (persisted with the transcript) so a
+/// resumed session diffs against what THAT conversation's model last saw,
+/// and `/clear`/fresh forks start from `None` (= seed silently, announce
+/// nothing). Plan permissions stay out: a `/plan config` retune is already
+/// reflected live in the system prompt and never contradicts history.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdvertisedContext {
+    /// `Some(plan_path)` while the model has been told it is planning.
+    pub plan_path: Option<std::path::PathBuf>,
+    pub safety_mode: SafetyMode,
+    pub model_id: String,
+}
+
+impl AdvertisedContext {
+    /// The facts as they stand right now — the injector's diff input.
+    pub fn observe(session: &Session) -> Self {
+        Self {
+            plan_path: session.plan.as_ref().map(|p| p.plan_path.clone()),
+            safety_mode: session.safety_mode,
+            model_id: session.model_id.clone(),
+        }
+    }
 }
 
 /// Persistent conversational state that survives across turns.
@@ -630,7 +683,7 @@ impl Session {
     /// widget live here; partial in-flight content lives in
     /// `TurnState::Generating`.
     pub fn messages(&self) -> &[ChatMessage] {
-        &self.conversation.messages
+        self.conversation.messages()
     }
 
     /// Append a committed assistant/user/tool message. Mutation happens

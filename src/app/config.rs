@@ -218,12 +218,23 @@ pub struct PromptConfig {
 
 impl PromptConfig {
     pub fn render_system_prompt(&self, default_prompt: &str) -> String {
-        let mut rendered = self
-            .system_prompt
-            .as_deref()
-            .unwrap_or(default_prompt)
-            .trim_end()
-            .to_string();
+        self.append_extras(self.base_prompt(default_prompt))
+    }
+
+    /// The base prompt before any `append_system_prompt` extras: the user's
+    /// override when set, else `default_prompt`.
+    ///
+    /// Split out so callers that REWRITE the base (plan mode splices whole
+    /// sections out of it) can do so before the extras are appended. Rewriting
+    /// the rendered string instead let a section splice run past the end of
+    /// the base and delete the user's appended instructions.
+    pub fn base_prompt<'a>(&'a self, default_prompt: &'a str) -> &'a str {
+        self.system_prompt.as_deref().unwrap_or(default_prompt)
+    }
+
+    /// Append the configured extras to an already-chosen base.
+    pub fn append_extras(&self, base: &str) -> String {
+        let mut rendered = base.trim_end().to_string();
 
         for extra in &self.append_system_prompt {
             let extra = extra.trim();
@@ -1382,10 +1393,19 @@ fn migrate_legacy_model_profiles(table: &mut toml::Table) {
 /// An empty table yields `Config::default()` (every field is `#[serde(default)]`).
 fn finalize_config(table: toml::Table) -> Result<(Config, Vec<String>)> {
     let mut ignored = Vec::new();
-    let config: Config = serde_ignored::deserialize(toml::Value::Table(table), |path| {
+    let mut config: Config = serde_ignored::deserialize(toml::Value::Table(table), |path| {
         ignored.push(path.to_string());
     })
     .context("Failed to interpret configuration. Run 'mermaid init' to regenerate.")?;
+    // `plan` is a session STATE, not a persistent permission level: entering it
+    // allocates a plan file and stages a mode to return to, neither of which a
+    // config default can express. `safety.mode = "plan"` would otherwise start
+    // a session that reports "planning" with no plan to write. Fall back to the
+    // default and let `/plan` do the real thing.
+    if config.safety.mode.is_planning() {
+        config.safety.mode = SafetyConfig::default().mode;
+        ignored.push("safety.mode (plan is entered with /plan, not configured)".to_string());
+    }
     Ok((config, ignored))
 }
 

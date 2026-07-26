@@ -1546,6 +1546,17 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // so a session never silently inherits a more-permissive mode from a
     // previous run. Mirrors the Alt+T reasoning cycle above.
     if code == KeyCode::BackTab {
+        // While planning, the live mode IS `Plan` and the plan read-only floor
+        // is in force, so Shift+Tab cannot mean "switch now" without lying.
+        // Re-target the mode plan exit will restore instead; the status band
+        // shows it as staged. This is why the two can no longer contradict.
+        if let Some(plan) = &mut state.session.plan
+            && state.session.safety_mode.is_planning()
+        {
+            plan.resume_safety_mode = cycle_safety(plan.resume_safety_mode);
+            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            return;
+        }
         let previous = state.session.safety_mode;
         let next = cycle_safety(previous);
         state.session.safety_mode = next;
@@ -2085,9 +2096,9 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     // The cut lands on a user message, which always starts a run, so the
     // prefix can't split a tool_use/tool_result pair — normalize anyway as
     // defense in depth.
-    let mut messages: Vec<ChatMessage> = original.messages[..message_index].to_vec();
+    let mut messages: Vec<ChatMessage> = original.messages()[..message_index].to_vec();
     super::compaction::normalize_history(&mut messages);
-    fork.messages = messages;
+    fork.set_messages(messages);
     fork.input_history = original.input_history.clone();
     fork.git_branch = original.git_branch.clone();
     fork.git_sha = original.git_sha.clone();
@@ -2099,7 +2110,7 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     // light up from these two fields with zero render changes.
     fork.forked_from = Some(original_id.clone());
     fork.parent_session = Some(original_id);
-    let selected = original.messages.get(message_index).cloned();
+    let selected = original.messages().get(message_index).cloned();
 
     // 3. Swap. Cumulative token meters continue (same spend, same session of
     //    work); context/last-usage described the dropped suffix — reset.
@@ -2367,6 +2378,14 @@ fn cycle_safety(current: crate::runtime::SafetyMode) -> crate::runtime::SafetyMo
         S::Ask => S::Auto,
         S::Auto => S::FullAccess,
         S::FullAccess => S::ReadOnly,
+        // Plan is NOT a position in the cycle: entering it allocates a plan
+        // path and may swap the model, and leaving it runs the approval /
+        // restore path — neither belongs on a keystroke that just widens
+        // permissions. Alt+P and `/plan` enter it; `exit_plan_mode` and
+        // `/plan off` leave it. While planning, Shift+Tab cycles the STAGED
+        // resume mode instead (see the `BackTab` handler), so this arm is
+        // defensive only; return the strictest real mode.
+        S::Plan => S::ReadOnly,
     }
 }
 
@@ -2678,6 +2697,36 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             );
         },
         SlashCmd::Safety(Some(mode)) => {
+            // `/safety plan` is not the way in: entering plan mode allocates a
+            // plan path and may swap the model, and leaving it runs the
+            // approval/restore path. Point the user at the real entry.
+            if mode.is_planning() {
+                push_system(
+                    state,
+                    cmds,
+                    "Use /plan (or Alt+P) to enter plan mode — /safety switches permission \
+                     levels only.",
+                );
+                return;
+            }
+            // While planning, `/safety <mode>` stages the post-plan mode rather
+            // than dropping the floor mid-draft (same contract as Shift+Tab).
+            if let Some(plan) = &mut state.session.plan
+                && state.session.safety_mode.is_planning()
+            {
+                plan.resume_safety_mode = mode;
+                push_system(
+                    state,
+                    cmds,
+                    format!(
+                        "Staged: leaving plan mode will restore {}. The plan read-only floor \
+                         stays in effect until then.",
+                        mode.as_str()
+                    ),
+                );
+                cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+                return;
+            }
             // Session-scoped (mirrors Shift+Tab) — not written to the config.
             let previous = state.session.safety_mode;
             state.session.safety_mode = mode;
@@ -3258,7 +3307,7 @@ fn push_system_kind(
     // just *before* that assistant message so the pair stays adjacent; as a
     // bonus the assistant message stays last, so in-flight tool actions/images
     // still attach to it. Anywhere else, plain append.
-    let messages = &state.session.conversation.messages;
+    let messages = state.session.conversation.messages();
     // Also guard `Compacting`: a `ContextLimitRetry`/`TruncationRecovery`
     // compaction keeps a trailing unpaired `tool_use` (see `preserve_pending_tail`),
     // so a mid-compaction `push_system` (e.g. `McpServerErrored`) must insert
@@ -3274,11 +3323,18 @@ fn push_system_kind(
     msg.kind = kind;
     if would_split {
         let pos = messages.len() - 1;
-        state.session.conversation.messages.insert(pos, msg);
+        state.session.conversation.messages_mut().insert(pos, msg);
     } else {
         state.session.append(msg, state.now);
     }
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    // A `RecoveryNudge` is swept at the next turn end, so persisting it buys
+    // nothing and costs a full transcript re-serialization. The plan-mode
+    // reminder is one of these and rides EVERY model call, so this fired once
+    // per dispatch for a byte-identical message that is guaranteed to be gone
+    // before the save could ever be read back. Durable kinds still save.
+    if kind != crate::models::ChatMessageKind::RecoveryNudge {
+        cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    }
 }
 
 /// Retire spent recovery nudges. A `RecoveryNudge` steers exactly one request
@@ -3288,7 +3344,7 @@ fn push_system_kind(
 /// *next, unrelated* turn while the transcript hides it. Returns whether
 /// anything was removed so callers on paths without a save can persist.
 fn sweep_spent_nudges(state: &mut State) -> bool {
-    let messages = &mut state.session.conversation.messages;
+    let messages = state.session.conversation.messages_mut();
     let before = messages.len();
     messages.retain(|m| m.kind != crate::models::ChatMessageKind::RecoveryNudge);
     messages.len() != before
@@ -4239,7 +4295,7 @@ fn handle_compaction_finished(
         .conversation
         .replace_messages(result.replacement_messages, state.now);
     if !intervening.is_empty() {
-        let messages = &mut state.session.conversation.messages;
+        let messages = state.session.conversation.messages_mut();
         let before_pending_tail = messages.last().is_some_and(|message| {
             message.role == MessageRole::Assistant
                 && message
@@ -4800,16 +4856,11 @@ fn handle_stream_done(
         // Captured once for the whole batch: the live safety mode + the
         // turn's intent (for the Auto-mode classifier).
         let intent = latest_user_intent(&state.session);
-        // Plan mode floors the effective safety mode to read-only at the one
-        // dispatch chokepoint — the policy gate, shell classifier, and
-        // subagent inheritance then all apply unchanged. The plan carve-outs
-        // (plan file, memory, known-safe builds) key on `plan_file` inside
-        // the gate.
-        let effective_safety = if state.session.plan.is_some() {
-            crate::runtime::SafetyMode::ReadOnly
-        } else {
-            state.session.safety_mode
-        };
+        // `SafetyMode::Plan` carries its own read-only floor in the policy
+        // engine, so there is nothing to substitute here — the live mode is
+        // the effective mode, always. The plan carve-outs (plan file, memory,
+        // known-safe builds) key on `plan_file` inside the gate.
+        let effective_safety = state.session.safety_mode;
         let plan_file = state
             .session
             .plan
@@ -4965,6 +5016,23 @@ fn handle_stream_done(
         let changes = state.runtime.run_line_changes;
         if !changes.is_empty() {
             summary.push_str(&format!(" · +{}/-{}", changes.added, changes.removed));
+        }
+        // Checklist retirement: a fully-completed checklist's lifetime is the
+        // run's — the harness owns "the work is done" (models demonstrably
+        // don't clean up after themselves, and a zombie list re-renders on
+        // every later run and haunts saves). The summary line absorbs the
+        // count, so retirement reads as completion, not data loss. Fires only
+        // HERE — the natural-completion path — so a cancelled or errored run
+        // keeps its list, and lists with unfinished work always carry over.
+        let tasks = &state.session.conversation.tasks;
+        if tasks.all_done() {
+            let completed = tasks.visible().count();
+            summary.push_str(&format!(
+                " · {completed} task{} completed",
+                if completed == 1 { "" } else { "s" }
+            ));
+            state.session.conversation.tasks = crate::domain::TaskStore::default();
+            cmds.push(Cmd::SyncTaskStore(crate::domain::TaskStore::default()));
         }
         state
             .session
@@ -5175,7 +5243,7 @@ fn handle_tool_progress(
                     TurnState::ExecutingTools { .. } | TurnState::Generating { .. }
                 ) =>
         {
-            if let Some(last) = state.session.conversation.messages.last_mut()
+            if let Some(last) = state.session.conversation.messages_mut().last_mut()
                 && last.role == MessageRole::Assistant
             {
                 let encoded = general_purpose::STANDARD.encode(&data);
@@ -5261,6 +5329,12 @@ fn handle_tool_finished(
             // Attach action display to the last assistant message so
             // the renderer can show it.
             if let Some(call) = calls.iter().find(|c| c.call_id == call_id) {
+                note_plan_tool_outcome(
+                    &mut state.runtime,
+                    state.session.plan.is_some(),
+                    &call.source.function.name,
+                    &outcome,
+                );
                 // A finished shell command may have scribbled on the terminal
                 // (a child that opened /dev/tty writes straight past ratatui's
                 // back buffer). Request a full repaint. Exec only: read/edit/
@@ -5278,7 +5352,7 @@ fn handle_tool_finished(
                     cmds.push(Cmd::SaveProcess(process.clone()));
                     state.runtime.register_process(process);
                 }
-                if let Some(last) = state.session.conversation.messages.last_mut()
+                if let Some(last) = state.session.conversation.messages_mut().last_mut()
                     && last.role == MessageRole::Assistant
                 {
                     last.actions.push(action);
@@ -5375,13 +5449,246 @@ fn handle_hook_context(state: &mut State, turn: TurnId, texts: Vec<String>) {
 /// context), then CLEAR the hook-context buffer — it is consumed exactly once,
 /// by the next real dispatch. Display-only builders (`/context` estimates) and
 /// the compaction request call `build_chat_request` directly and do not clear.
+/// Prefix of the plan-mode tail reminder — how `push_plan_reminder` retracts
+/// the previous instance before re-appending at the tail (and how plan-exit
+/// paths retract a stale one).
+const PLAN_REMINDER_PREFIX: &str = "Reminder: plan mode is active";
+
+/// Model calls after an arming plan denial before the tail reminder escalates
+/// to the corrective variant. Lower than `TASK_STALENESS_CALLS`: the observed
+/// doom loop burned 7+ minutes of pure denials, and the escalation is cheap
+/// (hidden, swept at turn-end).
+const PLAN_THRASH_CALLS: u32 = 3;
+
+/// Tools whose denial means the model tried to CHANGE something. Only these
+/// arm the doom-loop breaker.
+///
+/// The breaker's whole premise is "mutation attempts that never produce a
+/// plan write". Arming on any denial carrying `PLAN_DENIAL_MARKER` also
+/// caught the plan profile's capability denials — `[plan] web = deny` or
+/// `memory = deny` — so a purely read-only Ground phase could trip the
+/// "STOP attempting other mutations" corrective and cut research short.
+const PLAN_MUTATING_TOOLS: &[&str] = &["write_file", "apply_patch", "execute_command"];
+
+/// Plan doom-loop bookkeeping at the tool boundary: the FIRST denied MUTATION
+/// arms the breaker (a read-heavy Ground phase alone must never trip it — the
+/// doom-loop signature is mutation denials without a subsequent plan write);
+/// a call that actually WROTE THE PLAN disarms it.
+///
+/// Both conditions are facts recorded upstream, not proxies. The disarm reads
+/// `ToolRunMetadata::plan_file_written`, stamped by the gate that approved the
+/// write, so it covers all three authoring spellings — including the shell
+/// redirect the escalated corrective itself recommends, which the old
+/// tool-name check missed, leaving the breaker armed forever and re-injecting
+/// "the plan file does not exist" at a model that had just written it.
+fn note_plan_tool_outcome(
+    runtime: &mut super::runtime::RuntimeState,
+    planning: bool,
+    tool: &str,
+    outcome: &ToolOutcome,
+) {
+    if !planning {
+        return;
+    }
+    if outcome.status == crate::domain::ToolStatus::Error
+        && PLAN_MUTATING_TOOLS.contains(&tool)
+        && outcome.model_content.contains(&plan_denial_signature())
+    {
+        runtime.plan_thrash_armed = true;
+    }
+    if outcome.metadata.plan_file_written && outcome.status == crate::domain::ToolStatus::Success {
+        runtime.plan_thrash_armed = false;
+        runtime.plan_calls_since_denial = 0;
+    }
+}
+
+/// Dispatch-time context-delta injector: diff the mode-defining facts against
+/// what the model was last told (`AdvertisedContext`, persisted on the
+/// conversation), inject ONE persistent `ContextMarker` describing every
+/// change, and re-stamp the snapshot. The single un-bypassable announcement
+/// path for plan entry/exit, safety flips, and model swaps — the transitions
+/// themselves stay message-log-free, and rapid flips between dispatches
+/// (Alt+P on, Alt+P off) collapse to no marker at all.
+///
+/// A `None` snapshot (fresh conversation, `/clear`, fresh handoff, or a save
+/// from before the field existed) establishes the baseline silently: the
+/// system prompt already states current modes; only CHANGES need a timeline
+/// event. Subagents re-stamp silently too — children don't plan and their
+/// modes are fixed by the parent.
+fn advertise_context_changes(state: &mut State, cmds: &mut Vec<Cmd>) {
+    let live = super::state::AdvertisedContext::observe(&state.session);
+    let prev = match state
+        .session
+        .conversation
+        .advertised_context
+        .replace(live.clone())
+    {
+        Some(prev) => prev,
+        None => return,
+    };
+    if state.session.is_subagent || prev == live {
+        return;
+    }
+    let text = context_delta_text(&prev, &live, state.session.messages());
+    push_system_kind(
+        state,
+        cmds,
+        text,
+        crate::models::ChatMessageKind::ContextMarker,
+    );
+}
+
+/// Compose the single coalesced marker for every delta between two advertised
+/// contexts. Plan entry with a `[plan]` model override yields ONE message
+/// covering both; plan exit already names the live safety mode, so a safety
+/// sentence is added only when the mode changed without a plan flip.
+fn context_delta_text(
+    prev: &super::state::AdvertisedContext,
+    live: &super::state::AdvertisedContext,
+    messages: &[ChatMessage],
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match (&prev.plan_path, &live.plan_path) {
+        (None, Some(path)) => parts.push(format!(
+            "Plan mode is now ON. A read-only policy floor is in effect: do not implement, \
+             edit files, or run mutating commands. Author the plan at {} using write_file or \
+             apply_patch — the only writable path. Task checklist tools are disabled (the \
+             checklist is seeded from the approved plan's Tasks section). Call exit_plan_mode \
+             when the plan is decision-complete.",
+            path.display()
+        )),
+        (Some(_), None) => parts.push(format!(
+            "Plan mode is now OFF; safety mode is {}.",
+            live.safety_mode.as_str()
+        )),
+        // Path change without an exit is not currently reachable; treat it
+        // as a re-entry for totality.
+        (Some(a), Some(b)) if a != b => parts.push(format!(
+            "The plan file moved: author the plan at {} now.",
+            b.display()
+        )),
+        _ => {},
+    }
+    // A real mode switch the model must know about. Plan entry and exit each
+    // already say what the mode is, so a redundant second sentence is
+    // suppressed for those transitions.
+    //
+    // This is also where the contradiction used to be born: Shift+Tab while
+    // planning changed `safety_mode` out from under the still-active plan
+    // floor, and this emitted a permanent, never-swept "Safety mode changed to
+    // full_access" that the model read as permission to mutate. It cannot
+    // happen now — while planning the live mode IS `Plan`, and Shift+Tab
+    // re-targets the staged resume mode instead of this value.
+    if prev.safety_mode != live.safety_mode
+        && !prev.safety_mode.is_planning()
+        && !live.safety_mode.is_planning()
+    {
+        parts.push(format!(
+            "Safety mode changed from {} to {} (set by the user).",
+            prev.safety_mode.as_str(),
+            live.safety_mode.as_str()
+        ));
+    }
+    if prev.model_id != live.model_id {
+        parts.push(format!("The active model is now {}.", live.model_id));
+    }
+    // Leaving plan mode past standing plan denials: fold the re-attempt
+    // steering into the marker so the model does not trust stale blocks.
+    // (`neutralize_superseded_plan_denials` also rewrites the denials
+    // themselves per-request; this sentence covers the model's own memory
+    // of them within the live context.)
+    if prev.plan_path.is_some() && live.plan_path.is_none() && history_has_plan_denial(messages) {
+        parts.push(
+            "Earlier plan-mode policy blocks no longer apply — re-attempt gated actions \
+             instead of assuming they'll fail."
+                .to_string(),
+        );
+    }
+    parts.join(" ")
+}
+
+/// Per-dispatch plan reminder: while a plan is being drafted, keep a compact
+/// steering note at the HISTORY TAIL — the one position weak models reliably
+/// read (the observed failure mode was ignoring the same rules at the system
+/// tail behind ~70k tokens of history). Retract-then-reappend keeps exactly
+/// one instance, always last; `RecoveryNudge` kind means it is hidden from
+/// the transcript and swept at every turn-end for free. Byte-stable per plan
+/// session (the path is fixed at entry), so prompt-cache churn stays confined
+/// to the already-churning tail region.
+fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
+    let Some(plan) = &state.session.plan else {
+        return;
+    };
+    if state.session.is_subagent {
+        return;
+    }
+    let plan_path = plan.plan_path.display().to_string();
+    state.session.conversation.messages_mut().retain(|m| {
+        m.kind != crate::models::ChatMessageKind::RecoveryNudge
+            || !m.content.starts_with(PLAN_REMINDER_PREFIX)
+    });
+    // Doom-loop escalation: once a plan denial armed the breaker, count model
+    // calls; at the threshold, swap this dispatch's reminder for the
+    // corrective and re-arm (the task-staleness pattern). A successful plan
+    // write disarms via `note_plan_tool_outcome`.
+    let escalate = state.runtime.plan_thrash_armed && {
+        state.runtime.plan_calls_since_denial += 1;
+        if state.runtime.plan_calls_since_denial >= PLAN_THRASH_CALLS {
+            state.runtime.plan_calls_since_denial = 0;
+            true
+        } else {
+            false
+        }
+    };
+    let text = if escalate {
+        format!(
+            "{PLAN_REMINDER_PREFIX} and you keep hitting plan-mode policy blocks without \
+             writing the plan. STOP attempting other mutations — they will all be denied. \
+             Write your current plan to {plan_path} NOW by calling the write_file tool \
+             (apply_patch also works; a shell redirect writing ONLY that file works too). \
+             The plan file does not exist until you write it, and exit_plan_mode fails \
+             until it does."
+        )
+    } else {
+        format!(
+            "{PLAN_REMINDER_PREFIX} — read-only floor; do not implement. Author or update the \
+             plan at {plan_path} with write_file or apply_patch (the only writable path). Call \
+             exit_plan_mode when the plan is decision-complete."
+        )
+    };
+    push_system_kind(
+        state,
+        cmds,
+        text,
+        crate::models::ChatMessageKind::RecoveryNudge,
+    );
+}
+
+/// Are the checklist WRITERS (`task_create`/`task_update`) withdrawn right now?
+///
+/// One predicate, two consumers: the advertised tool set and the task-staleness
+/// nudge. They disagreed — the nudge kept telling the model to "update it
+/// (task_update)" for a tool that was neither advertised nor permitted, and
+/// since only a successful update resets the counter, the contradiction
+/// re-injected itself every `TASK_STALENESS_CALLS` dispatches for the whole
+/// planning session.
+fn checklist_writers_suppressed(state: &State) -> bool {
+    state.session.safety_mode.is_planning()
+        && state.settings.plan.permissions.tasks != crate::app::PlanPermLevel::Allow
+}
+
 fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
+    // Mode changes become history events BEFORE anything else rides this
+    // request — the marker must precede the tail reminder.
+    advertise_context_changes(state, cmds);
     // Structural plan-rot guard: count model-call cycles while a task sits
     // in_progress with no checklist update (`handle_tasks_updated` resets the
     // counter). At the threshold, inject a targeted nudge into THIS request
     // and re-arm — prompt discipline alone demonstrably decays mid-run.
+    // ...unless the writers are withdrawn, in which case the nudge would name
+    // a tool the model cannot call and the counter could never be reset.
     match state.session.conversation.tasks.active() {
-        Some(active) => {
+        Some(active) if !checklist_writers_suppressed(state) => {
             state.runtime.calls_since_task_update += 1;
             if state.runtime.calls_since_task_update >= TASK_STALENESS_CALLS {
                 state.runtime.calls_since_task_update = 0;
@@ -5392,8 +5699,13 @@ fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
                 push_task_notice(state, notice);
             }
         },
-        None => state.runtime.calls_since_task_update = 0,
+        // No active task, or the writers are withdrawn: hold the counter at
+        // zero so planning never leaves a primed nudge for the run after it.
+        _ => state.runtime.calls_since_task_update = 0,
     }
+    // The plan tail reminder is appended LAST so it is the most recent thing
+    // the model reads.
+    push_plan_reminder(state, cmds);
     let request = build_chat_request(state);
     state.pending_hook_context.clear();
     state.pending_task_notices.clear();
@@ -5487,15 +5799,12 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // While a plan is being drafted the EFFECTIVE mode is the read-only floor,
     // so pre-plan read-only denials still describe reality — pass the floor,
     // not the (possibly looser) restore target, so they stay untouched.
-    let effective_safety = if state.session.plan.is_some() {
-        crate::runtime::SafetyMode::ReadOnly
-    } else {
-        state.session.safety_mode
-    };
-    neutralize_superseded_policy_denials(&mut messages, effective_safety);
+    // `Plan` IS the read-only floor, so the live mode already describes
+    // reality — there is no separate floor to substitute.
+    neutralize_superseded_policy_denials(&mut messages, state.session.safety_mode);
     // Same contract for plan-mode denials: they stop applying the moment plan
     // mode ends (approve or cancel).
-    neutralize_superseded_plan_denials(&mut messages, state.session.plan.is_some());
+    neutralize_superseded_plan_denials(&mut messages, state.session.safety_mode.is_planning());
     super::compaction::normalize_history(&mut messages);
 
     ChatRequest {
@@ -5540,23 +5849,60 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         // compaction, manual /compact, or a conversation switch). Rides on the
         // request because the effect preflight never sees RuntimeState.
         suppress_auto_compact: state.runtime.auto_compact_suppressed,
+        // Plan mode hides the checklist WRITERS (their descriptions actively
+        // recommend the call the gate then hard-errors); `task_list` stays
+        // (post-compaction re-anchoring is legitimate while planning), and
+        // the policy-gated tools (write_file, execute_command, …) stay too —
+        // their teaching denials are part of the plan-mode surface. An
+        // explicit `tasks = allow` in the plan profile restores the writers,
+        // matching the runtime backstop in `tasks::plan_mode_block`.
+        suppressed_builtin_tools: if checklist_writers_suppressed(state) {
+            vec!["task_create", "task_update"]
+        } else {
+            Vec::new()
+        },
     }
 }
 
 fn system_prompt_for_state(state: &State) -> String {
-    let base = state
-        .settings
-        .prompt
-        .render_system_prompt(&get_system_prompt());
+    // While planning, the base prompt's execution imperatives ("task_create
+    // the FULL initial plan", "do not stop at a proposal") contradict the
+    // plan appendix; swap them for plan-shaped stubs so the model never has
+    // to resolve the conflict.
+    //
+    // The adaptation runs on the BASE prompt, BEFORE `append_system_prompt`
+    // extras are appended. Running it on the rendered string let the section
+    // splice — which extends to the next `\n## ` heading, or to end-of-string
+    // when there is none — delete the user's appended instructions along with
+    // the section. A base prompt whose last section is `## Task Planning` was
+    // enough to silently drop every `append_system_prompt` entry while
+    // planning. A fully custom base prompt misses the anchors and passes
+    // through untouched, which is the intended behavior for user-owned text.
+    let default_prompt = get_system_prompt();
+    let chosen = state.settings.prompt.base_prompt(&default_prompt);
+    let planning = state.session.safety_mode.is_planning();
+    let base = if planning {
+        state
+            .settings
+            .prompt
+            .append_extras(&crate::prompts::adapt_prompt_for_plan_mode(chosen))
+    } else {
+        state.settings.prompt.append_extras(chosen)
+    };
     // While a plan is being drafted the live-mode line would mislead ("attempt
     // gated actions") — the effective policy is the plan-mode read-only floor.
+    // The restore target is the STAGED resume mode, which Shift+Tab may have
+    // re-targeted since entry.
     let safety_line = match &state.session.plan {
-        Some(_) => format!(
+        Some(plan) if planning => format!(
             "Safety mode: plan (a plan is being drafted; the plan-mode read-only floor is in \
              effect; leaving plan mode restores {}).",
-            state.session.safety_mode.as_str()
+            plan.resume_safety_mode.as_str()
         ),
-        None => format!(
+        // Not planning: the live mode is the whole story. (`Some(_)` with a
+        // non-plan mode is the brief window between plan-data teardown and
+        // mode restore; the live line is correct there too.)
+        _ => format!(
             "Safety mode: {} (live — the user can switch it anytime with Shift+Tab or /safety; \
              trust this over any earlier tool error, and attempt gated actions rather than \
              assuming they will fail).",
@@ -5621,7 +5967,7 @@ fn plan_capabilities_line(perms: &crate::app::PlanPermissions) -> String {
     push("web search/fetch", perms.web);
     push("memory writes", perms.memory);
     let mut line = parts.join(", ");
-    line.push_str(", and edits to the plan file ONLY.");
+    line.push_str(", and authoring the plan file (write_file or apply_patch on the plan path — the ONLY writable path).");
     line
 }
 
@@ -5691,7 +6037,9 @@ fn neutralize_superseded_policy_denials(
     mode: crate::runtime::SafetyMode,
 ) {
     use crate::runtime::SafetyMode;
-    if mode == SafetyMode::ReadOnly {
+    // `Plan` carries the same read-only floor, so a read-only denial recorded
+    // earlier still describes reality and must NOT be retired.
+    if matches!(mode, SafetyMode::ReadOnly | SafetyMode::Plan) {
         return;
     }
     let signature = readonly_denial_signature();
@@ -5778,7 +6126,7 @@ fn note_safety_mode_change(
 ) {
     use crate::models::ChatMessageKind;
     use crate::runtime::SafetyMode;
-    let messages = &mut state.session.conversation.messages;
+    let messages = state.session.conversation.messages_mut();
     let before = messages.len();
     messages.retain(|m| {
         m.kind != ChatMessageKind::RecoveryNudge || !m.content.starts_with(SAFETY_NUDGE_PREFIX)
@@ -6027,26 +6375,38 @@ fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::
             plan_reasoning,
         ));
     }
+    // The mode BECOMES plan. `session.plan` carries only the plan's data, so
+    // there is no second value that can disagree with the floor; the mode to
+    // come back to is staged here (Shift+Tab re-targets it while planning).
+    let resume_safety_mode = state.session.safety_mode;
+    state.session.safety_mode = crate::runtime::SafetyMode::Plan;
     state.session.plan = Some(super::state::PlanState {
         plan_path: plan_path.clone(),
         prev_model_id,
         prev_reasoning,
+        resume_safety_mode,
     });
-    // Retract any pending mode-change nudge: "re-attempt gated actions" would
-    // steer the model wrong now that the read-only floor applies.
-    state.session.conversation.messages.retain(|m| {
+    // Retract any pending safety-mode nudge: "re-attempt gated actions" would
+    // steer the model wrong now that the read-only floor applies. (The old
+    // plan-exit nudge is gone — the context-delta injector diffs at dispatch,
+    // so an off→on flip between dispatches collapses to no message at all.)
+    state.session.conversation.messages_mut().retain(|m| {
         m.kind != crate::models::ChatMessageKind::RecoveryNudge
-            || (!m.content.starts_with(SAFETY_NUDGE_PREFIX)
-                && !m.content.starts_with(PLAN_NUDGE_PREFIX))
+            || !m.content.starts_with(SAFETY_NUDGE_PREFIX)
     });
+    // A fresh plan starts with a disarmed doom-loop breaker.
+    state.runtime.plan_thrash_armed = false;
+    state.runtime.plan_calls_since_denial = 0;
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
     Some(plan_path)
 }
 
 /// Interactive plan-mode entry (Alt+P / `/plan`): the state flip only — the
 /// status band announces the mode (it shows `plan mode on … restores: <mode>`
-/// while `session.plan` is set), so no transcript row is added. The model
-/// learns the mode + plan path from the system prompt.
+/// while `session.plan` is set), so no transcript row is added HERE. The
+/// model learns the mode from the context-delta marker the injector appends
+/// at the next dispatch (`advertise_context_changes`), the per-dispatch tail
+/// reminder, and the system-prompt appendix.
 fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     if let Some(plan) = &state.session.plan {
         let path = plan_path_display(state, &plan.plan_path.clone());
@@ -6060,7 +6420,9 @@ fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     enter_plan_mode_state(state, cmds);
 }
 
-/// Undo the `[plan]` model/reasoning overrides stashed at entry.
+/// Undo the `[plan]` model/reasoning overrides stashed at entry and leave the
+/// `Plan` mode for the staged resume mode (entry's mode, or whatever Shift+Tab
+/// re-targeted it to while planning).
 fn restore_plan_overrides(state: &mut State, plan: &super::state::PlanState) {
     if let Some(prev) = &plan.prev_model_id {
         state.session.model_id = prev.clone();
@@ -6068,6 +6430,9 @@ fn restore_plan_overrides(state: &mut State, plan: &super::state::PlanState) {
     }
     if let Some(prev) = plan.prev_reasoning {
         state.session.reasoning = prev;
+    }
+    if state.session.safety_mode.is_planning() {
+        state.session.safety_mode = plan.resume_safety_mode;
     }
 }
 
@@ -6080,10 +6445,24 @@ fn exit_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
         return;
     };
     restore_plan_overrides(state, &plan);
-    note_plan_mode_exit(state, cmds);
+    retract_plan_reminder(state);
     // No transcript row: the status band reverting to the plain safety mode
-    // is the announcement.
+    // is the human announcement; the model's comes from the context-delta
+    // marker at the next dispatch.
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+}
+
+/// Retract a standing plan tail reminder and disarm the doom-loop breaker —
+/// every `session.plan -> None` transition must call this, or an exit mid-run
+/// leaves "plan mode is active" riding the next boundary dispatch (and a
+/// stale thrash counter waiting for the next plan).
+fn retract_plan_reminder(state: &mut State) {
+    state.session.conversation.messages_mut().retain(|m| {
+        m.kind != crate::models::ChatMessageKind::RecoveryNudge
+            || !m.content.starts_with(PLAN_REMINDER_PREFIX)
+    });
+    state.runtime.plan_thrash_armed = false;
+    state.runtime.plan_calls_since_denial = 0;
 }
 
 /// The `content` infix that marks a persisted **plan-mode** policy denial.
@@ -6208,13 +6587,23 @@ fn handoff_plan_mode(
     }
     if fork {
         next.title = original.title.clone();
-        next.messages = original.messages.clone();
+        next.set_messages(original.messages().to_vec());
         next.input_history = original.input_history.clone();
         next.git_branch = original.git_branch.clone();
         next.tasks = original.tasks.clone();
         next.forked_from = Some(original.id.clone());
+        // The forked transcript carries the plan-ON marker, so the injector
+        // baseline rides along: its first dispatch diffs "advertised planning"
+        // against live plan-off and announces the exit IN THE NEW conversation
+        // — a timeline transition-point injection could never produce (the
+        // transition ran in the old one). Fresh handoffs keep `None`: a
+        // context that never saw plan mode has nothing to reconcile.
+        next.advertised_context = original.advertised_context.clone();
     }
     state.session.conversation = next;
+    // A standing plan reminder rode in with the forked messages (it is only
+    // swept at turn-end); plan mode is over, retract it.
+    retract_plan_reminder(state);
     if let Some(model) = model {
         state.session.model_id = model.clone();
         state.runtime.set_model(&model);
@@ -6243,34 +6632,6 @@ fn handoff_plan_mode(
         });
     drain_next_queued_message(state);
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
-}
-
-/// Content prefix of the plan-mode-exit nudge — how [`enter_plan_mode`] and
-/// [`note_plan_mode_exit`] recognize a pending one to retract it.
-const PLAN_NUDGE_PREFIX: &str = "Plan mode is now off";
-
-/// One-shot nudge injected when plan mode ends while plan-mode denials are in
-/// history, so the model re-attempts gated actions instead of trusting the
-/// old blocks. Pairs with [`neutralize_superseded_plan_denials`], which
-/// rewrites the denials themselves on every request.
-fn note_plan_mode_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
-    use crate::models::ChatMessageKind;
-    state.session.conversation.messages.retain(|m| {
-        m.kind != ChatMessageKind::RecoveryNudge || !m.content.starts_with(PLAN_NUDGE_PREFIX)
-    });
-    if history_has_plan_denial(state.session.messages()) {
-        push_system_kind(
-            state,
-            cmds,
-            format!(
-                "{PLAN_NUDGE_PREFIX}; earlier plan-mode policy blocks no longer \
-                 apply. Safety mode is {} — re-attempt gated actions instead of \
-                 assuming they'll fail.",
-                state.session.safety_mode.as_str()
-            ),
-            ChatMessageKind::RecoveryNudge,
-        );
-    }
 }
 
 /// Plan-tool post-processing at the tool boundary (`handle_tool_finished`):
@@ -6337,13 +6698,10 @@ fn finish_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>, body: &str, start: b
         return;
     };
     restore_plan_overrides(state, &plan);
-    // Retract any pending plan nudge; the per-request neutralizer rewrites
-    // the denials themselves, and the tool result already tells the model
-    // plan mode is off — no extra message here (see `plan_tool_transition`).
-    state.session.conversation.messages.retain(|m| {
-        m.kind != crate::models::ChatMessageKind::RecoveryNudge
-            || !m.content.starts_with(PLAN_NUDGE_PREFIX)
-    });
+    // Retract the standing plan tail reminder; the per-request neutralizer
+    // rewrites the denials themselves, and the context-delta marker at the
+    // next dispatch tells the model plan mode is off.
+    retract_plan_reminder(state);
     seed_plan_tasks(state, cmds, body);
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
     if start {
@@ -6695,12 +7053,12 @@ mod tests {
         assert_eq!(fork.forked_from.as_deref(), Some(original_id.as_str()));
         assert_eq!(fork.parent_session.as_deref(), Some(original_id.as_str()));
         assert_eq!(
-            fork.messages.len(),
+            fork.messages().len(),
             2,
             "fork keeps only the prefix before the selected message"
         );
-        assert_eq!(fork.messages[0].content, "first prompt");
-        assert_eq!(fork.messages[1].content, "first reply");
+        assert_eq!(fork.messages()[0].content, "first prompt");
+        assert_eq!(fork.messages()[1].content, "first reply");
         assert_eq!(
             state.ui.input_buffer, "second prompt",
             "composer pre-filled with the selected message"
@@ -6719,7 +7077,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(first_saved.id, original_id);
-        assert_eq!(first_saved.messages.len(), 4);
+        assert_eq!(first_saved.messages().len(), 4);
     }
 
     #[test]
@@ -7576,7 +7934,7 @@ mod tests {
             state.now,
         );
         history
-            .messages
+            .messages_mut()
             .push(ChatMessage::user("look [Image #16]").with_image_numbers(vec![16]));
         state.seed_conversation(history);
         // A paste after resume continues past the transcript's #16 → #17, not #1.
@@ -8617,6 +8975,150 @@ mod tests {
             crate::domain::runtime::RunTokenCounter::default(),
             "token counter reset on submit"
         );
+    }
+
+    /// Drive a natural run end (StreamDone with no tool calls) on a state
+    /// whose run anchor is set, returning the post-run state and cmds.
+    fn finish_run(mut state: State) -> (State, Vec<Cmd>) {
+        state.runtime.run_started =
+            Some(std::time::SystemTime::from(state.now) - std::time::Duration::from_secs(30));
+        state.turn = TurnState::Generating {
+            id: TurnId(5),
+            started: std::time::SystemTime::now(),
+            partial_text: "done".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: Vec::new(),
+            continuation: false,
+        };
+        update(
+            state,
+            Msg::StreamDone {
+                turn: TurnId(5),
+                usage: None,
+                provider_continuation: None,
+                stop_reason: None,
+            },
+        )
+    }
+
+    /// A fully-completed checklist's lifetime is the run's: natural run end
+    /// retires it (store cleared, broker synced) and the summary line absorbs
+    /// the count — the record of the work, where the run's totals live.
+    #[test]
+    fn run_end_retires_a_fully_completed_checklist() {
+        use crate::domain::TaskStatus::Completed;
+        let mut state = fresh_state();
+        state.session.conversation.tasks = sample_task_store(&[Completed, Completed, Completed]);
+        let (state, cmds) = finish_run(state);
+        assert!(
+            state.session.conversation.tasks.is_empty(),
+            "the finished checklist is emptied at run end"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SyncTaskStore(store) if store.visible().count() == 0)),
+            "the broker mirror is cleared too: {cmds:?}"
+        );
+        let summary = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .expect("run summary");
+        assert!(
+            summary.content.contains("3 tasks completed"),
+            "the summary absorbs the retired count: {:?}",
+            summary.content
+        );
+    }
+
+    /// Unfinished work carries across runs — that is the feature. Only a
+    /// fully-green list retires.
+    #[test]
+    fn run_end_keeps_a_checklist_with_unfinished_work() {
+        use crate::domain::TaskStatus::{Completed, Pending};
+        let mut state = fresh_state();
+        state.session.conversation.tasks = sample_task_store(&[Completed, Pending]);
+        let (state, cmds) = finish_run(state);
+        assert_eq!(
+            state.session.conversation.tasks.visible().count(),
+            2,
+            "unfinished checklist survives the run end"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Cmd::SyncTaskStore(_))),
+            "no broker churn for a surviving list"
+        );
+        let summary = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .expect("run summary");
+        assert!(
+            !summary.content.contains("completed"),
+            "no retirement note for a surviving list: {:?}",
+            summary.content
+        );
+    }
+
+    /// A cancelled run never reaches the natural-completion block, so its
+    /// checklist — green or not — stays put.
+    #[test]
+    fn cancelled_run_keeps_a_fully_completed_checklist() {
+        use crate::domain::TaskStatus::Completed;
+        let mut state = fresh_state();
+        state.session.conversation.tasks = sample_task_store(&[Completed, Completed]);
+        state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
+        state.turn = TurnState::Cancelling {
+            id: TurnId(5),
+            since: std::time::SystemTime::now(),
+        };
+        let (state, _) = update(state, Msg::TurnCancelled(TurnId(5)));
+        assert_eq!(
+            state.session.conversation.tasks.visible().count(),
+            2,
+            "cancel is not completion; the checklist stays"
+        );
+    }
+
+    /// Resume normalization: a save carrying an all-done checklist (written
+    /// before run-end retirement existed, or killed at the wrong moment)
+    /// loads with an empty store instead of resurrecting a zombie band.
+    #[test]
+    fn seeding_a_conversation_preserves_the_saved_checklist() {
+        use crate::domain::TaskStatus::{Completed, Pending};
+        let mut history = crate::session::ConversationHistory::new(
+            "/tmp/project".to_string(),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
+        history.tasks = sample_task_store(&[Completed, Completed]);
+        let mut state = fresh_state();
+        state.seed_conversation(history);
+        // Retirement happens at natural run end and NOWHERE else. A saved
+        // all-done list belongs to a run that did not end naturally (cancelled,
+        // errored, or killed), and run end deliberately preserves those — so
+        // clearing it here was a second, contradictory rule that silently
+        // discarded the user's checklist on resume.
+        assert_eq!(
+            state.session.conversation.tasks.visible().count(),
+            2,
+            "a saved checklist survives resume; only run end retires one",
+        );
+        // And an unfinished list still resumes intact.
+        let mut history = crate::session::ConversationHistory::new(
+            "/tmp/project".to_string(),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
+        history.tasks = sample_task_store(&[Completed, Pending]);
+        let mut state = fresh_state();
+        state.seed_conversation(history);
+        assert_eq!(state.session.conversation.tasks.visible().count(), 2);
     }
 
     #[test]
@@ -12134,10 +12636,20 @@ mod tests {
             "entry adds no transcript row (status band carries the mode): {:?}",
             state.session.messages()
         );
-        // The restore target is untouched — plan mode is not a safety mode.
-        assert_eq!(state.session.safety_mode, Config::default().safety.mode);
+        // Plan IS the safety mode now, and the mode it displaced is staged for
+        // restore — one value, so the two can never disagree.
+        assert_eq!(state.session.safety_mode, crate::runtime::SafetyMode::Plan);
+        assert_eq!(
+            state.session.plan.as_ref().unwrap().resume_safety_mode,
+            Config::default().safety.mode,
+        );
         let (state, _) = update(state, key());
         assert!(state.session.plan.is_none(), "Alt+P toggles back off");
+        assert_eq!(
+            state.session.safety_mode,
+            Config::default().safety.mode,
+            "exit restores the staged mode",
+        );
         assert!(
             state.session.messages().is_empty(),
             "exit adds no transcript row either: {:?}",
@@ -12169,17 +12681,690 @@ mod tests {
         assert_eq!(plan_path_for(&state), plan_path_for(&state));
     }
 
+    /// While planning, the base prompt must stop recommending task_create and
+    /// demanding implementation — the plan appendix owns behavior, and weak
+    /// models resolve contradictions by momentum.
+    #[test]
+    fn system_prompt_drops_task_create_advice_while_planning() {
+        let mut state = fresh_state();
+        let normal = system_prompt_for_state(&state);
+        assert!(normal.contains("FULL initial plan in one call"));
+        assert!(normal.contains("Do not stop at a proposal"));
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
+        let planning = system_prompt_for_state(&state);
+        assert!(!planning.contains("FULL initial plan in one call"));
+        assert!(!planning.contains("Do not stop at a proposal"));
+        assert!(
+            planning.contains("## Plan Mode"),
+            "the appendix still lands after the swap"
+        );
+    }
+
+    // ── Context-delta injector ───────────────────────────────────────
+
+    use crate::models::ChatMessageKind;
+
+    fn alt_p() -> Msg {
+        Msg::Key(Key {
+            code: KeyCode::Char('p'),
+            modifiers: KeyMods {
+                alt: true,
+                ..Default::default()
+            },
+        })
+    }
+
+    /// Dispatch once and return the request the model would see.
+    fn dispatch(state: &mut State, turn: u64) -> ChatRequest {
+        let mut cmds = Vec::new();
+        super::push_call_model(state, &mut cmds, TurnId(turn));
+        match cmds.into_iter().find_map(|c| match c {
+            Cmd::CallModel { request, .. } => Some(request),
+            _ => None,
+        }) {
+            Some(request) => request,
+            None => panic!("push_call_model must emit CallModel"),
+        }
+    }
+
+    /// Put a session into plan mode the way the reducer does: the MODE becomes
+    /// `Plan` and `session.plan` carries only the plan's data. Setting the data
+    /// without the mode is the state this refactor made unrepresentable, so
+    /// tests must not hand-roll it.
+    fn enter_planning(state: &mut State, plan_path: &str) {
+        state.session.safety_mode = crate::runtime::SafetyMode::Plan;
+        state.session.plan = Some(crate::domain::PlanState {
+            plan_path: PathBuf::from(plan_path),
+            ..Default::default()
+        });
+    }
+
+    /// Leave plan mode the way the reducer does: clear BOTH the mode and the
+    /// data. Clearing only `session.plan` leaves `safety_mode == Plan`, which
+    /// is the same half-state `enter_planning` guards against.
+    fn exit_planning(state: &mut State) {
+        let resume = state
+            .session
+            .plan
+            .as_ref()
+            .map(|p| p.resume_safety_mode)
+            .unwrap_or_default();
+        state.session.plan = None;
+        state.session.safety_mode = resume;
+    }
+
+    fn markers(request: &ChatRequest) -> Vec<String> {
+        request
+            .messages
+            .iter()
+            .filter(|m| m.kind == ChatMessageKind::ContextMarker)
+            .map(|m| m.content.clone())
+            .collect()
+    }
+
+    /// Issue #282: plan mode and safety mode used to be orthogonal values, so
+    /// Shift+Tab while planning set `full_access` live and the injector emitted
+    /// a permanent, never-swept "Safety mode changed … to full_access" marker
+    /// while the plan read-only floor was still in force. The model read that
+    /// as permission to mutate and collected denials — the exact loop the
+    /// salience work exists to prevent.
+    ///
+    /// With one mode value the contradiction is unrepresentable: Shift+Tab
+    /// re-targets the STAGED resume mode, the live mode stays `Plan`, and no
+    /// safety-delta marker can be emitted at all.
+    #[test]
+    fn shift_tab_while_planning_stages_the_mode_and_emits_no_marker() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        assert_eq!(state.session.safety_mode, SafetyMode::Plan);
+
+        // Shift+Tab three times: ask -> auto -> full_access -> read_only.
+        for _ in 0..3 {
+            let (next, _) = update(
+                state,
+                Msg::Key(Key {
+                    code: KeyCode::BackTab,
+                    modifiers: KeyMods::default(),
+                }),
+            );
+            state = next;
+            assert_eq!(
+                state.session.safety_mode,
+                SafetyMode::Plan,
+                "the live mode never leaves Plan while a plan is being drafted",
+            );
+        }
+        let staged = state.session.plan.as_ref().unwrap().resume_safety_mode;
+        assert_eq!(staged, SafetyMode::ReadOnly, "the staged target cycled");
+
+        // No marker may claim the safety mode changed — the floor still holds.
+        let request = dispatch(&mut state, 2);
+        for marker in markers(&request) {
+            assert!(
+                !marker.contains("Safety mode changed"),
+                "a safety-delta marker would contradict the plan floor: {marker}",
+            );
+        }
+
+        // Exit restores what Shift+Tab staged, not what entry captured.
+        let (state, _) = update(state, alt_p());
+        assert!(state.session.plan.is_none());
+        assert_eq!(state.session.safety_mode, SafetyMode::ReadOnly);
+    }
+
+    /// The staleness nudge named `task_update` while plan mode withdrew it, so
+    /// the model was told to call a tool it was never shown and the gate
+    /// hard-errors. Only a successful update resets the counter, so the
+    /// contradiction re-injected itself every `TASK_STALENESS_CALLS` dispatches.
+    #[test]
+    fn no_task_staleness_nudge_while_the_checklist_writers_are_withdrawn() {
+        use crate::domain::TaskStatus::InProgress;
+        let mut state = fresh_state();
+        state.session.conversation.tasks = sample_task_store(&[InProgress]);
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
+
+        for turn in 1..=(TASK_STALENESS_CALLS as u64 + 2) {
+            let request = dispatch(&mut state, turn);
+            let text = format!(
+                "{}{}",
+                request.instructions.clone().unwrap_or_default(),
+                request
+                    .messages
+                    .iter()
+                    .map(|m| m.content.clone())
+                    .collect::<String>()
+            );
+            assert!(
+                !text.contains("without a checklist update"),
+                "planning must not nudge toward a withdrawn tool (turn {turn})",
+            );
+        }
+        assert_eq!(
+            state.runtime.calls_since_task_update, 0,
+            "the counter stays parked so the next run does not inherit a primed nudge",
+        );
+    }
+
+    /// The plan-mode section splice runs to the next `\n## ` heading, or to
+    /// end-of-string when there is none. Applied to the RENDERED prompt, a
+    /// base whose last section is `## Task Planning` meant the splice ate the
+    /// user's `append_system_prompt` entries too — silently dropping standing
+    /// instructions on every request while planning.
+    #[test]
+    fn plan_adaptation_preserves_append_system_prompt_extras() {
+        let mut state = fresh_state();
+        state.settings.prompt.system_prompt = Some(
+            "# House rules\n\nBe brief.\n\n## Task Planning\n\nUse task_create for the FULL \
+             initial plan."
+                .to_string(),
+        );
+        state.settings.prompt.append_system_prompt =
+            vec!["Never touch db/migrations/.".to_string()];
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
+
+        let prompt = super::system_prompt_for_state(&state);
+        assert!(
+            prompt.contains("Never touch db/migrations/."),
+            "the user's appended instruction must survive the splice:\n{prompt}",
+        );
+        assert!(
+            prompt.contains("disabled while a plan is being drafted"),
+            "the section is still adapted for plan mode",
+        );
+        assert!(
+            !prompt.contains("FULL initial plan"),
+            "the contradicting execution imperative is still removed",
+        );
+    }
+
+    #[test]
+    fn plan_entry_is_announced_at_the_next_dispatch_not_the_keypress() {
+        let mut state = fresh_state();
+        // First dispatch establishes the baseline silently.
+        let req = dispatch(&mut state, 1);
+        assert!(markers(&req).is_empty(), "baseline seed must be silent");
+        // The keypress itself appends nothing (status band carries the mode).
+        let (mut state, _) = update(state, alt_p());
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .all(|m| m.kind != ChatMessageKind::ContextMarker)
+        );
+        // The next dispatch carries exactly one marker teaching the essentials.
+        let req = dispatch(&mut state, 2);
+        let m = markers(&req);
+        assert_eq!(m.len(), 1, "exactly one marker: {m:?}");
+        assert!(m[0].contains("Plan mode is now ON"));
+        // The marker must name the REAL plan path. Asserted against the path
+        // from state, not a hard-coded `.mermaid/plans` literal: the marker
+        // renders it with `Path::display()`, which is backslash-separated on
+        // Windows, and a forward-slash substring silently only ever held on
+        // unix.
+        let plan_path = state
+            .session
+            .plan
+            .as_ref()
+            .expect("planning")
+            .plan_path
+            .display()
+            .to_string();
+        assert!(
+            m[0].contains(&plan_path),
+            "marker must name the plan path {plan_path}: {}",
+            m[0],
+        );
+        assert!(m[0].contains("write_file"));
+        assert!(m[0].contains("exit_plan_mode"));
+        // No change → no new marker.
+        let req = dispatch(&mut state, 3);
+        assert_eq!(markers(&req).len(), 1, "unchanged context injects nothing");
+    }
+
+    #[test]
+    fn context_marker_coalesces_plan_entry_with_the_plan_model_swap() {
+        let mut state = fresh_state();
+        state.settings.plan.model = Some("ollama/plan-brain".to_string());
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        let req = dispatch(&mut state, 2);
+        let m = markers(&req);
+        assert_eq!(m.len(), 1, "one coalesced marker, not two: {m:?}");
+        assert!(m[0].contains("Plan mode is now ON"));
+        assert!(m[0].contains("ollama/plan-brain"));
+    }
+
+    #[test]
+    fn plan_exit_marker_is_unconditional_and_steering_is_denial_gated() {
+        // Without denials: the exit is announced, the re-attempt sentence not.
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (state, _) = update(state, alt_p());
+        let mut state = state;
+        dispatch(&mut state, 2);
+        let (mut state, _) = update(state, alt_p());
+        let req = dispatch(&mut state, 3);
+        let m = markers(&req);
+        let exit = m.last().expect("exit marker");
+        assert!(exit.contains("Plan mode is now OFF"));
+        assert!(!exit.contains("re-attempt gated actions"));
+
+        // With a standing plan denial: the steering sentence rides the marker.
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        dispatch(&mut state, 2);
+        state.session.append(
+            ChatMessage::assistant("editing").with_tool_calls(vec![
+                crate::models::tool_call::ToolCall {
+                    id: Some("call-1".to_string()),
+                    function: crate::models::tool_call::FunctionCall {
+                        name: "write_file".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
+                },
+            ]),
+            state.now,
+        );
+        state.session.append(
+            ChatMessage::tool(
+                "call-1",
+                "write_file",
+                format!(
+                    "write_file(x) blocked by policy: {} is active",
+                    crate::runtime::PLAN_DENIAL_MARKER
+                ),
+            ),
+            state.now,
+        );
+        let (mut state, _) = update(state, alt_p());
+        let req = dispatch(&mut state, 3);
+        let m = markers(&req);
+        let exit = m.last().expect("exit marker");
+        assert!(exit.contains("Plan mode is now OFF"));
+        assert!(
+            exit.contains("re-attempt gated actions"),
+            "denials in history must add the steering sentence: {exit}"
+        );
+    }
+
+    #[test]
+    fn rapid_plan_toggle_between_dispatches_injects_nothing() {
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, alt_p());
+        let req = dispatch(&mut state, 2);
+        assert!(
+            markers(&req).is_empty(),
+            "on→off between dispatches collapses to no marker"
+        );
+    }
+
+    #[test]
+    fn safety_mode_flip_is_announced_exactly_once() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        state.session.safety_mode = SafetyMode::ReadOnly;
+        let req = dispatch(&mut state, 2);
+        let m = markers(&req);
+        assert_eq!(m.len(), 1);
+        assert!(m[0].contains("Safety mode changed"));
+        assert!(m[0].contains("read_only"));
+        let req = dispatch(&mut state, 3);
+        assert_eq!(markers(&req).len(), 1, "no re-announcement");
+    }
+
+    #[test]
+    fn first_dispatch_of_a_pre_field_save_stamps_silently() {
+        // A resumed mid-plan save from before the field existed: plan is
+        // Some, baseline is None. Announce nothing; the appendix + reminder
+        // cover it.
+        let mut state = fresh_state();
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
+        assert!(state.session.conversation.advertised_context.is_none());
+        let req = dispatch(&mut state, 1);
+        assert!(markers(&req).is_empty());
+        let snap = state
+            .session
+            .conversation
+            .advertised_context
+            .as_ref()
+            .expect("baseline stamped");
+        assert!(snap.plan_path.is_some(), "snapshot records live plan state");
+    }
+
+    #[test]
+    fn subagents_get_no_markers_or_reminders() {
+        use crate::runtime::SafetyMode;
+        let mut state = fresh_state();
+        state.session.is_subagent = true;
+        dispatch(&mut state, 1);
+        state.session.safety_mode = SafetyMode::FullAccess;
+        let req = dispatch(&mut state, 2);
+        assert!(markers(&req).is_empty(), "subagents get no markers");
+        assert_eq!(
+            state
+                .session
+                .conversation
+                .advertised_context
+                .as_ref()
+                .map(|c| c.safety_mode),
+            Some(SafetyMode::FullAccess),
+            "snapshot still refreshes silently"
+        );
+        assert!(
+            req.messages
+                .iter()
+                .all(|m| !m.content.starts_with(PLAN_REMINDER_PREFIX)),
+            "subagents get no plan reminders"
+        );
+    }
+
+    #[test]
+    fn plan_reminder_rides_every_dispatch_and_never_duplicates() {
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        for turn in 2..4 {
+            let req = dispatch(&mut state, turn);
+            let reminders: Vec<_> = req
+                .messages
+                .iter()
+                .filter(|m| m.content.starts_with(PLAN_REMINDER_PREFIX))
+                .collect();
+            assert_eq!(reminders.len(), 1, "exactly one reminder per request");
+            assert_eq!(reminders[0].kind, ChatMessageKind::RecoveryNudge);
+            assert!(reminders[0].content.contains("write_file"));
+            assert!(
+                req.messages
+                    .last()
+                    .is_some_and(|m| m.content.starts_with(PLAN_REMINDER_PREFIX)),
+                "the reminder sits at the history tail"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_reminder_is_retracted_when_plan_mode_exits() {
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        dispatch(&mut state, 2);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.content.starts_with(PLAN_REMINDER_PREFIX))
+        );
+        let (mut state, _) = update(state, alt_p());
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .all(|m| !m.content.starts_with(PLAN_REMINDER_PREFIX)),
+            "Alt+P exit retracts the standing reminder"
+        );
+        let req = dispatch(&mut state, 3);
+        assert!(
+            req.messages
+                .iter()
+                .all(|m| !m.content.starts_with(PLAN_REMINDER_PREFIX))
+        );
+    }
+
+    #[test]
+    fn context_markers_survive_the_turn_end_sweep() {
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        dispatch(&mut state, 2);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.kind == ChatMessageKind::ContextMarker)
+        );
+        sweep_spent_nudges(&mut state);
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.kind == ChatMessageKind::ContextMarker),
+            "markers are the durable timeline record"
+        );
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .all(|m| !m.content.starts_with(PLAN_REMINDER_PREFIX)),
+            "the reminder is swept like any RecoveryNudge"
+        );
+    }
+
+    // ── Plan doom-loop breaker ───────────────────────────────────────
+
+    fn plan_denial_outcome() -> ToolOutcome {
+        ToolOutcome::error(
+            format!(
+                "execute_command echo x > src/a.rs blocked by policy: {} is active — planning \
+                 only",
+                crate::runtime::PLAN_DENIAL_MARKER
+            ),
+            0.0,
+        )
+    }
+
+    /// A successful call that the GATE approved via the plan-file carve-out —
+    /// the fact the breaker disarms on, whatever tool produced it.
+    fn plan_file_write_outcome() -> ToolOutcome {
+        let mut outcome = ToolOutcome::success("wrote the plan", "wrote", 0.0);
+        outcome.metadata.plan_file_written = true;
+        outcome
+    }
+
+    /// The escalated corrective tells the model "a shell redirect writing ONLY
+    /// that file works too". When the model complied, the old tool-name disarm
+    /// (`write_file`/`apply_patch` only) never fired, so the breaker stayed
+    /// armed and kept re-injecting "the plan file does not exist until you
+    /// write it" — false, and it steered the model into rewriting a plan it
+    /// had already authored instead of calling `exit_plan_mode`.
+    #[test]
+    fn a_shell_redirect_plan_write_disarms_the_stall_breaker() {
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        note_plan_tool_outcome(
+            &mut state.runtime,
+            true,
+            "execute_command",
+            &plan_denial_outcome(),
+        );
+        assert!(state.runtime.plan_thrash_armed, "a denied mutation arms it");
+        state.runtime.plan_calls_since_denial = 2;
+
+        note_plan_tool_outcome(
+            &mut state.runtime,
+            true,
+            "execute_command",
+            &plan_file_write_outcome(),
+        );
+        assert!(
+            !state.runtime.plan_thrash_armed,
+            "the shell spelling of plan authoring disarms the breaker too",
+        );
+        assert_eq!(state.runtime.plan_calls_since_denial, 0);
+    }
+
+    /// The breaker's doc contract says a read-heavy Ground phase must never
+    /// trip it. Arming on ANY denial carrying the plan marker broke that: with
+    /// `[plan] web = deny`, `web_fetch` denials armed it and three dispatches
+    /// later the model was told to "STOP attempting other mutations" and write
+    /// the plan NOW — cutting research short on a purely read-only phase.
+    #[test]
+    fn non_mutating_plan_denials_do_not_arm_the_stall_breaker() {
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        for tool in ["web_fetch", "web_search", "memory", "task_create"] {
+            note_plan_tool_outcome(&mut state.runtime, true, tool, &plan_denial_outcome());
+            assert!(
+                !state.runtime.plan_thrash_armed,
+                "a denied {tool} is not a mutation attempt",
+            );
+        }
+        // A denied mutation still arms it.
+        note_plan_tool_outcome(
+            &mut state.runtime,
+            true,
+            "write_file",
+            &plan_denial_outcome(),
+        );
+        assert!(state.runtime.plan_thrash_armed);
+    }
+
+    #[test]
+    fn plan_stall_escalates_the_reminder_after_repeated_denials() {
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        // Pure exploration never escalates, however long it runs.
+        for turn in 2..8 {
+            let req = dispatch(&mut state, turn);
+            let reminder = req.messages.last().expect("reminder at tail");
+            assert!(
+                !reminder.content.contains("STOP attempting"),
+                "unarmed breaker must not escalate (turn {turn})"
+            );
+        }
+        // A plan denial arms it...
+        note_plan_tool_outcome(
+            &mut state.runtime,
+            true,
+            "execute_command",
+            &plan_denial_outcome(),
+        );
+        assert!(state.runtime.plan_thrash_armed);
+        // ...and PLAN_THRASH_CALLS dispatches later the reminder escalates.
+        for turn in 8..8 + u64::from(PLAN_THRASH_CALLS) - 1 {
+            let req = dispatch(&mut state, turn);
+            assert!(
+                !req.messages
+                    .last()
+                    .is_some_and(|m| m.content.contains("STOP attempting")),
+                "not yet (turn {turn})"
+            );
+        }
+        let req = dispatch(&mut state, 20);
+        let reminder = req.messages.last().expect("reminder at tail");
+        assert!(
+            reminder.content.contains("STOP attempting"),
+            "threshold dispatch carries the corrective: {}",
+            reminder.content
+        );
+        assert!(reminder.content.contains("write_file"));
+        assert_eq!(
+            state.runtime.plan_calls_since_denial, 0,
+            "re-armed after firing"
+        );
+    }
+
+    #[test]
+    fn plan_write_disarms_the_stall_breaker() {
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        note_plan_tool_outcome(
+            &mut state.runtime,
+            true,
+            "execute_command",
+            &plan_denial_outcome(),
+        );
+        state.runtime.plan_calls_since_denial = 2;
+        // A successful write that was NOT the plan file (e.g. a memory write
+        // the plan profile allows) must NOT disarm — the tool name alone was
+        // never evidence a plan got written.
+        note_plan_tool_outcome(
+            &mut state.runtime,
+            true,
+            "write_file",
+            &ToolOutcome::success("wrote memory", "wrote", 0.0),
+        );
+        assert!(
+            state.runtime.plan_thrash_armed,
+            "a non-plan write must leave the breaker armed",
+        );
+        note_plan_tool_outcome(
+            &mut state.runtime,
+            true,
+            "write_file",
+            &plan_file_write_outcome(),
+        );
+        assert!(!state.runtime.plan_thrash_armed, "a plan write disarms");
+        assert_eq!(state.runtime.plan_calls_since_denial, 0);
+        // Outside plan mode the bookkeeping is inert.
+        note_plan_tool_outcome(
+            &mut state.runtime,
+            false,
+            "execute_command",
+            &plan_denial_outcome(),
+        );
+        assert!(!state.runtime.plan_thrash_armed);
+        // Exiting plan mode clears an armed breaker.
+        state.runtime.plan_thrash_armed = true;
+        state.runtime.plan_calls_since_denial = 1;
+        let (state, _) = update(state, alt_p());
+        assert!(!state.runtime.plan_thrash_armed, "exit clears the breaker");
+        assert_eq!(state.runtime.plan_calls_since_denial, 0);
+    }
+
+    #[test]
+    fn forked_handoff_announces_plan_end_in_the_new_conversation() {
+        let mut state = fresh_state();
+        dispatch(&mut state, 1);
+        let (mut state, _) = update(state, alt_p());
+        dispatch(&mut state, 2);
+        let old_id = state.session.conversation.id.clone();
+        let mut cmds = Vec::new();
+        super::handoff_plan_mode(
+            &mut state,
+            &mut cmds,
+            "## Tasks\n1. Step one\n",
+            false,
+            true,
+            None,
+        );
+        assert_ne!(state.session.conversation.id, old_id, "forked");
+        assert!(
+            state.session.conversation.advertised_context.is_some(),
+            "fork inherits the baseline"
+        );
+        let req = dispatch(&mut state, 3);
+        let m = markers(&req);
+        assert!(
+            m.iter().any(|c| c.contains("Plan mode is now OFF")),
+            "the NEW conversation's first dispatch announces the exit: {m:?}"
+        );
+    }
+
     #[test]
     fn plan_mode_floors_dispatch_to_read_only_and_stamps_the_plan_file() {
         use crate::runtime::SafetyMode;
         let mut state = state_with_two_exchanges();
+        // Entering plan mode from full_access: the MODE becomes plan, and
+        // full_access is staged as the resume target.
         state.session.safety_mode = SafetyMode::FullAccess;
         let plan_path = PathBuf::from("/tmp/project/.mermaid/plans/x.md");
-        state.session.plan = Some(crate::domain::PlanState {
-            plan_path: plan_path.clone(),
-            prev_model_id: None,
-            prev_reasoning: None,
-        });
+        enter_planning(&mut state, &plan_path.display().to_string());
         state.turn = TurnState::Generating {
             id: TurnId(9),
             started: std::time::SystemTime::now(),
@@ -12217,11 +13402,15 @@ mod tests {
                 _ => None,
             })
             .expect("ExecuteTool dispatched");
+        // The dispatched mode IS `Plan` — it carries the read-only floor in
+        // the policy engine itself, so nothing has to substitute `ReadOnly`
+        // for it here. Entering from full_access does not leak that mode.
         assert_eq!(
             mode,
-            SafetyMode::ReadOnly,
-            "plan mode floors the effective mode even from full_access"
+            SafetyMode::Plan,
+            "plan mode dispatches as Plan, not as the pre-plan mode"
         );
+        assert!(mode.is_planning());
         assert_eq!(plan_file, Some(plan_path));
     }
 
@@ -12254,11 +13443,7 @@ mod tests {
         );
 
         // While planning: the denial stands verbatim.
-        state.session.plan = Some(crate::domain::PlanState {
-            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
-            prev_model_id: None,
-            prev_reasoning: None,
-        });
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
         let req = build_chat_request(&state);
         let tool_msg = req
             .messages
@@ -12272,7 +13457,7 @@ mod tests {
         );
 
         // Plan mode off: rewritten to a past-tense note.
-        state.session.plan = None;
+        exit_planning(&mut state);
         let req = build_chat_request(&state);
         let tool_msg = req
             .messages
@@ -12295,11 +13480,7 @@ mod tests {
         // loosened-mode rewrite must not fire.
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::FullAccess;
-        state.session.plan = Some(crate::domain::PlanState {
-            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
-            prev_model_id: None,
-            prev_reasoning: None,
-        });
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
         let call = crate::models::tool_call::ToolCall {
             id: Some("call-1".to_string()),
             function: crate::models::tool_call::FunctionCall {
@@ -12355,11 +13536,7 @@ mod tests {
         let mut state = fresh_state();
         let prompt = system_prompt_for_state(&state);
         assert!(!prompt.contains("## Plan Mode"));
-        state.session.plan = Some(crate::domain::PlanState {
-            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
-            prev_model_id: None,
-            prev_reasoning: None,
-        });
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
         let prompt = system_prompt_for_state(&state);
         assert!(prompt.contains("## Plan Mode"));
         assert!(
@@ -12387,20 +13564,53 @@ mod tests {
         assert!(n.contains(&"enter_plan_mode".to_string()));
         assert!(!n.contains(&"exit_plan_mode".to_string()));
         // Planning: exit_plan_mode only.
-        state.session.plan = Some(crate::domain::PlanState {
-            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
-            prev_model_id: None,
-            prev_reasoning: None,
-        });
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
         let n = names(&state);
         assert!(n.contains(&"exit_plan_mode".to_string()));
         assert!(!n.contains(&"enter_plan_mode".to_string()));
         // Subagents get neither.
-        state.session.plan = None;
+        exit_planning(&mut state);
         state.session.is_subagent = true;
         let n = names(&state);
         assert!(!n.contains(&"enter_plan_mode".to_string()));
         assert!(!n.contains(&"exit_plan_mode".to_string()));
+    }
+
+    /// Plan mode must stop ADVERTISING the checklist writers — their schema
+    /// descriptions recommend exactly the call the gate then hard-errors.
+    #[test]
+    fn build_chat_request_suppresses_task_writers_while_planning() {
+        let mut state = fresh_state();
+        assert!(
+            build_chat_request(&state)
+                .suppressed_builtin_tools
+                .is_empty(),
+            "nothing suppressed outside plan mode"
+        );
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
+        assert_eq!(
+            build_chat_request(&state).suppressed_builtin_tools,
+            vec!["task_create", "task_update"],
+            "planning hides the writers, keeps task_list"
+        );
+        // An explicit `tasks = allow` in the plan profile restores them,
+        // matching the runtime backstop in tasks::plan_mode_block.
+        state.settings.plan.permissions.tasks = crate::app::PlanPermLevel::Allow;
+        assert!(
+            build_chat_request(&state)
+                .suppressed_builtin_tools
+                .is_empty(),
+            "tasks=allow restores advertisement"
+        );
+        // Subagents never plan, so nothing is suppressed for them either.
+        state.settings.plan.permissions.tasks = crate::app::PlanPermLevel::Deny;
+        exit_planning(&mut state);
+        state.session.is_subagent = true;
+        assert!(
+            build_chat_request(&state)
+                .suppressed_builtin_tools
+                .is_empty()
+        );
     }
 
     /// Drive a single named tool call through StreamDone so the turn lands in
@@ -12444,11 +13654,7 @@ mod tests {
     #[test]
     fn exit_plan_mode_approval_transitions_out_and_seeds_the_checklist() {
         let mut state = state_with_two_exchanges();
-        state.session.plan = Some(crate::domain::PlanState {
-            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
-            prev_model_id: None,
-            prev_reasoning: None,
-        });
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
         let call_id = drive_single_tool_call(&mut state, "exit_plan_mode");
 
         let body = "## Summary\nS\n\n## Tasks\n1. Add the flag\n2. Wire the broker\n";
@@ -12504,11 +13710,7 @@ mod tests {
     fn replan_reconcile_preserves_completed_tasks() {
         use crate::domain::tasks::{Stamp, TaskEdit, TaskOrigin, TaskSpec, TaskStatus};
         let mut state = fresh_state();
-        state.session.plan = Some(crate::domain::PlanState {
-            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
-            prev_model_id: None,
-            prev_reasoning: None,
-        });
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
         // Prior round: one completed, one still open.
         let mut store = crate::domain::tasks::TaskStore::default();
         let ids = store.create(
@@ -12643,7 +13845,11 @@ mod tests {
         let line = plan_capabilities_line(&PlanPermissions::strict());
         assert!(!line.contains("build and test"));
         assert!(!line.contains("web search/fetch"));
-        assert!(line.contains("plan file ONLY"));
+        assert!(
+            line.contains("write_file or apply_patch"),
+            "the capabilities line must name the plan-authoring tools: {line}"
+        );
+        assert!(line.contains("ONLY writable path"));
     }
 
     fn plan_outcome(fresh: bool, fork: bool, model: Option<&str>) -> ToolOutcome {
@@ -12665,11 +13871,7 @@ mod tests {
     #[test]
     fn clear_context_approval_hands_off_to_a_fresh_conversation() {
         let mut state = state_with_two_exchanges();
-        state.session.plan = Some(crate::domain::PlanState {
-            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
-            prev_model_id: None,
-            prev_reasoning: None,
-        });
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
         let original_id = state.session.conversation.id.clone();
         let call_id = drive_single_tool_call(&mut state, "exit_plan_mode");
         let (state, cmds) = update(
@@ -12715,11 +13917,7 @@ mod tests {
     #[test]
     fn fork_handoff_carries_the_transcript() {
         let mut state = state_with_two_exchanges();
-        state.session.plan = Some(crate::domain::PlanState {
-            plan_path: PathBuf::from("/tmp/project/.mermaid/plans/x.md"),
-            prev_model_id: None,
-            prev_reasoning: None,
-        });
+        enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
         let original_id = state.session.conversation.id.clone();
         let original_len = state.session.messages().len();
         let call_id = drive_single_tool_call(&mut state, "exit_plan_mode");

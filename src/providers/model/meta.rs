@@ -606,6 +606,7 @@ mod tests {
             resolved_max_output: Some(crate::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS),
             output_schema: None,
             suppress_auto_compact: false,
+            suppressed_builtin_tools: Vec::new(),
         }
     }
 
@@ -626,6 +627,28 @@ mod tests {
         assert!(body.get("previous_response_id").is_none());
         assert!(body.get("tool_choice").is_none());
         assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
+    }
+
+    /// Adapter contract (see `MessageAudience`): harness steering must reach
+    /// the model. The Responses API carries system-role input messages, so the
+    /// reminder passes through in place at the tail.
+    #[test]
+    fn model_directed_system_messages_reach_the_wire_in_place() {
+        use crate::models::ChatMessageKind;
+        let mut req = request();
+        let mut nudge = crate::models::ChatMessage::system("Reminder: plan mode is active.");
+        nudge.kind = ChatMessageKind::RecoveryNudge;
+        req.messages.push(nudge);
+        let body = build_request_body(&req, "muse-spark-1.1");
+
+        let input = body["input"].as_array().expect("input array");
+        let last = input.last().expect("non-empty");
+        assert_eq!(last["role"], "system");
+        assert!(
+            serde_json::to_string(&last["content"])
+                .unwrap()
+                .contains("plan mode is active"),
+        );
     }
 
     #[test]

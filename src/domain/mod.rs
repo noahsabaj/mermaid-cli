@@ -54,7 +54,7 @@ pub use runtime::{
 };
 pub use slash_commands::{COMMAND_GROUPS, COMMAND_REGISTRY, SlashCommand, filter_by_prefix};
 pub use state::{
-    ApprovalChoice, ApprovalKind, Attachment, Confirmation, ConfirmationTarget,
+    AdvertisedContext, ApprovalChoice, ApprovalKind, Attachment, Confirmation, ConfirmationTarget,
     ContextUsageSnapshot, ConversationSummary, GenPhase, IdAllocatorBundle, LiveToolStatus,
     McpServerEntry, McpServerStatus, McpState, McpToolSpec, PendingApproval, PendingToolCall,
     PlanState, PluginCommand, PromptTokenBreakdown, QueuedMessage, RewindCandidate, Session, State,

@@ -477,35 +477,24 @@ mod tests {
     use chrono::TimeZone;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use std::collections::VecDeque;
-
     fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
     }
 
     fn history(title: &str, branch: Option<&str>, updated: DateTime<Local>) -> ConversationHistory {
-        ConversationHistory {
-            id: "20260101_000000_000".to_string(),
-            title: title.to_string(),
-            messages: Vec::new(),
-            model_name: "ollama/test".to_string(),
-            project_path: "/home/nsabaj/Development/source-clone".to_string(),
-            created_at: updated,
-            updated_at: updated,
-            compactions: Vec::new(),
-            input_history: VecDeque::new(),
-            git_branch: branch.map(str::to_string),
-            safety_mode: None,
-            plan: None,
-            last_token_usage: None,
-            cumulative_token_usage: crate::domain::TokenUsageTotals::default(),
-            context_usage: None,
-            forked_from: None,
-            parent_session: None,
-            cli_version: None,
-            git_sha: None,
-            tasks: crate::domain::TaskStore::default(),
-        }
+        // `messages`/`revision` are private (the render memo keys off the
+        // revision), so build from the constructor and override the rest.
+        let mut h = ConversationHistory::new(
+            "/home/nsabaj/Development/source-clone".to_string(),
+            "ollama/test".to_string(),
+            updated,
+        );
+        h.id = "20260101_000000_000".to_string();
+        h.title = title.to_string();
+        h.created_at = updated;
+        h.updated_at = updated;
+        h.git_branch = branch.map(str::to_string);
+        h
     }
 
     fn entry(

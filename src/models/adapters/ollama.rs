@@ -1365,6 +1365,30 @@ mod tests {
         assert!(!untouched.to_string().contains("should not appear"));
     }
 
+    /// Adapter contract (see `MessageAudience`): harness steering must reach
+    /// the model. Ollama carries a native system role in history, so the
+    /// reminder passes through at the TAIL — the position weak local models
+    /// were observed to actually read.
+    #[tokio::test]
+    async fn model_directed_system_messages_reach_the_wire_in_place() {
+        use crate::models::ChatMessageKind;
+        let adapter = make_adapter().await;
+        let mut nudge = ChatMessage::system("Reminder: plan mode is active.");
+        nudge.kind = ChatMessageKind::RecoveryNudge;
+        let messages = vec![ChatMessage::user("ok"), nudge];
+        let body = adapter.build_request_body(&messages, &ModelConfig::default(), false, false);
+
+        let msgs = body["messages"].as_array().expect("messages array");
+        let last = msgs.last().expect("non-empty");
+        assert_eq!(last["role"], "system");
+        assert!(
+            last["content"]
+                .as_str()
+                .unwrap()
+                .contains("plan mode is active"),
+        );
+    }
+
     #[tokio::test]
     async fn ollama_request_body_omits_think_when_reasoning_none() {
         let adapter = make_adapter().await;

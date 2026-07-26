@@ -87,7 +87,18 @@ fn strip_persisted_screenshots(messages: &[ChatMessage]) -> Option<Vec<ChatMessa
 pub struct ConversationHistory {
     pub id: String,
     pub title: String,
-    pub messages: Vec<ChatMessage>,
+    /// PRIVATE on purpose. Every mutation must go through
+    /// [`ConversationHistory::messages_mut`], which bumps [`Self::revision`] —
+    /// the render layer's memo keys off that counter instead of re-hashing the
+    /// whole transcript on every frame. A public field would make the counter a
+    /// convention someone eventually forgets; this makes forgetting impossible
+    /// from outside this module.
+    messages: Vec<ChatMessage>,
+    /// Bumped on every mutable access to `messages`. Session-only (never
+    /// serialized): a resumed conversation starts at 0 with an empty render
+    /// memo, so no stale key can survive a reload.
+    #[serde(skip)]
+    revision: u64,
     pub model_name: String,
     pub project_path: String,
     pub created_at: DateTime<Local>,
@@ -117,6 +128,14 @@ pub struct ConversationHistory {
     /// the same plan file and restore target.
     #[serde(default)]
     pub plan: Option<crate::domain::PlanState>,
+    /// The mode-defining facts the model was last told about (see
+    /// `domain::AdvertisedContext`) — the dispatch-time context-delta
+    /// injector's baseline. Rides the conversation (not `Session`) so
+    /// save/resume, `/clear`, and forks inherit the right baseline for
+    /// free. `None` on fresh conversations and pre-field saves: the first
+    /// dispatch stamps it silently instead of announcing current state.
+    #[serde(default)]
+    pub advertised_context: Option<crate::domain::AdvertisedContext>,
     #[serde(default)]
     pub last_token_usage: Option<crate::domain::TokenUsageTotals>,
     #[serde(default)]
@@ -207,6 +226,35 @@ impl ConversationMeta {
 }
 
 impl ConversationHistory {
+    /// Read the committed transcript.
+    pub fn messages(&self) -> &[ChatMessage] {
+        &self.messages
+    }
+
+    /// Mutable access to the transcript. Bumps [`Self::revision`], which is
+    /// what lets the render memo skip re-hashing every message on every frame.
+    ///
+    /// Deliberately conservative: it bumps on ACCESS, not on actual change, so
+    /// a caller that takes the handle and changes nothing merely costs one memo
+    /// miss. The reverse error — a change that does not bump — would paint a
+    /// stale transcript, so the cheap direction is the safe one.
+    pub fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
+        self.revision = self.revision.wrapping_add(1);
+        &mut self.messages
+    }
+
+    /// Replace the transcript wholesale (compaction, `/clear`, fork, load).
+    pub fn set_messages(&mut self, messages: Vec<ChatMessage>) {
+        self.revision = self.revision.wrapping_add(1);
+        self.messages = messages;
+    }
+
+    /// Monotonic counter identifying the current transcript contents. Changes
+    /// whenever `messages` is touched; never serialized.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Create a new conversation history.
     ///
     /// `now` is injected rather than read from the wall clock because this
@@ -221,6 +269,7 @@ impl ConversationHistory {
             id: id.clone(),
             title: format!("Session {}", now.format("%Y-%m-%d %H:%M")),
             messages: Vec::new(),
+            revision: 0,
             model_name,
             project_path,
             created_at: now,
@@ -233,6 +282,8 @@ impl ConversationHistory {
             // Snapshotted from `Session` on save (see `snapshot_conversation`).
             safety_mode: None,
             plan: None,
+            // Stamped by the injector at the first dispatch (silent seed).
+            advertised_context: None,
             last_token_usage: None,
             cumulative_token_usage: crate::domain::TokenUsageTotals::default(),
             context_usage: None,
@@ -760,6 +811,28 @@ mod tests {
         assert!(conv.context_usage.is_none());
         assert!(conv.tasks.tasks.is_empty());
         assert_eq!(conv.tasks.next_id, 0);
+        assert!(
+            conv.advertised_context.is_none(),
+            "pre-field saves load a None baseline (silent seed)"
+        );
+    }
+
+    #[test]
+    fn advertised_context_round_trips_through_conversation_json() {
+        let mut fresh = touched("/tmp/proj");
+        fresh.advertised_context = Some(crate::domain::AdvertisedContext {
+            plan_path: Some(std::path::PathBuf::from("/tmp/proj/.mermaid/plans/x.md")),
+            safety_mode: crate::runtime::SafetyMode::Ask,
+            model_id: "ollama/test".to_string(),
+        });
+        let round: ConversationHistory =
+            serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        let ctx = round.advertised_context.expect("field survives");
+        assert_eq!(
+            ctx.plan_path.as_deref(),
+            Some(std::path::Path::new("/tmp/proj/.mermaid/plans/x.md"))
+        );
+        assert_eq!(ctx.model_id, "ollama/test");
     }
 
     #[test]

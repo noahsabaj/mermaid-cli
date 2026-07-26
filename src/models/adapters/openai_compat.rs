@@ -1955,6 +1955,30 @@ mod tests {
         assert_eq!(adapter.name(), "gpt-5-mini");
     }
 
+    /// Adapter contract (see `MessageAudience`): harness steering must reach
+    /// the model. This shape carries a native mid-conversation system role, so
+    /// it passes through in place — at the history TAIL, which is the position
+    /// the plan-mode reminder depends on.
+    #[test]
+    fn model_directed_system_messages_reach_the_wire_in_place() {
+        use crate::models::ChatMessageKind;
+        let adapter = test_adapter();
+        let mut nudge = ChatMessage::system("Reminder: plan mode is active.");
+        nudge.kind = ChatMessageKind::RecoveryNudge;
+        let messages = vec![ChatMessage::user("ok"), nudge];
+        let body = adapter.build_request_body(&messages, &ModelConfig::default(), false);
+
+        let msgs = body["messages"].as_array().expect("messages array");
+        let last = msgs.last().expect("non-empty");
+        assert_eq!(last["role"], "system", "delivered as a system turn");
+        assert!(
+            last["content"]
+                .as_str()
+                .unwrap()
+                .contains("plan mode is active"),
+        );
+    }
+
     #[test]
     fn build_request_body_includes_basic_fields() {
         let adapter = test_adapter();

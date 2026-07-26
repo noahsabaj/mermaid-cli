@@ -404,7 +404,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // (borrowed slice, no fingerprint); with them, the memo makes idle frames
     // a hash-check instead of a transcript clone.
     let committed = state.session.messages();
-    let base: &[crate::models::ChatMessage] = if needs_stitch(committed) {
+    let base: &[crate::models::ChatMessage] = if needs_stitch(committed, &state.turn) {
         let key = stitch_fingerprint(committed);
         if rstate.stitched.as_ref().map(|m| m.key) != Some(key) {
             rstate.stitched = Some(StitchedMemo {
@@ -421,15 +421,16 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         committed
     };
     let live_messages = build_live_messages(base, &state.turn, state.now);
+    // 500ms blink phase for in-flight action dots, from the injected clock
+    // (never the wall clock) so a frame stays a pure function of State.
+    let blink_on = (state.now.timestamp_millis().div_euclid(500)) % 2 == 0;
     let chat_widget = ChatWidget {
         messages: live_messages.as_ref(),
+        content_key: chat_content_key(state, base, live_messages.as_ref(), blink_on),
         theme: &rstate.theme,
         wrapped_line_cache: &mut rstate.wrapped_line_cache,
         show_reasoning: state.ui.show_reasoning,
-        // 500ms blink phase for in-flight action dots, from the injected
-        // clock (never the wall clock) so a frame stays a pure function of
-        // State. Only frames that paint a running action consume it.
-        blink_on: (state.now.timestamp_millis().div_euclid(500)) % 2 == 0,
+        blink_on,
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut rstate.chat);
 
@@ -608,7 +609,13 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             reasoning_level: effective,
             requested_level,
             safety_mode: state.session.safety_mode,
-            plan_active: state.session.plan.is_some(),
+            // Planning is the MODE; the plan data carries where to go back to.
+            plan_resume: state
+                .session
+                .plan
+                .as_ref()
+                .filter(|_| state.session.safety_mode.is_planning())
+                .map(|plan| plan.resume_safety_mode),
         };
         frame.render_widget(status_widget, chunks[4]);
     }
@@ -629,17 +636,83 @@ pub(crate) fn mergeable_into(prev: &crate::models::ChatMessage) -> bool {
         && prev.tool_calls.is_none()
 }
 
-/// Does the committed log contain anything the stitch pre-pass would change?
-/// The common session never does — and then rendering keeps borrowing the
-/// committed slice with zero copies, exactly as before auto-continue existed.
-fn needs_stitch(committed: &[crate::models::ChatMessage]) -> bool {
-    committed.iter().any(|m| {
-        matches!(
-            m.kind,
-            crate::models::ChatMessageKind::Continuation
-                | crate::models::ChatMessageKind::RecoveryNudge
-        )
-    })
+/// Identify the transcript the chat widget is about to paint, in O(1).
+///
+/// The widget's frame memo needs a key that changes whenever the rendered
+/// content changes. Hashing every message did that honestly but cost
+/// O(transcript) on every frame — 34% of an idle frame at a 2000-message
+/// scrollback, and the last thing scaling with history size.
+///
+/// Three inputs, all constant-time:
+/// - `ConversationHistory::revision`, bumped by the accessor that hands out
+///   `&mut` to the messages, so no committed change can escape it.
+/// - The messages `build_live_messages` derived on top of the committed slice
+///   (a streaming partial, or a live action row) — at most one, and not part
+///   of history, so it must be hashed directly.
+/// - The blink phase, folded in ONLY while a turn is active. Running action
+///   dots exist during a turn, and an active turn already invalidates the memo
+///   continuously; folding it in unconditionally would invalidate twice a
+///   second on every idle frame, which is exactly what this exists to avoid.
+///   The cosmetic cost is that a `Running` action left behind by a cancelled
+///   run stops blinking once the session goes idle.
+fn chat_content_key(
+    state: &State,
+    base: &[crate::models::ChatMessage],
+    live: &[crate::models::ChatMessage],
+    blink_on: bool,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    state.session.conversation.revision().hash(&mut h);
+    // The stitch is a pure function of committed history, but its output
+    // length is not, so fold it in rather than assuming.
+    base.len().hash(&mut h);
+    for msg in live.iter().skip(base.len()) {
+        msg.content.hash(&mut h);
+        msg.thinking.hash(&mut h);
+        std::mem::discriminant(&msg.kind).hash(&mut h);
+        msg.actions.len().hash(&mut h);
+        for action in &msg.actions {
+            action.action_type.hash(&mut h);
+            action.target.hash(&mut h);
+            std::mem::discriminant(&action.result).hash(&mut h);
+        }
+    }
+    if !matches!(state.turn, TurnState::Idle) {
+        blink_on.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Would the stitch pre-pass change anything the user can see? If not,
+/// rendering borrows the committed slice with zero copies.
+///
+/// Only CONTINUATIONS need it. `RecoveryNudge` and `ContextMarker` are hidden
+/// either way — `ChatWidget` skips exactly those two kinds itself — so
+/// removing them upstream matters only when something downstream inspects a
+/// message's neighbours, and only continuation merging does:
+///
+/// - `stitch_committed` merges a committed `Continuation` into `out.last_mut()`.
+/// - `build_live_messages` merges a LIVE continuation when
+///   `committed.last().is_some_and(mergeable_into)` — and during auto-continue
+///   the last committed message is the "hit the output limit" nudge, which
+///   must be stripped or the merge fails and the partial re-renders as a fresh
+///   bubble with duplicated overlap text. Hence the turn state, not just
+///   history: the live continuation streams BEFORE any `Continuation` is
+///   committed.
+///
+/// Including markers here made this permanently true for any session that ever
+/// changed mode — `ContextMarker` is never swept — which cost a
+/// transcript-sized hash on every frame forever, at ~60 frames per second.
+fn needs_stitch(committed: &[crate::models::ChatMessage], turn: &TurnState) -> bool {
+    let live_continuation = matches!(
+        turn,
+        TurnState::Generating { continuation, .. } if *continuation
+    );
+    live_continuation
+        || committed
+            .iter()
+            .any(|m| m.kind == crate::models::ChatMessageKind::Continuation)
 }
 
 /// Fingerprint of every committed-message field the stitched transcript
@@ -648,15 +721,9 @@ fn needs_stitch(committed: &[crate::models::ChatMessage]) -> bool {
 /// change message count (e.g. an action attached to the last message during a
 /// tool run) still invalidate the memo.
 fn stitch_fingerprint(committed: &[crate::models::ChatMessage]) -> u64 {
-    use std::fmt::Write as _;
     use std::hash::{Hash, Hasher};
-    struct HashWrite<'a, H: Hasher>(&'a mut H);
-    impl<H: Hasher> std::fmt::Write for HashWrite<'_, H> {
-        fn write_str(&mut self, s: &str) -> std::fmt::Result {
-            self.0.write(s.as_bytes());
-            Ok(())
-        }
-    }
+    use std::mem::discriminant;
+
     let mut h = rustc_hash::FxHasher::default();
     committed.len().hash(&mut h);
     for msg in committed {
@@ -668,15 +735,30 @@ fn stitch_fingerprint(committed: &[crate::models::ChatMessage]) -> u64 {
             .as_ref()
             .map_or(0, |v| v.len())
             .hash(&mut h);
-        let mut hw = HashWrite(&mut h);
-        let _ = write!(
-            hw,
-            "{:?}|{:?}|{:?}|{:?}",
-            msg.role,
-            msg.kind,
-            msg.actions,
-            msg.tool_calls.as_ref().map(|t| t.len())
-        );
+        discriminant(&msg.role).hash(&mut h);
+        discriminant(&msg.kind).hash(&mut h);
+        msg.tool_calls.as_ref().map(|t| t.len()).hash(&mut h);
+        // Actions used to be folded in with `{:?}`, which Debug-formatted the
+        // whole `ToolRunMetadata` — INCLUDING `display_diff`, a full diff
+        // string — for every action on every message, every frame. Since a
+        // persistent `ContextMarker` keeps `needs_stitch` true for the rest of
+        // the session, that ran continuously. Hash the fields that actually
+        // change instead: `display_diff` is captured once at tool-execution
+        // time and never mutates afterward, so its length is a sound stand-in.
+        msg.actions.len().hash(&mut h);
+        for action in &msg.actions {
+            action.action_type.hash(&mut h);
+            action.target.hash(&mut h);
+            discriminant(&action.result).hash(&mut h);
+            discriminant(&action.details).hash(&mut h);
+            action.duration_seconds.map(f64::to_bits).hash(&mut h);
+            if let Some(meta) = &action.metadata {
+                meta.lines_added.hash(&mut h);
+                meta.lines_removed.hash(&mut h);
+                meta.diff_truncated.hash(&mut h);
+                meta.display_diff.as_ref().map(String::len).hash(&mut h);
+            }
+        }
     }
     h.finish()
 }
@@ -695,7 +777,11 @@ fn stitch_fingerprint(committed: &[crate::models::ChatMessage]) -> u64 {
 fn stitch_committed(committed: &[crate::models::ChatMessage]) -> Vec<crate::models::ChatMessage> {
     let mut out: Vec<crate::models::ChatMessage> = Vec::with_capacity(committed.len());
     for msg in committed {
-        if msg.kind == crate::models::ChatMessageKind::RecoveryNudge {
+        if matches!(
+            msg.kind,
+            crate::models::ChatMessageKind::RecoveryNudge
+                | crate::models::ChatMessageKind::ContextMarker
+        ) {
             continue;
         }
         if msg.kind == crate::models::ChatMessageKind::Continuation
@@ -976,6 +1062,10 @@ pub(crate) fn render_frame(
 #[cfg(all(test, unix))]
 mod snapshots;
 
+/// Idle-frame measurement rig (`#[ignore]`d). See `bench.rs` for how to run it.
+#[cfg(test)]
+mod bench;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1209,7 +1299,7 @@ mod tests {
             part2,
         ];
 
-        assert!(needs_stitch(&committed));
+        assert!(needs_stitch(&committed, &TurnState::Idle));
         let stitched = stitch_committed(&committed);
         assert_eq!(stitched.len(), 2, "user + one merged bubble");
         assert_eq!(
@@ -1225,6 +1315,38 @@ mod tests {
         assert!(
             !stitched.iter().any(|m| m.content.contains("resume nudge")),
             "nudges never render"
+        );
+    }
+
+    /// Context markers are model-facing timeline records — the status band is
+    /// the human announcement of a mode change, so the transcript hides them.
+    #[test]
+    fn context_markers_are_hidden_from_the_transcript() {
+        use crate::models::{ChatMessage, ChatMessageKind};
+        let committed = vec![
+            ChatMessage::user("plan this"),
+            kinded(
+                ChatMessage::system("Plan mode is now ON. Author the plan at x.md."),
+                ChatMessageKind::ContextMarker,
+            ),
+            ChatMessage::assistant("Grounding first."),
+        ];
+        // Markers are hidden by `ChatWidget` itself, so they do NOT force the
+        // copying stitch path — that is the whole point, since a marker is
+        // never swept and would otherwise cost a transcript hash on every
+        // frame for the rest of the session.
+        assert!(
+            !needs_stitch(&committed, &TurnState::Idle),
+            "a marker alone must not defeat the zero-copy path",
+        );
+        // The stitch still drops them when it runs for a real continuation.
+        let stitched = stitch_committed(&committed);
+        assert_eq!(stitched.len(), 2, "user + assistant only");
+        assert!(
+            !stitched
+                .iter()
+                .any(|m| m.content.contains("Plan mode is now ON")),
+            "markers never render"
         );
     }
 
@@ -1259,7 +1381,48 @@ mod tests {
             ChatMessage::assistant("hello"),
             ChatMessage::system("note"),
         ];
-        assert!(!needs_stitch(&committed));
+        assert!(!needs_stitch(&committed, &TurnState::Idle));
+    }
+
+    /// A live auto-continue streams BEFORE any `Continuation` is committed,
+    /// and the message just before it is the "hit the output limit" nudge.
+    /// `build_live_messages` merges the partial only when
+    /// `committed.last()` is a mergeable assistant bubble — so the nudge has
+    /// to be stitched out even though nothing in HISTORY is a continuation.
+    /// Miss this and the partial renders as a fresh bubble with the overlap
+    /// text duplicated.
+    #[test]
+    fn a_live_continuation_still_forces_the_stitch() {
+        use crate::models::{ChatMessage, ChatMessageKind};
+        let committed = vec![
+            ChatMessage::user("write it"),
+            ChatMessage::assistant("first half"),
+            kinded(
+                ChatMessage::system("output limit — continuing"),
+                ChatMessageKind::RecoveryNudge,
+            ),
+        ];
+        let streaming = TurnState::Generating {
+            id: crate::domain::TurnId(1),
+            started: std::time::SystemTime::UNIX_EPOCH,
+            partial_text: "first half and the rest".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 0,
+            phase: crate::domain::GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: Vec::new(),
+            continuation: true,
+        };
+        assert!(
+            needs_stitch(&committed, &streaming),
+            "a live continuation needs the nudge stripped to find its bubble",
+        );
+        // Without the nudge in the way, the partial merges into the bubble.
+        let stitched = stitch_committed(&committed);
+        assert!(
+            stitched.last().is_some_and(mergeable_into),
+            "the stitched tail is the assistant bubble the partial merges into",
+        );
     }
 
     #[test]

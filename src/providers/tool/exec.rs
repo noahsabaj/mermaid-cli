@@ -162,6 +162,10 @@ impl ToolExecutor for ExecuteCommandTool {
         let mut policy_request =
             crate::runtime::ActionRequest::new("execute_command", category, command.to_string());
         policy_request.command = Some(command.to_string());
+        // The gate must resolve command-relative paths against the directory
+        // this command actually runs in (`cmd.current_dir` below), not the
+        // project root — see `ActionRequest::cwd`.
+        policy_request.cwd = Some(effective_workdir.clone());
         if containment == CwdContainment::External {
             policy_request.path = Some(effective_workdir.display().to_string());
         }
@@ -177,7 +181,7 @@ impl ToolExecutor for ExecuteCommandTool {
         // (checkpoint + approval row + blocking outcome). Allow returns the
         // classified risk so we can take the pre-existing Allow-path
         // checkpoint below.
-        match super::policy_gate::gate(
+        let plan_write = match super::policy_gate::gate(
             &ctx,
             policy_request,
             &[],
@@ -188,7 +192,7 @@ impl ToolExecutor for ExecuteCommandTool {
         .await
         {
             super::policy_gate::Gate::Block(outcome) => return outcome,
-            super::policy_gate::Gate::Proceed { risk } => {
+            super::policy_gate::Gate::Proceed { risk, plan_write } => {
                 // A proven scratch-contained command can't touch the project,
                 // so there is nothing worth snapshotting.
                 if !scratch_contained
@@ -202,8 +206,9 @@ impl ToolExecutor for ExecuteCommandTool {
                         ctx.checkpoint_origin(),
                     );
                 }
+                plan_write
             },
-        }
+        };
 
         let mode = match CommandMode::parse(&args) {
             Ok(mode) => mode,
@@ -409,7 +414,7 @@ impl ToolExecutor for ExecuteCommandTool {
         // Esc-cancel and Ctrl+B arms), so a timed-out command is tree-killed and
         // its driver aborted before we return — the old outer `select!` dropped
         // the future and leaked the process tree.
-        let outcome = finish_foreground_command(
+        let mut outcome = finish_foreground_command(
             run_command(
                 cmd,
                 progress,
@@ -425,6 +430,11 @@ impl ToolExecutor for ExecuteCommandTool {
             sandbox_network,
             sandbox_fs,
         );
+        // Record that this command WAS the plan write (the gate said so), so
+        // the doom-loop breaker disarms on the shell spelling of plan
+        // authoring instead of only on `write_file`/`apply_patch`.
+        outcome.metadata.plan_file_written =
+            plan_write && outcome.status == crate::domain::ToolStatus::Success;
         let _ = crate::runtime::run_plugin_hooks(
             "after_shell",
             &serde_json::json!({
@@ -2441,6 +2451,92 @@ mod tests {
             outcome.status,
             crate::domain::ToolStatus::Error,
             "out-of-project working_dir must be escalated + blocked: {outcome:?}",
+        );
+
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    /// The plan-file carve-out is the ONE writable path in plan mode, and it
+    /// is matched lexically. Every previous test for it drove `gate()`
+    /// directly, which never sees `working_dir` — so the gate matched
+    /// `.mermaid/plans/x.md` against the project root while the command ran
+    /// somewhere else and wrote a different file. Drive the real tool.
+    #[tokio::test]
+    async fn plan_write_carve_out_respects_the_effective_working_dir() {
+        let project = std::env::temp_dir().join(format!("mermaid_planwd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(project.join(".mermaid/plans")).unwrap();
+        // A second tree INSIDE the project, so containment stays `Project`
+        // and only the cwd differs — the benign shape of the bug.
+        std::fs::create_dir_all(project.join("sub")).unwrap();
+        let plan_file = project.join(".mermaid/plans/x.md");
+
+        let mk_ctx = || {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            let mut config = crate::app::Config::default();
+            config.safety.mode = crate::runtime::SafetyMode::ReadOnly;
+            config.safety.checkpoint_on_mutation = false;
+            let mut ctx = crate::providers::ctx::ExecContext::new(
+                tokio_util::sync::CancellationToken::new(),
+                tx,
+                ToolCallId(1),
+                TurnId(1),
+                project.clone(),
+                std::sync::Arc::new(config),
+                String::new(),
+                None,
+                None,
+                None,
+                crate::runtime::SafetyMode::ReadOnly,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            ctx.plan_file = Some(plan_file.clone());
+            (ctx, rx)
+        };
+
+        // Baseline: the plan write from the project root is allowed and the
+        // plan file really appears where the gate said it would.
+        let (ctx, _rx) = mk_ctx();
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({"command": "echo plan > .mermaid/plans/x.md"}),
+                ctx,
+            )
+            .await;
+        assert!(
+            outcome.is_success(),
+            "plan write must be allowed: {outcome:?}"
+        );
+        assert!(
+            plan_file.exists(),
+            "the plan file is the file that got written"
+        );
+
+        // The bug: same relative redirect, different cwd. The gate resolved
+        // it against the project root and approved a write to
+        // `<project>/sub/.mermaid/plans/x.md` — a file that is NOT the plan.
+        let (ctx, _rx) = mk_ctx();
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": "echo elsewhere > .mermaid/plans/x.md",
+                    "working_dir": project.join("sub").display().to_string(),
+                }),
+                ctx,
+            )
+            .await;
+        assert_eq!(
+            outcome.status,
+            crate::domain::ToolStatus::Error,
+            "a plan-relative write from another cwd is not a plan write: {outcome:?}",
+        );
+        assert!(
+            !project.join("sub/.mermaid/plans/x.md").exists(),
+            "nothing may be written outside the plan path",
         );
 
         let _ = std::fs::remove_dir_all(&project);

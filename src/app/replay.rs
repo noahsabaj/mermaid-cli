@@ -186,7 +186,7 @@ fn render_report(path: &Path, report: &ReplayReport) -> String {
                 out,
                 "  seed: continued from {} ({} messages)",
                 seed.id,
-                seed.messages.len()
+                seed.messages().len()
             );
         },
         None => {
