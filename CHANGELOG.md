@@ -129,6 +129,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly the call the gate then hard-errors (`task_list` stays; an explicit
   `tasks = "allow"` in `[plan]` restores the writers).
 
+### Fixed
+
+- **Anthropic and Gemini payloads always alternate roles.** Both APIs reject a
+  history with two same-role turns in a row, and several ordinary shapes
+  produced one: harness steering sitting between two user turns (a request that
+  errored before any assistant turn committed, then a retype), a typed message
+  arriving while tool results were pending, or two assistant turns from an
+  interrupted continuation. Delivering model-directed steering on a user turn
+  made the first of those reachable on every plan-mode session. Both adapters
+  now coalesce same-role neighbours at the single exit point of
+  `convert_messages`, so the invalid payload is unrepresentable however the
+  history is shaped rather than something each match arm has to remember.
+  Merged turns keep Anthropic's own block-placement rules (`tool_result` leads
+  a user turn, `thinking` leads an assistant turn), so the fix cannot trade a
+  role-alternation 400 for a placement one.
+
 ## [0.18.0] - 2026-07-21
 
 ### Changed

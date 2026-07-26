@@ -296,34 +296,82 @@ fn to_anthropic_tools(openai_tools: &[&Value]) -> Vec<Value> {
         .collect()
 }
 
-/// Wrap harness steering in a `<system-reminder>` tag and attach it to the
-/// user turn at this position, creating one if the previous message is not a
-/// user turn.
+/// Wrap harness steering in a `<system-reminder>` tag and emit it as a user
+/// turn. `coalesce_consecutive_roles` folds it into the neighbouring user turn
+/// when there is one, so this only has to get the tagging right.
 ///
 /// The tag matters: untagged, the text reads as something the USER said, and
 /// models answer it, thank the user for it, or treat it as a new instruction.
-/// Creating a user turn after an assistant message is safe here because the
+/// Standing alone after an assistant message is safe here because the
 /// continuation design deliberately carries no assistant-prefill dependency.
 fn push_system_reminder(out: &mut Vec<Value>, text: &str) {
-    let block = json!({
-        "type": "text",
-        "text": format!("<system-reminder>\n{text}\n</system-reminder>"),
-    });
-    if let Some(last) = out.last_mut()
-        && last["role"] == "user"
-    {
-        // User content is a string when it was a lone text block (the wire
-        // optimization above), otherwise an array. Normalize, then append.
-        if let Some(existing) = last["content"].as_str() {
-            last["content"] = json!([{"type": "text", "text": existing}, block]);
-        } else if let Some(arr) = last["content"].as_array_mut() {
-            arr.push(block);
-        } else {
-            last["content"] = json!([block]);
-        }
-        return;
+    out.push(json!({
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": format!("<system-reminder>\n{text}\n</system-reminder>"),
+        }],
+    }));
+}
+
+/// Normalize a message `content` field to a block array.
+///
+/// Anthropic accepts a bare string for a lone text block and `convert_messages`
+/// emits that shape as a wire optimization, so both forms round-trip here. An
+/// empty string yields no blocks: Anthropic rejects empty text blocks, so an
+/// empty turn must contribute nothing to a merge rather than poison it.
+fn content_blocks(content: &Value) -> Vec<Value> {
+    match content {
+        Value::Array(blocks) => blocks.clone(),
+        Value::String(text) if !text.is_empty() => {
+            vec![json!({"type": "text", "text": text})]
+        },
+        _ => Vec::new(),
     }
-    out.push(json!({"role": "user", "content": [block]}));
+}
+
+/// Collapse same-role neighbours so the payload always alternates.
+///
+/// Anthropic rejects a history whose roles do not alternate. The arms of
+/// `convert_messages` each push naively, and several ordinary histories put
+/// two same-role turns next to each other: a `Tool` batch followed by a typed
+/// user message, a model-directed reminder sitting between two user turns
+/// (a request that errored before any assistant turn committed, then a
+/// retype), or two assistant turns from an interrupted continuation. Enforcing
+/// the rule at the single exit point makes the invalid payload unrepresentable
+/// however the history is shaped, instead of asking each arm to remember it.
+///
+/// Merged turns also get their block order normalized, because Anthropic has
+/// placement rules of its own: `tool_result` blocks must lead a user turn and
+/// `thinking` must lead an assistant turn. A merge that ignored those would
+/// trade one 400 for another.
+fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(msgs.len());
+    for msg in msgs {
+        let same_role = out.last().is_some_and(|prev| prev["role"] == msg["role"]);
+        let Some(prev) = out.last_mut().filter(|_| same_role) else {
+            out.push(msg);
+            continue;
+        };
+        let incoming = content_blocks(&msg["content"]);
+        if incoming.is_empty() {
+            continue;
+        }
+        let mut blocks = content_blocks(&prev["content"]);
+        blocks.extend(incoming);
+        // Stable partition: the role's must-lead block kind first, the rest
+        // in their original relative order behind it.
+        let lead = if msg["role"] == "user" {
+            "tool_result"
+        } else {
+            "thinking"
+        };
+        let (mut leading, rest): (Vec<Value>, Vec<Value>) =
+            blocks.into_iter().partition(|b| b["type"] == lead);
+        leading.extend(rest);
+        prev["content"] = Value::Array(leading);
+    }
+    out
 }
 
 /// Translate Mermaid's `ChatMessage` history into Anthropic's
@@ -335,8 +383,9 @@ fn push_system_reminder(out: &mut Vec<Value>, text: &str) {
 ///
 /// Consecutive `MessageRole::Tool` messages are merged into a single
 /// user-role message with multiple `tool_result` content blocks because
-/// Anthropic forbids consecutive same-role messages and tool results
-/// always render as user-role.
+/// tool results always render as user-role. Anthropic forbids consecutive
+/// same-role messages in general, which `coalesce_consecutive_roles`
+/// guarantees on the way out — no arm below has to maintain it.
 ///
 /// Assistant messages with `thinking + provider_continuation` emit a
 /// `thinking` content block paired with the text/tool_use blocks; the
@@ -485,7 +534,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
         }
     }
 
-    (system, out)
+    (system, coalesce_consecutive_roles(out))
 }
 
 /// Anthropic Claude adapter.
@@ -1950,6 +1999,150 @@ mod tests {
                 .unwrap()
                 .contains("Resume where you stopped"),
         );
+    }
+
+    // ── Role alternation ────────────────────────────────────────────────
+
+    /// Anthropic rejects a history whose roles do not alternate, and several
+    /// ordinary shapes put two same-role turns next to each other. Asserted
+    /// as a property over the family rather than as one example: the ordering
+    /// that motivated the fix (steering between two user turns — a request
+    /// that errored before any assistant turn committed, then a retype) is
+    /// only one member, and the next one added should be caught here.
+    #[test]
+    fn convert_messages_never_emits_consecutive_same_role_turns() {
+        use crate::models::ChatMessageKind;
+        let steering = || {
+            let mut m = ChatMessage::system("Reminder: plan mode is active.");
+            m.kind = ChatMessageKind::ContextMarker;
+            m
+        };
+        let tool_call = || {
+            let mut m = ChatMessage::assistant("");
+            m.tool_calls = Some(vec![ToolCall {
+                id: Some("c1".to_string()),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: json!({"path": "a.txt"}),
+                },
+            }]);
+            m
+        };
+
+        let shapes: Vec<(&str, Vec<ChatMessage>)> = vec![
+            (
+                "steering between two user turns",
+                vec![
+                    ChatMessage::user("first"),
+                    steering(),
+                    ChatMessage::user("second"),
+                ],
+            ),
+            (
+                "two user turns in a row",
+                vec![ChatMessage::user("first"), ChatMessage::user("second")],
+            ),
+            (
+                "user types while tool results are pending",
+                vec![
+                    ChatMessage::user("read it"),
+                    tool_call(),
+                    ChatMessage::tool("c1", "read_file", "contents"),
+                    ChatMessage::user("actually, stop"),
+                ],
+            ),
+            (
+                "two assistant turns from an interrupted continuation",
+                vec![
+                    ChatMessage::user("go"),
+                    ChatMessage::assistant("part one"),
+                    ChatMessage::assistant("part two"),
+                ],
+            ),
+            (
+                "back-to-back steering",
+                vec![ChatMessage::user("go"), steering(), steering()],
+            ),
+            (
+                "steering with no user turn to attach to",
+                vec![ChatMessage::assistant("partial"), steering()],
+            ),
+        ];
+
+        for (name, messages) in shapes {
+            let (_system, out) = convert_messages(&messages);
+            assert!(!out.is_empty(), "{name}: the history must not vanish");
+            for pair in out.windows(2) {
+                assert_ne!(
+                    pair[0]["role"], pair[1]["role"],
+                    "{name}: emitted consecutive {} turns, which Anthropic rejects: {out:#?}",
+                    pair[0]["role"],
+                );
+            }
+        }
+    }
+
+    /// Coalescing must not lose content. An implementation that simply dropped
+    /// the second of two same-role turns would satisfy the alternation
+    /// property above, so the content has to be pinned separately.
+    #[test]
+    fn coalescing_two_user_turns_keeps_both_texts() {
+        let messages = vec![ChatMessage::user("first"), ChatMessage::user("second")];
+        let (_system, out) = convert_messages(&messages);
+        assert_eq!(out.len(), 1);
+        let blocks = out[0]["content"].as_array().expect("content array");
+        assert_eq!(blocks.len(), 2, "both texts survive: {blocks:#?}");
+        assert_eq!(blocks[0]["text"], "first");
+        assert_eq!(blocks[1]["text"], "second");
+    }
+
+    /// `tool_result` blocks must LEAD the user turn they sit in. When a typed
+    /// message merges into a pending tool batch, naive concatenation would put
+    /// the text first — trading a role-alternation 400 for a placement one.
+    #[test]
+    fn merged_user_turn_keeps_tool_results_first() {
+        let mut call = ChatMessage::assistant("");
+        call.tool_calls = Some(vec![ToolCall {
+            id: Some("c1".to_string()),
+            function: FunctionCall {
+                name: "read_file".into(),
+                arguments: json!({"path": "a.txt"}),
+            },
+        }]);
+        let messages = vec![
+            ChatMessage::user("read it"),
+            call,
+            ChatMessage::tool("c1", "read_file", "contents"),
+            ChatMessage::user("actually, stop"),
+        ];
+        let (_system, out) = convert_messages(&messages);
+        let blocks = out[2]["content"].as_array().expect("content array");
+        assert_eq!(out[2]["role"], "user");
+        assert_eq!(blocks[0]["type"], "tool_result", "{blocks:#?}");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "actually, stop");
+    }
+
+    /// The assistant-side counterpart: `thinking` must lead its turn, so a
+    /// merge that lands a thinking block behind a text block is a 400.
+    #[test]
+    fn merged_assistant_turn_keeps_thinking_first() {
+        let mut second = ChatMessage::assistant("part two");
+        second.thinking = Some("more reasoning".to_string());
+        second.provider_continuation = Some(ProviderContinuation::Anthropic {
+            signature: "sig_xyz".to_string(),
+        });
+        let messages = vec![
+            ChatMessage::user("go"),
+            ChatMessage::assistant("part one"),
+            second,
+        ];
+        let (_system, out) = convert_messages(&messages);
+        assert_eq!(out.len(), 2);
+        let blocks = out[1]["content"].as_array().expect("content array");
+        assert_eq!(blocks[0]["type"], "thinking", "{blocks:#?}");
+        assert_eq!(blocks[1]["text"], "part one");
+        assert_eq!(blocks[2]["text"], "part two");
     }
 
     #[test]
