@@ -71,7 +71,7 @@ jobs:
           key: ${{ matrix.os }}-${{ matrix.rust }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: nextest
 
