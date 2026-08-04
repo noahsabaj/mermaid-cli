@@ -17,10 +17,7 @@ use crate::models::adapters::ollama_sizing::{
     NumCtxInputs, converge_num_ctx, default_ollama_num_predict, kv_bytes_per_token,
     resolve_ollama_num_ctx,
 };
-use crate::models::{
-    BackendConfig, Model, ModelConfig, ModelError, ReasoningChunk, Result, StreamCallback,
-    StreamEvent as ModelStreamEvent,
-};
+use crate::models::{BackendConfig, Model, ModelConfig, ModelError, Result};
 use crate::runtime::{NewProviderProbe, RuntimeStore};
 
 use super::super::capabilities::Capabilities;
@@ -216,7 +213,7 @@ impl ModelProvider for OllamaProvider {
         // into the bounded sink in order, avoiding the per-event `tokio::
         // spawn` race that could deliver `Done` before prior tool calls.
         let (relay_tx, relay_handle) = super::stream_bridge::ordered_relay(ctx.sink.clone());
-        let callback = stream_callback_for(relay_tx.clone());
+        let callback = super::stream_bridge::forward_callback(relay_tx.clone());
 
         // Race adapter.chat against the cancellation token. When
         // cancelled, the adapter's stream loop observes the sink
@@ -414,38 +411,6 @@ async fn save_probe_to_db(model: String, info: OllamaModelInfo) {
     .await;
 }
 
-/// Build a `StreamCallback` that forwards `ModelStreamEvent`s from the
-/// adapter into an `UnboundedSender<StreamEvent>` (ordered relay). The
-/// caller wires that sender to a bounded sink via
-/// `stream_bridge::ordered_relay`; this keeps event delivery FIFO even
-/// though the adapter calls us from a sync context.
-fn stream_callback_for(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) -> StreamCallback {
-    Arc::new(move |event: ModelStreamEvent| {
-        let mapped = match event {
-            ModelStreamEvent::Text(s) => StreamEvent::Text(s),
-            ModelStreamEvent::Reasoning(chunk) => StreamEvent::Reasoning(ReasoningChunk {
-                text: chunk.text,
-                signature: chunk.signature,
-            }),
-            ModelStreamEvent::ToolCall(tc) => StreamEvent::ToolCall(tc),
-            ModelStreamEvent::Status(s) => StreamEvent::Status(s),
-            // No adapter emits `Done` through this callback — the wrapper
-            // sends the authoritative terminal `Done` built from the
-            // returned `ModelResponse` (F3). Map defensively without
-            // inventing usage (the old placeholder misfiled everything
-            // as completion tokens).
-            ModelStreamEvent::Done { .. } => StreamEvent::Done {
-                usage: None,
-                provider_continuation: None,
-                stop_reason: None,
-            },
-        };
-        // Synchronous send preserves ordering. Ignore errors — the
-        // receiver has closed means the turn is already gone.
-        let _ = sink.send(mapped);
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,58 +542,5 @@ mod tests {
         // With the learned 131_072 cap, sizing stays at the ceiling.
         let capped = build_model_config(&req, &app_cfg, Some(524_288), Some(131_072));
         assert_eq!(capped.ollama_options().num_predict, Some(131_072));
-    }
-
-    #[tokio::test]
-    async fn stream_callback_forwards_text_event() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let cb = stream_callback_for(tx);
-        cb(ModelStreamEvent::Text("hello".to_string()));
-        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
-            .await
-            .expect("recv")
-            .expect("sender alive");
-        match recv {
-            StreamEvent::Text(s) => assert_eq!(s, "hello"),
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_callback_forwards_status_notice() {
-        // The autostart notice rides the same ordered relay as content
-        // events; the bridge must map it 1:1 so it reaches the effect
-        // layer (→ Msg::TransientStatus → system line / stderr).
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let cb = stream_callback_for(tx);
-        cb(ModelStreamEvent::Status(
-            "Starting the local Ollama server…".to_string(),
-        ));
-        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
-            .await
-            .expect("recv")
-            .expect("sender alive");
-        match recv {
-            StreamEvent::Status(s) => assert!(s.contains("Starting")),
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_callback_done_never_invents_usage() {
-        // The wrapper's terminal Done (built from ModelResponse) is the only
-        // authoritative usage carrier; a callback Done must map to None
-        // rather than misfiling its bare count as completion tokens.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let cb = stream_callback_for(tx);
-        cb(ModelStreamEvent::Done { tokens: 42 });
-        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
-            .await
-            .expect("recv")
-            .expect("sender");
-        match recv {
-            StreamEvent::Done { usage, .. } => assert!(usage.is_none()),
-            _ => panic!("wrong variant"),
-        }
     }
 }

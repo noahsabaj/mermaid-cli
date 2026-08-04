@@ -1439,7 +1439,14 @@ pub struct ToolRunsRepo<'a> {
 }
 
 impl ToolRunsRepo<'_> {
-    pub fn start(&self, new: NewToolRun) -> Result<ToolRunRecord> {
+    pub fn start(&self, mut new: NewToolRun) -> Result<ToolRunRecord> {
+        // The repository is the mandatory persistence choke point. Callers may
+        // pass executable arguments unchanged; only this cloned serialized
+        // representation is scrubbed before SQLite sees it.
+        new.args_json = new
+            .args_json
+            .as_deref()
+            .map(crate::redact::redact_json_text);
         let id = new.id.unwrap_or_else(|| fresh_id("toolrun"));
         self.conn.execute(
             "INSERT INTO tool_runs
@@ -1460,6 +1467,7 @@ impl ToolRunsRepo<'_> {
     }
 
     pub fn finish(&self, id: &str, status: &str, output_json: Option<&str>) -> Result<()> {
+        let output_json = output_json.map(crate::redact::redact_json_text);
         let changed = self.conn.execute(
             "UPDATE tool_runs
              SET status = ?2, output_json = ?3, finished_at = ?4
@@ -3630,6 +3638,72 @@ mod tests {
             assert!(id.starts_with("process-"), "id must keep prefix: {id}");
             assert!(seen.insert(id), "fresh_id produced a duplicate");
         }
+    }
+
+    #[test]
+    fn tool_run_repository_redacts_arguments_and_outcomes() {
+        let path = temp_db("persistence_redaction");
+        let store = RuntimeStore::open(&path).expect("open store");
+        let run = store
+            .tool_runs()
+            .start(NewToolRun {
+                id: Some("toolrun-redacted".to_string()),
+                task_id: None,
+                turn_id: None,
+                call_id: None,
+                tool_name: "web_fetch".to_string(),
+                args_json: Some(
+                    serde_json::json!({
+                        "url": "https://user:password@example.test/a?X-Goog-Credential=opaque-id&X-Goog-Signature=opaque-signature#fragment",
+                        "password": "abc",
+                        "token": 12345,
+                        "nested": { "client_secret": true }
+                    })
+                    .to_string(),
+                ),
+            })
+            .expect("start tool run");
+        store
+            .tool_runs()
+            .finish(
+                &run.id,
+                "success",
+                Some(
+                    &serde_json::json!({
+                        "model_content": "OPENAI_API_KEY=sk-abcdefghijklmnop1234\npassword=abc\nAuthorization: Bearer xyz\nAuthorization: Basic dXNlcjphYmM=\nhttps://example.test/download/sk-zyxwvutsrqponmlk9876\n-----BEGIN PRIVATE KEY-----\ncHJpdmF0ZS1tYXRlcmlhbA==\n-----END PRIVATE KEY-----"
+                    })
+                    .to_string(),
+                ),
+            )
+            .expect("finish tool run");
+        let persisted = store.tool_runs().get(&run.id).unwrap().unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(persisted.args_json.as_deref().unwrap()).unwrap();
+        assert_eq!(args["password"], "[REDACTED]");
+        assert_eq!(args["token"], "[REDACTED]");
+        assert_eq!(args["nested"]["client_secret"], "[REDACTED]");
+        let combined = format!("{:?}{:?}", persisted.args_json, persisted.output_json);
+        for secret in [
+            "user",
+            "opaque-signature",
+            "opaque-id",
+            "fragment",
+            "sk-abcdefghijklmnop1234",
+            "password=abc",
+            "Bearer xyz",
+            "dXNlcjphYmM=",
+            "sk-zyxwvutsrqponmlk9876",
+            "cHJpdmF0ZS1tYXRlcmlhbA==",
+            "-----END PRIVATE KEY-----",
+            "12345",
+        ] {
+            assert!(
+                !combined.contains(secret),
+                "tool run leaked {secret}: {combined}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

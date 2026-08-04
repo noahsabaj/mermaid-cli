@@ -1,10 +1,9 @@
 #[cfg(any(unix, windows))]
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
-use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::data_dir;
@@ -64,63 +63,53 @@ pub fn request_daemon_json(mut body: serde_json::Value) -> Result<serde_json::Va
     request_daemon_text(&body.to_string())
 }
 
+/// Write one request line and read back the single JSON response line. The
+/// unix-socket and Windows named-pipe transports differ only in how the stream
+/// is opened, so the wire exchange itself lives here once.
+///
+/// The response is exactly one JSON line followed by `\n`, written before the
+/// server closes its end — so `read_line` completes on the newline and never
+/// reaches the post-close read (which Windows surfaces as a `BrokenPipe` error
+/// rather than a unix-style clean EOF).
+#[cfg(any(unix, windows))]
+fn daemon_exchange<S: Read + Write>(mut stream: S, line: &str) -> Result<serde_json::Value> {
+    stream.write_all(line.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut response = String::new();
+    let mut reader = BufReader::new(stream);
+    reader.read_line(&mut response)?;
+    let value: serde_json::Value =
+        serde_json::from_str(response.trim()).context("daemon returned invalid JSON")?;
+    if value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        anyhow::bail!(
+            "{}",
+            value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("daemon request failed")
+        );
+    }
+    Ok(value)
+}
+
 pub fn request_daemon_text(line: &str) -> Result<serde_json::Value> {
     #[cfg(unix)]
     {
         use std::os::unix::net::UnixStream;
 
         let socket = daemon_socket_path()?;
-        let mut stream = UnixStream::connect(&socket)
+        let stream = UnixStream::connect(&socket)
             .with_context(|| format!("failed to connect to {}", socket.display()))?;
-        stream.write_all(line.as_bytes())?;
-        stream.write_all(b"\n")?;
-        stream.flush()?;
-
-        let mut response = String::new();
-        let mut reader = BufReader::new(stream);
-        reader.read_line(&mut response)?;
-        let value: serde_json::Value =
-            serde_json::from_str(response.trim()).context("daemon returned invalid JSON")?;
-        if value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-            anyhow::bail!(
-                "{}",
-                value
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("daemon request failed")
-            );
-        }
-        Ok(value)
+        daemon_exchange(stream, line)
     }
 
     #[cfg(windows)]
     {
         let pipe_name = daemon_pipe_name()?;
         let stream = open_daemon_pipe(&pipe_name)?;
-        let mut stream = stream;
-        stream.write_all(line.as_bytes())?;
-        stream.write_all(b"\n")?;
-        stream.flush()?;
-
-        // The response is exactly one JSON line followed by `\n`, written before
-        // the server closes its end — so `read_line` completes on the newline and
-        // never reaches the post-close read (which Windows surfaces as a
-        // `BrokenPipe` error rather than a unix-style clean EOF).
-        let mut response = String::new();
-        let mut reader = BufReader::new(stream);
-        reader.read_line(&mut response)?;
-        let value: serde_json::Value =
-            serde_json::from_str(response.trim()).context("daemon returned invalid JSON")?;
-        if value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-            anyhow::bail!(
-                "{}",
-                value
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("daemon request failed")
-            );
-        }
-        Ok(value)
+        daemon_exchange(stream, line)
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -352,16 +341,6 @@ fn open_daemon_pipe(pipe_name: &str) -> Result<std::fs::File> {
         }
     }
     anyhow::bail!("daemon pipe {pipe_name} stayed busy after {ATTEMPTS} attempts")
-}
-
-pub fn snapshot_field_from_daemon<T: DeserializeOwned>(field: &str) -> Result<T> {
-    let value = request_daemon_json(serde_json::json!({ "command": "snapshot" }))?;
-    let field_value = value
-        .get(field)
-        .cloned()
-        .with_context(|| format!("daemon snapshot missing `{}`", field))?;
-    serde_json::from_value(field_value)
-        .with_context(|| format!("daemon snapshot field `{}` had unexpected shape", field))
 }
 
 #[cfg(test)]

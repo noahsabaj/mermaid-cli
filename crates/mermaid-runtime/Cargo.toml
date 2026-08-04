@@ -16,6 +16,7 @@ chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 getrandom = "0.4"
 rusqlite = { version = "0.40", features = ["bundled"] }
+regex = "1.12"
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -26,6 +27,7 @@ sha2 = "0.11"
 shell-words = "1.1"
 toml = "1.1"
 tracing = "0.1"
+url = "2.5"
 
 # Named-pipe daemon transport (#7): token→SID lookup for the per-user pipe
 # name, and SDDL→security-descriptor conversion for the owner-only pipe ACL —

@@ -237,15 +237,15 @@ pub fn parse_markdown(input: &str, theme: &Theme, width: usize) -> Vec<MarkdownL
             Event::End(tag) => {
                 style_stack.pop();
                 match tag {
-                    TagEnd::Heading(_) => {
-                        if !current_line_spans.is_empty() {
-                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-                        }
-                    },
-                    TagEnd::Paragraph | TagEnd::Item => {
-                        if !current_line_spans.is_empty() {
-                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-                        }
+                    // Every block-level close flushes the pending inline spans
+                    // as one finished line.
+                    TagEnd::Heading(_)
+                    | TagEnd::Paragraph
+                    | TagEnd::Item
+                    | TagEnd::BlockQuote(_)
+                        if !current_line_spans.is_empty() =>
+                    {
+                        lines.push(Line::from(std::mem::take(&mut current_line_spans)));
                     },
                     TagEnd::CodeBlock => {
                         in_code_block = false;
@@ -299,11 +299,6 @@ pub fn parse_markdown(input: &str, theme: &Theme, width: usize) -> Vec<MarkdownL
                             }
                         }
                     },
-                    TagEnd::BlockQuote(_) => {
-                        if !current_line_spans.is_empty() {
-                            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-                        }
-                    },
                     _ => {},
                 }
             },
@@ -334,10 +329,8 @@ pub fn parse_markdown(input: &str, theme: &Theme, width: usize) -> Vec<MarkdownL
                 }
                 lines.push(Line::from(Span::styled("─".repeat(40), rule_style)));
             },
-            Event::SoftBreak | Event::HardBreak => {
-                if !current_line_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-                }
+            Event::SoftBreak | Event::HardBreak if !current_line_spans.is_empty() => {
+                lines.push(Line::from(std::mem::take(&mut current_line_spans)));
             },
             _ => {},
         }

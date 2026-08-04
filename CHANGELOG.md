@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Web egress now has one capability and policy boundary.** Native fetch is
+  keyless and remains the default, but now uses a fail-closed client with no
+  ambient proxies or referrers, validates the initial URL and every redirect
+  against the global-unicast destination policy, rejects URL userinfo and
+  HTTPS downgrades, and preserves final provenance. Web tools are omitted and
+  hard-blocked by `safety.network = "deny"`; `read_only` requires one-shot web
+  approval unless `allow_readonly_web` is explicitly enabled. Web actions can
+  no longer be session-allowlisted, and project config can no longer select a
+  web backend or destination.
+
+- **Web results are typed and resource-bounded.** Native fetches now carry
+  requested and final URL, while cloud fetches explicitly mark final
+  provenance unavailable because the provider does not disclose redirects;
+  all fetches carry status, MIME, charset, backend, extraction mode,
+  source/extracted sizes, title, and truncation. MIME controls extraction;
+  declared charsets are decoded, unsupported media and empty extraction fail
+  explicitly, and the complete rendered envelope is capped at 30 KB. Runtime
+  limits are eight downloads globally, two per origin, two blocking
+  extractors, 16 MiB per response, and 64 MiB of decoded web data per turn,
+  charged while response chunks stream rather than after a download finishes.
+  Batched search runs four queries concurrently, preserves input order, and
+  reports partial failures structurally.
+
+- **Cloud web routing is explicit.** `web_search = "auto"` now means the
+  managed local SearXNG backend only; the presence of `OLLAMA_API_KEY` no
+  longer silently sends search queries to Ollama Cloud. Select `ollama`
+  explicitly for cloud fetch/search, or configure a self-hosted SearXNG. On
+  unsupported managed-search platforms, the tool is omitted with an
+  actionable reason. The interactive TUI now reports the same startup-resolved
+  fetch/search backend, availability, and trust destination consumed by the
+  registry and subagents without re-resolving credentials.
+
+### Added
+
+- **Bounded, isolated web-fetch session snapshots.** Each successful fetch returns a
+  snapshot id. Follow-up calls can perform full Unicode-caseless matching or
+  request stable line ranges without refetching a mutable page. Snapshot lookup
+  is bound to the originating session/task, and the process-wide cache retains
+  at most four entries / 32 MiB including owned metadata. The TUI and
+  run-event stream now expose sanitized backend, redirect, status, MIME,
+  extraction, size, match, partial-failure, and truncation provenance.
+
+### Fixed
+
+- **Web persistence and managed-search lifecycle hardening.** Runtime tool
+  arguments and outcomes are cloned and centrally redacted before SQLite
+  persistence, including signed URLs and secret-shaped fetched content.
+  Managed SearXNG now retains process ownership before awaiting readiness,
+  health-checks cached children through a bounded challenge-response JSON
+  probe, reaps failed/cancelled starts, bounds bundle downloads and decoded
+  archive expansion, rejects unsafe archive entries, serializes multi-process
+  provisioning through a crash-released advisory transition lock with
+  nonce-scoped ownership and exact stale-snapshot revalidation, fails closed
+  without secure entropy, and retains the transition claim through atomic
+  immutable-generation publication. Heartbeats atomically replace complete
+  owner records, lock quarantine is durably published before claim release,
+  and extracted trees are recursively synced before publication. Retained
+  generations and hard-crashed download staging are capped without deleting
+  trees that another process may still use. CI now exercises the real managed
+  bundle end to end on every supported Linux/macOS OS family.
+
+- **Dead code and duplication swept out of the tree.** Removed unreferenced
+  items (`path_stem`, `snapshot_field_from_daemon`, `arc_sink`,
+  `clear_selection`, `is_manually_scrolling`, dead `type_` wire fields) and
+  the stale `#[allow(dead_code)]` markers on fields that are in fact read.
+  The four provider wrappers no longer carry byte-identical copies of the
+  adapter stream callback — it lives once in `stream_bridge::forward_callback`
+  — and the duplicated SearXNG interpreter-path helper, the duplicated Ollama
+  Cloud backend construction, and the duplicated daemon request/response
+  exchange each collapse to a single definition. `parse_fetch_args` now
+  returns a `FetchTarget` enum, so "exactly one of url/snapshot_id" is
+  enforced by the type rather than by a downstream `expect`. The crate-wide
+  `clippy::collapsible_match` suppression is gone, its six sites fixed, and
+  `test_exec_context_with_config` now honors `config.safety.mode` instead of
+  silently forcing `FullAccess`.
+
 ## [0.18.0] - 2026-07-21
 
 ### Changed

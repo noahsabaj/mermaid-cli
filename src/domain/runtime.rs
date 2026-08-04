@@ -222,12 +222,56 @@ pub enum ToolMetadata {
         requested_count: usize,
         result_count: usize,
         sources: Vec<String>,
+        #[serde(default)]
+        backend: String,
+        #[serde(default)]
+        succeeded_queries: usize,
+        #[serde(default)]
+        failed_queries: usize,
+        #[serde(default)]
+        partial: bool,
+        #[serde(default)]
+        truncated: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        failures: Vec<WebSearchFailure>,
     },
     WebFetch {
+        /// Sanitized originally requested URL.
         url: String,
+        #[serde(default)]
+        final_url: Option<String>,
+        #[serde(default)]
+        status: Option<u16>,
+        #[serde(default)]
+        error_kind: Option<String>,
+        #[serde(default)]
+        media_type: Option<String>,
+        #[serde(default)]
+        charset: Option<String>,
+        #[serde(default)]
+        backend: String,
+        #[serde(default)]
+        extraction: String,
         title: Option<String>,
         line_count: usize,
         byte_count: usize,
+        #[serde(default)]
+        source_byte_count: usize,
+        /// Bytes in the extracted page before the 30 KiB rendered envelope is
+        /// applied. This may exceed the bytes retained in a bounded snapshot;
+        /// `truncated` records that distinction.
+        #[serde(default)]
+        output_byte_count: usize,
+        #[serde(default)]
+        truncated: bool,
+        #[serde(default)]
+        pattern: Option<String>,
+        #[serde(default)]
+        context_lines: Option<usize>,
+        #[serde(default)]
+        match_count: Option<usize>,
+        #[serde(default)]
+        snapshot_id: Option<String>,
     },
     ExecuteCommand {
         command: String,
@@ -310,6 +354,17 @@ pub enum ToolMetadata {
         name: String,
         data: Value,
     },
+}
+
+/// One failed item from an ordered web-search batch. The index preserves its
+/// relationship to the input without copying potentially sensitive query text
+/// into telemetry; `error` is redacted before construction.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WebSearchFailure {
+    /// Zero-based index into the original `queries` array.
+    pub query_index: usize,
+    /// Secret-redacted, byte-bounded backend failure detail.
+    pub error: String,
 }
 
 /// Non-text artifact produced by a tool. Images are base64 strings to

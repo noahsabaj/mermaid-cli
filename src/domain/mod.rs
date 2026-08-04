@@ -50,7 +50,7 @@ pub use run_event::{RUN_EVENT_PROTOCOL_VERSION, RunEvent};
 pub use runtime::{
     ManagedProcess, ManagedProcessStatus, ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState,
     RuntimeTimelineEvent, RuntimeTimelineKind, ToolArtifact, ToolMetadata, ToolRunMetadata,
-    ToolStatus,
+    ToolStatus, WebSearchFailure,
 };
 pub use slash_commands::{COMMAND_GROUPS, COMMAND_REGISTRY, SlashCommand, filter_by_prefix};
 pub use state::{

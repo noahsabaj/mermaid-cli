@@ -244,9 +244,9 @@ impl PromptConfig {
     }
 }
 
-/// Whether model-driven shell commands may reach the network. `Deny` engages
-/// the Linux seccomp network kill-switch (`--no-network`); a no-op on other
-/// platforms. Default `Allow` preserves today's behavior.
+/// Whether model-driven actions may reach the network. `Deny` removes web
+/// capabilities and engages the shell-command network kill-switch where the
+/// OS sandbox supports it. Default `Allow` preserves explicit network use.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkPolicy {
@@ -273,8 +273,8 @@ pub enum FilesystemPolicy {
 pub struct SafetyConfig {
     pub mode: SafetyMode,
     pub checkpoint_on_mutation: bool,
-    /// Network access policy for shell commands. `Deny` installs the OS
-    /// network kill-switch on Linux. See [`NetworkPolicy`].
+    /// Network access policy for every model-driven network action. `Deny`
+    /// also installs the shell-command OS kill-switch where supported.
     #[serde(default)]
     pub network: NetworkPolicy,
     /// Filesystem write policy for shell commands. `Project` confines writes
@@ -312,6 +312,11 @@ pub struct SafetyConfig {
     /// `--allow-untrusted-tools` or config for CI that needs them.
     #[serde(default)]
     pub allow_untrusted_headless_tools: bool,
+    /// Explicit user/session opt-in allowing public web reads to proceed in
+    /// `read_only` mode. Without it, each request requires one-shot approval;
+    /// project configuration is not permitted to enable this capability.
+    #[serde(default)]
+    pub allow_readonly_web: bool,
 }
 
 impl Default for SafetyConfig {
@@ -329,6 +334,7 @@ impl Default for SafetyConfig {
             system_installs: crate::runtime::FloorLevel::default(),
             auto_classifier_model: None,
             allow_untrusted_headless_tools: false,
+            allow_readonly_web: false,
         }
     }
 }
@@ -433,7 +439,10 @@ impl Default for PlanPermissions {
     fn default() -> Self {
         Self {
             builds: PlanPermLevel::Allow,
-            web: PlanPermLevel::Allow,
+            // Planning inherits the ReadOnly web posture: every externally
+            // observable URL/query needs one-shot approval unless the user
+            // explicitly opens this category in `/plan config`.
+            web: PlanPermLevel::Ask,
             memory: PlanPermLevel::Allow,
             tasks: PlanPermLevel::Deny,
         }
@@ -918,9 +927,9 @@ pub enum FetchBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchBackend {
-    /// Zero-config default: Ollama Cloud when `OLLAMA_API_KEY` is set, otherwise
-    /// an auto-managed local SearXNG container (mermaid starts it on the first
-    /// search and tears it down on exit). The user configures nothing.
+    /// Sovereign zero-config default: an auto-managed local SearXNG process on
+    /// platforms with a published bundle. It never selects a cloud backend
+    /// merely because a credential exists.
     #[default]
     Auto,
     /// Ollama Cloud's `/api/web_search` (needs `OLLAMA_API_KEY`).
@@ -943,10 +952,9 @@ pub struct WebConfig {
     /// Backend for `web_fetch`. `native` (default) fetches the URL from this
     /// machine and needs no key; `ollama` uses Ollama Cloud.
     pub fetch_backend: FetchBackend,
-    /// Backend for `web_search`. `auto` (default) uses Ollama Cloud when
-    /// `OLLAMA_API_KEY` is set and otherwise auto-manages a local SearXNG
-    /// container. `ollama` forces Ollama Cloud; `searxng` forces a self-hosted
-    /// instance at `searxng_url`.
+    /// Backend for `web_search`. `auto` (default) auto-manages a local SearXNG
+    /// process where a bundle is supported. `ollama` explicitly selects Ollama
+    /// Cloud; `searxng` selects a self-hosted instance at `searxng_url`.
     pub search_backend: SearchBackend,
     /// SearXNG base URL, used when `search_backend = "searxng"` (your own
     /// instance). The instance must have the JSON output format enabled

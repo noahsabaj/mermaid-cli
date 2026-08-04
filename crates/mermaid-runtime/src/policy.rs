@@ -138,6 +138,9 @@ pub struct ActionRequest {
     pub summary: String,
     pub command: Option<String>,
     pub path: Option<String>,
+    /// Complete structured tool arguments. Treat as untrusted input and redact
+    /// before sending it to an external classifier or persistence sink.
+    pub arguments: Option<serde_json::Value>,
     /// For `ToolCategory::Mcp` only: the server-advertised `readOnlyHint`.
     /// UNTRUSTED (servers self-declare), so it can only keep a read at the
     /// permissiveness every MCP tool had before the external-writes floor
@@ -159,6 +162,7 @@ impl ActionRequest {
             summary: summary.into(),
             command: None,
             path: None,
+            arguments: None,
             mcp_read_only_hint: false,
         }
     }
@@ -345,22 +349,19 @@ impl PolicyEngine {
                 // read-only fan-out (parallel exploration), the subagent
                 // tool's core use.
                 //
-                // Web is allowed too: `web_search` / `web_fetch` are
-                // GET-shaped reads of the public web — reading the world is
-                // exactly what read-only mode exists for, and the SSRF guard
-                // lives in the web tool itself (internal/loopback/metadata
-                // hosts are refused there in every mode). The `Web` category
-                // is reserved for those read tools; anything that ACTS on the
-                // network (posting, submitting, uploading) must take
-                // `Network`, which stays blocked here.
+                // Web reads are externally observable egress: URLs and search
+                // queries can carry local data even though they are GET-shaped.
+                // ReadOnly therefore requires a one-shot approval for Web.
                 //
                 // A `Deny` override and the destructive-prompt hard-deny are
-                // checked above and still win over both carve-outs.
-                if request.category == ToolCategory::Subagent
-                    || request.category == ToolCategory::Web
-                    || risk == RiskClass::ReadOnly
-                {
+                // checked above and still win over these mode defaults.
+                if request.category == ToolCategory::Subagent || risk == RiskClass::ReadOnly {
                     PolicyDecision::Allow {
+                        risk,
+                        checkpoint: false,
+                    }
+                } else if request.category == ToolCategory::Web {
+                    PolicyDecision::Ask {
                         risk,
                         checkpoint: false,
                     }
@@ -3211,10 +3212,9 @@ mod tests {
 
     #[test]
     fn read_only_mode_denies_external_tool_categories() {
-        // C1/H1/H2: ReadOnly must block mcp/computer-use/raw network. (Two
-        // deliberate exceptions: Subagent spawn — the child inherits
-        // read_only and every child tool call is re-gated — and Web, whose
-        // tools are GET-shaped reads; see the read_only_mode_allows_* tests.)
+        // C1/H1/H2: ReadOnly must block mcp/computer-use/raw network. Subagent
+        // spawn is the deliberate Allow exception; Web takes the separate Ask
+        // path tested below.
         for cat in [
             ToolCategory::Network,
             ToolCategory::Mcp,
@@ -3230,10 +3230,8 @@ mod tests {
     }
 
     #[test]
-    fn read_only_mode_allows_web_reads() {
-        // `web_search` / `web_fetch` are reads of the public web — read-only
-        // mode is FOR reading. The SSRF guard (internal-host refusal) lives
-        // in the web tool and applies in every mode.
+    fn read_only_mode_requires_approval_for_web_egress() {
+        // URLs and queries are externally observable and can carry local data.
         for (tool, summary) in [
             ("web_search", "web_search rust release notes"),
             ("web_fetch", "web_fetch https://example.com/docs"),
@@ -3246,12 +3244,12 @@ mod tests {
             assert!(
                 matches!(
                     decision,
-                    PolicyDecision::Allow {
+                    PolicyDecision::Ask {
                         checkpoint: false,
                         ..
                     }
                 ),
-                "read_only must allow {tool}, got {decision:?}",
+                "read_only must ask before {tool}, got {decision:?}",
             );
         }
     }

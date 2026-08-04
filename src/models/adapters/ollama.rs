@@ -1379,6 +1379,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ollama_request_body_preserves_registry_selected_web_tools() {
+        let adapter = make_adapter().await;
+        let config = ModelConfig {
+            tools: ["web_fetch", "web_search"]
+                .into_iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": "registered web tool",
+                            "parameters": {"type": "object"}
+                        }
+                    })
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false, false);
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect();
+        assert_eq!(names, ["web_fetch", "web_search"]);
+    }
+
+    #[tokio::test]
     async fn ollama_request_body_sets_think_true_for_low_reasoning() {
         let adapter = make_adapter().await;
         let config = ModelConfig {

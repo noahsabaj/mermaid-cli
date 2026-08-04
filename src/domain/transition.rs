@@ -280,15 +280,30 @@ fn action_details_for(
                 .result_count
                 .or_else(|| metadata_result_count(&outcome.metadata.detail))
                 .unwrap_or_else(|| count_search_results(outcome.output()));
+            let mut detail = format!(
+                "{} {} returned",
+                result_count,
+                pluralize("result", result_count)
+            );
+            if let ToolMetadata::WebSearch {
+                backend,
+                failed_queries,
+                truncated,
+                ..
+            } = &outcome.metadata.detail
+            {
+                if !backend.is_empty() {
+                    detail.push_str(&format!(" via {backend}"));
+                }
+                if *failed_queries > 0 {
+                    detail.push_str(&format!(" · {failed_queries} failed"));
+                }
+                if *truncated {
+                    detail.push_str(" · truncated");
+                }
+            }
             ActionDetails::Preview {
-                text: success_summary(
-                    format!(
-                        "{} {} returned",
-                        result_count,
-                        pluralize("result", result_count)
-                    ),
-                    duration,
-                ),
+                text: success_summary(detail, duration),
                 line_count: None,
             }
         },
@@ -298,11 +313,62 @@ fn action_details_for(
                 .line_count
                 .or_else(|| metadata_line_count(&outcome.metadata.detail))
                 .unwrap_or_else(|| outcome.output().lines().count());
+            let mut detail = format!("{} {} fetched", line_count, pluralize("line", line_count));
+            if let ToolMetadata::WebFetch {
+                url,
+                final_url,
+                backend,
+                status,
+                media_type,
+                extraction,
+                output_byte_count,
+                truncated,
+                pattern,
+                match_count,
+                snapshot_id,
+                ..
+            } = &outcome.metadata.detail
+            {
+                if !backend.is_empty() {
+                    detail.push_str(&format!(" via {backend}"));
+                }
+                if let Some(status) = status {
+                    detail.push_str(&format!(" · HTTP {status}"));
+                }
+                if let Some(media_type) = media_type {
+                    detail.push_str(&format!(" · {media_type}"));
+                }
+                if !extraction.is_empty() {
+                    detail.push_str(&format!(" · {extraction}"));
+                }
+                if *output_byte_count > 0 {
+                    detail.push_str(&format!(" · {output_byte_count} extracted bytes"));
+                }
+                if let Some(pattern) = pattern {
+                    let match_count = match_count.unwrap_or(0);
+                    let pattern = crate::utils::redact_secrets(pattern);
+                    detail.push_str(&format!(
+                        " · {match_count} {} for {:?}",
+                        pluralize("match", match_count),
+                        crate::utils::truncate_middle(&pattern, 48)
+                    ));
+                }
+                if let Some(final_url) = final_url.as_deref().filter(|final_url| *final_url != url)
+                {
+                    detail.push_str(&format!(
+                        " · final {}",
+                        crate::utils::truncate_middle(final_url, 96)
+                    ));
+                }
+                if *truncated {
+                    detail.push_str(" · truncated");
+                }
+                if let Some(snapshot_id) = snapshot_id {
+                    detail.push_str(&format!(" · {snapshot_id}"));
+                }
+            }
             ActionDetails::Preview {
-                text: success_summary(
-                    format!("{} {} fetched", line_count, pluralize("line", line_count)),
-                    duration,
-                ),
+                text: success_summary(detail, duration),
                 line_count: Some(line_count),
             }
         },
@@ -598,12 +664,18 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
                         })
                 })
                 .unwrap_or_default();
-            ("Web Search".to_string(), target)
+            (
+                "Web Search".to_string(),
+                crate::utils::redact_secrets(&target),
+            )
         },
-        "web_fetch" => (
-            "Web Fetch".to_string(),
-            string_arg("url").unwrap_or_default(),
-        ),
+        "web_fetch" => {
+            let target = string_arg("url")
+                .map(|url| crate::utils::sanitize_url_for_display(&url))
+                .or_else(|| string_arg("snapshot_id"))
+                .unwrap_or_default();
+            ("Web Fetch".to_string(), target)
+        },
         "memory" => {
             let action = string_arg("action").unwrap_or_default();
             let target = string_arg("id")
@@ -936,16 +1008,29 @@ mod tests {
     }
 
     #[test]
-    fn action_display_web_search_reports_result_count() {
-        let call = sample_call_args(1, "web_search", serde_json::json!({"query": "rust"}));
+    fn action_display_web_search_reports_partial_backend_and_truncation() {
+        let call = sample_call_args(
+            1,
+            "web_search",
+            serde_json::json!({"queries": [{"query": "rust"}, {"query": "systems"}]}),
+        );
         let output = "[SEARCH_RESULTS]\n[1] Title: A\nURL: https://a.test\nContent:\nA\n---\n[2] Title: B\nURL: https://b.test\nContent:\nB\n---\n";
         let outcome = ToolOutcome::success(output, "2 results returned", 15.2).with_metadata(
             ToolRunMetadata {
                 detail: ToolMetadata::WebSearch {
-                    queries: vec!["rust".to_string()],
-                    requested_count: 5,
+                    queries: vec!["rust".to_string(), "systems".to_string()],
+                    requested_count: 10,
                     result_count: 2,
                     sources: vec!["https://a.test".to_string(), "https://b.test".to_string()],
+                    backend: "mock".to_string(),
+                    succeeded_queries: 1,
+                    failed_queries: 1,
+                    partial: true,
+                    truncated: true,
+                    failures: vec![crate::domain::WebSearchFailure {
+                        query_index: 1,
+                        error: "upstream timed out".to_string(),
+                    }],
                 },
                 result_count: Some(2),
                 ..ToolRunMetadata::default()
@@ -956,6 +1041,9 @@ mod tests {
         match action.details {
             ActionDetails::Preview { text, .. } => {
                 assert!(text.contains("2 results returned"));
+                assert!(text.contains("via mock"));
+                assert!(text.contains("1 failed"));
+                assert!(text.contains("truncated"));
                 assert!(!text.contains("Success"), "no Success prefix: {text}");
                 assert!(text.contains("took 15s"));
             },
@@ -964,6 +1052,59 @@ mod tests {
         let metadata = action.metadata.expect("metadata");
         assert_eq!(metadata.result_count, Some(2));
         assert_eq!(metadata.duration_secs, Some(15.2));
+    }
+
+    #[test]
+    fn action_display_web_fetch_surfaces_safe_provenance() {
+        let call = sample_call_args(
+            1,
+            "web_fetch",
+            serde_json::json!({
+                "url": "https://example.test/page?token=opaque-secret#private"
+            }),
+        );
+        let outcome =
+            ToolOutcome::success("page", "4 lines fetched", 1.2).with_metadata(ToolRunMetadata {
+                detail: ToolMetadata::WebFetch {
+                    url: "https://example.test/page?token=%5BREDACTED%5D".to_string(),
+                    final_url: Some("https://example.test/final".to_string()),
+                    status: Some(200),
+                    error_kind: None,
+                    media_type: Some("text/html".to_string()),
+                    charset: Some("utf-8".to_string()),
+                    backend: "native".to_string(),
+                    extraction: "readability".to_string(),
+                    title: Some("Example".to_string()),
+                    line_count: 4,
+                    byte_count: 128,
+                    source_byte_count: 512,
+                    output_byte_count: 384,
+                    truncated: true,
+                    pattern: Some("OPENAI_API_KEY=abc".to_string()),
+                    context_lines: Some(2),
+                    match_count: Some(1),
+                    snapshot_id: Some("web-1".to_string()),
+                },
+                line_count: Some(4),
+                ..ToolRunMetadata::default()
+            });
+        let action = action_display_for(&call, &outcome);
+        assert!(!action.target.contains("opaque-secret"));
+        assert!(!action.target.contains("private"));
+        match action.details {
+            ActionDetails::Preview { text, .. } => {
+                assert!(text.contains("via native"));
+                assert!(text.contains("HTTP 200"));
+                assert!(text.contains("readability"));
+                assert!(text.contains("384 extracted bytes"));
+                assert!(text.contains("final https://example.test/final"));
+                assert!(text.contains("truncated"));
+                assert!(text.contains("web-1"));
+                assert!(!text.contains("OPENAI_API_KEY=abc"));
+                assert!(text.contains("OPENAI_API_KEY=[REDACTED]"));
+            },
+            other => panic!("expected preview details, got {other:?}"),
+        }
     }
 
     #[test]

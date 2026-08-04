@@ -17,10 +17,9 @@
 //! - **Non-replayable tools** (`web_*`, `mcp`, `subagent`, computer-use):
 //!   there is no checkpoint/replay path, so an `Ask` decision resolves
 //!   inline when an approval broker is bound and otherwise fails closed
-//!   unless the run opted in via `--allow-untrusted-tools`. `ReadOnly`
-//!   denies them — except `subagent`: spawning is allowed there because the
-//!   child inherits the live safety mode, so every child tool call is
-//!   re-gated at the same strength.
+//!   unless the run opted in via `--allow-untrusted-tools`. `ReadOnly` denies
+//!   mutations and control actions, permits inherited-safety subagent spawn,
+//!   and requires one-shot approval for externally observable Web egress.
 //!
 //! `Auto` mode resolves a `PolicyDecision::Classify` here by awaiting the
 //! injected `AutoClassifier` (in `ctx.classifier`): aligned ⇒ proceed,
@@ -54,9 +53,9 @@ pub enum Gate {
 /// action is blocked (e.g. `ReadOnly`/`Deny` override), or `None` to proceed.
 /// These tools have no checkpoint/replay path: an `Ask` decision resolves
 /// inline when an approval broker is bound and otherwise fails closed unless
-/// `--allow-untrusted-tools`. `ReadOnly` blocks them all except `subagent`
-/// (the child inherits the live safety mode, so its own tool calls are
-/// re-gated individually). Call this at the very top of `execute()`.
+/// `--allow-untrusted-tools`. `ReadOnly` blocks mutations/control actions,
+/// allows inherited-safety subagent spawn, and asks once for Web egress. Call
+/// this at the very top of `execute()`.
 pub async fn gate_external(
     ctx: &ExecContext,
     tool: &'static str,
@@ -95,6 +94,18 @@ async fn gate_external_inner(
     args: &serde_json::Value,
     mcp_read_only_hint: bool,
 ) -> Option<ToolOutcome> {
+    if matches!(
+        category,
+        crate::runtime::ToolCategory::Web | crate::runtime::ToolCategory::Network
+    ) && matches!(ctx.config.safety.network, crate::app::NetworkPolicy::Deny)
+    {
+        return Some(ToolOutcome::error(
+            format!(
+                "{tool} blocked because network access is disabled (safety.network = \"deny\" / --no-network)"
+            ),
+            0.0,
+        ));
+    }
     let mut request = ActionRequest::new(tool, category, summary);
     // Surface a concrete, content-bearing detail (the text being typed, the URL
     // being fetched, the MCP server__tool + args). Without this the Auto-mode
@@ -102,6 +113,7 @@ async fn gate_external_inner(
     // generic summary — so they can't actually vet *what* the action does
     // (#29, #30, #31).
     request.command = action_detail(tool, args);
+    request.arguments = Some(args.clone());
     request.mcp_read_only_hint = mcp_read_only_hint;
     let pending = serde_json::json!({ "tool": tool, "args": args });
     // `scratch_contained` is always false here: external actions (network,
@@ -113,24 +125,14 @@ async fn gate_external_inner(
     }
 }
 
-/// Build a concise, content-bearing one-line detail for an external action,
-/// landing in `ActionRequest.command`. This is what the Auto classifier vets
-/// and the approval modal shows, so it must reflect the *content* — not just
-/// the tool name. Returns `None` when there's nothing useful to add beyond the
-/// summary the caller already provided.
+/// Build the complete content-bearing detail for policy matching and the Auto
+/// classifier. This value is deliberately not clipped: presentation limits are
+/// applied only when rendering an approval modal.
 fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
-    /// Char-boundary-safe clamp for the preview.
-    fn clip(s: &str, max: usize) -> String {
-        if s.len() <= max {
-            return s.to_string();
-        }
-        let end = s.floor_char_boundary(max);
-        format!("{}…", &s[..end])
-    }
     let s = |k: &str| args.get(k).and_then(|v| v.as_str());
     let i = |k: &str| args.get(k).and_then(|v| v.as_i64());
     match tool {
-        "type_text" => Some(format!("type_text {:?}", clip(s("text")?, 200))),
+        "type_text" => Some(format!("type_text {:?}", s("text")?)),
         "press_key" => Some(format!("press_key {}", s("key").or_else(|| s("keys"))?)),
         "click" | "mouse_move" => match (i("x"), i("y")) {
             (Some(x), Some(y)) => Some(format!("{tool} ({x}, {y})")),
@@ -144,14 +146,14 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
                     .to_string(),
             )
         },
-        "web_fetch" => Some(format!("web_fetch {}", clip(s("url")?, 200))),
+        "web_fetch" => Some(format!("web_fetch {}", s("url")?)),
         "mcp_proxy" => {
             let server = s("server_name").unwrap_or("?");
             let name = s("tool_name").unwrap_or("?");
             let arg_preview = args
                 .get("arguments")
                 .filter(|a| !a.is_null())
-                .map(|a| clip(&a.to_string(), 200))
+                .map(serde_json::Value::to_string)
                 .unwrap_or_default();
             Some(format!("mcp {server}__{name}({arg_preview})"))
         },
@@ -173,14 +175,14 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
             if queries.is_empty() {
                 None
             } else {
-                Some(clip(&format!("web_search {}", queries.join(" | ")), 200))
+                Some(format!("web_search {}", queries.join(" | ")))
             }
         },
         "agent" => {
             // The subagent prompt is model-authored and can carry injection or
             // exfiltration; surface it so the reviewer vets the real task, not
             // the short label (#31).
-            Some(format!("agent: {}", clip(s("prompt")?, 200)))
+            Some(format!("agent: {}", s("prompt")?))
         },
         _ => None,
     }
@@ -224,6 +226,25 @@ pub async fn gate(
         apply_plan_profile(ctx, &request, decision)
     } else {
         decision
+    };
+
+    // Explicit user/session opt-in restores unattended public-web reads in
+    // ReadOnly. It may only soften the mode-generated Ask: global network deny
+    // is enforced before this function, while policy/plan Deny decisions remain
+    // untouched. Project config cannot set this flag.
+    let decision = match decision {
+        PolicyDecision::Ask { risk, .. }
+            if ctx.plan_file.is_none()
+                && ctx.safety_mode == crate::runtime::SafetyMode::ReadOnly
+                && request.category == crate::runtime::ToolCategory::Web
+                && ctx.config.safety.allow_readonly_web =>
+        {
+            PolicyDecision::Allow {
+                risk,
+                checkpoint: false,
+            }
+        },
+        other => other,
     };
 
     // Scratchpad downgrade: an Ask/Classify on a proven scratch-only action
@@ -289,6 +310,7 @@ pub async fn gate(
                         summary: request.summary.clone(),
                         command: request.command.clone(),
                         path: request.path.clone(),
+                        arguments: request.arguments.clone(),
                         intent: ctx.intent.clone(),
                         workdir: ctx.workdir.display().to_string(),
                         turn: ctx.turn,
@@ -370,15 +392,14 @@ fn plan_level_decision(level: crate::app::PlanPermLevel, risk: RiskClass) -> Pol
 
 /// Apply the plan permission profile on top of the read-only floor's
 /// decision: soften the mode-default deny per category (plan file, memory,
-/// known-safe builds), and tighten the floor's Web allowance when the
-/// profile says so. Override denies and the destructive hard-deny carry
-/// different reasons and pass through untouched.
+/// known-safe builds), and apply the explicit Web permission over ReadOnly's
+/// one-shot approval default. Override denies and the destructive hard-deny
+/// carry different reasons and pass through untouched.
 fn apply_plan_profile(
     ctx: &ExecContext,
     request: &ActionRequest,
     decision: PolicyDecision,
 ) -> PolicyDecision {
-    use crate::app::PlanPermLevel as L;
     use crate::runtime::ToolCategory as C;
     let perms = ctx.plan_permissions;
     match decision {
@@ -409,10 +430,10 @@ fn apply_plan_profile(
                 plan_deny(risk)
             }
         },
-        // The read-only floor allows Web (GET-shaped reads); the profile can
-        // tighten it while planning.
         PolicyDecision::Allow { risk, .. }
-            if request.category == C::Web && perms.web != L::Allow =>
+        | PolicyDecision::Ask { risk, .. }
+        | PolicyDecision::Classify { risk, .. }
+            if request.category == C::Web =>
         {
             plan_level_decision(perms.web, risk)
         },
@@ -512,19 +533,37 @@ async fn inline_decision(
 /// Build the modal body: the concrete command/path being run, plus any
 /// Auto-review reason. Kept here so the render layer stays dumb.
 fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>) -> String {
+    fn clip_preview(value: &str) -> String {
+        const MAX_BYTES: usize = 200;
+        if value.len() <= MAX_BYTES {
+            return value.to_string();
+        }
+        let end = value.floor_char_boundary(MAX_BYTES);
+        format!("{}…", &value[..end])
+    }
+
     use crate::runtime::ToolCategory as C;
-    let mut body = if let Some(cmd) = &request.command {
+    let redacted_detail = request.arguments.as_ref().and_then(|arguments| {
+        let mut safe = arguments.clone();
+        crate::utils::redact_json(&mut safe);
+        action_detail(&request.tool, &safe)
+    });
+    let modal_detail = redacted_detail.as_ref().or(request.command.as_ref());
+    let mut body = if let Some(cmd) = modal_detail {
         // A `$ ` prefix reads as "shell command"; only use it for actual shell
         // categories. Computer-use / MCP details (`type_text "…"`, `mcp s__t(…)`)
         // render verbatim so the prompt isn't misleading (#30, #31).
         match request.category {
             C::Shell | C::Git | C::Process => format!("$ {}", cmd),
-            _ => cmd.clone(),
+            _ => clip_preview(cmd),
         }
     } else if let Some(path) = &request.path {
         format!("{}  ({})", path, request.summary)
     } else {
-        request.summary.clone()
+        match request.category {
+            C::Shell | C::Git | C::Process => request.summary.clone(),
+            _ => clip_preview(&request.summary),
+        }
     };
     if let Some(reason) = classifier_reason {
         body.push_str(&format!("\n\nAuto-review flagged this: {}", reason));
@@ -645,58 +684,31 @@ fn block_for_approval(
 mod tests {
     use super::*;
     use crate::domain::{ToolCallId, TurnId};
-    use crate::providers::ctx::ProgressEvent;
     use crate::runtime::{SafetyMode, ToolCategory};
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    fn ctx_with(config: crate::app::Config) -> ExecContext {
+        crate::providers::ctx::test_exec_context_with_config(
+            TurnId(1),
+            ToolCallId(1),
+            PathBuf::from("."),
+            config,
+        )
+        .0
+    }
+
     fn ctx(mode: SafetyMode) -> ExecContext {
         let mut config = crate::app::Config::default();
         config.safety.mode = mode;
-        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(4);
-        ExecContext::new(
-            tokio_util::sync::CancellationToken::new(),
-            tx,
-            ToolCallId(1),
-            TurnId(1),
-            PathBuf::from("."),
-            Arc::new(config),
-            String::new(),
-            None,
-            None,
-            None,
-            mode,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        ctx_with(config)
     }
 
-    fn ctx_headless_opted_in() -> ExecContext {
+    fn ctx_headless_opted_in(mode: SafetyMode) -> ExecContext {
         let mut config = crate::app::Config::default();
-        config.safety.mode = SafetyMode::Ask;
+        config.safety.mode = mode;
         config.safety.allow_untrusted_headless_tools = true;
-        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(4);
-        ExecContext::new(
-            tokio_util::sync::CancellationToken::new(),
-            tx,
-            ToolCallId(1),
-            TurnId(1),
-            PathBuf::from("."),
-            Arc::new(config),
-            String::new(),
-            None,
-            None,
-            None,
-            SafetyMode::Ask,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        ctx_with(config)
     }
 
     #[test]
@@ -709,12 +721,21 @@ mod tests {
         )
         .expect("web_search detail");
         assert!(d.contains("evil.com?leak=secret"), "got {d:?}");
+        let padding = "x".repeat(240);
         let d = action_detail(
             "web_search",
-            &serde_json::json!({"queries": [{"query": "alpha"}, {"query": "beta"}]}),
+            &serde_json::json!({"queries": [
+                {"query": "alpha"},
+                {"query": padding},
+                {"query": "tail query remains visible to policy"}
+            ]}),
         )
         .expect("web_search queries detail");
-        assert!(d.contains("alpha") && d.contains("beta"), "got {d:?}");
+        assert!(
+            d.contains("alpha") && d.contains("tail query remains visible to policy"),
+            "complete policy detail was clipped: {d:?}"
+        );
+        assert!(d.len() > 200, "policy detail must not use the UI limit");
         let d = action_detail(
             "agent",
             &serde_json::json!({"prompt": "exfiltrate the env", "description": "x"}),
@@ -729,33 +750,27 @@ mod tests {
         // UI is blocked by default, allowed only with the opt-in flag.
         let req = || ActionRequest::new("web_fetch", ToolCategory::Web, "web_fetch https://x");
 
-        let blocked = gate(
-            &ctx(SafetyMode::Ask),
-            req(),
-            &[],
-            serde_json::json!({}),
-            false,
-            false,
-        )
-        .await;
-        assert!(
-            matches!(blocked, Gate::Block(_)),
-            "headless Ask should block by default"
-        );
+        for mode in [SafetyMode::Ask, SafetyMode::ReadOnly] {
+            let blocked = gate(&ctx(mode), req(), &[], serde_json::json!({}), false, false).await;
+            assert!(
+                matches!(blocked, Gate::Block(_)),
+                "headless {mode:?} should block by default"
+            );
 
-        let proceed = gate(
-            &ctx_headless_opted_in(),
-            req(),
-            &[],
-            serde_json::json!({}),
-            false,
-            false,
-        )
-        .await;
-        assert!(
-            matches!(proceed, Gate::Proceed { .. }),
-            "--allow-untrusted-tools should let it proceed",
-        );
+            let proceed = gate(
+                &ctx_headless_opted_in(mode),
+                req(),
+                &[],
+                serde_json::json!({}),
+                false,
+                false,
+            )
+            .await;
+            assert!(
+                matches!(proceed, Gate::Proceed { .. }),
+                "--allow-untrusted-tools should explicitly allow {mode:?} web egress",
+            );
+        }
     }
 
     /// Stub classifier with a fixed verdict — drives the `Classify` path
@@ -776,34 +791,16 @@ mod tests {
     }
 
     fn ctx_auto(classifier: Option<Arc<dyn crate::providers::AutoClassifier>>) -> ExecContext {
-        let mut config = crate::app::Config::default();
-        config.safety.mode = SafetyMode::Auto;
-        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(4);
-        ExecContext::new(
-            tokio_util::sync::CancellationToken::new(),
-            tx,
-            ToolCallId(1),
-            TurnId(1),
-            PathBuf::from("."),
-            Arc::new(config),
-            String::new(),
-            None,
-            None,
-            None,
-            SafetyMode::Auto,
-            Some("fetch the changelog".to_string()),
-            classifier,
-            None,
-            None,
-            None,
-        )
+        let mut ctx = ctx(SafetyMode::Auto);
+        ctx.intent = Some("fetch the changelog".to_string());
+        ctx.classifier = classifier;
+        ctx
     }
 
     #[tokio::test]
     async fn readonly_blocks_external_tools() {
-        // C1/H1/H2: the previously-bypassing tools must be denied in ReadOnly.
-        // (Web is deliberately absent: web_search/web_fetch are GET-shaped
-        // reads and read_only permits them — see readonly_allows_web_reads.)
+        // C1/H1/H2: mutations and control tools remain denied in ReadOnly.
+        // Web is tested separately because it takes the one-shot Ask path.
         let ctx = ctx(SafetyMode::ReadOnly);
         for (tool, cat) in [
             ("mcp_proxy", ToolCategory::Mcp),
@@ -835,10 +832,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readonly_allows_web_reads() {
-        // Reading the public web IS reading — read_only lets web_search and
-        // web_fetch through the gate untouched (the tools' own SSRF guard
-        // still applies in every mode).
+    async fn readonly_web_egress_fails_closed_without_approval_ui() {
         let ctx = ctx(SafetyMode::ReadOnly);
         for (tool, summary) in [
             ("web_search", "web_search rust release notes"),
@@ -853,9 +847,46 @@ mod tests {
                     &serde_json::json!({}),
                 )
                 .await
-                .is_none(),
-                "ReadOnly must allow {tool}",
+                .is_some(),
+                "ReadOnly must require approval for {tool}",
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_web_explicit_user_opt_in_proceeds() {
+        let mut context = ctx(SafetyMode::ReadOnly);
+        Arc::make_mut(&mut context.config).safety.allow_readonly_web = true;
+        assert!(
+            gate_external(
+                &context,
+                "web_fetch",
+                ToolCategory::Web,
+                "web_fetch example".to_string(),
+                &serde_json::json!({"url": "https://example.com"}),
+            )
+            .await
+            .is_none(),
+            "explicit user/session opt-in should allow ReadOnly web egress"
+        );
+    }
+
+    #[tokio::test]
+    async fn global_network_deny_blocks_web_even_in_full_access() {
+        let mut context = ctx(SafetyMode::FullAccess);
+        let safety = &mut Arc::make_mut(&mut context.config).safety;
+        safety.network = crate::app::NetworkPolicy::Deny;
+        safety.allow_readonly_web = true;
+        for tool in ["web_fetch", "web_search"] {
+            let blocked = gate_external(
+                &context,
+                tool,
+                ToolCategory::Web,
+                tool.to_string(),
+                &serde_json::json!({"url": "https://example.com"}),
+            )
+            .await;
+            assert!(blocked.is_some(), "network deny must block {tool}");
         }
     }
 
@@ -965,29 +996,87 @@ mod tests {
         );
     }
 
+    fn ctx_with_broker_mode(
+        mode: SafetyMode,
+        broker: crate::providers::ApprovalBroker,
+    ) -> ExecContext {
+        let mut ctx = ctx(mode);
+        ctx.call_id = ToolCallId(7);
+        ctx.approval = Some(broker);
+        ctx
+    }
+
     /// Build an `Ask`-mode ctx with an inline-approval broker bound.
     fn ctx_with_broker(broker: crate::providers::ApprovalBroker) -> ExecContext {
-        let mut config = crate::app::Config::default();
-        config.safety.mode = SafetyMode::Ask;
-        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(4);
-        ExecContext::new(
-            tokio_util::sync::CancellationToken::new(),
-            tx,
-            ToolCallId(7),
-            TurnId(1),
-            PathBuf::from("."),
-            Arc::new(config),
-            String::new(),
-            None,
-            None,
-            None,
-            SafetyMode::Ask,
-            None,
-            None,
-            Some(broker),
-            None,
-            None,
-        )
+        ctx_with_broker_mode(SafetyMode::Ask, broker)
+    }
+
+    #[tokio::test]
+    async fn readonly_web_uses_non_allowlistable_one_shot_approval() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::domain::Msg>(8);
+        let broker = crate::providers::ApprovalBroker::new(tx);
+        let context = ctx_with_broker_mode(SafetyMode::ReadOnly, broker.clone());
+        let handle = tokio::spawn(async move {
+            gate_external(
+                &context,
+                "web_fetch",
+                ToolCategory::Web,
+                "web_fetch example".to_string(),
+                &serde_json::json!({"url": "https://example.com"}),
+            )
+            .await
+        });
+
+        let (call_id, allowlist_scope) = match rx.recv().await.expect("approval requested") {
+            crate::domain::Msg::ApprovalRequested {
+                call_id,
+                allowlist_scope,
+                ..
+            } => (call_id, allowlist_scope),
+            other => panic!("expected ApprovalRequested, got {other:?}"),
+        };
+        assert!(
+            allowlist_scope.is_empty(),
+            "web approval must never expose approve-always"
+        );
+        broker.resolve(call_id, crate::providers::ApprovalDecision::ApproveAlways);
+        assert!(
+            handle.await.unwrap().is_none(),
+            "one approved request should proceed"
+        );
+        assert!(!broker.is_allowlisted("web_fetch"));
+    }
+
+    #[test]
+    fn external_policy_detail_is_complete_but_modal_preview_is_bounded() {
+        let tail = "tail-visible-only-to-policy";
+        let url = format!("https://example.com/{}{}", "x".repeat(240), tail);
+        let arguments = serde_json::json!({"url": url});
+        let mut request = ActionRequest::new("web_fetch", ToolCategory::Web, "web_fetch");
+        request.command = action_detail("web_fetch", &arguments);
+        request.arguments = Some(arguments);
+
+        assert!(request.command.as_deref().is_some_and(|d| d.contains(tail)));
+        let modal = format_approval_body(&request, None);
+        assert!(!modal.contains(tail), "modal should contain only a preview");
+        assert!(modal.ends_with('…'));
+    }
+
+    #[test]
+    fn web_approval_modal_sanitizes_url_credentials_and_fragment() {
+        let arguments = serde_json::json!({
+            "url": "https://alice:password123@example.com/path?token=opaque-secret-value#private-fragment"
+        });
+        let mut request = ActionRequest::new("web_fetch", ToolCategory::Web, "web_fetch");
+        request.command = action_detail("web_fetch", &arguments);
+        request.arguments = Some(arguments);
+
+        let modal = format_approval_body(&request, None);
+        assert!(!modal.contains("alice"));
+        assert!(!modal.contains("password123"));
+        assert!(!modal.contains("opaque-secret-value"));
+        assert!(!modal.contains("private-fragment"));
+        assert!(modal.contains("example.com/path?token="));
     }
 
     fn shell_request(cmd: &str) -> ActionRequest {
@@ -1177,7 +1266,7 @@ mod tests {
             ),
             Gate::Proceed { .. } => panic!("strict profile must deny builds"),
         }
-        // Web: the read-only floor allows it; the profile tightens it.
+        // Web: the read-only floor asks; the strict profile tightens to deny.
         assert!(
             gate_external(
                 &c,
@@ -1202,6 +1291,22 @@ mod tests {
         )
         .await;
         assert!(matches!(g, Gate::Proceed { .. }));
+    }
+
+    #[test]
+    fn default_plan_profile_preserves_readonly_web_approval() {
+        let context = ctx_plan();
+        let request = ActionRequest::new(
+            "web_fetch",
+            ToolCategory::Web,
+            "web_fetch https://example.com",
+        );
+        let readonly = PolicyEngine::new(SafetyMode::ReadOnly).decide(&request);
+        assert!(matches!(readonly, PolicyDecision::Ask { .. }));
+        assert!(matches!(
+            apply_plan_profile(&context, &request, readonly),
+            PolicyDecision::Ask { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1378,25 +1483,7 @@ mod tests {
             decision: crate::runtime::PolicyOverrideDecision::Deny,
             ..Default::default()
         }];
-        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(4);
-        let ctx = ExecContext::new(
-            tokio_util::sync::CancellationToken::new(),
-            tx,
-            ToolCallId(1),
-            TurnId(1),
-            PathBuf::from("."),
-            Arc::new(config),
-            String::new(),
-            None,
-            None,
-            None,
-            SafetyMode::Ask,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        let ctx = ctx_with(config);
         let g = gate(
             &ctx,
             edit_request("/scratch/notes.txt"),

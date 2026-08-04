@@ -71,6 +71,8 @@ chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 which = "8.0"  # Find executables
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "gzip", "brotli"] }
+encoding_rs = "0.8"
+mime = "0.3"
 bytes = "1.11"
 rusqlite = { version = "0.40", features = ["bundled"] }
 getrandom = "0.4"
@@ -83,6 +85,8 @@ rustc-hash = "2.0"  # Faster non-cryptographic hash for HashMap
 base64 = "0.22"  # Base64 encoding for binary files (PDFs, images)
 rpassword = "7.4.0"
 unicode-width = "0.2"
+unicode-normalization = "0.1.25"
+caseless = "0.2.2"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 # Native `web_fetch`: readability extraction + HTML-to-markdown, so a URL fetch
 # runs in-process without Ollama Cloud.
@@ -124,6 +128,10 @@ portable-pty = "0.9"
 # Snapshot suite for `render()` — pins full TUI frames for curated scenes
 # (src/render/snapshots.rs); review drift with `just snapshots`.
 insta = "1"
+# Managed-SearXNG archive-limit tests compile on unsupported hosts too, even
+# though extraction is only shipped on Unix targets.
+ruzstd = "0.8.3"
+tar = "0.4.46"
 
 [profile.release]
 lto = true

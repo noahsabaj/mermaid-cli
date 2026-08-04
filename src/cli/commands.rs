@@ -269,6 +269,38 @@ pub(crate) struct DoctorRuntime {
     pub(crate) local_store: DoctorCheck,
 }
 
+fn web_doctor_entries(config: &Config) -> (Vec<String>, Vec<String>) {
+    let capabilities = crate::providers::tool::web::WebCapabilities::resolve(&config.web);
+    let mut tools = Vec::new();
+    let mut next_steps = Vec::new();
+    for (name, status) in [
+        ("web_fetch", capabilities.fetch),
+        ("web_search", capabilities.search),
+    ] {
+        if config.safety.network == crate::app::NetworkPolicy::Deny {
+            next_steps.push(format!(
+                "{name} is disabled by safety.network = \"deny\" (selected backend '{}'; {}).",
+                status.backend, status.trust_destination
+            ));
+        } else if status.available {
+            tools.push(format!(
+                "{name} ({}; {})",
+                status.backend, status.trust_destination
+            ));
+        } else {
+            next_steps.push(format!(
+                "{name} is unavailable with backend '{}': {}.",
+                status.backend,
+                status
+                    .reason
+                    .as_deref()
+                    .unwrap_or("the selected backend could not be initialized")
+            ));
+        }
+    }
+    (tools, next_steps)
+}
+
 async fn show_doctor(
     config: &Config,
     cwd: &Path,
@@ -385,37 +417,13 @@ pub(crate) async fn build_doctor_report(
         },
     };
 
-    let has_ollama_key = std::env::var("OLLAMA_API_KEY").is_ok();
     let mut tools = vec![
         "read/edit/write files".to_string(),
         "run shell commands".to_string(),
         "create checkpoints before risky mutations".to_string(),
     ];
-    // web_fetch: native always works (no key); the Ollama backend needs a key.
-    match config.web.fetch_backend {
-        crate::app::FetchBackend::Native => tools.push("web_fetch (native, no key)".to_string()),
-        crate::app::FetchBackend::Ollama if has_ollama_key => {
-            tools.push("web_fetch (Ollama Cloud)".to_string())
-        },
-        crate::app::FetchBackend::Ollama => {},
-    }
-    // web_search: `auto` resolves to Ollama when a key is present, else a
-    // mermaid-managed local SearXNG; `searxng`/`ollama` force one backend.
-    match config.web.search_backend {
-        crate::app::SearchBackend::Auto if has_ollama_key => {
-            tools.push("web_search (auto: Ollama Cloud)".to_string())
-        },
-        crate::app::SearchBackend::Auto => {
-            tools.push("web_search (auto: managed local SearXNG)".to_string())
-        },
-        crate::app::SearchBackend::Searxng => {
-            tools.push(format!("web_search (SearXNG {})", config.web.searxng_url))
-        },
-        crate::app::SearchBackend::Ollama if has_ollama_key => {
-            tools.push("web_search (Ollama Cloud)".to_string())
-        },
-        crate::app::SearchBackend::Ollama => {},
-    }
+    let (web_tools, web_next_steps) = web_doctor_entries(config);
+    tools.extend(web_tools);
     if !config.mcp_servers.is_empty() {
         tools.push(format!(
             "{} configured MCP server(s)",
@@ -429,7 +437,7 @@ pub(crate) async fn build_doctor_report(
         ));
     }
 
-    let mut next_steps = Vec::new();
+    let mut next_steps = web_next_steps;
     if active_model.is_none() {
         next_steps.push(
             "Pick a model with `mermaid --model <provider/model>` or run `mermaid list`."
@@ -443,20 +451,6 @@ pub(crate) async fn build_doctor_report(
     }
     if instruction_paths.is_empty() {
         next_steps.push("Optional: add MERMAID.md or AGENTS.md with project-specific run commands and conventions.".to_string());
-    }
-    if matches!(config.web.search_backend, crate::app::SearchBackend::Ollama) && !has_ollama_key {
-        next_steps.push(
-            "Web search needs a backend: set OLLAMA_API_KEY (run `mermaid cloud-setup`) or set `[web] search_backend = \"searxng\"` with a running SearXNG.".to_string(),
-        );
-    }
-    if matches!(config.web.search_backend, crate::app::SearchBackend::Auto)
-        && !has_ollama_key
-        && which::which("podman").is_err()
-        && which::which("docker").is_err()
-    {
-        next_steps.push(
-            "Web search (auto) starts a local SearXNG container, but no podman or docker was found. Install one, or set OLLAMA_API_KEY.".to_string(),
-        );
     }
     if next_steps.is_empty() {
         next_steps.push(
@@ -1423,38 +1417,7 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
             })
     );
     if let Some(profile) = lookup_provider(&snapshot.provider) {
-        for (key, value) in [
-            (
-                "max_output_tokens_param",
-                format!("{:?}", profile.max_tokens_param),
-            ),
-            (
-                "parallel_tool_calls",
-                (!profile
-                    .disable_parallel_tool_calls_for
-                    .iter()
-                    .any(|disabled| *disabled == snapshot.model))
-                .to_string(),
-            ),
-            (
-                "reasoning_parameter_shape",
-                format!("{:?}", profile.reasoning_strategy),
-            ),
-            (
-                "streaming_usage_available",
-                "provider_dependent".to_string(),
-            ),
-            ("token_usage_field_shape", "openai_compatible".to_string()),
-        ] {
-            let _ = store.provider_probes().upsert(NewProviderProbe {
-                provider: provider.clone(),
-                model_id: snapshot.model.clone(),
-                capability_key: key.to_string(),
-                capability_value: value,
-                confidence: "static".to_string(),
-                error: None,
-            });
-        }
+        crate::runtime::record_static_provider_probes(&store, profile, &provider, &snapshot.model);
         println!("Token budget field: {:?}", profile.max_tokens_param);
         println!(
             "Single-tool-call models: {}",
@@ -2852,6 +2815,58 @@ fn build_pr_argv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_uses_resolved_keyless_web_capabilities() {
+        let config = Config {
+            web: crate::app::WebConfig {
+                fetch_backend: crate::app::FetchBackend::Native,
+                search_backend: crate::app::SearchBackend::Searxng,
+                searxng_url: "http://127.0.0.1:8080".to_string(),
+            },
+            ..Config::default()
+        };
+        let (tools, next_steps) = web_doctor_entries(&config);
+        assert!(
+            tools
+                .iter()
+                .any(|entry| entry.contains("web_fetch (native"))
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|entry| entry.contains("web_search (searxng"))
+        );
+        assert!(next_steps.is_empty(), "unexpected warnings: {next_steps:?}");
+        assert!(
+            tools.iter().all(|entry| !entry.contains("container")),
+            "doctor must describe the selected capability, not stale container setup"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_global_network_deny_instead_of_advertising_web() {
+        let mut config = Config::default();
+        config.web.search_backend = crate::app::SearchBackend::Searxng;
+        config.web.searxng_url = "http://127.0.0.1:8080".to_string();
+        config.safety.network = crate::app::NetworkPolicy::Deny;
+
+        let (tools, next_steps) = web_doctor_entries(&config);
+        assert!(
+            tools
+                .iter()
+                .all(|entry| !entry.starts_with("web_fetch") && !entry.starts_with("web_search")),
+            "network-denied tools were advertised: {tools:?}"
+        );
+        for name in ["web_fetch", "web_search"] {
+            assert!(
+                next_steps.iter().any(|entry| {
+                    entry.contains(name) && entry.contains("safety.network = \"deny\"")
+                }),
+                "missing network-deny explanation for {name}: {next_steps:?}"
+            );
+        }
+    }
 
     #[test]
     fn sanitize_terminal_text_strips_control_sequences() {

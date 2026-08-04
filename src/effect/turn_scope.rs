@@ -22,6 +22,8 @@
 //! forgetting there shipped as hangs-until-timeout bugs.
 
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use tokio::task::{AbortHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -38,6 +40,7 @@ pub struct TurnScope {
     /// work, don't kill it" (Ctrl+B). Tools that can detach (execute_command)
     /// `select!` on it; everyone else ignores it.
     background: CancellationToken,
+    web_bytes: Arc<AtomicUsize>,
     joins: JoinSet<()>,
 }
 
@@ -47,6 +50,7 @@ impl TurnScope {
             id,
             token: CancellationToken::new(),
             background: CancellationToken::new(),
+            web_bytes: Arc::new(AtomicUsize::new(0)),
             joins: JoinSet::new(),
         }
     }
@@ -65,6 +69,11 @@ impl TurnScope {
     /// detach a running child select on this instead of killing it.
     pub fn background_token(&self) -> CancellationToken {
         self.background.clone()
+    }
+
+    /// Shared decoded-web-byte counter for every tool call in this turn.
+    pub fn web_bytes(&self) -> Arc<AtomicUsize> {
+        self.web_bytes.clone()
     }
 
     /// Signal "background the running work" to every child task that listens.

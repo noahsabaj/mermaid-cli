@@ -308,22 +308,10 @@ impl OpenAICompatAdapter {
             json_messages.push(json_msg);
         }
 
-        // Tools come from `config.tools` (OpenAI-compat shape is the
-        // canonical one we pass around; the Anthropic / Gemini
-        // adapters translate from it). Drop web tools without a
-        // cloud API key.
-        let no_cloud_key = crate::ollama::get_cloud_api_key().is_none();
-        let tools: Vec<&Value> = config
-            .tools
-            .iter()
-            .filter(|t| {
-                let name = t
-                    .pointer("/function/name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("");
-                !(no_cloud_key && (name == "web_search" || name == "web_fetch"))
-            })
-            .collect();
+        // Tool registration is the single capability boundary. If a tool
+        // reaches `config.tools`, its selected backend is usable; adapters
+        // serialize that decision without re-checking unrelated credentials.
+        let tools: Vec<&Value> = config.tools.iter().collect();
 
         let mut body = json!({
             "model": self.model_name,
@@ -477,11 +465,9 @@ impl OpenAICompatAdapter {
         let usage = json.usage.map(token_usage_from_wire);
 
         // Reasoning content: extract from the named field if the profile
-        // points at one. For `InlineThinkTags`, leave it in `content`
-        // for now — Wave 6 wires the stripper.
-        // For InlineThinkTags providers the non-streaming body still contains
-        // `<think>…</think>`; run it through the same stripper the streaming path
-        // uses so reasoning is separated out of `content` (#5).
+        // points at one. For `InlineThinkTags` the non-streaming body still
+        // contains `<think>…</think>`; run it through the same stripper the
+        // streaming path uses so reasoning is separated out of `content`.
         let raw_content = choice.message.content.unwrap_or_default();
         let (content, inline_thinking) = match self.profile.reasoning_extraction {
             ReasoningExtraction::InlineThinkTags => {
@@ -511,7 +497,7 @@ impl OpenAICompatAdapter {
             .message
             .tool_calls
             .filter(|v| !v.is_empty())
-            .map(|raw| raw.into_iter().filter_map(parse_full_tool_call).collect());
+            .map(|raw| raw.into_iter().map(parse_full_tool_call).collect());
 
         let stop_reason = choice
             .finish_reason
@@ -1203,9 +1189,6 @@ fn token_usage_from_wire(usage: UsageWire) -> TokenUsage {
 struct ToolCallWire {
     #[serde(default)]
     id: Option<String>,
-    #[serde(rename = "type", default)]
-    #[allow(dead_code)]
-    type_: Option<String>,
     function: FunctionWire,
 }
 
@@ -1227,9 +1210,6 @@ struct ToolCallDeltaWire {
     index: usize,
     #[serde(default)]
     id: Option<String>,
-    #[serde(rename = "type", default)]
-    #[allow(dead_code)]
-    type_: Option<String>,
     #[serde(default)]
     function: Option<FunctionDeltaWire>,
 }
@@ -1305,7 +1285,7 @@ fn accumulate_tool_call(partials: &mut Vec<PartialToolCall>, delta: ToolCallDelt
     }
 }
 
-fn parse_full_tool_call(wire: ToolCallWire) -> Option<ToolCall> {
+fn parse_full_tool_call(wire: ToolCallWire) -> ToolCall {
     let name = wire.function.name;
     let arguments: Value = if wire.function.arguments.is_empty() {
         json!({})
@@ -1315,10 +1295,10 @@ fn parse_full_tool_call(wire: ToolCallWire) -> Option<ToolCall> {
             Err(_) => Value::String(wire.function.arguments),
         }
     };
-    Some(ToolCall {
+    ToolCall {
         id: wire.id,
         function: FunctionCall { name, arguments },
-    })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2137,6 +2117,36 @@ mod tests {
     }
 
     #[test]
+    fn build_request_body_preserves_registry_selected_web_tools() {
+        let adapter = test_adapter();
+        let config = ModelConfig {
+            tools: ["web_fetch", "web_search"]
+                .into_iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": "registered web tool",
+                            "parameters": {"type": "object"}
+                        }
+                    })
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config, false);
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(names, ["web_fetch", "web_search"]);
+    }
+
+    #[test]
     fn build_request_body_includes_temperature_for_non_reasoning_model() {
         // A non-reasoning model (gpt-4o) still receives `temperature` (#124).
         let adapter = OpenAICompatAdapter::new(
@@ -2347,7 +2357,6 @@ mod tests {
             ToolCallDeltaWire {
                 index: 0,
                 id: Some("call_abc".to_string()),
-                type_: Some("function".to_string()),
                 function: Some(FunctionDeltaWire {
                     name: Some("get_weather".to_string()),
                     arguments: Some(String::new()),
@@ -2359,7 +2368,6 @@ mod tests {
             ToolCallDeltaWire {
                 index: 0,
                 id: None,
-                type_: None,
                 function: Some(FunctionDeltaWire {
                     name: None,
                     arguments: Some("{\"loc".to_string()),
@@ -2371,7 +2379,6 @@ mod tests {
             ToolCallDeltaWire {
                 index: 0,
                 id: None,
-                type_: None,
                 function: Some(FunctionDeltaWire {
                     name: None,
                     arguments: Some("\":\"SF\"}".to_string()),
@@ -2398,7 +2405,6 @@ mod tests {
             ToolCallDeltaWire {
                 index: 0,
                 id: Some("call_x".to_string()),
-                type_: None,
                 function: Some(FunctionDeltaWire {
                     name: Some("list_windows".to_string()),
                     arguments: None,
@@ -2424,7 +2430,6 @@ mod tests {
             ToolCallDeltaWire {
                 index: 0,
                 id: Some("call_a".to_string()),
-                type_: None,
                 function: Some(FunctionDeltaWire {
                     name: Some("fn_a".to_string()),
                     arguments: Some("{}".to_string()),
@@ -2436,7 +2441,6 @@ mod tests {
             ToolCallDeltaWire {
                 index: 1,
                 id: Some("call_b".to_string()),
-                type_: None,
                 function: Some(FunctionDeltaWire {
                     name: Some("fn_b".to_string()),
                     arguments: Some("{}".to_string()),

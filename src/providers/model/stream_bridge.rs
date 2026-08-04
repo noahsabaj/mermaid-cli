@@ -19,7 +19,11 @@
 //! backpressure still applies because the relay `await`s on the real
 //! send — the unbounded channel just buffers briefly in between.
 
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
+
+use crate::models::{ReasoningChunk, StreamCallback, StreamEvent as ModelStreamEvent};
 
 use super::super::ctx::StreamEvent;
 
@@ -56,10 +60,39 @@ pub fn ordered_relay(
     (tx, handle)
 }
 
+/// Adapt an adapter's sync `ModelStreamEvent` callback onto the staging
+/// sender from [`ordered_relay`]. Every provider wrapper maps these events
+/// identically, so the mapping lives here rather than in four copies.
+///
+/// No adapter emits `Done` through this callback — the wrapper sends the
+/// authoritative terminal `Done` built from the returned `ModelResponse`.
+/// Map it defensively without inventing usage (an earlier placeholder
+/// misfiled everything as completion tokens).
+pub fn forward_callback(sink: mpsc::UnboundedSender<StreamEvent>) -> StreamCallback {
+    Arc::new(move |event: ModelStreamEvent| {
+        let mapped = match event {
+            ModelStreamEvent::Text(s) => StreamEvent::Text(s),
+            ModelStreamEvent::Reasoning(chunk) => StreamEvent::Reasoning(ReasoningChunk {
+                text: chunk.text,
+                signature: chunk.signature,
+            }),
+            ModelStreamEvent::ToolCall(tc) => StreamEvent::ToolCall(tc),
+            ModelStreamEvent::Status(s) => StreamEvent::Status(s),
+            ModelStreamEvent::Done { .. } => StreamEvent::Done {
+                usage: None,
+                provider_continuation: None,
+                stop_reason: None,
+            },
+        };
+        // Synchronous send preserves ordering. Ignore errors — a closed
+        // receiver means the turn is already gone.
+        let _ = sink.send(mapped);
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ReasoningChunk;
 
     /// Regression guard for F2: events pushed in order must arrive in
     /// order on the bounded sink. Spawning one task per callback
@@ -102,5 +135,57 @@ mod tests {
             });
         }
         assert_eq!(seen, vec!["text-a", "reasoning", "text-b", "done"]);
+    }
+    #[tokio::test]
+    async fn stream_callback_forwards_text_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cb = forward_callback(tx);
+        cb(ModelStreamEvent::Text("hello".to_string()));
+        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("recv")
+            .expect("sender alive");
+        match recv {
+            StreamEvent::Text(s) => assert_eq!(s, "hello"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_callback_forwards_status_notice() {
+        // The autostart notice rides the same ordered relay as content
+        // events; the bridge must map it 1:1 so it reaches the effect
+        // layer (→ Msg::TransientStatus → system line / stderr).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cb = forward_callback(tx);
+        cb(ModelStreamEvent::Status(
+            "Starting the local Ollama server…".to_string(),
+        ));
+        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("recv")
+            .expect("sender alive");
+        match recv {
+            StreamEvent::Status(s) => assert!(s.contains("Starting")),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_callback_done_never_invents_usage() {
+        // The wrapper's terminal Done (built from ModelResponse) is the only
+        // authoritative usage carrier; a callback Done must map to None
+        // rather than misfiling its bare count as completion tokens.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cb = forward_callback(tx);
+        cb(ModelStreamEvent::Done { tokens: 42 });
+        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("recv")
+            .expect("sender");
+        match recv {
+            StreamEvent::Done { usage, .. } => assert!(usage.is_none()),
+            _ => panic!("wrong variant"),
+        }
     }
 }

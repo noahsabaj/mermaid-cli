@@ -461,22 +461,10 @@ impl GeminiAdapter {
         }
         body["generationConfig"] = gen_config;
 
-        // Tools come from `config.tools` (OpenAI-compat shape,
-        // populated by the provider wrapper). Drop web tools when no
-        // cloud key is set.
-        let no_cloud_key = crate::ollama::get_cloud_api_key().is_none();
-        let filtered: Vec<&Value> = config
-            .tools
-            .iter()
-            .filter(|t| {
-                let name = t
-                    .pointer("/function/name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("");
-                !(no_cloud_key && (name == "web_search" || name == "web_fetch"))
-            })
-            .collect();
-        let gemini_tools = to_gemini_tools(&filtered);
+        // Tool registration is the single capability boundary. Preserve every
+        // registry-selected tool; native fetch and SearXNG are keyless.
+        let registered: Vec<&Value> = config.tools.iter().collect();
+        let gemini_tools = to_gemini_tools(&registered);
         if !gemini_tools.is_empty() {
             body["tools"] = json!(gemini_tools);
         }
@@ -1764,6 +1752,36 @@ mod tests {
         assert!(tools[0]["functionDeclarations"].is_array());
         let decls = tools[0]["functionDeclarations"].as_array().unwrap();
         assert_eq!(decls.len(), 5);
+    }
+
+    #[test]
+    fn build_request_body_preserves_registry_selected_web_tools() {
+        let adapter = test_adapter();
+        let config = ModelConfig {
+            tools: ["web_fetch", "web_search"]
+                .into_iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": "registered web tool",
+                            "parameters": {"type": "object"}
+                        }
+                    })
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config);
+        let names: Vec<&str> = body["tools"][0]["functionDeclarations"]
+            .as_array()
+            .expect("function declarations")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(names, ["web_fetch", "web_search"]);
     }
 
     #[test]
