@@ -336,6 +336,12 @@ pub enum ChatMessageKind {
     /// transcript and swept from history at the next turn-end — it must never
     /// outlive the request it steers.
     RecoveryNudge,
+    /// A persistent mode-change marker ("Plan mode is now ON …") injected by
+    /// the dispatch-time context-delta injector. Sent to the model on every
+    /// request — the durable timeline record that keeps history consistent
+    /// with the mode — hidden from the transcript (the status band is the
+    /// human announcement), and unlike `RecoveryNudge` NEVER swept.
+    ContextMarker,
     /// F74: a kind written by a NEWER build that this one doesn't model. Mapped
     /// here by `#[serde(other)]` instead of failing the whole conversation parse;
     /// it's neither a checkpoint nor a run summary, so every `matches!` site
@@ -343,6 +349,51 @@ pub enum ChatMessageKind {
     /// exhaustively, so adding this variant is compile-safe.)
     #[serde(other)]
     Unknown,
+}
+
+/// Who a `MessageRole::System` history message is FOR.
+///
+/// The distinction used to be implicit, and two adapters guessed wrong: every
+/// provider with an OpenAI-shaped API passed system-role history through
+/// inline, while Anthropic and Gemini — whose APIs have exactly one top-level
+/// system field — dropped it as "a TUI affordance, not model input". That
+/// silently deleted every harness steering message on those two providers: the
+/// plan-mode reminder and context markers, but also the pre-existing
+/// auto-continue resume and stalled-turn nudges.
+///
+/// Making it explicit means an adapter can no longer guess, and
+/// [`ChatMessageKind::audience`] is the single place the decision lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageAudience {
+    /// Ordinary conversation content. Adapters keep their existing handling.
+    Conversation,
+    /// Harness steering the model MUST see even though the transcript hides
+    /// it. An adapter that cannot express a mid-conversation system message
+    /// has to deliver it some other way — never drop it.
+    ModelDirected,
+}
+
+impl ChatMessageKind {
+    /// The audience for a system-role message of this kind.
+    ///
+    /// Deliberately an exhaustive match with no wildcard: adding a
+    /// `ChatMessageKind` fails to compile here until its audience is decided,
+    /// which is the guard against another kind being silently dropped on the
+    /// providers that can't carry system-role history.
+    pub fn audience(self) -> MessageAudience {
+        match self {
+            // Injected to steer the model — the whole point is that it reads
+            // them. Hidden from the transcript, never from the model.
+            ChatMessageKind::RecoveryNudge | ChatMessageKind::ContextMarker => {
+                MessageAudience::ModelDirected
+            },
+            ChatMessageKind::Normal
+            | ChatMessageKind::ContextCheckpoint
+            | ChatMessageKind::RunSummary
+            | ChatMessageKind::Continuation
+            | ChatMessageKind::Unknown => MessageAudience::Conversation,
+        }
+    }
 }
 
 /// Why a model stopped generating, normalized across providers.

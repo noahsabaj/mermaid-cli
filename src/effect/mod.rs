@@ -628,10 +628,12 @@ impl EffectRunner {
                 if let Some(tools) = &self.tools
                     && request.output_schema.is_none()
                 {
-                    let mut enriched = tools.describe_all();
+                    let mut enriched =
+                        filter_suppressed(tools.describe_all(), &request.suppressed_builtin_tools);
                     // Report the built-in tool-schema token cost so the
                     // reducer's /context preview can fold it into its MCP-only
                     // estimate and agree with what the model actually sees.
+                    // Runs AFTER suppression so the estimate matches reality.
                     let builtin_tokens = crate::domain::estimate_tool_schema_tokens(&enriched);
                     // Best-effort and cosmetic (the /context preview). This is the
                     // synchronous dispatch path so we can't await; if the bounded
@@ -1720,6 +1722,22 @@ fn note_stream_usage(
     }
 }
 
+/// Drop the built-in tool definitions the reducer suppressed for this request
+/// (`ChatRequest::suppressed_builtin_tools` — e.g. the task-checklist writers
+/// while a plan is being drafted). Pure so it unit-tests without the runner.
+fn filter_suppressed(
+    tools: Vec<crate::domain::ToolDefinition>,
+    suppressed: &[&'static str],
+) -> Vec<crate::domain::ToolDefinition> {
+    if suppressed.is_empty() {
+        return tools;
+    }
+    tools
+        .into_iter()
+        .filter(|t| !suppressed.contains(&t.name.as_str()))
+        .collect()
+}
+
 async fn dispatch_call_model(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
@@ -2343,6 +2361,7 @@ async fn consolidate_memory(
         resolved_max_output: None,
         output_schema: None,
         suppress_auto_compact: false,
+        suppressed_builtin_tools: Vec::new(),
     };
 
     let provider = match factory.resolve(&model_id).await {
@@ -3461,6 +3480,25 @@ mod tests {
         EffectRunner::pair(PathBuf::from("/tmp"))
     }
 
+    /// The reducer's `suppressed_builtin_tools` contract: named tools drop
+    /// out of the advertised set, everything else passes through in order.
+    #[test]
+    fn filter_suppressed_drops_only_the_named_tools() {
+        let def = |name: &str| crate::domain::ToolDefinition {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        };
+        let tools = vec![def("task_create"), def("task_list"), def("task_update")];
+        let kept = filter_suppressed(tools.clone(), &["task_create", "task_update"]);
+        assert_eq!(
+            kept.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec!["task_list"]
+        );
+        let kept = filter_suppressed(tools, &[]);
+        assert_eq!(kept.len(), 3, "empty suppression list is a no-op");
+    }
+
     #[test]
     fn runtime_tool_payloads_are_redacted_before_serialization() {
         let payload = serde_json::json!({
@@ -3722,6 +3760,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            suppressed_builtin_tools: Vec::new(),
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -3750,6 +3789,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            suppressed_builtin_tools: Vec::new(),
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -3837,6 +3877,7 @@ mod tests {
                 resolved_max_output: None,
                 output_schema: None,
                 suppress_auto_compact: false,
+                suppressed_builtin_tools: Vec::new(),
             },
         });
         assert_eq!(r.scope_count(), 1);
@@ -3868,6 +3909,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            suppressed_builtin_tools: Vec::new(),
         };
         let turn = TurnId(123);
 
@@ -3942,7 +3984,7 @@ mod tests {
             id: archive_id.to_string(),
             conversation_id: full.id.clone(),
             created_at: now,
-            messages: full.messages.clone(),
+            messages: full.messages().to_vec(),
         };
         let record = crate::domain::CompactionRecord {
             id: archive_id.to_string(),
@@ -4002,7 +4044,7 @@ mod tests {
             .unwrap();
         assert!(
             loaded
-                .messages
+                .messages()
                 .iter()
                 .any(|message| message.content == "new assistant reply")
         );
@@ -4042,7 +4084,7 @@ mod tests {
             .unwrap()
             .load_conversation(&full.id)
             .unwrap();
-        assert_eq!(loaded.messages[0].content, "raw history");
+        assert_eq!(loaded.messages()[0].content, "raw history");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4123,7 +4165,7 @@ mod tests {
             .unwrap()
             .load_conversation(&good_full.id)
             .unwrap();
-        assert_eq!(loaded.messages[0].content, "compacted checkpoint");
+        assert_eq!(loaded.messages()[0].content, "compacted checkpoint");
         let _ = std::fs::remove_dir_all(root);
     }
 

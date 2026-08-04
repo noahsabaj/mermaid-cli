@@ -63,6 +63,10 @@ pub struct ChatState {
     /// of re-parsing, re-wrapping, and rebuilding the click map every frame.
     /// Replaced whenever the fingerprint changes.
     frame_memo: Option<FrameMemo>,
+    /// Debug-only `(frame_key, full_content_hash)` from the previous frame,
+    /// used to assert the O(1) key never misses a content change.
+    #[cfg(debug_assertions)]
+    debug_key_check: Option<(u64, u64)>,
 }
 
 /// One memoized chat-frame assembly (see `ChatState::frame_memo`). Holds the
@@ -93,6 +97,8 @@ impl ChatState {
             selection: None,
             last_rendered_rows: Vec::new(),
             frame_memo: None,
+            #[cfg(debug_assertions)]
+            debug_key_check: None,
         }
     }
 
@@ -404,6 +410,10 @@ pub struct ChatWidget<'a> {
     /// markdown parse) keeps a committed message from being re-parsed *and*
     /// re-wrapped every frame — it's cloned from here instead (#134).
     pub wrapped_line_cache: &'a mut FxHashMap<u64, Vec<Line<'static>>>,
+    /// O(1) identity of `messages` for the frame memo — see
+    /// `render::chat_content_key`. Passed in rather than derived here because
+    /// the conversation revision that makes it O(1) lives on `State`.
+    pub content_key: u64,
     pub show_reasoning: bool,
     /// Blink phase for in-flight (`ActionResult::Running`) action headers,
     /// derived from `state.now` by the compose function. Ignored — including
@@ -500,7 +510,52 @@ impl<H: Hasher> std::fmt::Write for HashWrite<'_, H> {
 /// caching the per-message #134 cache already relies on; the complex non-`Hash`
 /// fields (`metadata`, `actions`) are folded in via their `Debug` form so no
 /// rendered field is silently missed.
-fn frame_fingerprint(
+/// The frame-memo key. `content_key` identifies the transcript in O(1) (see
+/// `render::chat_content_key`); this folds in the render inputs the widget
+/// itself owns.
+pub(crate) fn frame_key(
+    content_key: u64,
+    theme_seed: u64,
+    content_width: u16,
+    show_reasoning: bool,
+) -> u64 {
+    let mut h = rustc_hash::FxHasher::default();
+    content_key.hash(&mut h);
+    theme_seed.hash(&mut h);
+    content_width.hash(&mut h);
+    show_reasoning.hash(&mut h);
+    // The day-relative label ("Today"/"Yesterday"/date) on user timestamps
+    // changes only at midnight; fold today's date in so the memo refreshes then.
+    chrono::Local::now().date_naive().hash(&mut h);
+    h.finish()
+}
+
+/// Content key for tests and the bench rig, which render `ChatWidget` directly
+/// with a bare message slice and have no `State` to read a revision from.
+/// Hashing the content is O(n) but correct, which is what a test wants.
+#[cfg(test)]
+pub(crate) fn test_content_key(messages: &[ChatMessage]) -> u64 {
+    let mut h = rustc_hash::FxHasher::default();
+    messages.len().hash(&mut h);
+    for msg in messages {
+        msg.content.hash(&mut h);
+        msg.thinking.hash(&mut h);
+        std::mem::discriminant(&msg.kind).hash(&mut h);
+        msg.actions.len().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The OLD full-content fingerprint, retained as a debug-only cross-check on
+/// [`frame_key`]'s O(1) shortcut.
+///
+/// Rust privacy is module-scoped, so code inside `session::conversation` can
+/// still touch the messages field directly and skip the revision bump that
+/// `content_key` depends on. Encapsulation stops every caller outside that
+/// module; this catches a mistake made inside it. Debug builds only — in
+/// release it is exactly the O(transcript) cost being eliminated.
+#[cfg(debug_assertions)]
+pub(crate) fn frame_fingerprint(
     messages: &[ChatMessage],
     theme_seed: u64,
     content_width: u16,
@@ -512,12 +567,6 @@ fn frame_fingerprint(
     theme_seed.hash(&mut h);
     content_width.hash(&mut h);
     show_reasoning.hash(&mut h);
-    // The day-relative label ("Today"/"Yesterday"/date) on user timestamps
-    // changes only at midnight; fold today's date in so the memo refreshes then.
-    chrono::Local::now().date_naive().hash(&mut h);
-    // The blink phase only affects frames that actually paint a running
-    // action's header dot; folding it in unconditionally would invalidate the
-    // memo twice a second on every idle frame.
     if messages.iter().any(|m| {
         m.actions
             .iter()
@@ -572,26 +621,46 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         // frame is byte-identical to a fresh one. Scrolling and drag-selection
         // don't touch these inputs, so the common case (a static scrollback)
         // reuses the memo instead of re-parsing and re-wrapping every message.
-        let frame_key = frame_fingerprint(
-            self.messages,
+        let frame_key = frame_key(
+            self.content_key,
             theme_seed,
             content_width,
             self.show_reasoning,
-            self.blink_on,
         );
-        // Type is inferred from the map below (the frame_memo struct names the
-        // fields); an explicit annotation would just be a clippy::type_complexity.
-        let memo_hit = state
-            .frame_memo
-            .as_ref()
-            .filter(|m| m.key == frame_key)
-            .map(|m| (m.lines.clone(), m.click_map.clone()));
+        // Cross-check the O(1) key against the full-content hash it replaced:
+        // if the content changed, the key MUST have changed. The converse is
+        // fine (a conservative revision bump only costs a memo miss).
+        #[cfg(debug_assertions)]
+        {
+            let content_hash = frame_fingerprint(
+                self.messages,
+                theme_seed,
+                content_width,
+                self.show_reasoning,
+                self.blink_on,
+            );
+            if let Some((last_key, last_hash)) = state.debug_key_check {
+                debug_assert!(
+                    last_hash == content_hash || last_key != frame_key,
+                    "chat frame content changed without a new memo key — a mutation \
+                     bypassed ConversationHistory::messages_mut (stale transcript risk)",
+                );
+            }
+            state.debug_key_check = Some((frame_key, content_hash));
+        }
+        // TAKE the memo rather than borrowing it: owning it for the rest of the
+        // render frees `state` for the scroll/selection reads below, which is
+        // what used to force a full `lines.clone()` on every hit. Only the
+        // VISIBLE window is cloned now (see the tail of this function), so a
+        // frame costs O(viewport) instead of O(transcript) — at a 2000-message
+        // scrollback that clone was ~20k `Line`s to paint 40 rows, and it
+        // dominated the frame at ~98% of its cost.
+        let memo = state.frame_memo.take().filter(|m| m.key == frame_key);
 
-        let mut lines = if let Some((cached_lines, cached_click_map)) = memo_hit {
-            // Memo hit: reuse the assembled lines; restore the click map that
-            // was captured alongside them.
-            state.image_click_map = cached_click_map;
-            cached_lines
+        let memo = if let Some(memo) = memo {
+            // Memo hit: restore the click map captured alongside the lines.
+            state.image_click_map = memo.click_map.clone();
+            memo
         } else {
             // Memo miss: assemble fresh, then memoize for the next frame.
             let mut lines: Vec<Line<'static>> = Vec::new();
@@ -632,7 +701,12 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 // A recovery nudge is a one-shot model instruction, not user
                 // content — the stitch pre-pass hides committed ones, and this
                 // guard keeps a still-live one (mid-recovery) invisible too.
-                if matches!(msg.kind, ChatMessageKind::RecoveryNudge) {
+                // Context markers are likewise model-only (the status band is
+                // the human announcement of a mode change).
+                if matches!(
+                    msg.kind,
+                    ChatMessageKind::RecoveryNudge | ChatMessageKind::ContextMarker
+                ) {
                     continue;
                 }
 
@@ -938,13 +1012,13 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             // F31: memoize this assembly so an unchanged next frame reuses it
             // instead of re-running the loop above. Store the lines *before* the
             // selection highlight (applied per-frame below), so the cache stays
-            // selection-independent.
-            state.frame_memo = Some(FrameMemo {
+            // selection-independent. No `lines.clone()` here either — the memo
+            // owns them and the visible window is cloned out of it below.
+            FrameMemo {
                 key: frame_key,
-                lines: lines.clone(),
+                lines,
                 click_map: state.image_click_map.clone(),
-            });
-            lines
+            }
         };
 
         // NOTE: The response buffer is NOT rendered during streaming (buffering mode).
@@ -959,44 +1033,62 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         // keeps the rows from the miss that built it (content is unchanged on a
         // hit), so they need not be re-collected every frame (F31).
 
+        // NOTE: Wrapping is disabled because we handle it manually with hanging
+        // indents, so ONE content line is exactly one terminal row. That is what
+        // makes windowing exact: rows [scroll_pos, scroll_pos + height) are the
+        // only lines that can appear, so everything else is work with no pixels
+        // behind it.
+        //
+        // `lines.len()` is usize; convert to the u16 ratatui scroll type with a
+        // saturating cast so a scrollback longer than u16::MAX rows clamps the
+        // scroll position instead of wrapping it (F32).
+        let content_height = memo.lines.len();
+        let viewport_height = area.height;
+
+        let scroll_pos = state.get_scroll_position(clamp_to_u16(content_height), viewport_height);
+        state.last_scroll_position = scroll_pos;
+
+        // Clone ONLY the visible window. Feeding the whole transcript to
+        // `Paragraph` and letting it scroll meant cloning every line to paint a
+        // screenful; the window is bounded by the viewport instead.
+        let first = (scroll_pos as usize).min(content_height);
+        let last = first
+            .saturating_add(viewport_height as usize)
+            .min(content_height);
+        let mut lines: Vec<Line<'static>> = memo.lines[first..last].to_vec();
+
         // Paint the active drag selection (reverse video over the selected
-        // cells). Selection lines are content indices, matching `lines`.
+        // cells). Selection anchors are CONTENT line indices, so they are
+        // rebased onto the window here — an anchor outside it simply clips.
         if let Some((a, b)) = state.selection
             && !lines.is_empty()
         {
             let (start, end) = if a <= b { (a, b) } else { (b, a) };
             let sel_style = Style::new().add_modifier(Modifier::REVERSED);
-            let last_line = lines.len() - 1;
-            for (line_idx, line) in lines
-                .iter_mut()
-                .enumerate()
-                .take(end.0.min(last_line) + 1)
-                .skip(start.0)
-            {
-                let c0 = if line_idx == start.0 { start.1 } else { 0 };
-                let c1 = if line_idx == end.0 { end.1 } else { usize::MAX };
+            for (offset, line) in lines.iter_mut().enumerate() {
+                let content_idx = first + offset;
+                if content_idx < start.0 || content_idx > end.0 {
+                    continue;
+                }
+                let c0 = if content_idx == start.0 { start.1 } else { 0 };
+                let c1 = if content_idx == end.0 {
+                    end.1
+                } else {
+                    usize::MAX
+                };
                 if c1 > c0 {
                     highlight_line_cells(line, c0, c1, sel_style);
                 }
             }
         }
 
-        // NOTE: Wrapping is disabled because we handle it manually with hanging indents
-        // Calculate content height and viewport for proper scroll clamping.
-        // `lines.len()` is usize; convert to the u16 ratatui scroll type with a
-        // saturating cast so a scrollback longer than u16::MAX rows clamps the
-        // scroll position instead of wrapping it (F32).
-        let content_height = lines.len();
-        let viewport_height = area.height;
-
-        let scroll_pos = state.get_scroll_position(clamp_to_u16(content_height), viewport_height);
-        state.last_scroll_position = scroll_pos;
-
-        let paragraph = Paragraph::new(lines)
-            .block(Block::default())
-            .scroll((scroll_pos, 0));
+        // Scroll is already applied by the slice, so the paragraph starts at 0.
+        let paragraph = Paragraph::new(lines).block(Block::default()).scroll((0, 0));
 
         paragraph.render(content_area, buf);
+
+        // Put the memo back for the next frame.
+        state.frame_memo = Some(memo);
     }
 }
 
@@ -2310,6 +2402,7 @@ mod tests {
             term.draw(|f| {
                 let widget = ChatWidget {
                     messages: &messages,
+                    content_key: test_content_key(&messages),
                     theme: &theme,
                     wrapped_line_cache: cache,
                     show_reasoning: true,
@@ -2351,6 +2444,7 @@ mod tests {
         term.draw(|f| {
             let widget = ChatWidget {
                 messages: &messages,
+                content_key: test_content_key(&messages),
                 theme: &theme,
                 wrapped_line_cache: &mut cache,
                 show_reasoning: true,
@@ -3045,6 +3139,7 @@ mod tests {
             term.draw(|f| {
                 let widget = ChatWidget {
                     messages: &messages,
+                    content_key: test_content_key(&messages),
                     theme: &theme,
                     wrapped_line_cache: cache,
                     show_reasoning: true,

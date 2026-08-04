@@ -37,11 +37,17 @@ pub struct StatusWidget<'a> {
     /// Live session safety mode. Rendered on line 2 left so the active
     /// permission level is always visible (Shift+Tab / `/safety` change it).
     pub safety_mode: SafetyMode,
-    /// True while the session is drafting a plan: the safety segment reads
+    /// `Some(mode)` while the session is drafting a plan, carrying the STAGED
+    /// mode plan exit will restore: the safety segment reads
     /// `plan mode on (alt+p to toggle) - restores: <mode>` instead of
     /// `safety: <mode>`. Never the spinner/status widget (#245 invariant) —
     /// this is the persistent mode line.
-    pub plan_active: bool,
+    ///
+    /// It has to be carried separately now that `safety_mode` is `Plan` while
+    /// planning; reading the restore target off `safety_mode` would render
+    /// "restores: plan". Shift+Tab while planning re-targets THIS value, which
+    /// is what makes staging a post-approval mode visible.
+    pub plan_resume: Option<SafetyMode>,
 }
 
 impl<'a> Widget for StatusWidget<'a> {
@@ -100,13 +106,12 @@ impl<'a> Widget for StatusWidget<'a> {
         // Prefix the app version (the one inoffensive, always-visible place we
         // surface it) and the live safety mode (Shift+Tab / `/safety` change it
         // live) ahead of the reasoning level.
-        let safety_segment = if self.plan_active {
-            format!(
+        let safety_segment = match self.plan_resume {
+            Some(resume) => format!(
                 "plan mode on (alt+p to toggle) - restores: {}",
-                self.safety_mode.as_str()
-            )
-        } else {
-            format!("safety: {}", self.safety_mode.as_str())
+                resume.as_str()
+            ),
+            None => format!("safety: {}", self.safety_mode.as_str()),
         };
         let left_text = status_line2_left(self.version, &safety_segment, &reasoning_text);
         let model_display = self.model_name;

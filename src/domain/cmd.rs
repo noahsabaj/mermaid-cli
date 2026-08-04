@@ -343,7 +343,11 @@ pub enum Cmd {
 /// `Session` + `Settings` + current `MERMAID.md` context. Pure data —
 /// no provider-specific knowledge here (that's in
 /// `providers::model::*::chat`).
-#[derive(Debug, Clone)]
+/// `Default` exists so adding a field costs one line here instead of a
+/// mechanical edit in every construction site across providers, the CLI and
+/// the tests (adding `suppressed_builtin_tools` took 15). Use
+/// `..ChatRequest::default()` for the fields a caller does not care about.
+#[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
     pub model_id: String,
     pub messages: Vec<ChatMessage>,
@@ -392,6 +396,13 @@ pub struct ChatRequest {
     /// by a successful compaction, a manual `/compact`, or a conversation
     /// switch.
     pub suppress_auto_compact: bool,
+    /// Built-in tool names the effect layer must NOT advertise on this
+    /// request. Mirrors the `output_schema` empty-tools gate: the reducer
+    /// (which knows the mode) decides, the effect layer (which owns the
+    /// registry) enforces. Plan mode hides the checklist WRITERS here —
+    /// advertising a tool whose description says "create the full initial
+    /// plan" while the gate hard-errors it invites exactly that call.
+    pub suppressed_builtin_tools: Vec<&'static str>,
 }
 
 /// Provider-agnostic tool definition sent in the request. Concrete
@@ -693,6 +704,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            suppressed_builtin_tools: Vec::new(),
         };
         assert!(
             Cmd::CallModel {

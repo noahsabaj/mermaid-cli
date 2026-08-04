@@ -138,6 +138,7 @@ impl ModelAutoClassifier {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            suppressed_builtin_tools: Vec::new(),
         }
     }
 }

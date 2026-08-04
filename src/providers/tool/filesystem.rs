@@ -210,7 +210,7 @@ impl ToolExecutor for DeleteFileTool {
             "call_id": ctx.call_id.0,
             "task_id": ctx.task_id.clone(),
         });
-        if let Some(outcome) = mutation_policy_outcome(
+        if let MutationGate::Blocked(outcome) = mutation_policy_outcome(
             &ctx,
             "delete_file",
             raw_path,
@@ -220,7 +220,7 @@ impl ToolExecutor for DeleteFileTool {
         )
         .await
         {
-            return outcome;
+            return *outcome;
         }
         // Serialize writers to this canonical path: sibling tool calls in the same
         // turn run concurrently, so without this the checkpoint + delete could race
@@ -321,7 +321,7 @@ impl ToolExecutor for CreateDirectoryTool {
             "call_id": ctx.call_id.0,
             "task_id": ctx.task_id.clone(),
         });
-        if let Some(outcome) = mutation_policy_outcome(
+        if let MutationGate::Blocked(outcome) = mutation_policy_outcome(
             &ctx,
             "create_directory",
             raw_path,
@@ -331,7 +331,7 @@ impl ToolExecutor for CreateDirectoryTool {
         )
         .await
         {
-            return outcome;
+            return *outcome;
         }
         // Serialize writers to this canonical path (see delete_file). mkdir -p is
         // idempotent, but a uniform gate keeps ordering consistent and cheap.
@@ -438,7 +438,7 @@ impl ToolExecutor for WriteFileTool {
             "call_id": ctx.call_id.0,
             "task_id": ctx.task_id.clone(),
         });
-        if let Some(outcome) = mutation_policy_outcome(
+        let plan_write = match mutation_policy_outcome(
             &ctx,
             "write_file",
             path,
@@ -448,8 +448,9 @@ impl ToolExecutor for WriteFileTool {
         )
         .await
         {
-            return outcome;
-        }
+            MutationGate::Blocked(outcome) => return *outcome,
+            MutationGate::Proceed { plan_write } => plan_write,
+        };
         // Serialize writers to this canonical path: two write_file/edit calls to
         // the same file in one turn run concurrently, so without this the last
         // atomic rename silently wins (lost update). Distinct paths still overlap.
@@ -508,6 +509,7 @@ impl ToolExecutor for WriteFileTool {
                             diff_truncated: write.diff.truncated,
                             lines_added: write.diff.added,
                             lines_removed: write.diff.removed,
+                            plan_file_written: plan_write,
                             ..ToolRunMetadata::default()
                         })
                     },
@@ -688,6 +690,21 @@ fn write_with_diff_blocking(
 /// `Ask`/`Classify` on such a mutation to proceed — scratch files are
 /// session-private and ephemeral — while read-only mode and `Deny` overrides
 /// still block it.
+/// Outcome of gating a file mutation. `Proceed` carries `plan_write`: whether
+/// the allowance came from plan mode's plan-file carve-out, which the caller
+/// stamps onto `ToolRunMetadata::plan_file_written`.
+///
+/// The tool NAME is not a usable stand-in for this. "Under the plan floor the
+/// only Edit that can succeed is the plan file" stops being true as soon as
+/// `[plan] memory = allow` lets a `write_file` to a memory path succeed.
+pub(super) enum MutationGate {
+    /// Blocked — return this outcome verbatim. Boxed to keep the enum small.
+    Blocked(Box<ToolOutcome>),
+    Proceed {
+        plan_write: bool,
+    },
+}
+
 pub(super) async fn mutation_policy_outcome(
     ctx: &ExecContext,
     tool: &str,
@@ -695,7 +712,7 @@ pub(super) async fn mutation_policy_outcome(
     checkpoint_paths: &[PathBuf],
     pending_action: serde_json::Value,
     scratch_contained: bool,
-) -> Option<ToolOutcome> {
+) -> MutationGate {
     let mut request = crate::runtime::ActionRequest::new(
         tool,
         crate::runtime::ToolCategory::Edit,
@@ -714,8 +731,8 @@ pub(super) async fn mutation_policy_outcome(
     )
     .await
     {
-        super::policy_gate::Gate::Block(outcome) => Some(outcome),
-        super::policy_gate::Gate::Proceed { .. } => {
+        super::policy_gate::Gate::Block(outcome) => MutationGate::Blocked(Box::new(outcome)),
+        super::policy_gate::Gate::Proceed { plan_write, .. } => {
             let _ = crate::runtime::run_plugin_hooks(
                 "before_file_mutation",
                 &serde_json::json!({
@@ -726,7 +743,7 @@ pub(super) async fn mutation_policy_outcome(
                     "path": path,
                 }),
             );
-            None
+            MutationGate::Proceed { plan_write }
         },
     }
 }

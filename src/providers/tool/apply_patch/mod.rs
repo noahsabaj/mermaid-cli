@@ -21,7 +21,7 @@ use crate::runtime::apply_patch::{Hunk, UpdateFileChunk, derive_new_contents, pa
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
-use super::filesystem::{after_file_mutation, diff_summary, mutation_policy_outcome};
+use super::filesystem::{MutationGate, after_file_mutation, diff_summary, mutation_policy_outcome};
 use super::path_safety::{AllowedRoots, ResolvedInRoot, resolve_in_roots};
 
 const APPLY_PATCH_DESCRIPTION: &str = "Edit files with a patch. Pass `patch` as one string in this exact envelope:\n*** Begin Patch\n*** Update File: <path>\n@@ <optional anchor line, e.g. a function signature>\n <unchanged context line>\n-<line to remove>\n+<line to add>\n*** End Patch\nUse '*** Add File: <path>' then '+'-prefixed lines to create a file; '*** Delete File: <path>' to remove one; '*** Move to: <path>' immediately after an Update File line to rename. Include a few unchanged context lines (prefixed with a space) around each change so the edit can be located; matching tolerates whitespace/quote drift. Paths must resolve inside the project directory or the session scratchpad.";
@@ -81,7 +81,7 @@ impl ToolExecutor for ApplyPatchTool {
         });
         // Only project files are checkpointable; the gate bypasses entirely
         // when EVERY hunk lands in the session scratchpad.
-        if let Some(outcome) = mutation_policy_outcome(
+        let plan_write = match mutation_policy_outcome(
             &ctx,
             "apply_patch",
             &summary_path,
@@ -91,8 +91,9 @@ impl ToolExecutor for ApplyPatchTool {
         )
         .await
         {
-            return outcome;
-        }
+            MutationGate::Blocked(outcome) => return *outcome,
+            MutationGate::Proceed { plan_write } => plan_write,
+        };
 
         // Serialize writers to every affected path (sorted ⇒ deadlock-free),
         // raced against cancellation so a contended lock stays responsive.
@@ -131,7 +132,7 @@ impl ToolExecutor for ApplyPatchTool {
             }
         };
         after_file_mutation(&ctx, "apply_patch", &summary_path);
-        build_outcome(report, start.elapsed().as_secs_f64())
+        build_outcome(report, start.elapsed().as_secs_f64(), plan_write)
     }
 }
 
@@ -395,7 +396,7 @@ impl ApplyReport {
     }
 }
 
-fn build_outcome(report: ApplyReport, duration_secs: f64) -> ToolOutcome {
+fn build_outcome(report: ApplyReport, duration_secs: f64, plan_write: bool) -> ToolOutcome {
     let total =
         report.added.len() + report.modified.len() + report.deleted.len() + report.renamed.len();
     let mut lines = vec![format!("Applied patch: {total} file(s)")];
@@ -427,6 +428,7 @@ fn build_outcome(report: ApplyReport, duration_secs: f64) -> ToolOutcome {
         diff_truncated: report.diff_truncated,
         lines_added: report.added_lines,
         lines_removed: report.removed_lines,
+        plan_file_written: plan_write,
         ..ToolRunMetadata::default()
     })
 }

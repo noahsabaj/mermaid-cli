@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Fully-completed checklists retire at run end.** A checklist's lifetime is
+  the unit of work that created it: when a run ends naturally with every
+  task completed, the harness clears the store (and the tool-side broker
+  mirror) instead of leaving a zombie band that re-renders on every later
+  run and haunts saved sessions. The run summary line absorbs the record
+  ("Worked for … · 7 tasks completed"), and lists with unfinished work still
+  carry across runs. Retirement fires at natural run end and NOWHERE else —
+  a cancelled or errored run keeps its list, including across `--resume`.
+  Models are told finished work is retired automatically — cleanup is
+  structural, not prompt discipline.
+
+- **Plan-mode denials teach the escape hatch.** Every plan-policy denial now
+  names the plan file path and the tools that can write it, instead of the
+  generic "capture this change in the plan" (observed sending weaker models
+  into minutes-long probe loops that never found `write_file`). The plan
+  capabilities line and `PLAN_MODE_PROMPT` name `write_file`/`apply_patch`
+  explicitly, the base prompt's Task Planning section and
+  "do not stop at a proposal" imperative are swapped for plan-shaped stubs
+  while planning (custom system prompts pass through untouched), and the
+  task-checklist writers (`task_create`/`task_update`) are no longer
+  advertised while a plan is being drafted — their descriptions recommended
+  exactly the call the gate then hard-errors (`task_list` stays; an explicit
+  `tasks = "allow"` in `[plan]` restores the writers).
+
+
 - **Web egress now has one capability and policy boundary.** Native fetch is
   keyless and remains the default, but now uses a fail-closed client with no
   ambient proxies or referrers, validates the initial URL and every redirect
@@ -43,6 +68,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Plan mode: context-delta injector.** Mode changes are now conversational
+  EVENTS, not just ambient state: at every dispatch the reducer diffs the
+  live plan/safety/model context against what the model was last told
+  (`AdvertisedContext`, persisted with the conversation) and injects one
+  hidden, persistent timeline marker per change ("Plan mode is now ON —
+  author the plan at <path> using write_file or apply_patch…"). Entering
+  plan mode before or during a run now reorients the model at the next
+  request instead of it discovering the mode by hitting the policy gate;
+  rapid on/off toggles between dispatches collapse to no marker; forked
+  handoffs announce the plan's end in the NEW conversation. A compact
+  plan-mode reminder also rides the history tail on every dispatch while
+  planning — the position weak models reliably read — and escalates to a
+  corrective after repeated plan denials with no plan write (the doom-loop
+  breaker). The breaker arms and disarms on recorded FACTS, not tool names:
+  only a denied MUTATION arms it (a read-only Ground phase with
+  `[plan] web = deny` must not), and any call the gate approved via the
+  plan-file carve-out disarms it — including the shell redirect the escalated
+  corrective itself recommends.
+
+- **Plan mode: shell spelling of plan authoring.** A command whose only
+  provable effect is writing the plan file (`echo … > plan.md`,
+  `printf … >> plan.md`, `cat > plan.md <<'EOF'`) is now allowed while
+  planning — same exemption the `write_file`/`apply_patch` path always had.
+  Worst-segment anchored and fail-closed: substitutions, `tee`/`dd`,
+  variable/tilde/glob targets, chained mutations, expanding heredoc bodies
+  with `$(…)`, and any command that moves the shell's cwd (`cd`/`pushd`) all
+  still deny. The redirect target resolves against the directory the command
+  actually runs in, so an explicit `working_dir` can no longer land a
+  "plan write" on a different file.
+
+- **Heredoc-aware shell classification.** The safety classifier no longer
+  splits heredoc bodies into phantom command segments: `cat <<'EOF' …` with
+  prose (or quoted shell examples) classifies by the consuming command, so
+  read-only heredocs stop being denied in read-only/ask/auto modes. Bodies
+  of EXPANDING heredocs (`<<EOF`, unquoted delimiter) are still scanned for
+  `$(…)`/backtick substitutions — quote-blind, since heredoc bodies have no
+  shell quoting context — and the raw-text destructive scan runs before any
+  segmentation, unchanged. Two consequences are deliberately fail-closed
+  rather than free wins: an `Allow` override anchor refuses any command
+  carrying a heredoc (otherwise `allow psql` would widen to cover a whole
+  `psql <<'SQL' … SQL` script body), and the hard-deny scan looks INSIDE
+  heredoc and substitution bodies, so `bash <<'EOF' … nc -l … EOF` still
+  blocks. A `<<` whose delimiter never terminates is not treated as a heredoc
+  at all — stricter than the shell, because a misread operator that swallows
+  the following lines as inert data is a read-only bypass.
+
+- **Plan mode is a safety mode.** `SafetyMode::Plan` replaces the old
+  orthogonal `Session.plan` flag; `Session.plan` now carries only the plan's
+  DATA (path, saved overrides, staged resume mode). The two could previously
+  disagree — Shift+Tab while planning set `full_access` live and the injector
+  announced it while the plan read-only floor was still in force, which the
+  model read as permission to mutate (#282). While planning, Shift+Tab and
+  `/safety <mode>` STAGE the mode plan exit will restore; the status band
+  shows it as `restores: <mode>`. Plan is entered with `/plan` or Alt+P only —
+  it is not a position in the Shift+Tab cycle and not a valid
+  `safety.mode` config value.
+
+- **Rendering a frame no longer costs O(transcript).** Two changes, measured
+  end to end on a 324 KB / 2000-message session: **1962 us -> 116 us per idle
+  frame (16.9x)**, taking a 60fps idle repaint from ~11.8% of a core to
+  ~0.70%. Frame time is now flat as history grows (116 us at 25 pairs, 116 us
+  at 1000).
+  - The frame memo already cached the assembled lines, but every frame cloned
+    the whole vector (~20k `Line`s) and handed it to `Paragraph`, which drew
+    40 rows and dropped the rest. Only the visible window is cloned now.
+    Selection anchors are rebased onto it.
+  - The memo key was a hash of every message on every frame. It is now the
+    conversation's `revision` — `ConversationHistory::messages` is private and
+    the accessor that hands out `&mut` bumps it, so no committed change can
+    escape the key, and a stale transcript is not reachable by forgetting to
+    bump. A debug-only assertion cross-checks the key against the old
+    full-content hash, catching a mutation made inside the defining module
+    where Rust's privacy does not reach.
+
+  The full-frame snapshot suite is unchanged, byte for byte.
+
+- **Zero-copy rendering survives a mode change.** The render stitch pre-pass
+  runs only when a continuation actually needs merging — committed, or live
+  mid-stream. Hidden-but-persistent context markers no longer force it:
+  `ChatWidget` already skips those kinds, so stitching them out changes
+  nothing a user can see, and a single plan toggle used to make the pre-pass
+  permanent for the session. Primarily a correctness fix to a predicate that
+  claimed the transform would change something when it provably would not;
+  the per-frame saving is ~1% of frame time (measured), while the avoided
+  full-transcript clone on every history change is the larger win.
+
+- **Harness steering reaches every provider.** Model-directed messages
+  (plan reminders, context markers, and the pre-existing auto-continue and
+  stalled-turn nudges) are typed `MessageAudience::ModelDirected` and every
+  adapter must deliver them. Anthropic and Gemini — whose APIs have no
+  mid-conversation system role — were silently DROPPING all of them; they now
+  ride a tagged `<system-reminder>` block on the adjacent user turn, keeping
+  the history-tail position and leaving the cached system prefix untouched.
+
+
 - **Bounded, isolated web-fetch session snapshots.** Each successful fetch returns a
   snapshot id. Follow-up calls can perform full Unicode-caseless matching or
   request stable line ranges without refetching a mutable page. Snapshot lookup
@@ -52,6 +172,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extraction, size, match, partial-failure, and truncation provenance.
 
 ### Fixed
+
+- **Anthropic and Gemini payloads always alternate roles.** Both APIs reject a
+  history with two same-role turns in a row, and several ordinary shapes
+  produced one: harness steering sitting between two user turns (a request that
+  errored before any assistant turn committed, then a retype), a typed message
+  arriving while tool results were pending, or two assistant turns from an
+  interrupted continuation. Delivering model-directed steering on a user turn
+  made the first of those reachable on every plan-mode session. Both adapters
+  now coalesce same-role neighbours at the single exit point of
+  `convert_messages`, so the invalid payload is unrepresentable however the
+  history is shaped rather than something each match arm has to remember.
+  Merged turns keep Anthropic's own block-placement rules (`tool_result` leads
+  a user turn, `thinking` leads an assistant turn), so the fix cannot trade a
+  role-alternation 400 for a placement one.
 
 - **Web persistence and managed-search lifecycle hardening.** Runtime tool
   arguments and outcomes are cloned and centrally redacted before SQLite
@@ -84,6 +218,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `clippy::collapsible_match` suppression is gone, its six sites fixed, and
   `test_exec_context_with_config` now honors `config.safety.mode` instead of
   silently forcing `FullAccess`.
+
 
 ## [0.18.0] - 2026-07-21
 

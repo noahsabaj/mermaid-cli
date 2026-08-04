@@ -54,7 +54,7 @@ For multi-step work (3 or more distinct steps), plan with the task checklist: `t
 
 Write meaningful, verifiable steps (short imperative `subject`, present-tense `active_form`). Keep at most one task in_progress: mark a task in_progress BEFORE starting its work and completed IMMEDIATELY after it is done and verified — never batch-complete at the end, and never jump a task from pending straight to completed. Only mark completed when the work truly succeeded (tests pass, errors resolved). If a task hits a blocker, mark it blocked with a one-line `explanation`, add a task for the blocker, and mark that one in_progress.
 
-Do not let the plan go stale. When scope pivots — steps split, merge, reorder, or drop — update or delete tasks in the same turn and give a one-line `explanation`. After a context compaction, call `task_list` to re-anchor on ids and statuses. The user can edit the checklist too (`/todos`); when a notice reports their edit, acknowledge it and fold it into your plan.
+Do not let the plan go stale. When scope pivots — steps split, merge, reorder, or drop — update or delete tasks in the same turn and give a one-line `explanation`. After a context compaction, call `task_list` to re-anchor on ids and statuses. The user can edit the checklist too (`/todos`); when a notice reports their edit, acknowledge it and fold it into your plan. A fully-completed checklist is retired automatically when the run ends — never re-create or re-list finished work; the next job starts a fresh checklist.
 
 ## Web
 
@@ -145,6 +145,58 @@ pub fn get_system_prompt() -> String {
     SYSTEM_PROMPT.clone()
 }
 
+/// Anchor of the base-prompt section that [`adapt_prompt_for_plan_mode`]
+/// splices out while a plan is being drafted. Kept as a named constant so the
+/// template-drift guard test fails loudly if the heading is reworded.
+pub const TASK_PLANNING_ANCHOR: &str = "## Task Planning";
+
+/// The Core Loop sentence that pushes execution — replaced while planning
+/// (same drift-guard contract as [`TASK_PLANNING_ANCHOR`]).
+pub const PROPOSAL_SENTENCE_ANCHOR: &str = "Continue through tool results until the task is \
+genuinely handled. Do not stop at a proposal when the user asked for implementation.";
+
+/// Rewrite the rendered base prompt for plan mode: the permanent "## Task
+/// Planning" section instructs `task_create` for any 3+-step request and the
+/// Core Loop demands implementation — both directly contradict the plan-mode
+/// appendix, and weak models resolve the conflict by momentum (observed:
+/// "Applying fixes…" + `task_create` while planning). Swap both for
+/// plan-shaped stubs; behavior detail stays single-sourced in
+/// [`PLAN_MODE_PROMPT`].
+///
+/// A missing anchor means the user replaced the base prompt
+/// (`settings.prompt.system_prompt`) — their text is theirs; skip that
+/// replacement silently.
+///
+/// MUST run on the BASE prompt, before `append_system_prompt` extras are
+/// appended (`system_prompt_for_state` does this via
+/// `PromptConfig::base_prompt` + `append_extras`). The Task Planning splice
+/// ends at the next `\n## ` heading and falls back to end-of-string when
+/// there is none, so running it on the rendered prompt deleted the user's
+/// appended instructions along with the section.
+pub fn adapt_prompt_for_plan_mode(rendered: &str) -> String {
+    let mut prompt = rendered.to_string();
+    if let Some(start) = prompt.find(TASK_PLANNING_ANCHOR) {
+        let body_from = start + TASK_PLANNING_ANCHOR.len();
+        let end = prompt[body_from..]
+            .find("\n## ")
+            .map(|i| body_from + i)
+            .unwrap_or(prompt.len());
+        prompt.replace_range(
+            start..end,
+            "## Task Planning\n\nThe task checklist tools are disabled while a plan is being \
+             drafted. Implementation steps belong in the plan file's Tasks section — they seed \
+             the checklist when the plan is approved.",
+        );
+    }
+    if let Some(start) = prompt.find(PROPOSAL_SENTENCE_ANCHOR) {
+        prompt.replace_range(
+            start..start + PROPOSAL_SENTENCE_ANCHOR.len(),
+            "Continue through tool results until the plan is genuinely decision-complete.",
+        );
+    }
+    prompt
+}
+
 /// Appended to the system prompt while `session.plan` is `Some`
 /// (`system_prompt_for_state` substitutes `{plan_capabilities}` and
 /// `{plan_path}`). Deliberately short: Codex's plan prompt history shows this
@@ -153,7 +205,10 @@ pub fn get_system_prompt() -> String {
 ///
 /// Enforcement does not depend on any of this text: tool dispatch floors the
 /// effective safety mode to read-only and the policy gate applies the plan
-/// carve-outs regardless of what the model believes.
+/// carve-outs regardless of what the model believes. Salience does not depend
+/// solely on it either — the context-delta marker announces plan entry in
+/// history and a per-dispatch reminder rides the conversation tail (see
+/// `advertise_context_changes` / `push_plan_reminder` in the reducer).
 pub const PLAN_MODE_PROMPT: &str = "\
 ## Plan Mode
 You are in plan mode: a read-only collaboration state for designing work \
@@ -176,8 +231,8 @@ and the capability line above includes them.
 genuinely user-owned decisions (scope, UX, alternatives with real \
 tradeoffs) early with ask_user_question. Do not ask what the codebase can \
 answer.
-3. Author: write the plan into the plan file at {plan_path} and keep it \
-current as your understanding evolves.
+3. Author: write the plan into the plan file at {plan_path} using write_file \
+or apply_patch, and keep it current as your understanding evolves.
 
 Quality bar — decision-complete: after approval, implementation must need \
 no further design decisions. Commit to one approach; do not present menus \
@@ -404,6 +459,69 @@ mod tests {
             prompt.contains("never repeat its contents in prose"),
             "must suppress checklist echo (the harness renders it)"
         );
+    }
+
+    // ── Plan-mode prompt adaptation guards ──────────────────────────
+
+    /// Template-drift guard: the anchors `adapt_prompt_for_plan_mode` splices
+    /// on must exist verbatim in the template, or the adaptation silently
+    /// stops applying and the contradiction returns.
+    #[test]
+    fn template_contains_the_plan_adaptation_anchors() {
+        assert!(
+            SYSTEM_PROMPT_TEMPLATE.contains(TASK_PLANNING_ANCHOR),
+            "Task Planning anchor drifted out of the template"
+        );
+        assert!(
+            SYSTEM_PROMPT_TEMPLATE.contains(PROPOSAL_SENTENCE_ANCHOR),
+            "Core Loop proposal sentence drifted out of the template"
+        );
+    }
+
+    /// The splice is bounded: the Task Planning body is replaced with the
+    /// plan-mode stub, and the section that FOLLOWS survives intact.
+    #[test]
+    fn adapt_prompt_swaps_the_task_planning_section() {
+        let adapted = adapt_prompt_for_plan_mode(&get_system_prompt());
+        assert!(
+            !adapted.contains("FULL initial plan in one call"),
+            "task_create advice must not survive into plan mode"
+        );
+        assert!(
+            adapted.contains("disabled while a plan is being drafted"),
+            "plan-mode stub must replace the section body"
+        );
+        assert!(
+            adapted.contains("## Task Planning"),
+            "the section heading survives"
+        );
+        assert!(
+            adapted.contains("## Web"),
+            "the following section must survive the splice"
+        );
+    }
+
+    /// The execution imperative becomes a planning imperative.
+    #[test]
+    fn adapt_prompt_replaces_the_proposal_sentence() {
+        let adapted = adapt_prompt_for_plan_mode(&get_system_prompt());
+        assert!(!adapted.contains("Do not stop at a proposal"));
+        assert!(adapted.contains("until the plan is genuinely decision-complete"));
+    }
+
+    /// A custom base prompt (no anchors) passes through byte-identical —
+    /// the user's text is theirs.
+    #[test]
+    fn adapt_prompt_passes_custom_prompts_through() {
+        let custom = "You are a helpful pirate. Answer in rhyme.";
+        assert_eq!(adapt_prompt_for_plan_mode(custom), custom);
+    }
+
+    /// PLAN_MODE_PROMPT is the single source naming the plan-authoring tools.
+    #[test]
+    fn plan_mode_prompt_names_the_authoring_tools() {
+        assert!(PLAN_MODE_PROMPT.contains("write_file"));
+        assert!(PLAN_MODE_PROMPT.contains("apply_patch"));
     }
 
     // ── Memory section regression guards (v0.10.0) ──────────────────
